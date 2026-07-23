@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.17](https://github.com/NorthlandPositronics/Cogtrix/compare/v0.1.16...v0.1.17) (2026-03-05)
+
+
+### Bug Fixes
+
+* add missing `api` optional-dependency group to pyproject.toml ([a1a3af1](https://github.com/NorthlandPositronics/Cogtrix/commit/a1a3af1f43591582bb73bba11d262b36539df047))
+
 ## [0.1.16](https://github.com/NorthlandPositronics/Cogtrix/compare/v0.1.15...v0.1.16) (2026-03-05)
 
 

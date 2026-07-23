@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cogtrix"
-version = "0.1.16"
+version = "0.1.17"
 description = "Modular AI assistant with 53 built-in tools, multi-provider LLM support, and hybrid memory"
 readme = "README.md"
 requires-python = "~=3.13.0"
@@ -90,6 +90,15 @@ anthropic = [
 ]
 google = [
     "langchain-google-genai~=4.0.0",
+]
+api = [
+    "fastapi~=0.115.0",
+    "uvicorn[standard]~=0.34.0",
+    "sqlalchemy[asyncio]~=2.0.0",
+    "aiosqlite~=0.22.0",
+    "alembic~=1.18.0",
+    "python-jose[cryptography]~=3.4.0",
+    "passlib[bcrypt]~=1.7.0",
 ]
 
 [tool.ruff]
