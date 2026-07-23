@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.28](https://github.com/NorthlandPositronics/Cogtrix/compare/v0.1.27...v0.1.28) (2026-03-22)
+
+
+### Bug Fixes
+
+* xfail ws reconnect test teardown hang ([53edca6](https://github.com/NorthlandPositronics/Cogtrix/commit/53edca6651d27f3ef6d0ff9b02b5c0e3c7b18c2b))
+
 ## [0.1.27](https://github.com/NorthlandPositronics/Cogtrix/compare/v0.1.26...v0.1.27) (2026-03-22)
 
 
