@@ -160,29 +160,38 @@ class ModelCircuitBreaker:
         self.is_unavailable = False
         self.last_error = ""
 
-    def check_availability(self, cooldown: float = 300.0) -> tuple[bool, str | None]:
+    def _check_availability_locked(self, cooldown: float = 300.0) -> tuple[bool, str | None]:
+        """Check if model is available.
+
+        Caller MUST hold ``_circuit_breaker_lock`` before calling this method.
+
+        Returns:
+            Tuple of (is_available, reason_if_unavailable)
         """
-        Check if model is available.
+        if not self.is_unavailable:
+            return True, None
+
+        elapsed = time.time() - self.last_failure_time
+        if elapsed >= cooldown:
+            self.is_unavailable = False
+            self.consecutive_failures = 0
+            return True, None
+
+        remaining = int(cooldown - elapsed)
+        return False, (
+            f"Model marked unavailable after {self.consecutive_failures} "
+            f"consecutive failures. Last error: {self.last_error}. "
+            f"Will retry in {remaining}s."
+        )
+
+    def check_availability(self, cooldown: float = 300.0) -> tuple[bool, str | None]:
+        """Check if model is available. Thread-safe; acquires ``_circuit_breaker_lock``.
 
         Returns:
             Tuple of (is_available, reason_if_unavailable)
         """
         with _circuit_breaker_lock:
-            if not self.is_unavailable:
-                return True, None
-
-            elapsed = time.time() - self.last_failure_time
-            if elapsed >= cooldown:
-                self.is_unavailable = False
-                self.consecutive_failures = 0
-                return True, None
-
-            remaining = int(cooldown - elapsed)
-            return False, (
-                f"Model marked unavailable after {self.consecutive_failures} "
-                f"consecutive failures. Last error: {self.last_error}. "
-                f"Will retry in {remaining}s."
-            )
+            return self._check_availability_locked(cooldown)
 
 
 # Circuit breaker registry: tracks failures per "provider/model" key
@@ -249,7 +258,7 @@ def get_model_status() -> dict[str, Any]:
     status = {}
     for key, breaker in snapshot:
         with _circuit_breaker_lock:
-            available, reason = breaker.check_availability(cooldown)
+            available, reason = breaker._check_availability_locked(cooldown)
             consecutive_failures = breaker.consecutive_failures
             last_error = breaker.last_error if not available else None
         status[key] = {

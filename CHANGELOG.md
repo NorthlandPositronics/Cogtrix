@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.1.14](https://github.com/NorthlandPositronics/Cogtrix/compare/v0.1.13...v0.1.14) (2026-03-03)
+
+
+### Features
+
+* add defer_processing and suppress_reply tools for deferred message reasoning ([d910c1b](https://github.com/NorthlandPositronics/Cogtrix/commit/d910c1b006a8e24d09edc770a936f284d0d15e53))
+* **assistant:** add queue_reply tool for sequential message delivery ([72e7267](https://github.com/NorthlandPositronics/Cogtrix/commit/72e72671bc3d427621009573920d324b0391a083))
+
+
+### Bug Fixes
+
+* apply round-6 audit sprint B fixes (BUG-083, BUG-084, PERF-1004, ARCH-040-10, ARCH-040-05, ARCH-040-04, ARCH-040-12, ARCH-040-06, ARCH-040-09, PERF-1007) ([0b4e9c2](https://github.com/NorthlandPositronics/Cogtrix/commit/0b4e9c2552df69ab35dbb1e122debdd9561ef7ea))
+* **assistant:** apply queue_reply audit fixes (BUG-079, BUG-080, BUG-081, H1, H2) ([09d7ecf](https://github.com/NorthlandPositronics/Cogtrix/commit/09d7ecf29e8dfc497d04db668ea8ccdf4eba3c2b))
+* **assistant:** apply round-6 sprint-A audit fixes ([75cb8b1](https://github.com/NorthlandPositronics/Cogtrix/commit/75cb8b1370f324e724272aa9cb7f1a571d0a0c7e))
+* extract atomic_write_json utility and fix fd leaks (BUG-030, BUG-062, BUG-075) ([98b4595](https://github.com/NorthlandPositronics/Cogtrix/commit/98b4595691f6327d2aa273d7c62cdf28db4b6f1f))
+* **guardrails:** remove broken ViolationTracker save debounce ([e382969](https://github.com/NorthlandPositronics/Cogtrix/commit/e38296969bdf8fde3efb39d6997e0ebe3ce448da))
+* round-6 holistic audit — 18 findings across 14 files ([095e86a](https://github.com/NorthlandPositronics/Cogtrix/commit/095e86aceb12e1f971b36b9e1f87280c92888396))
+* Sprint 1 — critical safety and correctness fixes (round 7) ([81e77fe](https://github.com/NorthlandPositronics/Cogtrix/commit/81e77feb309709f715aa96fb2bc0545f50bf20dd))
+* sprint 3 — wizard template, SSRF guard, circuit breaker lock, MCP TOCTOU, LRU merge ([f861757](https://github.com/NorthlandPositronics/Cogtrix/commit/f8617570ab6926a74205ea2399863d04ab677ff3))
+* sprint 4 — flush_all timer race, module-level thread pools for compression and tool execution ([c092e27](https://github.com/NorthlandPositronics/Cogtrix/commit/c092e27d41df0154b29406f23e3d0a1112d862c7))
+
+
+### Documentation
+
+* update CLAUDE.md for round-7 bug fixes across all 4 sprints ([7551967](https://github.com/NorthlandPositronics/Cogtrix/commit/7551967b0fac881f47122431313a7ff525768a8b))
+
 ## [0.1.13](https://github.com/NorthlandPositronics/Cogtrix/compare/v0.1.12...v0.1.13) (2026-03-03)
 
 

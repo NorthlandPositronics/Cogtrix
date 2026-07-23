@@ -15,6 +15,7 @@ import re
 import tempfile
 import threading
 import time
+import unicodedata
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -150,8 +151,6 @@ _CONFUSABLE_TRANS: dict[int, str] = str.maketrans(_CONFUSABLE_MAP)
 
 def _skeleton(text: str) -> str:
     """Reduce text to a Latin skeleton for confusable-resistant matching."""
-    import unicodedata
-
     return unicodedata.normalize("NFKC", text).translate(_CONFUSABLE_TRANS)
 
 
@@ -423,37 +422,6 @@ class ChatRateLimiter:
         self._windows: dict[str, _ChatWindow] = {}
         self._lock = threading.Lock()
 
-    def check(self, chat_id: str) -> GuardrailResult:
-        with self._lock:
-            if len(self._windows) > 1000:
-                self._cleanup_stale()
-
-            window = self._windows.get(chat_id)
-            if window is None:
-                return GuardrailResult(is_safe=True)
-
-            now = time.monotonic()
-
-            while window.timestamps and (now - window.timestamps[0]) > 3600.0:
-                window.timestamps.popleft()
-
-            minute_count = sum(1 for ts in window.timestamps if (now - ts) <= 60.0)
-            if minute_count >= self._per_minute:
-                return GuardrailResult(
-                    is_safe=False,
-                    reason=f"Rate limit: {self._per_minute}/min exceeded",
-                    guard_name="rate_limit",
-                )
-
-            if len(window.timestamps) >= self._per_hour:
-                return GuardrailResult(
-                    is_safe=False,
-                    reason=f"Rate limit: {self._per_hour}/hour exceeded",
-                    guard_name="rate_limit",
-                )
-
-            return GuardrailResult(is_safe=True)
-
     def check_and_record(self, chat_id: str) -> GuardrailResult:
         """Check rate limits and record the message atomically under a single lock."""
         with self._lock:
@@ -470,18 +438,26 @@ class ChatRateLimiter:
             while window.timestamps and (now - window.timestamps[0]) > 3600.0:
                 window.timestamps.popleft()
 
-            minute_count = sum(1 for ts in window.timestamps if (now - ts) <= 60.0)
-            if minute_count >= self._per_minute:
-                return GuardrailResult(
-                    is_safe=False,
-                    reason=f"Rate limit: {self._per_minute}/min exceeded",
-                    guard_name="rate_limit",
-                )
-
             if len(window.timestamps) >= self._per_hour:
                 return GuardrailResult(
                     is_safe=False,
                     reason=f"Rate limit: {self._per_hour}/hour exceeded",
+                    guard_name="rate_limit",
+                )
+
+            # Count recent-minute messages by scanning from the right and
+            # stopping as soon as a timestamp older than 60 s is encountered.
+            minute_count = 0
+            cutoff = now - 60.0
+            for ts in reversed(window.timestamps):
+                if ts <= cutoff:
+                    break
+                minute_count += 1
+
+            if minute_count >= self._per_minute:
+                return GuardrailResult(
+                    is_safe=False,
+                    reason=f"Rate limit: {self._per_minute}/min exceeded",
                     guard_name="rate_limit",
                 )
 
@@ -540,15 +516,17 @@ class ViolationTracker:
             return GuardrailResult(is_safe=True)
 
     def record_violation(self, chat_id: str) -> None:
+        now = time.monotonic()
         with self._lock:
             if chat_id not in self._violations:
                 self._violations[chat_id] = deque()
-            self._violations[chat_id].append(time.monotonic())
-            snapshot = {
+            self._violations[chat_id].append(now)
+            snapshot: dict[str, list[float]] = {
                 cid: [ts - _MONO_OFFSET for ts in timestamps]
                 for cid, timestamps in self._violations.items()
             }
-            self._save_snapshot(snapshot)
+
+        self._save_snapshot(snapshot)
 
     def _cleanup_stale(self) -> None:
         now = time.monotonic()

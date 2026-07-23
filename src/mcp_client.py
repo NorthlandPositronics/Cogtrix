@@ -332,8 +332,6 @@ class MCPManager:
 
     def _ensure_loop(self) -> None:
         """Start the background event loop thread if it is not already running."""
-        if self._loop is not None and not self._loop.is_closed():
-            return
         with self._loop_lock:
             if self._loop is not None and not self._loop.is_closed():
                 return
@@ -393,12 +391,20 @@ class MCPManager:
         self, configs: list[MCPServerConfig]
     ) -> list[tuple[str, MCPConnection | None]]:
         """Connect to all servers concurrently and return per-server results."""
-        return list(
-            await asyncio.gather(
-                *[self._connect_one_async(cfg) for cfg in configs],
-                return_exceptions=False,
-            )
+        raw = await asyncio.gather(
+            *[self._connect_one_async(cfg) for cfg in configs],
+            return_exceptions=True,
         )
+        results: list[tuple[str, MCPConnection | None]] = []
+        for cfg, outcome in zip(configs, raw, strict=True):
+            if isinstance(outcome, BaseException):
+                get_logger().warning(
+                    "MCP: unexpected error connecting to server '%s': %s", cfg.name, outcome
+                )
+                results.append((cfg.name, None))
+            else:
+                results.append(outcome)
+        return results
 
     def connect_all(
         self,

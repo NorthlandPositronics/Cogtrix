@@ -171,6 +171,11 @@ def create_safe_tool_wrapper(
                             pass
                         else:
                             if ui is None:
+                                log.warning(
+                                    "Tool '%s' requires confirmation but no UI is available"
+                                    " — denying silently",
+                                    tool_name,
+                                )
                                 return "User denied execution"
 
                             if kwargs:

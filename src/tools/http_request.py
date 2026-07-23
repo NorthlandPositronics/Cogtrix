@@ -221,6 +221,8 @@ _recent_failures: dict[str, float] = {}
 _recent_failures_lock = threading.Lock()
 _FAILURE_COOLDOWN = 60  # seconds
 _RECENT_FAILURES_MAX = 1000
+_FAILURE_EVICT_INTERVAL = 30.0  # seconds between stale-entry scans
+_last_failure_evict: float = 0.0
 
 
 def _check_recent_failure(url: str) -> str | None:
@@ -240,12 +242,16 @@ def _check_recent_failure(url: str) -> str | None:
 
 def _record_failure(url: str) -> None:
     """Record a failure timestamp for *url*."""
+    global _last_failure_evict
     now = time.time()
     with _recent_failures_lock:
         _recent_failures[url] = now
-        stale = [k for k, v in _recent_failures.items() if (now - v) >= _FAILURE_COOLDOWN]
-        for k in stale:
-            del _recent_failures[k]
+        mono_now = time.monotonic()
+        if mono_now - _last_failure_evict >= _FAILURE_EVICT_INTERVAL:
+            _last_failure_evict = mono_now
+            stale = [k for k, v in _recent_failures.items() if (now - v) >= _FAILURE_COOLDOWN]
+            for k in stale:
+                del _recent_failures[k]
         while len(_recent_failures) > _RECENT_FAILURES_MAX:
             _recent_failures.pop(next(iter(_recent_failures)))
 

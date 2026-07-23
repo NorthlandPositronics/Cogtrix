@@ -14,15 +14,18 @@ from __future__ import annotations
 
 import contextlib
 import getpass
+import ipaddress
 import json
 import logging
 import os
 import re
+import socket
 import sys
 import tempfile
 import threading
 import urllib.request
 from pathlib import Path
+from string import Template
 from typing import Any
 
 import yaml
@@ -179,23 +182,23 @@ _DOCS_PATH = Path(__file__).resolve().parent.parent / "docs" / "CONFIGURATION.md
 _MAX_DOC_SIZE = 10 * 1024 * 1024  # 10 MB
 _DEFAULT_OUTPUT_PATH = Path.home() / ".cogtrix.yaml"
 
-_WIZARD_SYSTEM_PROMPT = """\
+_WIZARD_SYSTEM_PROMPT = Template("""\
 You are the Cogtrix setup wizard. Your job is to help the user create a \
 configuration file for Cogtrix by asking targeted questions.
 
 ## Documentation
 
-{docs}
+$docs
 
 ## Existing Configuration
 
-{existing_config}
+$existing_config
 
 ## Bootstrap Provider
 
 The user already has a working LLM connection with these settings:
-- Provider: {bootstrap_provider}
-- Model: {bootstrap_model}
+- Provider: $bootstrap_provider
+- Model: $bootstrap_model
 
 Include this as the primary provider in the generated config.
 
@@ -215,7 +218,7 @@ YAML block enclosed in ```yaml``` and ``` markers.
 - Never include actual API keys in the output \u2014 use placeholder values like \
 "your-api-key-here" and tell the user to replace them.
 - If editing an existing config, preserve settings the user does not want to change.\
-"""
+""")
 
 
 # ── Main wizard ──────────────────────────────────────────────────────
@@ -260,17 +263,14 @@ def run_setup_wizard(
     # Load docs
     docs = _load_docs(setup_docs_url)
 
-    # Build system prompt
-    safe_provider = bootstrap_info["provider"].replace("{", "{{").replace("}", "}}")
-    safe_model = bootstrap_info["model"].replace("{", "{{").replace("}", "}}")
-    docs_escaped = docs.replace("{", "{{").replace("}", "}}")
+    # Build system prompt — Template uses $placeholder syntax so curly braces in
+    # docs/config content are passed through without escaping.
     existing_config_raw = existing_yaml or "No existing configuration."
-    config_escaped = existing_config_raw.replace("{", "{{").replace("}", "}}")
-    system_prompt = _WIZARD_SYSTEM_PROMPT.format(
-        docs=docs_escaped,
-        existing_config=config_escaped,
-        bootstrap_provider=safe_provider,
-        bootstrap_model=safe_model,
+    system_prompt = _WIZARD_SYSTEM_PROMPT.substitute(
+        docs=docs,
+        existing_config=existing_config_raw,
+        bootstrap_provider=bootstrap_info["provider"],
+        bootstrap_model=bootstrap_info["model"],
     )
 
     # ── Step 2: LLM conversation ─────────────────────────────────
@@ -605,6 +605,37 @@ def _bootstrap_llm(
 # ── Documentation & config loading ───────────────────────────────────
 
 
+def _is_safe_url(url: str) -> bool:
+    """Return True if all resolved IP addresses for *url* are publicly routable.
+
+    Blocks loopback, RFC-1918 private, link-local, reserved, and unspecified
+    addresses to prevent SSRF attacks when the wizard fetches docs from a URL.
+    Returns False on any DNS resolution failure.
+    """
+    from urllib.parse import urlparse as _urlparse
+
+    try:
+        parsed = _urlparse(url)
+        hostname = parsed.hostname
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        if not hostname:
+            return False
+        resolved = socket.getaddrinfo(hostname, port)
+        for _, _, _, _, sockaddr in resolved:
+            ip = ipaddress.ip_address(sockaddr[0])
+            if (
+                ip.is_private
+                or ip.is_loopback
+                or ip.is_link_local
+                or ip.is_reserved
+                or ip.is_unspecified
+            ):
+                return False
+    except Exception:
+        return False
+    return True
+
+
 def _load_docs(url: str | None = None) -> str:
     """Load configuration documentation.
 
@@ -620,19 +651,22 @@ def _load_docs(url: str | None = None) -> str:
                 raise ValueError(
                     f"Unsupported URL scheme: {parsed.scheme!r} (only http/https allowed)"
                 )
-            req = urllib.request.Request(url)
-            with urllib.request.urlopen(req, timeout=15) as resp:  # nosec B310
-                raw = resp.read(_MAX_DOC_SIZE + 1)
-                if len(raw) > _MAX_DOC_SIZE:
-                    log.warning(
-                        "Docs URL response exceeded %d bytes, using embedded docs",
-                        _MAX_DOC_SIZE,
-                    )
-                else:
-                    content = raw.decode("utf-8", errors="replace")
-                    if content.strip():
-                        log.debug("Loaded docs from URL: %s", url)
-                        return content
+            if not _is_safe_url(url):
+                log.warning("Blocked potentially unsafe docs URL: %s (using embedded docs)", url)
+            else:
+                req = urllib.request.Request(url)
+                with urllib.request.urlopen(req, timeout=15) as resp:  # nosec B310
+                    raw = resp.read(_MAX_DOC_SIZE + 1)
+                    if len(raw) > _MAX_DOC_SIZE:
+                        log.warning(
+                            "Docs URL response exceeded %d bytes, using embedded docs",
+                            _MAX_DOC_SIZE,
+                        )
+                    else:
+                        content = raw.decode("utf-8", errors="replace")
+                        if content.strip():
+                            log.debug("Loaded docs from URL: %s", url)
+                            return content
         except Exception as exc:
             log.debug("Failed to fetch docs from %s: %s (using embedded)", url, exc)
 

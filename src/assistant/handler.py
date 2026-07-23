@@ -19,15 +19,24 @@ from src.assistant.datamarking import apply_datamark as _apply_datamark
 from src.assistant.datamarking import datamark_history as _datamark_history
 from src.assistant.datamarking import datamark_instruction as _datamark_instruction
 from src.assistant.datamarking import generate_datamark as _generate_datamark
+from src.assistant.deferral import (
+    DeferralManager,
+    DeferReplyState,
+    SuppressReplyState,
+    create_defer_processing_tool,
+    create_suppress_reply_tool,
+)
 from src.assistant.guardrails import _BLOCKED_RESPONSE, GuardrailPipeline
 from src.assistant.scheduler import (
     EditReplyState,
     MessageScheduler,
+    QueueReplyState,
     ScheduleReplyState,
     create_cancel_scheduled_tool,
     create_edit_reply_tool,
     create_edit_scheduled_tool,
     create_list_scheduled_tool,
+    create_queue_reply_tool,
     create_schedule_reply_tool,
 )
 from src.orchestration.session_state import SessionState
@@ -106,10 +115,10 @@ class MessageHandler:
         knowledge_store: Any = None,
         guardrails: Any = None,
         agent_runner: AgentRunner,
-        session_state: SessionState | None = None,
         parallel_tool_execution: bool = True,
         services_config: dict[str, Any] | None = None,
         scheduler: MessageScheduler | None = None,
+        deferral_mgr: DeferralManager | None = None,
         datamarking_enabled: Any = _UNSET,
     ) -> None:
         self._session_mgr = session_mgr
@@ -122,11 +131,11 @@ class MessageHandler:
         self._knowledge_store = knowledge_store
         self._guardrails = guardrails if guardrails is not None else GuardrailPipeline({})
         self._agent_runner: AgentRunner = agent_runner
-        self._session_state = session_state
         self._parallel_tool_execution = parallel_tool_execution
         self._services_config: dict[str, Any] = services_config or {}
         self._max_response_length: int = config.get("max_response_length", 4000)
         self._scheduler: MessageScheduler | None = scheduler
+        self._deferral_mgr: DeferralManager | None = deferral_mgr
 
         if datamarking_enabled is _UNSET:
             guardrail_cfg = config.get("guardrails", {})
@@ -145,17 +154,6 @@ class MessageHandler:
             name: tool for name, tool in available_tools.items() if name not in excluded
         }
         self._active_tools = [t for t in active_tools if getattr(t, "name", None) not in excluded]
-
-        if self._scheduler is not None:
-            self._list_scheduled_tool = create_list_scheduled_tool(
-                self._scheduler, self._services_config
-            )
-            self._edit_scheduled_tool = create_edit_scheduled_tool(self._scheduler)
-            self._cancel_scheduled_tool = create_cancel_scheduled_tool(self._scheduler)
-        else:
-            self._list_scheduled_tool = None
-            self._edit_scheduled_tool = None
-            self._cancel_scheduled_tool = None
 
     def _resolve_contact_prompt(self, msg: IncomingMessage) -> str | None:
         """Return per-contact instructions from config, or None if not configured."""
@@ -278,7 +276,7 @@ class MessageHandler:
 
         try:
             call_session_state = SessionState(
-                no_confirm=self._session_state.no_confirm if self._session_state else True,
+                no_confirm=True,
             )
             run_config = AgentRunConfig(
                 llm=self._llm,
@@ -312,9 +310,11 @@ class MessageHandler:
         response: str,
         schedule_state: ScheduleReplyState,
         edit_state: EditReplyState,
+        queue_state: QueueReplyState,
         session: Any,
     ) -> str:
         """Route the response to scheduled or immediate delivery and return the text for memory."""
+        edited_text: str | None = None
         if edit_state.was_called and session.last_sent_message_id:
             new_text = self._guardrails.sanitize_output(edit_state.new_text)
             if len(new_text) > self._max_response_length:
@@ -322,10 +322,12 @@ class MessageHandler:
             result = channel.edit_message(msg.chat_id, session.last_sent_message_id, new_text)
             if result.ok:
                 log.info("Edited last reply for %s", msg.chat_id)
+                edited_text = new_text
             else:
                 log.warning("Failed to edit message for %s: %s", msg.chat_id, result.error)
             # Fall through — schedule_reply may also have been called in the same turn.
 
+        scheduled_text: str | None = None
         if schedule_state.was_called and self._scheduler:
             reply_text = self._guardrails.sanitize_output(schedule_state.scheduled_text)
             if len(reply_text) > self._max_response_length:
@@ -336,7 +338,36 @@ class MessageHandler:
                 msg.channel, msg.chat_id, reply_text, send_at, recipient=recipient
             )
             log.info("Reply scheduled for %s (%d min)", msg.chat_id, schedule_state.delay_minutes)
-            return reply_text
+            scheduled_text = reply_text
+            # Fall through — queue_reply may also have been called in the same turn.
+
+        queued_texts: list[str] = []
+        if queue_state.items and self._scheduler:
+            recipient = self._resolve_recipient(msg)
+            for item in queue_state.items:
+                reply_text = self._guardrails.sanitize_output(item.text)
+                if len(reply_text) > self._max_response_length:
+                    reply_text = reply_text[: self._max_response_length - 3] + "..."
+                self._scheduler.queue_after_tail(
+                    msg.channel,
+                    msg.chat_id,
+                    reply_text,
+                    gap_seconds=item.gap_minutes * 60,
+                    recipient=recipient,
+                    persist=False,
+                )
+                queued_texts.append(reply_text)
+            self._scheduler.save()
+            log.info("Queued %d message(s) for %s", len(queue_state.items), msg.chat_id)
+
+        if scheduled_text is not None or queued_texts:
+            all_texts: list[str] = []
+            if edited_text is not None:
+                all_texts.append(edited_text)
+            if scheduled_text is not None:
+                all_texts.append(scheduled_text)
+            all_texts.extend(queued_texts)
+            return "\n---\n".join(all_texts)
 
         if not edit_state.was_called:
             response = self._guardrails.sanitize_output(response)
@@ -350,14 +381,36 @@ class MessageHandler:
             return response
 
         # Edit-only (no schedule, no immediate send) — return edited text for memory
+        if edited_text is not None:
+            return edited_text
         return self._guardrails.sanitize_output(edit_state.new_text)
 
-    def handle_batch(self, messages: list[IncomingMessage], channel: Channel) -> None:
+    def handle_batch(
+        self,
+        messages: list[IncomingMessage],
+        channel: Channel,
+        *,
+        is_reprocessing: bool = False,
+    ) -> None:
         """Process multiple rapid messages as a single agent turn."""
         if not messages:
             return
+
+        # If a deferred record is pending for this chat and this is not a re-processing
+        # pass, accumulate messages into the pending record instead of processing them.
+        if not is_reprocessing and self._deferral_mgr:
+            primary = messages[0]
+            all_absorbed = all(self._deferral_mgr.add_message(m) for m in messages)
+            if all_absorbed:
+                log.info(
+                    "Buffered %d message(s) for deferred session %s",
+                    len(messages),
+                    primary.session_key,
+                )
+                return
+
         if len(messages) == 1:
-            self.handle(messages[0], channel)
+            self.handle(messages[0], channel, is_reprocessing=is_reprocessing)
             return
         combined_text = "\n".join(m.text for m in messages)
         primary = messages[-1]
@@ -377,9 +430,11 @@ class MessageHandler:
             len(messages),
             primary.chat_id,
         )
-        self.handle(combined_msg, channel)
+        self.handle(combined_msg, channel, is_reprocessing=is_reprocessing)
 
-    def handle(self, msg: IncomingMessage, channel: Channel) -> None:
+    def handle(
+        self, msg: IncomingMessage, channel: Channel, *, is_reprocessing: bool = False
+    ) -> None:
         """Process *msg* and send a response back via *channel*."""
         session = self._session_mgr.get_or_create(msg)
         with session.lock:
@@ -391,27 +446,53 @@ class MessageHandler:
 
             schedule_state = ScheduleReplyState()
             edit_state = EditReplyState()
+            queue_state = QueueReplyState()
+            defer_state = DeferReplyState()
+            suppress_state = SuppressReplyState()
             active_tools: list[Any] = list(self._active_tools)
             if self._scheduler and "schedule_reply" not in self._excluded_tools:
                 active_tools.append(create_schedule_reply_tool(schedule_state))
+            if self._scheduler and "queue_reply" not in self._excluded_tools:
+                active_tools.append(create_queue_reply_tool(queue_state))
             if "edit_last_reply" not in self._excluded_tools and session.last_sent_message_id:
                 active_tools.append(create_edit_reply_tool(edit_state))
             if self._scheduler:
-                if (
-                    "list_scheduled_messages" not in self._excluded_tools
-                    and self._list_scheduled_tool is not None
-                ):
-                    active_tools.append(self._list_scheduled_tool)
-                if (
-                    "edit_scheduled_message" not in self._excluded_tools
-                    and self._edit_scheduled_tool is not None
-                ):
-                    active_tools.append(self._edit_scheduled_tool)
-                if (
-                    "cancel_scheduled_message" not in self._excluded_tools
-                    and self._cancel_scheduled_tool is not None
-                ):
-                    active_tools.append(self._cancel_scheduled_tool)
+                # Scheduler tools are created per-call with caller_chat_id to enforce
+                # per-session authorization (BUG-040, BUG-041).
+                if "list_scheduled_messages" not in self._excluded_tools:
+                    active_tools.append(
+                        create_list_scheduled_tool(
+                            self._scheduler,
+                            self._services_config,
+                            caller_chat_id=msg.chat_id,
+                        )
+                    )
+                if "edit_scheduled_message" not in self._excluded_tools:
+                    active_tools.append(
+                        create_edit_scheduled_tool(
+                            self._scheduler,
+                            caller_chat_id=msg.chat_id,
+                        )
+                    )
+                if "cancel_scheduled_message" not in self._excluded_tools:
+                    active_tools.append(
+                        create_cancel_scheduled_tool(
+                            self._scheduler,
+                            caller_chat_id=msg.chat_id,
+                        )
+                    )
+
+            # Inject defer_processing if deferral manager is present and depth < max
+            if self._deferral_mgr and "defer_processing" not in self._excluded_tools:
+                depth = self._deferral_mgr.current_depth(msg.session_key)
+                if depth < self._deferral_mgr.max_depth:
+                    active_tools.append(
+                        create_defer_processing_tool(defer_state, schedule_state=schedule_state)
+                    )
+
+            # Inject suppress_reply only during re-processing passes
+            if is_reprocessing and "suppress_reply" not in self._excluded_tools:
+                active_tools.append(create_suppress_reply_tool(suppress_state))
 
             effective_prompt, user_input, history = self._prepare_agent_call(
                 msg, context, combined_prefix
@@ -430,8 +511,26 @@ class MessageHandler:
                     session.session_key,
                     turn_loaded_tools,
                 )
+
+            # Check suppress_reply first — strongest signal: no delivery, no memory update.
+            if suppress_state.was_called:
+                log.info("Agent suppressed reply for %s", msg.chat_id)
+                return
+
+            # Check defer_processing — no delivery, no memory update; register deferral.
+            if defer_state.was_called and self._deferral_mgr:
+                depth = self._deferral_mgr.current_depth(msg.session_key)
+                log.info(
+                    "Agent deferred processing for %s by %.0fs (depth %d)",
+                    msg.chat_id,
+                    defer_state.delay_seconds,
+                    depth,
+                )
+                self._deferral_mgr.defer(msg, defer_state.delay_seconds, depth=depth)
+                return
+
             response_for_memory = self._route_response(
-                msg, channel, response, schedule_state, edit_state, session
+                msg, channel, response, schedule_state, edit_state, queue_state, session
             )
 
             # Memory records the response regardless of delivery success
@@ -443,10 +542,12 @@ class MessageHandler:
                 log.warning("Failed to update memory for session %s: %s", session.session_key, exc)
 
             do_extract = self._knowledge_store is not None and session.guardrail_violations == 0
+            sanitized_for_knowledge = (
+                self._guardrails.sanitize_output(msg.text) if do_extract else None
+            )
 
-        if do_extract:
+        if do_extract and sanitized_for_knowledge is not None:
             try:
-                sanitized = self._guardrails.sanitize_output(msg.text)
-                self._knowledge_store.extract_and_store(sanitized, response_for_memory)  # type: ignore[union-attr]
+                self._knowledge_store.extract_and_store(sanitized_for_knowledge, response_for_memory)  # type: ignore[union-attr]
             except Exception as exc:
                 log.debug("Knowledge extraction failed: %s", exc)

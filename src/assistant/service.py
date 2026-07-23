@@ -17,13 +17,13 @@ from typing import Any
 
 from src.agent.core import AgentRunner
 from src.assistant.channel import Channel
+from src.assistant.deferral import DeferralManager
 from src.assistant.guardrails import GuardrailPipeline
 from src.assistant.handler import MessageHandler
 from src.assistant.knowledge import SharedKnowledgeStore, create_extraction_llm
 from src.assistant.poller import ChannelPoller
 from src.assistant.scheduler import MessageScheduler
 from src.assistant.session import ChatSessionManager
-from src.orchestration.session_state import SessionState
 
 log = logging.getLogger("cogtrix")
 
@@ -48,6 +48,15 @@ _ASSISTANT_SYSTEM_PROMPT = (
     "delivery queue. Before scheduling a new message for a contact, check "
     "list_scheduled_messages to avoid duplicates. When information changes, "
     "edit or cancel the outdated scheduled message rather than sending a new one.\n"
+    "If a queue_reply tool is available, use it to send multiple messages in "
+    "sequence. Each call appends after the last pending message for this chat. "
+    "Use schedule_reply for a specific delay; use queue_reply when order matters "
+    "but exact timing does not.\n"
+    "A message may begin with a [Re-processing ...] prefix. This means you are re-entering "
+    "a conversation that you previously deferred. The prefix shows elapsed time and message "
+    "count — it is system metadata, not something the user wrote. Do not mention it or "
+    "explain it to the user. Treat the messages below the prefix as the current conversation "
+    "and respond normally. Defer again only if there is a concrete reason to wait further.\n"
 )
 
 
@@ -128,7 +137,6 @@ class AssistantService:
             from src.orchestration.runner import run_agent
 
             agent_runner = run_agent
-        _asst_session_state = SessionState(no_confirm=True)
 
         self._executor = ThreadPoolExecutor(max_workers=max_concurrent)
         self._channels: list[Channel] = self._discover_channels(config)
@@ -146,6 +154,20 @@ class AssistantService:
 
         debounce_seconds = float(asst_cfg.get("debounce_seconds", 3.0))
 
+        deferral_cfg: dict[str, Any] = asst_cfg.get("deferral", {})
+        if deferral_cfg.get("enabled", True):
+            deferral_path = Path(top_data_dir) / "assistant" / "deferrals.json"
+            self._deferral_mgr: DeferralManager | None = DeferralManager(
+                persist_path=deferral_path,
+                reprocess_callback=None,  # Wired after handler construction below
+                channels=channels_map,
+                max_depth=int(deferral_cfg.get("max_depth", 3)),
+                check_interval=float(deferral_cfg.get("check_interval", 10.0)),
+                stale_threshold=float(deferral_cfg.get("stale_threshold", 7200.0)),
+            )
+        else:
+            self._deferral_mgr = None
+
         self._handler = MessageHandler(
             session_mgr=self._session_mgr,
             config=asst_cfg,
@@ -160,7 +182,6 @@ class AssistantService:
             knowledge_store=self._knowledge_store,
             guardrails=guardrails,
             agent_runner=agent_runner,
-            session_state=_asst_session_state,
             parallel_tool_execution=bool(
                 asst_cfg.get(
                     "parallel_tool_execution", getattr(config, "parallel_tool_execution", True)
@@ -168,7 +189,16 @@ class AssistantService:
             ),
             services_config=config.services if hasattr(config, "services") else {},
             scheduler=self._scheduler,
+            deferral_mgr=self._deferral_mgr,
         )
+
+        # Wire the reprocess callback now that both handler and executor exist.
+        if self._deferral_mgr is not None:
+            self._deferral_mgr.set_reprocess_callback(
+                lambda msgs, ch, depth: self._executor.submit(
+                    self._handler.handle_batch, msgs, ch, is_reprocessing=True
+                )
+            )
 
         self._poller = ChannelPoller(
             self._channels,
@@ -196,6 +226,8 @@ class AssistantService:
 
         self._poller.start()
         self._scheduler.start()
+        if self._deferral_mgr is not None:
+            self._deferral_mgr.start()
         self._stop_event.wait()
 
     def _handle_shutdown(self, _signum: int, _frame: Any) -> None:
@@ -206,6 +238,9 @@ class AssistantService:
         self._poller.stop()
         self._scheduler.stop()
         self._scheduler.save()
+        if self._deferral_mgr is not None:
+            self._deferral_mgr.stop()
+            self._deferral_mgr.save()
         self._executor.shutdown(wait=True, cancel_futures=False)
         self._session_mgr.save_all()
         if self._knowledge_store is not None:

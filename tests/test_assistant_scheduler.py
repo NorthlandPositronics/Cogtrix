@@ -12,11 +12,13 @@ from unittest.mock import MagicMock, patch
 from src.assistant.channel import SendResult
 from src.assistant.scheduler import (
     MessageScheduler,
+    QueueReplyState,
     QuietHoursPolicy,
     ScheduledMessage,
     ScheduleReplyState,
     _is_in_quiet_window,
     _next_quiet_end,
+    create_queue_reply_tool,
     create_schedule_reply_tool,
 )
 
@@ -257,7 +259,7 @@ class TestMessageSchedulerPersistence:
         """_atomic_write swallows IOErrors — save() never propagates exceptions."""
         sched = _make_scheduler(tmp_path)
         # Patch mkstemp so every write attempt fails.
-        with patch("src.assistant.scheduler.tempfile.mkstemp", side_effect=OSError("disk full")):
+        with patch("src.utils.atomic_write.tempfile.mkstemp", side_effect=OSError("disk full")):
             # Must not raise even though the underlying write fails.
             sched._atomic_write({"test": "data"})
 
@@ -660,6 +662,163 @@ class TestHandlerIntegration:
         tool_names = [getattr(t, "name", None) for t in captured_tools]
         assert "schedule_reply" not in tool_names
 
+    def test_queued_delivery_when_agent_calls_queue_reply(self, tmp_path):
+        """When agent calls queue_reply, messages are queued and NOT sent immediately."""
+        channel = MagicMock()
+        channel.send.return_value = SendResult(ok=True)
+        sched = _make_scheduler(tmp_path)
+
+        def _runner_that_queues(**kwargs):
+            tools = (
+                kwargs["config"].active_tools_list
+                if kwargs.get("config") and kwargs["config"].active_tools_list
+                else []
+            )
+            for t in tools:
+                if getattr(t, "name", None) == "queue_reply":
+                    t.invoke({"text": "Message 1"})
+                    t.invoke({"text": "Message 2", "gap_minutes": 5})
+                    break
+            return "Queued two messages"
+
+        handler, _ = self._make_handler(tmp_path, scheduler=sched, agent_runner=_runner_that_queues)
+        handler.handle(self._make_msg(), channel)
+
+        channel.send.assert_not_called()
+        pending = [m for m in sched._queue.values() if m.status == "pending"]
+        assert len(pending) == 2
+        texts = sorted([m.text for m in pending])
+        assert texts == ["Message 1", "Message 2"]
+
+    def test_queue_reply_tool_injected_when_scheduler_present(self, tmp_path):
+        """queue_reply tool is present in active_tools when scheduler is set."""
+        sched = _make_scheduler(tmp_path)
+        captured_tools: list = []
+
+        def _capture_runner(**kwargs):
+            captured_tools.extend(
+                kwargs["config"].active_tools_list
+                if kwargs.get("config") and kwargs["config"].active_tools_list
+                else []
+            )
+            return "ok"
+
+        channel = MagicMock()
+        channel.send.return_value = SendResult(ok=True)
+        handler, _ = self._make_handler(tmp_path, scheduler=sched, agent_runner=_capture_runner)
+        handler.handle(self._make_msg(), channel)
+
+        tool_names = [getattr(t, "name", None) for t in captured_tools]
+        assert "queue_reply" in tool_names
+
+    def test_schedule_and_queue_both_processed_in_same_turn(self, tmp_path):
+        """Both schedule_reply and queue_reply calls are processed in the same turn."""
+        channel = MagicMock()
+        channel.send.return_value = SendResult(ok=True)
+        sched = _make_scheduler(tmp_path)
+
+        def _runner_schedules_and_queues(**kwargs):
+            tools = (
+                kwargs["config"].active_tools_list
+                if kwargs.get("config") and kwargs["config"].active_tools_list
+                else []
+            )
+            tool_map = {getattr(t, "name", None): t for t in tools}
+            if "schedule_reply" in tool_map:
+                tool_map["schedule_reply"].invoke({"text": "Scheduled text", "delay_minutes": 90})
+            if "queue_reply" in tool_map:
+                tool_map["queue_reply"].invoke({"text": "Queued text 1"})
+                tool_map["queue_reply"].invoke({"text": "Queued text 2", "gap_minutes": 10})
+            return "both scheduled and queued"
+
+        handler, session = self._make_handler(
+            tmp_path, scheduler=sched, agent_runner=_runner_schedules_and_queues
+        )
+        handler.handle(self._make_msg(), channel)
+
+        # Immediate send should NOT have been called.
+        channel.send.assert_not_called()
+
+        # One scheduled message + two queued messages = 3 total pending.
+        pending = [m for m in sched._queue.values() if m.status == "pending"]
+        assert len(pending) == 3
+
+        texts = sorted(m.text for m in pending)
+        assert texts == ["Queued text 1", "Queued text 2", "Scheduled text"]
+
+        # Memory text should include both the scheduled text and queued texts.
+        call_args = session.memory_manager.update.call_args
+        memory_text = call_args[0][1]
+        assert "Scheduled text" in memory_text
+        assert "Queued text 1" in memory_text
+        assert "Queued text 2" in memory_text
+
+    def test_edit_and_queue_both_processed_with_memory(self, tmp_path):
+        """Both edit_last_reply and queue_reply are processed; memory includes both."""
+        channel = MagicMock()
+        channel.send.return_value = SendResult(ok=True)
+        channel.edit_message.return_value = SendResult(ok=True, message_id="m1")
+        sched = _make_scheduler(tmp_path)
+
+        def _runner_edits_and_queues(**kwargs):
+            tools = (
+                kwargs["config"].active_tools_list
+                if kwargs.get("config") and kwargs["config"].active_tools_list
+                else []
+            )
+            tool_map = {getattr(t, "name", None): t for t in tools}
+            if "edit_last_reply" in tool_map:
+                tool_map["edit_last_reply"].invoke({"new_text": "Edited reply"})
+            if "queue_reply" in tool_map:
+                tool_map["queue_reply"].invoke({"text": "Queued after edit"})
+            return "edited and queued"
+
+        handler, session = self._make_handler(
+            tmp_path, scheduler=sched, agent_runner=_runner_edits_and_queues
+        )
+        # Set a prior message ID so edit_last_reply is injected.
+        session.last_sent_message_id = "m1"
+
+        handler.handle(self._make_msg(), channel)
+
+        # Edit should have been applied.
+        channel.edit_message.assert_called_once_with("42", "m1", "Edited reply")
+
+        # Queue item should have been scheduled.
+        pending = [m for m in sched._queue.values() if m.status == "pending"]
+        assert len(pending) == 1
+        assert pending[0].text == "Queued after edit"
+
+        # Immediate send should NOT have been called.
+        channel.send.assert_not_called()
+
+        # Memory should reference the queued text (queue_state wins over edit-only path).
+        call_args = session.memory_manager.update.call_args
+        memory_text = call_args[0][1]
+        assert "Queued after edit" in memory_text
+
+    def test_queue_reply_cap_at_ten_items(self, tmp_path):
+        """Calling queue_reply more than 10 times returns an error and stops appending."""
+        state = QueueReplyState()
+        tool = create_queue_reply_tool(state)
+
+        # First 10 calls should succeed.
+        for i in range(10):
+            result = tool.invoke({"text": f"Message {i + 1}"})
+            assert "queued" in result.lower(), f"Expected success on call {i + 1}, got: {result}"
+
+        assert len(state.items) == 10
+
+        # 11th call should return an error and not append.
+        error_result = tool.invoke({"text": "Overflow message"})
+        assert len(state.items) == 10
+        assert "limit" in error_result.lower() or "10" in error_result
+
+        # 12th call should also be rejected.
+        error_result_2 = tool.invoke({"text": "Also overflow"})
+        assert len(state.items) == 10
+        assert "limit" in error_result_2.lower() or "10" in error_result_2
+
 
 # ---------------------------------------------------------------------------
 # TestDynamicDispatch
@@ -678,3 +837,142 @@ class TestDynamicDispatch:
         sched.schedule("telegram", "42", "soon", time.time() + 5)
         interval = sched._next_wake_interval()
         assert 1.0 <= interval <= 6.0  # should be ~5s, clamped to min 1s
+
+
+# ---------------------------------------------------------------------------
+# TestQueueReplyState
+# ---------------------------------------------------------------------------
+
+
+class TestQueueReplyState:
+    """QueueReplyState dataclass initial state and item construction."""
+
+    def test_initial_values(self):
+        state = QueueReplyState()
+        assert state.items == []
+
+    def test_item_creation(self):
+        item = QueueReplyState.Item(text="hello", gap_minutes=5)
+        assert item.text == "hello"
+        assert item.gap_minutes == 5
+
+
+# ---------------------------------------------------------------------------
+# TestCreateQueueReplyTool
+# ---------------------------------------------------------------------------
+
+
+class TestCreateQueueReplyTool:
+    """create_queue_reply_tool factory and closure behavior."""
+
+    def test_tool_name(self):
+        state = QueueReplyState()
+        tool = create_queue_reply_tool(state)
+        assert tool.name == "queue_reply"
+
+    def test_single_call_appends_item(self):
+        state = QueueReplyState()
+        tool = create_queue_reply_tool(state)
+        result = tool.invoke({"text": "First message"})
+        assert len(state.items) == 1
+        assert state.items[0].text == "First message"
+        assert state.items[0].gap_minutes == 0
+        assert "#1" in result
+
+    def test_multiple_calls_append_in_order(self):
+        state = QueueReplyState()
+        tool = create_queue_reply_tool(state)
+        tool.invoke({"text": "msg1"})
+        tool.invoke({"text": "msg2", "gap_minutes": 30})
+        tool.invoke({"text": "msg3", "gap_minutes": 60})
+        assert len(state.items) == 3
+        assert state.items[0].text == "msg1"
+        assert state.items[1].text == "msg2"
+        assert state.items[1].gap_minutes == 30
+        assert state.items[2].text == "msg3"
+        assert state.items[2].gap_minutes == 60
+
+    def test_default_gap_is_zero(self):
+        state = QueueReplyState()
+        tool = create_queue_reply_tool(state)
+        tool.invoke({"text": "no gap"})
+        assert state.items[0].gap_minutes == 0
+
+    def test_closure_isolation(self):
+        state_a = QueueReplyState()
+        state_b = QueueReplyState()
+        tool_a = create_queue_reply_tool(state_a)
+        _tool_b = create_queue_reply_tool(state_b)
+        tool_a.invoke({"text": "only a"})
+        assert len(state_a.items) == 1
+        assert len(state_b.items) == 0
+
+
+# ---------------------------------------------------------------------------
+# TestQueueAfterTail
+# ---------------------------------------------------------------------------
+
+
+class TestQueueAfterTail:
+    """MessageScheduler.queue_after_tail() ordering and persistence."""
+
+    def test_empty_queue_uses_now(self, tmp_path):
+        sched = _make_scheduler(tmp_path)
+        before = time.time()
+        mid = sched.queue_after_tail("telegram", "42", "first")
+        after = time.time()
+        msg = sched._queue[mid]
+        assert before <= msg.send_at <= after
+
+    def test_appends_after_existing_tail(self, tmp_path):
+        sched = _make_scheduler(tmp_path)
+        future = time.time() + 3600
+        sched.schedule("telegram", "42", "existing", future)
+        mid = sched.queue_after_tail("telegram", "42", "appended")
+        msg = sched._queue[mid]
+        assert msg.send_at >= future
+
+    def test_gap_seconds_applied(self, tmp_path):
+        sched = _make_scheduler(tmp_path)
+        future = time.time() + 3600
+        sched.schedule("telegram", "42", "existing", future)
+        mid = sched.queue_after_tail("telegram", "42", "gapped", gap_seconds=300)
+        msg = sched._queue[mid]
+        assert msg.send_at >= future + 300
+
+    def test_sequential_calls_maintain_order(self, tmp_path):
+        sched = _make_scheduler(tmp_path)
+        mid1 = sched.queue_after_tail("telegram", "42", "first")
+        mid2 = sched.queue_after_tail("telegram", "42", "second", gap_seconds=60)
+        mid3 = sched.queue_after_tail("telegram", "42", "third", gap_seconds=60)
+        assert sched._queue[mid1].send_at < sched._queue[mid2].send_at
+        assert sched._queue[mid2].send_at < sched._queue[mid3].send_at
+        assert sched._queue[mid3].send_at - sched._queue[mid2].send_at >= 60
+
+    def test_ignores_other_chats(self, tmp_path):
+        sched = _make_scheduler(tmp_path)
+        far_future = time.time() + 99999
+        sched.schedule("telegram", "99", "other chat", far_future)
+        mid = sched.queue_after_tail("telegram", "42", "my chat")
+        msg = sched._queue[mid]
+        assert msg.send_at < far_future
+
+    def test_ignores_non_pending_messages(self, tmp_path):
+        sched = _make_scheduler(tmp_path)
+        far_future = time.time() + 99999
+        old_mid = sched.schedule("telegram", "42", "cancelled", far_future)
+        sched._queue[old_mid].status = "cancelled"
+        mid = sched.queue_after_tail("telegram", "42", "new")
+        msg = sched._queue[mid]
+        assert msg.send_at < far_future
+
+    def test_recipient_stored(self, tmp_path):
+        sched = _make_scheduler(tmp_path)
+        mid = sched.queue_after_tail("telegram", "42", "hello", recipient="Alice")
+        assert sched._queue[mid].recipient == "Alice"
+
+    def test_persists_to_disk(self, tmp_path):
+        sched = _make_scheduler(tmp_path)
+        mid = sched.queue_after_tail("telegram", "42", "persist me")
+        sched2 = _make_scheduler(tmp_path)
+        assert mid in sched2._queue

@@ -179,19 +179,22 @@ class ChatSessionManager:
     def save_all(self) -> None:
         """Persist all active sessions (called on graceful shutdown).
 
-        Acquires each session lock with a timeout to avoid hanging if a
-        handler is stuck.
+        Snapshots the session registry under the registry lock, then acquires
+        each session's lock individually outside the registry lock to avoid
+        deadlocking with get_or_create or evict_idle.
         """
         with self._lock:
-            for key, session in self._sessions.items():
-                acquired = session.lock.acquire(timeout=10.0)
-                if not acquired:
-                    log.warning("Failed to acquire lock for session %s on shutdown; skipping", key)
-                    continue
-                try:
-                    session.memory_manager.save()
-                    log.debug("Saved session %s", key)
-                except Exception as exc:
-                    log.warning("Failed to save session %s: %s", key, exc)
-                finally:
-                    session.lock.release()
+            items = list(self._sessions.items())
+
+        for key, session in items:
+            acquired = session.lock.acquire(timeout=10.0)
+            if not acquired:
+                log.warning("Failed to acquire lock for session %s on shutdown; skipping", key)
+                continue
+            try:
+                session.memory_manager.save()
+                log.debug("Saved session %s", key)
+            except Exception as exc:
+                log.warning("Failed to save session %s: %s", key, exc)
+            finally:
+                session.lock.release()

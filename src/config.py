@@ -140,7 +140,7 @@ class ProviderConfig:
                 f"providers.{self.name}.max_tokens must be > 0, got {self.max_tokens}"
             )
         if self.type:
-            from src.providers import PROVIDER_TYPES
+            from src.providers.defaults import PROVIDER_TYPES
 
             if self.type not in PROVIDER_TYPES:
                 raise ConfigError(

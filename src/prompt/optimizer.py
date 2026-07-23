@@ -8,10 +8,32 @@ from __future__ import annotations
 
 import re
 import secrets
+import threading
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
 from src.logging_config import get_logger
+
+_progress_callback: Callable[[str], None] | None = None
+_progress_lock = threading.Lock()
+
+
+def set_progress_callback(callback: Callable[[str], None]) -> None:
+    """Set the progress reporting callback for optimizer output."""
+    global _progress_callback
+    with _progress_lock:
+        _progress_callback = callback
+
+
+def _progress(msg: str) -> None:
+    with _progress_lock:
+        cb = _progress_callback
+    if cb is not None:
+        cb(msg)
+    else:
+        print(msg)
+
 
 # Skip LLM call for prompts shorter than this
 PROMPT_OPTIMIZER_MIN_LENGTH = 400
@@ -218,20 +240,20 @@ def optimize_prompt(
                 len(plan.text),
             )
             log.debug("Optimized prompt: %s", plan.text[:500])
-            print("  [optimizer] Prompt restructured for clarity")
+            _progress("  [optimizer] Prompt restructured for clarity")
             if plan.has_milestones:
-                print(f"  [optimizer] Task decomposed into {len(plan.milestones)} milestones")
+                _progress(f"  [optimizer] Task decomposed into {len(plan.milestones)} milestones")
             elif plan_milestones:
                 log.debug("Optimizer returned restructured text but no milestone markers")
         else:
             log.debug("Prompt optimizer: no changes needed")
             if force:
-                print("  [optimizer] Prompt already clear — no changes needed")
+                _progress("  [optimizer] Prompt already clear — no changes needed")
 
         return plan
 
     except Exception as exc:
         log.warning("Prompt optimizer failed: %s", exc)
         if force:
-            print(f"  [optimizer] Failed: {exc}")
+            _progress(f"  [optimizer] Failed: {exc}")
         return PromptPlan(text=user_input)

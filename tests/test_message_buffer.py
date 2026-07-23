@@ -392,13 +392,15 @@ class TestHandleBatch:
 
         handler.handle_batch([msg], channel)
 
-        handler.handle.assert_called_once_with(msg, channel)
+        handler.handle.assert_called_once_with(msg, channel, is_reprocessing=False)
 
     def test_multiple_messages_concatenated(self):
         """handle_batch with N>1 passes a combined message whose text is newline-joined."""
         captured: list[IncomingMessage] = []
 
-        def _capture_handle(msg: IncomingMessage, _ch: Any) -> None:
+        def _capture_handle(
+            msg: IncomingMessage, _ch: Any, *, is_reprocessing: bool = False
+        ) -> None:
             captured.append(msg)
 
         handler, _, _ = _make_handler()
@@ -418,7 +420,9 @@ class TestHandleBatch:
         """Combined message uses metadata from the last message in the batch."""
         captured: list[IncomingMessage] = []
 
-        def _capture_handle(msg: IncomingMessage, _ch: Any) -> None:
+        def _capture_handle(
+            msg: IncomingMessage, _ch: Any, *, is_reprocessing: bool = False
+        ) -> None:
             captured.append(msg)
 
         handler, _, _ = _make_handler()
@@ -436,7 +440,9 @@ class TestHandleBatch:
         """handle is invoked exactly once even for many messages."""
         handle_count = [0]
 
-        def _count_handle(_msg: IncomingMessage, _ch: Any) -> None:
+        def _count_handle(
+            _msg: IncomingMessage, _ch: Any, *, is_reprocessing: bool = False
+        ) -> None:
             handle_count[0] += 1
 
         handler, _, _ = _make_handler()
@@ -1436,7 +1442,7 @@ class TestRouteResponseEditAndSchedule:
         handler._scheduler.schedule.assert_called_once()
 
     def test_edit_and_schedule_returns_scheduled_text_for_memory(self):
-        """When both fire, the return value (for memory) is the scheduled text."""
+        """When both fire, the return value (for memory) includes edit and scheduled text."""
 
         def _runner_both(**kwargs: Any) -> str:
             tools: list = (
@@ -1467,7 +1473,7 @@ class TestRouteResponseEditAndSchedule:
 
         session.memory_manager.update.assert_called_once()
         _user_text, response_for_memory = session.memory_manager.update.call_args[0]
-        assert response_for_memory == "scheduled for later"
+        assert response_for_memory == "edited\n---\nscheduled for later"
 
     def test_edit_only_no_send(self):
         """When only edit fires (no schedule), channel.send is NOT called."""

@@ -435,14 +435,14 @@ class TestChatRateLimiter:
 
     def test_first_check_unknown_chat_passes(self):
         limiter = self._limiter()
-        result = limiter.check("chat1")
+        result = limiter.check_and_record("chat1")
         assert result.is_safe
 
     def test_under_per_minute_limit_passes(self):
         limiter = self._limiter(per_minute=3)
         for _ in range(2):
             limiter.check_and_record("chat1")
-        result = limiter.check("chat1")
+        result = limiter.check_and_record("chat1")
         assert result.is_safe
 
     def test_per_minute_limit_enforced(self):
@@ -450,7 +450,7 @@ class TestChatRateLimiter:
         with patch("src.assistant.guardrails.time.monotonic", return_value=1000.0):
             for _ in range(3):
                 limiter.check_and_record("chat1")
-            result = limiter.check("chat1")
+            result = limiter.check_and_record("chat1")
         assert not result.is_safe
         assert result.guard_name == "rate_limit"
         assert "/min" in result.reason
@@ -462,7 +462,7 @@ class TestChatRateLimiter:
             with patch("src.assistant.guardrails.time.monotonic", return_value=base + i * 120):
                 limiter.check_and_record("chat1")
         with patch("src.assistant.guardrails.time.monotonic", return_value=base + 600):
-            result = limiter.check("chat1")
+            result = limiter.check_and_record("chat1")
         assert not result.is_safe
         assert "/hour" in result.reason
 
@@ -472,7 +472,7 @@ class TestChatRateLimiter:
             for _ in range(2):
                 limiter.check_and_record("chat1")
         with patch("src.assistant.guardrails.time.monotonic", return_value=1070.0):
-            result = limiter.check("chat1")
+            result = limiter.check_and_record("chat1")
         assert result.is_safe
 
     def test_old_timestamps_expire_from_hour_window(self):
@@ -481,7 +481,7 @@ class TestChatRateLimiter:
             for _ in range(2):
                 limiter.check_and_record("chat1")
         with patch("src.assistant.guardrails.time.monotonic", return_value=1000.0 + 3700):
-            result = limiter.check("chat1")
+            result = limiter.check_and_record("chat1")
         assert result.is_safe
 
     def test_different_chat_ids_independent(self):
@@ -489,8 +489,8 @@ class TestChatRateLimiter:
         with patch("src.assistant.guardrails.time.monotonic", return_value=1000.0):
             for _ in range(2):
                 limiter.check_and_record("chat1")
-            result_chat1 = limiter.check("chat1")
-            result_chat2 = limiter.check("chat2")
+            result_chat1 = limiter.check_and_record("chat1")
+            result_chat2 = limiter.check_and_record("chat2")
         assert not result_chat1.is_safe
         assert result_chat2.is_safe
 
@@ -519,10 +519,10 @@ class TestChatRateLimiterCleanup:
             for i in range(1001):
                 limiter.check_and_record(f"chat_{i}")
 
-        # cleanup is triggered inside check() when len(_windows) > 1000;
+        # cleanup is triggered inside check_and_record() when len(_windows) > 1000;
         # by 7300 s later every existing window is stale (last ts > 7200 s ago)
         with patch("src.assistant.guardrails.time.monotonic", return_value=base + 7300):
-            limiter.check("trigger_cleanup_via_check")
+            limiter.check_and_record("trigger_cleanup_via_check")
 
         assert len(limiter._windows) < 1001
 

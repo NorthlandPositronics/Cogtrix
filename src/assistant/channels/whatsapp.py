@@ -20,6 +20,8 @@ from src.tools._whatsapp_client import REQUESTS_AVAILABLE, ChatOverview, Message
 
 log = logging.getLogger("cogtrix")
 
+_REACTIVATION_LOOKBACK: float = 300.0  # seconds; limits replay after watermark eviction
+
 
 def _normalize_number(number: str) -> str:
     """Normalize a phone number or Waha chatId to E.164 form.
@@ -360,7 +362,12 @@ class WhatsAppChannel(Channel):
     def _fetch_new_messages(self, chat: ChatOverview) -> list[Message]:
         """Fetch unseen user messages for a chat using per-chat watermark."""
         watermark = self._chat_watermarks.get(chat.id, 0)
-        filter_ts = watermark if watermark > 0 else self._startup_ts
+        if watermark > 0:
+            filter_ts = watermark
+        else:
+            # No watermark: new chat or evicted watermark — look back a short window only
+            # to prevent re-processing old messages after watermark eviction (BUG-055).
+            filter_ts = time.time() - _REACTIVATION_LOOKBACK
 
         messages = self._client.get_chat_messages(
             chat_id=chat.id,

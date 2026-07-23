@@ -134,7 +134,8 @@ class TestBug033OrphanedToolMessageChains:
     """BUG-033: sanitize_history must remove orphaned AI(tool_calls)+ToolMessage chains."""
 
     def test_orphaned_chain_removed(self):
-        """AI(tool_calls)+ToolMessage followed by a bad AI response should all be removed."""
+        """AI(tool_calls)+ToolMessage followed by a bad AI response should all be removed,
+        including the triggering HumanMessage (BUG-033 fix)."""
         from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
         from src.memory.manager import BaseMemoryManager
@@ -151,11 +152,13 @@ class TestBug033OrphanedToolMessageChains:
         ]
         cleaned = BaseMemoryManager.sanitize_history(messages)
 
-        assert len(cleaned) == 1
-        assert cleaned[0].content == "hello"
+        # BUG-033 fix: the triggering HumanMessage is also removed to prevent
+        # an orphaned HumanMessage with no following response.
+        assert len(cleaned) == 0
 
     def test_orphaned_chain_removed_empty_ai(self):
-        """AI(tool_calls)+ToolMessage followed by empty AI should all be removed."""
+        """AI(tool_calls)+ToolMessage followed by empty AI should all be removed,
+        including the triggering HumanMessage (BUG-033 fix)."""
         from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
         from src.memory.manager import BaseMemoryManager
@@ -171,8 +174,9 @@ class TestBug033OrphanedToolMessageChains:
         ]
         cleaned = BaseMemoryManager.sanitize_history(messages)
 
-        assert len(cleaned) == 1
-        assert cleaned[0].content == "hello"
+        # BUG-033 fix: the triggering HumanMessage is also removed to prevent
+        # an orphaned HumanMessage with no following response.
+        assert len(cleaned) == 0
 
     def test_valid_tool_chain_preserved(self):
         from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
@@ -193,7 +197,8 @@ class TestBug033OrphanedToolMessageChains:
         assert len(cleaned) == 4
 
     def test_multiple_orphaned_chains(self):
-        """Multiple consecutive tool-call steps followed by a bad AI should all be removed."""
+        """Multiple consecutive tool-call steps followed by a bad AI should all be removed,
+        including the triggering HumanMessage (BUG-033 fix)."""
         from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
         from src.memory.manager import BaseMemoryManager
@@ -213,8 +218,9 @@ class TestBug033OrphanedToolMessageChains:
             AIMessage(content=""),  # empty = bad
         ]
         cleaned = BaseMemoryManager.sanitize_history(messages)
-        assert len(cleaned) == 1
-        assert cleaned[0].content == "do stuff"
+        # BUG-033 fix: the triggering HumanMessage is also removed to prevent
+        # an orphaned HumanMessage with no following response.
+        assert len(cleaned) == 0
 
 
 # ---------------------------------------------------------------------------

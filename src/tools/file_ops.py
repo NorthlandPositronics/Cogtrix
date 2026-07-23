@@ -4,8 +4,6 @@ Write operations require user confirmation for safety.
 """
 
 import collections
-import os
-import tempfile
 import threading
 from datetime import UTC, datetime
 from pathlib import Path
@@ -60,11 +58,12 @@ def _get_append_lock(path: str) -> _RefLock:
         with ref_lock._ref_lock:
             ref_lock.ref_count += 1
         while len(_append_locks) > _APPEND_LOCK_MAX:
-            _, candidate = next(iter(_append_locks.items()))
+            oldest_key, candidate = next(iter(_append_locks.items()))
             with candidate._ref_lock:
                 if candidate.ref_count == 0:
                     _append_locks.popitem(last=False)
                 else:
+                    _append_locks.move_to_end(oldest_key)
                     break
         return ref_lock
 
@@ -130,10 +129,10 @@ def _validate_path(path: str, is_write: bool = False) -> tuple[bool, str, Path |
     """
     try:
         p = Path(path).resolve()
+        cwd = Path.cwd().resolve()
 
         # Check for path traversal attempts
         if ".." in path:
-            cwd = Path.cwd().resolve()
             in_allowed = False
             try:
                 p.relative_to(cwd)
@@ -159,7 +158,6 @@ def _validate_path(path: str, is_write: bool = False) -> tuple[bool, str, Path |
         # Paths must resolve within an allowed root directory.
         # Writes are restricted to cwd; reads also allow the app install directory
         # (so Docker users with -w /tmp can still read project docs at /app).
-        cwd = Path.cwd().resolve()
         in_cwd = False
         try:
             p.relative_to(cwd)
@@ -307,22 +305,10 @@ def write_file(path: str, content: str, encoding: str = "utf-8") -> str:
         # Create parent directories if they don't exist
         resolved.parent.mkdir(parents=True, exist_ok=True)
 
-        dir_path = os.path.dirname(resolved)
-        fd, tmp_path = tempfile.mkstemp(dir=dir_path, suffix=".tmp")
-        try:
-            with os.fdopen(fd, "w", encoding=encoding) as f:
-                f.write(content)
-            os.replace(tmp_path, str(resolved))
-        except BaseException:
-            try:
-                os.close(fd)
-            except OSError:
-                pass
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
-            raise
+        from src.utils.atomic_write import atomic_write_json
+
+        with atomic_write_json(resolved, encoding=encoding) as f:
+            f.write(content)
 
         return f"Successfully wrote {len(content)} characters to {path}"
     except PermissionError:

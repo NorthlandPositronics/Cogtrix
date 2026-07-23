@@ -6,6 +6,7 @@ reduce per-cycle token usage without losing important context.
 
 from __future__ import annotations
 
+import atexit
 import concurrent.futures
 import re
 from typing import Any
@@ -25,6 +26,11 @@ COMPRESSION_MIN_AGE_CYCLES = 3
 COMPRESSION_MIN_CHARS = 2_000
 _COMPRESSION_THRESHOLD_RATIO = 0.72
 _FALLBACK_MAX_CHARS = 30_000
+
+_COMPRESSION_POOL = concurrent.futures.ThreadPoolExecutor(
+    max_workers=4, thread_name_prefix="compress"
+)
+atexit.register(_COMPRESSION_POOL.shutdown, wait=False)
 
 
 def _content_len(msg: Any) -> int:
@@ -200,16 +206,12 @@ def apply_message_compression(
                     content, min(len(content) * 3 // 4, _FALLBACK_MAX_CHARS)
                 )
 
-        workers = min(len(eligible), 4)
-        with concurrent.futures.ThreadPoolExecutor(
-            max_workers=workers, thread_name_prefix="compress"
-        ) as pool:
-            futures = {pool.submit(_compress_one, i): i for i in eligible}
-            for future in concurrent.futures.as_completed(futures):
-                idx, compressed = future.result()
-                compressed_results[idx] = compressed
+        futures = {_COMPRESSION_POOL.submit(_compress_one, i): i for i in eligible}
+        for future in concurrent.futures.as_completed(futures):
+            idx, compressed = future.result()
+            compressed_results[idx] = compressed
 
-        # Pool has exited; update cache sequentially — no concurrent writes.
+        # Update cache sequentially — no concurrent writes.
         for idx, compressed in compressed_results.items():
             tcid = eligible[idx][2]
             if tcid:

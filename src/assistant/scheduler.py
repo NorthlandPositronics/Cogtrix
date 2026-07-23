@@ -10,12 +10,10 @@ from __future__ import annotations
 
 import json
 import logging
-import os
-import tempfile
 import threading
 import time
 import uuid
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -37,6 +35,7 @@ _BACKOFF_SECONDS: tuple[int, ...] = (30, 120, 600)
 _MIN_DISPATCH_INTERVAL: float = 1.0
 _STALE_THRESHOLD: float = 2 * 3600.0  # 2 hours
 _CLEANUP_AGE: float = 24 * 3600.0  # 24 hours
+_MAX_QUEUE_ITEMS_PER_TURN: int = 10
 
 
 # ---------------------------------------------------------------------------
@@ -90,6 +89,18 @@ class EditReplyState:
 
 
 @dataclass
+class QueueReplyState:
+    """Per-call state for queue_reply. Supports multiple calls per turn."""
+
+    @dataclass
+    class Item:
+        text: str
+        gap_minutes: int
+
+    items: list[Item] = field(default_factory=list)
+
+
+@dataclass
 class QuietHoursPolicy:
     start_hour: int  # e.g. 23
     end_hour: int  # e.g. 8
@@ -106,6 +117,20 @@ class ScheduleReplyInput(BaseModel):
     delay_minutes: int = Field(
         description="Minutes to wait before sending (e.g., 180 for 3 hours)",
         ge=1,
+        le=1440,
+    )
+
+
+class QueueReplyInput(BaseModel):
+    text: str = Field(description="The message text to deliver")
+    gap_minutes: int = Field(
+        default=0,
+        description=(
+            "Extra delay in minutes after the last pending message for this contact. "
+            "0 means deliver immediately after the previous queued message. "
+            "Use a positive value for spacing (e.g., 60 for an extra hour between messages)."
+        ),
+        ge=0,
         le=1440,
     )
 
@@ -241,6 +266,44 @@ def create_edit_reply_tool(state: EditReplyState) -> StructuredTool:  # type: ig
     )
 
 
+def create_queue_reply_tool(state: QueueReplyState) -> StructuredTool:  # type: ignore[valid-type]
+    """Return a StructuredTool whose closure captures *state*.
+
+    Unlike schedule_reply, this tool supports multiple calls per turn.
+    Each call appends an item to *state.items*.
+    """
+
+    _lock = threading.Lock()
+
+    def _queue_reply(text: str, gap_minutes: int = 0) -> str:
+        with _lock:
+            if len(state.items) >= _MAX_QUEUE_ITEMS_PER_TURN:
+                return (
+                    f"Queue limit reached: at most {_MAX_QUEUE_ITEMS_PER_TURN} messages "
+                    "may be queued per turn."
+                )
+            position = len(state.items) + 1
+            state.items.append(QueueReplyState.Item(text=text, gap_minutes=gap_minutes))
+        gap_note = f" with a {gap_minutes}-minute gap" if gap_minutes else ""
+        return (
+            f"Message #{position} queued for delivery after the current queue tail{gap_note}. "
+            "It will be sent automatically — do not repeat it."
+        )
+
+    return StructuredTool.from_function(  # type: ignore[union-attr]
+        func=_queue_reply,
+        name="queue_reply",
+        description=(
+            "Add a reply to the end of the delivery queue for this contact. "
+            "The message will be sent after all currently pending messages for this chat. "
+            "Use gap_minutes to add extra delay after the previous queued message. "
+            "Use this instead of schedule_reply when you want messages sent in order "
+            "without computing absolute delay times."
+        ),
+        args_schema=QueueReplyInput,
+    )
+
+
 def _resolve_message_id(scheduler: MessageScheduler, short_id: str) -> str | None:
     """Resolve a short ID prefix to the full message UUID, or None if not found."""
     if not short_id:
@@ -278,15 +341,21 @@ def _merge_phonebooks(services_config: dict[str, Any]) -> dict[str, list[str]]:
 def create_list_scheduled_tool(
     scheduler: MessageScheduler,
     services_config: dict[str, Any] | None = None,
+    caller_chat_id: str = "",
 ) -> StructuredTool:  # type: ignore[valid-type]
-    """Return a tool that lists pending scheduled messages."""
+    """Return a tool that lists pending scheduled messages.
+
+    ``caller_chat_id`` scopes the listing to the calling session's chat — callers
+    see only their own messages unless they explicitly provide a ``chat_id`` filter.
+    """
     import datetime
 
     _phonebook = _merge_phonebooks(services_config or {})
 
     def _list_scheduled(recipient: str = "", chat_id: str = "", contact_name: str = "") -> str:
         effective_recipient = recipient or None
-        effective_chat_id = chat_id or None
+        # Restrict to caller's own chat when no explicit chat_id filter is given (BUG-040)
+        effective_chat_id = chat_id or caller_chat_id or None
 
         if contact_name:
             key = contact_name.strip().lower()
@@ -363,8 +432,15 @@ def create_list_scheduled_tool(
     )
 
 
-def create_edit_scheduled_tool(scheduler: MessageScheduler) -> StructuredTool:  # type: ignore[valid-type]
-    """Return a tool that edits a pending scheduled message."""
+def create_edit_scheduled_tool(
+    scheduler: MessageScheduler,
+    caller_chat_id: str = "",
+) -> StructuredTool:  # type: ignore[valid-type]
+    """Return a tool that edits a pending scheduled message.
+
+    ``caller_chat_id`` enforces per-session authorization — callers may only edit
+    their own messages (BUG-041).
+    """
 
     def _edit_scheduled(
         message_id: str, new_text: str | None = None, reschedule_minutes: int | None = None
@@ -372,6 +448,12 @@ def create_edit_scheduled_tool(scheduler: MessageScheduler) -> StructuredTool:  
         full_id = _resolve_message_id(scheduler, message_id)
         if full_id is None:
             return f"No pending message found with ID starting with '{message_id}'."
+        # Authorization: callers may only edit messages belonging to their own chat (BUG-041)
+        if caller_chat_id:
+            with scheduler._lock:
+                msg_obj = scheduler._queue.get(full_id)
+            if msg_obj and msg_obj.chat_id != caller_chat_id:
+                return f"No pending message found with ID starting with '{message_id}'."
         new_send_at = time.time() + reschedule_minutes * 60 if reschedule_minutes else None
         ok = scheduler.edit_message(full_id, new_text=new_text, new_send_at=new_send_at)
         if not ok:
@@ -398,13 +480,26 @@ def create_edit_scheduled_tool(scheduler: MessageScheduler) -> StructuredTool:  
     )
 
 
-def create_cancel_scheduled_tool(scheduler: MessageScheduler) -> StructuredTool:  # type: ignore[valid-type]
-    """Return a tool that cancels a specific pending scheduled message."""
+def create_cancel_scheduled_tool(
+    scheduler: MessageScheduler,
+    caller_chat_id: str = "",
+) -> StructuredTool:  # type: ignore[valid-type]
+    """Return a tool that cancels a specific pending scheduled message.
+
+    ``caller_chat_id`` enforces per-session authorization — callers may only cancel
+    their own messages (BUG-041).
+    """
 
     def _cancel_scheduled(message_id: str) -> str:
         full_id = _resolve_message_id(scheduler, message_id)
         if full_id is None:
             return f"No pending message found with ID starting with '{message_id}'."
+        # Authorization: callers may only cancel messages belonging to their own chat (BUG-041)
+        if caller_chat_id:
+            with scheduler._lock:
+                msg_obj = scheduler._queue.get(full_id)
+            if msg_obj and msg_obj.chat_id != caller_chat_id:
+                return f"No pending message found with ID starting with '{message_id}'."
         ok = scheduler.cancel_message(full_id)
         if not ok:
             return (
@@ -553,6 +648,57 @@ class MessageScheduler:
         self.save()
         log.debug("Scheduled message %s for %s@%s at %.0f", msg.id, chat_id, channel, send_at)
         return msg.id
+
+    def queue_after_tail(
+        self,
+        channel: str,
+        chat_id: str,
+        text: str,
+        gap_seconds: float = 0.0,
+        recipient: str | None = None,
+        *,
+        persist: bool = True,
+    ) -> str:
+        """Atomically find the queue tail for *chat_id* and insert after it.
+
+        If no pending messages exist for this chat, the base time is
+        ``time.time()``.  Pass ``persist=False`` to skip the disk write
+        when batching multiple inserts (caller must call ``save()``
+        afterward).  Returns the message ID.
+        """
+        msg_id = str(uuid.uuid4())
+        now = time.time()
+        with self._lock:
+            tail_time = now
+            for m in self._queue.values():
+                if (
+                    m.channel == channel
+                    and m.chat_id == chat_id
+                    and m.status == "pending"
+                    and m.send_at >= tail_time
+                ):
+                    tail_time = m.send_at
+            send_at = tail_time + gap_seconds
+            msg = ScheduledMessage(
+                id=msg_id,
+                channel=channel,
+                chat_id=chat_id,
+                text=text,
+                send_at=send_at,
+                created_at=now,
+                recipient=recipient,
+            )
+            self._queue[msg_id] = msg
+        if persist:
+            self.save()
+        log.debug(
+            "Queued message %s after tail (send_at=%.0f) for %s@%s",
+            msg_id,
+            send_at,
+            chat_id,
+            channel,
+        )
+        return msg_id
 
     def cancel_pending(self, channel: str, chat_id: str) -> int:
         """Cancel all pending or in-flight messages for the given chat. Returns the count cancelled."""
@@ -816,21 +962,9 @@ class MessageScheduler:
 
     def _atomic_write(self, data: dict[str, Any]) -> None:
         try:
-            self._persist_path.parent.mkdir(parents=True, exist_ok=True)
-            tmp_fd, tmp_path = tempfile.mkstemp(dir=str(self._persist_path.parent), suffix=".tmp")
-            try:
-                with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
-                    json.dump(data, f, ensure_ascii=False, indent=2)
-                os.replace(tmp_path, self._persist_path)
-            except Exception:
-                try:
-                    os.close(tmp_fd)
-                except OSError:
-                    pass
-                try:
-                    os.unlink(tmp_path)
-                except OSError:
-                    pass
-                raise
+            from src.utils.atomic_write import atomic_write_json
+
+            with atomic_write_json(self._persist_path) as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
         except Exception as exc:
             log.debug("MessageScheduler: failed to persist queue: %s", exc)

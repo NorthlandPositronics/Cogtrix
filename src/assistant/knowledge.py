@@ -28,16 +28,18 @@ log = logging.getLogger("cogtrix")
 _EXTRACTION_MAX_WORKERS = 2
 _extraction_pool: _cf.ThreadPoolExecutor | None = None
 _extraction_pool_lock = threading.Lock()
+_pool_shutdown: bool = False
 
 
 def _get_extraction_pool() -> _cf.ThreadPoolExecutor:
-    global _extraction_pool
+    global _extraction_pool, _pool_shutdown
     with _extraction_pool_lock:
-        if _extraction_pool is None or _extraction_pool._shutdown:
+        if _extraction_pool is None or _pool_shutdown:
             _extraction_pool = _cf.ThreadPoolExecutor(
                 max_workers=_EXTRACTION_MAX_WORKERS,
                 thread_name_prefix="knowledge-extract",
             )
+            _pool_shutdown = False
     return _extraction_pool
 
 
@@ -320,7 +322,7 @@ class SharedKnowledgeStore:
         try:
             parsed = json.loads(json_str)
         except json.JSONDecodeError:
-            log.debug("Knowledge extraction: JSON parse failed for: %s", json_str[:200])
+            log.warning("Knowledge extraction: JSON parse failed for: %s", json_str[:200])
             return []
 
         if not isinstance(parsed, list):

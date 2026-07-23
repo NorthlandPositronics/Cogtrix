@@ -6,6 +6,7 @@ Builds a custom StateGraph with three nodes:
 - handle_phantom: recovers from phantom tool calls
 """
 
+import atexit
 import concurrent.futures
 import json as _json
 import re
@@ -41,6 +42,24 @@ from src.tools.resolver import resolve_tool_name as _resolve_tool_name
 DEFAULT_RECURSION_LIMIT = 90
 EMPTY_RESPONSE_MSG = "**Error:** The model returned an empty response. Please try again."
 _PARALLEL_TOOL_WORKERS = 8
+
+_TOOL_EXECUTOR: concurrent.futures.ThreadPoolExecutor | None = None
+_TOOL_EXECUTOR_LOCK = threading.Lock()
+
+
+def _get_tool_executor() -> concurrent.futures.ThreadPoolExecutor:
+    """Return the module-level parallel tool executor, creating it on first use."""
+    global _TOOL_EXECUTOR
+    if _TOOL_EXECUTOR is None:
+        with _TOOL_EXECUTOR_LOCK:
+            if _TOOL_EXECUTOR is None:
+                _TOOL_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
+                    max_workers=_PARALLEL_TOOL_WORKERS,
+                    thread_name_prefix="tool",
+                )
+                atexit.register(_TOOL_EXECUTOR.shutdown, wait=False)
+    return _TOOL_EXECUTOR
+
 
 _INVALID_TOOL_RE = re.compile(r"^Error:\s*(\S+)\s+is not a valid tool")
 
@@ -335,6 +354,10 @@ def build_agent_graph(
         if config.preset_tools is not None:
             preset_tools = config.preset_tools
         context_compression = config.context_compression
+        if config.compression_min_age is not None:
+            compression_min_age = config.compression_min_age
+        if config.compression_min_chars is not None:
+            compression_min_chars = config.compression_min_chars
         if config.compression_llm is not None:
             compression_llm = config.compression_llm
         if config.tool_call_guard is not None:
@@ -374,6 +397,7 @@ def build_agent_graph(
     _DUPLICATE_EXEMPT = {
         "request_tools",
         "report_progress",
+        "queue_reply",
         "list_scheduled_messages",
         "edit_scheduled_message",
         "cancel_scheduled_message",
@@ -788,18 +812,42 @@ def build_agent_graph(
             if parallel_calls[0]["name"] == "request_tools":
                 saw_request_tools = True
         elif parallel_calls:
-            workers = min(len(parallel_calls), _PARALLEL_TOOL_WORKERS)
-            with concurrent.futures.ThreadPoolExecutor(
-                max_workers=workers, thread_name_prefix="tool"
-            ) as pool:
-                futures = [
-                    (call, pool.submit(_invoke_one, call, config)) for call in parallel_calls
-                ]
+            pool = _get_tool_executor()
+            futures = [(call, pool.submit(_invoke_one, call, config)) for call in parallel_calls]
+            for call, future in futures:
+                try:
+                    result_msgs.append(future.result())
+                except UserCancelledRun:
+                    cancel_requested = True
+                    result_msgs.append(
+                        ToolMessage(
+                            content="User cancelled agent workflow",
+                            tool_call_id=call["id"],
+                            name=call["name"],
+                        )
+                    )
+                    break
+                except Exception as exc:
+                    log.error("Unexpected future exception: %s", exc, exc_info=True)
+                    result_msgs.append(
+                        ToolMessage(
+                            content=f"Error executing {call['name']}: {exc}",
+                            tool_call_id=call["id"],
+                            name=call["name"],
+                        )
+                    )
+                if call["name"] == "request_tools":
+                    saw_request_tools = True
+
+            if cancel_requested:
+                # Note: future.cancel() only prevents not-yet-started futures.
+                # In-flight futures complete naturally; the persistent pool keeps threads
+                # alive for the next batch. This is intentional — abrupt thread
+                # termination could leave resources in an inconsistent state.
+                processed_ids = {m.tool_call_id for m in result_msgs if hasattr(m, "tool_call_id")}
                 for call, future in futures:
-                    try:
-                        result_msgs.append(future.result())
-                    except UserCancelledRun:
-                        cancel_requested = True
+                    if call["id"] not in processed_ids:
+                        future.cancel()
                         result_msgs.append(
                             ToolMessage(
                                 content="User cancelled agent workflow",
@@ -807,37 +855,6 @@ def build_agent_graph(
                                 name=call["name"],
                             )
                         )
-                        break
-                    except Exception as exc:
-                        log.error("Unexpected future exception: %s", exc, exc_info=True)
-                        result_msgs.append(
-                            ToolMessage(
-                                content=f"Error executing {call['name']}: {exc}",
-                                tool_call_id=call["id"],
-                                name=call["name"],
-                            )
-                        )
-                    if call["name"] == "request_tools":
-                        saw_request_tools = True
-
-                if cancel_requested:
-                    # Note: future.cancel() only prevents not-yet-started futures.
-                    # In-flight futures complete naturally when the pool's `with`
-                    # block calls shutdown(wait=True). This is intentional — abrupt
-                    # thread termination could leave resources in an inconsistent state.
-                    processed_ids = {
-                        m.tool_call_id for m in result_msgs if hasattr(m, "tool_call_id")
-                    }
-                    for call, future in futures:
-                        if call["id"] not in processed_ids:
-                            future.cancel()
-                            result_msgs.append(
-                                ToolMessage(
-                                    content="User cancelled agent workflow",
-                                    tool_call_id=call["id"],
-                                    name=call["name"],
-                                )
-                            )
 
         if cancel_requested:
             raise UserCancelledRun()

@@ -3,6 +3,8 @@ Factory for creating memory managers by mode name.
 Supports dynamic registration of new memory modes.
 """
 
+import sys
+import threading
 from typing import Any
 
 from src.memory.base import BaseMemoryStore
@@ -25,6 +27,7 @@ class MemoryFactory:
     """
 
     _registry: dict[str, type[BaseMemoryManager]] = {}
+    _lock: threading.RLock = threading.RLock()
 
     @classmethod
     def register(cls, mode: str, manager_class: type[BaseMemoryManager]) -> None:
@@ -48,11 +51,12 @@ class MemoryFactory:
         if not issubclass(manager_class, BaseMemoryManager):
             raise TypeError(f"{manager_class.__name__} must inherit from " "BaseMemoryManager")
 
-        if mode in cls._registry:
-            existing = cls._registry[mode].__name__
-            raise ValueError(f"Mode '{mode}' is already registered to {existing}")
+        with cls._lock:
+            if mode in cls._registry:
+                existing = cls._registry[mode].__name__
+                raise ValueError(f"Mode '{mode}' is already registered to {existing}")
 
-        cls._registry[mode] = manager_class
+            cls._registry[mode] = manager_class
 
     @classmethod
     def unregister(cls, mode: str) -> None:
@@ -89,11 +93,12 @@ class MemoryFactory:
         Raises:
             ValueError: If mode is not registered
         """
-        if mode not in cls._registry:
-            available = cls.available_modes()
-            raise ValueError(f"Unknown memory mode: '{mode}'. Available modes: {available}")
+        with cls._lock:
+            if mode not in cls._registry:
+                available = cls.available_modes()
+                raise ValueError(f"Unknown memory mode: '{mode}'. Available modes: {available}")
 
-        manager_class = cls._registry[mode]
+            manager_class = cls._registry[mode]
         return manager_class(store, session_id, config)
 
     @classmethod
@@ -137,6 +142,10 @@ class MemoryFactory:
         """
         Clear all registrations.
 
-        For testing purposes only.
+        For testing purposes only. Raises ``RuntimeError`` outside of a
+        pytest session to prevent accidental production use.
         """
-        cls._registry.clear()
+        if "pytest" not in sys.modules:
+            raise RuntimeError("clear_registry() may only be called during testing")
+        with cls._lock:
+            cls._registry.clear()

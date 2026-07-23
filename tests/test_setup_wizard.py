@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import socket
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -14,6 +15,7 @@ from src.setup_wizard import (
     _extract_yaml,
     _has_yaml_block,
     _inject_bootstrap,
+    _is_safe_url,
     _list_ollama_models,
     _load_docs,
     _load_existing_config,
@@ -485,3 +487,93 @@ class TestPrintDetections:
 
     def test_no_exception_on_arbitrary_env(self):
         _print_detections({"some_unknown_key": "value"})
+
+
+class TestWizardSystemPromptTemplate:
+    """BUG-074 — _WIZARD_SYSTEM_PROMPT uses string.Template to handle curly braces."""
+
+    def test_curly_braces_in_docs_do_not_crash(self):
+        from src.setup_wizard import _WIZARD_SYSTEM_PROMPT
+
+        result = _WIZARD_SYSTEM_PROMPT.substitute(
+            docs="example {curly} and {{double}} and }}}",
+            existing_config="x: 1",
+            bootstrap_provider="ollama",
+            bootstrap_model="qwen3:8b",
+        )
+        assert "{curly}" in result
+        assert "{{double}}" in result
+        assert "}}}" in result
+
+    def test_substitution_inserts_all_fields(self):
+        from src.setup_wizard import _WIZARD_SYSTEM_PROMPT
+
+        result = _WIZARD_SYSTEM_PROMPT.substitute(
+            docs="doc content",
+            existing_config="cfg content",
+            bootstrap_provider="openai",
+            bootstrap_model="gpt-4",
+        )
+        assert "doc content" in result
+        assert "cfg content" in result
+        assert "openai" in result
+        assert "gpt-4" in result
+
+    def test_is_template_instance(self):
+        from string import Template
+
+        from src.setup_wizard import _WIZARD_SYSTEM_PROMPT
+
+        assert isinstance(_WIZARD_SYSTEM_PROMPT, Template)
+
+
+class TestIsUrlSafe:
+    """BUG-077 — _is_safe_url blocks SSRF targets."""
+
+    def test_loopback_is_blocked(self):
+        with patch(
+            "socket.getaddrinfo", return_value=[(None, None, None, None, ("127.0.0.1", 80))]
+        ):
+            assert _is_safe_url("http://localhost/path") is False
+
+    def test_link_local_is_blocked(self):
+        with patch(
+            "socket.getaddrinfo",
+            return_value=[(None, None, None, None, ("169.254.169.254", 80))],
+        ):
+            assert _is_safe_url("http://169.254.169.254/") is False
+
+    def test_private_rfc1918_is_blocked(self):
+        with patch(
+            "socket.getaddrinfo",
+            return_value=[(None, None, None, None, ("192.168.1.1", 80))],
+        ):
+            assert _is_safe_url("http://192.168.1.1/") is False
+
+    def test_public_ip_is_allowed(self):
+        with patch(
+            "socket.getaddrinfo",
+            return_value=[(None, None, None, None, ("8.8.8.8", 443))],
+        ):
+            assert _is_safe_url("https://docs.example.com/") is True
+
+    def test_dns_failure_is_blocked(self):
+        with patch("socket.getaddrinfo", side_effect=socket.gaierror("no host")):
+            assert _is_safe_url("http://nonexistent.invalid/") is False
+
+    def test_load_docs_blocks_loopback_url(self):
+        with patch(
+            "socket.getaddrinfo",
+            return_value=[(None, None, None, None, ("127.0.0.1", 9999))],
+        ):
+            docs = _load_docs("http://127.0.0.1:9999/docs")
+        # Must fall back to embedded docs (not raise)
+        assert len(docs) > 10
+
+    def test_load_docs_blocks_link_local(self):
+        with patch(
+            "socket.getaddrinfo",
+            return_value=[(None, None, None, None, ("169.254.169.254", 80))],
+        ):
+            docs = _load_docs("http://169.254.169.254/latest/meta-data/")
+        assert len(docs) > 10

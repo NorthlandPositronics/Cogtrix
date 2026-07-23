@@ -108,7 +108,13 @@ from src.orchestration.runner import (  # noqa: F401
 )
 from src.orchestration.session_orchestrator import SessionOrchestrator
 from src.orchestration.session_state import SessionState
-from src.prompt.optimizer import PromptPlan, optimize_prompt
+from src.prompt.optimizer import (
+    PromptPlan,
+    optimize_prompt,
+)
+from src.prompt.optimizer import (
+    set_progress_callback as set_optimizer_callback,
+)
 from src.registry import ToolRegistry
 from src.tools.configure import (
     TOOL_OUTPUT_CAP_MIN_CHARS,
@@ -3066,6 +3072,20 @@ def main():
         set_progress_callback(_deep_think_progress)
     except ImportError:
         pass
+
+    def _optimizer_progress(msg: str) -> None:
+        """Spinner-aware progress callback for the prompt optimizer."""
+        try:
+            _spinner.pause()
+        except Exception:  # noqa: BLE001
+            pass
+        print(msg)
+        try:
+            _spinner.resume()
+        except Exception:  # noqa: BLE001
+            pass
+
+    set_optimizer_callback(_optimizer_progress)
 
     set_milestone_callback(_milestone_progress)
 

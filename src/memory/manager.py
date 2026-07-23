@@ -11,9 +11,7 @@ Includes hybrid memory support:
 
 import json
 import logging
-import os
 import re
-import tempfile
 import threading
 import time
 from abc import ABC, abstractmethod
@@ -258,23 +256,11 @@ class BaseMemoryManager(ABC):
             "_summary_msg_idx": summary_idx,
         }
         try:
+            from src.utils.atomic_write import atomic_write_json
+
             meta_path = self._hybrid_meta_path()
-            meta_path.parent.mkdir(parents=True, exist_ok=True)
-            tmp_fd, tmp_path = tempfile.mkstemp(dir=str(meta_path.parent), suffix=".tmp")
-            try:
-                with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
-                    json.dump(meta, f)
-                Path(tmp_path).replace(meta_path)
-            except Exception:
-                try:
-                    os.close(tmp_fd)
-                except OSError:
-                    pass
-                try:
-                    os.unlink(tmp_path)
-                except OSError:
-                    pass
-                raise
+            with atomic_write_json(meta_path) as f:
+                json.dump(meta, f)
         except Exception as exc:
             log.warning("Failed to save hybrid meta: %s", exc)
 
@@ -307,23 +293,11 @@ class BaseMemoryManager(ABC):
                 meta_path.unlink(missing_ok=True)
             return
         try:
+            from src.utils.atomic_write import atomic_write_json
+
             meta_path = self._mode_meta_path()
-            meta_path.parent.mkdir(parents=True, exist_ok=True)
-            tmp_fd, tmp_path = tempfile.mkstemp(dir=str(meta_path.parent), suffix=".tmp")
-            try:
-                with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
-                    json.dump(data, f)
-                Path(tmp_path).replace(meta_path)
-            except Exception:
-                try:
-                    os.close(tmp_fd)
-                except OSError:
-                    pass
-                try:
-                    os.unlink(tmp_path)
-                except OSError:
-                    pass
-                raise
+            with atomic_write_json(meta_path) as f:
+                json.dump(data, f)
         except Exception as exc:
             log.warning("Failed to save mode meta: %s", exc)
 
@@ -666,31 +640,55 @@ class BaseMemoryManager(ABC):
                 i += 1
                 continue
 
-            # Check if this is a human message followed by a bad AI response
+            # Check if this is a human message followed by a bad AI response,
+            # possibly with an intermediate tool chain (BUG-064).
             is_human = msg_type in ("human", "humanmessage")
             if is_human and i + 1 < len(messages):
-                next_msg = messages[i + 1]
-                if isinstance(next_msg, dict):
-                    next_content = _coerce_content(next_msg.get("content", ""))
-                    next_type = next_msg.get("type", "")
-                elif hasattr(next_msg, "content"):
-                    next_content = _coerce_content(next_msg.content)
-                    next_type = type(next_msg).__name__.lower()
-                else:
-                    next_content = ""
-                    next_type = ""
+                # Scan forward past any tool chain (ai-tc + tool messages)
+                # to find the terminal AI response.
+                j = i + 1
+                while j < len(messages):
+                    scan_msg = messages[j]
+                    if isinstance(scan_msg, dict):
+                        scan_type = scan_msg.get("type", "")
+                    elif hasattr(scan_msg, "content"):
+                        scan_type = type(scan_msg).__name__.lower()
+                    else:
+                        scan_type = ""
+                    scan_is_tool = scan_type in ("tool", "toolmessage")
+                    scan_is_ai_tc = scan_type in (
+                        "ai",
+                        "aimessage",
+                    ) and BaseMemoryManager._has_tool_calls(scan_msg)
+                    if scan_is_tool or scan_is_ai_tc:
+                        j += 1
+                    else:
+                        break
 
-                next_is_ai = next_type in ("ai", "aimessage")
-                # Only treat as "bad pair" when next message is a plain
-                # AI response (no tool_calls) with error content.
-                if (
-                    next_is_ai
-                    and not BaseMemoryManager._has_tool_calls(next_msg)
-                    and _is_bad_ai_content(next_content)
-                ):
-                    removed += 2
-                    i += 2
-                    continue
+                # j now points to the first non-tool-chain message after human
+                if j < len(messages):
+                    terminal_msg = messages[j]
+                    if isinstance(terminal_msg, dict):
+                        terminal_content = _coerce_content(terminal_msg.get("content", ""))
+                        terminal_type = terminal_msg.get("type", "")
+                    elif hasattr(terminal_msg, "content"):
+                        terminal_content = _coerce_content(terminal_msg.content)
+                        terminal_type = type(terminal_msg).__name__.lower()
+                    else:
+                        terminal_content = ""
+                        terminal_type = ""
+
+                    terminal_is_ai = terminal_type in ("ai", "aimessage")
+                    # Remove the entire chain (human + tool-chain + bad AI terminal)
+                    if (
+                        terminal_is_ai
+                        and not BaseMemoryManager._has_tool_calls(terminal_msg)
+                        and _is_bad_ai_content(terminal_content)
+                    ):
+                        chain_len = j - i + 1  # human + all tool-chain msgs + terminal
+                        removed += chain_len
+                        i = j + 1
+                        continue
 
             # Check standalone AI message with bad content
             if is_ai and _is_bad_ai_content(content):
@@ -713,6 +711,19 @@ class BaseMemoryManager(ABC):
                         removed += 1
                     else:
                         break
+                # Also remove the triggering HumanMessage at the start of the chain
+                # (BUG-033: prevents lone HumanMessage with no following response)
+                if cleaned:
+                    tail = cleaned[-1]
+                    if isinstance(tail, dict):
+                        tail_type = tail.get("type", "")
+                    elif hasattr(tail, "content"):
+                        tail_type = type(tail).__name__.lower()
+                    else:
+                        tail_type = ""
+                    if tail_type in ("human", "humanmessage"):
+                        cleaned.pop()
+                        removed += 1
                 i += 1
                 continue
 

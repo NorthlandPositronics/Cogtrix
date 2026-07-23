@@ -651,17 +651,15 @@ def run_agent(
             with _bound_cache_lock:
                 if _cached_llm_id == current_llm_id:
                     for key, value in local_bound_cache.items():
-                        if key not in _persistent_bound_cache:
-                            _persistent_bound_cache[key] = value
-                            _persistent_bound_cache.move_to_end(key)
+                        _persistent_bound_cache[key] = value
+                        _persistent_bound_cache.move_to_end(key)
                     while len(_persistent_bound_cache) > _MAX_BOUND_CACHE_SIZE:
                         _persistent_bound_cache.popitem(last=False)
             with _compression_cache_lock:
                 if _cached_llm_id == current_llm_id:
                     for key, value in local_compression_cache.items():
-                        if key not in _persistent_compression_cache:
-                            _persistent_compression_cache[key] = value
-                            _persistent_compression_cache.move_to_end(key)
+                        _persistent_compression_cache[key] = value
+                        _persistent_compression_cache.move_to_end(key)
                     while len(_persistent_compression_cache) > _MAX_COMPRESSION_CACHE_SIZE:
                         _persistent_compression_cache.popitem(last=False)
 

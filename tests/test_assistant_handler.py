@@ -477,3 +477,98 @@ class TestSendBeforeMemoryUpdate:
         handler.handle(_make_msg(), channel)
 
         assert call_order.index("send") < call_order.index("extract")
+
+
+# ---------------------------------------------------------------------------
+# TestGuardrailViolationBlocksKnowledgeExtraction (BUG-060)
+# ---------------------------------------------------------------------------
+
+
+class TestGuardrailViolationBlocksKnowledgeExtraction:
+    """BUG-060: Knowledge extraction must not run for sessions with guardrail violations.
+
+    The fix snapshots ``guardrail_violations == 0`` inside the session lock so that
+    a concurrent violation recorded between the check and the extract call cannot
+    allow a violating user's content into the knowledge base.
+    """
+
+    def test_no_violation_knowledge_extracted(self):
+        """When guardrail_violations == 0, extract_and_store is called normally."""
+        knowledge_store = MagicMock()
+        knowledge_store.recall.return_value = None
+
+        channel = MagicMock()
+        mock_runner = MagicMock(return_value="Good response")
+        handler, _ = _make_handler(knowledge_store=knowledge_store, agent_runner=mock_runner)
+
+        handler.handle(_make_msg(text="Clean input"), channel)
+
+        knowledge_store.extract_and_store.assert_called_once()
+
+    def test_guardrail_violation_blocks_knowledge_extraction(self):
+        """When guardrail_violations > 0, extract_and_store must NOT be called."""
+        knowledge_store = MagicMock()
+        knowledge_store.recall.return_value = None
+
+        channel = MagicMock()
+        mock_runner = MagicMock(return_value="Response")
+
+        session = _make_session()
+        session.guardrail_violations = 1  # pre-existing violation
+        session_mgr = MagicMock()
+        session_mgr.get_or_create.return_value = session
+
+        handler = MessageHandler(
+            session_mgr=session_mgr,
+            config={},
+            llm=MagicMock(),
+            system_prompt="sys",
+            registry=MagicMock(),
+            approvals=set(),
+            available_tools={},
+            active_tools=[],
+            knowledge_store=knowledge_store,
+            agent_runner=mock_runner,
+        )
+
+        handler.handle(_make_msg(text="Violating input"), channel)
+
+        knowledge_store.extract_and_store.assert_not_called()
+
+    def test_sanitized_input_passed_to_extraction(self):
+        """sanitize_output is called on the user input before knowledge extraction.
+
+        The handler calls sanitize_output(msg.text) inside the session lock to
+        compute sanitized_for_knowledge, and that sanitized value is passed to
+        extract_and_store as the first argument (BUG-060 fix).
+        """
+        from unittest.mock import patch
+
+        knowledge_store = MagicMock()
+        knowledge_store.recall.return_value = None
+
+        channel = MagicMock()
+        channel.send.return_value = SendResult(ok=True)
+        mock_runner = MagicMock(return_value="Response")
+        handler, _ = _make_handler(knowledge_store=knowledge_store, agent_runner=mock_runner)
+
+        raw_input = "raw user input"
+
+        sanitize_calls: list[str] = []
+
+        def _tracking_sanitize(text: str) -> str:
+            sanitize_calls.append(text)
+            return f"sanitized({text})"
+
+        with patch.object(handler._guardrails, "sanitize_output", side_effect=_tracking_sanitize):
+            handler.handle(_make_msg(text=raw_input), channel)
+
+        # sanitize_output must have been called with the raw user input
+        assert (
+            raw_input in sanitize_calls
+        ), f"sanitize_output was not called with raw input; calls: {sanitize_calls}"
+        # extract_and_store must have received the sanitized version as first arg
+        first_arg = knowledge_store.extract_and_store.call_args[0][0]
+        assert (
+            first_arg == f"sanitized({raw_input})"
+        ), f"extract_and_store received '{first_arg}', expected 'sanitized({raw_input})'"
