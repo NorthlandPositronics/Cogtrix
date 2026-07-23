@@ -39,9 +39,9 @@ os.environ.setdefault("COGTRIX_DB_URL", "sqlite+aiosqlite:///:memory:")
 # Imports after env is set
 # ---------------------------------------------------------------------------
 
+import jwt as jose_jwt  # noqa: E402
 from fastapi import HTTPException  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
-from jose import jwt as jose_jwt  # noqa: E402
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine  # noqa: E402
 
 from src.api.app import (  # noqa: E402

@@ -23,8 +23,8 @@ import pytest
 
 pytest.importorskip("fastapi")
 
+import jwt  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
-from jose import jwt  # noqa: E402
 from sqlalchemy.ext.asyncio import (  # noqa: E402
     async_sessionmaker,
     create_async_engine,

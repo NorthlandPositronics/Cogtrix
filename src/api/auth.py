@@ -31,9 +31,10 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import bcrypt
+import jwt
 from fastapi import Depends, HTTPException, Query, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from jose import ExpiredSignatureError, JWTError, jwt
+from jwt.exceptions import ExpiredSignatureError, InvalidTokenError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 log = logging.getLogger("cogtrix.api.auth")
@@ -136,7 +137,7 @@ def create_access_token(user_id: str, role: str) -> str:
 def _decode_jwt(token: str) -> dict[str, Any]:
     """Decode and verify a JWT, returning its claims.
 
-    Uses ``python-jose`` with the HS256 algorithm.  The secret is loaded
+    Uses ``PyJWT`` with the HS256 algorithm.  The secret is loaded
     from the COGTRIX_JWT_SECRET environment variable.
 
     Raises:
@@ -154,7 +155,7 @@ def _decode_jwt(token: str) -> dict[str, Any]:
                 "message": "The JWT has expired; refresh the token and retry.",
             },
         ) from exc
-    except JWTError as exc:
+    except InvalidTokenError as exc:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail={"code": "UNAUTHORIZED", "message": "Missing or invalid bearer token."},

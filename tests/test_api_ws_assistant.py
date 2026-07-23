@@ -65,7 +65,7 @@ def _expired_token() -> str:
     """Mint a token that is already expired (negative expire_minutes)."""
     import datetime as _dt
 
-    import jose.jwt as _jwt
+    import jwt as _jwt
 
     secret = os.environ["COGTRIX_JWT_SECRET"]
     now = _dt.datetime.now(_dt.UTC)

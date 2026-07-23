@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.1.22](https://github.com/NorthlandPositronics/Cogtrix/compare/v0.1.21...v0.1.22) (2026-03-20)
+
+
+### Bug Fixes
+
+* **ci:** sign uv.lock update commit via GitHub Contents API ([#27](https://github.com/NorthlandPositronics/Cogtrix/issues/27)) ([ba4ccc1](https://github.com/NorthlandPositronics/Cogtrix/commit/ba4ccc1ee1ae7e2a764aa16a21d57a2fec4d8a52))
+* **ci:** use jq --rawfile to avoid ARG_MAX on base64-encoded uv.lock ([#34](https://github.com/NorthlandPositronics/Cogtrix/issues/34)) ([61b68c3](https://github.com/NorthlandPositronics/Cogtrix/commit/61b68c350db494d69076ec178971da55c99a6dc1))
+* **ci:** use jq temp file to avoid arg-too-long on large uv.lock ([#30](https://github.com/NorthlandPositronics/Cogtrix/issues/30)) ([a7a6733](https://github.com/NorthlandPositronics/Cogtrix/commit/a7a67334aecb1a7eee367a78a88e2b8a8cb0d9e5))
+* **deps:** resolve 7 security vulnerabilities in dependencies ([#32](https://github.com/NorthlandPositronics/Cogtrix/issues/32)) ([94cf6d5](https://github.com/NorthlandPositronics/Cogtrix/commit/94cf6d570403c707a0f61f12fb5d79aea80383c4))
+* use jq --rawfile to bypass ARG_MAX on large uv.lock ([b05d0a1](https://github.com/NorthlandPositronics/Cogtrix/commit/b05d0a10fe69f44fd114b46eda321131917425c9))
+
 ## [0.1.21](https://github.com/NorthlandPositronics/Cogtrix/compare/v0.1.20...v0.1.21) (2026-03-20)
 
 

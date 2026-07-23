@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cogtrix"
-version = "0.1.21"
+version = "0.1.22"
 description = "Modular AI assistant with 51 built-in tools, multi-provider LLM support, and hybrid memory"
 readme = "README.md"
 requires-python = "~=3.13.0"
@@ -37,7 +37,7 @@ dependencies = [
 
     # RAG - Vector Store & Document Processing
     "faiss-cpu~=1.13.0",
-    "pypdf~=6.5.0",
+    "pypdf~=6.9.0",
     "python-docx~=1.2.0",
 
     # CLI & Display
@@ -68,7 +68,7 @@ dev = [
     "pytest-cov~=7.0.0",
     "pytest-timeout~=2.3.0",
     "coverage~=7.13.4",
-    "black~=26.1.0",
+    "black~=26.3.0",
     "ruff~=0.15.1",
     "bandit~=1.9.3",
     "pyright~=1.1.408",
@@ -93,12 +93,12 @@ google = [
     "langchain-google-genai~=4.0.0",
 ]
 api = [
-    "fastapi~=0.115.0",
+    "fastapi~=0.135.0",
     "uvicorn[standard]~=0.34.0",
     "sqlalchemy[asyncio]~=2.0.0",
     "aiosqlite~=0.22.0",
     "alembic~=1.18.0",
-    "python-jose[cryptography]~=3.5.0",
+    "pyjwt[crypto]~=2.12.0",
     "bcrypt~=4.3.0",
     "email-validator~=2.2.0",
 ]
@@ -176,7 +176,7 @@ dev = [
     "pytest-cov~=7.0.0",
     "pytest-timeout~=2.3.0",
     "coverage~=7.13.4",
-    "black~=26.1.0",
+    "black~=26.3.0",
     "ruff~=0.15.1",
     "bandit~=1.9.3",
     "pyright~=1.1.408",
