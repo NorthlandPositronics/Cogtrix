@@ -188,6 +188,17 @@ class TestSessionVectorStoreLoadOrReset:
         # Should set ready=True despite failure
         assert self.store.ready is True
 
+    def test_load_or_reset_without_meta_attempts_index_load(self):
+        """Missing meta.json should still attempt to load an existing index."""
+        self.store._index_dir.mkdir(parents=True, exist_ok=True)
+        (self.store._index_dir / "index.faiss").write_bytes(b"index")
+        mock_store = MagicMock()
+        with patch("src.memory.recall.load_faiss_store_safe", return_value=mock_store) as mock_load:
+            self.store._load_or_reset()
+        mock_load.assert_called_once()
+        assert self.store._vectorstore is mock_store
+        assert self.store.ready is True
+
     def test_reset_index_removes_directory(self):
         """_reset_index() removes the index directory."""
         self.store._index_dir.mkdir(parents=True, exist_ok=True)

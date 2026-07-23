@@ -2,7 +2,9 @@
 
 All endpoints (except /api/v1/health, /api/v1/health/ready, and the auth
 registration/login endpoints) require a valid bearer token in the
-``Authorization: Bearer <jwt>`` header.
+``Authorization: Bearer <jwt>`` header. API keys with the ``cgx_live_``
+prefix are also accepted on the same bearer channel and are validated via
+``validate_api_key()``.
 
 WebSocket endpoints accept the token either in the Authorization header or
 as the ``token`` query parameter (browsers cannot set custom WS headers).
@@ -14,8 +16,9 @@ JWT claims:
     role — 'admin' or 'user'
 
 The JWT secret is read exclusively from the environment variable
-``COGTRIX_JWT_SECRET`` — never hardcoded.  The variable is accessed via
-``src.config`` to participate in the hierarchical config system.
+``COGTRIX_JWT_SECRET`` — never hardcoded.  API startup snapshots the value
+into an in-process cache so token operations do not re-read the environment
+on every request.
 
 Error codes:
     UNAUTHORIZED   — token missing, malformed, or signature invalid
@@ -27,6 +30,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -37,7 +41,14 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jwt.exceptions import ExpiredSignatureError, InvalidTokenError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.api.db import get_db
+
 log = logging.getLogger("cogtrix.api.auth")
+
+# In-process debounce for API key last_used_at writes.
+# Maps key_id -> monotonic timestamp of the last DB write.
+_API_KEY_LAST_USED: dict[str, float] = {}
+_API_KEY_DEBOUNCE_SECONDS = 60.0
 
 
 def _hash_api_key(token: str) -> str:
@@ -81,17 +92,28 @@ def verify_password(password: str, password_hash: str) -> bool:
 _ALGORITHM = "HS256"
 _ACCESS_TOKEN_EXPIRE_SECONDS = 3600  # 1 hour
 _REFRESH_TOKEN_EXPIRE_DAYS = 30
+_JWT_SECRET: str | None = None
 
 
-def _get_jwt_secret() -> str:
-    """Return the JWT signing secret from env, raising RuntimeError if missing."""
-    secret = os.environ.get("COGTRIX_JWT_SECRET", "")
+def configure_jwt_secret(secret: str) -> None:
+    """Snapshot the JWT signing secret for this process."""
     if len(secret) < 32:
         raise RuntimeError(
             "COGTRIX_JWT_SECRET must be set to at least 32 characters. "
             'Generate one with: python -c "import secrets; print(secrets.token_hex(32))"'
         )
-    return secret
+    global _JWT_SECRET
+    _JWT_SECRET = secret
+
+
+def _get_jwt_secret() -> str:
+    """Return the cached JWT signing secret, lazily initializing it once."""
+    global _JWT_SECRET
+    if _JWT_SECRET is None:
+        configure_jwt_secret(os.environ.get("COGTRIX_JWT_SECRET", ""))
+    if _JWT_SECRET is None:
+        raise RuntimeError("JWT secret not configured")
+    return _JWT_SECRET
 
 
 # ---------------------------------------------------------------------------
@@ -110,14 +132,24 @@ class TokenData:
         self.user_id = user_id
         """UUID v4 of the authenticated user (``sub`` claim)."""
         self.role = role
-        """Role string: 'admin' or 'user'."""
+        """Role string: 'admin', 'superadmin', or 'user'."""
         self.raw_claims = raw_claims
         """Full decoded JWT payload for advanced use."""
 
     @property
     def is_admin(self) -> bool:
-        """True when the user holds the 'admin' role."""
-        return self.role == "admin"
+        """True when the user holds the 'admin' or 'superadmin' role."""
+        return self.role in ("admin", "superadmin")
+
+    @property
+    def is_superadmin(self) -> bool:
+        """True when the user holds the 'superadmin' role."""
+        return self.role == "superadmin"
+
+    @property
+    def is_impersonating(self) -> bool:
+        """True when the request is carrying an impersonation token."""
+        return bool(self.raw_claims.get("impersonated_by"))
 
 
 # ---------------------------------------------------------------------------
@@ -133,6 +165,31 @@ def create_access_token(user_id: str, role: str) -> str:
         "role": role,
         "iat": now,
         "exp": now + timedelta(seconds=_ACCESS_TOKEN_EXPIRE_SECONDS),
+    }
+    return jwt.encode(claims, _get_jwt_secret(), algorithm=_ALGORITHM)
+
+
+def create_impersonation_token(
+    impersonated_user_id: str,
+    impersonated_role: str,
+    superadmin_id: str,
+    session_id: str,
+    duration_minutes: int = 30,
+) -> str:
+    """Mint an impersonation JWT.
+
+    The token encodes the impersonated user as ``sub`` and includes
+    ``impersonated_by`` / ``impersonation_session_id`` claims so the
+    auth layer can validate the active session on every request.
+    """
+    now = datetime.now(UTC)
+    claims = {
+        "sub": impersonated_user_id,
+        "role": impersonated_role,
+        "impersonated_by": superadmin_id,
+        "impersonation_session_id": session_id,
+        "iat": now,
+        "exp": now + timedelta(minutes=duration_minutes),
     }
     return jwt.encode(claims, _get_jwt_secret(), algorithm=_ALGORITHM)
 
@@ -181,12 +238,16 @@ async def get_current_user(
     token: str | None = Query(
         default=None, description="JWT for WebSocket connections that cannot set headers."
     ),
+    db: AsyncSession = Depends(get_db),
 ) -> TokenData:
     """FastAPI dependency: validate the bearer token and return decoded claims.
 
     Accepts the token from:
     1. ``Authorization: Bearer <jwt>`` header (preferred).
     2. ``?token=<jwt>`` query parameter (WebSocket fallback).
+
+    API keys with the ``cgx_live_`` prefix are validated through the API key
+    repository path before JWT decoding.
 
     Falls back to OIDC validation when a validator is configured and the local
     JWT check raises UNAUTHORIZED (invalid token).  TOKEN_EXPIRED is never
@@ -208,6 +269,11 @@ async def get_current_user(
             detail={"code": "UNAUTHORIZED", "message": "Missing or invalid bearer token."},
         )
 
+    if raw_token.startswith("cgx_live_"):
+        current = await validate_api_key(raw_token, db)
+        await _reject_inactive_user(current.user_id, db)
+        return current
+
     try:
         claims = _decode_jwt(raw_token)
     except HTTPException as local_exc:
@@ -222,14 +288,20 @@ async def get_current_user(
         if validator is None:
             raise
         try:
-            oidc_claims = validator.validate(raw_token)
+            # validator.validate() uses urllib (blocking I/O) — run in a
+            # thread pool to avoid blocking the async event loop.
+            import asyncio as _asyncio
+
+            oidc_claims = await _asyncio.to_thread(validator.validate, raw_token)
         except Exception:
             raise local_exc from None
         oidc_role = validator.map_role(oidc_claims)
         oidc_user_id = str(oidc_claims.get("sub", ""))
         if not oidc_user_id:
             raise local_exc from None
-        return TokenData(user_id=oidc_user_id, role=oidc_role, raw_claims=oidc_claims)
+        current = TokenData(user_id=oidc_user_id, role=oidc_role, raw_claims=oidc_claims)
+        await _reject_inactive_user(current.user_id, db)
+        return current
 
     user_id: str = claims.get("sub", "")
     role: str = claims.get("role", "user")
@@ -238,7 +310,42 @@ async def get_current_user(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail={"code": "UNAUTHORIZED", "message": "Missing or invalid bearer token."},
         )
-    return TokenData(user_id=user_id, role=role, raw_claims=claims)
+
+    # Handle impersonation tokens
+    impersonation_session_id: str | None = claims.get("impersonation_session_id")
+    if impersonation_session_id is not None:
+        from sqlalchemy import select
+
+        from src.api.db.models import ImpersonationSession
+
+        result = await db.execute(
+            select(ImpersonationSession).where(ImpersonationSession.id == impersonation_session_id)
+        )
+        imp_session = result.scalar_one_or_none()
+        now = datetime.now(UTC)
+        if imp_session is None or (imp_session.ended_at is not None):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail={
+                    "code": "UNAUTHORIZED",
+                    "message": "Impersonation session has ended or does not exist.",
+                },
+            )
+        expires_at = imp_session.expires_at
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=UTC)
+        if expires_at < now:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail={
+                    "code": "TOKEN_EXPIRED",
+                    "message": "Impersonation session has expired; re-authenticate.",
+                },
+            )
+
+    current = TokenData(user_id=user_id, role=role, raw_claims=claims)
+    await _reject_inactive_user(current.user_id, db)
+    return current
 
 
 async def require_admin(current_user: TokenData = Depends(get_current_user)) -> TokenData:
@@ -258,10 +365,28 @@ async def require_admin(current_user: TokenData = Depends(get_current_user)) -> 
     return current_user
 
 
+async def require_superadmin(current_user: TokenData = Depends(get_current_user)) -> TokenData:
+    """FastAPI dependency: require superadmin role.
+
+    Raises:
+        HTTPException 403 FORBIDDEN — authenticated user is not a superadmin.
+    """
+    if not current_user.is_superadmin:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": "FORBIDDEN",
+                "message": "Authenticated user lacks permission for this action.",
+            },
+        )
+    return current_user
+
+
 async def get_current_user_optional(
     request: Request,
     credentials: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),
     token: str | None = Query(default=None),
+    db: AsyncSession = Depends(get_db),
 ) -> TokenData | None:
     """FastAPI dependency: return decoded claims or None if no token is present.
 
@@ -282,7 +407,20 @@ async def get_current_user_optional(
 
     # A token was supplied — validate it strictly.  Do not silently degrade
     # an invalid/expired credential to anonymous access.
-    return await get_current_user(request, credentials, token)
+    return await get_current_user(request, credentials, token, db)
+
+
+async def _reject_inactive_user(user_id: str, db: AsyncSession) -> None:
+    """Reject authentication for a user record that has been deactivated."""
+    from src.api.db.repositories.users import UserRepository
+
+    repo = UserRepository(db)
+    user = await repo.get_by_id(user_id)
+    if user is not None and not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={"code": "UNAUTHORIZED", "message": "Missing or invalid bearer token."},
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -331,17 +469,20 @@ async def validate_api_key(api_key: str, db: AsyncSession) -> TokenData:
 
     user_repo = UserRepository(db)
     user = await user_repo.get_by_id(key_record.user_id)
-    if user is None:
+    if user is None or not user.is_active:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail={"code": "UNAUTHORIZED", "message": "Missing or invalid bearer token."},
         )
 
     # Update last_used_at only after confirming the user exists.
-    # Explicit commit ensures the timestamp persists even for read-only endpoints
-    # where the route handler never calls db.commit().
-    await repo.update_last_used(key_record.id, datetime.now(UTC))
-    await db.commit()
+    # Debounce in-process to avoid write amplification at high QPS.
+    now_mono = time.monotonic()
+    last_written = _API_KEY_LAST_USED.get(key_record.id, 0)
+    if now_mono - last_written >= _API_KEY_DEBOUNCE_SECONDS:
+        await repo.update_last_used(key_record.id, datetime.now(UTC))
+        await db.commit()
+        _API_KEY_LAST_USED[key_record.id] = now_mono
 
     return TokenData(
         user_id=user.id,

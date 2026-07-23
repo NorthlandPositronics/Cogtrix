@@ -50,9 +50,11 @@ class TestReasoningMemoryManager:
         """Test default configuration values."""
         manager = ReasoningMemoryManager(MockStore(), "test")
         assert manager._mode_config["working_memory_size"] == 30
+        assert manager._mode_config["vector_recall_k"] == 2
         assert manager._mode_config["track_reasoning"] is True
         assert manager._mode_config["track_decisions"] is True
         assert manager._mode_config["max_decisions"] == 20
+        assert manager._mode_config["summary_max_age_hours"] == 24
 
     def test_custom_config(self):
         """Test custom configuration overrides defaults."""

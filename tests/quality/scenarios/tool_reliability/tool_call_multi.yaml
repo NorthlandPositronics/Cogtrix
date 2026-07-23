@@ -1,0 +1,30 @@
+id: tool_call_multi
+complexity: medium
+category: tool_reliability
+description: "Two tools are called in one model turn and both complete successfully."
+tags: [tier1]
+system_prompt: "You are a helpful assistant."
+tools:
+  - github_list_issues
+  - github_list_pull_requests
+
+script:
+  - user: "Find the open issue and open pull request related to the MCP reconnect work, then summarize the queue."
+  - llm:
+      tool_calls:
+        - name: github_list_issues
+          args:
+            state: "open"
+        - name: github_list_pull_requests
+          args:
+            state: "open"
+  - tool_result: "Open issues include #149 tools_ready gate and #159 protected branch guard."
+  - tool_result: "Open pull requests include #149 and #163."
+  - llm: "The active queue contains the reconnect gate and the protected-branch guard."
+
+metrics:
+  required_tools: [github_list_issues, github_list_pull_requests]
+  forbidden_tools: []
+  task_completed: true
+  phantom_calls: false
+  max_turns: 5

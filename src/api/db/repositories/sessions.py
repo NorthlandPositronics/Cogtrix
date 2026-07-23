@@ -179,6 +179,15 @@ class SessionRepository:
         )
         return result.scalar_one()
 
+    async def count_all_active(self) -> int:
+        """Return the total number of active (non-archived) sessions across all users."""
+        result = await self._db.execute(
+            select(func.count())
+            .select_from(ApiSessionRecord)
+            .where(ApiSessionRecord.archived_at.is_(None))
+        )
+        return result.scalar_one()
+
     async def name_exists_for_user(
         self, user_id: str, name: str, *, exclude_id: str | None = None
     ) -> bool:

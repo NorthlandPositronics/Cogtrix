@@ -12,6 +12,7 @@ import atexit
 import concurrent.futures as _cf
 import hashlib
 import heapq
+import html
 import json
 import logging
 import threading
@@ -19,6 +20,8 @@ import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
+
+from src.api.rag_index import load_faiss_store_safe, save_faiss_store
 
 log = logging.getLogger("cogtrix")
 
@@ -44,6 +47,8 @@ def _get_extraction_pool() -> _cf.ThreadPoolExecutor:
 _DEFAULT_FACTS_SUBDIR = "knowledge/facts.json"
 _DEFAULT_FAISS_SUBDIR = "vectordb/knowledge"
 _FAISS_SAVE_INTERVAL = 60.0
+_EXTRACT_FACTS_MAX_CHARS = 2000
+_SUSPICIOUS_ENTITY_NAMES = {"system", "admin", "password", "token"}
 
 _EXTRACT_FACTS_SYSTEM = """Extract durable factual knowledge from this conversation exchange.
 
@@ -79,6 +84,14 @@ def _compute_hash(entity: str, fact: str) -> str:
     return hashlib.sha256(normalized.encode()).hexdigest()[:16]
 
 
+def _escape_extraction_text(value: str) -> str:
+    return html.escape(value[:_EXTRACT_FACTS_MAX_CHARS], quote=False)
+
+
+def _is_suspicious_entity_name(entity: str) -> bool:
+    return entity.lower().strip() in _SUSPICIOUS_ENTITY_NAMES
+
+
 class SharedKnowledgeStore:
     """Cross-chat knowledge store — extracts durable facts from conversations
     and recalls them when relevant to other chats."""
@@ -99,6 +112,7 @@ class SharedKnowledgeStore:
         )
         know_cfg: dict[str, Any] = asst_cfg.get("knowledge", {})
         self._max_facts: int = int(know_cfg.get("max_facts", 10000))
+        self._recall_threshold: float = float(know_cfg.get("recall_threshold", 0.25))
 
         knowledge_data_dir = know_cfg.get("data_dir")
         if knowledge_data_dir is not None:
@@ -139,15 +153,19 @@ class SharedKnowledgeStore:
     # Public API
     # ------------------------------------------------------------------
 
-    def extract_and_store(self, user_input: str, agent_response: str) -> None:
+    def extract_and_store(
+        self, user_input: str, agent_response: str, session_key: str = ""
+    ) -> None:
         """Submit fact extraction to the background pool and return immediately."""
         pool = _get_extraction_pool()
         try:
-            pool.submit(self._extract_and_store_sync, user_input, agent_response)
+            pool.submit(self._extract_and_store_sync, user_input, agent_response, session_key)
         except RuntimeError as exc:
             log.warning("Knowledge extraction pool rejected submission: %s", exc)
 
-    def _extract_and_store_sync(self, user_input: str, agent_response: str) -> None:
+    def _extract_and_store_sync(
+        self, user_input: str, agent_response: str, session_key: str = ""
+    ) -> None:
         """Synchronous fact extraction — runs inside the background pool."""
         try:
             facts = self._extract_facts(user_input, agent_response)
@@ -177,7 +195,7 @@ class SharedKnowledgeStore:
                 fact = Fact(
                     entity=entity,
                     fact=fact_text,
-                    source_session="",
+                    source_session=session_key,
                     timestamp=time.time(),
                     fact_hash=fhash,
                 )
@@ -191,7 +209,7 @@ class SharedKnowledgeStore:
             self._index_facts(added)
             self.save()
 
-    def recall(self, query: str, k: int = 5) -> str | None:
+    def recall(self, query: str, k: int = 5, score_threshold: float | None = None) -> str | None:
         """Retrieve relevant facts as a formatted string for context injection.
 
         Returns None if no relevant facts found.
@@ -202,8 +220,10 @@ class SharedKnowledgeStore:
         if not facts_snapshot:
             return None
 
+        _threshold = score_threshold if score_threshold is not None else self._recall_threshold
+
         if self._vectorstore is not None and self._embeddings_ready.is_set():
-            results = self._recall_semantic(query, k, facts_snapshot)
+            results = self._recall_semantic(query, k, facts_snapshot, score_threshold=_threshold)
         else:
             results = self._recall_keyword(query, k, facts_snapshot)
 
@@ -236,11 +256,11 @@ class SharedKnowledgeStore:
             self._schedule_faiss_save()
 
     def _write_faiss_index(self) -> None:
-        """Write the FAISS index and metadata to disk."""
+        """Write the FAISS index and metadata to disk (safe raw FAISS format)."""
         try:
             idx_dir = Path(self._faiss_index_dir)
             idx_dir.mkdir(parents=True, exist_ok=True)
-            self._vectorstore.save_local(str(idx_dir))
+            save_faiss_store(self._vectorstore, idx_dir)
             meta = {"embedding_model": self._embedding_tag}
             (idx_dir / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
             self._faiss_last_save = time.monotonic()
@@ -291,7 +311,14 @@ class SharedKnowledgeStore:
         """Call the extraction LLM and parse the JSON result."""
         from langchain_core.messages import HumanMessage, SystemMessage
 
-        user_content = f"User: {user_input}\n\nAssistant: {agent_response}"
+        user_content = (
+            "<user_input>\n"
+            f"{_escape_extraction_text(user_input)}\n"
+            "</user_input>\n"
+            "<agent_response>\n"
+            f"{_escape_extraction_text(agent_response)}\n"
+            "</agent_response>"
+        )
         messages = [
             SystemMessage(content=_EXTRACT_FACTS_SYSTEM),
             HumanMessage(content=user_content),
@@ -302,10 +329,25 @@ class SharedKnowledgeStore:
             response.content if hasattr(response, "content") else str(response)
         ).strip()
 
-        # Extract JSON array from response (may have surrounding text)
+        # Extract JSON array from response (may have surrounding text, code blocks, etc.)
         start = raw_text.find("[")
         end = raw_text.rfind("]")
         if start == -1 or end == -1 or end <= start:
+            # Try to handle single JSON object wrapped in array (common LLM pattern)
+            # e.g., {"entity": "X", "fact": "Y"} -> [{...}]
+            try:
+                single_obj = json.loads(raw_text)
+                if isinstance(single_obj, dict):
+                    entity = str(single_obj.get("entity", "")).strip()
+                    fact = str(single_obj.get("fact", "")).strip()
+                    if entity and fact and not _is_suspicious_entity_name(entity):
+                        log.info(
+                            "Knowledge extraction: wrapped single object in array: %s",
+                            raw_text[:100],
+                        )
+                        return [{"entity": entity, "fact": fact}]
+            except json.JSONDecodeError:
+                pass
             return []
 
         json_str = raw_text[start : end + 1]
@@ -316,19 +358,70 @@ class SharedKnowledgeStore:
             return []
 
         if not isinstance(parsed, list):
+            # Handle single object (common when LLM doesn't wrap in array)
+            if isinstance(parsed, dict):
+                entity = str(parsed.get("entity", "")).strip()
+                fact = str(parsed.get("fact", "")).strip()
+                if entity and fact and not _is_suspicious_entity_name(entity):
+                    log.info(
+                        "Knowledge extraction: promoted single object to array: %s",
+                        raw_text[:100],
+                    )
+                    return [{"entity": entity, "fact": fact}]
+                log.warning(
+                    "Knowledge extraction: single object missing entity/fact fields: %s",
+                    raw_text[:200],
+                )
+                return []
+            log.warning(
+                "Knowledge extraction: expected array or object, got %s: %s",
+                type(parsed).__name__,
+                raw_text[:200],
+            )
             return []
 
-        return [item for item in parsed if isinstance(item, dict)]
+        facts: list[dict[str, str]] = []
+        for item in parsed:
+            if not isinstance(item, dict):
+                log.debug(
+                    "Knowledge extraction: skipped non-dict item in array: %s",
+                    repr(item)[:50],
+                )
+                continue
+
+            entity = str(item.get("entity", "")).strip()
+            fact = str(item.get("fact", "")).strip()
+            if not entity or not fact:
+                log.debug(
+                    "Knowledge extraction: skipped item missing entity/fact: %s",
+                    repr(item)[:50],
+                )
+                continue
+
+            if _is_suspicious_entity_name(entity):
+                log.warning("Knowledge extraction: rejected suspicious entity name: %s", entity)
+                continue
+
+            facts.append({"entity": entity, "fact": fact})
+
+        return facts
 
     # ------------------------------------------------------------------
     # Recall helpers
     # ------------------------------------------------------------------
 
-    def _recall_semantic(self, query: str, k: int, facts_snapshot: list[Fact]) -> list[Fact]:
+    def _recall_semantic(
+        self, query: str, k: int, facts_snapshot: list[Fact], score_threshold: float | None = None
+    ) -> list[Fact]:
         """Semantic recall via FAISS."""
         with self._index_lock:
             try:
-                results = self._vectorstore.similarity_search(query, k=k)
+                if score_threshold is not None and score_threshold > 0.0:
+                    # Use L2 distance and convert: similarity = 1 / (1 + dist)
+                    scored = self._vectorstore.similarity_search_with_score(query, k=k)
+                    results = [doc for doc, dist in scored if 1.0 / (1.0 + dist) >= score_threshold]
+                else:
+                    results = self._vectorstore.similarity_search(query, k=k)
             except Exception as exc:
                 log.debug("FAISS recall failed: %s", exc)
                 return self._recall_keyword(query, k, facts_snapshot)
@@ -344,9 +437,11 @@ class SharedKnowledgeStore:
 
     def _recall_keyword(self, query: str, k: int, facts: list[Fact]) -> list[Fact]:
         """Keyword overlap recall — fallback when FAISS is not available."""
+        if not query or not query.strip():
+            return []
         query_tokens = set(query.lower().split())
         if not query_tokens:
-            return facts[:k]
+            return []
 
         scored: list[tuple[int, Fact]] = []
         for fact in facts:
@@ -439,15 +534,11 @@ class SharedKnowledgeStore:
 
             if meta.get("embedding_model") == self._embedding_tag:
                 try:
-                    from langchain_community.vectorstores import FAISS
-
-                    self._vectorstore = FAISS.load_local(
-                        str(idx_dir),
-                        self._embedding_fn,
-                        allow_dangerous_deserialization=True,
-                    )
-                    log.debug("Knowledge store: loaded FAISS index from %s", idx_dir)
-                    return
+                    self._vectorstore = load_faiss_store_safe(idx_dir, self._embedding_fn)
+                    if self._vectorstore is not None:
+                        log.debug("Knowledge store: loaded FAISS index from %s", idx_dir)
+                        return
+                    log.debug("Knowledge store: index not loadable from %s", idx_dir)
                 except Exception as exc:
                     log.debug("Knowledge store: failed to load FAISS index: %s", exc)
             else:

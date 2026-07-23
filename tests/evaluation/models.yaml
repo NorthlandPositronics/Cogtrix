@@ -1,0 +1,154 @@
+# Gate 2 model registry — models tested against Finance/Procurement scenarios.
+#
+# Design decisions (agreed 2026-05-01):
+# - Test the full Cogtrix+model stack, not the LLM in isolation.
+# - Smoke subset (fast, cheap): one model per provider family.
+# - Full matrix: all models, nightly after Gate 1 passes.
+# - Tier classification: A = production-ready, B = evaluation, C = experimental.
+#
+# Pricing (input_price_per_1m / output_price_per_1m) is in USD per 1,000,000
+# tokens.  When both fields are populated the Gate 2 cost-ceiling check
+# (D2) is active: a scenario whose actual cost exceeds 3× its
+# budget_usd_estimate flips to fail.  Models without prices opt out of
+# this gate.  Prices reflect public provider rates as of 2026-05; update
+# alongside any provider price change.
+
+default_timeout: 120    # seconds per scenario
+smoke_budget_usd: 0.50  # target cost ceiling for a smoke run
+
+models:
+  # ── Anthropic ──────────────────────────────────────────────────────────────
+  - id: claude-sonnet-4-6
+    provider: anthropic
+    display_name: "Claude Sonnet 4.6"
+    tier: A
+    smoke: true
+    env_key: ANTHROPIC_API_KEY
+    model_id: claude-sonnet-4-6
+    openrouter_model_id: anthropic/claude-sonnet-4-6
+    input_price_per_1m: 3.00
+    output_price_per_1m: 15.00
+
+  - id: claude-haiku-4-5
+    provider: anthropic
+    display_name: "Claude Haiku 4.5"
+    tier: B
+    smoke: false
+    env_key: ANTHROPIC_API_KEY
+    model_id: claude-haiku-4-5-20251001
+    openrouter_model_id: anthropic/claude-haiku-4-5
+    input_price_per_1m: 0.80
+    output_price_per_1m: 4.00
+
+  # ── OpenAI ─────────────────────────────────────────────────────────────────
+  - id: gpt-4o
+    provider: openai
+    display_name: "GPT-4o"
+    tier: A
+    smoke: true
+    env_key: OPENAI_API_KEY
+    model_id: gpt-4o
+    openrouter_model_id: openai/gpt-4o
+    input_price_per_1m: 2.50
+    output_price_per_1m: 10.00
+
+  - id: gpt-4o-mini
+    provider: openai
+    display_name: "GPT-4o mini"
+    tier: B
+    smoke: false
+    env_key: OPENAI_API_KEY
+    model_id: gpt-4o-mini
+    openrouter_model_id: openai/gpt-4o-mini
+    input_price_per_1m: 0.15
+    output_price_per_1m: 0.60
+
+  # ── DeepSeek ───────────────────────────────────────────────────────────────
+  - id: deepseek-v3
+    provider: deepseek
+    display_name: "DeepSeek V3"
+    tier: B
+    smoke: true
+    env_key: DEEPSEEK_API_KEY
+    model_id: deepseek-chat
+    openrouter_model_id: deepseek/deepseek-chat
+    input_price_per_1m: 0.27
+    output_price_per_1m: 1.10
+
+  # ── Alibaba / Qwen ─────────────────────────────────────────────────────────
+  - id: qwen3-72b
+    provider: openai_compatible
+    display_name: "Qwen3 72B"
+    tier: B
+    smoke: false
+    env_key: QWEN_API_KEY
+    model_id: qwen3-72b
+    base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    openrouter_model_id: qwen/qwen3-72b
+    input_price_per_1m: 0.50
+    output_price_per_1m: 1.50
+
+  - id: qwen3-32b
+    provider: openai_compatible
+    display_name: "Qwen3 32B"
+    tier: C
+    smoke: false
+    env_key: QWEN_API_KEY
+    model_id: qwen3-32b
+    base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    openrouter_model_id: qwen/qwen3-32b
+    input_price_per_1m: 0.30
+    output_price_per_1m: 1.00
+
+  # ── Moonshot ───────────────────────────────────────────────────────────────
+  # Kimi K2.5 — second strict-schema canary alongside DeepSeek-V3 for the
+  # stub-tool registry.  Moonshot retired K1.5 from public offering;
+  # OpenRouter routes moonshotai/kimi-k2.5 at $0.40 / $1.98 per 1M tokens
+  # (262K context).  Smoke=true so Gate 2 evaluates it on every run.
+  - id: kimi-k2-5
+    provider: openai_compatible
+    display_name: "Kimi K2.5"
+    tier: B
+    smoke: true
+    env_key: MOONSHOT_API_KEY
+    model_id: kimi-k2.5
+    base_url: https://api.moonshot.cn/v1
+    openrouter_model_id: moonshotai/kimi-k2.5
+    input_price_per_1m: 0.40
+    output_price_per_1m: 1.98
+
+  # ── Google ─────────────────────────────────────────────────────────────────
+  - id: gemini-2-5-pro
+    provider: google
+    display_name: "Gemini 2.5 Pro"
+    tier: A
+    smoke: false
+    env_key: GOOGLE_API_KEY
+    model_id: gemini-2.5-pro
+    openrouter_model_id: google/gemini-2.5-pro
+    input_price_per_1m: 1.25
+    output_price_per_1m: 5.00
+
+  - id: gemini-2-5-flash
+    provider: google
+    display_name: "Gemini 2.5 Flash"
+    tier: B
+    smoke: false
+    env_key: GOOGLE_API_KEY
+    model_id: gemini-2.5-flash
+    openrouter_model_id: google/gemini-2.5-flash
+    input_price_per_1m: 0.30
+    output_price_per_1m: 2.50
+
+  # ── Cerebras ───────────────────────────────────────────────────────────────
+  - id: llama3-70b-cerebras
+    provider: openai_compatible
+    display_name: "Llama 3.3 70B (Cerebras)"
+    tier: B
+    smoke: true
+    env_key: CEREBRAS_API_KEY
+    model_id: llama-3.3-70b
+    base_url: https://api.cerebras.ai/v1
+    openrouter_model_id: meta-llama/llama-3.3-70b-instruct
+    input_price_per_1m: 0.85
+    output_price_per_1m: 1.20

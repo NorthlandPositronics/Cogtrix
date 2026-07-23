@@ -64,6 +64,9 @@ class TestLayer1HappyPath:
             ("run the test suite", OwnershipMode.EXECUTE),
             ("delete the old config file", OwnershipMode.EXECUTE),
             ("create a new virtualenv", OwnershipMode.EXECUTE),
+            ("can you install docker", OwnershipMode.EXECUTE),
+            ("can you create a README", OwnershipMode.EXECUTE),
+            ("can you run the tests", OwnershipMode.EXECUTE),
             # AMBIGUOUS
             ("check how gh can be installed", OwnershipMode.AMBIGUOUS),
             ("verify the nginx config", OwnershipMode.AMBIGUOUS),
@@ -347,16 +350,21 @@ class TestAmbiguousPatternsPolitePrefix:
         [
             # "how to" dominates over "check" prefix → INFORM
             "Please check how to install gh",
-            # "can you X" matches broad INFORM pattern
+            # "can you check" is ambiguous; it should not be forced into INFORM
             "Can you check if the service is running",
         ],
     )
-    def test_inform_wins_over_polite_check_prefix(self, prompt: str) -> None:
-        """INFORM pattern takes priority when 'how to' or 'can you X' is present."""
+    def test_inform_or_ambiguous_wins_over_polite_check_prefix(self, prompt: str) -> None:
+        """How-to prompts stay INFORM; polite check prompts stay AMBIGUOUS."""
         result = _classify_ownership_layer1(prompt)
+        expected_mode = (
+            OwnershipMode.INFORM
+            if prompt.startswith("Please check how to")
+            else OwnershipMode.AMBIGUOUS
+        )
         assert (
-            result.mode == OwnershipMode.INFORM
-        ), f"Expected INFORM (dominant signal) for {prompt!r}, got {result.mode.name}"
+            result.mode == expected_mode
+        ), f"Expected {expected_mode.name} (dominant signal) for {prompt!r}, got {result.mode.name}"
 
 
 # ── M3: Layer-2 timeout ───────────────────────────────────────────────────────

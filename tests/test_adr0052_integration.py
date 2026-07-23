@@ -11,10 +11,17 @@ Covers:
 from __future__ import annotations
 
 import inspect
+from unittest.mock import MagicMock
 
+import pytest
+from langchain_core.messages import AIMessage, HumanMessage
+
+from cogtrix import _build_agent_graph
 from src.agent.core import build_system_prompt
+from src.orchestration.graph import build_agent_graph
 from src.orchestration.reflection_delegate import (
     ACCOUNTABILITY_PROMPT,
+    UNCERTAINTY_NOTE_PREFIX,
     extract_decision_justification,
 )
 from src.orchestration.run_config import AgentRunConfig
@@ -93,6 +100,11 @@ class TestConfigYamlParsing:
     def test_yaml_min_confidence_threshold(self):
         cfg = self._load({"decision_accountability": {"min_confidence_threshold": 8.5}})
         assert cfg.decision_accountability_min_confidence == 8.5
+
+    @pytest.mark.parametrize("threshold", [0.0, 0.5, 1.0])
+    def test_yaml_min_confidence_threshold_accepts_boundary_values(self, threshold):
+        cfg = self._load({"decision_accountability": {"min_confidence_threshold": threshold}})
+        assert cfg.decision_accountability_min_confidence == threshold
 
     def test_yaml_report_uncertainty_false(self):
         cfg = self._load({"decision_accountability": {"report_uncertainty": False}})
@@ -181,30 +193,139 @@ class TestUncertaintyNoteFormat:
         assert result["should_proceed"] is True
 
 
+# ── Graph wiring ─────────────────────────────────────────────────────────────
+
+
+class TestDecisionAccountabilityGraphIntegration:
+    @staticmethod
+    def _make_low_confidence_response(confidence: float = 0.5) -> AIMessage:
+        return AIMessage(
+            content=(
+                "---PLAN---\n"
+                "Do the thing.\n"
+                "---ASSUMPTIONS---\n"
+                "- A1\n"
+                "---EVIDENCE---\n"
+                "- E1\n"
+                "---CONFIDENCE---\n"
+                f"{confidence}\n"
+                "---END---\n"
+                "---COUNTER-PLAN---\n"
+                "Alternative.\n"
+                "---FLAWS---\n"
+                "- No critical flaws identified\n"
+                "---END---"
+            ),
+            id="da-low-confidence",
+        )
+
+    @pytest.mark.parametrize("threshold", [0.0, 0.5, 1.0])
+    def test_uncertainty_note_appended_when_enabled(self, threshold):
+        mock_llm = MagicMock()
+        mock_llm.bind_tools.return_value = mock_llm
+        mock_llm.invoke.return_value = self._make_low_confidence_response()
+
+        cfg = AgentRunConfig(
+            llm=mock_llm,
+            decision_accountability_enabled=True,
+            decision_accountability_report_uncertainty=True,
+            decision_accountability_min_confidence=threshold,
+        )
+        graph = build_agent_graph(config=cfg)
+
+        result = graph.invoke({"messages": [HumanMessage(content="evaluate the plan")]})
+        last = result["messages"][-1]
+
+        assert UNCERTAINTY_NOTE_PREFIX in getattr(last, "content", "")
+        assert f"threshold {threshold:.1f}." in getattr(last, "content", "")
+        assert "Proceeding with caution." in getattr(last, "content", "")
+
+    def test_uncertainty_note_suppressed_when_disabled(self):
+        mock_llm = MagicMock()
+        mock_llm.bind_tools.return_value = mock_llm
+        response = self._make_low_confidence_response()
+        mock_llm.invoke.return_value = response
+
+        cfg = AgentRunConfig(
+            llm=mock_llm,
+            decision_accountability_enabled=False,
+            decision_accountability_report_uncertainty=True,
+            decision_accountability_min_confidence=7.0,
+        )
+        graph = build_agent_graph(config=cfg)
+
+        result = graph.invoke({"messages": [HumanMessage(content="evaluate the plan")]})
+        last = result["messages"][-1]
+
+        assert UNCERTAINTY_NOTE_PREFIX not in getattr(last, "content", "")
+        assert getattr(last, "content", "") == response.content
+
+
 # ── graph.py structural wiring ────────────────────────────────────────────────
 
 
 class TestGraphDaWiring:
-    def test_da_closure_vars_read_from_config(self):
-        """build_agent_graph must read _da_enabled from AgentRunConfig."""
-        import src.orchestration.graph as graph_mod
+    def test_uncertainty_note_appended_by_graph_when_da_enabled(self):
+        """The graph should append the uncertainty note at runtime, not just in source text."""
 
-        src = inspect.getsource(graph_mod.build_agent_graph)
-        assert "_da_enabled" in src, "_da_enabled closure variable missing from build_agent_graph"
-        assert "decision_accountability_enabled" in src
+        response = AIMessage(
+            content=(
+                "I will proceed with the plan.\n\n"
+                "---PLAN---\nDo the thing.\n"
+                "---ASSUMPTIONS---\n- A1\n"
+                "---EVIDENCE---\n- E1\n"
+                "---CONFIDENCE---\n3.0\n---END---\n"
+                "---COUNTER-PLAN---\nThis might fail.\n"
+                "---FLAWS---\n- Missing validation\n- No rollback path\n---END---"
+            ),
+            id="m1",
+        )
+        mock_llm = MagicMock()
+        mock_llm.bind_tools.return_value = mock_llm
+        mock_llm.invoke.return_value = response
+
+        graph = _build_agent_graph(
+            llm=mock_llm,
+            system_prompt="",
+            active_tools_list=[],
+            available_tools={},
+            registry=MagicMock(),
+            approvals=set(),
+            config=AgentRunConfig(
+                llm=mock_llm,
+                system_prompt="",
+                active_tools_list=[],
+                available_tools={},
+                decision_accountability_enabled=True,
+                decision_accountability_report_uncertainty=True,
+                decision_accountability_min_confidence=7.0,
+            ),
+        )
+
+        result = graph.invoke({"messages": [HumanMessage(content="check")]})
+        ai_messages = [msg for msg in result["messages"] if isinstance(msg, AIMessage)]
+
+        assert ai_messages, "expected the graph to return at least one AIMessage"
+        assert any(
+            "Decision accountability: confidence 3.0/10" in msg.content for msg in ai_messages
+        )
+        assert any("Missing validation" in msg.content for msg in ai_messages)
 
     def test_post_response_parsing_present_in_call_model(self):
-        """call_model must call extract_decision_justification when _da_enabled."""
+        """call_model node must call extract_decision_justification when _da_enabled."""
         import src.orchestration.graph as graph_mod
+        import src.orchestration.nodes.call_model as call_model_mod
 
-        src = inspect.getsource(graph_mod.build_agent_graph)
-        assert "extract_decision_justification" in src
-        assert "_da_enabled" in src
+        graph_src = inspect.getsource(graph_mod.build_agent_graph)
+        node_src = inspect.getsource(call_model_mod.build_call_model_node)
+        assert "_da_enabled" in graph_src
+        assert "extract_decision_justification" in node_src
+        assert "UNCERTAINTY_NOTE_PREFIX" in node_src
 
     def test_uncertainty_note_injected_on_low_confidence(self):
         """Source must contain the uncertainty note pattern."""
-        import src.orchestration.graph as graph_mod
+        import src.orchestration.nodes.call_model as call_model_mod
 
-        src = inspect.getsource(graph_mod.build_agent_graph)
-        assert "Decision accountability" in src
+        src = inspect.getsource(call_model_mod.build_call_model_node)
         assert "_uncertainty_note" in src
+        assert "Proceeding with caution" in src

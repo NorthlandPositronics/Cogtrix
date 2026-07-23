@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cogtrix"
-version = "0.2.6"
-description = "Modular AI assistant with 72 built-in tools, multi-provider LLM support, and hybrid memory"
+version = "0.2.7"
+description = "Modular AI assistant with 88 built-in tools, multi-provider LLM support, and hybrid memory"
 readme = "README.md"
 requires-python = "~=3.13.0"
 
@@ -22,9 +22,9 @@ classifiers = [
 
 dependencies = [
     # LangChain Ecosystem
-    "langchain-core~=1.2.23",
+    "langchain-core>=1.3.3",
     "langchain-ollama~=1.0.1",
-    "langchain-openai~=1.1.12",
+    "langchain-openai~=1.2.1",
     "langchain-text-splitters~=1.1.0",
     "langchain-community~=0.4.1",
     "langgraph~=1.1.3",
@@ -39,6 +39,7 @@ dependencies = [
     "requests~=2.33.0",
     "slowapi~=0.1",
     "pyyaml~=6.0.3",           # YAML config file support
+    "prometheus-client~=0.25.0",  # Prometheus metrics export
     # Tools Dependencies
     "python-dateutil~=2.9.0",   # datetime_tool.py
     "pytz~=2026.1",             # datetime_tool.py (calendar-versioned)
@@ -46,6 +47,10 @@ dependencies = [
     "croniter~=6.0",             # cron_tools.py
     "pluggy~=1.6",               # src/plugins/ — tool plugin system
     "prompt-toolkit>=3.0",       # pinned prompt input session
+    "opentelemetry-sdk>=1.41.1",
+    "opentelemetry-api>=1.41.1",
+    "opentelemetry-instrumentation-fastapi>=0.62b1",
+    "opentelemetry-exporter-otlp-proto-grpc>=1.41.1",
 ]
 
 [project.optional-dependencies]
@@ -55,11 +60,20 @@ rag = [
     "python-docx~=1.2.0",
 ]
 search = [
-    "tavily-python~=0.7.21",
-    "exa-py~=2.9.0",
+    "tavily-python~=0.7.24",
+    "exa-py~=2.12.1",
     "google-search-results~=2.4.2",
 ]
 postgresql = ["asyncpg>=0.29.0"]
+saml = [
+    # Requires system packages: libxmlsec1-dev libxml2-dev pkg-config
+    # Install with: pip install cogtrix[saml]
+    "python3-saml~=1.16.0",
+]
+ldap = [
+    # Pure-Python LDAP client — no system packages required
+    "ldap3~=2.9.1",
+]
 dev = [
     "pytest~=9.0.2",
     "pytest-structlog~=1.2",
@@ -68,13 +82,13 @@ dev = [
     "pytest-timeout~=2.4.0",
     "coverage~=7.13.5",
     "black~=26.3.0",
-    "ruff~=0.15.8",
+    "ruff~=0.15.12",
     "bandit~=1.9.4",
-    "pyright~=1.1.408",
-    "tavily-python~=0.7.21",
-    "exa-py~=2.9.0",
+    "pyright~=1.1.409",
+    "tavily-python~=0.7.24",
+    "exa-py~=2.12.1",
     "google-search-results~=2.4.2",
-    "mcp~=1.26.0",
+    "mcp~=1.27.0",
     "langchain-anthropic~=1.4.0",
     "langchain-google-genai~=4.2.1",
     "argparse-manpage>=4",
@@ -90,7 +104,7 @@ slack = [
     "slack-sdk>=3.19",
 ]
 mcp = [
-    "mcp~=1.26.0",
+    "mcp~=1.27.0",
 ]
 anthropic = [
     "langchain-anthropic~=1.4.0",
@@ -103,13 +117,14 @@ google = [
 ]
 api = [
     "fastapi~=0.135.2",
-    "uvicorn[standard]~=0.44.0",
+    "uvicorn[standard]~=0.46.0",
     "sqlalchemy[asyncio]~=2.0.0",
     "aiosqlite~=0.22.0",
     "alembic~=1.18.0",
     "pyjwt[crypto]~=2.12.0",
     "bcrypt~=5.0.0",
     "email-validator~=2.3.0",
+    "stripe>=12.0.0",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -144,6 +159,8 @@ ignore = [
 "src/agent/core.py" = ["E501"]
 "src/tools/delegate.py" = ["E501"]
 "src/api/**" = ["B008"]
+"src/auth/**" = ["B008"]
+"tests/**" = ["B008"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["src"]
@@ -171,11 +188,28 @@ exclude = ["src/api", "tests"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 timeout = 30
+# Mirrors the runtime suppression in ``src/_bootstrap.py`` for the
+# upstream gap where langgraph 1.1.3 imports JsonPlusSerializer, which
+# constructs a langchain_core 1.3.3 Reviver() without an explicit
+# ``allowed_objects=``, triggering LangChainPendingDeprecationWarning
+# at import time.  pytest never imports ``_bootstrap`` (it has no
+# conftest hook), so its filter does not apply during test collection
+# — this entry is the test-process equivalent.  Remove once langgraph
+# passes ``allowed_objects='core'``.
+filterwarnings = [
+    "ignore:The default value of `allowed_objects` will change",
+]
 markers = [
     "agent_workflow: integration tests that require live LLM endpoints",
     "benchmark: concurrency and performance benchmarks (no live LLM required)",
     "docker: integration tests that require a running Docker daemon",
+    "quality: behavioural quality harness scenarios (no live LLM required)",
+    "critical: Tier 1 hard-gate scenarios that block CI on failure",
+    "tier1: all Tier 1 metric scenarios",
+    "tier2: Tier 2 warning metric scenarios",
     "live_llm: integration tests backed by the local Gemma 3 270M container (localhost:18080)",
+    "eval: Gate 2 live-LLM evaluation scenarios (call real APIs, incur cost — never on PR push)",
+    "smoke: Gate 2 smoke subset — one model per provider, ~$0.45/run, for release candidates",
 ]
 
 [tool.coverage.run]
@@ -195,15 +229,14 @@ dev = [
     "pytest-timeout~=2.4.0",
     "coverage~=7.13.5",
     "black~=26.3.0",
-    "ruff~=0.15.8",
+    "ruff~=0.15.12",
     "bandit~=1.9.4",
-    "pyright~=1.1.408",
-    "tavily-python~=0.7.21",
-    "exa-py~=2.9.0",
+    "pyright~=1.1.409",
+    "tavily-python~=0.7.24",
+    "exa-py~=2.12.1",
     "google-search-results~=2.4.2",
-    "mcp~=1.26.0",
+    "mcp~=1.27.0",
     "langchain-anthropic~=1.4.0",
     "langchain-google-genai~=4.2.1",
     "argparse-manpage>=4",
 ]
-

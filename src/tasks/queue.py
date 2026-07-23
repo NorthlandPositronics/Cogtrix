@@ -53,6 +53,8 @@ class TaskRecord:
     error: str
     log_path: str
     session_id: str = ""
+    user_id: str = ""
+    org_id: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -71,11 +73,15 @@ CREATE TABLE IF NOT EXISTS tasks (
     result     TEXT NOT NULL DEFAULT '',
     error      TEXT NOT NULL DEFAULT '',
     log_path   TEXT NOT NULL DEFAULT '',
-    session_id TEXT NOT NULL DEFAULT ''
+    session_id TEXT NOT NULL DEFAULT '',
+    user_id    TEXT NOT NULL DEFAULT '',
+    org_id     TEXT
 )
 """
 
 _MIGRATE_SESSION_ID = "ALTER TABLE tasks ADD COLUMN session_id TEXT NOT NULL DEFAULT ''"
+_MIGRATE_USER_ID = "ALTER TABLE tasks ADD COLUMN user_id TEXT NOT NULL DEFAULT ''"
+_MIGRATE_ORG_ID = "ALTER TABLE tasks ADD COLUMN org_id TEXT"
 
 
 # ---------------------------------------------------------------------------
@@ -102,11 +108,12 @@ class TaskQueue:
 
         with self._connect() as conn:
             conn.execute(_DDL)
-            # Migrate: add session_id column if missing (pre-existing DBs)
-            try:
-                conn.execute(_MIGRATE_SESSION_ID)
-            except sqlite3.OperationalError:
-                pass  # column already exists
+            # Migrate: add columns if missing (pre-existing DBs)
+            for migration in (_MIGRATE_SESSION_ID, _MIGRATE_USER_ID, _MIGRATE_ORG_ID):
+                try:
+                    conn.execute(migration)
+                except sqlite3.OperationalError:
+                    pass  # column already exists
 
     # ── Connection helpers ─────────────────────────────────────────────────
 
@@ -123,7 +130,14 @@ class TaskQueue:
 
     # ── Public API ─────────────────────────────────────────────────────────
 
-    def submit(self, agent_name: str, prompt: str, session_id: str = "") -> str:
+    def submit(
+        self,
+        agent_name: str,
+        prompt: str,
+        session_id: str = "",
+        user_id: str = "",
+        org_id: str | None = None,
+    ) -> str:
         task_id = str(uuid.uuid4())
         log_path = str(self._log_dir / f"{task_id}.log")
         now = time.time()
@@ -132,8 +146,8 @@ class TaskQueue:
                 conn.execute(
                     """
                     INSERT INTO tasks
-                        (task_id, agent_name, prompt, status, created_at, log_path, session_id)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                        (task_id, agent_name, prompt, status, created_at, log_path, session_id, user_id, org_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         task_id,
@@ -143,6 +157,8 @@ class TaskQueue:
                         now,
                         log_path,
                         session_id,
+                        user_id,
+                        org_id,
                     ),
                 )
         if self._executor is not None:
@@ -159,6 +175,7 @@ class TaskQueue:
         status: TaskStatus | None = None,
         limit: int = 50,
         session_id: str | None = None,
+        user_id: str | None = None,
     ) -> list[TaskRecord]:
         with self._connect() as conn:
             where_parts: list[str] = []
@@ -169,6 +186,9 @@ class TaskQueue:
             if session_id is not None:
                 where_parts.append("session_id = ?")
                 params.append(session_id)
+            if user_id is not None:
+                where_parts.append("user_id = ?")
+                params.append(user_id)
             where = f" WHERE {' AND '.join(where_parts)}" if where_parts else ""
             params.append(limit)
             rows = conn.execute(
@@ -284,6 +304,8 @@ class TaskQueue:
             error=row["error"],
             log_path=row["log_path"],
             session_id=row["session_id"] if "session_id" in row.keys() else "",
+            user_id=row["user_id"] if "user_id" in row.keys() else "",
+            org_id=row["org_id"] if "org_id" in row.keys() else None,
         )
 
 
@@ -310,8 +332,16 @@ def get_task_queue() -> TaskQueue:
     return _queue
 
 
-def submit_task(agent_name: str, prompt: str, session_id: str = "") -> str:
-    return get_task_queue().submit(agent_name, prompt, session_id=session_id)
+def submit_task(
+    agent_name: str,
+    prompt: str,
+    session_id: str = "",
+    user_id: str = "",
+    org_id: str | None = None,
+) -> str:
+    return get_task_queue().submit(
+        agent_name, prompt, session_id=session_id, user_id=user_id, org_id=org_id
+    )
 
 
 def get_task(task_id: str) -> TaskRecord | None:
@@ -321,8 +351,9 @@ def get_task(task_id: str) -> TaskRecord | None:
 def list_tasks(
     status: TaskStatus | None = None,
     limit: int = 50,
+    user_id: str | None = None,
 ) -> list[TaskRecord]:
-    return get_task_queue().list(status=status, limit=limit)
+    return get_task_queue().list(status=status, limit=limit, user_id=user_id)
 
 
 def cancel_task(task_id: str) -> bool:

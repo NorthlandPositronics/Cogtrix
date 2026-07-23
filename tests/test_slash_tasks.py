@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 import src.tasks.goal_tracker as _goal_mod
@@ -31,7 +33,7 @@ def _reset_goal_cache():
 
 def _make_registry(config=None):
     """Return a SlashCommandRegistry built by _build_slash_commands, with optional config."""
-    from cogtrix import _build_slash_commands
+    from src.cli.commands import _build_slash_commands
 
     reg = _build_slash_commands()
     reg.config = config
@@ -54,6 +56,16 @@ def _captured(capsys) -> str:
     """Return everything written to stdout so far."""
     out, _ = capsys.readouterr()
     return out
+
+
+class TestModeText:
+    def test_reasoning_window_docs_match_code(self):
+        source = Path(__file__).resolve().parents[1] / "src" / "cli" / "commands.py"
+        text = source.read_text(encoding="utf-8")
+        assert '"reasoning": 30' in text
+        assert "(30 msgs)" in text
+        assert '"reasoning": 40' not in text
+        assert "(40 msgs)" not in text
 
 
 # ---------------------------------------------------------------------------

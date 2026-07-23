@@ -217,6 +217,65 @@ class TestDeepSeekProviderSelection:
 
         assert issubclass(_DeepSeekChatModel, ChatOpenAI)
 
+    # ── Regression: unsafe substring match (issue #669) ──────────────
+
+    def test_lookalike_domain_not_selected(self) -> None:
+        """Lookalike domain (api.deepseek.com.evil.com) must NOT activate DeepSeek."""
+        from src.providers.openai import _DeepSeekChatModel, create_chat_model
+
+        model = create_chat_model(
+            model="gpt-4.1-mini",
+            api_key="sk-test",
+            base_url="https://api.deepseek.com.evil.com/v1",
+        )
+        assert not isinstance(model, _DeepSeekChatModel), (
+            "Lookalike domain api.deepseek.com.evil.com must NOT activate "
+            "_DeepSeekChatModel — hostname check must use urlparse, not substring"
+        )
+
+    def test_path_contains_deepseek_not_selected(self) -> None:
+        """Path segment containing 'api.deepseek.com' must NOT activate DeepSeek."""
+        from src.providers.openai import _DeepSeekChatModel, create_chat_model
+
+        model = create_chat_model(
+            model="gpt-4.1-mini",
+            api_key="sk-test",
+            base_url="http://evil.com/proxy/api.deepseek.com/v1",
+        )
+        assert not isinstance(model, _DeepSeekChatModel), (
+            "Path segment /proxy/api.deepseek.com/ must NOT activate "
+            "_DeepSeekChatModel — hostname check must use urlparse, not substring"
+        )
+
+    def test_base_url_none_standard_model(self) -> None:
+        """base_url=None must return standard ChatOpenAI, not _DeepSeekChatModel."""
+        from src.providers.openai import _DeepSeekChatModel, create_chat_model
+
+        model = create_chat_model(model="gpt-4.1-mini", api_key="sk-test")
+        assert not isinstance(
+            model, _DeepSeekChatModel
+        ), "base_url=None must NOT produce _DeepSeekChatModel"
+
+    def test_is_deepseek_base_url_helper(self) -> None:
+        """_is_deepseek_base_url returns True only for known DeepSeek hostnames."""
+        from src.providers.openai import _is_deepseek_base_url
+
+        # Legitimate DeepSeek URLs
+        assert _is_deepseek_base_url("https://api.deepseek.com/v1") is True
+        assert _is_deepseek_base_url("http://api.deepseek.com/") is True
+        assert _is_deepseek_base_url("https://api.deepseek.com") is True
+
+        # Lookalike / non-DeepSeek URLs
+        assert _is_deepseek_base_url("https://api.deepseek.com.evil.com/v1") is False
+        assert _is_deepseek_base_url("http://evil.com/proxy/api.deepseek.com/") is False
+        assert _is_deepseek_base_url("https://api.openai.com/v1") is False
+        assert _is_deepseek_base_url("https://api.x.ai/v1") is False
+
+        # Edge cases
+        assert _is_deepseek_base_url(None) is False
+        assert _is_deepseek_base_url("") is False
+        assert _is_deepseek_base_url("not-even-a-url") is False
+
 
 class TestDeepSeekChatModelCapture:
     """_DeepSeekChatModel._create_chat_result captures reasoning_content from API responses."""

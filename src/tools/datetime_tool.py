@@ -199,7 +199,14 @@ def parse_date(date_str: str, output_format: str = "%Y-%m-%d %H:%M:%S") -> str:
             dt = date_parser.parse(date_str)
             return dt.strftime(output_format)
         else:
-            # Try common formats without dateutil
+            # Try ISO 8601 first (Python 3.7+ stdlib handles this natively)
+            try:
+                dt = datetime.fromisoformat(date_str)
+                return dt.strftime(output_format)
+            except ValueError:
+                pass
+
+            # Fallback to common formats without dateutil
             formats = [
                 "%Y-%m-%d %H:%M:%S",
                 "%Y-%m-%d %H:%M",

@@ -39,7 +39,8 @@ log = logging.getLogger("cogtrix.api.oidc")
 _JWKS_TTL = 300  # 5 minutes
 _DISCOVERY_TTL = 3600  # 1 hour
 _HTTP_TIMEOUT = 5  # seconds
-_ALLOWED_SCHEMES = frozenset({"https", "http"})
+_SECURE_SCHEME = "https"
+_INSECURE_SCHEME = "http"
 
 
 @dataclass
@@ -49,6 +50,8 @@ class OIDCConfig:
     issuer: str
     audience: str
     jwks_uri: str | None = field(default=None)
+    allow_insecure_oidc: bool = field(default=False)
+    production_mode: bool = field(default=True)
     role_claim: str = field(default="roles")
     default_role: str = field(default="user")
 
@@ -125,22 +128,19 @@ class OIDCValidator:
         """Return the signing key matching ``kid``, refreshing the cache if needed."""
         jwks_set = self._load_jwks()
 
-        if kid is not None:
-            for k in jwks_set.keys:
-                if k.key_id == kid:
-                    return k
-            # kid not in cache — may be stale; force one refresh
-            log.debug("kid %r not in cached JWKS — forcing refresh", kid)
-            jwks_set = self._load_jwks(force=True)
-            for k in jwks_set.keys:
-                if k.key_id == kid:
-                    return k
-            raise InvalidTokenError(f"No key with kid={kid!r} found in JWKS")
+        if kid is None:
+            raise InvalidTokenError("kid header required")
 
-        # No kid header — use the first available key (single-key JWKS set)
-        if jwks_set.keys:
-            return jwks_set.keys[0]
-        raise InvalidTokenError("JWKS contains no usable keys")
+        for k in jwks_set.keys:
+            if k.key_id == kid:
+                return k
+        # kid not in cache — may be stale; force one refresh
+        log.debug("kid %r not in cached JWKS — forcing refresh", kid)
+        jwks_set = self._load_jwks(force=True)
+        for k in jwks_set.keys:
+            if k.key_id == kid:
+                return k
+        raise InvalidTokenError(f"No key with kid={kid!r} found in JWKS")
 
     def _load_jwks(self, *, force: bool = False) -> jwt.PyJWKSet:
         """Return the cached JWKS set, fetching from the network when expired."""
@@ -166,9 +166,7 @@ class OIDCValidator:
 
     def _fetch_jwks(self, jwks_uri: str) -> jwt.PyJWKSet:
         """Fetch and parse a JWKS document from ``jwks_uri``."""
-        scheme = urlparse(jwks_uri).scheme.lower()
-        if scheme not in _ALLOWED_SCHEMES:
-            raise ValueError(f"JWKS URI uses disallowed scheme '{scheme}': {jwks_uri}")
+        self._validate_oidc_uri_scheme(jwks_uri, context="JWKS URI")
         log.debug("Fetching JWKS from %s", jwks_uri)
         try:
             with urlopen(jwks_uri, timeout=_HTTP_TIMEOUT) as resp:  # nosec B310
@@ -211,9 +209,7 @@ class OIDCValidator:
         Raises ``RuntimeError`` on network failure or a malformed document.
         """
         well_known = issuer.rstrip("/") + "/.well-known/openid-configuration"
-        scheme = urlparse(well_known).scheme.lower()
-        if scheme not in _ALLOWED_SCHEMES:
-            raise ValueError(f"OIDC issuer uses disallowed scheme '{scheme}': {issuer}")
+        self._validate_oidc_uri_scheme(issuer, context="OIDC issuer")
         log.debug("Discovering OIDC configuration from %s", well_known)
         try:
             with urlopen(well_known, timeout=_HTTP_TIMEOUT) as resp:  # nosec B310
@@ -228,6 +224,22 @@ class OIDCValidator:
         if not jwks_uri:
             raise RuntimeError(f"OIDC discovery document missing 'jwks_uri' for {issuer}")
         return str(jwks_uri)
+
+    def _validate_oidc_uri_scheme(self, uri: str, *, context: str) -> None:
+        """Reject insecure or unsupported URL schemes for OIDC endpoints."""
+        scheme = urlparse(uri).scheme.lower()
+        if scheme == _SECURE_SCHEME:
+            return
+        if (
+            scheme == _INSECURE_SCHEME
+            and self._config.allow_insecure_oidc
+            and not self._config.production_mode
+        ):
+            log.warning(
+                "%s uses insecure HTTP because allow_insecure_oidc is enabled: %s", context, uri
+            )
+            return
+        raise ValueError(f"{context} uses disallowed scheme '{scheme}': {uri}")
 
 
 # ---------------------------------------------------------------------------

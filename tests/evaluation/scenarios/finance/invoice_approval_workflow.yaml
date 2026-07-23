@@ -1,0 +1,33 @@
+id: finance_invoice_approval_workflow
+domain: finance
+title: Invoice Approval Workflow
+description: |
+  An invoice arrives for $12,500. The agent must classify the invoice
+  based on amount, route it through the correct approval chain, and
+  notify the approver. Invoices over $10,000 require VP-level approval.
+user_prompt: |
+  I received an invoice #INV-2026-0428 from Acme Supplies for $12,500.
+  Please classify this invoice, route it to the appropriate approver,
+  and notify them.
+system_prompt: |
+  You are a finance assistant. When an invoice arrives, classify it by
+  amount using classify_invoice, route it for approval using
+  route_for_approval, and notify the approver with notify_approver.
+  Invoices over $10,000 require VP-level approval.
+tools_required:
+  - classify_invoice
+  - route_for_approval
+  - notify_approver
+expected_outcome: |
+  The invoice is classified as "high-value" (>$10k), routed to the VP
+  approval queue, and the VP is notified.
+success_criteria:
+  - "contains: classify_invoice"
+  - "contains: route_for_approval"
+  - "contains: notify_approver"
+  - "contains: 12500"
+  - "contains: VP"
+max_turns: 20
+tags:
+  - smoke
+budget_usd_estimate: 0.05

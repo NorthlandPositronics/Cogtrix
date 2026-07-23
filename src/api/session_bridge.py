@@ -103,69 +103,78 @@ async def warm_session(record: ApiSessionRecord, app_state: Any) -> ApiSession:
     5. Build ``AgentRunConfig`` with tools from ``app.state.tool_registry``.
     6. Return a populated ``ApiSession``.
     """
+    from src.logging_config import clear_session_id, set_session_id
     from src.orchestration.session_state import SessionState
 
-    # 1. Parse session config
+    set_session_id(record.id)
     try:
-        config = json.loads(record.config_json) if record.config_json else {}
-    except (json.JSONDecodeError, TypeError):
-        config = {}
+        # 1. Parse session config
+        try:
+            config = json.loads(record.config_json) if record.config_json else {}
+        except (json.JSONDecodeError, TypeError):
+            config = {}
 
-    # 2. Session state — API sessions never use CLI confirmation
-    session_state = SessionState(no_confirm=True)
-    # Deny shell/exec tools unless explicitly enabled in config
-    app_config = getattr(app_state, "config", None)
-    if not getattr(app_config, "api_dangerous_tools", False):
-        for _t in ("shell", "bash", "python_exec"):
-            session_state.deny_tool(_t)
+        # 2. Session state — API sessions never use CLI confirmation
+        session_state = SessionState(no_confirm=True)
+        # Deny shell/exec tools unless explicitly enabled in config
+        app_config = getattr(app_state, "config", None)
+        if not getattr(app_config, "api_dangerous_tools", False):
+            for _t in ("shell", "bash", "python_exec"):
+                session_state.deny_tool(_t)
 
-    # 3 & 4. Build memory manager and LLM concurrently — both are I/O-bound and independent.
-    memory_manager, llm = await asyncio.gather(
-        asyncio.to_thread(_build_memory_manager, record.id, config, app_state),
-        asyncio.to_thread(_build_llm, config, app_state),
-    )
-
-    if llm is None:
-        log.error(
-            "LLM could not be created for session %s — check provider config and API keys",
-            record.id,
+        # 3 & 4. Build memory manager and LLM concurrently — both are I/O-bound and independent.
+        memory_manager, llm = await asyncio.gather(
+            asyncio.to_thread(_build_memory_manager, record.id, config, app_state),
+            asyncio.to_thread(_build_llm, config, app_state),
         )
 
-    # 5. Build AgentRunConfig
-    run_config = _build_run_config(llm, session_state, config, app_state)
+        if llm is None:
+            raise RuntimeError(
+                f"LLM could not be created for session {record.id} — check provider config and API keys"
+            )
 
-    # Wire TCC helper attributes onto the memory manager so that background
-    # roll-forward jobs use the correct context budget and compression LLM.
-    if memory_manager is not None:
-        memory_manager._max_context_tokens = run_config.max_context_tokens  # type: ignore[attr-defined]
-        memory_manager._compression_llm = run_config.compression_llm  # type: ignore[attr-defined]
-        if llm is not None:
-            memory_manager.set_llm(llm)
+        if memory_manager is None:
+            raise RuntimeError(f"Memory manager could not be created for session {record.id}")
 
-    # 6. Parse token counts
-    try:
-        token_counts = json.loads(record.token_counts_json) if record.token_counts_json else {}
-    except (json.JSONDecodeError, TypeError):
-        token_counts = {}
-    token_counts.setdefault("input_tokens", 0)
-    token_counts.setdefault("output_tokens", 0)
-    token_counts.setdefault("context_window", 0)
+        # 5. Build AgentRunConfig
+        run_config = _build_run_config(llm, session_state, memory_manager, config, app_state)
 
-    session = ApiSession(
-        id=record.id,
-        user_id=record.user_id,
-        name=record.name,
-        config=config,
-        session_state=session_state,
-        memory_manager=memory_manager,
-        llm=llm,
-        run_config=run_config,
-        registry=getattr(app_state, "tool_registry", None),
-        agent_state=record.state or "idle",
-        token_counts=token_counts,
-    )
-    log.debug("Warmed session %s for user %s", record.id, record.user_id)
-    return session
+        # Wire TCC helper attributes onto the memory manager so that background
+        # roll-forward jobs use the correct context budget and compression LLM.
+        if memory_manager is not None:
+            memory_manager.configure_compression(
+                max_context_tokens=run_config.max_context_tokens,
+                compression_llm=run_config.compression_llm,
+            )
+            if llm is not None:
+                memory_manager.set_llm(llm)
+
+        # 6. Parse token counts
+        try:
+            token_counts = json.loads(record.token_counts_json) if record.token_counts_json else {}
+        except (json.JSONDecodeError, TypeError):
+            token_counts = {}
+        token_counts.setdefault("input_tokens", 0)
+        token_counts.setdefault("output_tokens", 0)
+        token_counts.setdefault("context_window", 0)
+
+        session = ApiSession(
+            id=record.id,
+            user_id=record.user_id,
+            name=record.name,
+            config=config,
+            session_state=session_state,
+            memory_manager=memory_manager,
+            llm=llm,
+            run_config=run_config,
+            registry=getattr(app_state, "tool_registry", None),
+            agent_state=record.state or "idle",
+            token_counts=token_counts,
+        )
+        log.debug("Warmed session %s for user %s", record.id, record.user_id)
+        return session
+    finally:
+        clear_session_id()
 
 
 def _build_memory_manager(session_id: str, config: dict, app_state: Any) -> Any:
@@ -188,8 +197,9 @@ def _build_memory_manager(session_id: str, config: dict, app_state: Any) -> Any:
         manager.load()
         return manager
     except Exception as exc:
-        log.warning("Could not build memory manager for session %s: %s", session_id, exc)
-        return None
+        raise RuntimeError(
+            f"Could not build memory manager for session {session_id}: {exc}"
+        ) from exc
 
 
 def _build_llm(config: dict, app_state: Any) -> Any:
@@ -203,8 +213,7 @@ def _build_llm(config: dict, app_state: Any) -> Any:
 
         app_cfg = getattr(app_state, "config", None)
         if app_cfg is None:
-            log.warning("Could not build LLM for session: app config not loaded")
-            return None
+            raise RuntimeError("Could not build LLM for session: app config not loaded")
 
         session_model = config.get("model")
 
@@ -214,22 +223,22 @@ def _build_llm(config: dict, app_state: Any) -> Any:
             else:
                 pc, mc = app_cfg.resolve_llm_config()
         except (ValueError, AttributeError) as exc:
-            log.warning("Could not resolve LLM config: %s", exc)
-            return None
+            raise RuntimeError(f"Could not resolve LLM config: {exc}") from exc
 
         return create_chat_model_from_configs(pc, mc, streaming=True)
     except Exception as exc:
-        log.warning("Could not build LLM for session: %s", exc)
-        return None
+        raise RuntimeError(f"Could not build LLM for session: {exc}") from exc
 
 
 def _build_run_config(
     llm: Any,
     session_state: Any,
+    memory_manager: Any,
     config: dict,
     app_state: Any,
 ) -> AgentRunConfig:
     """Build an AgentRunConfig from session config and app state."""
+    from src.agent.registry import filter_tools_for_agent
     from src.orchestration.run_config import AgentRunConfig
 
     # Gather tools from the registry
@@ -247,6 +256,23 @@ def _build_run_config(
     # (unwrapped) tool object — mirrors CLI behaviour (BUG-199).
     if available_tools:
         session_state.all_tool_originals = dict(available_tools)
+
+    # Extract agent_name from session config to enable tool filtering
+    agent_name = config.get("agent_name")
+
+    # Filter tools based on agent's tools_include/tools_exclude configuration
+    if agent_name and available_tools:
+        filtered_tools, filtered_list = filter_tools_for_agent(agent_name, available_tools)
+        if filtered_tools != available_tools:
+            log.info(
+                "Agent %r tool filtering: %d tools after filtering (included: %s, excluded: %s)",
+                agent_name,
+                len(filtered_tools),
+                config.get("tools_include", []),
+                config.get("tools_exclude", []),
+            )
+        available_tools = filtered_tools
+        active_tools_list = filtered_list
 
     # Seed active_tools_list with request_tools so the agent can load on-demand tools.
     # Auto-activate query_knowledge_base when a knowledge base exists.
@@ -284,6 +310,8 @@ def _build_run_config(
 
     parallel = _cfg_get("parallel_tool_execution", True)
     context_compression = _cfg_get("context_compression", True)
+    context_max_messages = _cfg_get("context_max_messages", 200)
+    context_max_tokens = _cfg_get("context_max_tokens", 40_000)
 
     # Build system prompt: use session override if set, otherwise construct
     # from DEFAULT_SYSTEM_PROMPT with model and tool context — matching CLI behavior.
@@ -337,8 +365,13 @@ def _build_run_config(
             else:
                 _, mc = app_cfg.resolve_llm_config()
             max_context_tokens = mc.context_window
-        except Exception:
-            pass
+        except Exception as exc:
+            log.warning(
+                "Could not resolve context window for session model %r: %s — using fallback %d",
+                session_model,
+                exc,
+                32_768,
+            )
     if max_context_tokens is None:
         max_context_tokens = 32_768  # matches _DEFAULT_CONTEXT_WINDOW in core.py
 
@@ -350,10 +383,18 @@ def _build_run_config(
         available_tools=available_tools,
         active_tools_list=active_tools_list,
         max_context_tokens=max_context_tokens,
+        context_max_messages=context_max_messages,
+        context_max_tokens=context_max_tokens,
         context_compression=bool(context_compression),
         parallel_tool_execution=bool(parallel),
         tier_cache_enabled=bool(tier_cache_enabled),
         session_state=session_state,
+        memory_manager=memory_manager,
+        tools_ready=(
+            getattr(getattr(app_state, "mcp_manager", None), "tools_ready", None)
+            if app_state
+            else None
+        ),
         bound_cache=OrderedDict(),
         compression_cache=OrderedDict(),
         decision_accountability_enabled=(
@@ -480,7 +521,11 @@ class ApiSessionRegistry:
             if record is None:
                 return None
 
-            session = await warm_session(record, self._app_state)
+            try:
+                session = await warm_session(record, self._app_state)
+            except Exception as exc:
+                log.error("Failed to warm session %s: %s", session_id, exc)
+                return None
 
             discarded: ApiSession | None = None
             async with self._lock:

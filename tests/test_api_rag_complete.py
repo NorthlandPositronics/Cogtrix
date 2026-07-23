@@ -23,13 +23,18 @@ os.environ.setdefault("COGTRIX_JWT_SECRET", _TEST_JWT_SECRET)
 os.environ.setdefault("COGTRIX_DB_URL", "sqlite+aiosqlite:///:memory:")
 
 import asyncio as _asyncio  # noqa: E402
-from unittest.mock import patch  # noqa: E402
+from unittest.mock import AsyncMock, patch  # noqa: E402
 
 from fastapi.testclient import TestClient  # noqa: E402
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine  # noqa: E402
 from sqlalchemy.pool import StaticPool  # noqa: E402
 
+from src.api.auth import create_access_token  # noqa: E402
 from src.api.db.engine import Base, get_db  # noqa: E402
+from src.api.db.models import RagDocument  # noqa: E402
+from src.api.db.repositories.organization import OrganizationRepository  # noqa: E402
+from src.api.db.repositories.users import UserRepository  # noqa: E402
+from src.api.pagination import encode_cursor  # noqa: E402
 
 _VALID_PASSWORD = "TestPass1!"
 
@@ -63,6 +68,7 @@ def app(tmp_path):
         patch("src.api.routes.rag.ingest_document_task", _noop_ingest),
     ):
         _app = create_app()
+        _app.state.db_factory = factory
 
         async def _override():
             async with factory() as session:
@@ -95,6 +101,52 @@ def _register_and_login(client, role_hint="first"):
     r = client.post("/api/v1/auth/login", json={"username": uname, "password": _VALID_PASSWORD})
     token = r.json()["data"]["access_token"]
     return {"Authorization": f"Bearer {token}"}
+
+
+def _seed_org_user(
+    app,
+    *,
+    org_name: str,
+    org_slug: str,
+    username: str,
+    email: str,
+    role: str = "user",
+) -> dict[str, str]:
+    """Create an organization-scoped user and return auth headers for it."""
+    org_id = str(uuid.uuid4())
+    user_id = str(uuid.uuid4())
+
+    async def _seed() -> None:
+        async with app.state.db_factory() as session:
+            org_repo = OrganizationRepository(session)
+            user_repo = UserRepository(session)
+            await org_repo.create(org_id=org_id, name=org_name, slug=org_slug)
+            await user_repo.create(
+                user_id=user_id,
+                username=username,
+                email=email,
+                password_hash="hash",
+                role=role,
+                org_id=org_id,
+            )
+            await session.commit()
+
+    _asyncio.run(_seed())
+    token = create_access_token(user_id=user_id, role=role)
+    return {"Authorization": f"Bearer {token}"}
+
+
+def _mark_document_indexed(app, document_id: str) -> None:
+    """Flip a RAG document to indexed so search can see it."""
+
+    async def _seed() -> None:
+        async with app.state.db_factory() as session:
+            doc = await session.get(RagDocument, document_id)
+            assert doc is not None
+            doc.status = "indexed"
+            await session.commit()
+
+    _asyncio.run(_seed())
 
 
 @pytest.fixture()
@@ -285,6 +337,13 @@ class TestListDocuments:
 
     def test_list_invalid_cursor_returns_400(self, client, user_headers):
         r = client.get("/api/v1/rag/documents?cursor=notvalidbase64!!!", headers=user_headers)
+        assert r.status_code == 400
+        assert r.json()["error"]["code"] == "INVALID_CURSOR"
+
+    def test_list_stale_cursor_returns_400(self, client, admin_headers, user_headers):
+        _upload_txt(client, admin_headers, filename="cursor-target.txt")
+        stale_cursor = encode_cursor(str(uuid.uuid4()))
+        r = client.get(f"/api/v1/rag/documents?cursor={stale_cursor}", headers=user_headers)
         assert r.status_code == 400
         assert r.json()["error"]["code"] == "INVALID_CURSOR"
 
@@ -488,3 +547,60 @@ class TestSearchRAG:
             headers={"Authorization": "Bearer bad.token"},
         )
         assert r.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# Organization scoping
+# ---------------------------------------------------------------------------
+
+
+class TestRagOrgScoping:
+    def test_rag_routes_are_scoped_to_org(self, app, client, tmp_path):
+        with (
+            patch("src.api.routes.rag.ingest_document_task", new=AsyncMock(return_value=None)),
+            patch("src.api.routes.rag._get_uploads_dir", return_value=tmp_path),
+            patch("src.api.tasks.rag._get_uploads_dir", return_value=tmp_path),
+        ):
+            org_a_headers = _seed_org_user(
+                app,
+                org_name="Org A",
+                org_slug="org-a",
+                username="orga-admin",
+                email="orga-admin@example.com",
+                role="admin",
+            )
+            org_b_headers = _seed_org_user(
+                app,
+                org_name="Org B",
+                org_slug="org-b",
+                username="orgb-admin",
+                email="orgb-admin@example.com",
+                role="admin",
+            )
+
+            upload = _upload_txt(client, org_a_headers, filename="tenant-a.txt")
+            assert upload.status_code == 202, upload.text
+            doc_id = upload.json()["data"]["id"]
+            _mark_document_indexed(app, doc_id)
+
+            list_a = client.get("/api/v1/rag/documents", headers=org_a_headers)
+            assert list_a.status_code == 200
+            assert any(item["id"] == doc_id for item in list_a.json()["data"]["items"])
+
+            list_b = client.get("/api/v1/rag/documents", headers=org_b_headers)
+            assert list_b.status_code == 200
+            assert all(item["id"] != doc_id for item in list_b.json()["data"]["items"])
+
+            get_b = client.get(f"/api/v1/rag/documents/{doc_id}", headers=org_b_headers)
+            assert get_b.status_code == 404
+            assert get_b.json()["error"]["code"] == "DOCUMENT_NOT_FOUND"
+
+            search_b = client.post(
+                "/api/v1/rag/search", json={"query": "tenant-a"}, headers=org_b_headers
+            )
+            assert search_b.status_code == 200
+            assert search_b.json()["data"]["total_documents_searched"] == 0
+
+            delete_b = client.delete(f"/api/v1/rag/documents/{doc_id}", headers=org_b_headers)
+            assert delete_b.status_code == 404
+            assert delete_b.json()["error"]["code"] == "DOCUMENT_NOT_FOUND"

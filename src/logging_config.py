@@ -8,15 +8,21 @@ Provides centralized logging setup with support for:
 - Custom formatters for different log levels
 """
 
+import json
 import logging
+import os
 import re as _re
 import sys
 import uuid
 from contextvars import ContextVar
+from datetime import UTC, datetime
 from pathlib import Path
 
 # Context variable for request/conversation tracking
 _request_id: ContextVar[str] = ContextVar("request_id", default="")
+
+# Context variable for session tracking
+_session_id: ContextVar[str] = ContextVar("session_id", default="")
 
 # Module-level logger
 logger = logging.getLogger("cogtrix")
@@ -62,16 +68,28 @@ _SENSITIVE_RE = _re.compile(
     """,
     _re.IGNORECASE | _re.VERBOSE,
 )
+# Match key names like api_key, secret, password when used as keys (followed by : or =)
+_KEY_NAME_RE = _re.compile(
+    r"\b(api[_-]?key|secret|token|password|authorization)\b\s*[:=]",
+    _re.IGNORECASE,
+)
 _BEARER_RE = _re.compile(r"Bearer\s+[A-Za-z0-9_\-/.]{8,}", _re.IGNORECASE)
-_SK_RE = _re.compile(r"sk-[A-Za-z0-9]{8,}")
+# Match sk-xxx patterns including those with hyphens
+_SK_RE = _re.compile(r"sk-[A-Za-z0-9_\-]{8,}")
 _KEY_LIKE_RE = _re.compile(r"(?:xai-|exa-|tvly-|BSA)[A-Za-z0-9_\-]{6,}")
 
 
 def _scrub_secrets(text: str) -> str:
     """Replace likely API keys / tokens with a redacted placeholder."""
+    # First replace the actual secret values (api_key=xxx patterns)
     text = _SENSITIVE_RE.sub("***REDACTED***", text)
+    # Then replace standalone key names (api_key, secret, etc.)
+    text = _KEY_NAME_RE.sub("***REDACTED***", text)
+    # Replace Bearer tokens
     text = _BEARER_RE.sub("Bearer ***", text)
+    # Replace sk-xxx patterns (including those with hyphens)
     text = _SK_RE.sub("sk-***", text)
+    # Replace other key-like patterns
     text = _KEY_LIKE_RE.sub("***REDACTED***", text)
     return text
 
@@ -103,7 +121,92 @@ class CogtrixFormatter(logging.Formatter):
         # Add request_id to record if not present
         if not hasattr(record, "request_id"):
             record.request_id = _request_id.get() or "-"
+        if not hasattr(record, "session_id"):
+            record.session_id = _session_id.get() or "-"
+        # Add trace_id and span_id if available from OpenTelemetry
+        trace_id, span_id = self._get_otel_context()
+        if trace_id:
+            record.trace_id = trace_id
+        if span_id:
+            record.span_id = span_id
         return super().format(record)
+
+    def _get_otel_context(self) -> tuple[str | None, str | None]:
+        """Get trace_id and span_id from OpenTelemetry context."""
+        try:
+            from opentelemetry import trace
+
+            span = trace.get_current_span()
+            if span.is_recording():
+                span_context = span.get_span_context()
+                return (
+                    format(span_context.trace_id, "032x"),
+                    format(span_context.span_id, "016x"),
+                )
+        except Exception:  # pragma: no cover - defensive fallback
+            pass
+        return None, None
+
+
+class JSONCogtrixFormatter(logging.Formatter):
+    """Structured JSON formatter for machine-readable logs."""
+
+    def __init__(self, debug: bool = False):
+        self.debug = debug
+        super().__init__()
+
+    def _get_otel_context(self) -> tuple[str | None, str | None]:
+        """Get trace_id and span_id from OpenTelemetry context."""
+        try:
+            from opentelemetry import trace
+
+            span = trace.get_current_span()
+            if span.is_recording():
+                span_context = span.get_span_context()
+                return (
+                    format(span_context.trace_id, "032x"),
+                    format(span_context.span_id, "016x"),
+                )
+        except Exception:  # pragma: no cover - defensive fallback
+            pass
+        return None, None
+
+    def format(self, record: logging.LogRecord) -> str:
+        try:
+            message = _scrub_secrets(record.getMessage())
+        except Exception as exc:  # pragma: no cover - defensive fallback
+            message = f"<unformattable log message: {exc}>"
+
+        session_id = getattr(record, "session_id", None) or _session_id.get() or "-"
+        request_id = getattr(record, "request_id", None) or _request_id.get() or "-"
+        trace_id, span_id = self._get_otel_context()
+
+        payload: dict[str, object] = {
+            "timestamp": datetime.fromtimestamp(record.created, tz=UTC)
+            .isoformat()
+            .replace("+00:00", "Z"),
+            "level": record.levelname,
+            "logger": record.name,
+            "message": message,
+            "session_id": session_id,
+            "request_id": request_id,
+        }
+        if trace_id:
+            payload["trace_id"] = trace_id
+        if span_id:
+            payload["span_id"] = span_id
+
+        if record.exc_info:
+            try:
+                payload["exception"] = self.formatException(record.exc_info)
+            except Exception:  # pragma: no cover - defensive fallback
+                payload["exception"] = "failed to format exception"
+
+        try:
+            return json.dumps(payload, ensure_ascii=False, default=str)
+        except Exception:  # pragma: no cover - never let logging fail
+            fallback = {key: str(value) for key, value in payload.items()}
+            return json.dumps(fallback, ensure_ascii=False)
 
 
 class CogtrixLoggerAdapter(logging.LoggerAdapter):  # type: ignore[type-arg]
@@ -113,6 +216,7 @@ class CogtrixLoggerAdapter(logging.LoggerAdapter):  # type: ignore[type-arg]
         # Add request_id to extra
         extra = kwargs.get("extra", {})
         extra["request_id"] = _request_id.get() or "-"
+        extra["session_id"] = _session_id.get() or "-"
         kwargs["extra"] = extra
         return msg, kwargs
 
@@ -158,6 +262,8 @@ def setup_logging(
         Configured logger instance.
     """
     global _verbose_logging
+    json_format = os.environ.get("LOG_FORMAT", "").strip().lower() == "json"
+
     # verbosity takes precedence over the legacy debug/verbose booleans when non-zero
     if verbosity:
         set_verbosity(verbosity)
@@ -172,7 +278,7 @@ def setup_logging(
 
     # --log-file always takes priority; stream_output only applies when no file is given
     if log_file is None and stream_output:
-        fmt = CogtrixFormatter(debug=debug)
+        fmt = JSONCogtrixFormatter() if json_format else CogtrixFormatter(debug=debug)
         level = logging.DEBUG if debug else logging.INFO
 
         stdout_handler = logging.StreamHandler(sys.stdout)
@@ -207,7 +313,9 @@ def setup_logging(
         # File handler
         file_handler = logging.FileHandler(log_file, encoding="utf-8")
         file_handler.setLevel(logging.DEBUG if debug else logging.INFO)
-        file_handler.setFormatter(CogtrixFormatter(debug=debug))
+        file_handler.setFormatter(
+            JSONCogtrixFormatter() if json_format else CogtrixFormatter(debug=debug)
+        )
         logger.addHandler(file_handler)
     except OSError as exc:
         print(f"Warning: could not set up log file {log_file!r}: {exc}", file=sys.stderr)
@@ -216,7 +324,9 @@ def setup_logging(
     if console_output:
         console_handler = logging.StreamHandler(sys.stderr)
         console_handler.setLevel(logging.DEBUG if debug else logging.INFO)
-        console_handler.setFormatter(CogtrixFormatter(debug=debug))
+        console_handler.setFormatter(
+            JSONCogtrixFormatter() if json_format else CogtrixFormatter(debug=debug)
+        )
         logger.addHandler(console_handler)
 
     # Log initial message
@@ -247,6 +357,22 @@ def clear_request_id() -> None:
     _request_id.set("")
 
 
+def set_session_id(session_id: str) -> str:
+    """Set the current session ID for the active context."""
+    _session_id.set(session_id)
+    return session_id
+
+
+def get_session_id() -> str:
+    """Get the current session ID."""
+    return _session_id.get() or "-"
+
+
+def clear_session_id() -> None:
+    """Clear the current session ID."""
+    _session_id.set("")
+
+
 # Convenience functions for structured logging
 def log_user_message(message: str) -> None:
     """Log a user message."""
@@ -273,7 +399,16 @@ def log_tool_call(
     log = get_logger()
 
     if error:
-        log.error("Tool failed: %s - %s", tool_name, error)
+        # Expected security enforcement is WARNING — it is not an unexpected failure.
+        _SECURITY_PATTERNS = (
+            "Access denied",
+            "path outside allowed",
+            "outside allowed directories",
+        )
+        if any(pat in error for pat in _SECURITY_PATTERNS):
+            log.warning("Tool blocked (security): %s - %s", tool_name, error)
+        else:
+            log.error("Tool failed: %s - %s", tool_name, error)
         if inputs:
             log.debug("Tool input: %s", inputs)
         return
@@ -343,6 +478,7 @@ def log_session_info(
 ) -> None:
     """Log session information at startup."""
     log = get_logger()
+    set_session_id(session_id)
     log.info("Session started: %s", session_id)
     log.info("Provider: %s/%s", provider, model)
     log.info("Memory mode: %s", memory_mode)

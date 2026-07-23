@@ -10,6 +10,7 @@ Configuration:
 
 from __future__ import annotations
 
+import concurrent.futures
 import re
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -28,6 +29,7 @@ else:
         BaseModel = object  # type: ignore[assignment,misc]
         Field = lambda *a, **kw: None  # type: ignore[assignment]  # noqa: E731
 
+from src.agent.safety import UserCancelledRun
 from src.providers import create_chat_model_from_configs
 
 if TYPE_CHECKING:
@@ -38,6 +40,9 @@ if TYPE_CHECKING:
 _config: Config | None = None
 
 _APP_DIR: Path = Path(__file__).resolve().parent.parent.parent
+
+# Timeout for LLM invoke calls during test generation (seconds)
+_GENERATE_TESTS_LLM_TIMEOUT_SECONDS = 120
 
 
 # ── Configuration ─────────────────────────────────────────────────────────────
@@ -249,8 +254,18 @@ def generate_tests(
         assert _HumanMessage is not None
         llm = create_chat_model_from_configs(*_config.resolve_llm_config())
         prompt = _build_prompt(source_file, source_content, focus)
-        response = llm.invoke([_HumanMessage(content=prompt)])
-        raw = getattr(response, "content", str(response))
+        pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        try:
+            future = pool.submit(llm.invoke, [_HumanMessage(content=prompt)])
+            response = future.result(timeout=_GENERATE_TESTS_LLM_TIMEOUT_SECONDS)
+            raw = getattr(response, "content", str(response))
+        except concurrent.futures.TimeoutError:
+            pool.shutdown(wait=False)
+            return "Error: LLM call timed out"
+        finally:
+            pool.shutdown(wait=False)
+    except UserCancelledRun:
+        raise
     except Exception as exc:
         return f"Error: LLM call failed — {exc}"
 

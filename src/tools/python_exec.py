@@ -14,10 +14,13 @@ Requires user confirmation for safety.
 """
 
 import ast
+import contextvars
 import io
+import logging
 import multiprocessing as mp
 import threading
 import traceback
+import uuid
 from collections import OrderedDict
 from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import dataclass, field
@@ -26,6 +29,8 @@ from queue import Empty
 from typing import Any
 
 from pydantic import BaseModel, Field
+
+_logger = logging.getLogger("cogtrix.python_exec")
 
 # Configuration constants
 MAX_OUTPUT_SIZE = 10000  # Maximum output size in characters
@@ -81,6 +86,13 @@ _MAX_SESSIONS = 1000
 _session_states: OrderedDict[str, SessionState] = OrderedDict()
 _session_states_lock: threading.RLock = threading.RLock()
 
+# Auto-generated default session ID per execution context (thread or asyncio task).
+# Using a ContextVar ensures that concurrent callers without an explicit session_id
+# receive isolated sessions, while single-threaded callers still get persistence.
+_default_session_ctx: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "python_exec_default_session", default=None
+)
+
 # Current session ID for interactive (single-threaded) mode.
 # WARNING: not thread-safe — do not rely on this in concurrent (assistant) contexts.
 # In assistant mode, pass session_id explicitly via the tool input schema instead.
@@ -97,15 +109,32 @@ def set_session(session_id: str) -> None:
     _current_session = session_id
 
 
+def reset_default_session() -> None:
+    """Clear the auto-generated default session for the current context.
+
+    After calling this, the next lookup with an omitted or ``"default"``
+    *session_id* will generate a fresh UUID.
+    """
+    _default_session_ctx.set(None)
+
+
 def _get_session_state(session_id: str | None = None) -> SessionState:
     """Get or create session state for the given session_id.
 
-    Falls back to "default" (never to the global _current_session) so that
-    concurrent callers without an explicit session_id cannot interfere with each other.
+    When *session_id* is ``None`` or the literal string ``"default"``, a
+    per-context UUID is generated (and cached for the current thread/async
+    task).  This prevents unrelated concurrent callers from accidentally
+    sharing the same "default" session while preserving persistence for
+    single-threaded callers such as the CLI.
 
     Applies LRU eviction when the number of sessions reaches _MAX_SESSIONS.
     """
-    sid = session_id if session_id is not None else "default"
+    sid = session_id
+    if sid is None or sid == "default":
+        sid = _default_session_ctx.get()
+        if sid is None:
+            sid = str(uuid.uuid4())
+            _default_session_ctx.set(sid)
     with _session_states_lock:
         if sid in _session_states:
             _session_states.move_to_end(sid)
@@ -416,23 +445,48 @@ SAFE_MODULES = {
     "time",  # Limited functionality (sleep, time)
 }
 
-# Optional data science modules (added if available)
+# Optional data science modules (C-extensions that bypass AST sandbox)
+# WARNING: These modules call C-level fopen/fwrite directly and completely
+# bypass the Python AST sandbox. Do NOT add to SAFE_MODULES unless explicitly enabled.
+# Users must set enable_datascience_modules=True in config to use them.
 OPTIONAL_MODULES = {"numpy", "pandas", "scipy"}
 
-# Check for optional modules and add them if available
+# Track which optional modules are importable (without adding to SAFE_MODULES)
 _AVAILABLE_OPTIONAL: dict[str, bool] = {}
-for _mod_name in OPTIONAL_MODULES:
-    try:
-        __import__(_mod_name)
-        SAFE_MODULES.add(_mod_name)
-        _AVAILABLE_OPTIONAL[_mod_name] = True
-    except ImportError:
-        _AVAILABLE_OPTIONAL[_mod_name] = False
 
 
 def get_available_modules() -> dict[str, bool]:
     """Return dict of optional modules and their availability."""
     return _AVAILABLE_OPTIONAL.copy()
+
+
+def configure_datascience_modules(enabled: bool) -> None:
+    """Configure data science modules (numpy, pandas, scipy) for python_exec.
+
+    When enabled, these C-extensions are added to SAFE_MODULES (if importable).
+    When disabled, they are removed from SAFE_MODULES to prevent sandbox escape.
+
+    This function should be called during tool configuration with the value
+    from config.enable_datascience_modules.
+
+    Note: Unlike the old import-time behavior, this function retries imports
+    at runtime, so modules installed after process start can be enabled.
+    """
+    # First remove all optional modules to ensure clean state
+    for _mod_name in OPTIONAL_MODULES:
+        SAFE_MODULES.discard(_mod_name)
+
+    # Add only if enabled AND importable (retry import to handle modules installed after init)
+    if enabled:
+        for _mod_name in OPTIONAL_MODULES:
+            if _mod_name not in SAFE_MODULES:
+                try:
+                    __import__(_mod_name)
+                    SAFE_MODULES.add(_mod_name)
+                    _AVAILABLE_OPTIONAL[_mod_name] = True
+                except ImportError:
+                    _AVAILABLE_OPTIONAL[_mod_name] = False
+                    pass
 
 
 def _check_ast_security(tree: ast.AST) -> tuple[bool, str]:
@@ -512,7 +566,7 @@ def _check_ast_security(tree: ast.AST) -> tuple[bool, str]:
                         if arg.value in DANGEROUS_ATTRS:
                             return (
                                 False,
-                                f"Blocked: getattr/setattr with '{arg.value}' " "is not allowed",
+                                f"Blocked: getattr/setattr with '{arg.value}' is not allowed",
                             )
 
             # AST-based detection of dangerous built-in calls (avoids substring
@@ -932,8 +986,7 @@ def _safe_range(*args):
     r = range(*args)
     if len(r) > MAX_LOOP_ITERATIONS:
         raise RuntimeError(
-            f"Range too large: {len(r)} > {MAX_LOOP_ITERATIONS}. "
-            "Use smaller ranges or generators."
+            f"Range too large: {len(r)} > {MAX_LOOP_ITERATIONS}. Use smaller ranges or generators."
         )
     return r
 
@@ -958,7 +1011,7 @@ def _safe_set(iterable=None):
     result = set(iterable)
     if len(result) > MAX_COLLECTION_SIZE:
         raise RuntimeError(
-            f"Set too large: {len(result)} > {MAX_COLLECTION_SIZE}. " "Use smaller data sets."
+            f"Set too large: {len(result)} > {MAX_COLLECTION_SIZE}. Use smaller data sets."
         )
     return result
 
@@ -968,7 +1021,7 @@ def _safe_dict(*args, **kwargs):
     result = dict(*args, **kwargs)
     if len(result) > MAX_COLLECTION_SIZE:
         raise RuntimeError(
-            f"Dict too large: {len(result)} > {MAX_COLLECTION_SIZE}. " "Use smaller data sets."
+            f"Dict too large: {len(result)} > {MAX_COLLECTION_SIZE}. Use smaller data sets."
         )
     return result
 
@@ -1024,8 +1077,11 @@ def _execute_code_internal(
     # Apply loop iteration limits
     try:
         transformed_code = _add_loop_limits(transformed_code)
-    except Exception:  # noqa: BLE001  # nosec B110
-        pass  # If AST transformation fails, continue with original code
+    except Exception:
+        return {
+            "success": False,
+            "error": "Code contains complex loop structures that could not be safely bounded",
+        }
 
     # Create restricted globals with context
     restricted_globals: dict[str, Any] = {
@@ -1088,7 +1144,7 @@ def _execute_code_internal(
             import logging as _lg
 
             _lg.getLogger("cogtrix.python_exec").debug(
-                "execute_python: %d variable(s) dropped from context " "(not repr()-able): %s",
+                "execute_python: %d variable(s) dropped from context (not repr()-able): %s",
                 len(_dropped_vars_inline),
                 _dropped_vars_inline,
             )
@@ -1412,6 +1468,7 @@ __all__ = [
     "PythonExecInput",
     "TOOL_CONFIG",
     "set_session",
+    "reset_default_session",
     "get_context",
     "get_history",
     "clear_context",

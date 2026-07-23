@@ -225,8 +225,8 @@ Conventional commit prefixes used in this project:
 
 | Version | Status | Support ends |
 |---------|--------|-------------|
-| v1.x (current) | Active — security + bug fixes | Until v2.0 + 6 months |
-| v0.x | End-of-life after v0.2.0 ships | No further patches |
+| v0.2.x (current) | Active — security + bug fixes | Until v0.3.0 + 6 months |
+| v0.1.x | End-of-life | No further patches |
 
 Only the latest `MINOR` release of the current `MAJOR` line receives security patches.
 Users are encouraged to upgrade to the latest `MINOR` version before the next `MAJOR` release.

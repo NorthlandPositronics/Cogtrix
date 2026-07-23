@@ -365,7 +365,7 @@ class TestAssistantStatus:
 
 class TestAssistantChats:
     def test_list_chats_service_not_running(self, client):
-        resp = client.get("/api/v1/assistant/chats", headers=_user_headers())
+        resp = client.get("/api/v1/assistant/chats", headers=_admin_headers())
         assert resp.status_code == 200
         body = resp.json()
         assert body["data"]["items"] == []
@@ -383,7 +383,7 @@ class TestAssistantChats:
 
         with TestClient(app) as c:
             app.state.assistant_service = svc
-            resp = c.get("/api/v1/assistant/chats", headers=_user_headers())
+            resp = c.get("/api/v1/assistant/chats", headers=_admin_headers())
             app.state.assistant_service = None
 
         assert resp.status_code == 200
@@ -406,7 +406,7 @@ class TestAssistantChats:
 
         with TestClient(app) as c:
             app.state.assistant_service = svc
-            resp = c.get("/api/v1/assistant/chats?channel=whatsapp", headers=_user_headers())
+            resp = c.get("/api/v1/assistant/chats?channel=whatsapp", headers=_admin_headers())
             app.state.assistant_service = None
 
         assert resp.status_code == 200
@@ -423,7 +423,7 @@ class TestAssistantChats:
             app.state.assistant_service = svc
             resp = c.get(
                 "/api/v1/assistant/chats/nonexistent::key/messages",
-                headers=_user_headers(),
+                headers=_admin_headers(),
             )
             app.state.assistant_service = None
 
@@ -433,7 +433,7 @@ class TestAssistantChats:
     def test_get_chat_messages_service_not_running(self, client):
         resp = client.get(
             "/api/v1/assistant/chats/whatsapp::+1234/messages",
-            headers=_user_headers(),
+            headers=_admin_headers(),
         )
         assert resp.status_code == 409
 
@@ -455,7 +455,7 @@ class TestAssistantChats:
             app.state.assistant_service = svc
             resp = c.get(
                 "/api/v1/assistant/chats/wa::123/messages",
-                headers=_user_headers(),
+                headers=_admin_headers(),
             )
             app.state.assistant_service = None
 
@@ -484,7 +484,7 @@ class TestScheduledMessages:
         )
 
     def test_list_scheduled_no_service(self, client):
-        resp = client.get("/api/v1/assistant/scheduled", headers=_user_headers())
+        resp = client.get("/api/v1/assistant/scheduled", headers=_admin_headers())
         assert resp.status_code == 200
         body = resp.json()
         assert body["data"]["items"] == []
@@ -498,7 +498,7 @@ class TestScheduledMessages:
 
         with TestClient(app) as c:
             app.state.assistant_service = svc
-            resp = c.get("/api/v1/assistant/scheduled", headers=_user_headers())
+            resp = c.get("/api/v1/assistant/scheduled", headers=_admin_headers())
             app.state.assistant_service = None
 
         assert resp.status_code == 200
@@ -519,7 +519,7 @@ class TestScheduledMessages:
 
         with TestClient(app) as c:
             app.state.assistant_service = svc
-            resp = c.get("/api/v1/assistant/scheduled?channel=telegram", headers=_user_headers())
+            resp = c.get("/api/v1/assistant/scheduled?channel=telegram", headers=_admin_headers())
             app.state.assistant_service = None
 
         assert resp.status_code == 200
@@ -635,7 +635,7 @@ class TestDeferredRecords:
         )
 
     def test_list_deferred_no_service(self, client):
-        resp = client.get("/api/v1/assistant/deferred", headers=_user_headers())
+        resp = client.get("/api/v1/assistant/deferred", headers=_admin_headers())
         assert resp.status_code == 200
         assert resp.json()["data"] == []
 
@@ -649,7 +649,7 @@ class TestDeferredRecords:
 
         with TestClient(app) as c:
             app.state.assistant_service = svc
-            resp = c.get("/api/v1/assistant/deferred", headers=_user_headers())
+            resp = c.get("/api/v1/assistant/deferred", headers=_admin_headers())
             app.state.assistant_service = None
 
         assert resp.status_code == 200
@@ -662,7 +662,7 @@ class TestDeferredRecords:
     def test_cancel_deferred_not_running(self, client):
         resp = client.delete(
             "/api/v1/assistant/deferred/whatsapp::+123",
-            headers=_user_headers(),
+            headers=_admin_headers(),
         )
         assert resp.status_code == 409
 
@@ -676,7 +676,7 @@ class TestDeferredRecords:
             app.state.assistant_service = svc
             resp = c.delete(
                 "/api/v1/assistant/deferred/nonexistent::key",
-                headers=_user_headers(),
+                headers=_admin_headers(),
             )
             app.state.assistant_service = None
 
@@ -695,7 +695,7 @@ class TestDeferredRecords:
             app.state.assistant_service = svc
             resp = c.delete(
                 f"/api/v1/assistant/deferred/{key}",
-                headers=_user_headers(),
+                headers=_admin_headers(),
             )
             app.state.assistant_service = None
 
@@ -711,7 +711,7 @@ class TestDeferredRecords:
 
         with TestClient(app) as c:
             app.state.assistant_service = svc
-            resp = c.get("/api/v1/assistant/deferred", headers=_user_headers())
+            resp = c.get("/api/v1/assistant/deferred", headers=_admin_headers())
             app.state.assistant_service = None
 
         assert resp.status_code == 200
@@ -725,7 +725,7 @@ class TestDeferredRecords:
 
 class TestContacts:
     def test_list_contacts_no_service(self, client):
-        resp = client.get("/api/v1/assistant/contacts", headers=_user_headers())
+        resp = client.get("/api/v1/assistant/contacts", headers=_admin_headers())
         assert resp.status_code == 200
         assert resp.json()["data"] == []
 
@@ -744,7 +744,7 @@ class TestContacts:
 
         with TestClient(app) as c:
             app.state.assistant_service = svc
-            resp = c.get("/api/v1/assistant/contacts", headers=_user_headers())
+            resp = c.get("/api/v1/assistant/contacts", headers=_admin_headers())
             app.state.assistant_service = None
 
         assert resp.status_code == 200
@@ -774,7 +774,7 @@ class TestContacts:
 
         with TestClient(app) as c:
             app.state.assistant_service = svc
-            resp = c.get("/api/v1/assistant/contacts", headers=_user_headers())
+            resp = c.get("/api/v1/assistant/contacts", headers=_admin_headers())
             app.state.assistant_service = None
 
         assert resp.status_code == 200
@@ -799,7 +799,7 @@ class TestContacts:
 
         with TestClient(app) as c:
             app.state.assistant_service = svc
-            resp = c.get("/api/v1/assistant/contacts", headers=_user_headers())
+            resp = c.get("/api/v1/assistant/contacts", headers=_admin_headers())
             app.state.assistant_service = None
 
         assert resp.status_code == 200
@@ -916,7 +916,7 @@ class TestKnowledge:
         )
 
     def test_list_knowledge_no_service(self, client):
-        resp = client.get("/api/v1/assistant/knowledge", headers=_user_headers())
+        resp = client.get("/api/v1/assistant/knowledge", headers=_admin_headers())
         assert resp.status_code == 200
         body = resp.json()["data"]
         assert body["items"] == []
@@ -929,7 +929,7 @@ class TestKnowledge:
 
         with TestClient(app) as c:
             app.state.assistant_service = svc
-            resp = c.get("/api/v1/assistant/knowledge", headers=_user_headers())
+            resp = c.get("/api/v1/assistant/knowledge", headers=_admin_headers())
             app.state.assistant_service = None
 
         assert resp.status_code == 200
@@ -947,7 +947,7 @@ class TestKnowledge:
 
         with TestClient(app) as c:
             app.state.assistant_service = svc
-            resp = c.get("/api/v1/assistant/knowledge", headers=_user_headers())
+            resp = c.get("/api/v1/assistant/knowledge", headers=_admin_headers())
             app.state.assistant_service = None
 
         assert resp.status_code == 200
@@ -971,7 +971,7 @@ class TestKnowledge:
             app.state.assistant_service = svc
             resp = c.get(
                 "/api/v1/assistant/knowledge?source_chat=wa::chat111",
-                headers=_user_headers(),
+                headers=_admin_headers(),
             )
             app.state.assistant_service = None
 
@@ -984,7 +984,7 @@ class TestKnowledge:
         resp = client.post(
             "/api/v1/assistant/knowledge/search",
             json={"query": "Alice", "top_k": 5},
-            headers=_user_headers(),
+            headers=_admin_headers(),
         )
         assert resp.status_code == 200
         assert resp.json()["data"] == []
@@ -1003,7 +1003,7 @@ class TestKnowledge:
             resp = c.post(
                 "/api/v1/assistant/knowledge/search",
                 json={"query": "veterinarian Alice", "top_k": 5},
-                headers=_user_headers(),
+                headers=_admin_headers(),
             )
             app.state.assistant_service = None
 
@@ -1023,7 +1023,7 @@ class TestKnowledge:
             resp = c.post(
                 "/api/v1/assistant/knowledge/search",
                 json={"query": "test query", "top_k": 5},
-                headers=_user_headers(),
+                headers=_admin_headers(),
             )
             app.state.assistant_service = None
 

@@ -183,6 +183,21 @@ class TestPerf5010EnqueueAgentStateNonBlocking:
 class TestBug159LlmGenerationReadInsideLock:
     """_llm_generation must be read atomically under _cache_lock."""
 
+    @pytest.fixture(autouse=True)
+    def _save_runner_state(self):
+        """Save and restore runner module state so mutations don't leak."""
+        from src.orchestration import runner as runner_mod
+
+        with runner_mod._cache_lock:
+            orig_generation = runner_mod._llm_generation
+            orig_bound_cache = dict(runner_mod._persistent_bound_cache)
+            orig_compression_cache = dict(runner_mod._persistent_compression_cache)
+        yield
+        with runner_mod._cache_lock:
+            runner_mod._llm_generation = orig_generation
+            runner_mod._persistent_bound_cache = orig_bound_cache
+            runner_mod._persistent_compression_cache = orig_compression_cache
+
     def test_invalidate_from_another_thread_is_reflected(self):
         """After invalidate_llm_caches() from another thread, next run_agent sees
         a fresh generation so the cached LLM id changes.

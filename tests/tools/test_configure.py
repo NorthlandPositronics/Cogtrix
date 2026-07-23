@@ -141,6 +141,19 @@ class TestCreateRequestToolsTool:
         assert "ADD" in result
         assert "x" in result
 
+    def test_no_names_provided_uses_compact_catalog_when_many_tools_active(self):
+        from src.tools.configure import create_request_tools_tool
+
+        available = {f"tool_{i}": MagicMock(description=f"Tool {i}") for i in range(12)}
+        catalog = {name: tool.description for name, tool in available.items()}
+        active = {f"active_{i}" for i in range(10)}
+        tool = create_request_tools_tool(available, catalog, active_names=active)
+        assert tool is not None
+        result = tool.invoke({"add": [], "remove": []})
+        assert "use add=[...]" in result.lower()
+        assert "tool_0" not in result
+        assert "active_0" not in result
+
     def test_description_does_not_contain_tool_names(self):
         """Tool names must not appear in the description; they are in the return value."""
         from src.tools.configure import create_request_tools_tool
@@ -153,6 +166,21 @@ class TestCreateRequestToolsTool:
         # Catalog is still accessible via the return value when called with no args
         result = tool.invoke({"add": [], "remove": []})
         assert "web_search" in result
+
+    def test_full_catalog_still_lists_tool_names_for_small_active_sets(self):
+        from src.tools.configure import create_request_tools_tool
+
+        available = {
+            "search_web": MagicMock(description="Search"),
+            "read_file": MagicMock(description="Read"),
+        }
+        catalog = {"search_web": "Search", "read_file": "Read"}
+        active = {"core_tool"}
+        tool = create_request_tools_tool(available, catalog, active_names=active)
+        assert tool is not None
+        result = tool.invoke({"add": [], "remove": []})
+        assert "search_web" in result
+        assert "read_file" in result
 
     def test_fuzzy_add_resolves_abbreviated_name(self):
         """BUG-076: gpt-4o sends 'search' instead of 'search_web'."""

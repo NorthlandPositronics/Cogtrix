@@ -67,6 +67,7 @@ class TestApplyConfigFileNonNumeric:
         config = Config()
         _apply_config_file(config, cfg_file)
         # Should not crash; default_timeout stays unchanged
+        assert config.delegate_default_timeout == 60
 
     def test_context_compression_min_age_non_numeric(self, tmp_path):
         cfg_file = self._write_yaml(
@@ -75,6 +76,7 @@ class TestApplyConfigFileNonNumeric:
         )
         config = Config()
         _apply_config_file(config, cfg_file)
+        assert config.context_compression_min_age == 6
 
     def test_context_compression_min_chars_non_numeric(self, tmp_path):
         cfg_file = self._write_yaml(
@@ -83,6 +85,7 @@ class TestApplyConfigFileNonNumeric:
         )
         config = Config()
         _apply_config_file(config, cfg_file)
+        assert config.context_compression_min_chars == 2000
 
     def test_rag_chunk_size_non_numeric(self, tmp_path):
         cfg_file = self._write_yaml(
@@ -91,6 +94,7 @@ class TestApplyConfigFileNonNumeric:
         )
         config = Config()
         _apply_config_file(config, cfg_file)
+        assert config.rag.chunk_size == 2000
 
     def test_rag_chunk_overlap_non_numeric(self, tmp_path):
         cfg_file = self._write_yaml(
@@ -99,6 +103,7 @@ class TestApplyConfigFileNonNumeric:
         )
         config = Config()
         _apply_config_file(config, cfg_file)
+        assert config.rag.chunk_overlap == 200
 
     def test_research_delegate_timeout_non_numeric(self, tmp_path):
         cfg_file = self._write_yaml(
@@ -107,6 +112,7 @@ class TestApplyConfigFileNonNumeric:
         )
         config = Config()
         _apply_config_file(config, cfg_file)
+        assert config.research_delegate_timeout == 300
 
     def test_research_delegate_cap_ratio_non_numeric(self, tmp_path):
         cfg_file = self._write_yaml(
@@ -115,6 +121,7 @@ class TestApplyConfigFileNonNumeric:
         )
         config = Config()
         _apply_config_file(config, cfg_file)
+        assert config.research_delegate_cap_ratio == 0.85
 
     def test_provider_num_ctx_non_numeric(self, tmp_path):
         """Non-numeric num_ctx in provider YAML auto-migrates to model; invalid value is dropped."""

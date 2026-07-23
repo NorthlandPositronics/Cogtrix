@@ -76,13 +76,29 @@ Thumbs.db
 # ── Audit & analysis artifacts ───────────────────────────────────
 docs/bugs/
 docs/ux/
+tests/quality/results/
 MagicMock/
 mypy_report/
 settings/
 
+# ── Retired directories — deliberately excluded ──────────────────
+# scripts/ was removed in 583450f (the cogtrix-task.sh Docker
+# wrapper).  Listed here so the directory cannot reappear via
+# accidental ``git add``.
+scripts/
+
+# ── Local scratch dir ────────────────────────────────────────────
+# .tmp/ accumulates stale logs and ad-hoc test data during local
+# development.  Always local, never tracked.
+.tmp/
+
+# ── Docker build artifacts ───────────────────────────────────────
+docker-buildx-bake.hcl
+
 # ── AI coding agents ──────────────────────────────────────────────
 # Anthropic Claude Code
 CLAUDE.md
+DESIGN.md
 .claude/*
 !.claude/print/
 # OpenCode

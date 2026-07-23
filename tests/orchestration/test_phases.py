@@ -280,3 +280,48 @@ class TestRunResearchDelegateURLWarning:
         assert len(drop_warnings) == 1
         assert "15" in drop_warnings[0].message
         assert "5" in drop_warnings[0].message
+
+
+# ---------------------------------------------------------------------------
+# Regression — force_deep_think must not swallow UserCancelledRun (#1185)
+# ---------------------------------------------------------------------------
+
+
+class TestForceDeepThinkUserCancelledRun:
+    def test_user_cancelled_run_propagates(self):
+        """UserCancelledRun raised by deep_think must not be caught by the broad except Exception."""
+        from unittest.mock import patch
+
+        from src.agent.safety import UserCancelledRun
+        from src.orchestration.phases import force_deep_think
+
+        log_mock = MagicMock()
+
+        with patch("src.tools.deep_think.deep_think", side_effect=UserCancelledRun("stop")):
+            with pytest.raises(UserCancelledRun):
+                force_deep_think(
+                    user_input="think deep about this",
+                    agent_response="initial response",
+                    tool_outputs="",
+                    log=log_mock,
+                )
+
+    def test_other_exceptions_still_swallowed(self):
+        """Non-cancellation exceptions must still be caught and logged."""
+        from unittest.mock import patch
+
+        from src.orchestration.phases import force_deep_think
+
+        log_mock = MagicMock()
+
+        with patch("src.tools.deep_think.deep_think", side_effect=RuntimeError("boom")):
+            result = force_deep_think(
+                user_input="think deep about this",
+                agent_response="fallback response",
+                tool_outputs="",
+                log=log_mock,
+            )
+
+        assert result == "fallback response"
+        log_mock.warning.assert_called_once()
+        assert "Programmatic deep_think failed" in log_mock.warning.call_args[0][0]

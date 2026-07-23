@@ -81,6 +81,19 @@ Good places to start:
 - Keep commits focused — one logical change per commit
 - Use [Conventional Commits](https://www.conventionalcommits.org/) for commit messages (`feat:`, `fix:`, `docs:`, etc.)
 
+## Touching the Gate 2 Eval Framework?
+
+If your PR modifies `tests/evaluation/runner.py`,
+`tests/evaluation/stub_tool_registry.py`,
+`tests/evaluation/ci_gate2.py`, `tests/evaluation/models.yaml`, or any
+file under `tests/evaluation/scenarios/`, please follow the
+strict-schema canary policy: see
+[docs/testing/eval-canary.md](docs/testing/eval-canary.md).
+In short — run the two canary models (`deepseek-v3` + `kimi-k2-5`)
+against the smoke matrix locally and paste the summary into the PR
+body.  It's a 3-minute, $0.05 check that catches the
+description-only-stubs class of regression before Gate 2 has to.
+
 ## Code of Conduct
 
 All participants are expected to follow our [Code of Conduct](CODE_OF_CONDUCT.md).

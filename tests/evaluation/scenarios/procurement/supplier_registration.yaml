@@ -1,0 +1,33 @@
+id: procurement_supplier_registration
+domain: procurement
+title: Supplier Registration
+description: |
+  User provides a supplier registration form; the agent must onboard the
+  supplier by calling register_supplier with all required fields, then
+  validate the data using validate_supplier_data.
+user_prompt: |
+  I need to onboard a new supplier. Here are the details:
+  Company: Global Widgets Inc.
+  Tax ID: 12-3456789
+  Address: 123 Industrial Blvd, Manufacturing City, TX 75001
+  Contact: Jane Doe, jane.doe@globalwidgets.com, +1-555-0199
+  Primary product category: Electronics
+  Please register this supplier and validate the information.
+system_prompt: |
+  You are a procurement assistant. When the user provides supplier details,
+  register the supplier using the register_supplier tool with all provided
+  fields, then validate the data using validate_supplier_data.
+tools_required:
+  - register_supplier
+  - validate_supplier_data
+expected_outcome: |
+  A supplier record is created for "Global Widgets Inc." with all required
+  fields populated, and the data passes validation.
+success_criteria:
+  - "contains: register_supplier"
+  - "contains: validate_supplier_data"
+  - "contains: Global Widgets Inc."
+  - "contains: 12-3456789"
+max_turns: 20
+tags: []
+budget_usd_estimate: 0.05

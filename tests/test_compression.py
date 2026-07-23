@@ -419,3 +419,142 @@ class TestCompressionTimeout:
 
         assert isinstance(_COMPRESSION_TOTAL_TIMEOUT_SECS, int)
         assert _COMPRESSION_TOTAL_TIMEOUT_SECS > 0
+
+
+# ---------------------------------------------------------------------------
+# Regression: internal LLM.invoke timeout (Issue #1151)
+# ---------------------------------------------------------------------------
+
+
+class TestCompressionInternalTimeout:
+    """BUG #1151 — compress_tool_message and _compress_ai_one must time out
+    internally so hung LLM calls do not exhaust the shared compression pool.
+    """
+
+    def test_compress_tool_message_timeout_returns_truncation_fallback(self) -> None:
+        """compress_tool_message falls back to truncation when LLM.invoke hangs."""
+        import time
+        from unittest.mock import patch
+
+        from src.orchestration.compression import compress_tool_message
+
+        mock_llm = MagicMock()
+
+        def _slow_invoke(prompt: str) -> MagicMock:
+            time.sleep(2)
+            return MagicMock(content="compressed")
+
+        mock_llm.invoke.side_effect = _slow_invoke
+
+        content = "A" * 5000
+        with patch("src.orchestration.compression._COMPRESS_INVOKE_TIMEOUT_SECONDS", 0.1):
+            result = compress_tool_message(content, "read_file", mock_llm)
+
+        # Must be truncated fallback, not the LLM response
+        assert "compressed" not in result
+        assert len(result) < len(content)
+
+    def test_compress_tool_message_sequential_timeouts_pool_not_exhausted(self) -> None:
+        """After 5 sequential timeouts, a 6th call with a fast LLM still succeeds."""
+        import time
+        from unittest.mock import patch
+
+        from src.orchestration.compression import compress_tool_message
+
+        slow_llm = MagicMock()
+
+        def _slow_invoke(prompt: str) -> MagicMock:
+            time.sleep(2)
+            return MagicMock(content="compressed")
+
+        slow_llm.invoke.side_effect = _slow_invoke
+
+        fast_llm = MagicMock()
+        fast_llm.invoke.return_value = MagicMock(content="fast compressed result")
+
+        content = "B" * 5000
+        with patch("src.orchestration.compression._COMPRESS_INVOKE_TIMEOUT_SECONDS", 0.1):
+            # 5 sequential timeouts — each returns fallback without hanging
+            for _ in range(5):
+                result = compress_tool_message(content, "read_file", slow_llm)
+                assert "compressed" not in result
+
+            # 6th call with a fast LLM must succeed (pool not exhausted)
+            result = compress_tool_message(content, "read_file", fast_llm)
+
+        assert result == "fast compressed result"
+
+    def test_ai_message_compression_timeout_preserves_original(self) -> None:
+        """Hung LLM in AIMessage compression preserves original; no crash."""
+        import time
+        from unittest.mock import patch
+
+        from src.orchestration.compression import apply_message_compression
+
+        large_ai_content = "A" * 10_000
+        old_ais = [AIMessage(content=large_ai_content) for _ in range(5)]
+        msgs = old_ais + [AIMessage(content="done")]
+
+        llm = MagicMock()
+
+        def _slow_invoke(prompt_msgs: list) -> MagicMock:
+            time.sleep(2)
+            return MagicMock(content="ai summary")
+
+        llm.invoke.side_effect = _slow_invoke
+
+        with patch("src.orchestration.compression._COMPRESS_INVOKE_TIMEOUT_SECONDS", 0.1):
+            result = apply_message_compression(
+                msgs,
+                call_count=10,
+                compression_cache={},
+                llm=llm,
+                max_context_tokens=_TRIGGER_CONTEXT,
+                min_age_cycles=1,
+                min_chars=100,
+                ai_min_chars=500,
+            )
+
+        # All AIMessages must retain original content (timeouts → no summary)
+        for msg in result:
+            if isinstance(msg, AIMessage):
+                assert not str(msg.content).startswith("[Summary:")
+                assert msg.content in (large_ai_content, "done")
+
+    def test_compress_tool_message_hung_thread_returns_within_guard_timeout(self) -> None:
+        """A truly hung LLM thread must not block the caller on __exit__.
+
+        Regression for Ami Wong review finding: ``with ThreadPoolExecutor``
+        calls ``shutdown(wait=True)`` in ``__exit__``, which blocks on the
+        hung thread.  Using manual ``finally: pool.shutdown(wait=False)``
+        must return within a few seconds even when the mock blocks forever.
+        """
+        import threading
+        import time
+        from unittest.mock import patch
+
+        from src.orchestration.compression import compress_tool_message
+
+        mock_llm = MagicMock()
+        stop_event = threading.Event()
+
+        def _never_return(prompt: str) -> MagicMock:
+            stop_event.wait(timeout=60)
+            return MagicMock(content="compressed")
+
+        mock_llm.invoke.side_effect = _never_return
+
+        content = "A" * 5000
+        start = time.monotonic()
+        with patch("src.orchestration.compression._COMPRESS_INVOKE_TIMEOUT_SECONDS", 0.1):
+            result = compress_tool_message(content, "read_file", mock_llm)
+        elapsed = time.monotonic() - start
+
+        stop_event.set()
+
+        # Must return quickly — the internal timeout is 0.1s and shutdown is
+        # non-blocking, so anything > 5s means __exit__ is still joining.
+        assert elapsed < 5, f"Function blocked for {elapsed:.1f}s — likely __exit__ hang"
+        # Must be truncated fallback, not the LLM response
+        assert "compressed" not in result
+        assert len(result) < len(content)

@@ -16,6 +16,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import PlainTextResponse
 
 from src.api.auth import TokenData, get_current_user
+from src.api.org_context import OrgContext, get_org_context
 from src.api.schemas.common import APIResponse
 from src.api.schemas.task import TaskCreateRequest, TaskOut
 
@@ -36,7 +37,22 @@ def _task_to_out(task: object) -> TaskOut:
         result=str(getattr(task, "result", "")),
         error=str(getattr(task, "error", "")),
         log_path=str(getattr(task, "log_path", "")),
+        user_id=str(getattr(task, "user_id", "")),
+        org_id=getattr(task, "org_id", None),
     )
+
+
+def _assert_task_ownership(record: object, current_user: TokenData) -> None:
+    """Raise 403 FORBIDDEN if the task does not belong to the current user."""
+    task_user_id = getattr(record, "user_id", "")
+    if task_user_id and task_user_id != current_user.user_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": "TASK_ACCESS_DENIED",
+                "message": "You do not have permission to access this task.",
+            },
+        )
 
 
 def _get_queue():
@@ -78,6 +94,7 @@ def _get_queue():
 async def create_task(
     body: TaskCreateRequest,
     current_user: TokenData = Depends(get_current_user),
+    ctx: OrgContext = Depends(get_org_context),
 ) -> APIResponse[TaskOut]:
     """Submit a task to the background queue.
 
@@ -85,7 +102,9 @@ async def create_task(
     Error codes: UNAUTHORIZED, TOKEN_EXPIRED, TASK_QUEUE_UNAVAILABLE.
     """
     queue = _get_queue()
-    task_id = queue.submit(body.agent_name, body.prompt)
+    task_id = queue.submit(
+        body.agent_name, body.prompt, user_id=current_user.user_id, org_id=ctx.org_id
+    )
     record = queue.get(task_id)
     if record is None:
         raise HTTPException(
@@ -134,7 +153,7 @@ async def list_tasks(
                     "message": f"Unknown status {task_status!r}. Valid values: {[s.value for s in TaskStatus]}",
                 },
             ) from exc
-    tasks = queue.list(status=status_filter, limit=limit)
+    tasks = queue.list(status=status_filter, limit=limit, user_id=current_user.user_id)
     return APIResponse(data=[_task_to_out(t) for t in tasks])
 
 
@@ -166,6 +185,7 @@ async def get_task(
             status_code=status.HTTP_404_NOT_FOUND,
             detail={"code": "TASK_NOT_FOUND", "message": "No task with that ID exists."},
         )
+    _assert_task_ownership(record, current_user)
     return APIResponse(data=_task_to_out(record))
 
 
@@ -199,6 +219,7 @@ async def cancel_task(
             status_code=status.HTTP_404_NOT_FOUND,
             detail={"code": "TASK_NOT_FOUND", "message": "No task with that ID exists."},
         )
+    _assert_task_ownership(record, current_user)
     cancelled = queue.cancel(task_id)
     if not cancelled:
         raise HTTPException(
@@ -241,6 +262,7 @@ async def get_task_log(
             status_code=status.HTTP_404_NOT_FOUND,
             detail={"code": "TASK_NOT_FOUND", "message": "No task with that ID exists."},
         )
+    _assert_task_ownership(record, current_user)
     log_path = pathlib.Path(record.log_path).resolve()
     try:
         queue._log_dir.resolve()

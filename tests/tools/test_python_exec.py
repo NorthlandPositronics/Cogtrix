@@ -17,6 +17,7 @@ from src.tools.python_exec import (
     execute_python,
     get_context,
     get_history,
+    reset_default_session,
     set_session,
 )
 
@@ -27,6 +28,7 @@ class TestSessionIsolation:
     def setup_method(self) -> None:
         """Clear all session state before each test."""
         _session_states.clear()
+        reset_default_session()
 
     def test_variable_overwrite_does_not_cross_sessions(self) -> None:
         """Overwriting a variable in one session must not affect another."""
@@ -50,14 +52,14 @@ class TestSessionIsolation:
         assert len(hist_b) == 2
 
     def test_default_session_does_not_use_global(self) -> None:
-        """When session_id is omitted, _get_session_state falls back to 'default', not global."""
+        """When session_id is omitted, _get_session_state uses an auto-generated UUID, not global."""
         set_session("some_other_session")
 
         state = _get_session_state()
         assert "some_other_session" not in _session_states or state is not _session_states.get(
             "some_other_session"
         )
-        assert _session_states.get("default") is state
+        assert _session_states.get("default") is not state
 
     def test_clear_context_only_affects_target_session(self) -> None:
         """clear_context for one session_id must leave other sessions intact."""
@@ -93,15 +95,17 @@ class TestGetSessionStateDefault:
 
     def setup_method(self) -> None:
         _session_states.clear()
+        reset_default_session()
 
-    def test_none_maps_to_default_key(self) -> None:
+    def test_none_maps_to_auto_generated_key(self) -> None:
         state = _get_session_state(None)
-        assert "default" in _session_states
-        assert _session_states["default"] is state
+        assert "default" not in _session_states
+        assert state in _session_states.values()
 
-    def test_explicit_default_string_maps_to_default_key(self) -> None:
+    def test_explicit_default_string_maps_to_auto_generated_key(self) -> None:
         state = _get_session_state("default")
-        assert _session_states["default"] is state
+        assert "default" not in _session_states
+        assert state in _session_states.values()
 
     def test_named_session_creates_distinct_state(self) -> None:
         default_state = _get_session_state(None)
@@ -112,8 +116,8 @@ class TestGetSessionStateDefault:
         """Changing _current_session via set_session must not redirect _get_session_state(None)."""
         set_session("injected")
         state = _get_session_state(None)
-        assert "default" in _session_states
-        assert _session_states["default"] is state
+        assert "default" not in _session_states
+        assert state in _session_states.values()
 
 
 class TestPythonExecInputSchema:
@@ -214,7 +218,7 @@ class TestSandboxEscapeViaRuntimeAttr:
         assert "blocked in sandbox" in result.get("error", "")
 
     def test_join_constructed_globals_blocked(self):
-        code = "attr = '__' + 'gl' + 'obals__'\n" "def f(): pass\n" "x = getattr(f, attr)\n"
+        code = "attr = '__' + 'gl' + 'obals__'\ndef f(): pass\nx = getattr(f, attr)\n"
         result = _execute_code_internal(code, {})
         assert not result["success"]
         assert "blocked in sandbox" in result.get("error", "")
@@ -224,7 +228,7 @@ class TestSandboxEscapeViaRuntimeAttr:
         assert not is_safe
 
     def test_setattr_escape_blocked(self):
-        code = "attr = '__' + 'class' + '__'\n" "setattr([], attr, int)\n"
+        code = "attr = '__' + 'class' + '__'\nsetattr([], attr, int)\n"
         result = _execute_code_internal(code, {})
         assert not result["success"]
         assert "blocked in sandbox" in result.get("error", "")
@@ -252,6 +256,23 @@ class TestLegitimateGetattr:
         code = "import math\nsetattr(math, 'custom_val', 42)\nresult = math.custom_val\n"
         result = _execute_code_internal(code, {})
         assert result["success"]
+
+
+class TestLoopLimiterRejectsOnFailure:
+    """BUG-1240: AST transformation failure must reject code, not execute without limits."""
+
+    def test_add_loop_limits_failure_rejects_code(self, monkeypatch):
+        """If _add_loop_limits raises, the code must be rejected."""
+
+        def _boom(_code):
+            raise RuntimeError("AST explosion")
+
+        monkeypatch.setattr("src.tools.python_exec._add_loop_limits", _boom)
+
+        result = _execute_code_internal("x = 1 + 1", {})
+
+        assert result["success"] is False
+        assert "could not be safely bounded" in result["error"]
 
 
 class TestCodeSafetyChecks:
@@ -342,6 +363,7 @@ class TestSessionLruEviction:
 
     def setup_method(self) -> None:
         _session_states.clear()
+        reset_default_session()
 
     def test_eviction_occurs_when_exceeding_max_sessions(self, monkeypatch) -> None:
         import src.tools.python_exec as mod
@@ -380,3 +402,75 @@ class TestSessionLruEviction:
 
     def test_max_sessions_constant_exists(self) -> None:
         assert _MAX_SESSIONS == 1000
+
+
+class TestDefaultSessionContextIsolation:
+    """BUG-1073: Default session must be isolated across concurrent contexts."""
+
+    def setup_method(self) -> None:
+        _session_states.clear()
+        reset_default_session()
+
+    def test_same_thread_reuses_auto_session(self) -> None:
+        """Single-threaded callers get persistence via the cached auto session."""
+        state_a = _get_session_state(None)
+        state_b = _get_session_state("default")
+        state_c = _get_session_state(None)
+        assert state_a is state_b is state_c
+
+    def test_different_threads_get_distinct_auto_sessions(self) -> None:
+        """Concurrent threads must not share the auto-generated default session."""
+        import concurrent.futures
+
+        def _get_sid() -> str:
+            reset_default_session()
+            state = _get_session_state(None)
+            # Return the key that maps to this state
+            for k, v in _session_states.items():
+                if v is state:
+                    return k
+            raise RuntimeError("state not found")
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            future_a = pool.submit(_get_sid)
+            future_b = pool.submit(_get_sid)
+            sid_a = future_a.result()
+            sid_b = future_b.result()
+
+        assert sid_a != sid_b
+
+    def test_explicit_named_session_not_affected_by_auto_sessions(self) -> None:
+        """Named sessions remain independent of auto-generated default sessions."""
+        auto_state = _get_session_state(None)
+        named_state = _get_session_state("named_session")
+        assert auto_state is not named_state
+
+    def test_cross_session_data_leakage_blocked(self) -> None:
+        """Variables set in one thread's default session must not leak to another."""
+        import concurrent.futures
+
+        def _thread_a() -> str:
+            reset_default_session()
+            return execute_python("leak_test_var = 42")
+
+        def _thread_b() -> str:
+            reset_default_session()
+            return execute_python("result = leak_test_var * 2")
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            future_a = pool.submit(_thread_a)
+            future_b = pool.submit(_thread_b)
+            result_a = future_a.result(timeout=5)
+            result_b = future_b.result(timeout=5)
+
+        # thread_a should succeed
+        assert "Error" not in result_a
+        # thread_b should fail with NameError because leak_test_var is isolated
+        assert "Name Error" in result_b
+
+    def test_reset_default_session_creates_fresh_uuid(self) -> None:
+        """After reset_default_session(), the next lookup must use a new UUID."""
+        state_first = _get_session_state(None)
+        reset_default_session()
+        state_second = _get_session_state(None)
+        assert state_first is not state_second

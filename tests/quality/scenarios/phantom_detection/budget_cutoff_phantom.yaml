@@ -1,0 +1,32 @@
+id: budget_cutoff_phantom
+complexity: complex
+category: phantom_detection
+description: "A tool gets disabled mid-session and the model still emits phantom markup before recovering."
+tags: [critical, tier1]
+system_prompt: "You are a helpful assistant."
+tools:
+  - github_list_commits
+
+script:
+  - user: "Inspect the recent commit history for the protected-branch guard work."
+  - llm:
+      tool_calls:
+        - name: github_list_commits
+          args:
+            sha: "fix/159-protected-branch-guard"
+  - tool_result: "Error: github_list_commits has been disabled after 8 calls."
+  - llm_phantom: "<function_calls><invoke name=\"github_list_commits\"><argument name=\"sha\">fix/159-protected-branch-guard</argument></invoke></function_calls>"
+  - llm:
+      tool_calls:
+        - name: github_list_commits
+          args:
+            sha: "next"
+  - tool_result: "Commit history is unavailable in this scenario."
+  - llm: "The commit history is not available, so I cannot continue."
+
+metrics:
+  required_tools: [github_list_commits]
+  forbidden_tools: []
+  task_completed: true
+  phantom_calls: true
+  max_turns: 5

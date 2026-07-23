@@ -64,7 +64,7 @@ Cogtrix is a modular LangChain-based AI agent built with a layered architecture:
 ┌───────────────┴───────────────┐ ┌───────────────┴───────────────┐
 │        Memory System          │ │        Tool Modules           │
 │       (src/memory/)           │ │       (src/tools/)            │
-│  • Mode managers              │ │  • 79 built-in tools          │
+│  • Mode managers              │ │  • 74 built-in tools          │
 │  • Context preparation        │ │  • Auto-discovery             │
 │  • JSON persistence           │ │  • Pydantic schemas           │
 └───────────────────────────────┘ └───────────────────────────────┘
@@ -132,44 +132,70 @@ src/
 │   ├── pagination.py      # encode_cursor/decode_cursor/paginate_list, compound keyset cursors
 │   ├── validation.py      # Request validation helpers
 │   ├── assistant_lifecycle.py  # Assistant start/stop for API mode
+│   ├── stripe_client.py   # Lazy Stripe SDK wrapper: api_key init, client factory
 │   ├── __main__.py        # uvicorn entry point
 │   ├── db/
 │   │   ├── engine.py      # Async SQLAlchemy engine (aiosqlite/asyncpg), get_db() dependency
-│   │   ├── models.py      # ORM models: User, ApiSessionRecord, Message, RefreshToken, ApiKey
+│   │   ├── models.py      # ORM models: User, Organization, Team, Workspace, WorkspaceMembership,
+│   │   │                  #   ApiSessionRecord, Message, RefreshToken, ApiKey, Plan, UsageRecord
 │   │   └── repositories/
-│   │       ├── users.py      # UserRepository (atomic first-user admin election)
-│   │       ├── sessions.py   # SessionRepository
-│   │       ├── messages.py   # MessageRepository
-│   │       ├── tokens.py     # RefreshTokenRepository
-│   │       └── api_keys.py   # ApiKeyRepository
+│   │       ├── users.py         # UserRepository (atomic first-user admin election)
+│   │       ├── sessions.py      # SessionRepository
+│   │       ├── messages.py      # MessageRepository
+│   │       ├── tokens.py        # RefreshTokenRepository
+│   │       ├── api_keys.py      # ApiKeyRepository
+│   │       ├── organization.py  # OrganizationRepository (multi-tenancy)
+│   │       ├── teams.py         # TeamRepository, TeamMembershipRepository
+│   │       ├── workspaces.py    # WorkspaceRepository
+│   │       ├── plans.py         # PlanRepository
+│   │       └── usage.py         # UsageRepository (metering)
 │   ├── routes/
-│   │   ├── auth.py        # Registration, login, refresh, logout, profile, API key CRUD (8 endpoints)
-│   │   ├── sessions.py    # Session lifecycle: create, list, get, update, delete (5 endpoints)
-│   │   ├── messages.py    # Send message, list history, clear history; WebSocket stream (4 endpoints)
-│   │   ├── memory.py      # Get memory state, switch mode, clear memory (3 endpoints)
-│   │   ├── tools.py       # List tools, load, enable, disable (4 endpoints)
-│   │   ├── config.py      # Read/write config sections, provider management, model aliases (12 endpoints)
-│   │   ├── assistant.py   # Start/stop assistant, channel management, phonebook, outbound, campaigns (24 endpoints)
-│   │   ├── workflows.py   # Workflow CRUD, per-workflow docs, chat bindings (11 endpoints)
-│   │   ├── users.py       # User management: list, create, update role, delete (5 admin endpoints)
-│   │   ├── rag.py         # Upload documents, list, delete, query knowledge base (5 endpoints)
-│   │   ├── mcp.py         # List servers, connect, disconnect, restart, list tools (5 endpoints)
-│   │   ├── system.py      # Server info, shutdown; live log WebSocket (2 REST + 1 WS endpoint)
-│   │   └── health.py      # Liveness (/health) and readiness (/health/ready) probes (2 endpoints)
+│   │   ├── auth.py           # Registration, login, refresh, logout, profile, API key CRUD (8 endpoints)
+│   │   ├── sessions.py       # Session lifecycle: create, list, get, update, delete (5 endpoints)
+│   │   ├── messages.py       # Send message, list history, clear history; WebSocket stream (4 endpoints)
+│   │   ├── memory.py         # Get memory state, switch mode, clear memory (3 endpoints)
+│   │   ├── tools.py          # List tools, load, enable, disable (4 endpoints)
+│   │   ├── config.py         # Read/write config sections, provider management, model aliases (12 endpoints)
+│   │   ├── assistant.py      # Start/stop assistant, channel management, phonebook, outbound, campaigns (24 endpoints)
+│   │   ├── workflows.py      # Workflow CRUD, per-workflow docs, chat bindings (11 endpoints)
+│   │   ├── users.py          # User management: list, create, update role, delete (5 admin endpoints)
+│   │   ├── admin.py          # Organization list, global stats (2 admin endpoints)
+│   │   ├── rag.py            # Upload documents, list, delete, query knowledge base (5 endpoints)
+│   │   ├── mcp.py            # List servers, connect, disconnect, restart, list tools (5 endpoints)
+│   │   ├── system.py         # Server info, shutdown; live log WebSocket (2 REST + 1 WS endpoint)
+│   │   ├── health.py         # Liveness (/health) and readiness (/health/ready) probes (2 endpoints)
+│   │   ├── metrics.py        # Prometheus metrics export (1 endpoint)
+│   │   ├── plans.py          # Plan CRUD, assign to org (8 endpoints)
+│   │   ├── usage.py          # Usage summary, per-event records, manual record (3 endpoints)
+│   │   ├── enforcement.py    # Plan limit snapshot and headroom (1 endpoint)
+│   │   ├── teams.py          # Team management, membership (8 endpoints)
+│   │   ├── workspaces.py     # Workspace CRUD, membership, scoped config (10 endpoints)
+│   │   ├── cross_workspace.py # Cross-workspace message bus (5 endpoints)
+│   │   ├── saml.py           # SAML 2.0 SSO: metadata, login, ACS, SLO (4 endpoints)
+│   │   ├── scim.py           # SCIM 2.0 user provisioning — RFC 7643/7644 (7 endpoints)
+│   │   ├── ldap.py           # LDAP/AD sync: config, trigger, status (3 endpoints)
+│   │   ├── jit.py            # Just-in-time provisioning config and policies (3 endpoints)
+│   │   ├── billing.py        # Stripe billing: Checkout, Customer Portal, subscription, webhook (4 endpoints)
+│   │   ├── agents.py         # Named agent configuration: list, get (2 endpoints)
+│   │   └── tasks.py          # Background task queue: submit, list, get, cancel, log (5 endpoints)
 │   ├── schemas/
-│   │   ├── auth.py        # Auth request/response models
-│   │   ├── session.py     # Session models
-│   │   ├── message.py     # Message models
-│   │   ├── memory.py      # Memory models
-│   │   ├── tool.py        # Tool models
-│   │   ├── config.py      # Config models
-│   │   ├── assistant.py   # Assistant models
-│   │   ├── rag.py         # RAG models
-│   │   ├── mcp.py         # MCP models
-│   │   ├── system.py      # System models
-│   │   ├── user.py        # User management models
-│   │   ├── workflow.py    # Workflow models
-│   │   └── common.py      # APIResponse[T] envelope, CursorPage[T], APIError
+│   │   ├── auth.py           # Auth request/response models
+│   │   ├── session.py        # Session models
+│   │   ├── message.py        # Message models
+│   │   ├── memory.py         # Memory models
+│   │   ├── tool.py           # Tool models
+│   │   ├── config.py         # Config models
+│   │   ├── assistant.py      # Assistant models
+│   │   ├── rag.py            # RAG models
+│   │   ├── mcp.py            # MCP models
+│   │   ├── system.py         # System models
+│   │   ├── user.py           # User management models
+│   │   ├── workflow.py       # Workflow models
+│   │   ├── organization.py   # Organization, multi-tenancy models
+│   │   ├── plans.py          # Plan, PlanLimits models
+│   │   ├── teams.py          # Team, TeamMembership models
+│   │   ├── workspaces.py     # Workspace, WorkspaceMembership models
+│   │   └── common.py         # APIResponse[T] envelope, CursorPage[T], APIError
 │   └── tasks/
 │       └── rag.py         # Background task helper for async document ingestion
 ├── cli/
@@ -178,17 +204,22 @@ src/
 │   ├── input.py           # read_multiline(), run_inline_shell(), readline history
 │   └── escape_monitor.py  # EscapeMonitor: daemon thread translating Escape to SIGINT
 ├── ui/
-│   └── spinner.py         # ActivityIndicator animated terminal spinner
+│   ├── spinner.py         # ActivityIndicator animated terminal spinner
+│   └── input_session.py   # PromptSession wrapper with CPR disabled (prevents PTY tight-loop)
 ├── prompt/
 │   └── optimizer.py       # optimize_prompt(): one-shot LLM prompt rewriter
 ├── memory/
 │   ├── base.py            # Abstract base classes
 │   ├── factory.py         # Memory mode factory
+│   ├── mode_selector.py   # Heuristic memory mode classifier (conversation / code / reasoning)
 │   ├── manager.py         # BaseMemoryManager + hybrid memory logic + _sanitize_session_id()
 │   ├── context.py         # MemoryContext data structure
 │   ├── json_store.py      # JSON file persistence
 │   ├── summarizer.py      # LLM-based incremental summarization
+│   ├── distillation.py    # Extract durable facts from rolling memory summary
+│   ├── facts.py           # Persistent distilled facts for long-lived sessions
 │   ├── recall.py          # Per-session FAISS vector store for semantic recall
+│   ├── tier_cache.py      # Tiered Context Cache (TCC) data structures and assembly
 │   └── modes/
 │       ├── conversation.py  # General chat mode
 │       ├── code.py          # Code development mode
@@ -246,6 +277,7 @@ src/
 │   ├── semantic_tool_index.py # Semantic tool description index
 │   ├── serpapi_search.py  # SerpAPI (Google/Bing structured)
 │   ├── shell.py           # Shell commands
+│   ├── slack_tools.py     # Slack messaging (1 tool: cogtrix_slack_post_message)
 │   ├── tavily_search.py   # Tavily AI search (2 tools)
 │   ├── text_tools.py      # Text processing
 │   ├── weather.py         # Weather information
@@ -285,6 +317,7 @@ class ModelConfig:
     context_window: Optional[int]
     temperature: Optional[float]
     max_tokens: Optional[int]
+    timeout: int               # per-request LLM timeout in seconds (default 180)
 
 @dataclass
 class Config:
@@ -312,7 +345,11 @@ class Config:
 | `Config.resolve_llm_config_for(alias)` | Same but for a named alias or `provider/model` shorthand |
 | `Config.resolve_embedding_config()` | Resolve `rag.model` via the `models` registry to `(provider_type, model, base_url, api_key)` |
 
-`ProviderConfig` validates `type` at construction time via `__post_init__` — unrecognized types raise `ConfigError`. `ModelConfig` validates inference parameters: `temperature` must be in `[0.0, 2.0]`, `context_window` must be `>= 256`, `max_tokens` must be `>= 1` — all violations raise `ConfigError`. The `context_window` field is forwarded to Ollama as `num_ctx` by the provider registry; it is silently dropped for OpenAI, Anthropic, and Google.
+`ProviderConfig` validates `type` at construction time via `__post_init__` — unrecognized types
+raise `ConfigError`. `ModelConfig` validates inference parameters: `temperature` must be in `[0.0,
+2.0]`, `context_window` must be `>= 256`, `max_tokens` must be `>= 1` — all violations raise
+`ConfigError`. The `context_window` field is forwarded to Ollama as `num_ctx` by the provider
+registry; it is silently dropped for OpenAI, Anthropic, and Google.
 
 ### 2. CLI Interface (`cogtrix.py` + `src/cli/`)
 
@@ -333,7 +370,11 @@ The entry point handles both interactive and non-interactive modes. CLI utility 
 | `EscapeMonitor` | `src/cli/escape_monitor.py` | Daemon thread: Escape key → SIGINT |
 | `ActivityIndicator` | `src/ui/spinner.py` | Animated terminal spinner |
 
-`EscapeMonitor` runs as a background daemon thread. On Unix terminals with a real tty, it enters cbreak mode during LLM inference, detects standalone Escape bytes (as opposed to escape sequences such as arrow keys), restores the terminal, and sends SIGINT to the main process. The existing `KeyboardInterrupt` handler in `cogtrix.py` catches this signal. It is a no-op on non-tty stdin, Windows, or assistant mode.
+`EscapeMonitor` runs as a background daemon thread. On Unix terminals with a real tty, it enters
+cbreak mode during LLM inference, detects standalone Escape bytes (as opposed to escape sequences
+such as arrow keys), restores the terminal, and sends SIGINT to the main process. The existing
+`KeyboardInterrupt` handler in `cogtrix.py` catches this signal. It is a no-op on non-tty stdin,
+Windows, or assistant mode.
 
 **Slash Command Dispatch:**
 
@@ -454,7 +495,12 @@ Individual kwargs are preserved in `run_agent()` for backward compatibility; whe
 | `classify_task_ownership(prompt, ...)` | 3-layer pipeline defined in `intent.py`; called by `run_agent()` to determine execution ownership |
 | `_build_ownership_constraint(mode)` | Generates system-prompt constraint text for INFORM/ADVISE/AMBIGUOUS modes; called inside `run_agent()` to inject the constraint before the graph starts |
 
-Before `run_agent()` starts the LangGraph graph, it calls `classify_task_ownership()` to determine whether the prompt is an execution request (EXECUTE), an information request (INFORM/ADVISE), or ambiguous. For INFORM and ADVISE modes, `_build_ownership_constraint()` generates a system-prompt constraint that instructs the agent not to execute operations — only explain. For AMBIGUOUS mode with `ambiguous_action="ask"`, the agent is constrained to ask one focused clarifying question before proceeding.
+Before `run_agent()` starts the LangGraph graph, it calls `classify_task_ownership()` to determine
+whether the prompt is an execution request (EXECUTE), an information request (INFORM/ADVISE), or
+ambiguous. For INFORM and ADVISE modes, `_build_ownership_constraint()` generates a system-prompt
+constraint that instructs the agent not to execute operations — only explain. For AMBIGUOUS mode
+with `ambiguous_action="ask"`, the agent is constrained to ask one focused clarifying question
+before proceeding.
 
 `ToolCallLogger` uses `call_id` (LangChain's unique per-call ID) as the timing key so concurrent calls to the same tool each get accurate duration measurements. Stale entries are evicted after 10 minutes to prevent memory leaks.
 
@@ -494,8 +540,19 @@ Agent Response
 **Node responsibilities:**
 
 - `call_model` — binds active tools to the LLM via `bind_tools()`, prepends the system message, optionally runs context compression, and invokes the model. Uses `_bound_cache` (an `OrderedDict` with LRU eviction at capacity 8) keyed by a tuple of active tool names. The cache is only rebuilt when the active tool set changes, avoiding redundant `bind_tools()` calls on every LLM invocation.
-- `process_tools` — iterates the last AIMessage's `tool_calls`, executes known tools, and handles unknown tool names via `_resolve_tool_name()`. When the agent calls a tool not yet in the active set, `process_tools` auto-loads it from the on-demand pool (up to `_MAX_TOOL_EXPANSIONS = 3` auto-expansions per graph run). The `on_tool_expansion` callback decouples spinner updates from the orchestration layer — `graph.py` has no UI imports. `request_tools` calls are processed via `_detect_tool_request()` which scans only the current iteration's messages, not the full history. Mid-turn guidance messages injected by this node are sent as `HumanMessage` (not `SystemMessage`) to remain compatible with providers that reject `SystemMessage` outside position 0.
-- `handle_phantom` — injects a correction hint when the model returns an empty AIMessage with `finish_reason=tool_calls` (a malformed-JSON failure mode seen in vLLM and some inference servers). The correction hint is sent as a `HumanMessage`, not a `SystemMessage`, so it is accepted by providers that reject `SystemMessage` outside position 0 (Qwen3, strict vLLM deployments). Retries up to `_MAX_PHANTOM_RETRIES = 3` times before injecting a fallback response.
+- `process_tools` — iterates the last AIMessage's `tool_calls`, executes known tools, and handles
+unknown tool names via `_resolve_tool_name()`. When the agent calls a tool not yet in the active
+set, `process_tools` auto-loads it from the on-demand pool (up to `_MAX_TOOL_EXPANSIONS = 3`
+auto-expansions per graph run). The `on_tool_expansion` callback decouples spinner updates from the
+orchestration layer — `graph.py` has no UI imports. `request_tools` calls are processed via
+`_detect_tool_request()` which scans only the current iteration's messages, not the full history.
+Mid-turn guidance messages injected by this node are sent as `HumanMessage` (not `SystemMessage`) to
+remain compatible with providers that reject `SystemMessage` outside position 0.
+- `handle_phantom` — injects a correction hint when the model returns an empty AIMessage with
+`finish_reason=tool_calls` (a malformed-JSON failure mode seen in vLLM and some inference servers).
+The correction hint is sent as a `HumanMessage`, not a `SystemMessage`, so it is accepted by
+providers that reject `SystemMessage` outside position 0 (Qwen3, strict vLLM deployments). Retries
+up to `_MAX_PHANTOM_RETRIES = 3` times before injecting a fallback response.
 
 **Key exports from `graph.py`:**
 
@@ -565,7 +622,12 @@ Summarizes old, large `ToolMessage` objects before each LLM call to reduce token
 | `compress_tool_message(content, tool_name, llm)` | One-shot LLM summarization; falls back to `truncate_tool_output()` |
 | `truncate_tool_output(text, max_chars)` | Middle-truncation with informative ellipsis |
 
-Compression is skipped entirely for providers with fewer than 16,384 context tokens (where simple truncation is cheaper). Eligible messages are compressed in parallel using `concurrent.futures.ThreadPoolExecutor` (up to 4 workers) rather than sequentially, so large batches of stale tool outputs are summarized in a single wall-clock pass. Once compressed, results are cached by `tool_call_id` and reused. The compression pass operates on a copy of the message list — graph state is never mutated.
+Compression is skipped entirely for providers with fewer than 16,384 context tokens (where simple
+truncation is cheaper). Eligible messages are compressed in parallel using
+`concurrent.futures.ThreadPoolExecutor` (up to 4 workers) rather than sequentially, so large batches
+of stale tool outputs are summarized in a single wall-clock pass. Once compressed, results are
+cached by `tool_call_id` and reused. The compression pass operates on a copy of the message list —
+graph state is never mutated.
 
 #### 3g. Session State (`src/orchestration/session_state.py`)
 
@@ -870,7 +932,13 @@ class BaseMemoryManager(ABC):
     def _build_hybrid_prefix(self, user_input: str) -> str | None
 ```
 
-**Hybrid Memory:** All modes inherit a hybrid memory layer from `BaseMemoryManager`. When an LLM is injected via `set_llm()`, messages that fall outside the sliding window are incrementally summarized every 6 messages. Summarization and embedding both run on a background daemon thread named `memory-slow-path` — they never block the user response. `save()` checks whether the background thread is alive rather than blocking on `join()`. When an embedding function is injected via `set_embeddings()`, evicted messages are also embedded into a per-session FAISS index for semantic recall. Both are injected into the context prefix by `_build_hybrid_prefix()`.
+**Hybrid Memory:** All modes inherit a hybrid memory layer from `BaseMemoryManager`. When an LLM is
+injected via `set_llm()`, messages that fall outside the sliding window are incrementally summarized
+every 6 messages. Summarization and embedding both run on a background daemon thread named
+`memory-slow-path` — they never block the user response. `save()` checks whether the background
+thread is alive rather than blocking on `join()`. When an embedding function is injected via
+`set_embeddings()`, evicted messages are also embedded into a per-session FAISS index for semantic
+recall. Both are injected into the context prefix by `_build_hybrid_prefix()`.
 
 **Meaningful-Content Gate:** Summarization will not fire on short or tool-heavy exchanges. It only runs when at least `_MIN_MEANINGFUL_MSGS_FOR_SUMMARY = 4` messages (2 full H+A pairs) and `_MIN_MEANINGFUL_CHARS_FOR_SUMMARY = 5000` characters of real conversational content exist outside the sliding window.
 
@@ -1154,13 +1222,35 @@ Idle 30+ minutes                → ApiSessionRegistry.evict_idle() saves + remo
 Process shutdown                → save_all() flushes all live sessions
 ```
 
-**Turn execution (`turn_runner.py`):** `run_message_turn()` runs `run_agent()` via `asyncio.to_thread` (never blocks the event loop). Three execution modes are supported: `normal` (standard agent run), `think` (deep reasoning via `_run_think_pipeline`), and `delegate` (parallel sub-agent delegation via `_run_delegate_pipeline`). Intermediate agent states (`analyzing`, `deep_thinking`, `researching`, `delegating`) are streamed to the WebSocket for frontend progress visibility. Both pipeline helpers check `session.cancel_event.is_set()` between phases; if cancellation arrives during post-processing, an `except asyncio.CancelledError` block resets `session.agent_state = "idle"` before re-raising so the session is never left in a stale intermediate state. The `done` sentinel message uses `asyncio.wait_for(put(), timeout=5.0)` and catches only `TimeoutError` — `asyncio.Queue.put()` never raises `QueueFull` (BUG-AUDIT-001). The `callbacks.py` `WebSocketCallbackHandler` measures tool duration with `time.monotonic()` (consistent with `ToolCallLogger` in `runner.py`; immune to NTP clock-adjustment drift). Prompt character computation in `on_llm_start` is gated behind `log.isEnabledFor(logging.DEBUG)` to avoid an O(n) string scan on every LLM call in production.
+**Turn execution (`turn_runner.py`):** `run_message_turn()` runs `run_agent()` via
+`asyncio.to_thread` (never blocks the event loop). Three execution modes are supported: `normal`
+(standard agent run), `think` (deep reasoning via `_run_think_pipeline`), and `delegate` (parallel
+sub-agent delegation via `_run_delegate_pipeline`). Intermediate agent states (`analyzing`,
+`deep_thinking`, `researching`, `delegating`) are streamed to the WebSocket for frontend progress
+visibility. Both pipeline helpers check `session.cancel_event.is_set()` between phases; if
+cancellation arrives during post-processing, an `except asyncio.CancelledError` block resets
+`session.agent_state = "idle"` before re-raising so the session is never left in a stale
+intermediate state. The `done` sentinel message uses `asyncio.wait_for(put(), timeout=5.0)` and
+catches only `TimeoutError` — `asyncio.Queue.put()` never raises `QueueFull` (BUG-AUDIT-001). The
+`callbacks.py` `WebSocketCallbackHandler` measures tool duration with `time.monotonic()` (consistent
+with `ToolCallLogger` in `runner.py`; immune to NTP clock-adjustment drift). Prompt character
+computation in `on_llm_start` is gated behind `log.isEnabledFor(logging.DEBUG)` to avoid an O(n)
+string scan on every LLM call in production.
 
-**WebSocket streaming (`ws.py`):** `ConnectionManager` maintains one WebSocket per session; a second connection gracefully displaces the first. Messages are typed via `ServerMessage` / `ClientMessage` Pydantic envelopes. A 30-second reconnect buffer with sequence-based replay handles brief disconnections. Server message types include `token`, `tool_start`, `tool_end`, `tool_confirm_request`, `agent_state`, `memory_update`, `error`, `done`, and `pong`.
+**WebSocket streaming (`ws.py`):** `ConnectionManager` maintains one WebSocket per session; a second
+connection gracefully displaces the first. Messages are typed via `ServerMessage` / `ClientMessage`
+Pydantic envelopes. A 30-second reconnect buffer with sequence-based replay handles brief
+disconnections. Server message types include `token`, `tool_start`, `tool_end`,
+`tool_confirm_request`, `agent_state`, `memory_update`, `error`, `done`, and `pong`.
 
 **Tool confirmation (`confirmation.py`):** `ApiConfirmationUI` implements the `ConfirmationUI` Protocol from `safety.py` over WebSocket, replacing the CLI Rich panel. `read_choice()` polls at 0.5 s intervals with a 5-minute timeout (defaults to deny). `_POLL_INTERVAL` and `_TIMEOUT_SECONDS` are module-level constants so they are assigned once at import time rather than on every poll iteration (BUG-AUDIT-002).
 
-**Database layer (`db/`):** Async SQLAlchemy with `aiosqlite` by default; switch to `asyncpg` via `COGTRIX_DB_URL`. ORM models: `User`, `ApiSessionRecord`, `Message`, `RefreshToken`, `ApiKey`. All access goes through repository classes in `db/repositories/`. Schema migrations use Alembic in production; `Base.metadata.create_all` is available for development.
+**Database layer (`db/`):** Async SQLAlchemy with `aiosqlite` by default; switch to `asyncpg` via
+`COGTRIX_DB_URL`. ORM models: `User`, `Organization`, `Team`, `Workspace`, `WorkspaceMembership`,
+`Plan`, `UsageRecord`, `ApiSessionRecord`, `Message`, `RefreshToken`, `ApiKey`. All access goes
+through repository classes in `db/repositories/`. Schema migrations use Alembic (`alembic upgrade
+head`); 11 migrations ship with the project (0001–0011) covering the full schema including the
+enterprise multi-tenancy layer and Stripe billing fields.
 
 **Key patterns:**
 
@@ -1178,7 +1268,12 @@ Process shutdown                → save_all() flushes all live sessions
 
 Shared helpers used by multiple packages across the codebase.
 
-**`atomic_write.py`** — `atomic_write_json(path)` is a context manager that yields a `(tmp_path, fd)` pair. On clean exit it renames the temporary file to the target path, making the write atomic from the OS perspective. On any `BaseException` the rename is skipped, leaving the target file intact. Used by `src/assistant/scheduler.py`, `src/assistant/knowledge.py`, `src/assistant/deferral.py`, `src/tools/file_ops.py`, and `src/memory/manager.py` to prevent corrupt JSON on process crash or signal.
+**`atomic_write.py`** — `atomic_write_json(path)` is a context manager that yields a `(tmp_path,
+fd)` pair. On clean exit it renames the temporary file to the target path, making the write atomic
+from the OS perspective. On any `BaseException` the rename is skipped, leaving the target file
+intact. Used by `src/assistant/scheduler.py`, `src/assistant/knowledge.py`,
+`src/assistant/deferral.py`, `src/tools/file_ops.py`, and `src/memory/manager.py` to prevent corrupt
+JSON on process crash or signal.
 
 ---
 
@@ -1460,7 +1555,11 @@ All `configure_*` functions in `src/tools/configure.py` use atomic reference swa
 
 ### Assistant Mode Guardrails
 
-Assistant mode adds a dedicated security layer in `src/assistant/guardrails.py`. See [Section 12 — Security Guardrails](#security-guardrails-srcassistantguardrailspy) for the full description. The pipeline includes `EncodingDetectionGuard`, `ToolCallGuard`, and `ViolationTracker` (auto-blacklist) in addition to the original four components. Configuration is in the `services.assistant.guardrails` config block.
+Assistant mode adds a dedicated security layer in `src/assistant/guardrails.py`. See [Section 12 —
+Security Guardrails](#security-guardrails-srcassistantguardrailspy) for the full description. The
+pipeline includes `EncodingDetectionGuard`, `ToolCallGuard`, and `ViolationTracker` (auto-blacklist)
+in addition to the original four components. Configuration is in the `services.assistant.guardrails`
+config block.
 
 ### API Key Management
 

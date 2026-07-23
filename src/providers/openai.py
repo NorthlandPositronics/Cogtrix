@@ -2,9 +2,15 @@
 
 from __future__ import annotations
 
+import logging
+import os
 from typing import Any
+from urllib.parse import urlparse
 
+from src.providers import _redact_url
 from src.providers.defaults import CHAT_MODELS, EMBEDDING_MODELS
+
+_log = logging.getLogger("cogtrix.providers.openai")
 
 # ── Lazy imports ─────────────────────────────────────────────────────
 
@@ -79,12 +85,14 @@ if CHAT_AVAILABLE:
                     )
                     if rc:
                         rc_by_index[i] = rc
-            except (AttributeError, KeyError, TypeError, IndexError):
-                pass  # introspection failure — super() path still runs
+            except (AttributeError, KeyError, TypeError, IndexError) as _exc:
+                _log.debug(
+                    "DeepSeek _create_chat_result: introspection failure skipping "
+                    "reasoning_content: %s",
+                    _exc,
+                )
             except Exception as _exc:
-                import logging as _logging
-
-                _logging.getLogger("cogtrix.providers.openai").warning(
+                _log.warning(
                     "DeepSeek _create_chat_result: unexpected error capturing "
                     "reasoning_content: %s",
                     _exc,
@@ -123,8 +131,12 @@ if CHAT_AVAILABLE:
                         rc = delta.get("reasoning_content") if isinstance(delta, dict) else None
                         if rc and hasattr(result, "message"):
                             result.message.additional_kwargs["reasoning_content"] = rc
-            except (AttributeError, KeyError, TypeError, IndexError):
-                pass
+            except (AttributeError, KeyError, TypeError, IndexError) as _exc:
+                _log.debug(
+                    "DeepSeek _convert_chunk_to_generation_chunk: introspection failure skipping "
+                    "reasoning_content: %s",
+                    _exc,
+                )
             return result
 
         def _get_request_payload(self, input_: Any, *, stop: Any = None, **kwargs: Any) -> dict:
@@ -163,12 +175,14 @@ if CHAT_AVAILABLE:
                                 else:
                                     msg_dict.setdefault("reasoning_content", "")
                             break  # only process the first key that has entries
-            except (AttributeError, KeyError, TypeError):
-                pass  # introspection failure — payload still sent without reasoning_content
+            except (AttributeError, KeyError, TypeError) as _exc:
+                _log.debug(
+                    "DeepSeek _get_request_payload: introspection failure skipping "
+                    "reasoning_content re-injection: %s",
+                    _exc,
+                )
             except Exception as _exc:
-                import logging as _logging
-
-                _logging.getLogger("cogtrix.providers.openai").warning(
+                _log.warning(
                     "DeepSeek _get_request_payload: unexpected error re-injecting "
                     "reasoning_content: %s",
                     _exc,
@@ -179,7 +193,31 @@ if CHAT_AVAILABLE:
 else:
     _DeepSeekChatModel = None  # type: ignore[assignment,misc]
 
-_DEEPSEEK_BASE_URL = "api.deepseek.com"
+_DEEPSEEK_HOSTS: frozenset[str] = frozenset(["api.deepseek.com"])
+
+
+def _is_deepseek_base_url(url: str | None) -> bool:
+    """Check whether *url* targets a known DeepSeek API host.
+
+    Uses ``urllib.parse.urlparse`` to extract the hostname rather than a naive
+    substring match, which would produce false positives for lookalike domains
+    or proxy path segments (e.g. ``api.deepseek.com.evil.com``).
+
+    Returns ``False`` if URL parsing fails or if the hostname is not a known
+    DeepSeek host. Logs warnings for malformed URLs to help diagnose config issues.
+    """
+    if not url:
+        return False
+    try:
+        hostname = urlparse(url).hostname
+    except Exception as exc:
+        _log.warning("Failed to parse DeepSeek base URL %r: %s", url, exc)
+        return False
+    if hostname is None:
+        _log.warning("DeepSeek base URL %r has no hostname", url)
+        return False
+    return hostname in _DEEPSEEK_HOSTS
+
 
 try:
     from langchain_openai import OpenAIEmbeddings
@@ -222,19 +260,23 @@ def create_chat_model(
     }
     if base_url:
         llm_kwargs["base_url"] = base_url
+        _log.info("OpenAI-compatible endpoint configured: %s", _redact_url(base_url))
         # OpenAI-compatible endpoints (vLLM, LM Studio, etc.) often require no
         # authentication, but the SDK unconditionally rejects a missing api_key.
-        # Use the caller-supplied key when present; fall back to a placeholder so
-        # the SDK's client-option check passes without forcing users to invent a
-        # key.  "not-required" is deliberately descriptive so it never appears as
-        # a confusing literal in SDK error messages (BUG-231).
-        llm_kwargs["api_key"] = api_key or "not-required"
+        # Use the caller-supplied key when present; otherwise let the SDK fall
+        # back to the OPENAI_API_KEY environment variable.  Only use the
+        # "not-required" placeholder when no credential is available at all
+        # (BUG-231, BUG-991).
+        if api_key:
+            llm_kwargs["api_key"] = api_key
+        elif not os.environ.get("OPENAI_API_KEY"):
+            llm_kwargs["api_key"] = "not-required"
     elif api_key:
         llm_kwargs["api_key"] = api_key
     llm_kwargs.update(kwargs)
     cls = (
         _DeepSeekChatModel
-        if (base_url and _DEEPSEEK_BASE_URL in base_url and _DeepSeekChatModel is not None)
+        if (_is_deepseek_base_url(base_url) and _DeepSeekChatModel is not None)
         else ChatOpenAI
     )
     return cls(**llm_kwargs)

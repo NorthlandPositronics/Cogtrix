@@ -25,3 +25,5 @@ class TaskOut(BaseModel):
     result: str
     error: str
     log_path: str
+    user_id: str = ""
+    org_id: str | None = None

@@ -359,6 +359,13 @@ def _follow_redirects(
         response.close()
         url = redirect_url
 
+        # RFC 7231 §6.4.4: 303 See Other requires the client to switch to GET
+        # and drop the request body, regardless of the original method.
+        if response.status_code == 303:
+            method = "GET"
+            kwargs.pop("json", None)
+            kwargs.pop("data", None)
+
     response.close()
     raise ValueError(f"Too many redirects (limit: {MAX_REDIRECTS})")
 
@@ -368,9 +375,9 @@ _RE_STYLE = re.compile(r"<style[^>]*>.*?</style>", re.DOTALL | re.IGNORECASE)
 _RE_COMMENT = re.compile(r"<!--.*?-->", re.DOTALL)
 _RE_SVG = re.compile(r"<svg[^>]*>.*?</svg>", re.DOTALL | re.IGNORECASE)
 _RE_BLOCK_ELEMENT = re.compile(r"<(?:p|div|br|h[1-6]|li|tr|section|article)[^>]*>", re.IGNORECASE)
-_RE_HTML_TAG = re.compile(
+_RE_HTML_TAG = re.compile(  # codeql[py/bad-tag-filter] not a security sanitizer — LLM text extraction only, not XSS prevention
     r"<[^>]{0,2000}>"
-)  # codeql[py/bad-tag-filter] not a security sanitizer — used only for LLM text extraction, not XSS prevention
+)
 _RE_INLINE_WS = re.compile(r"[^\S\n]+")
 _RE_MULTI_BLANK = re.compile(r"\n\s*\n+")
 

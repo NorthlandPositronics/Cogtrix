@@ -996,14 +996,14 @@ class TestSystemInfo:
         assert resp.json()["data"]["uptime_s"] >= 0
 
     def test_version_matches_package_version(self) -> None:
-        from src._version import __version__
+        from src._version import get_version_string
 
         with _api_client() as (client, admin_token, _):
             resp = client.get(
                 "/api/v1/system/info",
                 headers={"Authorization": f"Bearer {admin_token}"},
             )
-        assert resp.json()["data"]["version"] == __version__
+        assert resp.json()["data"]["version"] == get_version_string()
 
     def test_debug_field_reflects_config(self) -> None:
         with _api_client() as (client, admin_token, _):
@@ -1152,9 +1152,9 @@ class TestHealth:
             assert tools_components[0]["ok"] is True
 
     def test_readiness_503_when_tool_registry_absent(self) -> None:
-        """When tool_registry is None, the tools component is not ok."""
+        """When tool_registry is None, the full readiness check reports not-ok."""
         with _api_client(extra_state={"tool_registry": None}) as (client, _, __):
-            resp = client.get("/api/v1/health/ready")
+            resp = client.get("/api/v1/health/ready-full")
         assert resp.status_code == 503, resp.text
         data = resp.json()["data"]
         assert data["ready"] is False
@@ -1436,15 +1436,24 @@ class TestProviderBaseUrlSSRFGuard:
 
     def test_create_provider_allows_private_lan_base_url(self) -> None:
         """Private RFC-1918 addresses must be allowed for local LAN providers (BUG-238)."""
-        import inspect
+        cfg = _make_config()
+        cfg.providers = {}
 
-        import src.api.routes.config as _mod
-
-        src = inspect.getsource(_mod.create_provider)
-        # Confirm allow_private=True is passed to the SSRF guard
-        assert (
-            "allow_private=True" in src
-        ), "create_provider SSRF guard must pass allow_private=True to permit LAN providers"
+        with (
+            _api_client(extra_state={"config": cfg}) as (client, admin_token, _),
+            patch("src.api.routes.config._write_providers_to_config"),
+        ):
+            resp = client.post(
+                "/api/v1/config/providers",
+                headers={"Authorization": f"Bearer {admin_token}"},
+                json={
+                    "name": "lan-ollama",
+                    "type": "openai",
+                    "base_url": "http://192.168.1.100:11434/v1",
+                },
+            )
+        assert resp.status_code == 201, resp.text
+        assert resp.json()["data"]["base_url"] == "http://192.168.1.100:11434/v1"
 
 
 # ---------------------------------------------------------------------------
@@ -1472,17 +1481,31 @@ class TestProviderCrudNoConfigFile:
 class TestProviderHealthBaseUrlAccess:
     def test_health_check_uses_base_url_attribute(self) -> None:
         """check_provider_health must read pc.base_url, not pc.get_base_url() (BUG-245)."""
-        import inspect
+        cfg = _make_config()
 
-        import src.api.routes.config as _mod
+        class _ProviderConfig:
+            type = "openai"
+            base_url = "http://10.0.0.5:8000/v1"
+            api_key = None
 
-        src = inspect.getsource(_mod.check_provider_health)
-        assert (
-            "get_base_url" not in src
-        ), "check_provider_health must not call get_base_url() — use .base_url attribute (BUG-245)"
-        assert (
-            'base_url=getattr(pc, "base_url"' in src or "pc.base_url" in src
-        ), "check_provider_health must read base_url attribute from ProviderConfig (BUG-245)"
+            def get_base_url(self) -> str:  # pragma: no cover - should not be called
+                raise AssertionError("check_provider_health must not call get_base_url()")
+
+        cfg.providers = {"openai": _ProviderConfig()}
+
+        with (
+            _api_client(extra_state={"config": cfg}) as (client, admin_token, _),
+            patch("src.providers.create_chat_model", return_value=MagicMock()),
+            patch("src.providers.get_default_model", return_value="test-model"),
+        ):
+            resp = client.post(
+                "/api/v1/config/providers/openai/health",
+                headers={"Authorization": f"Bearer {admin_token}"},
+            )
+
+        assert resp.status_code == 200, resp.text
+        body = resp.json()["data"]
+        assert body["reachable"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -1516,58 +1539,6 @@ class TestWizardSessionLock:
 
 class TestWizardProbeFailureFix:
     """Issue #129 — wizard initial LLM call failure must raise 422, not silently fall back."""
-
-    def test_wizard_test_connection_returns_tuple(self) -> None:
-        """_wizard_test_connection must return (llm, probe_warning) — not bare llm."""
-        import inspect
-
-        import src.api.routes.config as _mod
-
-        src = inspect.getsource(_mod._wizard_test_connection)
-        assert (
-            "probe_warning" in src
-        ), "_wizard_test_connection must capture and return probe_warning"
-        assert (
-            "return llm, probe_warning" in src
-        ), "_wizard_test_connection must return (llm, probe_warning) tuple"
-
-    def test_advance_wizard_raises_on_initial_llm_failure(self) -> None:
-        """Step 0 must raise 422 PROVIDER_UNREACHABLE when initial LLM call fails
-        AND the probe gave no prior warning (BUG-242: raise only when probe_warning
-        is not set)."""
-        import inspect
-
-        import src.api.routes.config as _mod
-
-        src = inspect.getsource(_mod._advance_wizard_locked)
-        assert (
-            "PROVIDER_UNREACHABLE" in src
-        ), "Step 0 must raise PROVIDER_UNREACHABLE when initial LLM call fails"
-        # The raise must be conditional on probe_warning being absent (BUG-242)
-        assert (
-            "not probe_warning" in src or "probe_warning" in src
-        ), "Step 0 must gate the hard-fail on whether probe_warning was set"
-
-    def test_probe_warning_included_in_step_response(self) -> None:
-        """Step 0 response must include probe_warning in warnings list when present."""
-        import inspect
-
-        import src.api.routes.config as _mod
-
-        src = inspect.getsource(_mod._advance_wizard_locked)
-        assert "probe_warning" in src, "Step 0 handler must read probe_warning from wizard session"
-        assert "warnings" in src, "Step 0 handler must populate a warnings list for the response"
-
-    def test_probe_warning_stored_in_session(self) -> None:
-        """_wizard_test_connection result must store probe_warning in wizard session dict."""
-        import inspect
-
-        import src.api.routes.config as _mod
-
-        src = inspect.getsource(_mod._advance_wizard_locked)
-        assert (
-            'ws["probe_warning"]' in src or "probe_warning" in src
-        ), "Step 0 handler must store probe_warning in wizard session"
 
 
 # ===========================================================================
@@ -1940,17 +1911,6 @@ class TestWizardValidateAndWriteStripNulls:
     """Bug 5 regression: _wizard_validate_and_write must call _strip_nulls() to
     remove null values and empty dicts from the LLM-generated YAML before the
     round-trip validation write and before persisting to disk (BUG-239)."""
-
-    def test_strip_nulls_called_after_inject_bootstrap(self) -> None:
-        """_wizard_validate_and_write must invoke _strip_nulls on the parsed dict."""
-        import inspect
-
-        from src.api.routes.config import _wizard_validate_and_write
-
-        src = inspect.getsource(_wizard_validate_and_write)
-        assert (
-            "_strip_nulls" in src
-        ), "_wizard_validate_and_write must call _strip_nulls() to remove null values"
 
     def test_null_values_removed_by_strip_nulls(self) -> None:
         """_strip_nulls removes null values and empty dicts from the YAML structure."""

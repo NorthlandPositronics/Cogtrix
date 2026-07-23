@@ -180,8 +180,7 @@ class EditScheduledInput(BaseModel):
         ge=1,
         le=1440,
         description=(
-            "Reschedule delivery to this many minutes from now. "
-            "Leave empty to keep current time."
+            "Reschedule delivery to this many minutes from now. Leave empty to keep current time."
         ),
     )
 
@@ -461,8 +460,7 @@ def create_edit_scheduled_tool(
             if caller_chat_id:
                 return f"No pending message found with ID starting with '{message_id}'."
             return (
-                f"Could not edit message {message_id} — "
-                "it may have already been sent or cancelled."
+                f"Could not edit message {message_id} — it may have already been sent or cancelled."
             )
         parts = []
         if new_text is not None:
@@ -549,7 +547,8 @@ def _is_in_quiet_window(policy: QuietHoursPolicy, wall_time: float) -> bool:
         import zoneinfo
 
         tz = zoneinfo.ZoneInfo(policy.timezone)
-    except Exception:
+    except (zoneinfo.ZoneInfoNotFoundError, ImportError):
+        # Fall back to UTC if timezone is unavailable or zoneinfo module fails
         import datetime
 
         tz = datetime.UTC  # type: ignore[assignment]
@@ -578,7 +577,8 @@ def _next_quiet_end(policy: QuietHoursPolicy, wall_time: float) -> float:
         import zoneinfo
 
         tz = zoneinfo.ZoneInfo(policy.timezone)
-    except Exception:
+    except (zoneinfo.ZoneInfoNotFoundError, ImportError):
+        # Fall back to UTC if timezone is unavailable or zoneinfo module fails
         import datetime
 
         tz = datetime.UTC  # type: ignore[assignment]
@@ -671,15 +671,15 @@ class MessageScheduler:
         msg_id = str(uuid.uuid4())
         now = time.time()
         with self._lock:
-            tail_time = now
-            for m in self._queue.values():
-                if (
-                    m.channel == channel
-                    and m.chat_id == chat_id
-                    and m.status == "pending"
-                    and m.send_at >= tail_time
-                ):
-                    tail_time = m.send_at
+            # Find the maximum send_at among ALL pending messages for this chat,
+            # regardless of whether they are past-due (send_at < now). This ensures
+            # new messages are always placed after overdue messages.
+            pending_messages = [
+                m
+                for m in self._queue.values()
+                if m.channel == channel and m.chat_id == chat_id and m.status == "pending"
+            ]
+            tail_time = max((m.send_at for m in pending_messages), default=now)
             send_at = tail_time + gap_seconds
             msg = ScheduledMessage(
                 id=msg_id,

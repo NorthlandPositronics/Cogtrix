@@ -12,15 +12,21 @@ from __future__ import annotations
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.api.auth import TokenData, get_current_user, hash_password, require_admin
+from src.api.auth import TokenData, get_current_user, hash_password
 from src.api.db import get_db
+from src.api.db.models import User
 from src.api.db.repositories.users import UserRepository
+from src.api.org_context import OrgContext, get_org_context
 from src.api.quota import _quota_config_from_app_config, get_user_quota_status
 from src.api.schemas.common import APIResponse
 from src.api.schemas.user import UserCreateRequest, UserOut, UserUpdateRequest
+from src.audit import record_user_action
+from src.auth.middleware import require
+from src.auth.permissions import Permission
 
 router = APIRouter(prefix="/users", tags=["Users"])
 
@@ -76,16 +82,24 @@ async def get_my_quota(
     },
 )
 async def list_users(
+    ctx: OrgContext = Depends(get_org_context),
     db: AsyncSession = Depends(get_db),
-    current_user: TokenData = Depends(require_admin),
+    current_user: TokenData = Depends(require(Permission.USERS_MANAGE)),
 ) -> APIResponse[list[UserOut]]:
-    """List all registered users.
+    """List all registered users in the caller's organization.
 
     Auth: admin bearer token required.
     Error codes: UNAUTHORIZED, TOKEN_EXPIRED, FORBIDDEN.
     """
     repo = UserRepository(db)
-    users = await repo.list_all()
+    if ctx.has_org:
+        users = await repo.list_by_org(ctx.org_id)
+    else:
+        # Back-compat: admin without org sees only unscoped users.
+        result = await db.execute(
+            select(User).where(User.org_id.is_(None)).order_by(User.created_at)
+        )
+        users = list(result.scalars().all())
     return APIResponse(data=[_user_to_out(u) for u in users])
 
 
@@ -105,10 +119,11 @@ async def list_users(
 )
 async def create_user(
     body: UserCreateRequest,
+    ctx: OrgContext = Depends(get_org_context),
     db: AsyncSession = Depends(get_db),
-    current_user: TokenData = Depends(require_admin),
+    current_user: TokenData = Depends(require(Permission.USERS_CREATE)),
 ) -> APIResponse[UserOut]:
-    """Create a new user account (admin only).
+    """Create a new user account in the caller's organization (admin only).
 
     Auth: admin bearer token required.
     Error codes: UNAUTHORIZED, TOKEN_EXPIRED, FORBIDDEN, CONFLICT, VALIDATION_ERROR.
@@ -121,6 +136,7 @@ async def create_user(
             email=str(body.email),
             password_hash=hash_password(body.password),
             role=body.role,
+            org_id=ctx.org_id,
         )
         await db.commit()
         await db.refresh(user)
@@ -153,18 +169,20 @@ async def create_user(
 async def update_user(
     user_id: str,
     body: UserUpdateRequest,
+    ctx: OrgContext = Depends(get_org_context),
     db: AsyncSession = Depends(get_db),
-    current_user: TokenData = Depends(require_admin),
+    current_user: TokenData = Depends(require(Permission.USERS_UPDATE)),
 ) -> APIResponse[UserOut]:
-    """Update user role (admin only).
+    """Update user role (admin only, same org).
 
     Auth: admin bearer token required.
     Error codes: UNAUTHORIZED, TOKEN_EXPIRED, FORBIDDEN, NOT_FOUND, VALIDATION_ERROR.
     """
+    repo = UserRepository(db)
+
     if body.role is None:
-        repo = UserRepository(db)
         user = await repo.get_by_id(user_id)
-        if user is None:
+        if user is None or user.org_id != ctx.org_id:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail={"code": "NOT_FOUND", "message": f"User '{user_id}' not found."},
@@ -177,7 +195,14 @@ async def update_user(
             detail={"code": "BAD_REQUEST", "message": "Cannot demote your own account."},
         )
 
-    repo = UserRepository(db)
+    user = await repo.get_by_id(user_id)
+    if user is None or user.org_id != ctx.org_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "NOT_FOUND", "message": f"User '{user_id}' not found."},
+        )
+
+    previous_role = user.role
     user = await repo.update_role(user_id, body.role)
     if user is None:
         raise HTTPException(
@@ -186,6 +211,19 @@ async def update_user(
         )
     await db.commit()
     await db.refresh(user)
+
+    record_user_action(
+        "update_user_role",
+        actor=current_user.user_id,
+        status="ok",
+        detail={
+            "org_id": ctx.org_id,
+            "user_id": user_id,
+            "previous_role": previous_role,
+            "new_role": body.role,
+        },
+    )
+
     return APIResponse(data=_user_to_out(user))
 
 
@@ -204,10 +242,11 @@ async def update_user(
 )
 async def delete_user(
     user_id: str,
+    ctx: OrgContext = Depends(get_org_context),
     db: AsyncSession = Depends(get_db),
-    current_user: TokenData = Depends(require_admin),
+    current_user: TokenData = Depends(require(Permission.USERS_DELETE)),
 ) -> APIResponse[None]:
-    """Delete a user account (admin only).
+    """Delete a user account (admin only, same org).
 
     Auth: admin bearer token required.
     Error codes: UNAUTHORIZED, TOKEN_EXPIRED, FORBIDDEN, BAD_REQUEST, NOT_FOUND.
@@ -218,6 +257,12 @@ async def delete_user(
             detail={"code": "BAD_REQUEST", "message": "Cannot delete your own account."},
         )
     repo = UserRepository(db)
+    user = await repo.get_by_id(user_id)
+    if user is None or user.org_id != ctx.org_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "NOT_FOUND", "message": f"User '{user_id}' not found."},
+        )
     deleted = await repo.delete(user_id)
     if not deleted:
         raise HTTPException(

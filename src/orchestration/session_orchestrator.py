@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -46,6 +47,7 @@ class SessionOrchestrator:
     ) -> None:
         self._config = config
         self._slash_cmds_ref = slash_cmds_ref
+        self._lock = threading.Lock()
 
     # ------------------------------------------------------------------
     # Public API
@@ -66,18 +68,19 @@ class SessionOrchestrator:
         (``memory_manager``, ``system_prompt``, tool lists) as keyword
         arguments; config-level state is read directly from ``self._config``.
         """
-        cfg = self._config
-        return SessionSnapshot(
-            active_model_alias=cfg.active_model_alias,
-            memory_mode=cfg.memory_mode,
-            memory_config=cfg.memory_config,
-            session=cfg.session,
-            system_prompt=system_prompt,
-            memory_manager=memory_manager,
-            registry_tools=dict(registry_tools) if registry_tools is not None else {},
-            available_tools=dict(available_tools) if available_tools is not None else {},
-            tools=list(tools) if tools is not None else [],
-        )
+        with self._lock:
+            cfg = self._config
+            return SessionSnapshot(
+                active_model_alias=cfg.active_model_alias,
+                memory_mode=cfg.memory_mode,
+                memory_config=cfg.memory_config,
+                session=cfg.session,
+                system_prompt=system_prompt,
+                memory_manager=memory_manager,
+                registry_tools=dict(registry_tools) if registry_tools is not None else {},
+                available_tools=dict(available_tools) if available_tools is not None else {},
+                tools=list(tools) if tools is not None else [],
+            )
 
     def rollback(
         self,
@@ -95,29 +98,30 @@ class SessionOrchestrator:
         provided, it is cleared and refilled in-place from the snapshot so
         the same list object is mutated (matching the existing behaviour).
         """
-        cfg = self._config
+        with self._lock:
+            cfg = self._config
 
-        # Restore config-level fields
-        cfg.active_model_alias = snap.active_model_alias
-        cfg.memory_mode = snap.memory_mode
-        cfg.memory_config = snap.memory_config
-        cfg.session = snap.session
+            # Restore config-level fields
+            cfg.active_model_alias = snap.active_model_alias
+            cfg.memory_mode = snap.memory_mode
+            cfg.memory_config = snap.memory_config
+            cfg.session = snap.session
 
-        # Restore tool list in-place when the caller supplies it
-        if tools_list is not None and snap.tools is not None:
-            tools_list.clear()
-            tools_list.extend(snap.tools)
+            # Restore tool list in-place when the caller supplies it
+            if tools_list is not None and snap.tools is not None:
+                tools_list.clear()
+                tools_list.extend(snap.tools)
 
-        # Update slash command references
-        sc = self._slash_cmds_ref
-        if snap.system_prompt is not None:
-            sc.system_prompt = snap.system_prompt
-        if snap.memory_manager is not None:
-            sc.memory_manager = snap.memory_manager
-        sc.available_tools = snap.available_tools
+            # Update slash command references
+            sc = self._slash_cmds_ref
+            if snap.system_prompt is not None:
+                sc.system_prompt = snap.system_prompt
+            if snap.memory_manager is not None:
+                sc.memory_manager = snap.memory_manager
+            sc.available_tools = snap.available_tools
 
-        return {
-            "memory_manager": snap.memory_manager,
-            "system_prompt": snap.system_prompt,
-            "available_tools": snap.available_tools,
-        }
+            return {
+                "memory_manager": snap.memory_manager,
+                "system_prompt": snap.system_prompt,
+                "available_tools": snap.available_tools,
+            }

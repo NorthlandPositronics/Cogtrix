@@ -256,15 +256,22 @@ class TestInjectBootstrap:
 
 class TestMaskSecrets:
     def test_masks_api_key(self):
-        text = 'api_key: "sk-secret-value"'
+        text = 'api_key: "sk-secret-value-1234"'
         result = _mask_secrets(text)
-        assert "sk-secret-value" not in result
-        assert "***" in result
+        assert "sk-secret-value-1234" not in result
+        assert 'api_key: "sk-***1234"' in result
+
+    def test_masks_api_key_short(self):
+        text = 'api_key: "abc"'
+        result = _mask_secrets(text)
+        assert "abc" not in result
+        assert 'api_key: "***"' in result
 
     def test_masks_token(self):
         text = "token: bot123456:ABC"
         result = _mask_secrets(text)
         assert "bot123456" not in result
+        assert "token: bot***:ABC" in result
 
     def test_preserves_non_secret(self):
         text = "provider: ollama\nmodel: qwen3:8b"
@@ -304,11 +311,7 @@ class TestExtractConfigInfo:
 
     def test_model_falls_back_to_inference_when_top_level_absent(self):
         yaml_content = (
-            "provider: ollama\n"
-            "inference:\n"
-            "  ollama:\n"
-            "    type: ollama\n"
-            "    model: llama3.2\n"
+            "provider: ollama\ninference:\n  ollama:\n    type: ollama\n    model: llama3.2\n"
         )
         info = _extract_config_info(yaml_content)
         assert info["model"] == "llama3.2"
@@ -357,11 +360,7 @@ class TestExtractConfigInfo:
 
     def test_no_api_key_when_absent(self):
         yaml_content = (
-            "provider: ollama\n"
-            "inference:\n"
-            "  ollama:\n"
-            "    type: ollama\n"
-            "    model: qwen3:8b\n"
+            "provider: ollama\ninference:\n  ollama:\n    type: ollama\n    model: qwen3:8b\n"
         )
         info = _extract_config_info(yaml_content)
         assert "api_key" not in info
@@ -653,7 +652,14 @@ class TestTestConnection:
             "Error code: 400 - {'error': {'message': 'No connected db.', 'type': 'no_db_connection', 'param': None, 'code': '400'}}"
         )
         exc.message = "Error code: 400 - {'error': {'message': 'No connected db.', 'type': 'no_db_connection', 'param': None, 'code': '400'}}"  # type: ignore[attr-defined]
-        exc.body = {"error": {"message": "No connected db.", "type": "no_db_connection", "param": None, "code": "400"}}  # type: ignore[attr-defined]
+        exc.body = {
+            "error": {
+                "message": "No connected db.",
+                "type": "no_db_connection",
+                "param": None,
+                "code": "400",
+            }
+        }  # type: ignore[attr-defined]
         llm_mock.invoke.side_effect = exc
         with patch("src.providers.create_chat_model", return_value=llm_mock):
             _test_connection("openai", "gpt-oss", "sk-test", "http://192.168.70.254:8080/v1")
@@ -1290,7 +1296,7 @@ class TestSanitizeYamlForPrompt:
         yaml_str = "services:\n  email:\n    password: smtp-pass\n    host: mail.example.com\n"
         result = _sanitize_yaml_for_prompt(yaml_str)
         assert "smtp-pass" not in result
-        assert "mail.example.com" in result
+        assert "mail.example.com" in result  # codeql[py/incomplete-url-substring-sanitization]
 
     def test_invalid_yaml_returns_placeholder(self):
         result = _sanitize_yaml_for_prompt("{bad: yaml: content")

@@ -6,6 +6,7 @@ prompts via regex and LLM classification.
 
 from __future__ import annotations
 
+import concurrent.futures
 import re
 from dataclasses import dataclass
 from enum import Enum, auto
@@ -14,6 +15,11 @@ from typing import Any
 from src.logging_config import get_logger
 
 log = get_logger()
+
+# Seconds to wait for the LLM classification call before treating it as hung.
+# A hung call would block the agent's think-category classification step,
+# which runs on every agent turn.  This timeout prevents indefinite blocking.
+_CLASSIFY_TIMEOUT_SECONDS: int = 60
 
 # ── /think task categories & prompt templates ────────────────────────────
 #
@@ -1139,7 +1145,22 @@ def classify_think_task(task: str, llm: Any) -> ThinkCategory:
             f"<task_text>{sanitized}</task_text>\n\n"
             "Reply with ONLY the single category name."
         )
-        response = llm.invoke(classify_prompt)
+        # Wrap the LLM call in a temporary executor so we can enforce a timeout.
+        # Python threads cannot be cancelled; shutdown(wait=False) lets the
+        # hung thread die in the background without blocking the caller.
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(llm.invoke, classify_prompt)
+            try:
+                response = future.result(timeout=_CLASSIFY_TIMEOUT_SECONDS)
+            except concurrent.futures.TimeoutError:
+                future.cancel()
+                pool.shutdown(wait=False)
+                log.warning(
+                    "classify_think_task: LLM call timed out after %ds — "
+                    "falling back to default category",
+                    _CLASSIFY_TIMEOUT_SECONDS,
+                )
+                return THINK_DEFAULT_CATEGORY
         raw_label = getattr(response, "content", str(response))
         if isinstance(raw_label, list):
             raw_label = " ".join(
@@ -1375,6 +1396,69 @@ _SIMPLE_RESEARCH_GATE = re.compile(
     re.IGNORECASE,
 )
 
+# ── Query complexity constants ────────────────────────────────────────────
+# These constants are used by _classify_query_complexity in cogtrix.py.
+# They are defined here to avoid circular import issues (cogtrix.py imports
+# from both this module and memory.mode_selector).
+
+_SIMPLE_QUERY_KEYWORDS = frozenset(
+    {
+        "fix",
+        "what",
+        "list",
+        "show",
+        "rename",
+        "explain",
+        "format",
+        "define",
+        "find",
+        "count",
+        "print",
+        "display",
+        "describe",
+        "translate",
+        "summarize",
+        "convert",
+        "check",
+        "get",
+        "set",
+        "is",
+        "are",
+        "can",
+        "does",
+        "do",
+        "tell",
+        "how",
+        "why",
+        "when",
+        "where",
+        "which",
+        "who",
+    }
+)
+
+_COMPLEX_QUERY_MARKERS = frozenset(
+    {
+        "implement",
+        "build",
+        "create",
+        "write",
+        "design",
+        "refactor",
+        "migrate",
+        "analyze",
+        "debug",
+        "optimize",
+        "architect",
+        "develop",
+        "generate",
+        "test",
+        "deploy",
+        "integrate",
+        "research",
+    }
+)
+
 
 def classify_task_complexity(prompt: str) -> TaskComplexity:
     """Classify prompt complexity for adaptive execution strategy.
@@ -1441,7 +1525,7 @@ _INFORM_PATTERNS = re.compile(
       | explain\s+(?:how|what|why|the\s+process)
       | tell\s+me\s+(?:about|how|what)
       | show\s+me\s+(?:how|what)
-      | can\s+(?:I|you|we|one)\s+\w+
+      | can\s+I\s+\w+
       | is\s+it\s+possible\s+to
       | what\s+(?:would|does)\s+(?:happen|it\s+take)
     )\b
@@ -1589,6 +1673,7 @@ def _classify_ownership_layer2(
             try:
                 result = _fut.result(timeout=timeout_seconds)
             except _cf.TimeoutError:
+                _fut.cancel()
                 _pool.shutdown(wait=False)
                 log.warning(
                     "Ownership classifier LLM call timed out after %ds — "

@@ -49,7 +49,7 @@ class MemoryFactory:
             raise TypeError("manager_class must be a class")
 
         if not issubclass(manager_class, BaseMemoryManager):
-            raise TypeError(f"{manager_class.__name__} must inherit from " "BaseMemoryManager")
+            raise TypeError(f"{manager_class.__name__} must inherit from BaseMemoryManager")
 
         with cls._lock:
             if mode in cls._registry:
@@ -68,7 +68,8 @@ class MemoryFactory:
         Args:
             mode: Mode name to unregister
         """
-        cls._registry.pop(mode, None)
+        with cls._lock:
+            cls._registry.pop(mode, None)
 
     @classmethod
     def create(

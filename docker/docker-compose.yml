@@ -53,6 +53,7 @@ services:
       COGTRIX_DATA_DIR: /data
       COGTRIX_WHATSAPP_URL: "http://waha:3000"
       COGTRIX_ALLOWED_WRITE_PATHS: "/data/log,/data/output"
+      TZ: UTC
     user: "1000:1000"
     command: api
     expose:
@@ -64,6 +65,14 @@ services:
       timeout: 5s
       start_period: 20s
       retries: 3
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 4G
+        reservations:
+          cpus: "0.5"
+          memory: 1G
     volumes:
       - cogtrix-data:/data
       - ./data/log:/data/log
@@ -72,7 +81,9 @@ services:
       - ./data/documents:/data/documents
       - ./config/cogtrix.yml:/app/.cogtrix.yaml:ro
     networks:
-      - cogtrix-net
+      - cogtrix-frontend
+      - cogtrix-api
+      - cogtrix-messaging
     depends_on:
       cogtrix-init:
         condition: service_completed_successfully
@@ -92,7 +103,7 @@ services:
     ports:
       - "80:80"
     networks:
-      - cogtrix-net
+      - cogtrix-frontend
     depends_on:
       cogtrix:
         condition: service_healthy
@@ -103,7 +114,9 @@ services:
   # admin panel on all network interfaces.
   # ----------------------------------------------------------
   waha:
-    image: devlikeapro/waha
+    # Pinned to a specific version for reproducible builds and supply-chain
+    # auditability. Update intentionally after reviewing release notes.
+    image: devlikeapro/waha:gows-2026.4.2
     container_name: waha-gateway
     restart: unless-stopped
     env_file:
@@ -115,7 +128,7 @@ services:
     volumes:
       - waha-data:/app/.sessions
     networks:
-      - cogtrix-net
+      - cogtrix-messaging
 
   # ----------------------------------------------------------
   # MCP Filesystem server (SSE bridge via supergateway)
@@ -123,18 +136,19 @@ services:
   # with the cogtrix API port (8000).
   # ----------------------------------------------------------
   mcp-filesystem:
-    image: supercorp/supergateway
+    image: supercorp/supergateway:3.4.3@sha256:095acf4471e142553c1a5514aa5e480abbc5885d00549d4a3481cc70eac53889
     container_name: mcp-filesystem
     restart: unless-stopped
     command: >
-      --stdio "npx -y @modelcontextprotocol/server-filesystem /data"
+      --stdio "npx -y @modelcontextprotocol/server-filesystem /data /workspace"
       --port 8001
     expose:
       - "8001"
     volumes:
       - mcp-workspace:/data
+      - ./workspace:/workspace:ro
     networks:
-      - cogtrix-net
+      - cogtrix-api
 
 volumes:
   waha-data:
@@ -142,5 +156,9 @@ volumes:
   mcp-workspace:
 
 networks:
-  cogtrix-net:
+  cogtrix-frontend:
+    driver: bridge
+  cogtrix-api:
+    driver: bridge
+  cogtrix-messaging:
     driver: bridge

@@ -410,7 +410,7 @@ class TestGetSessionTools:
     def test_get_auto_approved_tool_shows_auto_approved(self, client, tokens, session_setup):
         sid, live, _ = session_setup
         live.session_state.loaded_tools.add("web_search")
-        live.session_state.approvals.add("web_search")
+        live.session_state.add_approval("web_search")
         r = client.get(f"/api/v1/sessions/{sid}/tools", headers=_h(tokens["owner"]))
         items = {i["name"]: i for i in r.json()["data"]}
         assert items["web_search"]["status"] == "auto_approved"
@@ -505,18 +505,18 @@ class TestPatchSessionTools:
             json={"auto_approve": ["web_search"]},
         )
         assert r.status_code == 200
-        assert "web_search" in live.session_state.approvals
+        assert "web_search" in live.session_state.get_approvals_snapshot()
 
     def test_patch_revoke_approval_tool(self, client, tokens, session_setup):
         sid, live, _ = session_setup
-        live.session_state.approvals.add("web_search")
+        live.session_state.add_approval("web_search")
         r = client.patch(
             f"/api/v1/sessions/{sid}/tools",
             headers=_h(tokens["owner"]),
             json={"revoke_approval": ["web_search"]},
         )
         assert r.status_code == 200
-        assert "web_search" not in live.session_state.approvals
+        assert "web_search" not in live.session_state.get_approvals_snapshot()
 
     def test_patch_load_nonexistent_tool_returns_404(self, client, tokens, session_setup):
         sid, _, _ = session_setup
@@ -590,7 +590,7 @@ class TestPatchSessionTools:
         assert r.status_code == 200
         assert "web_search" in live.session_state.loaded_tools
         assert "shell" in live.session_state.denials
-        assert "write_file" in live.session_state.approvals
+        assert "write_file" in live.session_state.get_approvals_snapshot()
 
     def test_patch_returns_updated_status(self, client, tokens, session_setup):
         sid, _, _ = session_setup

@@ -9,6 +9,9 @@ so rapid messages from the same chat are processed in order.
 from __future__ import annotations
 
 import logging
+import re
+import shutil
+import subprocess
 import time
 import uuid
 from dataclasses import dataclass
@@ -47,6 +50,7 @@ from src.orchestration.session_state import SessionState
 log = logging.getLogger("cogtrix")
 
 _UNSET: object = object()
+_PR_REF_RE = re.compile(r"\bPR\s*#(\d+)\b", re.IGNORECASE)
 
 
 def _load_prompt_value(value: str, allowed_roots: list[Path] | None = None) -> str:
@@ -68,7 +72,13 @@ def _load_prompt_value(value: str, allowed_roots: list[Path] | None = None) -> s
                 )
                 return ""
         try:
-            return path.read_text(encoding="utf-8").strip()
+            content = path.read_text(encoding="utf-8").strip()
+            if not content:
+                log.warning(
+                    "Contact prompt file %s exists but is empty — returning None to caller",
+                    path,
+                )
+            return content
         except OSError as exc:
             log.warning("Failed to read contact prompt file %s: %s", path, exc)
             return ""
@@ -150,8 +160,15 @@ class MessageHandler:
         self._guardrails = guardrails if guardrails is not None else GuardrailPipeline({})
         self._agent_runner: AgentRunner = agent_runner
         self._parallel_tool_execution = parallel_tool_execution
+        self._config = config  # Store config for recall threshold access
         self._services_config: dict[str, Any] = services_config or {}
-        self._max_response_length: int = config.get("max_response_length", 4000)
+        github_cfg = self._services_config.get("github", {}) if self._services_config else {}
+        self._github_default_repo: str = str(github_cfg.get("default_repo", "")).strip()
+        _mrl = config.get("max_response_length", 4000)
+        if _mrl < 3:
+            log.warning("max_response_length %d is below minimum (3); using 3", _mrl)
+            _mrl = 3
+        self._max_response_length: int = _mrl
         self._scheduler: MessageScheduler | None = scheduler
         self._deferral_mgr: DeferralManager | None = deferral_mgr
         self._workflow_registry: Any = workflow_registry
@@ -222,6 +239,52 @@ class MessageHandler:
             return msg.sender_name
         return msg.chat_id
 
+    def _pr_reference_is_valid(self, pr_number: int) -> bool:
+        """Return True when the referenced PR exists in the configured repo."""
+        github_repo = getattr(self, "_github_default_repo", "")
+        if not github_repo or shutil.which("gh") is None:
+            return True
+
+        cmd = [
+            "gh",
+            "api",
+            f"repos/{github_repo}/pulls/{pr_number}",
+            "--jq",
+            ".number",
+        ]
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        except FileNotFoundError:
+            log.debug("PR validation skipped — gh CLI not available")
+            return True
+
+        if result.returncode != 0:
+            return False
+        return result.stdout.strip() == str(pr_number)
+
+    def _prepare_outbound_text(self, text: str) -> str:
+        """Validate PR refs in outbound text, then apply standard output sanitization."""
+        github_repo = getattr(self, "_github_default_repo", "")
+        if github_repo and _PR_REF_RE.search(text):
+            seen: set[int] = set()
+
+            def _replace(match: re.Match[str]) -> str:
+                pr_number = int(match.group(1))
+                if pr_number not in seen:
+                    seen.add(pr_number)
+                    if not self._pr_reference_is_valid(pr_number):
+                        log.warning(
+                            "Outbound message referenced missing PR #%d in %s; flagging it",
+                            pr_number,
+                            github_repo,
+                        )
+                        return f"PR #{pr_number} [not found]"
+                return match.group(0)
+
+            text = _PR_REF_RE.sub(_replace, text)
+
+        return self._guardrails.sanitize_output(text)
+
     def _check_guardrails(self, msg: IncomingMessage, session: Any, channel: Channel) -> bool:
         """Return True if input passes guardrails; on failure, send blocked response and return False."""
         result = self._guardrails.check_input(msg.text, msg.chat_id)
@@ -250,7 +313,11 @@ class MessageHandler:
         if self._knowledge_store:
             try:
                 recall_k = 5
-                knowledge = self._knowledge_store.recall(msg.text, k=recall_k)
+                # Get threshold from config, fall back to store default (0.25)
+                recall_threshold = self._config.get("vector_recall_threshold", 0.25)
+                knowledge = self._knowledge_store.recall(
+                    msg.text, k=recall_k, score_threshold=recall_threshold
+                )
                 if knowledge:
                     section = f"Known facts (learned over time):\n{knowledge}"
                     combined_prefix = (
@@ -342,6 +409,7 @@ class MessageHandler:
                 compression_llm=self._compression_llm,
                 tool_call_guard=self._guardrails.check_tool_call,
                 session_state=call_session_state,
+                memory_manager=session.memory_manager,
                 parallel_tool_execution=self._parallel_tool_execution,
             )
             response: str = self._agent_runner(
@@ -357,7 +425,7 @@ class MessageHandler:
             return "", set()
         except Exception as exc:
             log.error("Agent error for session %s: %s", session.session_key, exc)
-            response = "I encountered an error processing your message. Please try again."
+            response = f"I encountered a {type(exc).__name__} error. Please try again or contact the administrator."
             return response, set()
 
         return response, call_session_state.loaded_tools
@@ -375,7 +443,7 @@ class MessageHandler:
         """Route the response to scheduled or immediate delivery and return the text for memory."""
         edited_text: str | None = None
         if edit_state.was_called and session.last_sent_message_id:
-            new_text = self._guardrails.sanitize_output(edit_state.new_text)
+            new_text = self._prepare_outbound_text(edit_state.new_text)
             if len(new_text) > self._max_response_length:
                 new_text = new_text[: self._max_response_length - 3] + "..."
             result = channel.edit_message(msg.chat_id, session.last_sent_message_id, new_text)
@@ -388,7 +456,7 @@ class MessageHandler:
 
         scheduled_text: str | None = None
         if schedule_state.was_called and self._scheduler:
-            reply_text = self._guardrails.sanitize_output(schedule_state.scheduled_text)
+            reply_text = self._prepare_outbound_text(schedule_state.scheduled_text)
             if len(reply_text) > self._max_response_length:
                 reply_text = reply_text[: self._max_response_length - 3] + "..."
             send_at = time.time() + schedule_state.delay_minutes * 60
@@ -404,7 +472,7 @@ class MessageHandler:
         if queue_state.items and self._scheduler:
             recipient = self._resolve_recipient(msg)
             for item in queue_state.items:
-                reply_text = self._guardrails.sanitize_output(item.text)
+                reply_text = self._prepare_outbound_text(item.text)
                 if len(reply_text) > self._max_response_length:
                     reply_text = reply_text[: self._max_response_length - 3] + "..."
                 self._scheduler.queue_after_tail(
@@ -429,7 +497,7 @@ class MessageHandler:
             return "\n---\n".join(all_texts)
 
         if not edit_state.was_called:
-            response = self._guardrails.sanitize_output(response)
+            response = self._prepare_outbound_text(response)
             if len(response) > self._max_response_length:
                 response = response[: self._max_response_length - 3] + "..."
             result = channel.send(msg.chat_id, response)
@@ -447,7 +515,7 @@ class MessageHandler:
         # Fall back to immediate send with the original agent response so the
         # user receives a reply rather than silence (BUG-110).
         log.info("Edit failed for %s — falling back to immediate send", msg.chat_id)
-        fallback_text = self._guardrails.sanitize_output(edit_state.new_text)
+        fallback_text = self._prepare_outbound_text(edit_state.new_text)
         if len(fallback_text) > self._max_response_length:
             fallback_text = fallback_text[: self._max_response_length - 3] + "..."
         result = channel.send(msg.chat_id, fallback_text)
@@ -532,8 +600,17 @@ class MessageHandler:
     ) -> None:
         """Process *msg* and send a response back via *channel*."""
         session = self._session_mgr.get_or_create(msg)
+
+        # Pre-record the user message for shutdown durability before acquiring
+        # the session lock.  Uses prerecord_user() which writes a lightweight
+        # pending file without calling update(), so existing call-count
+        # assertions are unaffected.  Cleaned up by update() on success or by
+        # discard_prerecord() on deferral/suppress paths.
+        session.memory_manager.prerecord_user(msg.text)
+
         with session.lock:
             if not self._check_guardrails(msg, session, channel):
+                session.memory_manager.discard_prerecord()
                 return
 
             session.last_activity = time.monotonic()
@@ -640,6 +717,7 @@ class MessageHandler:
             # Check suppress_reply first — strongest signal: no delivery, no memory update.
             if suppress_state.was_called:
                 log.info("Agent suppressed reply for %s", msg.chat_id)
+                session.memory_manager.discard_prerecord()
                 return
 
             # Check defer_processing — no delivery, no memory update; register deferral.
@@ -653,6 +731,7 @@ class MessageHandler:
                     deferral_depth,
                 )
                 self._deferral_mgr.defer(msg, defer_state.delay_seconds, depth=deferral_depth)
+                session.memory_manager.discard_prerecord()
                 return
 
             response_for_memory = self._route_response(
@@ -665,10 +744,9 @@ class MessageHandler:
                 log.warning(
                     "Skipping memory update for %s: no response was delivered", session.session_key
                 )
+                session.memory_manager.discard_prerecord()
                 return
 
-            # Memory records the response regardless of delivery success
-            # (at-least-once memory semantics).
             try:
                 session.memory_manager.update(msg.text, response_for_memory)
                 session.memory_manager.save()
@@ -694,14 +772,16 @@ class MessageHandler:
                     campaign_outcome_state.reason,
                 )
 
-            do_extract = self._knowledge_store is not None and session.guardrail_violations == 0
+            do_extract = session.guardrail_violations == 0
             sanitized_for_knowledge = (
                 self._guardrails.sanitize_output(msg.text) if do_extract else None
             )
 
-        if do_extract and sanitized_for_knowledge is not None:
+        if self._knowledge_store is not None and do_extract and sanitized_for_knowledge is not None:
             try:
-                self._knowledge_store.extract_and_store(sanitized_for_knowledge, response_for_memory)  # type: ignore[union-attr]
+                self._knowledge_store.extract_and_store(
+                    sanitized_for_knowledge, response_for_memory, session.session_key
+                )
             except Exception as exc:
                 log.debug("Knowledge extraction failed: %s", exc)
 
@@ -728,8 +808,7 @@ class MessageHandler:
             the channel message ID (None if delivery failed).
         """
         framed_text = (
-            f"[Operator instruction — initiate conversation with {contact_name}]\n"
-            f"{instructions}"
+            f"[Operator instruction — initiate conversation with {contact_name}]\n{instructions}"
         )
         synthetic_msg = IncomingMessage(
             channel=channel.name,
@@ -743,6 +822,10 @@ class MessageHandler:
         )
 
         session = self._session_mgr.get_or_create(synthetic_msg)
+
+        memory_user_text = f"[Operator instruction] {instructions}"
+        session.memory_manager.prerecord_user(memory_user_text)
+
         with session.lock:
             session.last_activity = time.monotonic()
             context, combined_prefix = self._prepare_context(synthetic_msg, session)
@@ -783,7 +866,8 @@ class MessageHandler:
                     contact_name,
                 )
                 session.memory_manager.update(
-                    f"[Operator instruction] {instructions}", "[Outbound suppressed by agent]"
+                    f"[Operator instruction] {instructions}",
+                    "[Outbound suppressed by agent]",
                 )
                 try:
                     session.memory_manager.save()
@@ -795,7 +879,7 @@ class MessageHandler:
                     )
                 return "[Outbound suppressed by agent]", None
 
-            response = self._guardrails.sanitize_output(response)
+            response = self._prepare_outbound_text(response)
             if len(response) > self._max_response_length:
                 response = response[: self._max_response_length - 3] + "..."
 
@@ -812,7 +896,6 @@ class MessageHandler:
                     result.error,
                 )
 
-            memory_user_text = f"[Operator instruction] {instructions}"
             try:
                 session.memory_manager.update(memory_user_text, response)
                 session.memory_manager.save()
@@ -866,7 +949,7 @@ class MessageHandler:
             else:
                 task = instructions or message
             framed_text = (
-                f"[Operator instruction — initiate conversation with {contact_label}]\n" f"{task}"
+                f"[Operator instruction — initiate conversation with {contact_label}]\n{task}"
             )
             effective_sender_id = "operator"
             effective_sender_name = "Operator"
@@ -991,6 +1074,7 @@ class MessageHandler:
                 compression_llm=self._compression_llm,
                 tool_call_guard=_tracking_tool_guard,
                 session_state=call_session_state,
+                memory_manager=session.memory_manager,
                 parallel_tool_execution=self._parallel_tool_execution,
             )
             try:
@@ -1002,6 +1086,9 @@ class MessageHandler:
                     context_prefix=combined_prefix,
                     config=sim_run_config,
                 )
+            except UserCancelledRun:
+                log.info("Simulate agent cancelled for %s", session.session_key)
+                raise
             except Exception as exc:
                 log.error("Simulate agent error for %s: %s", session.session_key, exc)
                 response = "I encountered an error processing your message. Please try again."
@@ -1010,7 +1097,10 @@ class MessageHandler:
             deferred = defer_state.was_called
 
             if not suppressed and not deferred:
-                response = self._guardrails.sanitize_output(response)
+                if direction == "outbound":
+                    response = self._prepare_outbound_text(response)
+                else:
+                    response = self._guardrails.sanitize_output(response)
                 if len(response) > self._max_response_length:
                     response = response[: self._max_response_length - 3] + "..."
 

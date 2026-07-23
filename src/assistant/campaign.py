@@ -265,7 +265,11 @@ class CampaignManager:
             if campaign is None:
                 return None
             for key, value in kwargs.items():
-                if hasattr(campaign, key) and key not in ("id", "created_at", "targets"):
+                if key in campaign.__dataclass_fields__ and key not in (
+                    "id",
+                    "created_at",
+                    "targets",
+                ):
                     setattr(campaign, key, value)
             campaign.updated_at = time.time()
         self.save()
@@ -316,7 +320,7 @@ class CampaignManager:
                 target.status = "active"
 
             try:
-                framed = f"[Campaign outbound — goal: {goal}]\n" f"{instructions}"
+                framed = f"[Campaign outbound — goal: {goal}]\n{instructions}"
                 _response, msg_id = self._handler.handle_outbound(
                     contact_name=target.contact_name,
                     instructions=framed,
@@ -332,6 +336,8 @@ class CampaignManager:
                     target.contact_name,
                     exc,
                 )
+                with self._lock:
+                    target.status = "pending"
                 results[target.contact_name] = f"error: {exc}"
 
         self.save()
@@ -425,8 +431,7 @@ class CampaignManager:
                 return
             if self._handler is None:
                 raise RuntimeError(
-                    "CampaignManager.start() called before set_handler(); "
-                    "wire dependencies first"
+                    "CampaignManager.start() called before set_handler(); wire dependencies first"
                 )
             self._stop_event.clear()
             self._thread = threading.Thread(

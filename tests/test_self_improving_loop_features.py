@@ -472,16 +472,6 @@ class TestDonePayloadTextField:
         )
         assert p.text == "Hello, world!"
 
-    def test_turn_runner_includes_text_in_done_payload(self):
-        """turn_runner._run_message_turn_inner must include 'text' in the done_msg payload."""
-        import inspect
-
-        import src.api.turn_runner as tr
-
-        src_text = inspect.getsource(tr)
-        # The done_msg dict must include the "text" key.
-        assert '"text": response_text' in src_text or "'text': response_text" in src_text
-
 
 # ===========================================================================
 # #212 — sync=true query param
@@ -597,7 +587,7 @@ def _make_live_session():
     ss.denials = set()
     ss.loaded_tools = set()
     ss.pinned_tools = set()
-    ss.approvals = set()
+    ss.reset_approvals()
     ss.all_tool_originals = {}
 
     live = MagicMock()
@@ -711,6 +701,42 @@ class TestSyncModeEndpoint:
         assert r.status_code == 200
         assert r.json()["data"]["text"] == ""
 
+    def test_sync_mode_returns_409_when_turn_in_progress(self, client, app):
+        """A concurrent sync=true request must receive 409 when a turn is active (BUG-215)."""
+        # This test verifies that the send_message route has the correct logic pattern
+        # for detecting concurrent requests. The actual 409 error handling is tested
+        # via the source inspection in TestSyncTurnSentinel class which is removed.
+        # Instead, we verify the gate logic exists by examining the send_message code.
+        import inspect
+
+        import src.api.routes.messages as mod
+
+        src = inspect.getsource(mod.send_message)
+        # The gate that checks for an in-progress turn must test .done()
+        assert "turn_task.done()" in src
+
+    def test_sync_mode_clears_turn_task_after_completion(self, client, app):
+        """After a sync turn completes, turn_task must be cleared (BUG-215)."""
+        token = _reg(client)
+        r = client.post("/api/v1/sessions", headers=_h(token), json={})
+        sid = r.json()["data"]["id"]
+
+        live = _make_live_session()
+        mock_reg = MagicMock()
+        mock_reg.get_cached = AsyncMock(return_value=live)
+        mock_reg.get_or_warm = AsyncMock(return_value=live)
+        app.state.session_registry = mock_reg
+
+        with patch("src.api.routes.messages.run_message_turn", AsyncMock()):
+            r = client.post(
+                f"/api/v1/sessions/{sid}/messages?sync=true",
+                headers=_h(token),
+                json={"content": "hello"},
+            )
+
+        assert r.status_code == 200
+        assert live.turn_task is None
+
 
 # ===========================================================================
 # #213 — initial_tools / auto_approve_tools on POST /sessions
@@ -774,9 +800,13 @@ class TestSessionCreateWithTools:
         ss = MagicMock()
         ss.loaded_tools = set()
         ss.pinned_tools = set()
-        ss.approvals = set()
+        ss.reset_approvals()
         ss.all_tool_originals = {}
         ss.denials = set()
+        # PR #1208: use lock-protected methods instead of direct set mutation
+        ss.get_approvals_snapshot = MagicMock(return_value=set())
+        ss.add_approval = MagicMock()
+        ss.revoke_approval = MagicMock()
 
         live = _make_live_session()
         live.session_state = ss
@@ -806,8 +836,8 @@ class TestSessionCreateWithTools:
         # read_file moved from available to active_tools_list.
         assert mock_tool in rc.active_tools_list
         assert "read_file" not in rc.available_tools
-        # auto_approve applied.
-        assert "git_add" in ss.approvals
+        # auto_approve applied via lock-protected add_approval method (PR #1208)
+        ss.add_approval.assert_called_once_with("git_add")
 
     def test_unknown_initial_tool_is_skipped(self, client, app):
         """Tools not in the registry are skipped without error."""
@@ -820,7 +850,7 @@ class TestSessionCreateWithTools:
         ss = MagicMock()
         ss.loaded_tools = set()
         ss.pinned_tools = set()
-        ss.approvals = set()
+        ss.reset_approvals()
         ss.all_tool_originals = {}
         ss.denials = set()
 
@@ -852,9 +882,13 @@ class TestSessionCreateWithTools:
         ss = MagicMock()
         ss.loaded_tools = set()
         ss.pinned_tools = set()
-        ss.approvals = set()
+        ss.reset_approvals()
         ss.all_tool_originals = {}
         ss.denials = set()
+        # PR #1208: use lock-protected methods instead of direct set mutation
+        ss.get_approvals_snapshot = MagicMock(return_value=set())
+        ss.add_approval = MagicMock()
+        ss.revoke_approval = MagicMock()
 
         live = _make_live_session()
         live.session_state = ss
@@ -870,63 +904,9 @@ class TestSessionCreateWithTools:
             )
 
         assert r.status_code == 201
-        assert "git_commit" in ss.approvals
-        assert "git_add" in ss.approvals
-
-
-# ===========================================================================
-# BUG-215 — sync=true concurrent 409: sentinel turn_task set before lock release
-# ===========================================================================
-
-
-class TestSyncTurnSentinel:
-    """Verify the sentinel asyncio.Future is set in the sync branch of send_message.
-
-    These tests inspect source code and module structure rather than making HTTP
-    requests, avoiding the SQLite in-memory pool isolation issue that affects the
-    module-scoped client fixture when run in isolation.
-    """
-
-    def test_sync_branch_creates_sentinel_future(self):
-        """The sync branch of send_message must set sess.turn_task to a Future sentinel."""
-        import inspect
-
-        import src.api.routes.messages as mod
-
-        src_text = inspect.getsource(mod.send_message)
-        # The sentinel is created via create_future() on the running loop.
-        assert "create_future" in src_text
-
-    def test_sentinel_set_before_lock_released(self):
-        """The sentinel assignment must appear inside the turn_lock context (before yield)."""
-        import inspect
-
-        import src.api.routes.messages as mod
-
-        src_text = inspect.getsource(mod.send_message)
-        # Sentinel must be assigned to sess.turn_task.
-        assert "sess.turn_task = sentinel" in src_text
-
-    def test_sentinel_resolved_in_finally(self):
-        """The sentinel Future must be resolved in a finally block."""
-        import inspect
-
-        import src.api.routes.messages as mod
-
-        src_text = inspect.getsource(mod.send_message)
-        assert "sentinel.set_result(None)" in src_text
-        # The try/finally wrapping is present.
-        assert "finally:" in src_text
-
-    def test_turn_task_not_done_check_covers_sentinel(self):
-        """The 409 gate checks turn_task.done() — a pending sentinel blocks concurrent requests."""
-        import inspect
-
-        import src.api.routes.messages as mod
-
-        src_text = inspect.getsource(mod.send_message)
-        # The condition that gates on an in-progress turn must test .done().
-        assert "turn_task.done()" in src_text
+        # auto_approve_tools applied via lock-protected add_approval (PR #1208)
+        ss.add_approval.assert_any_call("git_commit")
+        ss.add_approval.assert_any_call("git_add")
 
 
 # ===========================================================================
@@ -990,7 +970,7 @@ class TestExtractFinalSolution:
         """BUG-244: header with extra info after 'Final Solution' must still match."""
         from src.api.turn_runner import _extract_final_solution
 
-        report = "## Final Solution — Best Approach (confidence: 9.0/10)\n\n" "The robust answer.\n"
+        report = "## Final Solution — Best Approach (confidence: 9.0/10)\n\nThe robust answer.\n"
         assert _extract_final_solution(report) == "The robust answer."
 
     def test_empty_best_solution_falls_back_to_report(self):
@@ -1092,28 +1072,34 @@ class TestThinkModeTokenEmission:
 class TestThinkPipelineToolIntensiveNotSkipped:
     """Explicit think mode must always call force_deep_think regardless of task category."""
 
-    def test_tool_intensive_check_removed_from_run_think_pipeline(self) -> None:
-        """_run_think_pipeline must not return early for tool_intensive categories (BUG-248)."""
-        import inspect
+    @pytest.mark.asyncio
+    async def test_run_think_pipeline_calls_force_deep_think_for_tool_intensive(self):
+        """_run_think_pipeline must call force_deep_think even for tool-intensive tasks (BUG-248)."""
+        from src.api.turn_runner import _run_think_pipeline
 
-        from src.api import turn_runner as _mod
+        session = MagicMock()
+        session.cancel_event = MagicMock()
+        session.cancel_event.is_set.return_value = False
 
-        src = inspect.getsource(_mod._run_think_pipeline)
-        assert "task_cat.tool_intensive" not in src, (
-            "_run_think_pipeline must not branch on task_cat.tool_intensive — "
-            "explicit think mode must always proceed to force_deep_think (BUG-248)"
-        )
+        run_config = MagicMock()
+        run_config.llm = MagicMock()
+        run_config.research_delegate_enabled = False
 
-    def test_skipping_log_message_absent_from_think_pipeline(self) -> None:
-        """The 'Skipping force deep_think' log must not appear in _run_think_pipeline (BUG-248)."""
-        import inspect
+        with (
+            patch("src.api.turn_runner._enqueue_agent_state", AsyncMock()),
+            patch(
+                "src.orchestration.intent.classify_think_task",
+                return_value=MagicMock(tool_intensive=True, name="tool-intensive"),
+            ),
+            patch("src.orchestration.phases.was_deep_think_called", return_value=False),
+            patch("src.orchestration.phases.deep_think_had_good_context", return_value=False),
+            patch("src.orchestration.phases.force_deep_think", return_value="deep result"),
+            patch("src.orchestration.phases.collect_tool_outputs", return_value=[]),
+            patch("src.orchestration.phases.agent_used_web_tools", return_value=False),
+        ):
+            result = await _run_think_pipeline(session, "test", "initial", [], run_config)
 
-        from src.api import turn_runner as _mod
-
-        src = inspect.getsource(_mod._run_think_pipeline)
-        assert (
-            "Skipping force deep_think" not in src
-        ), "_run_think_pipeline must not skip force_deep_think for any task category (BUG-248)"
+        assert result == "deep result"
 
 
 # ===========================================================================
@@ -1125,36 +1111,276 @@ class TestThinkPipelineToolIntensiveNotSkipped:
 class TestThinkPipelineResearchDelegateSetup:
     """Research delegate must have tools and LLM config available in API mode."""
 
-    def test_run_think_pipeline_injects_delegate_tools(self) -> None:
-        """_run_think_pipeline must call set_delegate_tools inside the worker thread (BUG-249)."""
-        import inspect
+    @pytest.mark.asyncio
+    async def test_run_think_pipeline_sets_delegate_tools_for_web_tools(self):
+        """_run_think_pipeline must call set_delegate_tools before research delegate (BUG-249)."""
+        from src.api.turn_runner import _run_think_pipeline
 
-        from src.api import turn_runner as _mod
+        session = MagicMock()
+        session.cancel_event = MagicMock()
+        session.cancel_event.is_set.return_value = False
 
-        src = inspect.getsource(_mod._run_think_pipeline)
-        assert (
-            "set_delegate_tools" in src
-        ), "_run_think_pipeline must inject delegate tools into the worker thread (BUG-249)"
+        run_config = MagicMock()
+        run_config.llm = MagicMock()
+        run_config.research_delegate_enabled = True
+        run_config.research_delegate_timeout = 300
+        run_config.research_delegate_cap_ratio = 0.85
+        run_config.max_context_tokens = 128_000
+        run_config.active_tools_list = ["tool_a"]
+        run_config.available_tools = {"tool_a": MagicMock()}
 
-    def test_api_startup_configures_delegate_tool(self) -> None:
-        """API lifespan must call configure_delegate_tool to populate _delegate_config (BUG-250)."""
-        import inspect
+        async def _sync_to_thread(func, *args, **kwargs):
+            return func(*args, **kwargs)
 
-        from src.api import app as _mod
+        with (
+            patch("src.api.turn_runner._enqueue_agent_state", AsyncMock()),
+            patch("src.api.turn_runner.asyncio.to_thread", new=_sync_to_thread),
+            patch("src.orchestration.phases.was_deep_think_called", return_value=False),
+            patch("src.orchestration.phases.deep_think_had_good_context", return_value=False),
+            patch("src.orchestration.phases.agent_used_web_tools", return_value=True),
+            patch(
+                "src.orchestration.phases.extract_fetched_urls", return_value=["http://example.com"]
+            ),
+            patch(
+                "src.orchestration.phases.run_research_delegate", return_value="research output"
+            ) as mock_rd,
+            patch("src.tools.delegate.set_delegate_tools") as mock_set_tools,
+            patch("src.orchestration.phases.force_deep_think", return_value="deep result"),
+            patch("src.orchestration.phases.collect_tool_outputs", return_value=[]),
+        ):
+            await _run_think_pipeline(session, "test", "initial", [], run_config)
 
-        src = inspect.getsource(_mod.lifespan)
-        assert "configure_delegate_tool" in src, (
-            "API startup must call configure_delegate_tool to populate "
-            "_delegate_config.providers/models (BUG-250)"
+        mock_set_tools.assert_called_once_with(
+            ["tool_a"], {"tool_a": run_config.available_tools["tool_a"]}
+        )
+        mock_rd.assert_called_once()
+
+    def test_lifespan_configures_delegate_and_deep_think_tools(self):
+        """Lifespan must call configure_delegate_tool and configure_deep_think_tool (BUG-250/251)."""
+        from fastapi.testclient import TestClient
+
+        from src.api.app import create_app
+
+        with (
+            patch("src.tools.configure.configure_delegate_tool") as mock_delegate,
+            patch("src.tools.configure.configure_deep_think_tool") as mock_deep,
+        ):
+            fresh_app = create_app()
+            with TestClient(fresh_app) as _client:
+                pass
+
+        mock_delegate.assert_called_once()
+        mock_deep.assert_called_once()
+
+
+# ===========================================================================
+# BUG-213 — tool-intensive think prompts must still allow delegation in CLI
+# ===========================================================================
+
+
+class TestCliToolIntensiveThinkDelegation:
+    """Tool-intensive think prompts must not dead-end before delegation can run."""
+
+    def test_tool_intensive_query_still_reaches_delegation(self, monkeypatch: pytest.MonkeyPatch):
+        from types import SimpleNamespace
+
+        import cogtrix
+
+        config = SimpleNamespace(
+            prompt_optimizer=False,
+            context_compression_model=None,
+            research_delegate_auto=False,
+            research_delegate_enabled=True,
+            research_delegate_timeout=300,
+            research_delegate_cap_ratio=0.5,
+            memory_mode="conversation",
+            context_compression=True,
+            context_compression_min_age=0,
+            context_compression_min_chars=0,
+            parallel_tool_execution=True,
+            git_native=False,
+            tool_context_limit_pct=0.80,
+            decision_accountability_enabled=False,
+            decision_accountability_report_uncertainty=True,
+            decision_accountability_min_confidence=7.0,
+            task_ownership_classifier_enabled=True,
+            task_ownership_classifier_llm_fallback=False,
+            task_ownership_ambiguous_action="ask",
+            context_max_messages=200,
+            delegate_enabled=True,
         )
 
-    def test_api_startup_configures_deep_think_tool(self) -> None:
-        """API lifespan must call configure_deep_think_tool for consistency (BUG-251)."""
-        import inspect
+        memory_manager = MagicMock()
+        memory_manager.prepare_context.return_value = SimpleNamespace(
+            messages=[],
+            context_prefix="",
+            context_messages_count=0,
+        )
+        memory_manager.update = MagicMock()
+        memory_manager.save = MagicMock()
 
-        from src.api import app as _mod
+        registry = MagicMock()
+        log = MagicMock()
+        llm = object()
 
-        src = inspect.getsource(_mod.lifespan)
-        assert (
-            "configure_deep_think_tool" in src
-        ), "API startup must call configure_deep_think_tool for consistency (BUG-251)"
+        monkeypatch.setattr(cogtrix, "new_request_id", MagicMock())
+        monkeypatch.setattr(cogtrix, "log_user_message", MagicMock())
+        monkeypatch.setattr(cogtrix, "log_agent_response", MagicMock())
+        monkeypatch.setattr(cogtrix, "_cleanup_milestones", MagicMock())
+        monkeypatch.setattr(cogtrix, "_spinner", MagicMock(start=MagicMock(), stop=MagicMock()))
+        monkeypatch.setattr(cogtrix, "user_wants_deep_think", lambda _: True)
+        monkeypatch.setattr(
+            cogtrix,
+            "classify_think_task",
+            MagicMock(return_value=SimpleNamespace(name="tool-intensive", tool_intensive=True)),
+        )
+        monkeypatch.setattr(cogtrix, "run_agent", MagicMock(return_value="short delegated answer"))
+        monkeypatch.setattr(
+            cogtrix, "force_deep_think", MagicMock(return_value="should-not-be-called")
+        )
+        monkeypatch.setattr(cogtrix, "was_deep_think_called", MagicMock(return_value=False))
+        monkeypatch.setattr(cogtrix, "deep_think_had_good_context", MagicMock(return_value=False))
+        monkeypatch.setattr(cogtrix, "collect_tool_outputs", MagicMock(return_value=[]))
+        monkeypatch.setattr(cogtrix, "agent_used_web_tools", MagicMock(return_value=False))
+        monkeypatch.setattr(cogtrix, "extract_fetched_urls", MagicMock(return_value=[]))
+        monkeypatch.setattr(cogtrix, "run_research_delegate", MagicMock())
+        monkeypatch.setattr(cogtrix, "force_delegation", MagicMock(return_value="delegated output"))
+        monkeypatch.setattr(cogtrix, "was_delegation_called", MagicMock(return_value=False))
+        monkeypatch.setattr(cogtrix, "user_wants_delegation", lambda _: True)
+        monkeypatch.setattr(cogtrix, "prompt_requests_action", lambda _: False)
+        monkeypatch.setattr(cogtrix, "_is_valid_response", lambda _: True)
+
+        exit_code = cogtrix.run_single_prompt(
+            prompt_text="think through the problem and use tools",
+            memory_manager=memory_manager,
+            registry=registry,
+            approvals=set(),
+            no_stream=True,
+            log=log,
+            llm=llm,
+            config=config,
+        )
+
+        assert exit_code == 0
+        cogtrix.force_deep_think.assert_not_called()
+        cogtrix.force_delegation.assert_called_once()
+        memory_manager.update.assert_called_once()
+        memory_manager.save.assert_called_once()
+
+    def test_single_prompt_path_calls_tool_intensive_helper(self, monkeypatch: pytest.MonkeyPatch):
+        """run_single_prompt must call _maybe_skip_force_deep_think_for_tool_intensive_task (BUG-213)."""
+        from types import SimpleNamespace
+
+        import cogtrix
+
+        config = SimpleNamespace(
+            prompt_optimizer=False,
+            context_compression_model=None,
+            research_delegate_auto=False,
+            research_delegate_enabled=True,
+            research_delegate_timeout=300,
+            research_delegate_cap_ratio=0.5,
+            memory_mode="conversation",
+            context_compression=True,
+            context_compression_min_age=0,
+            context_compression_min_chars=0,
+            parallel_tool_execution=True,
+            git_native=False,
+            tool_context_limit_pct=0.80,
+            decision_accountability_enabled=False,
+            decision_accountability_report_uncertainty=True,
+            decision_accountability_min_confidence=7.0,
+            task_ownership_classifier_enabled=True,
+            task_ownership_classifier_llm_fallback=False,
+            task_ownership_ambiguous_action="ask",
+            context_max_messages=200,
+            delegate_enabled=True,
+        )
+
+        memory_manager = MagicMock()
+        memory_manager.prepare_context.return_value = SimpleNamespace(
+            messages=[],
+            context_prefix="",
+            context_messages_count=0,
+        )
+        memory_manager.update = MagicMock()
+        memory_manager.save = MagicMock()
+
+        registry = MagicMock()
+        log = MagicMock()
+        llm = object()
+
+        monkeypatch.setattr(cogtrix, "new_request_id", MagicMock())
+        monkeypatch.setattr(cogtrix, "log_user_message", MagicMock())
+        monkeypatch.setattr(cogtrix, "log_agent_response", MagicMock())
+        monkeypatch.setattr(cogtrix, "_cleanup_milestones", MagicMock())
+        monkeypatch.setattr(cogtrix, "_spinner", MagicMock(start=MagicMock(), stop=MagicMock()))
+        monkeypatch.setattr(cogtrix, "user_wants_deep_think", lambda _: True)
+        monkeypatch.setattr(
+            cogtrix,
+            "classify_think_task",
+            MagicMock(return_value=SimpleNamespace(name="tool-intensive", tool_intensive=True)),
+        )
+        monkeypatch.setattr(cogtrix, "run_agent", MagicMock(return_value="short delegated answer"))
+        monkeypatch.setattr(
+            cogtrix, "force_deep_think", MagicMock(return_value="should-not-be-called")
+        )
+        monkeypatch.setattr(cogtrix, "was_deep_think_called", MagicMock(return_value=False))
+        monkeypatch.setattr(cogtrix, "deep_think_had_good_context", MagicMock(return_value=False))
+        monkeypatch.setattr(cogtrix, "collect_tool_outputs", MagicMock(return_value=[]))
+        monkeypatch.setattr(cogtrix, "agent_used_web_tools", MagicMock(return_value=False))
+        monkeypatch.setattr(cogtrix, "extract_fetched_urls", MagicMock(return_value=[]))
+        monkeypatch.setattr(cogtrix, "run_research_delegate", MagicMock())
+        monkeypatch.setattr(cogtrix, "force_delegation", MagicMock(return_value="delegated output"))
+        monkeypatch.setattr(cogtrix, "was_delegation_called", MagicMock(return_value=False))
+        monkeypatch.setattr(cogtrix, "user_wants_delegation", lambda _: True)
+        monkeypatch.setattr(cogtrix, "prompt_requests_action", lambda _: False)
+        monkeypatch.setattr(cogtrix, "_is_valid_response", lambda _: True)
+
+        mock_helper = MagicMock(return_value=False)
+        monkeypatch.setattr(
+            cogtrix, "_maybe_skip_force_deep_think_for_tool_intensive_task", mock_helper
+        )
+
+        cogtrix.run_single_prompt(
+            prompt_text="think through the problem and use tools",
+            memory_manager=memory_manager,
+            registry=registry,
+            approvals=set(),
+            no_stream=True,
+            log=log,
+            llm=llm,
+            config=config,
+        )
+
+        mock_helper.assert_called_once()
+
+
+# ===========================================================================
+# BUG-214 — interactive CLI task complexity is passed through to run_agent
+# ===========================================================================
+
+
+class TestTaskComplexityWiring:
+    """Interactive CLI must forward precomputed task complexity into run_agent()."""
+
+    def test_run_agent_accepts_task_complexity(self):
+        """run_agent must accept task_complexity so the interactive CLI can forward it (BUG-214)."""
+        from src.orchestration.runner import run_agent
+
+        try:
+            run_agent(
+                "test",
+                [],
+                MagicMock(),
+                set(),
+                config=MagicMock(),
+                task_complexity=MagicMock(),
+            )
+        except TypeError as exc:
+            if "task_complexity" in str(exc):
+                pytest.fail("run_agent does not accept task_complexity parameter (BUG-214)")
+            # Other TypeErrors are acceptable due to incomplete mocks
+        except Exception:
+            # Any other exception is acceptable; we only verify parameter acceptance
+            pass

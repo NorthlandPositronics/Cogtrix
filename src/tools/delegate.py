@@ -15,6 +15,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from src.agent.safety import UserCancelledRun
 from src.logging_config import get_logger, log_delegation
 
 log = get_logger()
@@ -55,14 +56,32 @@ def get_delegate_tools() -> list[Any]:
     return getattr(_delegate_tools_tls, "tools", [])
 
 
-# Names excluded from the delegate tool set to prevent recursion
-# and keep delegate execution fast.
+# Names excluded from the delegate tool set to prevent recursion,
+# keep delegate execution fast, and sandbox delegates from destructive
+# operations (shell execution, file writes, arbitrary code execution).
 _DELEGATE_EXCLUDED_TOOLS = frozenset(
     {
+        # Delegation / recursion
         "delegate_task",
         "delegate_parallel",
         "deep_think",
         "request_tools",
+        # Shell / code execution
+        "execute_shell_command",
+        "execute_python",
+        # File mutation
+        "write_file",
+        "patch_file",
+        "append_file",
+        # Outbound network / messaging
+        "http_post",
+        "send_email",
+        "whatsapp_send",
+        "whatsapp_send_image",
+        "telegram_send",
+        "telegram_send_photo",
+        # Self-modification
+        "self_improve",
     }
 )
 
@@ -73,13 +92,14 @@ def set_delegate_tools(
 ) -> None:
     """Register tools that delegate agents can use.
 
-    Delegates receive **all** tools — both the currently active set and
-    any on-demand tools that the main agent hasn't activated yet.  This
-    means delegates can read files, run shell commands, search the web,
-    etc. from the very first invocation without needing to request tools.
+    Delegates receive the main agent's active and available tool sets,
+    minus a sandbox exclusion list.  Destructive tools (shell execution,
+    file writes, arbitrary code execution, outbound messaging, and
+    self-modification) are stripped so delegates operate in a read-only
+    and research-oriented scope.
 
-    Delegation tools and ``deep_think`` are automatically excluded to
-    prevent recursion.
+    Delegation tools and ``deep_think`` are also excluded to prevent
+    recursion.
 
     Parameters
     ----------
@@ -87,7 +107,7 @@ def set_delegate_tools(
         The main agent's currently active tool list.
     available_tools:
         On-demand tools not yet active in the main agent.  Merged into
-        the delegate toolset so delegates have full capabilities.
+        the delegate toolset after sandbox filtering.
     """
     seen: set[str] = set()
     merged: list[Any] = []
@@ -382,7 +402,7 @@ class DelegateParallelInput(BaseModel):
             "List of tasks to run in parallel. Each task is a dict with: "
             "'task' (required), 'context', 'use_tools' (default True), "
             "'response_format', 'json_schema', 'provider', 'model', "
-            "'temperature'"
+            "'temperature', 'timeout'"
         )
     )
     timeout: int = Field(
@@ -715,8 +735,6 @@ def run_delegate_agent(
         return ""  # empty signals caller to fall back
 
     prompt = _DELEGATE_AGENT_SYSTEM_PROMPT
-    if context:
-        prompt += f"\n## Provided Context\n\n{context}\n"
 
     try:
         agent = create_react_agent(
@@ -729,10 +747,20 @@ def run_delegate_agent(
         return f"Error: delegate agent failed ({type(exc).__name__}: {exc})"
 
     try:
-        if LANGCHAIN_MESSAGES_AVAILABLE:
-            input_msg = HumanMessage(content=task)
+        # Build user message: context comes from the user (or upstream
+        # LLM output) and MUST NOT be appended to the system prompt.
+        # Passing it as user-role content prevents prompt injection
+        # where an attacker embeds system-level override instructions
+        # in the context field (issue #1004).
+        if context:
+            user_content = f"**Context:**\n\n{context}\n\n---\n\n**Task:** {task}"
         else:
-            input_msg = {"role": "user", "content": task}
+            user_content = task
+
+        if LANGCHAIN_MESSAGES_AVAILABLE:
+            input_msg = HumanMessage(content=user_content)
+        else:
+            input_msg = {"role": "user", "content": user_content}
 
         result = agent.invoke(
             {"messages": [input_msg]},
@@ -748,8 +776,14 @@ def run_delegate_agent(
             if msg_type in ("aimessage", "ai"):
                 if not getattr(msg, "tool_calls", None):
                     return msg_content
-        return _extract_content(messages[-1]) if messages else ""
+        if messages:
+            last_content = _extract_content(messages[-1])
+            if last_content.strip():
+                return last_content
+        return "Error: delegate agent returned no substantive response"
 
+    except UserCancelledRun:
+        raise
     except Exception as exc:
         if "recursion" in type(exc).__name__.lower() or "recursion" in str(exc).lower():
             log.warning("Delegate exceeded step limit: %s", exc, exc_info=True)
@@ -869,6 +903,8 @@ def _execute_single_task(
             error=None,
         )
 
+    except UserCancelledRun:
+        raise
     except Exception as e:
         duration = time.time() - start_time
         error_msg = str(e)
@@ -943,6 +979,9 @@ def delegate_task(
     if not _delegate_config.get("enabled", True):
         return "**Delegation disabled.** Enable in configuration."
 
+    # Guard against None context (safe default)
+    context = context or ""
+
     # Reject LLM-only delegation with empty context
     if not use_tools and not context.strip():
         return (
@@ -969,6 +1008,10 @@ def delegate_task(
     # Fill in defaults for anything still None after alias resolution
     resolved_provider, resolved_model = resolve_delegate_defaults(resolved_provider, resolved_model)
 
+    # Guard against None from alias config overrides
+    timeout = timeout if timeout is not None else 60
+    temperature = temperature if temperature is not None else 0.5
+
     # Clamp timeout and temperature to valid ranges
     timeout = max(10, min(600, timeout))  # Allow up to 600s for reasoning models
     temperature = max(0.0, min(2.0, temperature))
@@ -976,7 +1019,7 @@ def delegate_task(
     # Show delegation activity to the user
     alias_hint = f" (alias: {model})" if model and model != resolved_model else ""
     mode_hint = " (with tools)" if use_tools and get_delegate_tools() else ""
-    _emit_status(f"→ Delegating to {resolved_provider}/{resolved_model}" f"{alias_hint}{mode_hint}")
+    _emit_status(f"→ Delegating to {resolved_provider}/{resolved_model}{alias_hint}{mode_hint}")
 
     # Execute with timeout — use explicit executor management so that
     # a timeout does not block in executor.__exit__(wait=True).
@@ -1000,7 +1043,7 @@ def delegate_task(
         except FuturesTimeoutError:
             future.cancel()
             _emit_status(f"✗ Delegation timed out after {timeout}s")
-            return f"**Delegation timed out** after {timeout}s.\n\n" f"Task: {task[:100]}..."
+            return f"**Delegation timed out** after {timeout}s.\n\nTask: {task[:100]}..."
     finally:
         executor.shutdown(wait=False, cancel_futures=True)
 
@@ -1063,7 +1106,7 @@ def delegate_parallel(
         if error:
             return f"**Delegation blocked (task {i + 1}):** {error}"
         task_use_tools = task_def.get("use_tools", True)
-        task_context = task_def.get("context", "")
+        task_context = task_def.get("context") or ""
         if not task_use_tools and not task_context.strip():
             return (
                 f"**Delegation rejected (task {i + 1}):** context is empty "
@@ -1116,6 +1159,15 @@ def delegate_parallel(
         )
         return (index, result)
 
+    def _resolve_task_timeout(task_def: dict[str, Any]) -> int:
+        """Resolve a per-task timeout and clamp it to the supported range."""
+        raw_timeout = task_def.get("timeout", timeout)
+        try:
+            task_timeout = int(raw_timeout)
+        except (TypeError, ValueError):
+            task_timeout = timeout
+        return max(10, min(600, task_timeout))
+
     # Execute all tasks in parallel — use explicit executor management so that
     # a timeout does not block in executor.__exit__(wait=True).
     executor = ThreadPoolExecutor(max_workers=min(len(tasks), 10))
@@ -1129,6 +1181,7 @@ def delegate_parallel(
         # timeout entries are associated with the correct task.
         for i, future in enumerate(futures):
             try:
+                task_timeout = _resolve_task_timeout(tasks[i])
                 remaining = timeout - (time.time() - start_time)
                 if remaining <= 0:
                     future.cancel()
@@ -1148,7 +1201,7 @@ def delegate_parallel(
                         )
                     )
                 else:
-                    results.append(future.result(timeout=remaining))
+                    results.append(future.result(timeout=min(remaining, task_timeout)))
             except FuturesTimeoutError:
                 future.cancel()
                 results.append(
@@ -1205,13 +1258,12 @@ def delegate_parallel(
     ]
 
     for i, (_idx, result) in enumerate(results):
-        task_desc = tasks[i].get("task", "")[:50]
+        task_desc = (tasks[i].get("task") or "")[:50]
         output_parts.append(f"---\n### Task {i + 1}: {task_desc}...")
 
         if result.success:
             output_parts.append(
-                f"**Model:** `{result.provider}/{result.model_used}` "
-                f"({result.duration_seconds}s)"
+                f"**Model:** `{result.provider}/{result.model_used}` ({result.duration_seconds}s)"
             )
             if tasks[i].get("response_format") == "json":
                 status = "✓" if result.format_valid else "✗"

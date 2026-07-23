@@ -162,6 +162,22 @@ class TestChatSessionManager:
 
         assert s1 is s2
 
+    def test_get_or_create_existing_session_updates_last_activity(self):
+        """get_or_create() updates last_activity when returning an existing session."""
+        mock_mm = _make_mock_memory_manager()
+        mgr = _make_manager()
+        msg = _make_msg(channel="telegram", chat_id="200")
+
+        with self._patched_create(mgr, mock_mm):
+            s1 = mgr.get_or_create(msg)
+            original_activity = s1.last_activity
+            # Simulate time passing
+            time.sleep(0.01)
+            s2 = mgr.get_or_create(msg)
+
+        assert s1 is s2
+        assert s2.last_activity > original_activity
+
     def test_different_keys_produce_different_sessions(self):
         """Different (channel, chat_id) pairs produce independent sessions."""
         mock_mm = _make_mock_memory_manager()

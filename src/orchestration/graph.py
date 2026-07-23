@@ -14,15 +14,17 @@ import threading
 import time
 import types
 import typing
-from collections import OrderedDict
-from dataclasses import dataclass
+from collections import Counter, OrderedDict
+from dataclasses import asdict, dataclass, is_dataclass
 from difflib import SequenceMatcher
 from typing import Any
 
+from opentelemetry.trace import Status, StatusCode
+
 from src.agent.core import CogtrixState
 from src.agent.safety import UserCancelledRun
-from src.agent.safety import create_safe_tool_wrapper as _safe_wrap
-from src.logging_config import get_logger, is_trace
+from src.api.telemetry import start_span
+from src.logging_config import get_logger
 from src.orchestration.compression import (
     _CHARS_PER_TOKEN,
     _EMERGENCY_THRESHOLD_RATIO,
@@ -31,26 +33,33 @@ from src.orchestration.compression import (
     COMPRESSION_MIN_CHARS,
     _content_len,
     apply_message_compression,
+    truncate_tool_output,
+)
+from src.orchestration.nodes.process_tools import build_process_tools_node
+from src.orchestration.nodes.recovery import (
+    build_handle_action_intent_node,
+    build_handle_phantom_node,
 )
 from src.orchestration.run_config import AgentRunConfig
 from src.orchestration.session_state import SessionState
 from src.registry import LazyToolProxy as _LazyToolProxy
 from src.tools.configure import (
     TOOL_OUTPUT_CAP_MIN_CHARS,
-    apply_output_cap,
     build_tool_catalog,
     compute_tool_output_cap,
-    configure_delegate_tools,
-    create_request_tools_tool,
 )
-from src.tools.resolver import resolve_tool_name as _resolve_tool_name
 
 DEFAULT_RECURSION_LIMIT = 90
 EMPTY_RESPONSE_MSG = "**Error:** The model returned an empty response. Please try again."
 _PARALLEL_TOOL_WORKERS = 8
+_HISTORY_TOOL_MESSAGE_CAP_CHARS = 30_000
 
 _TOOL_EXECUTOR: concurrent.futures.ThreadPoolExecutor | None = None
 _TOOL_EXECUTOR_LOCK = threading.Lock()
+
+_LLM_EXECUTOR: concurrent.futures.ThreadPoolExecutor | None = None
+_LLM_EXECUTOR_LOCK = threading.Lock()
+_LLM_EXECUTOR_WORKERS = 4
 
 
 def _get_tool_executor() -> concurrent.futures.ThreadPoolExecutor:
@@ -65,6 +74,64 @@ def _get_tool_executor() -> concurrent.futures.ThreadPoolExecutor:
                 )
                 atexit.register(_TOOL_EXECUTOR.shutdown, wait=False, cancel_futures=True)
     return _TOOL_EXECUTOR
+
+
+def _get_llm_executor() -> concurrent.futures.ThreadPoolExecutor:
+    """Return the module-level LLM executor, creating it on first use.
+
+    Use a shared bounded pool instead of creating a fresh
+    ThreadPoolExecutor per LLM call to avoid thread leakage when
+    calls time out and the underlying OS thread stays blocked in I/O.
+    """
+    global _LLM_EXECUTOR
+    if _LLM_EXECUTOR is None:
+        with _LLM_EXECUTOR_LOCK:
+            if _LLM_EXECUTOR is None:
+                _LLM_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
+                    max_workers=_LLM_EXECUTOR_WORKERS,
+                    thread_name_prefix="llm",
+                )
+                atexit.register(_LLM_EXECUTOR.shutdown, wait=False, cancel_futures=True)
+    return _LLM_EXECUTOR
+
+
+def _extract_llm_labels(llm: Any) -> tuple[str, str]:
+    """Extract provider and model labels from a LangChain LLM instance.
+
+    Falls back to ``"unknown"`` when the LLM object does not expose the
+    expected attributes.
+    """
+    if llm is None:
+        return "unknown", "unknown"
+
+    # Model name — try common attribute names across LangChain providers.
+    model = getattr(llm, "model_name", None) or getattr(llm, "model", None) or ""
+    if not model:
+        _ident = getattr(llm, "_identifying_params", None) or {}
+        model = _ident.get("model_name") or _ident.get("model") or "unknown"
+
+    # Provider — normalize from _llm_type or class name.
+    _llm_type = getattr(llm, "_llm_type", None)
+    if _llm_type:
+        provider = _llm_type.lower().replace("chat-", "").replace("-chat", "")
+    else:
+        cls_name = type(llm).__name__.lower()
+        if "openai" in cls_name:
+            provider = "openai"
+        elif "anthropic" in cls_name:
+            provider = "anthropic"
+        elif "google" in cls_name:
+            provider = "google"
+        elif "ollama" in cls_name:
+            provider = "ollama"
+        elif "deepseek" in cls_name:
+            provider = "deepseek"
+        elif "xai" in cls_name:
+            provider = "xai"
+        else:
+            provider = "unknown"
+
+    return provider, model
 
 
 _INVALID_TOOL_RE = re.compile(r"^Error:\s*(\S+)\s+is not a valid tool")
@@ -101,6 +168,288 @@ def _is_context_overflow_error(exc: Exception) -> bool:
     # String fallback — covers providers that embed the message in the exc string
     msg = str(exc).lower()
     return any(p in msg for p in _CONTEXT_OVERFLOW_PATTERNS)
+
+
+def _stable_tool_call_value(value: Any, seen: set[int] | None = None) -> Any:
+    """Return a deterministic JSON-safe representation for tool-call args."""
+    if seen is None:
+        seen = set()
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, bytes):
+        return {"__type__": "builtins.bytes", "__value__": value.hex()}
+    if isinstance(value, bytearray):
+        return {"__type__": "builtins.bytearray", "__value__": bytes(value).hex()}
+    if is_dataclass(value) and not isinstance(value, type):
+        return {
+            "__type__": f"{type(value).__module__}.{type(value).__qualname__}",
+            "__state__": _stable_tool_call_value(asdict(value), seen),
+        }
+
+    model_dump = getattr(value, "model_dump", None)
+    if callable(model_dump):
+        try:
+            dumped = model_dump()
+        except Exception:
+            pass
+        else:
+            return {
+                "__type__": f"{type(value).__module__}.{type(value).__qualname__}",
+                "__state__": _stable_tool_call_value(dumped, seen),
+            }
+
+    obj_id = id(value)
+    if obj_id in seen:
+        return {
+            "__type__": f"{type(value).__module__}.{type(value).__qualname__}",
+            "__cycle__": True,
+        }
+
+    if isinstance(value, dict):
+        seen.add(obj_id)
+        try:
+            return {
+                str(key): _stable_tool_call_value(value[key], seen)
+                for key in sorted(value, key=lambda key: str(key))
+            }
+        finally:
+            seen.discard(obj_id)
+
+    if isinstance(value, list):
+        seen.add(obj_id)
+        try:
+            return [_stable_tool_call_value(item, seen) for item in value]
+        finally:
+            seen.discard(obj_id)
+
+    if isinstance(value, tuple):
+        seen.add(obj_id)
+        try:
+            return {
+                "__type__": "builtins.tuple",
+                "__items__": [_stable_tool_call_value(item, seen) for item in value],
+            }
+        finally:
+            seen.discard(obj_id)
+
+    if isinstance(value, (set, frozenset)):
+        seen.add(obj_id)
+        try:
+            items = [_stable_tool_call_value(item, seen) for item in value]
+            items.sort(key=lambda item: _json.dumps(item, sort_keys=True, separators=(",", ":")))
+            return {
+                "__type__": f"{type(value).__module__}.{type(value).__qualname__}",
+                "__items__": items,
+            }
+        finally:
+            seen.discard(obj_id)
+
+    if hasattr(value, "__dict__"):
+        seen.add(obj_id)
+        try:
+            return {
+                "__type__": f"{type(value).__module__}.{type(value).__qualname__}",
+                "__state__": {
+                    key: _stable_tool_call_value(attr, seen)
+                    for key, attr in sorted(vars(value).items())
+                    if not key.startswith("__")
+                },
+            }
+        finally:
+            seen.discard(obj_id)
+
+    slots = getattr(value, "__slots__", None)
+    if slots:
+        seen.add(obj_id)
+        try:
+            state: dict[str, Any] = {}
+            slot_names = (slots,) if isinstance(slots, str) else tuple(slots)
+            for slot in slot_names:
+                if hasattr(value, slot):
+                    state[slot] = _stable_tool_call_value(getattr(value, slot), seen)
+            return {
+                "__type__": f"{type(value).__module__}.{type(value).__qualname__}",
+                "__state__": state,
+            }
+        finally:
+            seen.discard(obj_id)
+
+    return {
+        "__type__": f"{type(value).__module__}.{type(value).__qualname__}",
+        "__value__": str(value),
+    }
+
+
+def _apply_context_budget_guard(
+    response: Any,
+    *,
+    max_context_tokens: int | None,
+    tool_context_limit_pct: float,
+) -> Any:
+    """Return a warning AIMessage when tool calls exceed the turn budget."""
+    if not max_context_tokens or not getattr(response, "tool_calls", None):
+        return response
+
+    um = getattr(response, "usage_metadata", None)
+    if not um or not isinstance(um, dict):
+        return response
+
+    turn_input = um.get("input_tokens", 0)
+    if not isinstance(turn_input, int) or turn_input <= max_context_tokens * tool_context_limit_pct:
+        return response
+
+    from langchain_core.messages import AIMessage
+
+    pct_used = int(turn_input * 100 / max_context_tokens)
+    warning = (
+        f"[Context budget reached — {pct_used}% of {max_context_tokens:,} "
+        f"tokens used this turn (limit: {int(tool_context_limit_pct * 100)}%). "
+        "Tool execution halted. Summarising based on available information.]"
+    )
+    return AIMessage(
+        content=warning,
+        id=getattr(response, "id", None),
+        response_metadata={"budget_guard": True},
+    )
+
+
+_TOPIC_SWITCH_MESSAGE_WINDOW = 8
+_TOPIC_SWITCH_MAX_WORDS = 15
+_TOPIC_SWITCH_MIN_SIMILARITY = 0.40
+_TOPIC_SWITCH_NUDGE = (
+    "The user has changed topic. Answer the new question directly without reference "
+    "to the prior task."
+)
+_TOPIC_SWITCH_STOPWORDS = {
+    "a",
+    "about",
+    "an",
+    "and",
+    "are",
+    "at",
+    "be",
+    "for",
+    "from",
+    "how",
+    "i",
+    "in",
+    "is",
+    "it",
+    "me",
+    "of",
+    "on",
+    "or",
+    "our",
+    "please",
+    "that",
+    "the",
+    "their",
+    "this",
+    "to",
+    "what",
+    "what's",
+    "whats",
+    "with",
+    "you",
+    "your",
+}
+
+
+def _topic_switch_tokens(text: str) -> list[str]:
+    """Return normalized content tokens used by the topic-switch heuristic."""
+    normalized = text.lower().replace("'s", "")
+    return [
+        token
+        for token in re.findall(r"[a-z0-9]+", normalized)
+        if len(token) > 2 and token not in _TOPIC_SWITCH_STOPWORDS
+    ]
+
+
+def _should_reset_summary_for_topic_switch(messages: list[Any]) -> bool:
+    """Return True when the latest user message appears to switch topics."""
+    if not messages:
+        return False
+
+    last_human_idx = -1
+    last_human_text = ""
+    for idx in range(len(messages) - 1, -1, -1):
+        msg = messages[idx]
+        if getattr(msg, "type", None) == "human":
+            last_human_idx = idx
+            content = getattr(msg, "content", "")
+            last_human_text = content if isinstance(content, str) else ""
+            break
+
+    if last_human_idx <= 0 or not last_human_text:
+        return False
+
+    if len(last_human_text.split()) >= _TOPIC_SWITCH_MAX_WORDS:
+        return False
+
+    current_tokens = _topic_switch_tokens(last_human_text)
+    if not current_tokens:
+        return False
+
+    reference_messages = messages[
+        max(0, last_human_idx - _TOPIC_SWITCH_MESSAGE_WINDOW) : last_human_idx
+    ]
+    reference_tokens: list[str] = []
+    for msg in reference_messages:
+        content = getattr(msg, "content", "")
+        if isinstance(content, str) and content:
+            reference_tokens.extend(_topic_switch_tokens(content))
+
+    if not reference_tokens:
+        return False
+
+    current_counts = Counter(current_tokens)
+    reference_counts = Counter(reference_tokens)
+    overlap = sum(min(count, reference_counts[token]) for token, count in current_counts.items())
+    similarity = overlap / max(len(current_tokens), len(reference_tokens))
+
+    has_question = "?" in last_human_text
+    if has_question:
+        return overlap <= 1 and similarity < _TOPIC_SWITCH_MIN_SIMILARITY
+
+    # Imperative commands ("check slack", "look at github") are valid topic
+    # switches even without a question mark.  Use a stricter threshold —
+    # zero overlap and at least 2 meaningful tokens — to reduce false positives
+    # on short continuations like "okay proceed".
+    return overlap == 0 and len(current_tokens) >= 2
+
+
+def _infer_llm_provider_name(llm: Any) -> str:
+    """Infer a stable provider label for telemetry."""
+    for attr in ("provider", "provider_name", "_provider_name"):
+        value = getattr(llm, attr, None)
+        if isinstance(value, str) and value:
+            return value
+
+    module = getattr(llm.__class__, "__module__", "").lower()
+    if "openai" in module:
+        return "openai"
+    if "anthropic" in module:
+        return "anthropic"
+    if "ollama" in module:
+        return "ollama"
+    if "google" in module or "genai" in module:
+        return "google"
+    return llm.__class__.__name__.lower()
+
+
+def _infer_llm_model_name(llm: Any) -> str:
+    """Infer the model identifier for telemetry."""
+    for attr in ("model", "model_name", "model_id", "model_name_or_path"):
+        value = getattr(llm, attr, None)
+        if isinstance(value, str) and value:
+            return value
+    kwargs = getattr(llm, "_default_params", None)
+    if isinstance(kwargs, dict):
+        for key in ("model", "model_name", "model_id"):
+            value = kwargs.get(key)
+            if isinstance(value, str) and value:
+                return value
+    return llm.__class__.__name__
 
 
 # ── Action-intent detection ───────────────────────────────────────────────────
@@ -269,6 +618,153 @@ def _is_action_intent(message: Any) -> bool:
     return False
 
 
+_PHANTOM_TOOL_MARKUP_RE = re.compile(
+    r"<\s*(?:function_calls|invoke|Call|antml:function_calls)\b",
+    re.IGNORECASE,
+)
+
+# JSON array of {"tool": "...", "arguments": {...}} objects emitted as literal text
+# instead of structured tool_calls (e.g. model hallucinates tool calls as JSON).
+_PHANTOM_JSON_TOOL_RE = re.compile(
+    r'"tool"\s*:\s*"[^"\n]{1,120}"',
+    re.IGNORECASE,
+)
+
+_CODE_FENCE_RE = re.compile(
+    r"^\s*```(?:[a-zA-Z0-9_+-]+)?\s*\n(?P<body>.*)\n```\s*$",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _unwrap_code_fence(content: str) -> str:
+    """Return the body of a fenced code block, or the original content."""
+    match = _CODE_FENCE_RE.match(content)
+    if match:
+        return match.group("body")
+    return content
+
+
+def _looks_like_phantom_tool_markup(message: Any) -> bool:
+    """Return True when plain text resembles raw tool-call markup.
+
+    Catches two families:
+    - XML-style:  ``<function_calls>``, ``<invoke>``, ``<Call>``, etc.
+    - JSON-style: ``[{"tool": "...", "arguments": {...}}]`` arrays in text
+
+    Both should be treated as phantom tool-call responses so the graph can
+    recover instead of accepting hallucinated markup as final prose.
+    """
+    if getattr(message, "tool_calls", None):
+        return False
+    content = getattr(message, "content", "")
+    if not isinstance(content, str):
+        return False
+    candidate = _unwrap_code_fence(content)
+    if _PHANTOM_TOOL_MARKUP_RE.search(candidate):
+        return True
+    # JSON phantom: require the message to look like raw JSON at the start so
+    # prose that merely mentions {"tool": ...} or "arguments" does not trip it.
+    stripped = candidate.lstrip()
+    if not stripped or stripped[0] not in "[{":
+        return False
+    return bool(_PHANTOM_JSON_TOOL_RE.search(candidate) and '"arguments"' in candidate)
+
+
+_MARKDOWN_TABLE_ROW_RE = re.compile(r"^\s*\|.+\|.+\|", re.MULTILINE)
+_NUMBERED_SECTION_RE = re.compile(r"^#{1,4}\s+\d+\.", re.MULTILINE)
+_SUCCESS_CLAIM_RE = re.compile(
+    r"(?:✅|:white_check_mark:|\bsuccess(?:ful|fully)?\b|\b(?:created|completed|finished)\s+successfully\b)",
+    re.IGNORECASE,
+)
+_NEGATED_SUCCESS_RE = re.compile(
+    r"\b(?:not|no|failed|unable|cannot|can't|couldn't|didn't)\b.{0,24}"
+    r"(?:success(?:ful|fully)?|created|completed|finished)\b",
+    re.IGNORECASE,
+)
+_TOOL_ERROR_INDICATORS = (
+    "error:",
+    "failed",
+    "http error",
+    "timed out",
+    "permission denied",
+    "access denied",
+    "not found",
+    "tool not loaded",
+    "path outside allowed",
+    "cannot",
+)
+
+
+def _looks_like_markdown_phantom_report(message: Any) -> bool:
+    """Return True when the response is a fabricated structured markdown report.
+
+    The "markdown phantom" variant generates a plausible-looking tool-output
+    report (numbered sections, tables) from training-data memory without calling
+    any tools.  Unlike XML/JSON phantoms it contains no markup syntax — just
+    normal prose and tables — so ``_looks_like_phantom_tool_markup`` misses it.
+
+    Detection signal: markdown table rows AND numbered section headers together
+    in a response with no tool calls.  Legitimate responses either have tool_calls
+    before producing structured output, or produce plain prose without tables.
+    """
+    if getattr(message, "tool_calls", None):
+        return False
+    content = getattr(message, "content", "")
+    if not isinstance(content, str) or len(content) < 80:
+        return False
+    return bool(_MARKDOWN_TABLE_ROW_RE.search(content) and _NUMBERED_SECTION_RE.search(content))
+
+
+def _looks_like_fabricated_success_after_tool_errors(
+    messages: typing.Sequence[Any],
+    last_message: Any,
+) -> bool:
+    """Return True when final success text contradicts immediately prior tool errors.
+
+    Guard scope is intentionally narrow:
+    - only inspects the contiguous ToolMessage block immediately before ``last_message``
+    - only fires when *all* of those tool results look like errors
+    - only fires when ``last_message`` contains an explicit success claim
+    """
+    if getattr(last_message, "tool_calls", None):
+        return False
+    content = getattr(last_message, "content", "")
+    if not isinstance(content, str) or not content.strip():
+        return False
+    if not _SUCCESS_CLAIM_RE.search(content):
+        return False
+    if _NEGATED_SUCCESS_RE.search(content):
+        return False
+
+    i = len(messages) - 2
+    recent_tool_messages: list[Any] = []
+    while i >= 0 and hasattr(messages[i], "tool_call_id"):
+        recent_tool_messages.append(messages[i])
+        i -= 1
+    if not recent_tool_messages:
+        return False
+
+    for tool_msg in recent_tool_messages:
+        tool_content = getattr(tool_msg, "content", "")
+        if not isinstance(tool_content, str):
+            return False
+        headline = _stuck_detection_headline(tool_content).lower()
+        headline = headline.lstrip()
+        if not any(headline.startswith(ind) for ind in _TOOL_ERROR_INDICATORS):
+            return False
+
+    return True
+
+
+def _stuck_detection_headline(content: str) -> str:
+    """Return the first non-empty line used for stuck-detection heuristics."""
+    for line in content.splitlines():
+        stripped = line.strip()
+        if stripped:
+            return stripped
+    return ""
+
+
 @dataclass
 class ToolManagementRequest:
     """Result of scanning agent messages for ``request_tools`` calls."""
@@ -429,6 +925,222 @@ def _strip_failed_tool_messages(messages: list, tool_names: set[str]) -> list:
     return final
 
 
+def _repair_tool_message_pairs(messages: list) -> list:
+    """Remove ToolMessages whose tool_call_id has no valid preceding AIMessage.
+
+    OpenAI (and compatible providers) reject requests where a ToolMessage is not
+    preceded by an AIMessage that contains a tool_call with a matching id.  This
+    situation arises when:
+    - An MCP/tool call raises an exception (e.g. ClosedResourceError) and the
+      ToolMessage error is stored in state, but the triggering AIMessage was empty
+      or had a malformed / truncated tool_calls list.
+    - Message compression strips tool_calls from an AIMessage while retaining the
+      paired ToolMessages.
+
+    The repair pass collects every tool_call id that appears in an AIMessage
+    (checking .tool_calls, additional_kwargs["tool_calls"], and Anthropic/Bedrock
+    content blocks), then drops any ToolMessage whose tool_call_id is absent from
+    that set or appears before the declaring AIMessage.  Truly empty AIMessages
+    (no content, no tool_calls of any kind) that no longer serve as a pair anchor
+    are also dropped.
+    """
+    from langchain_core.messages import AIMessage, ToolMessage
+
+    def _collect_tool_call_ids(msg: AIMessage) -> set[str]:
+        """Return all tool_call ids declared by an AIMessage across all encoding styles."""
+        ids: set[str] = set()
+        # Standard LangChain attribute (OpenAI, Anthropic modern, etc.)
+        for tc in getattr(msg, "tool_calls", None) or []:
+            tcid = tc.get("id") if isinstance(tc, dict) else getattr(tc, "id", None)
+            if tcid:
+                ids.add(tcid)
+        # OpenAI additional_kwargs encoding (some providers / older LangChain)
+        for tc in (getattr(msg, "additional_kwargs", None) or {}).get("tool_calls") or []:
+            tcid = tc.get("id") if isinstance(tc, dict) else None
+            if tcid:
+                ids.add(tcid)
+        # Anthropic/Bedrock content-block encoding: content=[{type:tool_use, id:...}]
+        content = getattr(msg, "content", None)
+        if isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "tool_use":
+                    tcid = block.get("id")
+                    if tcid:
+                        ids.add(tcid)
+        return ids
+
+    def _msg_has_content(msg: AIMessage) -> bool:
+        """True when the message carries text, tool-calls, or content blocks."""
+        if _collect_tool_call_ids(msg):
+            return True
+        content = getattr(msg, "content", None)
+        if isinstance(content, str):
+            return bool(content.strip())
+        if isinstance(content, list):
+            return bool(content)  # any content blocks (including tool_use) count
+        return bool(content)
+
+    # Pass 1 — collect declared tool_call ids and their first declaring position.
+    declared_ids: set[str] = set()
+    declared_positions: dict[str, int] = {}
+    for idx, msg in enumerate(messages):
+        if not isinstance(msg, AIMessage):
+            continue
+        tool_call_ids = _collect_tool_call_ids(msg)
+        declared_ids |= tool_call_ids
+        for tcid in tool_call_ids:
+            declared_positions.setdefault(tcid, idx)
+
+    # Pass 2 — identify orphaned and misordered ToolMessage tool_call_ids.
+    orphaned_ids: set[str] = set()
+    misordered_ids: set[str] = set()
+    for msg_idx, msg in enumerate(messages):
+        if isinstance(msg, ToolMessage):
+            tcid = getattr(msg, "tool_call_id", None)
+            if tcid and tcid not in declared_ids:
+                orphaned_ids.add(tcid)
+                continue
+            if tcid and declared_positions.get(tcid) is not None:
+                if msg_idx < declared_positions[tcid]:
+                    misordered_ids.add(tcid)
+
+    if not orphaned_ids and not misordered_ids:
+        return messages
+
+    import logging as _logging
+
+    _logging.getLogger("cogtrix.orchestration.graph").warning(
+        "Repairing %d orphaned and %d misordered ToolMessage(s) (orphans: %s; misordered: %s) — "
+        "likely caused by ClosedResourceError, malformed tool_calls, or compressed history",
+        len(orphaned_ids),
+        len(misordered_ids),
+        ", ".join(sorted(orphaned_ids)) if orphaned_ids else "none",
+        ", ".join(sorted(misordered_ids)) if misordered_ids else "none",
+    )
+
+    repaired: list = []
+    for msg in messages:
+        if isinstance(msg, ToolMessage):
+            tcid = getattr(msg, "tool_call_id", None)
+            if tcid in orphaned_ids or tcid in misordered_ids:
+                continue  # drop orphaned or misordered ToolMessage
+        elif isinstance(msg, AIMessage):
+            # Drop truly empty AIMessages: no text, no tool_calls, no content blocks
+            if not _msg_has_content(msg):
+                continue
+        repaired.append(msg)
+    return repaired
+
+
+def _apply_context_message_cap(
+    messages: list,
+    max_messages: int | None,
+    max_tokens: int | None = None,
+) -> list:
+    """Trim oldest message pairs when history exceeds the configured cap(s).
+
+    Consecutive AIMessage + ToolMessage runs are treated as a single logical
+    chunk so tool-call pairs are never split.  Oldest chunks are dropped until
+    both the message-count and token budgets fit.  The newest chunk is always
+    preserved even if it exceeds the configured budget on its own.
+    """
+    if (not max_messages or max_messages <= 0) and (not max_tokens or max_tokens <= 0):
+        return messages
+
+    from langchain_core.messages import AIMessage, ToolMessage
+
+    def _tool_ids(msg: Any) -> set[str]:
+        ids: set[str] = set()
+        for tc in getattr(msg, "tool_calls", None) or []:
+            tcid = tc.get("id") if isinstance(tc, dict) else getattr(tc, "id", None)
+            if tcid:
+                ids.add(tcid)
+        return ids
+
+    def _msg_tokens(msg: Any) -> int:
+        content = getattr(msg, "content", None)
+        if isinstance(content, str):
+            return max(1, len(content) // _CHARS_PER_TOKEN)
+        if isinstance(content, list):
+            chars = 0
+            for item in content:
+                if isinstance(item, str):
+                    chars += len(item)
+                elif isinstance(item, dict):
+                    chars += len(item.get("text", ""))
+            return max(1, chars // _CHARS_PER_TOKEN)
+        return 1
+
+    chunks: list[list[Any]] = []
+    i = 0
+    while i < len(messages):
+        msg = messages[i]
+        if isinstance(msg, AIMessage):
+            tc_ids = _tool_ids(msg)
+            if tc_ids:
+                chunk: list[Any] = [msg]
+                j = i + 1
+                while j < len(messages):
+                    nxt = messages[j]
+                    if not isinstance(nxt, ToolMessage):
+                        break
+                    if getattr(nxt, "tool_call_id", None) not in tc_ids:
+                        break
+                    chunk.append(nxt)
+                    j += 1
+                chunks.append(chunk)
+                i = j
+                continue
+        chunks.append([msg])
+        i += 1
+
+    kept: list[list[Any]] = []
+    kept_count = 0
+    kept_tokens = 0
+    for chunk in reversed(chunks):
+        chunk_count = len(chunk)
+        chunk_tokens = sum(_msg_tokens(msg) for msg in chunk)
+        if not kept:
+            kept.append(chunk)
+            kept_count += chunk_count
+            kept_tokens += chunk_tokens
+            continue
+        if max_messages and max_messages > 0 and kept_count + chunk_count > max_messages:
+            break
+        if max_tokens and max_tokens > 0 and kept_tokens + chunk_tokens > max_tokens:
+            break
+        kept.append(chunk)
+        kept_count += chunk_count
+        kept_tokens += chunk_tokens
+
+    if not kept:
+        return messages
+
+    kept.reverse()
+    truncated = [m for chunk in kept for m in chunk]
+    dropped = len(messages) - len(truncated)
+    if dropped > 0:
+        import logging as _log_mod
+
+        _log_mod.getLogger("cogtrix.orchestration.graph").warning(
+            "context_max_messages=%s context_max_tokens=%s: dropped %d oldest message(s)",
+            max_messages if max_messages is not None else 0,
+            max_tokens if max_tokens is not None else 0,
+            dropped,
+        )
+    return truncated
+
+
+# Cache for _correct_tool_args schema introspection results.
+# Keyed by logical schema identity (tool name + sorted field names) so MCP
+# reconnects that recreate equivalent Pydantic models reuse the same cache entry.
+_ToolArgSchemaCacheKey = tuple[str, tuple[str, ...]]
+_TOOL_ARG_SCHEMA_CACHE_MAX_SIZE = 512
+_tool_arg_schema_cache: dict[
+    _ToolArgSchemaCacheKey, tuple[dict[str, Any], dict[str, str], dict[str, str]]
+] = {}
+_tool_arg_cache_lock = threading.Lock()
+
 _FUZZY_ARG_BLOCKLIST: frozenset[str] = frozenset(
     {
         "data",
@@ -478,27 +1190,49 @@ def _correct_tool_args(tool: Any, args: dict) -> dict:
             expected = schema.__fields__  # Pydantic v1
         if not expected:
             return args
-    except Exception:
+    except (AttributeError, TypeError) as exc:
+        tool_name = str(getattr(tool, "name", "") or "<unknown_tool>")
+        get_logger().warning(
+            "_correct_tool_args: schema introspection failed for tool %r: %s — returning args unchanged",
+            tool_name,
+            exc,
+        )
         return args
+
+    expected = dict(expected)
+    tool_name = str(getattr(tool, "name", "") or "<unknown_tool>")
+    cache_key: _ToolArgSchemaCacheKey = (tool_name, tuple(sorted(expected.keys())))
+
+    with _tool_arg_cache_lock:
+        _cached = _tool_arg_schema_cache.get(cache_key)
+        if _cached is not None:
+            expected, alias_map, _well_known_remaps_cached = _cached
+        else:
+            # --- Alias resolution -------------------------------------------------
+            # Pydantic aliases (Field(alias=...)) are not visible as field names.
+            # Map known aliases to their canonical field name so LLMs that send the
+            # alias (e.g. "cmd" instead of "command") get corrected before fuzzy match.
+            alias_map: dict[str, str] = {}
+            for fname, finfo in expected.items():
+                _alias = getattr(finfo, "alias", None)
+                if _alias and _alias != fname:
+                    alias_map[_alias] = fname
+                # Also check validation_alias (Pydantic v2)
+                _valias = getattr(finfo, "validation_alias", None)
+                if isinstance(_valias, str) and _valias != fname:
+                    alias_map[_valias] = fname
+
+            _well_known_remaps_cached: dict[str, str] = {}
+            # Evict oldest entries if cache exceeds max size (FIFO eviction)
+            if len(_tool_arg_schema_cache) >= _TOOL_ARG_SCHEMA_CACHE_MAX_SIZE:
+                # Pop the first (oldest) item - Python 3.7+ dicts maintain insertion order
+                _tool_arg_schema_cache.pop(next(iter(_tool_arg_schema_cache)))
+            _tool_arg_schema_cache[cache_key] = (expected, alias_map, _well_known_remaps_cached)
 
     expected_names = set(expected.keys())
     provided_names = set(args.keys())
 
     corrected = dict(args)
-
-    # --- Alias resolution -------------------------------------------------
-    # Pydantic aliases (Field(alias=...)) are not visible as field names.
-    # Map known aliases to their canonical field name so LLMs that send the
-    # alias (e.g. "cmd" instead of "command") get corrected before fuzzy match.
-    alias_map: dict[str, str] = {}
-    for fname, finfo in expected.items():
-        _alias = getattr(finfo, "alias", None)
-        if _alias and _alias != fname:
-            alias_map[_alias] = fname
-        # Also check validation_alias (Pydantic v2)
-        _valias = getattr(finfo, "validation_alias", None)
-        if isinstance(_valias, str) and _valias != fname:
-            alias_map[_valias] = fname
 
     for alias_key, canonical in alias_map.items():
         if alias_key in corrected and canonical not in corrected:
@@ -509,36 +1243,48 @@ def _correct_tool_args(tool: Any, args: dict) -> dict:
     # --- Well-known parameter variations ────────────────────────────
     # LLMs frequently use common synonyms that fall below the fuzzy
     # threshold (0.75).  Explicit remaps for the most common cases.
-    _WELL_KNOWN_REMAPS: dict[str, str] = {
-        "filename": "path",
-        "file_path": "path",
-        "filepath": "path",
-        "file_name": "path",
-        "file_content": "content",
-        "text": "content",
-        "body": "content",
-        "cmd": "command",
-        "query_string": "query",
-        "search_query": "query",
-        "dir": "path",
-        "directory": "path",
+    _WELL_KNOWN_REMAPS: dict[str, list[str]] = {
+        "filename": ["path"],
+        "file_path": ["path"],
+        "filepath": ["path"],
+        "file_name": ["path"],
+        "file_content": ["content"],
+        "text": ["content", "prompt"],
+        "body": ["content"],
+        "cmd": ["command"],
+        "query_string": ["query"],
+        "search_query": ["query"],
+        "dir": ["path"],
+        "directory": ["path"],
         # Additional common LLM variants (ratio 0.75–0.84 — below old threshold)
-        "infile": "input_file",
-        "input_file": "infile",
-        "workdir": "working_dir",
-        "working_dir": "workdir",
-        "verbose": "verbosity",
-        "verbosity": "verbose",
-        "filenamestr": "file_name",
+        "infile": ["input_file"],
+        "input_file": ["infile"],
+        "workdir": ["working_dir"],
+        "working_dir": ["workdir"],
+        "verbose": ["verbosity"],
+        "verbosity": ["verbose"],
+        "filenamestr": ["file_name"],
+        # cron_add: LLMs commonly use "pattern" for cron expressions (#520)
+        "pattern": ["schedule"],
+        "expression": ["schedule"],
+        # GitHub PR tools: LLMs use pr_number / number for pull_number
+        "pr_number": ["pull_number"],
+        "pull_request_number": ["pull_number"],
+        # list_pull_requests: LLMs use status for state
+        "status": ["state"],
+        # Tools that expect "prompt" but LLM sends content/message
+        "content": ["prompt"],
+        "message": ["prompt"],
     }
     for provided_key in list(corrected.keys()):
         if provided_key in expected_names:
             continue  # already matches a field — skip
-        canonical = _WELL_KNOWN_REMAPS.get(provided_key)
-        if canonical and canonical in expected_names and canonical not in corrected:
-            corrected[canonical] = corrected.pop(provided_key)
-            log = get_logger()
-            log.info("Tool arg well-known remap: '%s' → '%s'", provided_key, canonical)
+        for canonical in _WELL_KNOWN_REMAPS.get(provided_key, []):
+            if canonical in expected_names and canonical not in corrected:
+                corrected[canonical] = corrected.pop(provided_key)
+                log = get_logger()
+                log.info("Tool arg well-known remap: '%s' → '%s'", provided_key, canonical)
+                break
 
     provided_names = set(corrected.keys())
 
@@ -580,6 +1326,35 @@ def _correct_tool_args(tool: Any, args: dict) -> dict:
                 log = get_logger()
                 log.info("Tool arg corrected: '%s' → '%s' (score=%.2f)", unk, best, best_ratio)
 
+    # --- Type coercion: schema expects list but got JSON-encoded string → decode.
+    import json as _json_mod
+
+    for key, value in list(corrected.items()):
+        if key not in expected:
+            continue
+        if not isinstance(value, str):
+            continue
+        field_info = expected[key]
+        annotation = getattr(field_info, "annotation", None) or getattr(
+            field_info, "outer_type_", None
+        )
+        origin = typing.get_origin(annotation)
+        if origin is typing.Union or isinstance(annotation, types.UnionType):
+            type_args = [a for a in typing.get_args(annotation) if a is not type(None)]
+            if len(type_args) == 1:
+                annotation = type_args[0]
+        if annotation is list or (typing.get_origin(annotation) is list):
+            stripped = value.strip()
+            if stripped.startswith("["):
+                try:
+                    parsed = _json_mod.loads(stripped)
+                    if isinstance(parsed, list):
+                        corrected[key] = parsed
+                        log = get_logger()
+                        log.debug("Tool arg '%s' coerced from JSON string to list", key)
+                except (ValueError, KeyError):
+                    pass
+
     # --- Type coercion: schema expects str but got list/dict → JSON-encode.
     for key, value in list(corrected.items()):
         if key not in expected:
@@ -605,6 +1380,16 @@ def _correct_tool_args(tool: Any, args: dict) -> dict:
     return corrected
 
 
+def _safe_tool_name(name: str, max_len: int = 80) -> str:
+    """Strip everything except word chars, hyphens, and dots; truncate.
+
+    Prevents model-supplied names from carrying injection payload into
+    guidance messages that are fed back to the model.
+    """
+    sanitized = re.sub(r"[^\w\-\.]", "", name)
+    return sanitized[:max_len] if sanitized else "<unknown>"
+
+
 def build_agent_graph(
     llm: Any = None,
     system_prompt: str = "",
@@ -618,6 +1403,8 @@ def build_agent_graph(
     compression_min_age: int = COMPRESSION_MIN_AGE_CYCLES,
     compression_min_chars: int = COMPRESSION_MIN_CHARS,
     compression_llm: Any = None,
+    context_max_messages: int = 200,
+    context_max_tokens: int = 40_000,
     tool_call_guard: Any | None = None,
     session_state: SessionState | None = None,
     confirmation_ui: Any | None = None,
@@ -625,6 +1412,7 @@ def build_agent_graph(
     parallel_tool_execution: bool = True,
     git_native: bool = False,
     tool_context_limit_pct: float = 0.80,
+    extend_run_state: Any = None,
     *,
     config: AgentRunConfig | None = None,
     bound_cache: OrderedDict | None = None,
@@ -647,7 +1435,6 @@ def build_agent_graph(
     """
     from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
     from langchain_core.messages.modifier import RemoveMessage
-    from langchain_core.runnables import RunnableConfig
     from langgraph.graph import END, StateGraph
 
     _model_timeout = 180  # default LLM request timeout (seconds)
@@ -669,6 +1456,7 @@ def build_agent_graph(
             tool_call_guard = config.tool_call_guard
         if config.session_state is not None:
             session_state = config.session_state
+        memory_manager = getattr(config, "memory_manager", None)
         if config.confirmation_ui is not None:
             confirmation_ui = config.confirmation_ui
         if config.on_tool_expansion is not None:
@@ -676,6 +1464,8 @@ def build_agent_graph(
         parallel_tool_execution = config.parallel_tool_execution
         git_native = config.git_native
         context_compression = config.context_compression
+        _context_max_messages = getattr(config, "context_max_messages", context_max_messages) or 0
+        _context_max_tokens = getattr(config, "context_max_tokens", context_max_tokens) or 0
         _model_timeout = getattr(config, "llm_timeout", 180)
         if config.compression_llm is not None:
             compression_llm = config.compression_llm
@@ -687,11 +1477,16 @@ def build_agent_graph(
             tool_context_limit_pct = config.tool_context_limit_pct
         if hasattr(config, "checkpoint_store"):
             checkpoint_store = config.checkpoint_store
+        tools_ready = getattr(config, "tools_ready", None)
         _tier_cache_enabled = getattr(config, "tier_cache_enabled", True)
         _da_enabled = getattr(config, "decision_accountability_enabled", False)
         _da_report_uncertainty = getattr(config, "decision_accountability_report_uncertainty", True)
         _da_min_confidence = getattr(config, "decision_accountability_min_confidence", 7.0)
     else:
+        _context_max_messages = context_max_messages or 0
+        _context_max_tokens = context_max_tokens or 0
+        tools_ready = None
+        memory_manager = None
         _tier_cache_enabled = False
         _da_enabled = False
         _da_report_uncertainty = True
@@ -707,13 +1502,68 @@ def build_agent_graph(
     if session_state is None:
         session_state = SessionState()
 
+    # Mutable container so _reset_for_new_run can swap the state each run
+    # without rebuilding the compiled graph.
+    extend_run_state_ref: list[Any] = [extend_run_state]
+    if extend_run_state is not None:
+        try:
+            from langchain_core.tools import StructuredTool as _ST
+
+            from src.tools.extend_run import ExtendRunInput
+
+            def _extend_run_fn(
+                mode: str = "continue",
+                subtasks: list[str] | None = None,
+                reason: str = "",
+            ) -> str:
+                _state = extend_run_state_ref[0]
+                if _state is None:
+                    return "Error: extend_run is not available in this run context."
+                if mode == "delegate" and not subtasks:
+                    return (
+                        "Error: mode='delegate' requires a non-empty 'subtasks' list. "
+                        "Provide 2-5 independent subtask descriptions."
+                    )
+                _state.request_extension(mode=mode, subtasks=subtasks or [], reason=reason)
+                if mode == "delegate":
+                    count = len(subtasks or [])
+                    return (
+                        f"Extension registered: {count} subtask(s) queued for parallel "
+                        "delegation. Continue sequential work; delegation runs after this run."
+                    )
+                return (
+                    "Extension registered: the step budget will be increased when the "
+                    "current limit is reached. Continue working on the task."
+                )
+
+            _extend_tool = _ST.from_function(
+                func=_extend_run_fn,
+                name="extend_run",
+                description=(
+                    "Request more execution steps or delegate work to parallel sub-agents. "
+                    "Call when the task needs significantly more turns than available.\n\n"
+                    "Modes:\n"
+                    "- 'continue': Request more sequential steps.\n"
+                    "- 'delegate': Split into parallel sub-agents (requires 'subtasks' list).\n\n"
+                    "Call EARLY — don't wait until almost out of steps."
+                ),
+                args_schema=ExtendRunInput,
+            )
+            if not any(getattr(tool, "name", "") == "extend_run" for tool in active_tools_list):
+                active_tools_list.append(_extend_tool)
+            available_tools["extend_run"] = _extend_tool
+        except ImportError:
+            pass
+
     phantom_count = [0]
+    fabrication_count = [0]
     action_intent_count = [0]
     expansion_count = [0]
     auto_expansion_count = [0]
     call_count = [0]
     _last_input_tokens = [0]  # actual input tokens from the previous model call
     _MAX_PHANTOM_RETRIES = 3
+    _MAX_FABRICATION_RETRIES = 3
     _MAX_ACTION_INTENT_RETRIES = 3
     _MAX_TOOL_EXPANSIONS = 3
     request_tools_noop_count = [0]
@@ -725,9 +1575,10 @@ def build_agent_graph(
     # After _TOOL_BUDGET_SOFT calls, a synthesis hint is appended to the output.
     # After _TOOL_BUDGET_HARD calls, the tool returns a stop message.
     _tool_call_counts: dict[str, int] = {}
+    _tool_budget_lock = threading.Lock()  # Protects _tool_call_counts and active_tools_list
     _TOOL_BUDGET_SOFT = 5  # nudge: "please synthesize"
     _TOOL_BUDGET_HARD = 8  # stop: "budget exhausted"
-    _TOOL_BUDGET_EXEMPT = {
+    _TOOL_BUDGET_SOFT_EXEMPT = {
         "request_tools",
         "report_progress",
         "queue_reply",
@@ -746,6 +1597,20 @@ def build_agent_graph(
         "patch_file",
         # Progress tracking — must always be callable.
         "checkpoint",
+    }
+    _TOOL_BUDGET_HARD_EXEMPT = _TOOL_BUDGET_SOFT_EXEMPT | {
+        # Search tools should not hard-stop at the fixed cutoff because
+        # legitimate research often requires many progressive searches.
+        "search_web",
+        "search_news",
+        "google_search",
+        "brave_search",
+        "exa_search",
+        "tavily_search",
+        "serpapi_search",
+        "searxng_search",
+        "search_email",
+        "calendar_search_events",
     }
     _DUPLICATE_EXEMPT = {
         "request_tools",
@@ -772,6 +1637,16 @@ def build_agent_graph(
     _last_tool_version = [-1]
     _REFLECTION_INTERVAL = 10  # inject reflection every N call_model cycles
     _last_reflection_at = [0]
+    _TOOL_HEALTH_CHECK_INTERVAL = (
+        getattr(config, "tool_health_check_interval", 20) if config is not None else 20
+    )
+    _last_tool_health_check_at = [0]
+    _TOOL_QUALITY_GATE_ENABLED = (
+        getattr(config, "tool_quality_gate_enabled", True) if config is not None else True
+    )
+    _TOPIC_SWITCH_DETECTION_ENABLED = (
+        getattr(config, "topic_switch_detection_enabled", True) if config is not None else True
+    )
 
     # ── Stuck detection ───────────────────────────────────────────────
     # Tracks consecutive tool calls that produce errors.  When the count
@@ -783,11 +1658,14 @@ def build_agent_graph(
     _STUCK_THRESHOLD_CALIBRATED = [False]
     _consecutive_errors = [0]
     _force_thinking_break = [False]
+    _last_identical_error_signature: list[tuple[str, str] | None] = [None]
+    _consecutive_identical_error_count = [0]
     _last_checkpoint_count = [0]
     _rounds_since_checkpoint = [0]
     _calls_since_last_checkpoint = [0]  # tool calls since last checkpoint
     _CHECKPOINT_NUDGE_INTERVAL = 8  # nudge after N tool calls without checkpoint
     _same_file_writes: dict[str, int] = {}  # track repeated writes to same file
+    _same_file_writes_lock = threading.Lock()
     _REWRITE_SEARCH_THRESHOLD = 2  # search reminder after N writes to same file
 
     _cached_fingerprint: list[tuple[str, ...]] = [()]
@@ -816,6 +1694,7 @@ def build_agent_graph(
         _checkpoint_store: CheckpointStore = checkpoint_store
     else:
         _checkpoint_store = CheckpointStore()
+    _checkpoint_store_lock = threading.Lock()
 
     _checkpoint_tool = create_checkpoint_tool(_checkpoint_store)
     if _checkpoint_tool is not None and active_tools_list is not None:
@@ -826,6 +1705,53 @@ def build_agent_graph(
             _tool_lookup["checkpoint"] = _checkpoint_tool
 
     _graph_log = get_logger()
+
+    def _warm_bound_cache() -> None:
+        """Seed the bind_tools cache for the initial active tool set."""
+        if llm is None or not active_tools_list:
+            return
+        if tools_ready is not None and not tools_ready.is_set():
+            _graph_log.debug("Skipping bind_tools warm-up until MCP tools finish reconnecting")
+            return
+        tool_list = list(active_tools_list)
+        _seen_names_rev: set[str] = set()
+        deduped_rev: list[Any] = []
+        for _t in reversed(tool_list):
+            _tname = getattr(_t, "name", "")
+            if _tname not in _seen_names_rev:
+                _seen_names_rev.add(_tname)
+                deduped_rev.append(_t)
+        tool_list = list(reversed(deduped_rev))
+        normalized_tools: list[Any] = []
+        for tool_obj in tool_list:
+            if isinstance(tool_obj, _LazyToolProxy):
+                try:
+                    tool_obj = tool_obj._resolve()
+                except Exception as exc:
+                    _graph_log.warning(
+                        "bind_tools warm-up failed to resolve lazy tool %r: %s",
+                        getattr(tool_obj, "name", ""),
+                        exc,
+                    )
+                    continue
+                if tool_obj is None:
+                    continue
+            normalized_tools.append(tool_obj)
+        if not normalized_tools:
+            return
+        fingerprint = tuple(getattr(t, "name", "") for t in normalized_tools)
+        if fingerprint in _bound_cache:
+            return
+        try:
+            if len(_bound_cache) >= 8:
+                _bound_cache.popitem(last=False)
+            _bound_cache[fingerprint] = llm.bind_tools(normalized_tools)
+            _cached_fingerprint[0] = fingerprint
+            _graph_log.debug("⏱ bind_tools warm-up: %d tool(s)", len(normalized_tools))
+        except Exception as exc:
+            _graph_log.warning("Initial bind_tools warm-up failed: %s", exc)
+
+    _warm_bound_cache()
 
     def _maybe_compress(msgs: list) -> list:
         """Pre-invoke compression check (mid-turn guard).
@@ -910,17 +1836,18 @@ def build_agent_graph(
     def _invoke_with_timeout(_model: Any, _messages: list, _cfg: Any, _timeout: int) -> Any:
         import concurrent.futures as _cf
 
+        _executor = _get_llm_executor()
         last_exc: Exception | None = None
         for _attempt in range(_LLM_MAX_RETRIES):
-            # NOT using `with` (context manager) — __exit__ calls shutdown(wait=True)
-            # which blocks until the hung LLM thread finishes, defeating the timeout.
-            _pool = _cf.ThreadPoolExecutor(max_workers=1)
-            _fut = _pool.submit(_model.invoke, _messages, _cfg)
-            _pool.shutdown(wait=False)  # allow thread to finish naturally; don't block
+            _fut = _executor.submit(_model.invoke, _messages, _cfg)
             try:
                 _timeout_for_attempt = _LLM_RETRY_TIMEOUT if _attempt > 0 else _timeout
                 return _fut.result(timeout=_timeout_for_attempt)
             except _cf.TimeoutError:
+                # Cancel the future so the shared executor can reclaim the
+                # slot.  If the underlying LLM I/O is stuck the OS thread may
+                # continue running, but it is bounded by the pool's max_workers.
+                _fut.cancel()
                 last_exc = RuntimeError(
                     f"LLM backend not responding (timed out after {_timeout_for_attempt}s)"
                 )
@@ -950,384 +1877,124 @@ def build_agent_graph(
                 time.sleep(_delay)
         raise last_exc or RuntimeError("LLM invocation failed after all retries")
 
-    def call_model(state: CogtrixState, config: RunnableConfig) -> dict:
-        if llm is None:
-            raise RuntimeError(
-                "LLM not configured — check provider settings, API keys, and config file"
-            )
-        _cm_t0 = time.monotonic()
-        call_count[0] += 1
-        if _tool_version[0] != _last_tool_version[0]:
-            _cached_fingerprint[0] = (
-                tuple(getattr(t, "name", "") for t in active_tools_list)
-                if active_tools_list
-                else ()
-            )
-            _last_tool_version[0] = _tool_version[0]
-        fingerprint = _cached_fingerprint[0]
-        with _bound_cache_lock:
-            if fingerprint in _bound_cache:
-                _bound_cache.move_to_end(fingerprint)
+    # ── Tool output quality gate helpers ──────────────────────────────
+    _SUBSTANCELESS_PREFIXES = ("error:", "no results", "0 results")
+
+    def _is_substanceless(content: Any) -> bool:
+        """Return True if a tool result lacks actionable substance."""
+        if content is None:
+            return True
+        if not isinstance(content, str):
+            return False
+        stripped = content.strip()
+        if not stripped:
+            return True
+        # An empty JSON array/object is valid "nothing found" data, not no-data.
+        # list_pull_requests returning [] means "no open PRs" — the quality gate
+        # must not fire when prior turns already returned valid results.
+        if stripped in ("[]", "{}", "[ ]", "{ }"):
+            return False
+        if len(stripped) < 20:
+            return True
+        lower = stripped.lower()
+        if lower.startswith(_SUBSTANCELESS_PREFIXES):
+            return True
+        return False
+
+    def _all_tool_results_substanceless(messages: list[Any]) -> bool:
+        """Return True when the most recent contiguous ToolMessage block is non-empty
+        and every message in it is substanceless.
+        """
+        tool_msgs: list[Any] = []
+        for msg in reversed(messages):
+            if isinstance(msg, ToolMessage):
+                tool_msgs.append(msg)
             else:
-                tool_list = list(active_tools_list) if active_tools_list else []
-                # Deduplicate by name — guards against duplicate entries that arise when
-                # tool-budget enforcement removes a tool from active_names but not from
-                # active_tools_list, and request_tools later re-adds it from available.
-                # Without this, providers that enforce unique tool names (DeepSeek,
-                # OpenAI strict mode) return 400 "Tool names must be unique".
-                # Keep the LAST occurrence of each tool name — request_tools always
-                # appends so the last entry is the most recently loaded instance,
-                # which has the current output_cap and confirmation state.
-                _seen_names_rev: set[str] = set()
-                deduped_rev: list = []
-                for _t in reversed(tool_list):
-                    _tname = getattr(_t, "name", "")
-                    if _tname not in _seen_names_rev:
-                        _seen_names_rev.add(_tname)
-                        deduped_rev.append(_t)
-                    else:
-                        _graph_log.warning(
-                            "Duplicate tool name %r in active_tools_list — "
-                            "dropping extra instance to avoid API 400. "
-                            "Check budget-enforcement and request_tools paths.",
-                            _tname,
-                        )
-                        # Also repair the live list so downstream code stays consistent
-                        try:
-                            active_tools_list.remove(_t)
-                        except ValueError:
-                            pass
-                tool_list = list(reversed(deduped_rev))
-                # If dedup removed duplicates the fingerprint (computed before the
-                # lock from the stale list) may differ from the clean tool_list.
-                # Recompute from the actual bound list so the cache key is stable
-                # and future turns with a clean list get a cache hit (F5).
-                clean_fingerprint = tuple(getattr(t, "name", "") for t in tool_list)
-                if clean_fingerprint != fingerprint:
-                    _cached_fingerprint[0] = clean_fingerprint
-                    fingerprint = clean_fingerprint
-                if len(_bound_cache) >= 8:
-                    _bound_cache.popitem(last=False)
-                _bound_cache[fingerprint] = llm.bind_tools(tool_list) if tool_list else llm
-            model = _bound_cache[fingerprint]
-        if is_trace():
-            _graph_log.debug("⏱ call_model bind_tools: %.0fms", (time.monotonic() - _cm_t0) * 1000)
-        msgs = list(state["messages"])
-        _comp_llm = compression_llm or llm
-        # Pre-invoke compression: char-based estimate fires at 60% threshold
-        # before every model.invoke() — catches mid-turn context growth that
-        # the previous token-based check (using stale _last_input_tokens) would miss.
-        msgs = _maybe_compress(msgs)
+                break
+        if not tool_msgs:
+            return False
+        return all(_is_substanceless(getattr(m, "content", None)) for m in tool_msgs)
 
-        # ── Calibrate stuck threshold on first call ─────────────────
-        # Scale the checkpoint-based stuck threshold based on the user's
-        # prompt complexity.  COMPLEX_ACTION tasks need more room.
-        if not _STUCK_THRESHOLD_CALIBRATED[0] and call_count[0] == 1:
-            _STUCK_THRESHOLD_CALIBRATED[0] = True
-            from src.orchestration.intent import (
-                TaskComplexity as _TC,
-            )
-            from src.orchestration.intent import (
-                classify_task_complexity as _classify_tc,
-            )
+    from src.orchestration.nodes.call_model import CallModelContext, build_call_model_node
 
-            _user_text = ""
-            for _m in msgs:
-                if hasattr(_m, "type") and _m.type == "human":
-                    _user_text = getattr(_m, "content", "")
-                    break
-            _tc = _classify_tc(_user_text)
-            if _tc == _TC.COMPLEX_ACTION:
-                _STUCK_NO_CHECKPOINT_THRESHOLD[0] = 35
-            elif _tc == _TC.COMPLEX_RESEARCH:
-                _STUCK_NO_CHECKPOINT_THRESHOLD[0] = 20
-            else:
-                _STUCK_NO_CHECKPOINT_THRESHOLD[0] = 20
-            _graph_log.debug(
-                "Stuck threshold calibrated to %d (complexity=%s)",
-                _STUCK_NO_CHECKPOINT_THRESHOLD[0],
-                _tc.name,
-            )
+    call_model = build_call_model_node(
+        CallModelContext(
+            llm=llm,
+            tools_ready=tools_ready,
+            active_tools_list=active_tools_list,
+            active_names=_active_names,
+            bound_cache=_bound_cache,
+            bound_cache_lock=_bound_cache_lock,
+            cached_fingerprint=_cached_fingerprint,
+            compression_cache=_compression_cache,
+            tool_version=_tool_version,
+            last_tool_version=_last_tool_version,
+            call_count=call_count,
+            last_input_tokens=_last_input_tokens,
+            max_context_tokens=max_context_tokens,
+            context_max_messages=_context_max_messages,
+            context_max_tokens=_context_max_tokens,
+            model_max_tokens=getattr(llm, "max_tokens", None),
+            compression_llm=compression_llm,
+            memory_manager=memory_manager,
+            checkpoint_store=_checkpoint_store,
+            calls_since_last_checkpoint=_calls_since_last_checkpoint,
+            last_checkpoint_count=_last_checkpoint_count,
+            rounds_since_checkpoint=_rounds_since_checkpoint,
+            force_thinking_break=_force_thinking_break,
+            consecutive_errors=_consecutive_errors,
+            last_identical_error_signature=_last_identical_error_signature,
+            consecutive_identical_error_count=_consecutive_identical_error_count,
+            last_reflection_at=_last_reflection_at,
+            tool_health_check_interval=_TOOL_HEALTH_CHECK_INTERVAL,
+            last_tool_health_check_at=_last_tool_health_check_at,
+            tool_quality_gate_enabled=_TOOL_QUALITY_GATE_ENABLED,
+            topic_switch_detection_enabled=_TOPIC_SWITCH_DETECTION_ENABLED,
+            stuck_threshold=_STUCK_THRESHOLD,
+            stuck_no_checkpoint_threshold=_STUCK_NO_CHECKPOINT_THRESHOLD,
+            stuck_threshold_calibrated=_STUCK_THRESHOLD_CALIBRATED,
+            checkpoint_nudge_interval=_CHECKPOINT_NUDGE_INTERVAL,
+            reflection_interval=_REFLECTION_INTERVAL,
+            max_request_tools_noops=_MAX_REQUEST_TOOLS_NOOPS,
+            sys_msg=_sys_msg,
+            model_timeout=_model_timeout,
+            tool_context_limit_pct=tool_context_limit_pct,
+            da_enabled=_da_enabled,
+            da_report_uncertainty=_da_report_uncertainty,
+            da_min_confidence=_da_min_confidence,
+            apply_context_message_cap=_apply_context_message_cap,
+            maybe_compress=_maybe_compress,
+            invoke_with_timeout=_invoke_with_timeout,
+            all_tool_results_substanceless=_all_tool_results_substanceless,
+        )
+    )
 
-        # ── Checkpoint nudge ──────────────────────────────────────────
-        # Check BEFORE checkpoint injection/reset so the counter
-        # reflects the state since the LAST checkpoint, not after reset.
-        if _calls_since_last_checkpoint[0] >= _CHECKPOINT_NUDGE_INTERVAL and call_count[0] > 3:
-            _graph_log.info(
-                "Checkpoint nudge fired (calls_since=%d, round=%d)",
-                _calls_since_last_checkpoint[0],
-                call_count[0],
-            )
-            msgs.append(
-                HumanMessage(
-                    content=(
-                        "[Checkpoint reminder] You've made several actions without "
-                        "recording a checkpoint. Use the checkpoint tool now to record "
-                        "what you've accomplished or learned since your last checkpoint."
-                    )
-                )
-            )
-            _calls_since_last_checkpoint[0] = 0  # reset after nudge
+    handle_phantom = build_handle_phantom_node(
+        phantom_count=phantom_count,
+        max_retries=_MAX_PHANTOM_RETRIES,
+    )
+    handle_action_intent = build_handle_action_intent_node(
+        action_intent_count=action_intent_count,
+        max_retries=_MAX_ACTION_INTENT_RETRIES,
+    )
 
-        # ── Checkpoint injection ──────────────────────────────────────
-        # Prepend recorded findings so the LLM always sees them,
-        # regardless of context compression.
-        if _checkpoint_store is not None and len(_checkpoint_store) > 0:
-            _ckpt_summary = _checkpoint_store.summary()
-            if _ckpt_summary:
-                msgs.append(HumanMessage(content=_ckpt_summary))
-
-        # ── Checkpoint-based stuck detection ──────────────────────────
-        # If the agent goes _STUCK_NO_CHECKPOINT_THRESHOLD rounds without
-        # recording a new checkpoint, it's likely stuck in a loop.
-        if _checkpoint_store is not None:
-            current_ckpt_count = len(_checkpoint_store)
-            if current_ckpt_count > _last_checkpoint_count[0]:
-                _last_checkpoint_count[0] = current_ckpt_count
-                _rounds_since_checkpoint[0] = 0
-                _calls_since_last_checkpoint[0] = 0
-            else:
-                _rounds_since_checkpoint[0] += 1
-                _threshold = _STUCK_NO_CHECKPOINT_THRESHOLD[0]
-                if _rounds_since_checkpoint[0] >= _threshold and call_count[0] > _threshold:
-                    _force_thinking_break[0] = True
-                    _rounds_since_checkpoint[0] = 0
-                    _graph_log.info(
-                        "No new checkpoints in %d rounds — forcing thinking break",
-                        _threshold,
-                    )
-
-        # ── Forced thinking break (stuck detection) ───────────────────
-        # When the agent has produced _STUCK_THRESHOLD consecutive error
-        # results OR gone too long without a checkpoint, strip all tools
-        # for one LLM round so the model MUST produce a text-only
-        # Chain-of-Thought response.
-        if _force_thinking_break[0]:
-            _force_thinking_break[0] = False
-            _consecutive_errors[0] = 0
-            _graph_log.info("Stuck detected — forcing thinking break (no tools for this round)")
-            msgs.append(
-                HumanMessage(
-                    content=(
-                        "[THINKING BREAK — tools temporarily disabled]\n"
-                        "You have been repeating similar actions that keep failing. "
-                        "STOP and think carefully:\n\n"
-                        "1. Review your checkpoints — what has actually WORKED so far?\n"
-                        "2. What approaches have FAILED and WHY? List each failed category.\n"
-                        "3. Have you SEARCHED THE WEB? If not, your first action after this "
-                        'break MUST be: request_tools(add=["search_web"]) then search.\n'
-                        "4. List exactly THREE categorically different strategies you "
-                        "haven't tried. 'Different category' means a completely different "
-                        "method — not the same method with a different URL or version.\n\n"
-                        "Write out your analysis and pick ONE of your three strategies. "
-                        "Do NOT guess URLs — search for real ones. "
-                        "Your tools will be restored after this response."
-                    )
-                )
-            )
-            # Call LLM WITHOUT tools — forces a text-only response
-            think_messages = [_sys_msg, *msgs] if _sys_msg is not None else list(msgs)
-            _cm_t1 = time.monotonic()
-            try:
-                response = _invoke_with_timeout(llm, think_messages, config, 180)
-            except RuntimeError:
-                _graph_log.warning("LLM timed out during thinking break")
-                return {"messages": []}
-            if is_trace():
-                _graph_log.debug(
-                    "⏱ call_model thinking_break: %.0fms",
-                    (time.monotonic() - _cm_t1) * 1000,
-                )
-            return {"messages": [response]}
-
-        # ── Periodic reflection (Chain of Thought) ────────────────────
-        # Every _REFLECTION_INTERVAL tool-call cycles, inject a prompt
-        # asking the agent to assess progress and plan next steps.
-        # Context-aware: if recent errors detected, use debug-specific prompt.
-        if (
-            call_count[0] > 1
-            and call_count[0] % _REFLECTION_INTERVAL == 0
-            and call_count[0] != _last_reflection_at[0]
-        ):
-            _last_reflection_at[0] = call_count[0]
-            if _consecutive_errors[0] >= 2:
-                # Debug-mode reflection
-                msgs.append(
-                    HumanMessage(
-                        content=(
-                            "[Debug cycle check] You've had recent errors. Before continuing:\n"
-                            "1. Read the EXACT error message from your last failed attempt.\n"
-                            "2. What SPECIFIC line or issue does it point to?\n"
-                            "3. Have you searched the web for that specific error or for a "
-                            "working reference implementation?\n"
-                            "4. Run ONLY the failing test case in isolation, not the full suite.\n"
-                            "5. Fix the ONE thing the error message identifies. Don't rewrite "
-                            "the whole file."
-                        )
-                    )
-                )
-            else:
-                msgs.append(
-                    HumanMessage(
-                        content=(
-                            "[Work cycle check] Before continuing:\n"
-                            "1. EVALUATE: What did your last actions achieve? "
-                            "Checkpoint any new findings.\n"
-                            "2. PLAN: What specific information do you still need? "
-                            "Write it out clearly.\n"
-                            "3. RESEARCH: Search for that specific information. After getting "
-                            "results, ask: do I have a SPECIFIC URL/command/answer, or just "
-                            "general info? If general → refine query and search again.\n"
-                            "4. ACT only when you have actionable specifics from research.\n"
-                            "Do NOT guess URLs or fill in details from memory — "
-                            "search until you have concrete answers."
-                        )
-                    )
-                )
-
-        full_messages = [_sys_msg, *msgs] if _sys_msg is not None else list(msgs)
-        _cm_t1 = time.monotonic()
-
-        # First call gets extra time for prompt eval; subsequent calls use model timeout
-        _LLM_TIMEOUT = _model_timeout if call_count[0] > 1 else max(_model_timeout, 300)
-
-        try:
-            response = _invoke_with_timeout(model, full_messages, config, _LLM_TIMEOUT)
-        except Exception as _invoke_exc:
-            if not _is_context_overflow_error(_invoke_exc):
-                raise
-            _graph_log.warning(
-                "Context overflow from model (%s) — applying emergency compression and retrying",
-                type(_invoke_exc).__name__,
-            )
-            msgs = apply_message_compression(
-                msgs,
-                call_count=call_count[0],
-                compression_cache=_compression_cache,
-                llm=_comp_llm,
-                max_context_tokens=max_context_tokens,
-                min_age_cycles=0,
-                min_chars=0,
-                emergency_threshold=0.0,
-                actual_input_tokens=_last_input_tokens[0],
-            )
-            full_messages = [_sys_msg, *msgs] if _sys_msg is not None else list(msgs)
-            try:
-                response = _invoke_with_timeout(model, full_messages, config, _LLM_RETRY_TIMEOUT)
-            except Exception as _retry_exc:
-                raise RuntimeError(
-                    f"Context overflow: unable to fit conversation into model context window "
-                    f"({max_context_tokens:,} tokens) even after emergency compression. "
-                    "Start a new session with /session new."
-                ) from _retry_exc
-        if is_trace():
-            _graph_log.debug(
-                "⏱ call_model model.invoke: %.0fms", (time.monotonic() - _cm_t1) * 1000
-            )
-        # Store actual input token count for next-turn compression trigger
-        _resp_um = getattr(response, "usage_metadata", None)
-        if _resp_um and isinstance(_resp_um, dict):
-            _resp_input = _resp_um.get("input_tokens", 0)
-            if isinstance(_resp_input, int) and _resp_input > 0:
-                _last_input_tokens[0] = _resp_input
-        # ── Per-turn context budget guard ────────────────────────────────────
-        # If the model wants more tool calls but we've already consumed a large
-        # fraction of the context window this turn, abort the loop by stripping
-        # tool_calls from the response and injecting a warning.
-        if max_context_tokens and getattr(response, "tool_calls", None):
-            um = getattr(response, "usage_metadata", None)
-            if um and isinstance(um, dict):
-                turn_input = um.get("input_tokens", 0)
-                if turn_input > max_context_tokens * tool_context_limit_pct:
-                    pct_used = int(turn_input * 100 / max_context_tokens)
-                    warning = (
-                        f"[Context budget reached — {pct_used}% of {max_context_tokens:,} "
-                        f"tokens used this turn (limit: {int(tool_context_limit_pct * 100)}%). "
-                        "Tool execution halted. Summarising based on available information.]"
-                    )
-                    response = AIMessage(
-                        content=warning,
-                        id=getattr(response, "id", None),
-                    )
-        # ── Decision accountability parsing (ADR-0052 M2) ────────────────────
-        # When the feature is enabled, extract any structured plan/counter-plan
-        # from the agent response, log it, and append an uncertainty note when
-        # the adjusted confidence falls below the configured threshold.
-        if _da_enabled:
-            from src.orchestration.reflection_delegate import (
-                UNCERTAINTY_NOTE_PREFIX,
-                extract_decision_justification,
-            )
-
-            try:
-                _raw_content = getattr(response, "content", "") or ""
-                # Multimodal providers (e.g. Anthropic) may return list-of-parts.
-                # Flatten to str before the delimiter parser runs.
-                if isinstance(_raw_content, list):
-                    _da_content = " ".join(
-                        str(c.get("text", c) if isinstance(c, dict) else c) for c in _raw_content
-                    )
-                else:
-                    _da_content = str(_raw_content)
-
-                _da_result = extract_decision_justification(_da_content)
-                if _da_result is not None:
-                    _has_tool_calls = bool(getattr(response, "tool_calls", None))
-                    _graph_log.info(
-                        "decision_accountability: confidence=%.1f adjustment=%.1f "
-                        "flaws=%d should_proceed=%s%s",
-                        _da_result["confidence"],
-                        _da_result["confidence_adjustment"],
-                        len(_da_result["flaws"]),
-                        _da_result["should_proceed"],
-                        " (note suppressed: tool-calls present)" if _has_tool_calls else "",
-                    )
-                    if (
-                        not _da_result["should_proceed"]
-                        and _da_report_uncertainty
-                        and not _has_tool_calls
-                    ):
-                        _flaw_suffix = (
-                            f" with {len(_da_result['flaws'])} critical flaw(s): "
-                            + "; ".join(_da_result["flaws"][:2])
-                            if _da_result["flaws"]
-                            else ""
-                        )
-                        _adj_conf = _da_result["confidence"] + _da_result["confidence_adjustment"]
-                        _uncertainty_note = (
-                            f"\n\n{UNCERTAINTY_NOTE_PREFIX} confidence "
-                            f"{_da_result['confidence']:.1f}/10{_flaw_suffix}. "
-                            f"Adjusted confidence {_adj_conf:.1f}/10 is below "
-                            f"threshold {_da_min_confidence:.1f}. Proceeding with caution."
-                        )
-                        response = AIMessage(
-                            content=_da_content + _uncertainty_note,
-                            id=getattr(response, "id", None),
-                        )
-            except Exception as _da_exc:  # noqa: BLE001 — DA is non-critical; never crash a turn
-                _graph_log.warning("decision_accountability parsing failed: %s", _da_exc)
-
-        return {"messages": [response]}
-
-    def handle_phantom(state: CogtrixState) -> dict:
-        phantom_count[0] += 1
-        msgs = state["messages"]
-        last = msgs[-1]
+    def handle_fabrication(state: CogtrixState) -> dict:
+        fabrication_count[0] += 1
+        last = state["messages"][-1]
         log = get_logger()
         log.warning(
-            "Phantom tool call detected, attempt %d/%d. Injecting hint.",
-            phantom_count[0],
-            _MAX_PHANTOM_RETRIES,
+            "Fabricated success-after-error detected, attempt %d/%d. Injecting correction.",
+            fabrication_count[0],
+            _MAX_FABRICATION_RETRIES,
         )
-        if phantom_count[0] > _MAX_PHANTOM_RETRIES:
+        if fabrication_count[0] > _MAX_FABRICATION_RETRIES:
             return {
                 "messages": [
                     RemoveMessage(id=last.id),
                     AIMessage(
                         content=(
-                            "I encountered persistent formatting issues with tool calls "
-                            "and could not complete the request. Please try rephrasing "
-                            "your question, or I can try to answer based on what I know."
+                            "I reported success incorrectly after tool errors and could not "
+                            "recover safely. Please retry your request."
                         )
                     ),
                 ]
@@ -1337,35 +2004,11 @@ def build_agent_graph(
                 RemoveMessage(id=last.id),
                 HumanMessage(
                     content=(
-                        "Your last tool call could not be parsed by the server. "
-                        "The JSON was malformed. Please try your tool call again "
-                        "with carefully formatted JSON arguments, or if you have "
-                        "enough information, provide your answer directly."
+                        "Some of the tools you called returned errors, but your response claims "
+                        "success. Report honestly what the tools returned. Do not fabricate "
+                        "success messages."
                     )
                 ),
-            ]
-        }
-
-    def handle_action_intent(state: CogtrixState) -> dict:
-        action_intent_count[0] += 1
-        log = get_logger()
-        log.warning(
-            "Action-intent without tool call detected, attempt %d/%d. Injecting nudge.",
-            action_intent_count[0],
-            _MAX_ACTION_INTENT_RETRIES,
-        )
-        if action_intent_count[0] > _MAX_ACTION_INTENT_RETRIES:
-            # Give up and let the model's last response stand as-is.
-            return {"messages": []}
-        return {
-            "messages": [
-                HumanMessage(
-                    content=(
-                        "You described an action but did not call any tools. "
-                        "Please proceed now: call the appropriate tool(s) to carry "
-                        "out what you described, rather than explaining it in text."
-                    )
-                )
             ]
         }
 
@@ -1384,10 +2027,107 @@ def build_agent_graph(
         tool_obj = _tool_lookup.get(tool_name)
         if tool_obj is not None:
             tool_name = getattr(tool_obj, "name", tool_name) or tool_name
-        try:
-            return tool_name + ":" + _json.dumps(call.get("args", {}))
-        except (TypeError, ValueError):
+        args_json = _json.dumps(_stable_tool_call_value(call.get("args", {})), sort_keys=True)
+        return tool_name + ":" + args_json
+
+    def _identical_error_signature(call: dict) -> str | None:
+        """Return a stable signature for repeated identical-error detection.
+
+        Uses the tool name plus the first meaningful argument so that retry
+        loops on the same action are grouped together without requiring the
+        full argument payload to match byte-for-byte.
+        """
+        tool_name = call.get("name", "")
+        if not tool_name:
             return None
+        args = call.get("args", {})
+        if not isinstance(args, dict):
+            return None
+        primary_keys = (
+            "pull_number",
+            "path",
+            "url",
+            "query",
+            "command",
+            "name",
+            "text",
+            "repo",
+            "email",
+            "username",
+            "branch",
+        )
+        primary_key = next(
+            (
+                key
+                for key in primary_keys
+                if key in args and args.get(key) not in (None, "", [], {})
+            ),
+            None,
+        )
+        if primary_key is None:
+            if not args:
+                return None
+            primary_key = next(iter(sorted(args.keys())))
+        try:
+            primary_value = _json.dumps(args.get(primary_key), sort_keys=True, default=str)
+        except (TypeError, ValueError):
+            primary_value = str(args.get(primary_key))
+        return f"{tool_name}:{primary_key}={primary_value}"
+
+    def _tool_error_class(content: str) -> str | None:
+        """Normalize an error ToolMessage into a coarse error class."""
+        normalized = content.strip()
+        if normalized.lower().startswith("[duplicate call"):
+            normalized = normalized.split("\n\n", 1)[-1]
+        content_lower = _stuck_detection_headline(normalized).lower()
+        if "repository rule violations" in content_lower:
+            return "repository_rule_violations"
+        if "permission denied" in content_lower or "forbidden" in content_lower:
+            return "permission_denied"
+        if "timed out" in content_lower or "timeout" in content_lower:
+            return "timeout"
+        if (
+            "not found" in content_lower
+            or "404" in content_lower
+            or "no such file" in content_lower
+            or "cannot open" in content_lower
+        ):
+            return "not_found"
+        if (
+            content_lower.startswith("error")
+            or "error executing" in content_lower
+            or "traceback" in content_lower
+            or "failed" in content_lower
+        ):
+            return "generic_error"
+        return None
+
+    def _tool_error_guidance(error_class: str, tool_name: str) -> str:
+        """Return short guidance tailored to the repeated error class."""
+        if error_class == "repository_rule_violations":
+            return (
+                f"'{_safe_tool_name(tool_name)}' hit repository rule violations. "
+                "Stop retrying and verify CI/branch protections or ask a maintainer to merge."
+            )
+        if error_class == "permission_denied":
+            return (
+                f"'{_safe_tool_name(tool_name)}' was denied. Stop retrying and verify "
+                "authentication or permissions before trying again."
+            )
+        if error_class == "timeout":
+            return (
+                f"'{_safe_tool_name(tool_name)}' timed out repeatedly. Stop retrying and "
+                "switch to a different approach or inspect the service health."
+            )
+        if error_class == "not_found":
+            return (
+                f"'{_safe_tool_name(tool_name)}' cannot find the target repeatedly. "
+                "Verify the identifier or path before trying again."
+            )
+        return (
+            f"'{_safe_tool_name(tool_name)}' has returned the same error repeatedly. "
+            "Stop retrying and inspect the last failure before continuing."
+        )
 
     def _check_duplicate(call: dict, key: str | None = None) -> ToolMessage | None:
         """Return a cached ToolMessage if this exact call was seen before."""
@@ -1424,6 +2164,12 @@ def build_agent_graph(
             if len(_tool_call_history) > _MAX_TOOL_CALL_HISTORY:
                 _tool_call_history.popitem(last=False)
 
+    def _cap_history_tool_content(content: str) -> str:
+        """Cap tool output before it is stored in message history."""
+        if len(content) <= _HISTORY_TOOL_MESSAGE_CAP_CHARS:
+            return content
+        return truncate_tool_output(content, _HISTORY_TOOL_MESSAGE_CAP_CHARS)
+
     def _invoke_one(call: dict, run_config: Any) -> Any:
         """Execute a single tool call already in tool_lookup. Returns ToolMessage."""
         call_key = _tool_call_key(call)
@@ -1437,37 +2183,43 @@ def build_agent_graph(
         # Prevents runaway search loops where the model calls the same tool
         # 10+ times with diminishing returns.  Exempt tools (request_tools,
         # report_progress, etc.) are not counted.
-        if tool_name not in _TOOL_BUDGET_EXEMPT:
-            count = _tool_call_counts.get(tool_name, 0) + 1
-            _tool_call_counts[tool_name] = count
-            if count > _TOOL_BUDGET_HARD:
-                # Remove from active set AND add to denials so the model
-                # can't re-load it via request_tools(add=[...]).
-                # Also remove from active_tools_list so bind_tools stops
-                # advertising the disabled tool to the LLM, and so
-                # _reset_for_new_run doesn't silently re-enable it by
-                # rebuilding _tool_lookup from the stale list (root cause
-                # of the "Tool names must be unique" 400 on re-add).
-                _tool_lookup.pop(tool_name, None)
-                _active_names.discard(tool_name)
-                session_state.deny_tool(tool_name)
-                try:
+        if tool_name not in _TOOL_BUDGET_HARD_EXEMPT:
+            # Critical section: protect compound read-increment-write on
+            # _tool_call_counts and concurrent removal from active_tools_list
+            with _tool_budget_lock:
+                count = _tool_call_counts.get(tool_name, 0) + 1
+                _tool_call_counts[tool_name] = count
+                if count > _TOOL_BUDGET_HARD:
+                    # Remove from active set AND add to denials so the model
+                    # can't re-load it via request_tools(add=[...]).
+                    # Also remove from active_tools_list so bind_tools stops
+                    # advertising the disabled tool to the LLM, and so
+                    # _reset_for_new_run doesn't silently re-enable it by
+                    # rebuilding _tool_lookup from the stale list (root cause
+                    # of the "Tool names must be unique" 400 on re-add).
+                    _tool_lookup.pop(tool_name, None)
+                    _active_names.discard(tool_name)
+                    session_state.deny_tool(tool_name)
                     _disabled_obj = next(
-                        t for t in active_tools_list if getattr(t, "name", "") == tool_name
+                        (t for t in active_tools_list if getattr(t, "name", "") == tool_name),
+                        None,
                     )
-                    active_tools_list.remove(_disabled_obj)
-                except StopIteration:
-                    pass
-                _tool_version[0] += 1  # force bind_tools refresh
-                return ToolMessage(
-                    content=(
-                        f"Tool '{tool_name}' has been disabled after {_TOOL_BUDGET_HARD} calls "
-                        f"and is no longer available. Please synthesize your findings into a "
-                        f"final response now using the data you already have."
-                    ),
-                    tool_call_id=call["id"],
-                    name=tool_name,
-                )
+                    if _disabled_obj is not None:
+                        with _bound_cache_lock:
+                            try:
+                                active_tools_list.remove(_disabled_obj)
+                            except ValueError:
+                                pass  # already removed by a concurrent invocation
+                    _tool_version[0] += 1  # force bind_tools refresh
+                    return ToolMessage(
+                        content=(
+                            f"Tool '{tool_name}' has been disabled after {_TOOL_BUDGET_HARD} calls "
+                            f"and is no longer available. Please synthesize your findings into a "
+                            f"final response now using the data you already have."
+                        ),
+                        tool_call_id=call["id"],
+                        name=tool_name,
+                    )
 
         tool_input = {**call, "type": "tool_call"}
 
@@ -1490,692 +2242,120 @@ def build_agent_graph(
                     name=tool_name,
                 )
         try:
-            tool = _tool_lookup.get(tool_name)
+            with _tool_budget_lock:
+                tool = _tool_lookup.get(tool_name)
             if tool is None:
                 return ToolMessage(
                     content=f"Tool '{tool_name}' is no longer active.",
                     tool_call_id=call["id"],
                     name=tool_name,
                 )
-            result = tool.invoke(tool_input, run_config)
+            _corrected = _correct_tool_args(tool, call.get("args", {}))
+            _corrected_input = {**tool_input, "args": _corrected}
+            _tool_t0 = time.monotonic()
+            with start_span(
+                "src.orchestration.graph",
+                "tool.call",
+                attributes={"tool.name": tool_name},
+            ) as _tool_span:
+                try:
+                    result = tool.invoke(_corrected_input, run_config)
+                except Exception as exc:
+                    _tool_span.record_exception(exc)
+                    _tool_span.set_attribute("tool.status", "error")
+                    _tool_span.set_attribute(
+                        "tool.duration_ms", int((time.monotonic() - _tool_t0) * 1000)
+                    )
+                    _tool_span.set_status(Status(StatusCode.ERROR, str(exc)))
+                    raise
 
-            # Soft budget nudge: after N calls to the same tool, hint to synthesize.
-            _cnt = _tool_call_counts.get(tool_name, 0)
-            _nudge = ""
-            if _cnt >= _TOOL_BUDGET_SOFT and tool_name not in _TOOL_BUDGET_EXEMPT:
-                _nudge = (
-                    f"\n\n[Note: You have called {tool_name} {_cnt} times this turn. "
-                    "You likely have enough data — please synthesize your findings "
-                    "into a complete response now rather than searching further.]"
+                # Soft budget nudge: after N calls to the same tool, hint to synthesize.
+                with _tool_budget_lock:
+                    _cnt = _tool_call_counts.get(tool_name, 0)
+                _nudge = ""
+                if _cnt >= _TOOL_BUDGET_SOFT and tool_name not in _TOOL_BUDGET_SOFT_EXEMPT:
+                    _nudge = (
+                        f"\n\n[Note: You have called {tool_name} {_cnt} times this turn. "
+                        "You likely have enough data — please synthesize your findings "
+                        "into a complete response now rather than searching further.]"
+                    )
+
+                if isinstance(result, ToolMessage):
+                    content = result.content if isinstance(result.content, str) else ""
+                    if _nudge:
+                        content += _nudge
+                    content = _cap_history_tool_content(content)
+                    _store_call_result(call, content, key=call_key)
+                    result.content = content
+                    _tool_span.set_attribute("tool.status", "success")
+                    _tool_span.set_attribute(
+                        "tool.duration_ms", int((time.monotonic() - _tool_t0) * 1000)
+                    )
+                    _tool_span.set_status(Status(StatusCode.OK))
+                    return result
+                text = str(result) if result is not None else ""
+                text = _cap_history_tool_content(text)
+                _store_call_result(call, text, key=call_key)
+                _tool_span.set_attribute("tool.status", "success")
+                _tool_span.set_attribute(
+                    "tool.duration_ms", int((time.monotonic() - _tool_t0) * 1000)
                 )
-
-            if isinstance(result, ToolMessage):
-                content = result.content if isinstance(result.content, str) else ""
-                _store_call_result(call, content, key=call_key)
-                if _nudge:
-                    result.content = content + _nudge
-                return result
-            text = str(result) if result is not None else ""
-            _store_call_result(call, text, key=call_key)
-            return ToolMessage(
-                content=text,
-                tool_call_id=call["id"],
-                name=tool_name,
-            )
+                _tool_span.set_status(Status(StatusCode.OK))
+                return ToolMessage(
+                    content=text,
+                    tool_call_id=call["id"],
+                    name=tool_name,
+                )
         except UserCancelledRun:
             raise
         except Exception as exc:
             log = get_logger()
             log.warning("Tool %s raised: %s", tool_name, exc, exc_info=True)
             return ToolMessage(
-                content=f"Error executing {tool_name}: {exc}",
+                content=_cap_history_tool_content(f"Error executing {tool_name}: {exc}"),
                 tool_call_id=call["id"],
                 name=tool_name,
             )
 
-    def process_tools(state: CogtrixState, config: RunnableConfig) -> dict:
-        log = get_logger()
-        msgs = state["messages"]
-        last = msgs[-1]
-
-        if not (isinstance(last, AIMessage) and last.tool_calls):
-            return {"messages": []}
-
-        tool_lookup_ref = _tool_lookup
-        active_names_ref = _active_names
-
-        result_msgs: list = []
-        tools_activated: list[str] = []
-        tools_released: list[str] = []
-        guidance_lines: list[str] = []
-        saw_request_tools = False
-
-        # ── Classification pass ──────────────────────────────────
-        if parallel_tool_execution and len(last.tool_calls) > 1:
-            snapshot_names = set(tool_lookup_ref.keys())
-            serial_first: list = []
-            parallel_calls: list = []
-            for call in last.tool_calls:
-                name = call["name"]
-                if name == "request_tools" or name not in snapshot_names:
-                    serial_first.append(call)
-                else:
-                    parallel_calls.append(call)
-        else:
-            serial_first = list(last.tool_calls)
-            parallel_calls = []
-
-        # ── Serial-first execution (expansion, request_tools) ────
-        cancel_requested = False
-        for call in serial_first:
-            tool_name = call["name"]
-
-            if tool_name in tool_lookup_ref:
-                try:
-                    msg = _invoke_one(call, config)
-                except UserCancelledRun:
-                    cancel_requested = True
-                    msg = ToolMessage(
-                        content="User cancelled agent workflow",
-                        tool_call_id=call["id"],
-                        name=tool_name,
-                    )
-                result_msgs.append(msg)
-                if cancel_requested:
-                    break
-                if tool_name == "request_tools":
-                    saw_request_tools = True
-            else:
-                can_expand = auto_expansion_count[0] < _MAX_TOOL_EXPANSIONS
-
-                if can_expand and _available_tools_ref[0]:
-                    match, source = _resolve_tool_name(
-                        tool_name,
-                        _available_tools_ref[0],
-                        active_names_ref,
-                    )
-                else:
-                    match, source = None, ""
-
-                if match and source == "available":
-                    if session_state.is_denied(match):
-                        result_msgs.append(
-                            ToolMessage(
-                                content=f"Tool '{match}' is disabled by the user.",
-                                tool_call_id=call["id"],
-                                name=tool_name,
-                            )
-                        )
-                        continue
-                    tool_obj = _available_tools_ref[0].pop(match)
-                    tool_catalog.pop(match, None)
-                    # Resolve LazyToolProxy before adding to active tools —
-                    # bind_tools() requires real StructuredTool objects.
-                    # Use isinstance() rather than hasattr() to avoid
-                    # accidentally calling _resolve() on MagicMock objects
-                    # in tests or other non-proxy objects that happen to have
-                    # a _resolve attribute.
-                    if isinstance(tool_obj, _LazyToolProxy):
-                        tool_obj = tool_obj._resolve()
-                        if tool_obj is None:
-                            result_msgs.append(
-                                ToolMessage(
-                                    content=f"Tool '{match}' could not be loaded.",
-                                    tool_call_id=call["id"],
-                                    name=tool_name,
-                                )
-                            )
-                            continue
-                    apply_output_cap(tool_obj, output_cap)
-                    if registry is not None and registry.requires_confirmation(match):
-                        if session_state.no_confirm:
-                            approvals.add(match)
-                        tool_obj = _safe_wrap(
-                            tool_obj,
-                            match,
-                            registry,
-                            approvals,
-                            session_state=session_state,
-                            ui=confirmation_ui,
-                            git_native=git_native,
-                        )
-                    active_tools_list.append(tool_obj)
-                    active_names_ref.add(match)
-                    tool_lookup_ref[match] = tool_obj
-                    tools_activated.append(match)
-                    session_state.loaded_tools.add(match)
-                    auto_expansion_count[0] += 1
-
-                    if match != tool_name:
-                        guidance_lines.append(
-                            f"'{tool_name}' resolved to '{match}' (now activated)."
-                        )
-
-                    if tool_call_guard is not None:
-                        _guard_result = tool_call_guard(match, call.get("args", {}))
-                        if hasattr(_guard_result, "is_safe") and not _guard_result.is_safe:
-                            log.warning(
-                                "Tool call blocked [%s]: %s — %s",
-                                getattr(_guard_result, "guard_name", ""),
-                                match,
-                                getattr(_guard_result, "reason", ""),
-                            )
-                            result_msgs.append(
-                                ToolMessage(
-                                    content=(
-                                        f"Tool call blocked by security policy: "
-                                        f"{getattr(_guard_result, 'reason', 'blocked')}"
-                                    ),
-                                    tool_call_id=call["id"],
-                                    name=tool_name,
-                                )
-                            )
-                            continue
-                    try:
-                        corrected_args = _correct_tool_args(tool_obj, call.get("args", {}))
-                        corrected_input = {
-                            **call,
-                            "name": match,
-                            "type": "tool_call",
-                            "args": corrected_args,
-                        }
-                        result = tool_obj.invoke(corrected_input, config)
-                        # Store cache key under the resolved name so
-                        # deduplication works for both alias and canonical
-                        # name (BUG-198).
-                        resolved_call = {**call, "name": match}
-                        if isinstance(result, ToolMessage):
-                            _store_call_result(
-                                resolved_call,
-                                result.content if isinstance(result.content, str) else "",
-                            )
-                            result_msgs.append(result)
-                        else:
-                            text = str(result) if result is not None else ""
-                            _store_call_result(resolved_call, text)
-                            result_msgs.append(
-                                ToolMessage(
-                                    content=text,
-                                    tool_call_id=call["id"],
-                                    name=match,
-                                )
-                            )
-                    except UserCancelledRun:
-                        cancel_requested = True
-                        result_msgs.append(
-                            ToolMessage(
-                                content="User cancelled agent workflow",
-                                tool_call_id=call["id"],
-                                name=match,
-                            )
-                        )
-                        break
-                    except Exception as exc:
-                        log.warning("Tool %s raised: %s", match, exc, exc_info=True)
-                        result_msgs.append(
-                            ToolMessage(
-                                content=f"Error executing {match}: {exc}",
-                                tool_call_id=call["id"],
-                                name=match,
-                            )
-                        )
-
-                elif match and source == "active":
-                    guidance_lines.append(
-                        f"'{tool_name}' is not a tool name. "
-                        f"Use the already-active tool '{match}' instead."
-                    )
-                    result_msgs.append(
-                        ToolMessage(
-                            content=(
-                                f"'{tool_name}' is not a valid tool. "
-                                f"Did you mean '{match}'? It is already active."
-                            ),
-                            tool_call_id=call["id"],
-                            name=tool_name,
-                        )
-                    )
-                else:
-                    guidance_lines.append(f"'{tool_name}' does not match any known tool.")
-                    result_msgs.append(
-                        ToolMessage(
-                            content=f"'{tool_name}' is not a valid tool and could not be resolved.",
-                            tool_call_id=call["id"],
-                            name=tool_name,
-                        )
-                    )
-
-        # ── Parallel execution ───────────────────────────────────
-        # Pre-filter: resolve alias/unknown names before submitting to the pool.
-        # The serial-first path already does fuzzy alias resolution; without
-        # this step parallel calls with unrecognised names bypass it entirely,
-        # producing a bare "Tool X is no longer active" message with no hint.
-        if not cancel_requested and parallel_calls:
-            resolved_parallel: list = []
-            for _pcall in parallel_calls:
-                _pname = _pcall["name"]
-                if _pname in _tool_lookup:
-                    resolved_parallel.append(_pcall)
-                    continue
-                # Fuzzy-resolve against active + available pools
-                _pmatch, _psource = _resolve_tool_name(
-                    _pname, _available_tools_ref[0], active_names_ref
-                )
-                if _pmatch and _pmatch in session_state.denials:
-                    # F4: pre-filter must respect denials, same as serial path
-                    guidance_lines.append(
-                        f"'{_pname}' has been disabled this session and cannot be re-loaded."
-                    )
-                    result_msgs.append(
-                        ToolMessage(
-                            content=f"'{_pname}' is disabled for this session.",
-                            tool_call_id=_pcall["id"],
-                            name=_pname,
-                        )
-                    )
-                elif _pmatch and _psource == "active":
-                    guidance_lines.append(
-                        f"'{_pname}' is not a tool name. "
-                        f"Use the already-active tool '{_pmatch}' instead."
-                    )
-                    result_msgs.append(
-                        ToolMessage(
-                            content=(
-                                f"'{_pname}' is not a valid tool. "
-                                f"Did you mean '{_pmatch}'? It is already active."
-                            ),
-                            tool_call_id=_pcall["id"],
-                            name=_pname,
-                        )
-                    )
-                elif _pmatch and _psource == "available":
-                    # F3: tool exists in the on-demand pool but is not yet active —
-                    # give an actionable hint rather than the generic "not resolved"
-                    guidance_lines.append(
-                        f"'{_pname}' matched '{_pmatch}' which is available but not active. "
-                        f"Call request_tools(add=['{_pmatch}']) first, then retry."
-                    )
-                    result_msgs.append(
-                        ToolMessage(
-                            content=(
-                                f"'{_pname}' matched '{_pmatch}' but it is not yet active. "
-                                f"Use request_tools(add=['{_pmatch}']) to load it first."
-                            ),
-                            tool_call_id=_pcall["id"],
-                            name=_pname,
-                        )
-                    )
-                else:
-                    guidance_lines.append(f"'{_pname}' does not match any known tool.")
-                    result_msgs.append(
-                        ToolMessage(
-                            content=f"'{_pname}' is not a valid tool and could not be resolved.",
-                            tool_call_id=_pcall["id"],
-                            name=_pname,
-                        )
-                    )
-            parallel_calls = resolved_parallel
-
-        if cancel_requested:
-            for call in parallel_calls:
-                result_msgs.append(
-                    ToolMessage(
-                        content="User cancelled agent workflow",
-                        tool_call_id=call["id"],
-                        name=call["name"],
-                    )
-                )
-        elif len(parallel_calls) == 1:
-            try:
-                result_msgs.append(_invoke_one(parallel_calls[0], config))
-            except UserCancelledRun:
-                cancel_requested = True
-                result_msgs.append(
-                    ToolMessage(
-                        content="User cancelled agent workflow",
-                        tool_call_id=parallel_calls[0]["id"],
-                        name=parallel_calls[0]["name"],
-                    )
-                )
-        elif parallel_calls:
-            pool = _get_tool_executor()
-            futures = [(call, pool.submit(_invoke_one, call, config)) for call in parallel_calls]
-            for call, future in futures:
-                try:
-                    # 10-minute timeout prevents indefinite hangs from stuck
-                    # tool calls (BUG-202).  On timeout, produce an error
-                    # ToolMessage so LangGraph's 1:1 tool_call_id mapping
-                    # is preserved.
-                    result_msgs.append(future.result(timeout=600))
-                except (TimeoutError, concurrent.futures.TimeoutError):
-                    log.warning("Tool '%s' timed out after 600s", call["name"])
-                    # Cancel the future to prevent zombie threads
-                    future.cancel()
-                    result_msgs.append(
-                        ToolMessage(
-                            content=f"Error: tool '{call['name']}' timed out after 10 minutes",
-                            tool_call_id=call["id"],
-                            name=call["name"],
-                        )
-                    )
-                except UserCancelledRun:
-                    cancel_requested = True
-                    result_msgs.append(
-                        ToolMessage(
-                            content="User cancelled agent workflow",
-                            tool_call_id=call["id"],
-                            name=call["name"],
-                        )
-                    )
-                    break
-                except Exception as exc:
-                    log.error("Unexpected future exception: %s", exc, exc_info=True)
-                    result_msgs.append(
-                        ToolMessage(
-                            content=f"Error executing {call['name']}: {exc}",
-                            tool_call_id=call["id"],
-                            name=call["name"],
-                        )
-                    )
-
-            if cancel_requested:
-                # Note: future.cancel() only prevents not-yet-started futures.
-                # In-flight futures complete naturally; the persistent pool keeps threads
-                # alive for the next batch. This is intentional — abrupt thread
-                # termination could leave resources in an inconsistent state.
-                processed_ids = {m.tool_call_id for m in result_msgs if hasattr(m, "tool_call_id")}
-                for call, future in futures:
-                    if call["id"] not in processed_ids:
-                        future.cancel()
-                        result_msgs.append(
-                            ToolMessage(
-                                content="User cancelled agent workflow",
-                                tool_call_id=call["id"],
-                                name=call["name"],
-                            )
-                        )
-
-        if cancel_requested:
-            raise UserCancelledRun()
-
-        if saw_request_tools:
-            mgmt_req = _detect_tool_request(
-                [last],
-                start_idx=0,
-            )
-            if mgmt_req and mgmt_req.has_changes:
-                for rname in mgmt_req.add:
-                    # Fuzzy-resolve names the LLM may have abbreviated
-                    if rname not in _available_tools_ref[0]:
-                        resolved, source = _resolve_tool_name(
-                            rname,
-                            _available_tools_ref[0],
-                            active_names_ref,
-                        )
-                        if resolved and source == "available":
-                            rname = resolved
-                    _existing_active = {getattr(t, "name", "") for t in active_tools_list}
-                    if session_state.is_denied(rname):
-                        guidance_lines.append(
-                            f"'{rname}' has been disabled this session and cannot be re-loaded."
-                        )
-                        continue
-                    if rname not in _available_tools_ref[0] and rname not in _existing_active:
-                        # Tool is not known at all — give early feedback so the
-                        # model doesn't keep requesting a non-existent tool name.
-                        guidance_lines.append(
-                            f"'{rname}' is not a recognised tool name and cannot be loaded. "
-                            "Call request_tools() with no arguments to see the available catalog."
-                        )
-                        continue
-                    if (
-                        rname in _available_tools_ref[0]
-                        and rname not in tools_activated
-                        and rname not in _existing_active  # guard: never create duplicates
-                    ):
-                        tool_obj = _available_tools_ref[0].pop(rname)
-                        tool_catalog.pop(rname, None)
-                        if isinstance(tool_obj, _LazyToolProxy):
-                            tool_obj = tool_obj._resolve()
-                            if tool_obj is None:
-                                continue
-                        apply_output_cap(tool_obj, output_cap)
-                        if registry is not None and registry.requires_confirmation(rname):
-                            if session_state.no_confirm:
-                                approvals.add(rname)
-                            tool_obj = _safe_wrap(
-                                tool_obj,
-                                rname,
-                                registry,
-                                approvals,
-                                session_state=session_state,
-                                ui=confirmation_ui,
-                                git_native=git_native,
-                            )
-                        active_tools_list.append(tool_obj)
-                        active_names_ref.add(rname)
-                        tool_lookup_ref[rname] = tool_obj
-                        tools_activated.append(rname)
-                        session_state.loaded_tools.add(rname)
-
-                for rname in mgmt_req.remove:
-                    # Fuzzy-resolve against active pool only (not available)
-                    if rname not in active_names_ref and rname not in protected:
-                        resolved, source = _resolve_tool_name(
-                            rname,
-                            {},
-                            active_names_ref,
-                        )
-                        if resolved and source == "active":
-                            rname = resolved
-                    if rname in tools_activated:
-                        continue
-                    if rname in protected:
-                        guidance_lines.append(
-                            f"'{rname}' is core to this mode and cannot be released."
-                        )
-                    elif rname in active_names_ref:
-                        idx = next(
-                            (
-                                i
-                                for i, t in enumerate(active_tools_list)
-                                if getattr(t, "name", None) == rname
-                            ),
-                            None,
-                        )
-                        if idx is not None:
-                            popped = active_tools_list.pop(idx)
-                            active_names_ref.discard(rname)
-                            original = session_state.all_tool_originals.get(rname, popped)
-                            _available_tools_ref[0][rname] = original
-                            tool_catalog.update(build_tool_catalog({rname: original}))
-                            tools_released.append(rname)
-                            session_state.loaded_tools.discard(rname)
-                            if rname in tool_lookup_ref:
-                                del tool_lookup_ref[rname]
-                    else:
-                        guidance_lines.append(f"'{rname}' is not in the active set.")
-
-        # Circuit-breaker for repeated request_tools no-ops
-        if saw_request_tools:
-            if tools_activated or tools_released:
-                request_tools_noop_count[0] = 0
-            else:
-                request_tools_noop_count[0] += 1
-                if request_tools_noop_count[0] >= _MAX_REQUEST_TOOLS_NOOPS:
-                    log.warning(
-                        "request_tools circuit-breaker: %d consecutive no-op calls",
-                        request_tools_noop_count[0],
-                    )
-                    guidance_lines.append(
-                        "STOP: You have made multiple unsuccessful attempts to "
-                        "manage tools. Work with the tools you already have, or "
-                        "tell the user you cannot complete the task with the "
-                        "available tools."
-                    )
-
-        if tools_activated or tools_released:
-            expansion_count[0] += 1
-            _tool_version[0] += 1
-
-            active_tools_list[:] = [
-                t for t in active_tools_list if getattr(t, "name", "") != "request_tools"
-            ]
-            _tool_lookup.pop("request_tools", None)
-            releasable = active_names_ref - protected - {"request_tools"}
-            if _available_tools_ref[0] or releasable:
-                rt = create_request_tools_tool(
-                    _available_tools_ref[0],
-                    tool_catalog,
-                    active_names=active_names_ref,
-                    protected_names=protected,
-                    denials=session_state.get_denials_snapshot(),
-                )
-                if rt:
-                    active_tools_list.append(rt)
-                    _tool_lookup["request_tools"] = rt
-
-            configure_delegate_tools(active_tools_list, _available_tools_ref[0])
-
-            visible_count = sum(
-                1 for t in active_tools_list if getattr(t, "name", "") != "request_tools"
-            )
-            log.info(
-                "Tool expansion round %d (auto: %d) — added: %s, released: %s (%d total)",
-                expansion_count[0],
-                auto_expansion_count[0],
-                tools_activated,
-                tools_released,
-                visible_count,
-            )
-            if on_tool_expansion is not None:
-                on_tool_expansion(tools_activated, tools_released, visible_count)
-
-            note_parts: list[str] = []
-            if tools_activated:
-                note_parts.append(
-                    "The following tools have been added to your toolkit: "
-                    f"{', '.join(tools_activated)}. You can now use them."
-                )
-            if tools_released:
-                note_parts.append(
-                    "The following tools have been released: "
-                    f"{', '.join(tools_released)}. "
-                    "They are back in the catalog if you need them again."
-                )
-            if guidance_lines:
-                note_parts.append(" ".join(guidance_lines))
-            note_parts.append("Continue with your task.")
-            result_msgs.append(HumanMessage(content=" ".join(note_parts)))
-        elif guidance_lines:
-            result_msgs.append(
-                HumanMessage(content=" ".join(guidance_lines) + " Continue with your task.")
-            )
-
-        # ── Track tool calls since last checkpoint ─────────────────
-        _calls_since_last_checkpoint[0] += len(
-            [m for m in result_msgs if isinstance(m, ToolMessage)]
-        )
-
-        # ── Repeated file-write detection ─────────────────────────────
-        # If the agent writes to the same file 3+ times, suggest
-        # searching for a working reference before rewriting again.
-        for call in getattr(state["messages"][-1], "tool_calls", None) or []:
-            _tname = call.get("name", "")
-            if _tname in ("write_file", "append_file"):
-                _fpath = call.get("args", {}).get("path", "")
-                if _fpath:
-                    _same_file_writes[_fpath] = _same_file_writes.get(_fpath, 0) + 1
-                    if _same_file_writes[_fpath] == _REWRITE_SEARCH_THRESHOLD:
-                        result_msgs.append(
-                            HumanMessage(
-                                content=(
-                                    f"[Rewrite detected] You've written to '{_fpath}' "
-                                    f"{_REWRITE_SEARCH_THRESHOLD} times. Before rewriting "
-                                    "again, search the web for a WORKING reference "
-                                    "implementation and adapt it instead of guessing."
-                                )
-                            )
-                        )
-            # Also detect shell-based file writes: heredocs, python open(), tee
-            if _tname == "execute_shell_command":
-                import re as _re
-
-                _cmd = call.get("args", {}).get("command", "")
-                _write_paths: list[str] = []
-                # cat > file, cat >> file
-                for _wm in _re.finditer(r"cat\s*>>?\s*(\S+)", _cmd):
-                    _write_paths.append(_wm.group(1))
-                # tee file, tee -a file
-                for _wm in _re.finditer(r"tee\s+(?:-a\s+)?(\S+)", _cmd):
-                    _write_paths.append(_wm.group(1))
-                # python open('file', 'w')
-                for _wm in _re.finditer(r"open\(['\"]([^'\"]+)['\"],\s*['\"]w", _cmd):
-                    _write_paths.append(_wm.group(1))
-                for _fpath in _write_paths:
-                    _same_file_writes[_fpath] = _same_file_writes.get(_fpath, 0) + 1
-                    if _same_file_writes[_fpath] == _REWRITE_SEARCH_THRESHOLD:
-                        result_msgs.append(
-                            HumanMessage(
-                                content=(
-                                    f"[Rewrite detected] You've written to '{_fpath}' "
-                                    f"{_REWRITE_SEARCH_THRESHOLD} times. Before "
-                                    "rewriting again: 1) Read the ERROR message from "
-                                    "your last attempt carefully. 2) Search the web for "
-                                    "a working reference. 3) Fix the SPECIFIC issue."
-                                )
-                            )
-                        )
-
-        # ── Stuck detection: count consecutive error results ──────────
-        _error_indicators = (
-            "Error",
-            "Failed",
-            "HTTP Error",
-            "404",
-            "not found",
-            "timed out",
-            "Traceback",
-            "exit code:",
-            "=> not found",
-            "Permission denied",
-            "No such file",
-            "cannot open",
-        )
-        _has_error = False
-        _has_success = False
-        for msg in result_msgs:
-            if isinstance(msg, ToolMessage):
-                content = msg.content if isinstance(msg.content, str) else ""
-                content_lower = content.lower()
-                if any(ind.lower() in content_lower for ind in _error_indicators):
-                    _has_error = True
-                # Detect genuine progress: file creation, version output, etc.
-                _success_indicators = (
-                    "success",
-                    "saved to",
-                    "extracted",
-                    "version",
-                    "checkpoint #",
-                    "confirmed working",
-                )
-                if any(si in content_lower for si in _success_indicators):
-                    _has_success = True
-        # Only count as stuck if there are errors AND no successes in
-        # this round — a round with mixed results is making progress.
-        if _has_error and not _has_success:
-            _consecutive_errors[0] += 1
-            if _consecutive_errors[0] >= _STUCK_THRESHOLD:
-                _force_thinking_break[0] = True
-                _graph_log.info(
-                    "Stuck threshold reached (%d consecutive errors) — "
-                    "will force thinking break on next call_model",
-                    _consecutive_errors[0],
-                )
-        else:
-            _consecutive_errors[0] = 0
-
-        return {"messages": result_msgs}
+    process_tools = build_process_tools_node(
+        _invoke_one=_invoke_one,
+        _tool_lookup=_tool_lookup,
+        _active_names=_active_names,
+        _available_tools_ref=_available_tools_ref,
+        session_state=session_state,
+        parallel_tool_execution=parallel_tool_execution,
+        _identical_error_signature=_identical_error_signature,
+        _tool_error_class=_tool_error_class,
+        _tool_error_guidance=_tool_error_guidance,
+        _last_identical_error_signature=_last_identical_error_signature,
+        _consecutive_identical_error_count=_consecutive_identical_error_count,
+        _force_thinking_break=_force_thinking_break,
+        _graph_log=_graph_log,
+        protected=protected,
+        tool_catalog=tool_catalog,
+        registry=registry,
+        approvals=approvals,
+        confirmation_ui=confirmation_ui,
+        git_native=git_native,
+        on_tool_expansion=on_tool_expansion,
+        output_cap=output_cap,
+        expansion_count=expansion_count,
+        auto_expansion_count=auto_expansion_count,
+        request_tools_noop_count=request_tools_noop_count,
+        _MAX_REQUEST_TOOLS_NOOPS=_MAX_REQUEST_TOOLS_NOOPS,
+        active_tools_list=active_tools_list,
+        _tool_version=_tool_version,
+        _calls_since_last_checkpoint=_calls_since_last_checkpoint,
+        _same_file_writes=_same_file_writes,
+        _same_file_writes_lock=_same_file_writes_lock,
+        _REWRITE_SEARCH_THRESHOLD=_REWRITE_SEARCH_THRESHOLD,
+        _consecutive_errors=_consecutive_errors,
+        _STUCK_THRESHOLD=_STUCK_THRESHOLD,
+        _stuck_detection_headline=_stuck_detection_headline,
+        _get_tool_executor=lambda: _get_tool_executor(),
+        _detect_tool_request=_detect_tool_request,
+        _safe_tool_name=_safe_tool_name,
+    )
 
     def route_after_model(state: CogtrixState) -> str:
         msgs = state["messages"]
@@ -2187,20 +2367,45 @@ def build_agent_graph(
             content = getattr(last, "content", "")
             has_content = isinstance(content, str) and bool(content.strip())
             tool_calls = getattr(last, "tool_calls", None)
+            meta = getattr(last, "response_metadata", None)
 
             if not has_content and not tool_calls:
-                meta = getattr(last, "response_metadata", None)
                 if meta and isinstance(meta, dict):
                     if meta.get("finish_reason") == "tool_calls":
                         return "handle_phantom"
                 return END
 
+            if meta and isinstance(meta, dict) and meta.get("budget_guard"):
+                return END
+
             if tool_calls:
                 return "process_tools"
 
+            if _looks_like_phantom_tool_markup(last):
+                return "handle_phantom"
+
+            if _looks_like_markdown_phantom_report(last):
+                return "handle_phantom"
+
+            if _looks_like_fabricated_success_after_tool_errors(msgs, last):
+                return "handle_fabrication"
+
             # Has content but no tool calls — check for intention-without-action.
+            # Suppress the nudge when the agent is responding to an access-denied
+            # tool failure: the model is offering alternatives, not planning to act.
+            # Nudging it again causes a counterproductive retry of the same blocked path.
             if _is_action_intent(last):
-                return "handle_action_intent"
+                msgs = state.get("messages", [])
+                recent_tool_errors = [
+                    getattr(m, "content", "") or "" for m in msgs[-6:] if hasattr(m, "tool_call_id")
+                ]
+                if any(
+                    "Access denied" in err or "path outside allowed" in err
+                    for err in recent_tool_errors
+                ):
+                    pass  # skip nudge — agent handled the error gracefully
+                else:
+                    return "handle_action_intent"
 
         return END
 
@@ -2214,10 +2419,16 @@ def build_agent_graph(
             return END
         return "call_model"
 
+    def route_after_fabrication(state: CogtrixState) -> str:  # noqa: ARG001
+        if fabrication_count[0] > _MAX_FABRICATION_RETRIES:
+            return END
+        return "call_model"
+
     def _reset_for_new_run(
         new_available_tools: dict,
         new_bound_cache: "OrderedDict",
         new_compression_cache: dict,
+        extend_run_state: Any = None,
     ) -> None:
         """Reset all per-run mutable state so the compiled graph can be reused.
 
@@ -2226,6 +2437,7 @@ def build_agent_graph(
         and refreshes mutable references that change between agent turns.
         """
         phantom_count[0] = 0
+        fabrication_count[0] = 0
         action_intent_count[0] = 0
         expansion_count[0] = 0
         auto_expansion_count[0] = 0
@@ -2234,22 +2446,29 @@ def build_agent_graph(
         request_tools_noop_count[0] = 0
         _consecutive_errors[0] = 0
         _force_thinking_break[0] = False
+        _consecutive_identical_error_count[0] = 0
+        _last_identical_error_signature[0] = None
         _last_reflection_at[0] = 0
+        _last_tool_health_check_at[0] = 0
         _rounds_since_checkpoint[0] = 0
         _last_checkpoint_count[0] = 0
         _calls_since_last_checkpoint[0] = 0
         _STUCK_THRESHOLD_CALIBRATED[0] = False
         _STUCK_NO_CHECKPOINT_THRESHOLD[0] = 15
-        _same_file_writes.clear()
-        _checkpoint_store.clear()
-        _tool_call_counts.clear()
+        with _same_file_writes_lock:
+            _same_file_writes.clear()
+        with _checkpoint_store_lock:
+            _checkpoint_store.clear()
+        with _tool_budget_lock:
+            _tool_call_counts.clear()
         with _history_lock:
             _tool_call_history.clear()
         _available_tools_ref[0] = new_available_tools
         tool_catalog.clear()
         tool_catalog.update(build_tool_catalog(new_available_tools))
-        _bound_cache.clear()
-        _bound_cache.update(new_bound_cache)
+        with _bound_cache_lock:
+            _bound_cache.clear()
+            _bound_cache.update(new_bound_cache)
         _compression_cache.clear()
         _compression_cache.update(new_compression_cache)
         # Refresh _tool_lookup and _active_names from the current active_tools_list
@@ -2263,10 +2482,14 @@ def build_agent_graph(
         # Reset tool-version tracking so bind_tools() fingerprint is recomputed.
         _tool_version[0] += 1
         _last_tool_version[0] = -1
+        # Swap extend_run state so the new run's tool closure uses the fresh instance.
+        if extend_run_state is not None:
+            extend_run_state_ref[0] = extend_run_state
 
     graph: Any = StateGraph(CogtrixState)
     graph.add_node("call_model", call_model)
     graph.add_node("handle_phantom", handle_phantom)
+    graph.add_node("handle_fabrication", handle_fabrication)
     graph.add_node("handle_action_intent", handle_action_intent)
     graph.add_node("process_tools", process_tools)
     graph.set_entry_point("call_model")
@@ -2276,6 +2499,7 @@ def build_agent_graph(
         {
             "process_tools": "process_tools",
             "handle_phantom": "handle_phantom",
+            "handle_fabrication": "handle_fabrication",
             "handle_action_intent": "handle_action_intent",
             END: END,
         },
@@ -2289,6 +2513,11 @@ def build_agent_graph(
     graph.add_conditional_edges(
         "handle_action_intent",
         route_after_action_intent,
+        {"call_model": "call_model", END: END},
+    )
+    graph.add_conditional_edges(
+        "handle_fabrication",
+        route_after_fabrication,
         {"call_model": "call_model", END: END},
     )
     compiled = graph.compile()

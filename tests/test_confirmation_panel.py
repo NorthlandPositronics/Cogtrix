@@ -13,15 +13,16 @@ Verifies that:
 """
 
 import re
+from types import SimpleNamespace
 
 import pytest
+
+from src.ui.confirmation import _TokenAccumulator
 
 
 @pytest.fixture
 def ui():
     """Create a _RichConfirmationUI instance with mocked console."""
-    # Import the class from cogtrix.py
-
     # We need to test the actual render_prompt logic, so we'll
     # replicate the key logic and test it directly.
     HIDDEN_KEYS = frozenset({"timeout", "type", "name", "id"})
@@ -145,11 +146,11 @@ class TestConfirmationPanelFormatting:
     """Tests for visual formatting — no square brackets, no leading spaces."""
 
     def _read_source_lines(self):
-        """Read cogtrix.py and return its content."""
+        """Read src/ui/confirmation.py and return its content."""
         from pathlib import Path
 
-        cogtrix_path = Path(__file__).resolve().parent.parent / "cogtrix.py"
-        return cogtrix_path.read_text(encoding="utf-8")
+        confirmation_path = Path(__file__).resolve().parent.parent / "src/ui/confirmation.py"
+        return confirmation_path.read_text(encoding="utf-8")
 
     def test_hint_msg_no_square_brackets(self):
         """Choice letters must NOT be wrapped in square brackets."""
@@ -205,3 +206,47 @@ class TestConfirmationPanelFormatting:
         assert (
             "  Logging to:" not in source or 'f"  Logging to:' not in source
         ), "Plain 'Logging to:' has leading spaces"
+
+
+class TestTokenAccumulator:
+    def test_llm_output_usage(self):
+        acc = _TokenAccumulator()
+        response = SimpleNamespace(
+            llm_output={"token_usage": {"prompt_tokens": 4, "completion_tokens": 9}}
+        )
+
+        acc.on_llm_end(response)
+
+        assert acc.input_tokens == 4
+        assert acc.output_tokens == 9
+        assert acc.last_input_tokens == 4
+
+    def test_usage_metadata_fallback(self):
+        acc = _TokenAccumulator()
+        response = SimpleNamespace(
+            generations=[
+                [
+                    SimpleNamespace(
+                        message=SimpleNamespace(
+                            usage_metadata={"input_tokens": 6, "output_tokens": 8}
+                        )
+                    )
+                ]
+            ]
+        )
+
+        acc.on_llm_end(response)
+
+        assert acc.input_tokens == 6
+        assert acc.output_tokens == 8
+        assert acc.last_input_tokens == 6
+
+    def test_ignores_unusable_response(self):
+        acc = _TokenAccumulator()
+        response = SimpleNamespace(generations=[[SimpleNamespace(message=SimpleNamespace())]])
+
+        acc.on_llm_end(response)
+
+        assert acc.input_tokens == 0
+        assert acc.output_tokens == 0
+        assert acc.last_input_tokens == 0

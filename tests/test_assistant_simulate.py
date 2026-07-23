@@ -10,6 +10,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from src.agent.safety import UserCancelledRun  # noqa: E402
+
 # ---------------------------------------------------------------------------
 # Environment setup — must happen before any src.api imports
 # ---------------------------------------------------------------------------
@@ -287,6 +289,13 @@ class TestSimulateInbound:
         handler._guardrails.sanitize_output.assert_called_once_with("dirty response")
         assert result.response == "clean response"
 
+    def test_user_cancelled_run_propagates(self) -> None:
+        """UserCancelledRun raised during simulate() must propagate to caller."""
+        handler = _make_handler("Any response")
+        handler._agent_runner = MagicMock(side_effect=UserCancelledRun())
+        with pytest.raises(UserCancelledRun):
+            handler.simulate(channel_name="whatsapp", chat_id="+1@c.us", message="Hi")
+
 
 class TestSimulateGuardrails:
     def test_blocked_by_guardrails(self) -> None:
@@ -461,29 +470,147 @@ class TestBug4DuplicateExemptControls:
     """Bug 4: suppress_reply and defer_processing must be exempt from tool-call
     deduplication so a ToolCallGuard block does not poison the cache."""
 
-    def test_suppress_reply_in_duplicate_exempt(self) -> None:
-        # We need to call build_agent_graph to access the closure-local set,
-        # but _DUPLICATE_EXEMPT is referenced via module attribute injected at
-        # graph build time.  The simplest check is to verify the set literal in
-        # source includes suppress_reply.
-        import inspect
+    def test_suppress_reply_injected_for_inbound(self) -> None:
+        """suppress_reply must be injected into active_tools for inbound turns."""
+        import time
+        from unittest.mock import MagicMock
 
-        from src.orchestration import graph as _g
+        from src.assistant.channel import IncomingMessage
+        from src.assistant.handler import MessageHandler
 
-        src = inspect.getsource(_g.build_agent_graph)
+        session = MagicMock()
+        session.lock = MagicMock()
+        session.last_activity = time.monotonic()
+        session.guardrail_violations = 0
+        session.last_sent_message_id = None
+        session.session_key = "telegram::42"
+        session.memory_manager = MagicMock()
+        session.memory_manager.prepare_context.return_value = MagicMock(
+            context_prefix=None, messages=[]
+        )
+
+        session_mgr = MagicMock()
+        session_mgr.get_or_create.return_value = session
+
+        captured_tools: list[str] = []
+
+        def fake_runner(**kwargs):
+            tools = kwargs.get("config", MagicMock()).active_tools_list or []
+            captured_tools.extend(getattr(t, "name", "") for t in tools)
+            return "Reply"
+
+        handler = MessageHandler(
+            session_mgr=session_mgr,
+            config={},
+            llm=MagicMock(),
+            system_prompt="sys",
+            registry=MagicMock(),
+            approvals=set(),
+            available_tools={},
+            active_tools=[],
+            agent_runner=fake_runner,
+        )
+
+        msg = IncomingMessage(
+            channel="telegram",
+            chat_id="42",
+            message_id="msg-1",
+            sender_id="user-1",
+            sender_name="Test User",
+            text="Hello",
+            timestamp=time.time(),
+            metadata={},
+            resolved_phone=None,
+        )
+        ch = MagicMock()
+        ch.name = "telegram"
+        ch.send.return_value = MagicMock(ok=True, message_id="sent-1")
+        ch.is_ready.return_value = True
+
+        handler.handle(msg, ch)
+
+        # Verify suppress_reply was injected in the session.lock-held path
         assert (
-            '"suppress_reply"' in src
-        ), "suppress_reply must appear in _DUPLICATE_EXEMPT inside build_agent_graph"
+            "suppress_reply" in captured_tools
+        ), "suppress_reply must be injected into active_tools for inbound turns"
 
-    def test_defer_processing_in_duplicate_exempt(self) -> None:
-        import inspect
+    def test_defer_processing_injected_when_deferral_mgr_present(self) -> None:
+        """defer_processing must be injected when deferral_mgr is set."""
+        import time
+        from pathlib import Path
+        from unittest.mock import MagicMock
 
-        from src.orchestration import graph as _g
+        from src.assistant.channel import IncomingMessage
+        from src.assistant.deferral import DeferralManager
+        from src.assistant.handler import MessageHandler
 
-        src = inspect.getsource(_g.build_agent_graph)
+        session = MagicMock()
+        session.lock = MagicMock()
+        session.last_activity = time.monotonic()
+        session.guardrail_violations = 0
+        session.last_sent_message_id = None
+        session.session_key = "telegram::42"
+        session.memory_manager = MagicMock()
+        session.memory_manager.prepare_context.return_value = MagicMock(
+            context_prefix=None, messages=[]
+        )
+
+        session_mgr = MagicMock()
+        session_mgr.get_or_create.return_value = session
+
+        tmp_path = Path("/tmp/test_deferral_mgr")
+        tmp_path.mkdir(exist_ok=True)
+        mgr = DeferralManager(
+            persist_path=tmp_path / "deferrals.json",
+            reprocess_callback=None,
+            channels={},
+            max_depth=3,
+            check_interval=60.0,
+            stale_threshold=7200.0,
+        )
+
+        captured_tools: list[str] = []
+
+        def fake_runner(**kwargs):
+            tools = kwargs.get("config", MagicMock()).active_tools_list or []
+            captured_tools.extend(getattr(t, "name", "") for t in tools)
+            return "Reply"
+
+        handler = MessageHandler(
+            session_mgr=session_mgr,
+            config={},
+            llm=MagicMock(),
+            system_prompt="sys",
+            registry=MagicMock(),
+            approvals=set(),
+            available_tools={},
+            active_tools=[],
+            agent_runner=fake_runner,
+            deferral_mgr=mgr,
+        )
+
+        msg = IncomingMessage(
+            channel="telegram",
+            chat_id="42",
+            message_id="msg-1",
+            sender_id="user-1",
+            sender_name="Test User",
+            text="Hello",
+            timestamp=time.time(),
+            metadata={},
+            resolved_phone=None,
+        )
+        ch = MagicMock()
+        ch.name = "telegram"
+        ch.send.return_value = MagicMock(ok=True, message_id="sent-1")
+        ch.is_ready.return_value = True
+
+        handler.handle(msg, ch)
+
+        # Verify defer_processing was injected when deferral_mgr is present
         assert (
-            '"defer_processing"' in src
-        ), "defer_processing must appear in _DUPLICATE_EXEMPT inside build_agent_graph"
+            "defer_processing" in captured_tools
+        ), "defer_processing must be injected into active_tools when deferral_mgr is set"
 
 
 class TestBug1SimulateSchedulerTools:

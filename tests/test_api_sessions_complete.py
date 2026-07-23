@@ -447,6 +447,24 @@ class TestMessagesExtra:
         )
         assert r.status_code == 200
 
+    def test_clear_history_turn_in_progress_returns_409(self, client, tokens, app, session_id):
+        live = MagicMock()
+        turn_lock = MagicMock()
+        turn_lock.locked.return_value = True
+        live.turn_lock = turn_lock
+        live.memory_manager = MagicMock()
+
+        mock_reg = MagicMock()
+        mock_reg.get_cached = AsyncMock(return_value=live)
+        app.state.session_registry = mock_reg
+
+        r = client.delete(
+            f"/api/v1/sessions/{session_id}/messages",
+            headers=_h(tokens["owner"]),
+        )
+        assert r.status_code == 409
+        assert r.json()["error"]["code"] == "TURN_IN_PROGRESS"
+
     def test_send_message_no_auth_returns_401(self, client, session_id, app):
         mock_reg = MagicMock()
         mock_reg.get_cached = AsyncMock(return_value=None)
@@ -991,20 +1009,45 @@ class TestHardDeleteRowcount:
 
 
 class TestDeleteSessionOrderOfOperations:
-    def test_db_write_before_ws_disconnect(self) -> None:
+    @pytest.mark.asyncio
+    async def test_db_write_before_ws_disconnect(self) -> None:
         """delete_session must commit to DB before disconnecting WebSocket (BUG-247)."""
-        import inspect
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock, MagicMock, patch
 
         from src.api.routes import sessions as _mod
 
-        src = inspect.getsource(_mod.delete_session)
-        commit_pos = src.find("await db.commit()")
-        disconnect_pos = src.find("await _ws_manager.disconnect")
-        assert commit_pos != -1, "db.commit() not found in delete_session"
-        assert disconnect_pos != -1, "ws_manager.disconnect not found in delete_session"
-        assert (
-            commit_pos < disconnect_pos
-        ), "delete_session must commit DB before disconnecting WebSocket (BUG-247)"
+        call_order: list[str] = []
+
+        class _FakeDB:
+            async def commit(self) -> None:
+                call_order.append("commit")
+
+        fake_repo = MagicMock()
+        fake_repo.archive = AsyncMock(side_effect=lambda _session_id: call_order.append("archive"))
+
+        fake_request = SimpleNamespace(
+            app=SimpleNamespace(state=SimpleNamespace(session_registry=None))
+        )
+
+        with (
+            patch.object(_mod, "_check_session_access", new=AsyncMock()),
+            patch.object(_mod, "_get_registry", return_value=None),
+            patch.object(_mod, "SessionRepository", return_value=fake_repo),
+            patch(
+                "src.api.ws.manager.disconnect",
+                new=AsyncMock(side_effect=lambda _sid: call_order.append("disconnect")),
+            ),
+        ):
+            await _mod.delete_session(
+                "session-123",
+                fake_request,
+                current_user=SimpleNamespace(user_id="user-1"),
+                db=_FakeDB(),
+                permanent=False,
+            )
+
+        assert call_order == ["archive", "commit", "disconnect"]
 
 
 # ---------------------------------------------------------------------------
@@ -1110,3 +1153,178 @@ class TestSessionRestoreExtra:
         assert "name" in data
         assert "state" in data
         assert r.json()["error"] is None
+
+
+# ---------------------------------------------------------------------------
+# Agent tool restrictions — integration tests
+# ---------------------------------------------------------------------------
+
+
+class TestAgentToolRestrictions:
+    """Verify agent-level tool filtering flows through _build_run_config."""
+
+    def test_build_run_config_filters_by_agent_tools_include(self) -> None:
+        """When agent has tools_include, only those tools appear in available_tools."""
+        from unittest.mock import MagicMock
+
+        from src.agent.registry import AgentConfig, clear, register
+        from src.api.session_bridge import _build_run_config
+
+        clear()
+        register(
+            AgentConfig(
+                name="restricted_agent",
+                tools_include=["search", "read_file"],
+            )
+        )
+
+        # Build a mock tool registry with 4 tools
+        mock_registry = MagicMock()
+        mock_registry.tools = {
+            "search": MagicMock(),
+            "read_file": MagicMock(),
+            "write_file": MagicMock(),
+            "shell": MagicMock(),
+        }
+
+        mock_app_state = MagicMock()
+        mock_app_state.tool_registry = mock_registry
+
+        mock_llm = MagicMock()
+        mock_session_state = MagicMock()
+        mock_memory = MagicMock()
+
+        config = {"agent_name": "restricted_agent"}
+        result = _build_run_config(
+            mock_llm, mock_session_state, mock_memory, config, mock_app_state
+        )
+
+        assert set(result.available_tools.keys()) == {"search", "read_file"}
+        assert "write_file" not in result.available_tools
+        assert "shell" not in result.available_tools
+
+    def test_build_run_config_filters_by_agent_tools_exclude(self) -> None:
+        """When agent has tools_exclude, those tools are removed from available_tools."""
+        from unittest.mock import MagicMock
+
+        from src.agent.registry import AgentConfig, clear, register
+        from src.api.session_bridge import _build_run_config
+
+        clear()
+        register(
+            AgentConfig(
+                name="no_shell",
+                tools_exclude=["shell"],
+            )
+        )
+
+        mock_registry = MagicMock()
+        mock_registry.tools = {
+            "search": MagicMock(),
+            "write_file": MagicMock(),
+            "shell": MagicMock(),
+        }
+
+        mock_app_state = MagicMock()
+        mock_app_state.tool_registry = mock_registry
+
+        config = {"agent_name": "no_shell"}
+        result = _build_run_config(MagicMock(), MagicMock(), MagicMock(), config, mock_app_state)
+
+        assert set(result.available_tools.keys()) == {"search", "write_file"}
+        assert "shell" not in result.available_tools
+
+    def test_build_run_config_no_agent_name_passes_all_tools(self) -> None:
+        """Without agent_name, all tools are available (backward compatible)."""
+        from unittest.mock import MagicMock
+
+        from src.agent.registry import clear
+        from src.api.session_bridge import _build_run_config
+
+        clear()
+
+        mock_registry = MagicMock()
+        mock_registry.tools = {
+            "search": MagicMock(),
+            "write_file": MagicMock(),
+        }
+
+        mock_app_state = MagicMock()
+        mock_app_state.tool_registry = mock_registry
+
+        config: dict = {}
+        result = _build_run_config(MagicMock(), MagicMock(), MagicMock(), config, mock_app_state)
+
+        assert set(result.available_tools.keys()) == {"search", "write_file"}
+
+    def test_build_run_config_unknown_agent_falls_back_to_all_tools(self) -> None:
+        """When agent_name references unknown agent, all tools are available."""
+        from unittest.mock import MagicMock
+
+        from src.agent.registry import clear
+        from src.api.session_bridge import _build_run_config
+
+        clear()
+
+        mock_registry = MagicMock()
+        mock_registry.tools = {
+            "search": MagicMock(),
+            "shell": MagicMock(),
+        }
+
+        mock_app_state = MagicMock()
+        mock_app_state.tool_registry = mock_registry
+
+        config = {"agent_name": "nonexistent_agent"}
+        result = _build_run_config(MagicMock(), MagicMock(), MagicMock(), config, mock_app_state)
+
+        assert set(result.available_tools.keys()) == {"search", "shell"}
+
+    def test_build_run_config_empty_tools_registry(self) -> None:
+        """When tool registry has no tools, filtering is a no-op."""
+        from unittest.mock import MagicMock
+
+        from src.agent.registry import AgentConfig, clear, register
+        from src.api.session_bridge import _build_run_config
+
+        clear()
+        register(
+            AgentConfig(
+                name="restricted",
+                tools_include=["search"],
+            )
+        )
+
+        mock_registry = MagicMock()
+        mock_registry.tools = {}
+
+        mock_app_state = MagicMock()
+        mock_app_state.tool_registry = mock_registry
+
+        config = {"agent_name": "restricted"}
+        result = _build_run_config(MagicMock(), MagicMock(), MagicMock(), config, mock_app_state)
+
+        assert result.available_tools == {}
+
+    def test_build_run_config_no_tool_registry_on_app_state(self) -> None:
+        """When app_state has no tool_registry, available_tools is empty."""
+        from unittest.mock import MagicMock
+
+        from src.agent.registry import AgentConfig, clear, register
+        from src.api.session_bridge import _build_run_config
+
+        clear()
+        register(
+            AgentConfig(
+                name="restricted",
+                tools_include=["search"],
+            )
+        )
+
+        mock_app_state = MagicMock()
+        mock_app_state.tool_registry = None
+
+        config = {"agent_name": "restricted"}
+        result = _build_run_config(MagicMock(), MagicMock(), MagicMock(), config, mock_app_state)
+
+        assert result.available_tools == {}

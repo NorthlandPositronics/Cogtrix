@@ -1,6 +1,7 @@
 """Unit tests for memory system foundation."""
 
 import pytest
+from langchain_core.messages import AIMessage, HumanMessage
 
 from src.memory.base import BaseMemoryStore
 from src.memory.context import MemoryContext
@@ -287,6 +288,44 @@ class TestBaseMemoryManager:
         """Test default system prompt additions is None."""
         manager = MockMemoryManager(MockStore(), "session")
         assert manager.get_system_prompt_additions() is None
+
+    def test_reset_summary_clears_summary_only(self):
+        """Test reset_summary clears summary but preserves messages."""
+        manager = MockMemoryManager(MockStore(), "session")
+        manager._messages = [
+            {"type": "human", "content": "Hello"},
+            {"type": "ai", "content": "Hi there"},
+        ]
+        manager._summary = "old engineering context"
+        manager._summary_msg_idx = 5
+
+        manager.reset_summary()
+
+        assert manager._summary is None
+        assert manager._summary_msg_idx == 0
+        assert len(manager._messages) == 2
+        assert manager._messages[0]["content"] == "Hello"
+        assert manager._messages[1]["content"] == "Hi there"
+
+    def test_reset_summary_preserves_langchain_messages(self):
+        """Test reset_summary preserves LangChain message objects."""
+        manager = MockMemoryManager(MockStore(), "session")
+        manager._messages = [
+            HumanMessage(content="What is the weather?"),
+            AIMessage(content="It's sunny today."),
+        ]
+        manager._summary = "previous conversation context"
+        manager._summary_msg_idx = 2
+
+        manager.reset_summary()
+
+        assert manager._summary is None
+        assert manager._summary_msg_idx == 0
+        assert len(manager._messages) == 2
+        assert isinstance(manager._messages[0], HumanMessage)
+        assert manager._messages[0].content == "What is the weather?"
+        assert isinstance(manager._messages[1], AIMessage)
+        assert manager._messages[1].content == "It's sunny today."
 
     def test_to_dict(self):
         """Test serialization to dict."""

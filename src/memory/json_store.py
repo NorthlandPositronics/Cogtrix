@@ -11,6 +11,8 @@ import threading
 from pathlib import Path
 from typing import Any
 
+from src.utils.path_safety import _sanitize_session_id
+
 # Best-effort file locking for concurrent same-session writes.
 # fcntl is POSIX-only; on Windows we fall back to a threading lock (which at
 # least guards the in-process case).
@@ -60,7 +62,11 @@ def _message_to_dict(msg: Any) -> dict:
     if ToolMessage is not None and isinstance(msg, ToolMessage):
         d: dict[str, Any] = {
             "type": "tool",
-            "content": msg.content if isinstance(msg.content, str) else str(msg.content or ""),
+            "content": (
+                msg.content
+                if isinstance(msg.content, list)
+                else (msg.content if msg.content else "")
+            ),
             "name": getattr(msg, "name", ""),
             "tool_call_id": getattr(msg, "tool_call_id", ""),
         }
@@ -71,7 +77,10 @@ def _message_to_dict(msg: Any) -> dict:
         is_human = HumanMessage is not None and isinstance(msg, HumanMessage)
         role = "human" if is_human else "ai"
         ts = (msg.additional_kwargs or {}).get("_ts")
-        content = msg.content if isinstance(msg.content, str) else str(msg.content or "")
+        # Preserve list content as JSON array; string stays as string
+        content: str | list = (
+            msg.content if isinstance(msg.content, list) else (msg.content if msg.content else "")
+        )
         d = {"type": role, "content": content}
 
         # Preserve tool_calls on AIMessages so the agent can see its
@@ -94,8 +103,12 @@ def _message_to_dict(msg: Any) -> dict:
             # Preserve reasoning_content for DeepSeek round-trip: the API
             # requires this field to be echoed back in subsequent calls.
             # Without serialization it is lost on save/load, causing 400 errors.
+            # Cap at 8192 chars to prevent multi-KB CoT from compounding into
+            # very large JSON files that are fully loaded on every session restore.
             rc = (msg.additional_kwargs or {}).get("reasoning_content")
             if rc:
+                if len(rc) > 8192:
+                    rc = rc[:8192] + " … [truncated]"
                 d["reasoning_content"] = rc
 
         if ts:
@@ -130,6 +143,7 @@ def _dict_to_message(data: dict) -> Any:
 
     # ── ToolMessage ───────────────────────────────────────────────
     if msg_type == "tool" and ToolMessage is not None:
+        # content can be str or list; pass through as-is
         return ToolMessage(
             content=content,
             name=data.get("name", ""),
@@ -143,6 +157,7 @@ def _dict_to_message(data: dict) -> Any:
         if rc:
             additional["reasoning_content"] = rc
         tool_calls_data = data.get("tool_calls")
+        # content can be str or list; pass through as-is
         if tool_calls_data:
             return AIMessage(
                 content=content,
@@ -153,6 +168,7 @@ def _dict_to_message(data: dict) -> Any:
 
     # ── HumanMessage ──────────────────────────────────────────────
     if HumanMessage is not None:
+        # content can be str or list; pass through as-is
         return HumanMessage(content=content, additional_kwargs=additional)
 
     # ── Fallback (no LangChain) ───────────────────────────────────
@@ -192,22 +208,8 @@ class JsonFileMemoryStore(BaseMemoryStore):
             )
 
     def _session_path(self, session_id: str) -> Path:
-        # Sanitize: replace path separators, traversal sequences, and null bytes
-        safe_id = (
-            session_id.replace("\x00", "_").replace("/", "_").replace("\\", "_").replace("..", "_")
-        )
-
-        # Enforce a reasonable length (filesystem limit is typically 255).
-        # Truncate before any incomplete percent-encoding so we never leave a
-        # bare '%' or '%X' at the end of the filename component.
-        if len(safe_id) > 128:
-            truncated = safe_id[:128]
-            # Walk back from the cut point to skip any incomplete %XX sequence
-            while truncated and truncated[-1] == "%":
-                truncated = truncated[:-1]
-            if len(truncated) >= 2 and truncated[-2] == "%":
-                truncated = truncated[:-2]
-            safe_id = truncated or "_"
+        # Use the shared sanitizer from path_safety.py for consistent encoding
+        safe_id = _sanitize_session_id(session_id)
 
         # Resolve and verify the path stays inside base_path
         full_path = (self.base_path / f"{safe_id}.json").resolve()

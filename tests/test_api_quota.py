@@ -165,6 +165,59 @@ class TestUsageTracker:
         assert t.get_requests_in_window("bob") == 1
         assert t.get_requests_in_window("charlie") == 0
 
+    def test_cleanup_stale_entries_removes_old_users(self):
+        """Test that cleanup_stale_entries removes entries for inactive users."""
+        t = UsageTracker()
+        # Create some active and inactive users
+        t.record_request("active-user")
+        # Simulate old entries by setting timestamps from long ago
+        old_ts = time.time() - 8 * 24 * 60 * 60  # 8 days ago (beyond 7-day threshold)
+        t._requests["old-user-1"] = deque([old_ts])
+        t._requests["old-user-2"] = deque([old_ts])
+        # One user with both old request and old token entry
+        t._requests["old-user-3"] = deque([old_ts])
+        t._daily_tokens["old-user-3"] = ("1990-01-01", 9999)
+        # Add an entry that's just the token (no requests)
+        t._daily_tokens["old-token-user"] = ("1990-01-01", 500)
+
+        # Before cleanup: count all entries
+        before_requests = len(t._requests)
+        before_tokens = len(t._daily_tokens)
+
+        # Cleanup entries older than 7 days
+        removed = t.cleanup_stale_entries(max_idle_days=7)
+
+        # Verify stale entries were removed
+        assert "old-user-1" not in t._requests
+        assert "old-user-2" not in t._requests
+        assert "old-user-3" not in t._requests
+        assert "old-user-3" not in t._daily_tokens
+        assert "old-token-user" not in t._daily_tokens
+        # Active user should still be there
+        assert "active-user" in t._requests
+
+        # Verify return value
+        assert removed == before_requests + before_tokens - (
+            len(t._requests) + len(t._daily_tokens)
+        )
+
+    def test_cleanup_stale_entries_keeps_recent_users(self):
+        """Test that cleanup_stale_entries keeps entries for recent users."""
+        t = UsageTracker()
+        # Create users with recent activity
+        t.record_request("recent-user-1")
+        t.record_request("recent-user-2")
+        t.record_tokens("recent-user-2", 100)
+
+        # Cleanup with a very large threshold (should remove nothing)
+        removed = t.cleanup_stale_entries(max_idle_days=365)
+
+        # All recent users should still be there
+        assert "recent-user-1" in t._requests
+        assert "recent-user-2" in t._requests
+        assert "recent-user-2" in t._daily_tokens
+        assert removed == 0
+
 
 # ---------------------------------------------------------------------------
 # QuotaEnforcer unit tests

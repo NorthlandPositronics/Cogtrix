@@ -448,17 +448,6 @@ class TestPipelineCancelResetsAgentState:
 class TestCallbacksDebugLogGuard:
     """prompt_chars sum computation must be gated behind isEnabledFor(DEBUG)."""
 
-    def test_debug_guard_present_in_source(self):
-        """Verify the source-level guard exists."""
-        import inspect
-
-        from src.api import callbacks
-
-        source = inspect.getsource(callbacks.WebSocketCallbackHandler.on_llm_start)
-        assert (
-            "isEnabledFor" in source or "DEBUG" in source
-        ), "on_llm_start must gate expensive computation behind a log-level check"
-
     def test_on_llm_start_with_debug_disabled_does_not_sum_prompts(self):
         """With DEBUG disabled, prompt_chars sum must not execute."""
         handler, q, loop = _make_callback_handler()
@@ -479,7 +468,7 @@ class TestCallbacksDebugLogGuard:
 
             # Should not raise even though prompts contains a custom object
             # (only fails if sum(len(p) for p in prompts) is evaluated)
-            handler.on_llm_start(serialized={"name": "model"}, prompts=["normal prompt"])
+            handler.on_llm_start(serialized={"name": "model"}, prompts=[_FailOnLen()])
         finally:
             log.setLevel(original_level)
             loop.close()

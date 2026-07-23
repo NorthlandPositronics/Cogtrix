@@ -51,6 +51,20 @@ docker pull ghcr.io/northlandpositronics/cogtrix-webui:latest
 | [Development](DEVELOPMENT.md) | Adding tools, memory modes, slash commands, testing |
 | [Bug Hunting](BUG_HUNTING.md) | Manual testing checklist for QA |
 
+## Reference & Planning
+
+| Document | Status | Description |
+|----------|--------|-------------|
+| [Versioning](VERSIONING.md) | Active | Versioning and stability policy |
+| [Roadmap](ROADMAP.md) | Active | Core product roadmap |
+| [Migration](MIGRATION.md) | Planned | v1.0 migration guide draft |
+| [Security Audit](SECURITY_AUDIT.md) | Historical | Audit report from 2026-03-29 |
+| [Tools Authoring](TOOLS_AUTHORING.md) | Active | How to add built-in, file-drop, and entry-point tools |
+| [Enterprise Platform Roadmap](ENTERPRISE_PLATFORM_ROADMAP.md) | Active | Enterprise SaaS phase plan |
+| [Bug Checkpoint Tool](bug_checkpoint_tool.md) | Historical | Bug checkpoint workflow notes |
+| [Testing](testing/) | Active | Audit-run notes and test harness reports |
+| [Quality](quality/) | Active | Quality metrics and CI gate docs |
+
 ## Architecture Decision Records
 
 | ADR | Status | Description |
@@ -101,12 +115,6 @@ docker pull ghcr.io/northlandpositronics/cogtrix-webui:latest
 | [ADR-0047b Performance](adr/0047b-performance-audit-round5-ttft-and-total-latency.md) | Proposed | Performance audit — TTFT and total request latency |
 | [ADR-0048](adr/0048-workflow-system.md) | Accepted | Workflow system — per-chat knowledge bases, tool policies, auto-detection |
 | [ADR-0049](adr/0049-architecture-review-holistic-audit-march-2026.md) | Informational | Architecture review — holistic audit, March 2026 |
-
-## Bug Reports
-
-The [`docs/bugs/`](bugs/) directory contains 62 bug report files produced during
-automated and manual audit sweeps. Each file documents findings from a single
-audit session with BUG-IDs, root-cause analysis, and fix status.
 
 ## Internal Documentation
 

@@ -1,0 +1,65 @@
+id: regression_stuck_loop_identical_tool_calls
+domain: regression
+title: Agent must not loop on the same tool call
+description: |
+  Reproduces the May 2026 Hermes incident (session cd2bd800) where the
+  agent made 33 consecutive successful get_current_datetime calls,
+  passing every Gate 1 metric while producing nothing useful for the
+  user.  This is the literal motivating example cited in
+  docs/quality/QUALITY_PIPELINE.md §51 — yet until now no Gate 2
+  scenario actually exercised it.
+
+  The task is naturally completable in one tool call: the agent calls
+  get_current_datetime once, reads the result, and replies in plain
+  English.  A model that loops on the same call without producing a
+  user-visible answer fails on max_total_tool_calls.
+
+  Why this passes Gate 1 today: tool selection rate, parameter F1,
+  parameter values, phantom count, completion (the model does emit a
+  final response eventually) all stay clean.  Only the call-count
+  bound catches the regression.
+
+user_prompt: |
+  What is today's date?  Just tell me the current date in a single
+  sentence.
+
+system_prompt: |
+  You are a helpful assistant.  Use get_current_datetime to fetch the
+  current date when the user asks for it, then reply in plain English
+  with a single sentence.  Do not call the tool more than twice.
+
+tools_required:
+  - get_current_datetime
+
+expected_outcome: |
+  The agent calls get_current_datetime at most a small number of
+  times and replies with a natural-language sentence containing the
+  date.  The reply contains no error fallback and no phantom
+  tool-call markup.
+
+success_criteria:
+  # Positive — the required tool was actually called.
+  - "contains: get_current_datetime"
+
+  # Hard bound on total tool invocations.  The Hermes incident hit 33;
+  # a healthy run uses 1–2.  Five gives generous headroom for a model
+  # that double-checks the date before answering.
+  - "max_total_tool_calls: 5"
+
+  # Catches the legacy fallback message and any phantom markup.
+  - "response_not_contains: persistent formatting issues"
+  - "response_not_contains: <tool_call>"
+
+max_turns: 8
+timeout_seconds: 60
+
+tags:
+  - gate2
+  - smoke
+  - regression
+  - stuck-loop
+
+# Budget: a one-tool-call scenario should land at <$0.01 on cheap
+# models, ~$0.02 on Sonnet.  Set 0.02 so the D2 ceiling (3× = $0.06)
+# triggers if a model loops 30+ times.
+budget_usd_estimate: 0.02

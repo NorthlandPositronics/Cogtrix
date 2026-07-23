@@ -1,0 +1,26 @@
+id: xml_phantom
+complexity: medium
+category: phantom_detection
+description: "The model emits XML phantom markup, then recovers with a valid tool call."
+tags: [critical, tier1]
+system_prompt: "You are a helpful assistant."
+tools:
+  - github_list_issues
+
+script:
+  - user: "Check whether the protected-branch guard issue is still open."
+  - llm_phantom: "<function_calls><invoke name=\"github_list_issues\"><argument name=\"state\">open</argument></invoke></function_calls>"
+  - llm:
+      tool_calls:
+        - name: github_list_issues
+          args:
+            state: "open"
+  - tool_result: "Issue #159 is still open."
+  - llm: "Issue #159 remains open and is still being worked."
+
+metrics:
+  required_tools: [github_list_issues]
+  forbidden_tools: []
+  task_completed: true
+  phantom_calls: true
+  max_turns: 4

@@ -219,15 +219,30 @@ class TestDiscordChannelColdStart:
         ch.poll()
         assert "C1" not in ch._last_seen
 
-    def test_cold_start_seed_exception_ignored(self) -> None:
+    def test_cold_start_message_fetch_error_still_seeds(self) -> None:
+        """When channel discovery succeeds but message fetch fails, seeding still happens."""
         ch = _make_discord_channel()
         ch._client.get_guilds.return_value = [{"id": "G1"}]
         ch._client.get_guild_channels.return_value = [{"id": "C1", "type": 0}]
         ch._client.get_messages.side_effect = RuntimeError("network error")
 
         result = ch.poll()
+
+        # Channel was discovered, so seeding succeeds despite message fetch error
         assert result == []
         assert ch._seeded is True
+        # Watermark was not set because get_messages failed
+        assert "C1" not in ch._last_seen
+
+    def test_cold_start_empty_discovery_no_seed(self) -> None:
+        ch = _make_discord_channel()
+        ch._client.get_guilds.return_value = [{"id": "G1"}]
+        ch._client.get_guild_channels.return_value = []
+
+        result = ch.poll()
+        assert result == []
+        # _seeded remains False because no channels were discovered
+        assert ch._seeded is False
 
     def test_second_poll_fetches_messages(self) -> None:
         ch = _make_discord_channel()

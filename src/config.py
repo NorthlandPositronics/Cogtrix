@@ -62,6 +62,8 @@ from typing import Any
 
 import yaml
 
+from src.orchestration.run_config import ExecutionSettings
+
 _log = logging.getLogger("cogtrix")
 
 
@@ -84,13 +86,19 @@ def _safe_int(value: Any, field_name: str, default: int | None = None) -> int | 
 
 def _safe_float(value: Any, field_name: str, default: float | None = None) -> float | None:
     """Safely coerce a config value to float, logging a warning on failure."""
+    import math
+
     if isinstance(value, bool):
         _log.warning(
             "Invalid float for %s: %r (bool is not a valid float), skipping", field_name, value
         )
         return default
     try:
-        return float(value)
+        result = float(value)
+        if math.isnan(result) or math.isinf(result):
+            _log.warning("Invalid float for %s: %r is NaN or Inf, skipping", field_name, result)
+            return default
+        return result
     except (ValueError, TypeError):
         if default is not None:
             _log.warning("Invalid float for %s: %r, using default %g", field_name, value, default)
@@ -142,11 +150,17 @@ class ProviderConfig:
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to dictionary."""
+        api_key: str | None = self.api_key
+        if api_key:
+            if len(api_key) < 10:
+                api_key = "***"
+            else:
+                api_key = api_key[:3] + "***" + api_key[-4:]
         return {
             "name": self.name,
             "type": self.type,
             "base_url": self.base_url,
-            "api_key": "***" if self.api_key else None,
+            "api_key": api_key,
             "tool_instructions": self.tool_instructions,
         }
 
@@ -222,6 +236,9 @@ class Config:
     # External services — flat dict of {service_name: {config...}}
     services: dict[str, dict[str, Any]] = field(default_factory=dict)
 
+    # Cron jobs defined in config — list of {name, schedule, prompt, context}
+    cron: list[dict[str, Any]] = field(default_factory=list)
+
     # Memory settings
     memory_mode: str = "conversation"
     memory_config: dict[str, Any] | None = field(default=None)
@@ -261,6 +278,11 @@ class Config:
     # Allow shell/bash/python_exec in API sessions (disabled by default for safety)
     api_dangerous_tools: bool = False
 
+    # Enable data science modules (numpy, pandas, scipy) in python_exec
+    # WARNING: These modules bypass the AST sandbox via C-extensions.
+    # Set to true ONLY if you need numpy/pandas/scipy and understand the risks.
+    enable_datascience_modules: bool = False
+
     # Named flag profiles: profile_name -> {config_key: value}
     profiles: dict[str, dict[str, Any]] = field(default_factory=dict)
 
@@ -285,6 +307,10 @@ class Config:
     context_compression_human_msg_max_chars: int = 20_000
     """Maximum HumanMessage content length before middle-truncation. 0 = disabled."""
     context_compression_model: str | None = None  # model name or "provider/model"
+    context_max_messages: int = 200
+    """Maximum retained message count before oldest-end truncation. 0 = disabled."""
+    context_max_tokens: int = 40_000
+    """Maximum retained context token budget for oldest-end truncation. 0 = disabled."""
 
     # Tiered Context Cache (TCC) — pre-compressed tier snapshots for accurate
     # context size tracking and O(1) context assembly.
@@ -328,6 +354,7 @@ class Config:
     oidc_issuer: str | None = None
     oidc_audience: str | None = None
     oidc_jwks_uri: str | None = None
+    oidc_allow_insecure_oidc: bool = False
     oidc_role_claim: str = "roles"
     oidc_default_role: str = "user"
 
@@ -403,6 +430,34 @@ class Config:
     for consent before irreversible operations. Off by default — opt in via
     pre_action_confirmation.enabled in .cogtrix.yaml."""
 
+    # ── Metrics endpoint security ────────────────────────────────────────────
+    metrics_auth_enabled: bool = True
+    """When True (default), the Prometheus metrics endpoint requires
+    authentication. Disable only for in-cluster scrapers that cannot
+    present a bearer token."""
+
+    def to_execution_settings(self) -> ExecutionSettings:
+        """Project agent-facing runtime knobs into an execution settings bundle."""
+        return ExecutionSettings(
+            context_compression=self.context_compression,
+            compression_min_age=self.context_compression_min_age,
+            compression_min_chars=self.context_compression_min_chars,
+            context_max_messages=self.context_max_messages,
+            tier_cache_enabled=self.tier_cache_enabled,
+            tool_context_limit_pct=self.tool_context_limit_pct,
+            parallel_tool_execution=self.parallel_tool_execution,
+            git_native=self.git_native,
+            decision_accountability_enabled=self.decision_accountability_enabled,
+            decision_accountability_report_uncertainty=(
+                self.decision_accountability_report_uncertainty
+            ),
+            decision_accountability_min_confidence=self.decision_accountability_min_confidence,
+            task_ownership_classifier_enabled=self.task_ownership_classifier_enabled,
+            task_ownership_classifier_llm_fallback=self.task_ownership_classifier_llm_fallback,
+            task_ownership_ambiguous_action=self.task_ownership_ambiguous_action,
+            pre_action_confirmation_enabled=self.pre_action_confirmation_enabled,
+        )
+
     # ── Service key accessors ─────────────────────────────────────
     # These provide a clean API for tool configuration code, reading
     # from the consolidated ``services`` dict.
@@ -468,9 +523,9 @@ class Config:
         def _mask(val: str | None) -> str:
             if not val:
                 return "(none)"
-            if len(val) <= 8:
+            if len(val) < 10:
                 return "***"
-            return val[:4] + "..." + val[-4:]
+            return val[:3] + "***" + val[-4:]
 
         lines = [
             "=== Resolved configuration ===",
@@ -484,6 +539,8 @@ class Config:
             f"  context_compression:  {self.context_compression}",
             f"    min_age:            {self.context_compression_min_age}",
             f"    min_chars:          {self.context_compression_min_chars}",
+            f"    max_messages:       {self.context_max_messages}",
+            f"    max_tokens:         {self.context_max_tokens}",
             f"    model:              {self.context_compression_model or '(default)'}",
             f"  delegate_enabled:     {self.delegate_enabled}",
             f"    timeout:            {self.delegate_default_timeout}",
@@ -532,6 +589,8 @@ class Config:
                 for k, v in self.services.items()
             ]
             lines.append(f"  services: {', '.join(svc_names)}")
+        if self.cron:
+            lines.append(f"  cron: {len(self.cron)} job(s)")
 
         log.debug("\n".join(lines))
 
@@ -544,6 +603,13 @@ class Config:
         Path traversal sequences (``..``) that escape ``data_dir`` are rejected.
         """
         subpath = str(subpath)
+        # ── Early traversal guard: reject ``..`` in the raw string ───────
+        # Pathlib normalises ``data/../foo`` to ``foo``, which can hide the
+        # ``..`` before the legacy ``data/`` prefix is stripped below.
+        # Checking the raw string first catches traversal attempts before
+        # any manipulation, closing the ``data/../../../etc`` bypass window.
+        if ".." in subpath.replace("\\", "/").split("/"):
+            raise ConfigError(f"Path traversal detected in data path: {subpath!r}")
         p = Path(subpath)
         if p.is_absolute():
             return p
@@ -556,7 +622,7 @@ class Config:
             result = data_dir / stripped if stripped else data_dir
         else:
             result = data_dir / subpath
-        # Traversal check: use resolved absolute paths to catch ``..`` escapes.
+        # Defense-in-depth: resolve-and-compare as secondary check.
         base_resolved = data_dir.resolve()
         result_resolved = result.resolve()
         if not result_resolved.is_relative_to(base_resolved):
@@ -597,6 +663,10 @@ class Config:
         Looks up rag.model in the models registry, then resolves provider
         connection details. Falls back to the active provider if rag.model
         is not set or not found.
+
+        Raises:
+            ConfigError: If no models are configured.
+            ValueError: If the active provider is not configured.
         """
         model_name = self.rag.model
         if model_name and model_name in self.models:
@@ -612,8 +682,17 @@ class Config:
                 model_name,
                 mc.provider,
             )
-        pc = self.get_active_provider()
-        return pc.type, None, pc.get_base_url(), pc.api_key
+        # Check if there's an active provider before calling get_active_provider()
+        # to provide a clearer error message
+        try:
+            pc = self.get_active_provider()
+            return pc.type, None, pc.get_base_url(), pc.api_key
+        except (ConfigError, ValueError) as e:
+            # Re-raise with more context
+            raise type(e)(
+                f"Cannot resolve embedding config: {e}. "
+                "Ensure at least one model and provider are configured via /setup or the config file."
+            ) from e
 
     def find_model_entry(self, target: str) -> "tuple[str | None, ModelConfig | None]":
         """Resolve *target* to a (canonical_alias, ModelConfig) pair.
@@ -1002,6 +1081,44 @@ def _apply_config_file(config: Config, path: Path) -> None:
             if key not in config.services:
                 config.services[key] = data[key]
 
+    # ── Cron jobs ───────────────────────────────────────────────────
+    if "cron" in data:
+        cron_data = data["cron"]
+        if isinstance(cron_data, list):
+            parsed_cron: list[dict[str, Any]] = []
+            for idx, item in enumerate(cron_data):
+                if not isinstance(item, dict):
+                    _log.warning(
+                        "Skipping cron[%d]: expected mapping, got %s", idx, type(item).__name__
+                    )
+                    continue
+                schedule = item.get("schedule")
+                prompt = item.get("prompt")
+                if not isinstance(schedule, str) or not schedule.strip():
+                    _log.warning("Skipping cron[%d]: missing or invalid schedule", idx)
+                    continue
+                if not isinstance(prompt, str) or not prompt.strip():
+                    _log.warning("Skipping cron[%d]: missing or invalid prompt", idx)
+                    continue
+                context = str(item.get("context", "fresh")).strip().lower()
+                if context not in {"fresh", "inherit"}:
+                    _log.warning(
+                        "cron[%d].context must be 'fresh' or 'inherit'; using 'fresh'",
+                        idx,
+                    )
+                    context = "fresh"
+                parsed_cron.append(
+                    {
+                        "name": str(item.get("name", "")),
+                        "schedule": schedule,
+                        "prompt": prompt,
+                        "context": context,
+                    }
+                )
+            config.cron = parsed_cron
+        else:
+            _log.warning("cron must be a list of mappings, ignoring")
+
     # ── Memory settings ───────────────────────────────────────────
     if "memory" in data and isinstance(data["memory"], dict):
         memory_cfg = data["memory"]
@@ -1049,9 +1166,15 @@ def _apply_config_file(config: Config, path: Path) -> None:
     if "git_native" in data:
         config.git_native = bool(data["git_native"])
     if "banner" in data:
-        _banner_val = str(data["banner"]).lower().strip()
-        if _banner_val in ("full", "compact", "off", "none", "false", "0"):
-            config.banner = "off" if _banner_val in ("off", "none", "false", "0") else _banner_val
+        banner_val = data["banner"]
+        if banner_val is None or (isinstance(banner_val, str) and banner_val.strip() == ""):
+            config.banner = "off"
+        else:
+            _banner_val = str(banner_val).lower().strip()
+            if _banner_val in ("full", "compact", "off", "none", "false", "0"):
+                config.banner = (
+                    "off" if _banner_val in ("off", "none", "false", "0") else _banner_val
+                )
     if "theme" in data:
         val = data["theme"]
         if isinstance(val, str) and val in ("default", "minimal", "dracula"):
@@ -1078,6 +1201,13 @@ def _apply_config_file(config: Config, path: Path) -> None:
             config.api_dangerous_tools = val
         else:
             _log.warning("api_dangerous_tools must be a boolean, ignoring")
+
+    if "enable_datascience_modules" in data:
+        val = data["enable_datascience_modules"]
+        if isinstance(val, bool):
+            config.enable_datascience_modules = val
+        else:
+            _log.warning("enable_datascience_modules must be a boolean, ignoring")
 
     if "profiles" in data and isinstance(data["profiles"], dict):
         config.profiles = {
@@ -1193,6 +1323,27 @@ def _apply_config_file(config: Config, path: Path) -> None:
                 )
         else:
             config.context_compression = bool(cc)
+
+    # ── Context message cap ──────────────────────────────────────
+    if "context_max_messages" in data:
+        val = _safe_int(data["context_max_messages"], "context_max_messages")
+        if val is not None and val >= 0:
+            config.context_max_messages = val
+        elif val is not None:
+            _log.warning(
+                "context_max_messages must be >= 0, using default %d",
+                config.context_max_messages,
+            )
+
+    if "context_max_tokens" in data:
+        val = _safe_int(data["context_max_tokens"], "context_max_tokens")
+        if val is not None and val >= 0:
+            config.context_max_tokens = val
+        elif val is not None:
+            _log.warning(
+                "context_max_tokens must be >= 0, using default %d",
+                config.context_max_tokens,
+            )
 
     # ── MCP servers ──────────────────────────────────────────────
     if "mcp_servers" in data and isinstance(data["mcp_servers"], dict):
@@ -1346,6 +1497,8 @@ def _apply_config_file(config: Config, path: Path) -> None:
             _raw = oidc_data.get(_field)
             _val: str | None = str(_raw).strip() if _raw is not None else None
             setattr(config, _attr, _val or None)
+        if "allow_insecure_oidc" in oidc_data:
+            config.oidc_allow_insecure_oidc = bool(oidc_data["allow_insecure_oidc"])
         if "role_claim" in oidc_data:
             config.oidc_role_claim = str(oidc_data["role_claim"])
         _dr = str(oidc_data.get("default_role", "")).strip()
@@ -1725,16 +1878,21 @@ def _apply_env_vars(config: Config) -> None:
         tg = config.services.setdefault("telegram", {})
         tg["bot_token"] = tg_token
 
-    # Allowed write paths
+    # Allowed write paths — comma-separated to match file_ops.py runtime parser.
     if env_val := os.getenv("COGTRIX_ALLOWED_WRITE_PATHS"):
-        config.allowed_write_paths = [p.strip() for p in env_val.split(":") if p.strip()]
+        config.allowed_write_paths = [p.strip() for p in env_val.split(",") if p.strip()]
 
-    # Allowed read paths
+    # Allowed read paths — comma-separated.
     if env_val := os.getenv("COGTRIX_ALLOWED_READ_PATHS"):
-        config.allowed_read_paths = [p.strip() for p in env_val.split(":") if p.strip()]
-    # Plugin tool directories
+        config.allowed_read_paths = [p.strip() for p in env_val.split(",") if p.strip()]
+
+    # Plugin tool directories — comma-separated.
     if env_val := os.getenv("COGTRIX_TOOL_DIRS"):
-        config.tool_dirs = [p.strip() for p in env_val.split(":") if p.strip()]
+        config.tool_dirs = [p.strip() for p in env_val.split(",") if p.strip()]
+
+    # Data science modules — enable numpy/pandas/scipy in python_exec
+    if env_val := os.getenv("COGTRIX_ENABLE_DATASCIENCE_MODULES"):
+        config.enable_datascience_modules = env_val.lower() in ("true", "1", "yes")
 
 
 def _apply_cli_args(config: Config, args) -> None:

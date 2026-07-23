@@ -44,6 +44,7 @@ class TestConversationMemoryManager:
         manager = ConversationMemoryManager(MockStore(), "test")
         assert manager._mode_config["working_memory_size"] == 25
         assert manager._mode_config["summary_threshold"] == 35
+        assert manager._mode_config["summary_max_age_hours"] is None
         assert manager._mode_config["entity_extraction"] is False
         assert manager._mode_config["rag_enabled"] is False
 
@@ -95,21 +96,27 @@ class TestConversationMemoryManager:
         assert context.context_messages_count == 4
         assert len(context.messages) == 4
 
-    def test_working_memory_window(self):
-        """Test that working memory window limits context."""
+    def test_cold_cache_preserves_all_messages(self):
+        """Test that cold-cache path returns ALL messages (no truncation).
+
+        After the sliding-window amnesia fix (#657), the cold-cache first-turn
+        path no longer truncates to working_memory_size. Instead, all messages
+        are returned and background summarization compresses them into tier cache.
+        """
         config = {"working_memory_size": 4}  # Only keep 4 messages
         manager = ConversationMemoryManager(MockStore(), "test", config)
         manager.load()
 
-        # Add 10 messages (5 turns)
+        # Add 10 messages (5 turns) - exceeds window size
         for i in range(5):
             manager.update(f"Question {i}", f"Answer {i}")
 
+        # Cold-cache path: all messages returned, no truncation
         context = manager.prepare_context("next")
 
         assert context.total_messages_stored == 10
-        assert context.context_messages_count == 4  # Window size
-        assert len(context.messages) == 4
+        assert context.context_messages_count == 10  # NOT truncated
+        assert len(context.messages) == 10
 
     def test_save_and_load(self):
         """Test persistence via save and load."""
@@ -429,3 +436,121 @@ class TestTimestamps:
             ts = m2._get_msg_ts(msg)
             assert ts is not None
             datetime.fromisoformat(ts)
+
+    # --- Layer-1a: token-based summary TTL (#380) ------------------------
+
+    def test_tokens_since_summary_increments_on_update(self):
+        """Each update() call adds tokens from human + ai messages."""
+        manager = ConversationMemoryManager(MockStore(), "test")
+        manager.load()
+        assert manager._tokens_since_summary == 0
+
+        manager.update("Hello there", "Hi!")
+        # "Hello there" = 11 chars → 5 tokens; "Hi!" = 3 chars → 1 token
+        expected = 5 + 1
+        assert manager._tokens_since_summary == expected
+
+        manager.update("How are you today?", "I am fine, thanks.")
+        # "How are you today?" = 18 chars → 9 tokens; "I am fine, thanks." = 18 chars → 9 tokens
+        expected += 9 + 9
+        assert manager._tokens_since_summary == expected
+
+    def test_token_ttl_resets_summary_at_threshold(self):
+        """When _tokens_since_summary reaches threshold, summary resets."""
+        manager = ConversationMemoryManager(MockStore(), "test")
+        manager.load()
+        manager._mode_config["summary_max_uncovered_tokens"] = 10
+        manager._summary = "Old summary"
+        manager._summary_last_updated_at = datetime.now()
+
+        # One large message pushes us over the 10-token threshold
+        manager.update("x" * 40, "y" * 40)  # 20 + 20 = 40 tokens
+        assert manager._summary is None
+        assert manager._tokens_since_summary == 0
+
+    def test_token_ttl_does_not_reset_below_threshold(self):
+        """Summary survives when token churn is below threshold."""
+        manager = ConversationMemoryManager(MockStore(), "test")
+        manager.load()
+        manager._mode_config["summary_max_uncovered_tokens"] = 100
+        manager._summary = "Old summary"
+        manager._summary_last_updated_at = datetime.now()
+
+        manager.update("Hello", "Hi!")  # 2 + 1 = 3 tokens
+        assert manager._summary == "Old summary"
+        assert manager._tokens_since_summary == 3
+
+    def test_reset_summary_state_clears_token_counter(self):
+        """_reset_summary_state() must zero _tokens_since_summary."""
+        manager = ConversationMemoryManager(MockStore(), "test")
+        manager.load()
+        manager.update("Hello", "Hi!")
+        assert manager._tokens_since_summary > 0
+        manager._reset_summary_state()
+        assert manager._tokens_since_summary == 0
+
+    def test_default_config_includes_summary_max_uncovered_tokens(self):
+        """DEFAULT_CONFIG includes summary_max_uncovered_tokens."""
+        manager = ConversationMemoryManager(MockStore(), "test")
+        assert manager._mode_config["summary_max_uncovered_tokens"] == 16_000
+
+    def test_cold_cache_first_turn_preserves_all_messages(self):
+        """Regression test for sliding-window amnesia (#657).
+
+        The cold-cache first-turn path was truncating messages to working_memory_size
+        BEFORE summarization completed, causing message loss. After the fix, all messages
+        should be returned on cold-cache paths (background summarization will compress
+        them into tier cache on subsequent turns).
+        """
+        # Use a small working memory size (3 messages) to trigger the cold-cache path
+        config = {"working_memory_size": 3}
+        manager = ConversationMemoryManager(MockStore(), "test", config)
+        manager.load()
+
+        # Add 5 turns (10 messages total) - this exceeds the window size
+        for i in range(5):
+            manager.update(f"Question {i}", f"Answer {i}")
+
+        # First prepare_context call (cold cache) should return ALL messages,
+        # not truncate to working_memory_size
+        context = manager.prepare_context("next")
+
+        # All messages should be present (no truncation on cold-cache path)
+        assert context.total_messages_stored == 10
+        assert context.context_messages_count == 10  # NOT truncated to 3
+        assert len(context.messages) == 10
+
+        # Verify the oldest messages are present (not dropped)
+        first_msg = context.messages[0]
+        first_content = first_msg.content if hasattr(first_msg, "content") else first_msg["content"]
+        assert "Question 0" in first_content
+
+        # Verify the newest messages are present
+        last_msg = context.messages[-1]
+        last_content = last_msg.content if hasattr(last_msg, "content") else last_msg["content"]
+        assert "Answer 4" in last_content
+
+    def test_cold_cache_preserves_all_messages_with_larger_window(self):
+        """Verify the fix works with different window sizes."""
+        # Test with working_memory_size=5 and 15 messages (3 turns)
+        config = {"working_memory_size": 5}
+        manager = ConversationMemoryManager(MockStore(), "test", config)
+        manager.load()
+
+        for i in range(3):
+            manager.update(f"Q{i}", f"A{i}")
+
+        context = manager.prepare_context("next")
+
+        # All 6 messages (3 turns) should be present
+        assert context.total_messages_stored == 6
+        assert context.context_messages_count == 6
+        assert len(context.messages) == 6
+
+        # Verify oldest message is present (was dropped in the bug)
+        first_content = (
+            context.messages[0].content
+            if hasattr(context.messages[0], "content")
+            else context.messages[0]["content"]
+        )
+        assert "Q0" in first_content

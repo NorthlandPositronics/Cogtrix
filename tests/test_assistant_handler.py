@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
+from src.agent.safety import UserCancelledRun
 from src.assistant.channel import IncomingMessage, SendResult
 from src.assistant.handler import _DEFAULT_EXCLUDED, MessageHandler
 from src.memory.context import MemoryContext
@@ -49,6 +50,7 @@ def _make_handler(
     knowledge_store: MagicMock | None = None,
     available_tools: dict | None = None,
     active_tools: list | None = None,
+    services_config: dict | None = None,
     agent_runner: Callable | None = None,
 ) -> tuple[MessageHandler, MagicMock]:
     """Return (handler, mock_session_mgr)."""
@@ -68,6 +70,7 @@ def _make_handler(
         approvals={"*"},
         available_tools=available_tools or {},
         active_tools=active_tools or [],
+        services_config=services_config,
         knowledge_store=knowledge_store,
         agent_runner=agent_runner,
     )
@@ -215,6 +218,176 @@ class TestResponseTruncation:
         handler, _ = _make_handler()
         assert handler._max_response_length == 4000
 
+    def test_max_response_length_clamped_to_minimum_of_3(self):
+        """max_response_length below 3 is clamped to 3 with a warning."""
+        handler, _ = _make_handler(config={"max_response_length": 1})
+        assert handler._max_response_length == 3
+
+        handler2, _ = _make_handler(config={"max_response_length": 2})
+        assert handler2._max_response_length == 3
+
+        handler3, _ = _make_handler(config={"max_response_length": 0})
+        assert handler3._max_response_length == 3
+
+        handler4, _ = _make_handler(config={"max_response_length": -1})
+        assert handler4._max_response_length == 3
+
+
+# ---------------------------------------------------------------------------
+# TestOutboundPrValidation
+# ---------------------------------------------------------------------------
+
+
+class TestOutboundPrValidation:
+    def _handler(self, response: str) -> tuple[MessageHandler, MagicMock]:
+        agent_runner = MagicMock(return_value=response)
+        handler, _ = _make_handler(
+            services_config={"github": {"default_repo": "NorthlandPositronics/Cogtrix"}},
+            agent_runner=agent_runner,
+        )
+        return handler, agent_runner
+
+    def test_valid_outbound_pr_refs_are_preserved(self):
+        channel = MagicMock()
+        channel.name = "slack"
+        channel.send.return_value = SendResult(ok=True, message_id="m-1")
+        handler, _ = self._handler("Project status: PR #508 is still open.")
+
+        def _fake_run(cmd, capture_output, text, check):
+            result = MagicMock()
+            result.returncode = 0
+            result.stdout = "508\n"
+            result.stderr = ""
+            return result
+
+        with (
+            patch("src.assistant.handler.shutil.which", return_value="/usr/bin/gh"),
+            patch("src.assistant.handler.subprocess.run", side_effect=_fake_run),
+        ):
+            response, message_id = handler.handle_outbound(
+                contact_name="Amy",
+                instructions="Send status",
+                channel=channel,
+                chat_id="42",
+            )
+
+        sent_text = channel.send.call_args[0][1]
+        assert "PR #508" in sent_text
+        assert "[not found]" not in sent_text
+        assert response == sent_text
+        assert message_id == "m-1"
+
+    def test_missing_outbound_pr_refs_are_flagged(self):
+        channel = MagicMock()
+        channel.name = "slack"
+        channel.send.return_value = SendResult(ok=True, message_id="m-2")
+        handler, _ = self._handler("Project status: PR #508 and PR #999 are listed.")
+
+        def _fake_run(cmd, capture_output, text, check):
+            result = MagicMock()
+            pr_number = int(cmd[2].split("/")[-1])
+            if pr_number == 508:
+                result.returncode = 0
+                result.stdout = "508\n"
+                result.stderr = ""
+            else:
+                result.returncode = 1
+                result.stdout = ""
+                result.stderr = "Not Found"
+            return result
+
+        with (
+            patch("src.assistant.handler.shutil.which", return_value="/usr/bin/gh"),
+            patch("src.assistant.handler.subprocess.run", side_effect=_fake_run),
+        ):
+            response, message_id = handler.handle_outbound(
+                contact_name="Amy",
+                instructions="Send status",
+                channel=channel,
+                chat_id="42",
+            )
+
+        sent_text = channel.send.call_args[0][1]
+        assert "PR #508" in sent_text
+        assert "PR #999 [not found]" in sent_text
+        assert response == sent_text
+        assert message_id == "m-2"
+
+    def test_pr_ref_without_space_detected(self):
+        """PR references without space (PR#123) are detected by the regex."""
+        channel = MagicMock()
+        channel.name = "slack"
+        channel.send.return_value = SendResult(ok=True, message_id="m-3")
+        handler, _ = self._handler("Project status: PR#123 is referenced without space.")
+
+        def _fake_run(cmd, capture_output, text, check):
+            result = MagicMock()
+            pr_number = int(cmd[2].split("/")[-1])
+            if pr_number == 123:
+                result.returncode = 0
+                result.stdout = "123\n"
+                result.stderr = ""
+            else:
+                result.returncode = 1
+                result.stdout = ""
+                result.stderr = "Not Found"
+            return result
+
+        with (
+            patch("src.assistant.handler.shutil.which", return_value="/usr/bin/gh"),
+            patch("src.assistant.handler.subprocess.run", side_effect=_fake_run),
+        ):
+            response, message_id = handler.handle_outbound(
+                contact_name="Amy",
+                instructions="Send status",
+                channel=channel,
+                chat_id="42",
+            )
+
+        sent_text = channel.send.call_args[0][1]
+        assert "PR#123" in sent_text
+        assert "[not found]" not in sent_text
+        assert response == sent_text
+        assert message_id == "m-3"
+
+
+# ---------------------------------------------------------------------------
+# TestRunConfigWiring
+# ---------------------------------------------------------------------------
+
+
+class TestRunConfigWiring:
+    def test_run_config_carries_session_memory_manager(self):
+        """The handler passes the live session memory manager into AgentRunConfig."""
+        channel = MagicMock()
+        session = _make_session(context_prefix="Memory prefix")
+        session_mgr = MagicMock()
+        session_mgr.get_or_create.return_value = session
+
+        captured_configs: list[object] = []
+
+        def _fake_run_agent(**kwargs: object) -> str:
+            captured_configs.append(kwargs["config"])
+            return "OK"
+
+        handler = MessageHandler(
+            session_mgr=session_mgr,
+            config={},
+            llm=MagicMock(),
+            system_prompt="sys",
+            registry=MagicMock(),
+            approvals=set(),
+            available_tools={},
+            active_tools=[],
+            knowledge_store=None,
+            agent_runner=_fake_run_agent,
+        )
+
+        handler.handle(_make_msg(), channel)
+
+        assert captured_configs
+        assert captured_configs[0].memory_manager is session.memory_manager
+
 
 # ---------------------------------------------------------------------------
 # TestKnowledgeRecall
@@ -297,7 +470,7 @@ class TestKnowledgeRecall:
         assert "Bob: Likes Python" in prefix
 
     def test_knowledge_extraction_called_after_agent(self):
-        """extract_and_store is called with user input and agent response."""
+        """extract_and_store is called with user input, agent response, and session key."""
         knowledge_store = MagicMock()
         knowledge_store.recall.return_value = None
 
@@ -308,7 +481,7 @@ class TestKnowledgeRecall:
         handler.handle(_make_msg(text="User says hello"), channel)
 
         knowledge_store.extract_and_store.assert_called_once_with(
-            "User says hello", "Agent says hi"
+            "User says hello", "Agent says hi", "telegram::42"
         )
 
     def test_no_knowledge_store_runs_without_error(self):
@@ -354,6 +527,42 @@ class TestKnowledgeRecall:
 
         assert captured_prefix[0] == "Memory prefix"
 
+    def test_recall_uses_score_threshold(self):
+        """recall() is called with score_threshold to filter low-quality matches."""
+        knowledge_store = MagicMock()
+        knowledge_store.recall.return_value = None
+        # Set the default threshold (matches what SharedKnowledgeStore does)
+        knowledge_store._recall_threshold = 0.25
+
+        channel = MagicMock()
+        session = _make_session(context_prefix=None)
+        session_mgr = MagicMock()
+        session_mgr.get_or_create.return_value = session
+
+        def _fake_run_agent(**kwargs: object) -> str:
+            return "OK"
+
+        handler = MessageHandler(
+            session_mgr=session_mgr,
+            config={},
+            llm=MagicMock(),
+            system_prompt="sys",
+            registry=MagicMock(),
+            approvals=set(),
+            available_tools={},
+            active_tools=[],
+            knowledge_store=knowledge_store,
+            agent_runner=_fake_run_agent,
+        )
+
+        handler.handle(_make_msg(), channel)
+
+        # Verify recall was called with score_threshold
+        knowledge_store.recall.assert_called_once()
+        call_kwargs = knowledge_store.recall.call_args[1]
+        assert "score_threshold" in call_kwargs
+        assert call_kwargs["score_threshold"] == 0.25
+
 
 # ---------------------------------------------------------------------------
 # TestAgentErrorHandling
@@ -373,7 +582,57 @@ class TestAgentErrorHandling:
 
         channel.send.assert_called_once()
         sent_text = channel.send.call_args[0][1]
-        assert "error" in sent_text.lower()
+        assert (
+            sent_text
+            == "I encountered a RuntimeError error. Please try again or contact the administrator."
+        )
+
+    def test_agent_error_includes_exception_type_name(self):
+        """Regression: exception type name is included in the fallback message."""
+        channel = MagicMock()
+        mock_runner = MagicMock(side_effect=ValueError("bad config"))
+        handler, _ = _make_handler(agent_runner=mock_runner)
+
+        handler.handle(_make_msg(), channel)
+
+        channel.send.assert_called_once()
+        sent_text = channel.send.call_args[0][1]
+        assert "ValueError" in sent_text
+        assert "Please try again or contact the administrator." in sent_text
+
+    def test_failed_send_logged_but_does_not_raise(self):
+        """When channel.send() returns False, handle() logs and does not raise."""
+        channel = MagicMock()
+        channel.send.return_value = SendResult(ok=False)
+        mock_runner = MagicMock(return_value="Reply")
+        handler, _ = _make_handler(agent_runner=mock_runner)
+
+        handler.handle(_make_msg(), channel)
+
+        channel.send.assert_called_once()
+
+
+class TestUserCancelledRunPath:
+    """Test the UserCancelledRun exception path in _run_agent()."""
+
+    def test_user_cancelled_run_sends_empty_response(self):
+        """When UserCancelledRun is raised, handler sends empty response and updates memory."""
+        channel = MagicMock()
+        channel.send.return_value = SendResult(ok=True, message_id="m2")
+        mock_runner = MagicMock(side_effect=UserCancelledRun())
+        handler, _ = _make_handler(agent_runner=mock_runner)
+
+        handler.handle(_make_msg(), channel)
+
+        # Empty response IS sent (so memory records it properly)
+        channel.send.assert_called_once()
+        sent_text = channel.send.call_args[0][1]
+        assert sent_text == ""
+
+        # Memory is updated with empty response
+        handler._session_mgr.get_or_create.assert_called_once()
+        session = handler._session_mgr.get_or_create()
+        session.memory_manager.update.assert_called_once_with("Hello", "")
 
     def test_successful_response_sent_via_channel(self):
         """channel.send() is called with the agent's response."""
@@ -398,7 +657,11 @@ class TestAgentErrorHandling:
         channel.send.assert_called_once()
 
     def test_memory_update_called_after_agent(self):
-        """session.memory_manager.update() is called with user input and response."""
+        """update() is called exactly once with the actual response.
+
+        prerecord_user() handles pre-LLM durability without calling update(),
+        so update() is called once with the final response after the LLM completes.
+        """
         channel = MagicMock()
         session = _make_session()
         session_mgr = MagicMock()
@@ -419,6 +682,9 @@ class TestAgentErrorHandling:
 
         handler.handle(_make_msg(text="Query"), channel)
 
+        # prerecord_user() is called for shutdown durability (no update() call)
+        session.memory_manager.prerecord_user.assert_called_once_with("Query")
+        # update() is called exactly once with the final response
         session.memory_manager.update.assert_called_once_with("Query", "Resp")
 
 
@@ -428,36 +694,17 @@ class TestAgentErrorHandling:
 
 
 class TestSendBeforeMemoryUpdate:
-    """BUG-038: channel.send() must be called before memory_manager.update()."""
+    """BUG-038: channel.send() must be called before knowledge store extract.
 
-    def test_send_called_before_memory_update(self):
-        """channel.send is called before memory_manager.update in handle()."""
-        call_order: list[str] = []
+    The handle() method now pre-records the user message to ensure at-least-once
+    memory durability during shutdown (issue #681). This means:
+    1. User message placeholder is recorded BEFORE LLM call (new for #681)
+    2. LLM response is recorded AFTER send
+    3. The important constraint: send happens before knowledge extraction
 
-        channel = MagicMock()
-        channel.send.side_effect = lambda *_: call_order.append("send") or SendResult(ok=True)
-
-        session = _make_session()
-        session.memory_manager.update.side_effect = lambda *_: call_order.append("update")
-        session_mgr = MagicMock()
-        session_mgr.get_or_create.return_value = session
-
-        mock_runner = MagicMock(return_value="Hello")
-        handler = MessageHandler(
-            session_mgr=session_mgr,
-            config={},
-            llm=MagicMock(),
-            system_prompt="sys",
-            registry=MagicMock(),
-            approvals=set(),
-            available_tools={},
-            active_tools=[],
-            agent_runner=mock_runner,
-        )
-
-        handler.handle(_make_msg(), channel)
-
-        assert call_order.index("send") < call_order.index("update")
+    The placeholder update before LLM is acceptable because it preserves the
+    user's input even if shutdown interrupts the turn.
+    """
 
     def test_send_called_before_knowledge_store_extract(self):
         """channel.send is called before knowledge_store.extract_and_store()."""
@@ -472,8 +719,6 @@ class TestSendBeforeMemoryUpdate:
 
         mock_runner = MagicMock(return_value="Response")
         handler, _ = _make_handler(knowledge_store=knowledge_store, agent_runner=mock_runner)
-
-        channel.send.side_effect = lambda *_: call_order.append("send") or SendResult(ok=True)
 
         handler.handle(_make_msg(), channel)
 
@@ -716,9 +961,39 @@ class TestBug110EditFailFallback:
         channel.edit_message.return_value = SendResult(ok=False)
         channel.send.return_value = SendResult(ok=False, error="network error")
 
-        # Should not raise even when fallback send fails;
-        # returns None so undelivered text is not recorded in memory (BUG-138)
+        # Should not raise even when fallback send fails.
+        # _route_response still returns None, but the caller (handle) now
+        # records the user message with "" response for continuity (issue #680).
         result = handler._route_response(
             msg, channel, "original", schedule_state, edit_state, queue_state, session
         )
         assert result is None
+
+
+# ---------------------------------------------------------------------------
+# TestMemoryOnSendFailure (issue #680)
+# ---------------------------------------------------------------------------
+
+
+class TestMemoryOnSendFailure:
+    """issue #680: user message must be recorded in memory even when
+    _route_response() returns None due to edit fallback send failure."""
+
+    def test_memory_updated_when_route_response_returns_none(self):
+        """handle() calls prerecord_user() which is discarded, not update()."""
+        handler, session_mgr = _make_handler(agent_runner=MagicMock(return_value="Agent reply"))
+
+        session = session_mgr.get_or_create.return_value
+        channel = MagicMock()
+
+        # Simulate _route_response returning None (edit fallback send failure)
+        with patch.object(handler, "_route_response", return_value=None):
+            handler.handle(_make_msg(text="User query"), channel)
+
+        # prerecord_user() is called for shutdown durability
+        session.memory_manager.prerecord_user.assert_called_once_with("User query")
+        # discard_prerecord() cleans up the pending file
+        session.memory_manager.discard_prerecord.assert_called_once()
+        # update() is never called in this path
+        session.memory_manager.update.assert_not_called()
+        session.memory_manager.save.assert_not_called()

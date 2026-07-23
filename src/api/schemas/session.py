@@ -59,6 +59,11 @@ class TokenCounts(BaseModel):
 class SessionConfig(BaseModel):
     """Mutable session configuration settable at creation and via PATCH."""
 
+    agent_name: str | None = Field(
+        default=None,
+        description="Name of the registered agent to use for this session. If provided, tool filtering based on agent.tools_include/tools_exclude will be applied.",
+        examples=["researcher"],
+    )
     model: str | None = Field(
         default=None,
         description="Model alias from the models registry or raw model name.",

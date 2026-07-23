@@ -9,6 +9,9 @@ from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
 from prompt_toolkit.completion import Completer, Completion
 from prompt_toolkit.formatted_text import ANSI
 from prompt_toolkit.history import FileHistory, InMemoryHistory
+from prompt_toolkit.output.base import Output
+from prompt_toolkit.output.defaults import create_output
+from prompt_toolkit.output.vt100 import Vt100_Output
 from prompt_toolkit.styles import Style
 
 _HISTORY_PATH = os.path.join(
@@ -74,6 +77,18 @@ def _get_prompt() -> ANSI:
     return ANSI(f"{sep}\n\033[38;5;37m\u276f\033[0m ")
 
 
+def _create_output() -> Output:
+    """Create prompt_toolkit output with CPR disabled.
+
+    prompt_toolkit's CPR probing can spin on orphaned PTYs, so keep the
+    renderer from asking for cursor position in the first place.
+    """
+    output = create_output()
+    if isinstance(output, Vt100_Output):
+        output.enable_cpr = False
+    return output
+
+
 _COMPLETION_STYLE = Style.from_dict(
     {
         "completion-menu": "bg:#1a1a2e #e0e0e0",
@@ -98,4 +113,5 @@ def create_session(
         style=_COMPLETION_STYLE,
         reserve_space_for_menu=4,
         mouse_support=False,
+        output=_create_output(),
     )

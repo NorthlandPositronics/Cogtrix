@@ -1,0 +1,11 @@
+{{- if .Values.config.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "cogtrix.fullname" . }}-config
+  labels:
+    {{- include "cogtrix.labels" . | nindent 4 }}
+data:
+  .cogtrix.yaml: |
+    {{- .Values.config.content | nindent 4 }}
+{{- end }}

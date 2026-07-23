@@ -8,6 +8,7 @@ This page covers every way to configure Cogtrix — from the simplest environmen
 - [Configuration File](#configuration-file)
   - [Providers Section](#providers-section)
   - [Models Section](#models-section)
+  - [Cron Jobs](#cron-jobs)
   - [Research Delegate Section](#research-delegate-section)
   - [Decision Accountability](#decision-accountability)
   - [Prompt Optimizer](#prompt-optimizer)
@@ -65,6 +66,25 @@ session: default
 | `session` | string | `"default"` | Session ID for memory persistence |
 
 The active model is selected via `models.default` (see [Models Section](#models-section)). The legacy top-level `provider` and `model` keys still work but are deprecated — they are auto-migrated at load time.
+
+### Cron Jobs
+
+Define recurring jobs in the config file so they are loaded at startup. Each job can run in a fresh isolated context or inherit the current session state when the host process provides an inherited-context runner.
+
+```yaml
+cron:
+  - name: nightly status
+    schedule: "0 2 * * *"
+    prompt: "Summarize the latest team status."
+    context: inherit
+```
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `name` | string | `""` | Human-readable label used in `cron_list` |
+| `schedule` | string | required | 5- or 6-field cron expression |
+| `prompt` | string | required | Prompt to send when the job fires |
+| `context` | string | `"fresh"` | `fresh` uses an isolated invocation; `inherit` reuses the current session history and tools when available |
 
 ### Providers Section
 
@@ -310,7 +330,11 @@ delegate:
 
 ### Research Delegate Section
 
-When the user requests deep reasoning (via `/think` or "think deeply" in a prompt) and the agent has used web tools during its initial research, Cogtrix can spawn a **research delegate** — a sub-agent that re-fetches the same URLs with a much larger context budget and extracts structured, verbatim specifications instead of lossy summaries. The extracted content is then fed into the `deep_think` engine as high-fidelity context.
+When the user requests deep reasoning (via `/think` or "think deeply" in a prompt) and the agent has
+used web tools during its initial research, Cogtrix can spawn a **research delegate** — a sub-agent
+that re-fetches the same URLs with a much larger context budget and extracts structured, verbatim
+specifications instead of lossy summaries. The extracted content is then fed into the `deep_think`
+engine as high-fidelity context.
 
 ```yaml
 research_delegate:
@@ -454,6 +478,9 @@ context_compression:
   model: fast
   min_age: 8       # call_model cycles before eligible (default: 6)
   min_chars: 6000  # minimum content length to qualify (default: 2000)
+
+# Hard cap on retained history length
+context_max_messages: 200
 ```
 
 | Option | Type | Default | Description |
@@ -463,6 +490,7 @@ context_compression:
 | `model` | string | `null` | Model alias or `provider/model` string for a dedicated compression LLM. Uses the main agent LLM when not set. |
 | `min_age` | int | `6` | Number of `call_model` cycles a ToolMessage must survive before it becomes eligible for compression |
 | `min_chars` | int | `2000` | Minimum character length of a ToolMessage's content to qualify for compression |
+| `context_max_messages` | int | `200` | Maximum message count retained before the oldest messages are dropped with pair-safe truncation |
 
 **How it works:**
 
@@ -480,6 +508,7 @@ context_compression:
 - Set `model` to a fast/cheap model alias to avoid using the main agent model for compression. Without this, each compression call uses the same (potentially slow) model.
 - Increase `min_age` if you find recent tool outputs are being compressed too early.
 - Increase `min_chars` to only compress very large outputs (e.g., full file contents).
+- Lower `context_max_messages` if long-running sessions accumulate too much history; Cogtrix trims from the oldest end without splitting AI/tool pairs.
 
 ### Parallel Tool Execution
 
@@ -589,8 +618,11 @@ Transport is auto-detected from the config keys:
 | `headers` | object | `null` | HTTP headers for SSE transport (e.g., auth tokens) |
 | `requires_confirmation` | bool | `true` | Whether tools from this server need user confirmation |
 | `timeout` | int | `30` | Per-call timeout in seconds |
+| `pin` | bool | `true` | Pin all tools from this server into the active set at startup so the LLM sees them directly. Set to `false` for very large servers (hundreds of tools) to keep them in the on-demand pool instead. |
 
-MCP tools are registered into the on-demand pool and loaded by the agent via `request_tools`, just like built-in tools. They appear in `/tools` with an `[mcp]` tag.
+MCP tools with `pin: true` (the default) are pinned into the active tool set at startup — the LLM sees them in its bound function list from the very first turn and will prefer the most specific tool for a task. Tools from servers with `pin: false` remain in the on-demand pool and must be loaded via `request_tools`.
+
+They appear in `/tools` with an `[mcp]` tag.
 
 **Prerequisite:** Install the MCP SDK: `uv pip install "cogtrix[mcp]"` (or `pip install mcp`). If the package is not installed and `mcp_servers` is configured, a warning is logged and servers are skipped.
 
@@ -603,7 +635,8 @@ When running Cogtrix in Docker, stdio MCP servers can't be spawned directly beca
 ```yaml
 # Example: run supergateway as a separate container
 # docker run -d --name mcp-filesystem -v mcp-data:/data supercorp/supergateway \
-#   --stdio "npx -y @modelcontextprotocol/server-filesystem /data" --port 8000
+#   -v /home/user/project:/workspace:ro \
+#   --stdio "npx -y @modelcontextprotocol/server-filesystem /data /workspace" --port 8000
 ```
 
 Then configure Cogtrix to connect via SSE:
@@ -700,6 +733,8 @@ services:
     cse_id: "abc123..."
   openweather:
     api_key: "..."
+  slack:
+    bot_token: "xoxb-..."
 ```
 
 Tools that require an API key are **automatically hidden** from the agent when the key is not configured — no errors, they simply don't appear in the tool list.
@@ -716,14 +751,14 @@ Cogtrix includes six search providers. DuckDuckGo is always available with no se
 | Brave | `brave_search` | Included (`requests`) | `BRAVE_API_KEY` | 2 000/month |
 | Google | `google_search` | Included (`requests`) | `GOOGLE_API_KEY` + `GOOGLE_CSE_ID` | 100/day |
 | SerpAPI | `serpapi_search` | `google-search-results` | `SERPAPI_API_KEY` | 100/month |
-| SearXNG | `searxng_search` | Included (`requests`) | `SEARXNG_BASE_URL` | Self-hosted |
+| SearXNG | `searxng_search` | Included (`requests`) | `SEARXNG_URL` | Self-hosted |
 
 **Configuring SearXNG:**
 
-[SearXNG](https://docs.searxng.org/) is a self-hosted meta-search engine. To enable it, set `SEARXNG_BASE_URL` to your instance URL:
+[SearXNG](https://docs.searxng.org/) is a self-hosted meta-search engine. To enable it, set `SEARXNG_URL` to your instance URL:
 
 ```bash
-export SEARXNG_BASE_URL=http://localhost:8888
+export SEARXNG_URL=http://localhost:8888
 ```
 
 Or in config YAML:
@@ -731,7 +766,7 @@ Or in config YAML:
 ```yaml
 services:
   searxng:
-    base_url: http://localhost:8888
+    url: http://localhost:8888
 ```
 
 The `searxng_search` tool becomes available automatically once the URL is configured.
@@ -997,7 +1032,11 @@ services:
 2. New messages are passed to `MessageBuffer`, which resets a per-chat debounce timer. When the timer expires (after `debounce_seconds` of silence from that chat), all buffered messages are concatenated and dispatched as a single agent turn via `handle_batch()`. A single message with no follow-ups dispatches immediately after the quiet window.
 3. Each incoming message (or batch) is checked by the `GuardrailPipeline` (rate limit, input validation, injection detection). Blocked messages receive a canned reply without reaching the agent.
 4. Each `(channel, chat_id)` pair gets an independent `ConversationMemoryManager` — no context blending between chats.
-5. The agent runs with the same tool pipeline as interactive mode (minus excluded tools). Up to eight message management tools are injected per turn: `schedule_reply`, `queue_reply`, `edit_last_reply` (only when a prior message ID is available), `list_scheduled_messages`, `edit_scheduled_message`, `cancel_scheduled_message`, `defer_processing` (only when deferral is enabled and below max depth), and `suppress_reply` (only during re-processing passes).
+5. The agent runs with the same tool pipeline as interactive mode (minus excluded tools). Up to
+eight message management tools are injected per turn: `schedule_reply`, `queue_reply`,
+`edit_last_reply` (only when a prior message ID is available), `list_scheduled_messages`,
+`edit_scheduled_message`, `cancel_scheduled_message`, `defer_processing` (only when deferral is
+enabled and below max depth), and `suppress_reply` (only during re-processing passes).
 6. After each turn, durable facts are extracted and stored in a shared knowledge store (`data/knowledge/facts.json`).
 7. On each new message, relevant facts are recalled and injected into the agent's context — enabling cross-chat knowledge without exposing raw conversation history.
 8. The agent response is routed by `_route_response`: edit and schedule paths run independently — both can fire in the same turn. Output is sanitized (PII redaction, URL stripping, banned string removal) in each delivery branch before being sent and before being written to memory.
@@ -1203,7 +1242,11 @@ Rate limit violations are recorded but do not increment the security violation c
 
 **Encoding detection:**
 
-`EncodingDetectionGuard` scores each message with four independent sub-detectors (Morse code, Base64, hex encoding, leetspeak/ROT13), each returning 0–1. The maximum of the four scores is compared against `min_score` (default 0.6). Messages that exceed the threshold are rejected. Violations are counted toward auto-blacklisting. Tune `min_score` downward to catch more attempts (with higher false-positive risk) or upward to reduce false positives on legitimate content.
+`EncodingDetectionGuard` scores each message with four independent sub-detectors (Morse code,
+Base64, hex encoding, leetspeak/ROT13), each returning 0–1. The maximum of the four scores is
+compared against `min_score` (default 0.6). Messages that exceed the threshold are rejected.
+Violations are counted toward auto-blacklisting. Tune `min_score` downward to catch more attempts
+(with higher false-positive risk) or upward to reduce false positives on legitimate content.
 
 **Tool call guard:**
 
@@ -1215,7 +1258,11 @@ Rate limit violations are recorded but do not increment the security violation c
 
 **Auto-blacklist:**
 
-`ViolationTracker` maintains a per-chat sliding window of security violation timestamps. When a chat's violation count within the last `window_minutes` minutes reaches `max_violations`, all subsequent messages from that chat are rejected immediately (before any other check) with a blacklist reason. The blacklist state is persisted to `data/assistant/violations.json` and survives assistant restarts. Expired violations (older than the sliding window) are pruned on load.
+`ViolationTracker` maintains a per-chat sliding window of security violation timestamps. When a
+chat's violation count within the last `window_minutes` minutes reaches `max_violations`, all
+subsequent messages from that chat are rejected immediately (before any other check) with a
+blacklist reason. The blacklist state is persisted to `data/assistant/violations.json` and survives
+assistant restarts. Expired violations (older than the sliding window) are pruned on load.
 
 **Output sanitization:**
 
@@ -1225,7 +1272,11 @@ Rate limit violations are recorded but do not increment the security violation c
 - PII is replaced with typed placeholders: `[EMAIL_REDACTED]`, `[CREDIT_CARD_REDACTED]`, `[SSN_REDACTED]`, `[IP_ADDRESS_REDACTED]`.
 - URLs are replaced with `[link removed]` when `block_urls_in_output` is true.
 
-**LLM judge:** When `llm_judge.enabled: true`, an additional LLM call classifies the input as SAFE or UNSAFE. The judge is fail-closed — if the LLM call fails or returns an empty response, the message is blocked. This is intentional secure-by-default behavior: a deliberate crash of the judge must not bypass the guardrail. Use `llm_judge.model` to point the judge at a fast/cheap model alias to avoid adding 500ms–2s to every request.
+**LLM judge:** When `llm_judge.enabled: true`, an additional LLM call classifies the input as SAFE
+or UNSAFE. The judge is fail-closed — if the LLM call fails or returns an empty response, the
+message is blocked. This is intentional secure-by-default behavior: a deliberate crash of the judge
+must not bypass the guardrail. Use `llm_judge.model` to point the judge at a fast/cheap model alias
+to avoid adding 500ms–2s to every request.
 
 **Disabling:** Set `guardrails.enabled: false` to bypass the entire pipeline. The `GuardrailPipeline` still exists in the handler but all checks return safe immediately.
 
@@ -1258,11 +1309,12 @@ Rate limit violations are recorded but do not increment the security violation c
 | `GOOGLE_API_KEY` | Google Custom Search API key | `AIza...` |
 | `GOOGLE_CSE_ID` | Google Programmable Search Engine ID | `abc123...` |
 | `SERPAPI_API_KEY` | SerpAPI search API key | `...` |
-| `SEARXNG_BASE_URL` | SearXNG instance URL. When set, enables the `searxng_search` tool. | `http://localhost:8888` |
+| `SEARXNG_URL` | SearXNG instance URL. When set, enables the `searxng_search` tool. | `http://localhost:8888` |
 | `COGTRIX_WHATSAPP_URL` | Waha server URL | `http://localhost:3000` |
 | `COGTRIX_WHATSAPP_API_KEY` | Waha API key | `yoursecretkey` |
 | `COGTRIX_WHATSAPP_SESSION` | Waha session name | `default` |
 | `COGTRIX_TELEGRAM_TOKEN` | Telegram bot token | `123456:ABC-DEF...` |
+| `COGTRIX_SLACK_BOT_TOKEN` | Slack bot token for `cogtrix_slack_post_message` tool | `xoxb-...` |
 | `COGTRIX_JWT_SECRET` | JWT signing secret for API mode (min 32 chars, required) | `your-secret-key-at-least-32-chars` |
 | `COGTRIX_DB_URL` | Database URL for API mode (default: SQLite `aiosqlite`) | `postgresql+asyncpg://user:pass@host/db` |
 | `COGTRIX_CORS_ORIGINS` | Comma-separated CORS allowed origins for API mode | `http://localhost:5173,https://app.example.com` |
@@ -1270,7 +1322,7 @@ Rate limit violations are recorded but do not increment the security violation c
 | `COGTRIX_API_PORT` | API server bind port (default `8000`) | `3001` |
 | `COGTRIX_API_WORKERS` | Number of uvicorn workers (default `1`) | `4` |
 
-#### Docker Healthcheck
+### Docker Healthcheck
 
 The container image includes a built-in healthcheck that probes `GET /api/v1/health` using Python's stdlib `urllib` (no `curl` or `wget` required). This enables `depends_on: condition: service_healthy` in docker-compose:
 
@@ -1337,6 +1389,8 @@ python cogtrix.py --prompt "Generate JSON" --no-stream -o data.json
 |--------|-------|-------------|
 | `--prompt TEXT` | | Send a single prompt and exit |
 | `--prompt-file FILE` | | Read prompt from file and exit |
+| `--system-prompt FILE` | | Override the default system prompt with inline text |
+| `--system-prompt-file FILE` | | Override the default system prompt by loading text from FILE |
 | `--output FILE` | `-o` | Write response to file |
 | `--no-stream` | | Disable streaming output |
 
@@ -1405,7 +1459,12 @@ python cogtrix.py --setup --setup-docs https://example.com/cogtrix-config-docs
 - API keys entered during bootstrap are injected into the final YAML, so the LLM never sees the actual key value.
 - The output file is shown after writing: `Config written to: ~/.cogtrix.yaml`.
 
-**Docker auto-start:** When running the official container image, the container automatically launches the setup wizard if all of the following are true: (1) no command-line arguments were passed to the container, (2) no config file exists at `/app/.cogtrix.yaml` or `/app/.cogtrix.json`, (3) none of `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `XAI_API_KEY`, `DEEPSEEK_API_KEY`, `COGTRIX_OLLAMA`, or `OLLAMA_BASE_URL` is set, and (4) stdin is a TTY. This simplifies first-run setup:
+**Docker auto-start:** When running the official container image, the container automatically
+launches the setup wizard if all of the following are true: (1) no command-line arguments were
+passed to the container, (2) no config file exists at `/app/.cogtrix.yaml` or `/app/.cogtrix.json`,
+(3) none of `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `XAI_API_KEY`,
+`DEEPSEEK_API_KEY`, `COGTRIX_OLLAMA`, or `OLLAMA_BASE_URL` is set, and (4) stdin is a TTY. This
+simplifies first-run setup:
 
 ```bash
 docker run -it -v ~/.cogtrix.yaml:/app/.cogtrix.yaml ghcr.io/northlandpositronics/cogtrix:latest
@@ -1794,7 +1853,11 @@ models:
     temperature: 0.5
 ```
 
-**Auto-migration:** Old configs continue to work without changes. When Cogtrix loads a config that has model fields (`model`, `temperature`, `context_window`) inside a provider entry, they are automatically migrated to the `models` registry as a new entry named after that provider. Similarly, top-level `provider` and `model` keys are mapped to `models.default` by matching against existing registry entries. A log warning is emitted for each migrated field.
+**Auto-migration:** Old configs continue to work without changes. When Cogtrix loads a config that
+has model fields (`model`, `temperature`, `context_window`) inside a provider entry, they are
+automatically migrated to the `models` registry as a new entry named after that provider. Similarly,
+top-level `provider` and `model` keys are mapped to `models.default` by matching against existing
+registry entries. A log warning is emitted for each migrated field.
 
 **Recommended steps to update manually:**
 

@@ -424,7 +424,7 @@ class TestOutputGuardURLs:
     def test_url_blocking_disabled(self):
         guard = OutputGuard({"block_urls_in_output": False})
         text, actions = guard.sanitize("Visit https://example.com")
-        assert "https://example.com" in text
+        assert "https://example.com" in text  # codeql[py/incomplete-url-substring-sanitization]
         assert "stripped_urls" not in actions
 
     def test_no_url_no_action(self):

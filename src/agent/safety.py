@@ -22,7 +22,7 @@ log = get_logger()
 # C:\Users\user\file with <path>.
 _ABS_PATH_RE = re.compile(
     r"(?:"
-    r"(?:/[a-zA-Z0-9_.@-]+){2,}"  # POSIX absolute path (/home/user/...)
+    r"(?:^|(?<=[\s/]))(?:/[a-zA-Z0-9_.@-]+)+"  # POSIX absolute path (/tmp, /etc, /home/user/...)
     r"|(?:[A-Za-z]:\\(?:[^\\/:*?\"<>|\r\n]+\\)*[^\\/:*?\"<>|\r\n]*)"  # Windows path
     r")"
 )
@@ -100,7 +100,7 @@ class ConfirmationUI(Protocol):
         self, tool_name: str, tool_input: dict, last_keys: frozenset[str], preview_limit: int
     ) -> None: ...
 
-    def read_choice(self) -> str: ...
+    def read_choice(self) -> str | None: ...
 
     def show_message(self, message: str, style: str) -> None: ...
 
@@ -191,7 +191,7 @@ def _compute_file_diff(tool_name: str, tool_input: dict) -> tuple[str, list[str]
             )
             return (path_str, diff) if diff else None
     except Exception as exc:  # noqa: BLE001
-        log.debug("_compute_file_diff failed for tool %r: %s", tool_name, exc)
+        log.warning("_compute_file_diff failed for tool %r: %s", tool_name, exc)
         return None
     return None
 
@@ -206,7 +206,11 @@ def run_confirmation_prompt(
     """Display a confirmation prompt via *ui* and return the user's decision."""
     ui.render_prompt(tool_name, tool_input, last_keys, preview_limit)
     while True:
-        choice = ui.read_choice().strip().lower()
+        raw = ui.read_choice()
+        if raw is None:
+            log.warning("read_choice returned None for tool '%s' — denying once", tool_name)
+            return ConfirmationResult.DENIED_ONCE
+        choice = raw.strip().lower()
         if choice in ("a", "all"):
             return ConfirmationResult.APPROVED_SESSION
         elif choice in ("y", "yes", ""):
@@ -367,6 +371,8 @@ def create_safe_tool_wrapper(
                     pass
                 _git_auto_commit(tool_name, _tool_input_for_git)
             return _result
+        except UserCancelledRun:
+            raise
         except Exception as e:
             log.warning("Tool %s execution error: %s", tool_name, e, exc_info=True)
             # Sanitize absolute paths from the error message before returning

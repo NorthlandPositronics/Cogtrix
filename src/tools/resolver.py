@@ -21,6 +21,28 @@ def _is_word_contained(short: str, long: str) -> bool:
     return long.startswith(short + "_") or long.endswith("_" + short) or f"_{short}_" in long
 
 
+def _levenshtein_distance(a: str, b: str) -> int:
+    """Compute the Levenshtein (edit) distance between two strings."""
+    # Standard dynamic programming implementation
+    m, n = len(a), len(b)
+    if m < n:
+        a, b, m, n = b, a, n, m
+
+    # Use two rows instead of full matrix
+    prev = list(range(n + 1))
+
+    for i, char_a in enumerate(a, 1):
+        curr = [i] + [0] * n
+        for j, char_b in enumerate(b, 1):
+            if char_a == char_b:
+                curr[j] = prev[j - 1]
+            else:
+                curr[j] = 1 + min(prev[j], curr[j - 1], prev[j - 1])
+        prev = curr
+
+    return prev[n]
+
+
 def resolve_tool_name(
     requested: str,
     available_tools: dict[str, Any],
@@ -34,6 +56,11 @@ def resolve_tool_name(
       3. Fuzzy match (token overlap /
          substring containment)             → ``("name", "available"|"active")``
       4. No match                           → ``(None, "none")``
+
+    Tie-breaking rules (applied when scores are equal):
+      - Exact name match wins
+      - Shorter Levenshtein distance wins
+      - Alphabetically first wins
 
     Args:
         requested: The raw tool name produced by the LLM.
@@ -55,7 +82,9 @@ def resolve_tool_name(
     req_norm = requested.lower().replace("-", "_")
     req_tokens = set(req_norm.split("_"))
 
-    best: tuple[str | None, float, str] = (None, 0.0, "none")
+    # best = (tool_name, score, source, levenshtein_dist, tool_name_for_alpha)
+    # Using float('inf') for initial levenshtein to ensure any real distance beats it
+    best: tuple[str | None, float, str, float, str] = (None, 0.0, "none", float("inf"), "")
 
     pools: list[tuple[dict[str, Any] | set[str], str]] = [
         (available_tools, "available"),
@@ -83,8 +112,18 @@ def resolve_tool_name(
             if _prefix_hit:
                 score += 0.35
 
-            if score > best[1]:
-                best = (tool_name, score, source)
+            # Tie-breaking: compute secondary metrics
+            levenshtein_dist = _levenshtein_distance(req_norm, tn_norm)
+
+            # Compare: higher score wins, then lower levenshtein, then alphabetically
+            is_better = (
+                score > best[1]
+                or (score == best[1] and levenshtein_dist < best[3])
+                or (score == best[1] and levenshtein_dist == best[3] and tool_name < best[4])
+            )
+
+            if is_better:
+                best = (tool_name, score, source, levenshtein_dist, tool_name)
 
     if best[1] >= FUZZY_MATCH_THRESHOLD:
         return best[0], best[2]

@@ -21,9 +21,11 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, Query, Request, WebSocket, WebSocketDisconnect
 
-from src.api.auth import TokenData, _decode_jwt, get_current_user, require_admin
+from src.api.auth import TokenData, _decode_jwt, get_current_user
 from src.api.schemas.common import APIResponse
 from src.api.schemas.system import DebugToggleRequest, SystemInfoOut
+from src.auth.middleware import require
+from src.auth.permissions import Permission
 from src.logging_config import get_verbosity, set_verbosity
 
 log = logging.getLogger("cogtrix.api.system")
@@ -38,17 +40,15 @@ _STARTUP_DT = datetime.now(UTC)
 
 def _make_system_info(request: Request) -> SystemInfoOut:
     cfg = getattr(request.app.state, "config", None)
-    version = "unknown"
-    try:
-        from src._version import __version__
+    from src._version import get_commit_hash, get_version_string
 
-        version = __version__
-    except Exception:
-        pass
+    version = get_version_string()
+    commit = get_commit_hash()
 
     uptime = time.monotonic() - _STARTUP_TIME
     return SystemInfoOut(
         version=version,
+        commit=commit,
         api_version="v1",
         platform=platform.platform(),
         python_version=sys.version.split()[0],
@@ -95,7 +95,7 @@ async def system_info(
 )
 async def toggle_debug(
     request: Request,
-    current_user: TokenData = Depends(require_admin),
+    current_user: TokenData = Depends(require(Permission.CONFIG_MANAGE)),
     body: DebugToggleRequest | None = None,
 ) -> APIResponse[SystemInfoOut]:
     """Toggle debug/verbose logging at runtime (admin only).
@@ -219,7 +219,7 @@ async def log_stream_websocket(
         await websocket.close(code=4001)
         return
 
-    if claims.get("role") != "admin":
+    if claims.get("role") not in ("admin", "superadmin"):
         await websocket.close(code=4003)
         return
 

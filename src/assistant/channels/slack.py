@@ -70,6 +70,11 @@ def _check_receive_contact(
     return True
 
 
+def _normalize_message_text(text: str) -> str:
+    """Collapse whitespace so near-identical status messages compare cleanly."""
+    return " ".join(text.split())
+
+
 # ── Channel ────────────────────────────────────────────────────────────────────
 
 
@@ -101,6 +106,12 @@ class SlackChannel(Channel):
         self._phonebook: dict[str, str] = config.get("phonebook", {})
         self._allowed_channels: list[str] = [str(c) for c in config.get("allowed_channels", [])]
         self._ignore_older_than: float | None = parse_duration(config.get("ignore_older_than"))
+        cooldown = parse_duration(config.get("dedup_cooldown", "25m"))
+        self._dedup_cooldown_s: float = cooldown if cooldown is not None else 25 * 60.0
+        try:
+            self._dedup_history_limit: int = max(int(config.get("dedup_history_limit", 3)), 1)
+        except (TypeError, ValueError):
+            self._dedup_history_limit = 3
 
         # channel_id → last-seen Slack timestamp string (watermark)
         self._last_ts: dict[str, str] = {}
@@ -114,7 +125,10 @@ class SlackChannel(Channel):
         self._user_cache: dict[str, str] = {}
         self._USER_CACHE_MAX = 1024
 
-        self._client: Any = WebClient(token=self._bot_token) if self._bot_token else None
+        self._client: Any = None
+        if self._bot_token:
+            assert WebClient is not None
+            self._client = WebClient(token=self._bot_token)
 
         if self._filter_mode != "none":
             log.info(
@@ -148,8 +162,11 @@ class SlackChannel(Channel):
                         self._last_ts[ch_id] = msgs[0]["ts"]
                 except Exception as exc:
                     log.debug("Slack cold-start seed failed for %s: %s", ch_id, exc)
-            self._seeded = True
-            log.debug("Slack cold-start: seeded %d channel(s)", len(self._joined_channels))
+            if self._joined_channels:
+                self._seeded = True
+                log.debug("Slack cold-start: seeded %d channel(s)", len(self._joined_channels))
+            else:
+                log.warning("Slack cold-start: no channels discovered, will retry next poll")
             return []
 
         result: list[IncomingMessage] = []
@@ -245,8 +262,10 @@ class SlackChannel(Channel):
         """
         if self._client is None:
             return SendResult(ok=False, error="Slack client not initialized")
+        if self._should_skip_duplicate_send(chat_id, text):
+            return SendResult(ok=True)
         try:
-            resp = self._client.chat_postMessage(channel=chat_id, text=text)
+            resp = self._client.chat_postMessage(channel=chat_id, text=text, mrkdwn=True)
             message_id: str | None = resp.get("ts") or None
             return SendResult(ok=True, message_id=message_id)
         except Exception as exc:
@@ -338,3 +357,49 @@ class SlackChannel(Channel):
             return name
         except Exception:
             return user_id
+
+    def _should_skip_duplicate_send(self, chat_id: str, text: str) -> bool:
+        """Return True if the channel recently received the same bot-authored text."""
+        if self._client is None or self._dedup_cooldown_s <= 0:
+            return False
+
+        target_text = _normalize_message_text(text)
+        if not target_text:
+            return False
+
+        try:
+            resp = self._client.conversations_history(
+                channel=chat_id,
+                limit=self._dedup_history_limit,
+            )
+        except Exception as exc:
+            log.warning("Slack: failed to inspect recent messages for %s: %s", chat_id, exc)
+            return False
+
+        recent: list[dict[str, Any]] = resp.get("messages", [])
+        now = time.time()
+        for msg in recent:
+            if not (msg.get("bot_id") or msg.get("subtype") == "bot_message"):
+                continue
+
+            ts_raw = msg.get("ts")
+            if ts_raw is None:
+                continue
+            try:
+                ts = float(ts_raw)
+            except (TypeError, ValueError):
+                continue
+
+            age = now - ts
+            if age < 0 or age > self._dedup_cooldown_s:
+                continue
+
+            if _normalize_message_text(str(msg.get("text") or "")) == target_text:
+                log.info(
+                    "Slack: skipping duplicate send to %s (recent bot message %.0fs old)",
+                    chat_id,
+                    age,
+                )
+                return True
+
+        return False

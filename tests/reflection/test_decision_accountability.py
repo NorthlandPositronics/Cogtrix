@@ -8,6 +8,8 @@ correctly) rather than structure (field names exist).
 
 from __future__ import annotations
 
+import pytest
+
 from src.orchestration.reflection_delegate import (
     CounterPlanEvaluator,
     PlanGenerator,
@@ -363,6 +365,29 @@ class TestExtractDecisionJustification:
         result = extract_decision_justification(self._FULL_RESPONSE)
         assert result is not None
         assert "shadow mode" in result["counter_plan"]
+
+    @pytest.mark.parametrize("confidence", [0.0, 0.5, 1.0])
+    def test_low_boundary_confidence_values_are_parsed_and_rejected(self, confidence):
+        response = (
+            "---PLAN---\n"
+            "Do the thing.\n"
+            "---ASSUMPTIONS---\n"
+            "- A1\n"
+            "---EVIDENCE---\n"
+            "- E1\n"
+            "---CONFIDENCE---\n"
+            f"{confidence}\n"
+            "---END---\n"
+            "---COUNTER-PLAN---\n"
+            "Alternative.\n"
+            "---FLAWS---\n"
+            "- No critical flaws identified\n"
+            "---END---"
+        )
+        result = extract_decision_justification(response)
+        assert result is not None
+        assert result["confidence"] == confidence
+        assert result["should_proceed"] is False
 
     def test_parses_flaws(self):
         result = extract_decision_justification(self._FULL_RESPONSE)

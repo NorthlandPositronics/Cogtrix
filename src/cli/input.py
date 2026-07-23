@@ -20,6 +20,13 @@ HISTORY_MAX = 1000
 
 
 def _history_dir() -> Path:
+    # Prefer COGTRIX_DATA_DIR env var so Docker deployments with a read-only
+    # working directory write to the correct writable volume instead of CWD.
+    import os
+
+    data_root = os.environ.get("COGTRIX_DATA_DIR")
+    if data_root:
+        return Path(data_root) / "history"
     return Path("data") / "history"
 
 
@@ -212,8 +219,10 @@ def run_inline_shell(command: str) -> None:
             print("Usage: !<command>  (e.g. !ls -la)")
         return
 
-    _shell_meta = {"|", ">", "<", "&", ";", "`", "$", "(", ")", "*", "?", "{", "}"}
-    needs_shell = any(ch in command for ch in _shell_meta)
+    _shell_meta = {"|", ">", "<", "&", ";", "`", "$", "(", ")", "*", "?"}
+    needs_shell = any(ch in command for ch in _shell_meta) or bool(
+        re.search(r"\{[^}]*,[^}]*\}", command)
+    )
 
     try:
         if needs_shell:

@@ -1,6 +1,6 @@
 # Cogtrix Tools Reference
 
-Complete documentation of all 79 built-in tools. You don't need to memorize these — the agent picks the right tool automatically based on your request. This page is a reference for when you want to know exactly what's available, what parameters a tool accepts, or how to configure optional providers.
+Complete documentation of all 74 built-in tools. You don't need to memorize these — the agent picks the right tool automatically based on your request. This page is a reference for when you want to know exactly what's available, what parameters a tool accepts, or how to configure optional providers.
 
 **Quick orientation:**
 
@@ -25,6 +25,7 @@ Complete documentation of all 79 built-in tools. You don't need to memorize thes
 - [NLP Tools](#nlp-tools)
 - [WhatsApp Messaging](#whatsapp-messaging)
 - [Telegram Messaging](#telegram-messaging)
+- [Slack Messaging](#slack-messaging)
 - [Scheduling](#scheduling)
 - [Knowledge Base](#knowledge-base)
 - [Delegation](#delegation)
@@ -210,7 +211,13 @@ Last 5 execution(s):
 
 ## File Operations
 
-All file tools enforce path safety: paths must resolve within the current working directory. Read-only tools (`read_file`, `list_directory`, `file_info`) also allow access to the application install directory — this matters in Docker containers where the working directory may differ from the install path (e.g., `-w /tmp` while the app lives at `/app`). Write tools are restricted to the working directory by default, but additional write directories can be allowed via `--allow-write-path`, `COGTRIX_ALLOWED_WRITE_PATHS`, or the `allowed_write_paths` config option (see [Configuration](CONFIGURATION.md#allowed-write-paths)).
+All file tools enforce path safety: paths must resolve within the current working directory.
+Read-only tools (`read_file`, `list_directory`, `file_info`) also allow access to the application
+install directory — this matters in Docker containers where the working directory may differ from
+the install path (e.g., `-w /tmp` while the app lives at `/app`). Write tools are restricted to the
+working directory by default, but additional write directories can be allowed via
+`--allow-write-path`, `COGTRIX_ALLOWED_WRITE_PATHS`, or the `allowed_write_paths` config option (see
+[Configuration](CONFIGURATION.md#allowed-write-paths)).
 
 ### read_file
 
@@ -698,7 +705,11 @@ Convert JSON to human-readable text.
 
 ## Search
 
-Cogtrix includes 11 search tools across 6 providers. All API-key-gated tools (search, weather, WhatsApp) are automatically hidden from the agent when not configured — they simply don't appear in the tool list. DuckDuckGo is always available (no API key, provides both `search_web` and `search_news`). Other providers are automatically enabled when their API key is configured, and hidden from the agent otherwise.
+Cogtrix includes 11 search tools across 6 providers. All API-key-gated tools (search, weather,
+WhatsApp) are automatically hidden from the agent when not configured — they simply don't appear in
+the tool list. DuckDuckGo is always available (no API key, provides both `search_web` and
+`search_news`). Other providers are automatically enabled when their API key is configured, and
+hidden from the agent otherwise.
 
 ### search_web
 
@@ -1176,6 +1187,49 @@ Outbound messages are rate-limited to prevent abuse. Default: 30 messages/hour (
 
 ## Scheduling
 
+### cron_add
+
+Schedule a recurring prompt to run on a cron expression. The prompt is sent to the LLM in the background at each scheduled time and the response is printed to the console.
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `schedule` | string | Yes | 5-field cron expression (e.g. `"*/15 * * * *"` for every 15 min, `"0 9 * * 1-5"` for weekdays at 09:00) |
+| `prompt` | string | Yes | Prompt to send to the LLM at each scheduled time |
+| `name` | string | No | Human-readable label used when listing or removing the job |
+| `context` | string | No | Execution mode: `"fresh"` (default) runs isolated, `"inherit"` reuses the current session history and tools when the host process provides a runner |
+
+**Returns:** Job summary including the assigned 8-character ID, schedule, and next run time.
+
+---
+
+### cron_list
+
+List all scheduled cron jobs.
+
+**Parameters:** None
+
+**Returns:** Table of job ID, name, schedule expression, context, run count, last run, and next run time.
+
+---
+
+### cron_remove
+
+Remove a scheduled cron job. Accepts the job ID, a name substring, or the schedule expression.
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `job_id` | string | Yes | Job ID (8-char hex from `cron_add`), case-insensitive substring of the job name, or exact cron schedule expression |
+
+If multiple jobs match by name or schedule, all are removed. If the ID is not remembered, use `cron_list` first or pass the name given at creation time.
+
+**Returns:** Confirmation listing removed job IDs and names, or an error message if no match was found.
+
+---
+
 ### schedule_reply
 
 Schedule a reply for delayed delivery instead of sending immediately.
@@ -1211,6 +1265,22 @@ Schedule a reply for delayed delivery instead of sending immediately.
 ---
 
 ## Knowledge Base
+
+### save_to_knowledge_base
+
+Persist a fact or note to the agent knowledge base for future retrieval. Writes to the agent-notes FAISS sub-index when FAISS is available, and falls back to a JSONL log when it is not.
+
+**Parameters:**
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `content` | string | Yes | — | The fact, finding, or note to persist |
+| `source` | string | No | `"agent"` | Origin label for the entry |
+| `tags` | array[string] | No | `[]` | Optional topic tags to attach to the entry |
+
+**Returns:** Confirmation string on success, or an error message
+
+---
 
 ### query_knowledge_base
 
@@ -1353,6 +1423,45 @@ deep_think(
   num_branches=3
 )
 ```
+
+---
+
+## See Also
+
+- [CONFIGURATION.md](CONFIGURATION.md) — Tool configuration
+- [DEVELOPMENT.md](DEVELOPMENT.md) — Adding custom tools
+- [DEEPTHINK.md](DEEPTHINK.md) — Deep Think reasoning guide
+- [RAG_GUIDE.md](RAG_GUIDE.md) — Knowledge base setup
+- [WHATSAPP_GUIDE.md](WHATSAPP_GUIDE.md) — WhatsApp assistant setup
+- [TELEGRAM_GUIDE.md](TELEGRAM_GUIDE.md) — Telegram assistant setup
+
+---
+
+## Slack Messaging
+
+### cogtrix_slack_post_message
+
+Post a message to a Slack channel with automatic markdown-to-mrkdwn conversion. Supports **bold**, tables, and headings.
+
+**Configuration:** Requires `services.slack.bot_token` in `.cogtrix.yaml`.
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `channel` | string | Yes | Slack channel ID (e.g., `C0123456789`) |
+| `text` | string | Yes | Message text (supports markdown) |
+| `blocks` | array | No | Optional block structure for rich messaging |
+
+**Example:**
+```python
+cogtrix_slack_post_message(
+    channel="C0123456789",
+    text="**Task Complete!**\n\nThe analysis is ready. See details in the report."
+)
+```
+
+**Returns:** Message timestamp and success status
 
 ---
 

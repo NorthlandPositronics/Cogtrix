@@ -44,6 +44,9 @@ def _reimport_engine(env: dict[str, str]) -> ModuleType:
         mock_cfg.data_dir = env.get("_MOCK_DATA_DIR", "data")
         with patch("src.config.load_config", return_value=mock_cfg):
             mod = importlib.import_module("src.api.db.engine")
+            # URL resolution is lazy (PEP 562); force it now while the
+            # load_config patch and env-var patches are still active.
+            mod._get_db_url()
     return mod
 
 
@@ -79,12 +82,12 @@ class TestDbUrlResolution:
                 "_MOCK_DATA_DIR": "/also/ignored",
             }
         )
-        assert str(mod._DB_URL) == explicit
+        assert str(mod._get_db_url()) == explicit
 
     def test_cogtrix_data_dir_env_var_used_when_no_db_url(self, tmp_path: Path) -> None:
         """COGTRIX_DATA_DIR relocates the SQLite file without setting COGTRIX_DB_URL."""
         mod = _reimport_engine({"COGTRIX_DATA_DIR": str(tmp_path), "_MOCK_DATA_DIR": str(tmp_path)})
-        db_path = _extract_db_path(mod._DB_URL)
+        db_path = _extract_db_path(mod._get_db_url())
         assert db_path.startswith(
             str(tmp_path)
         ), f"DB path {db_path!r} should be under COGTRIX_DATA_DIR={tmp_path}"
@@ -98,7 +101,7 @@ class TestDbUrlResolution:
         saved_data_dir = os.environ.pop("COGTRIX_DATA_DIR", None)
         try:
             mod = _reimport_engine({"_MOCK_DATA_DIR": str(tmp_path)})
-            db_path = _extract_db_path(mod._DB_URL)
+            db_path = _extract_db_path(mod._get_db_url())
             assert db_path.startswith(
                 str(tmp_path)
             ), f"DB path {db_path!r} should be derived from config.data_dir={tmp_path}"
@@ -122,8 +125,10 @@ class TestDbUrlResolution:
 
             with patch("src.config.load_config", side_effect=RuntimeError("no config")):
                 mod = importlib.import_module("src.api.db.engine")
+                # Force lazy resolution while the patch is still active.
+                mod._get_db_url()
 
-            db_path = _extract_db_path(mod._DB_URL)
+            db_path = _extract_db_path(mod._get_db_url())
             assert "data/api/cogtrix.db" in db_path
         finally:
             if saved_db_url is not None:
@@ -145,7 +150,7 @@ class TestDbUrlResolution:
                     "_MOCK_DATA_DIR": config_data_dir,
                 }
             )
-            db_path = _extract_db_path(mod._DB_URL)
+            db_path = _extract_db_path(mod._get_db_url())
             assert db_path.startswith(
                 env_data_dir
             ), f"COGTRIX_DATA_DIR should win over config data_dir; got {db_path!r}"

@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from src.logging_config import get_logger
+from src.providers import _redact_url
 from src.providers.defaults import CHAT_MODELS, EMBEDDING_MODELS
 
 log = get_logger()
@@ -40,7 +41,8 @@ def create_chat_model(
     Args:
         model: Model name (default: gemini-2.5-flash).
         api_key: API key (``None`` → falls back to ``GOOGLE_API_KEY`` env var).
-        base_url: Ignored — Google API does not support custom endpoints.
+        base_url: Must be ``None``.  Google API does not support custom
+            endpoints; a non-``None`` value raises ``ValueError``.
         temperature: Sampling temperature.
         **kwargs: Extra keyword arguments forwarded to
             ``ChatGoogleGenerativeAI``.
@@ -57,11 +59,11 @@ def create_chat_model(
         )
 
     if base_url:
-        log.warning(
-            "Google provider does not support custom base_url and will ignore '%s'. "
+        raise ValueError(
+            "Google provider does not support custom base_url. "
+            f"Received base_url={_redact_url(base_url)!r}. "
             "If you need a proxy or Vertex AI endpoint, configure GOOGLE_API_KEY to "
-            "point to your instance or use the 'google' provider's transport= kwarg.",
-            base_url,
+            "point to your instance or use the 'google' provider's transport= kwarg."
         )
 
     llm_kwargs: dict[str, Any] = {
@@ -86,7 +88,8 @@ def create_embeddings(
     Args:
         model: Embedding model name (default: text-embedding-004).
         api_key: API key.
-        base_url: Ignored — Google API does not support custom endpoints.
+        base_url: Must be ``None``.  Google API does not support custom
+            endpoints; a non-``None`` value raises ``ValueError``.
 
     Returns:
         ``GoogleGenerativeAIEmbeddings`` instance.
@@ -100,11 +103,11 @@ def create_embeddings(
         )
 
     if base_url:
-        log.warning(
-            "Google provider does not support custom base_url and will ignore '%s'. "
+        raise ValueError(
+            "Google provider does not support custom base_url. "
+            f"Received base_url={_redact_url(base_url)!r}. "
             "If you need a proxy or Vertex AI endpoint, configure GOOGLE_API_KEY to "
-            "point to your instance or use the 'google' provider's transport= kwarg.",
-            base_url,
+            "point to your instance or use the 'google' provider's transport= kwarg."
         )
 
     resolved_model = model or EMBEDDING_MODELS["google"]

@@ -1,0 +1,25 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "cogtrix.fullname" . }}
+  labels:
+    {{- include "cogtrix.labels" . | nindent 4 }}
+  {{- with .Values.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.service.type }}
+  ports:
+    - port: {{ .Values.service.port }}
+      targetPort: http
+      protocol: TCP
+      name: http
+    {{- if .Values.waha.enabled }}
+    - port: {{ .Values.waha.service.port }}
+      targetPort: waha
+      protocol: TCP
+      name: waha
+    {{- end }}
+  selector:
+    {{- include "cogtrix.selectorLabels" . | nindent 4 }}

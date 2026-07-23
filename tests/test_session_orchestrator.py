@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from unittest.mock import MagicMock
 
 from src.orchestration.session_orchestrator import SessionOrchestrator, SessionSnapshot
@@ -119,3 +120,48 @@ class TestSessionOrchestratorRollback:
         orch.rollback(snap)
 
         assert "search" in slash_cmds.available_tools
+
+
+class TestSessionOrchestratorConcurrency:
+    def test_snapshot_rollback_are_atomic_under_race(self) -> None:
+        """Concurrent snapshot and rollback must not produce torn reads/writes."""
+        import threading
+        import time
+
+        orch, config, _ = _make_orchestrator(
+            active_model_alias="model-a",
+            memory_mode="conversation",
+            session="default",
+        )
+        errors: list[str] = []
+
+        def writer() -> None:
+            for i in range(200):
+                snap = orch.snapshot()
+                config.active_model_alias = f"model-{i}"
+                config.memory_mode = f"mode-{i}"
+                config.session = f"session-{i}"
+                time.sleep(0.0001)
+                orch.rollback(snap)
+                if config.active_model_alias != "model-a":
+                    errors.append(f"torn write at iter {i}: {config.active_model_alias}")
+
+        def reader() -> None:
+            for _ in range(200):
+                snap = orch.snapshot()
+                if snap.active_model_alias != config.active_model_alias:
+                    errors.append("torn read: snapshot alias != live alias")
+
+        t1 = threading.Thread(target=writer)
+        t2 = threading.Thread(target=reader)
+        t1.start()
+        t2.start()
+        t1.join()
+        t2.join()
+
+        assert not errors, f"Race detected: {errors[:5]}"
+
+    def test_orchestrator_has_lock_attribute(self) -> None:
+        orch, _, _ = _make_orchestrator()
+        assert hasattr(orch, "_lock")
+        assert isinstance(orch._lock, threading.Lock)

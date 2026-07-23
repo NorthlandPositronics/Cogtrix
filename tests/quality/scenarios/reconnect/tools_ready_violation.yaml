@@ -1,0 +1,24 @@
+id: tools_ready_violation
+complexity: medium
+category: reconnect
+description: "The model tries to use a tool while reconnect readiness is still false."
+tags: [critical, tier1]
+system_prompt: "You are a helpful assistant."
+tools: []
+
+script:
+  - user: "Check the current open PRs."
+  - llm:
+      tool_calls:
+        - name: github_list_pull_requests
+          args:
+            state: "open"
+  - tool_result: "Error: tools are not ready while reconnect is still in progress."
+  - llm: "I should wait until the reconnect finishes before trying again."
+
+metrics:
+  required_tools: []
+  forbidden_tools: [github_list_pull_requests]
+  task_completed: false
+  phantom_calls: false
+  max_turns: 3

@@ -13,6 +13,7 @@ from src.tools.file_ops import (
     _RefLock,
     append_file,
     list_directory,
+    patch_file,
     read_file,
     set_allowed_write_dirs,
     write_file,
@@ -104,6 +105,26 @@ class TestWriteFile:
         result = write_file("/tmp/cogtrix_test_escape.txt", "data")
         assert result.startswith("Error:")
 
+    def test_path_as_dict_with_path_key(self, tmp_cwd: Path) -> None:
+        """write_file should unwrap dict paths (e.g., {"path": "target.txt"})."""
+        result = write_file({"path": "target.txt"}, "data")
+        assert "Successfully wrote" in result
+        assert (tmp_cwd / "target.txt").read_text() == "data"
+
+    def test_path_as_dict_with_absolute_path_key(self, tmp_cwd: Path) -> None:
+        result = write_file({"absolute_path": str(tmp_cwd / "abs.txt")}, "data")
+        assert "Successfully wrote" in result
+        assert (tmp_cwd / "abs.txt").read_text() == "data"
+
+    def test_path_as_dict_with_file_path_key(self, tmp_cwd: Path) -> None:
+        result = write_file({"file_path": "fp.txt"}, "data")
+        assert "Successfully wrote" in result
+        assert (tmp_cwd / "fp.txt").read_text() == "data"
+
+    def test_path_as_dict_unknown_key_returns_error(self, tmp_cwd: Path) -> None:
+        result = write_file({"unknown_key": "foo.txt"}, "data")
+        assert result == "Error: Invalid arguments for write_file"
+
 
 class TestAppendFile:
     """append_file correctness tests."""
@@ -117,6 +138,29 @@ class TestAppendFile:
         result = append_file("fresh.txt", "data")
         assert "Successfully appended" in result
         assert (tmp_cwd / "fresh.txt").read_text() == "data"
+
+    def test_path_as_dict(self, tmp_cwd: Path) -> None:
+        """append_file should unwrap dict paths."""
+        result = append_file({"path": "append_dict.txt"}, "hello")
+        assert "Successfully appended" in result
+        assert (tmp_cwd / "append_dict.txt").read_text() == "hello"
+
+
+class TestPatchFile:
+    """patch_file correctness tests."""
+
+    def test_replaces_string(self, tmp_cwd: Path) -> None:
+        (tmp_cwd / "patchme.txt").write_text("hello world")
+        result = patch_file("patchme.txt", "world", "cogtrix")
+        assert "Patched patchme.txt" in result
+        assert (tmp_cwd / "patchme.txt").read_text() == "hello cogtrix"
+
+    def test_path_as_dict(self, tmp_cwd: Path) -> None:
+        """patch_file should unwrap dict paths."""
+        (tmp_cwd / "dict_patch.txt").write_text("before")
+        result = patch_file({"path": "dict_patch.txt"}, "before", "after")
+        assert "Patched dict_patch.txt" in result
+        assert (tmp_cwd / "dict_patch.txt").read_text() == "after"
 
 
 class TestListDirectory:
@@ -303,3 +347,77 @@ class TestGetAppendLock:
         with _append_lock_guard:
             for k in busy_keys:
                 _append_locks[k].ref_count = 0
+
+
+class TestPatchFileLocking:
+    """patch_file additional correctness paths and per-file lock behaviour.
+
+    Renamed from a second ``TestPatchFile`` (collided with the class at
+    line 149 — the second definition shadowed the first, so the basic
+    correctness tests never ran).  Split intentionally: this class
+    covers locking and concurrent-patch semantics; basic correctness
+    stays in TestPatchFile above.
+    """
+
+    def test_patches_existing_file(self, tmp_cwd: Path) -> None:
+        (tmp_cwd / "target.txt").write_text("hello old world")
+        result = patch_file("target.txt", "old", "new")
+        assert result.startswith("Patched")
+        assert (tmp_cwd / "target.txt").read_text() == "hello new world"
+
+    def test_old_str_not_found_returns_error(self, tmp_cwd: Path) -> None:
+        (tmp_cwd / "target.txt").write_text("hello world")
+        result = patch_file("target.txt", "missing", "new")
+        assert result.startswith("Error: old_str not found")
+
+    def test_ambiguous_old_str_returns_error(self, tmp_cwd: Path) -> None:
+        (tmp_cwd / "target.txt").write_text("old old old")
+        result = patch_file("target.txt", "old", "new")
+        assert "found 3 times" in result
+
+    def test_uses_file_lock(self, tmp_cwd: Path) -> None:
+        """patch_file must acquire the per-file lock to prevent lost updates."""
+        (tmp_cwd / "target.txt").write_text("hello old world")
+
+        with patch("src.tools.file_ops._get_append_lock") as mock_get_lock:
+            mock_lock = mock_get_lock.return_value
+            mock_lock.__enter__ = lambda self: self  # type: ignore[no-untyped-def]
+            mock_lock.__exit__ = lambda *args: None  # type: ignore[no-untyped-def]
+
+            patch_file("target.txt", "old", "new")
+
+            mock_get_lock.assert_called_once_with(str(tmp_cwd / "target.txt"))
+
+    def test_concurrent_patches_are_serialized(self, tmp_cwd: Path) -> None:
+        """Two concurrent patches to the same file must not lose updates."""
+        import threading
+
+        (tmp_cwd / "target.txt").write_text("hello old world")
+        results: list[str] = []
+        barrier = threading.Barrier(2)
+
+        def patch_a() -> None:
+            barrier.wait()
+            results.append(patch_file("target.txt", "old", "NEW_A"))
+
+        def patch_b() -> None:
+            barrier.wait()
+            results.append(patch_file("target.txt", "old", "NEW_B"))
+
+        t1 = threading.Thread(target=patch_a)
+        t2 = threading.Thread(target=patch_b)
+        t1.start()
+        t2.start()
+        t1.join()
+        t2.join()
+
+        # With proper locking, exactly one succeeds and one errors
+        successes = [r for r in results if r.startswith("Patched")]
+        errors = [r for r in results if r.startswith("Error")]
+        assert len(successes) == 1, f"Expected 1 success, got: {results}"
+        assert len(errors) == 1, f"Expected 1 error, got: {results}"
+
+        # The file must contain exactly one replacement
+        content = (tmp_cwd / "target.txt").read_text()
+        assert "old" not in content
+        assert ("NEW_A" in content) != ("NEW_B" in content)

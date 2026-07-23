@@ -1,0 +1,95 @@
+# Cogtrix Prometheus Alert Rules
+# Deployed to: deploy/prometheus/alerts.rules.yml
+# This file contains 5 critical alerts for monitoring Cogtrix operations
+
+groups:
+  - name: cogtrix-alerts
+    interval: 30s
+    rules:
+      # API Error Rate Alert: Trigger when API error rate exceeds 5% over 5 minutes
+      - alert: CogtrixAPIErrorRateHigh
+        expr: |
+          sum(rate(cogtrix_api_requests_total{status=~"5.."}[5m]))
+          /
+          sum(rate(cogtrix_api_requests_total[5m]))
+          > 0.05
+        for: 5m
+        labels:
+          severity: critical
+          team: platform
+        annotations:
+          summary: "Cogtrix API error rate exceeds 5%"
+          description: |
+            API error rate is {{ $value | humanizePercentage }} over the last 5 minutes.
+            Expected: < 5%
+            Current: {{ $value | humanizePercentage }}
+          runbook_url: "https://internal.cogtrix/docs/runbooks/api-errors"
+
+      # LLM Latency Alert: Trigger when p99 latency exceeds 10 seconds over 5 minutes
+      - alert: CogtrixLLMLatencyHigh
+        expr: |
+          histogram_quantile(0.99, sum(rate(cogtrix_llm_duration_seconds_bucket[5m])) by (le))
+          > 10
+        for: 5m
+        labels:
+          severity: critical
+          team: platform
+        annotations:
+          summary: "Cogtrix LLM p99 latency exceeds 10 seconds"
+          description: |
+            LLM p99 latency is {{ $value | humanizeDuration }} over the last 5 minutes.
+            Expected: < 10s
+            Current: {{ $value | humanizeDuration }}
+          runbook_url: "https://internal.cogtrix/docs/runbooks/llm-latency"
+
+      # Database Pool Alert: Trigger when DB pool usage exceeds 80%
+      - alert: CogtrixDBPoolHighUtilization
+        expr: |
+          cogtrix_db_pool_active / cogtrix_db_pool_max
+          > 0.8
+        for: 5m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "Cogtrix DB pool utilization exceeds 80%"
+          description: |
+            Database pool utilization is {{ $value | humanizePercentage }}.
+            Expected: < 80%
+            Current: {{ $value | humanizePercentage }}
+            Consider scaling the database pool or optimizing queries.
+          runbook_url: "https://internal.cogtrix/docs/runbooks/db-pool"
+
+      # Active Sessions Alert: Trigger when active sessions exceed 90% of capacity
+      - alert: CogtrixSessionsHighUtilization
+        expr: |
+          cogtrix_active_sessions / cogtrix_session_capacity
+          > 0.9
+        for: 5m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "Cogtrix active sessions exceed 90% of capacity"
+          description: |
+            Active sessions: {{ $value | humanizePercentage }} of capacity.
+            Expected: < 90%
+            Current: {{ $value | humanizePercentage }}
+            Consider scaling session capacity to maintain headroom.
+          runbook_url: "https://internal.cogtrix/docs/runbooks/sessions"
+
+      # Stripe Webhook Failure Alert: Trigger when webhook failures occur
+      - alert: CogtrixStripeWebhookFailures
+        expr: |
+          sum(rate(cogtrix_stripe_webhook_failures_total[5m])) > 0
+        for: 1m
+        labels:
+          severity: critical
+          team: payments
+        annotations:
+          summary: "Cogtrix Stripe webhook failures detected"
+          description: |
+            Stripe webhook failures detected: {{ $value }} failures in the last 5 minutes.
+            Expected: 0 failures
+            Immediate attention required - check Stripe webhook logs.
+          runbook_url: "https://internal.cogtrix/docs/runbooks/stripe-webhooks"

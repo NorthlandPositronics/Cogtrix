@@ -1125,6 +1125,22 @@ class TestMessageList:
         assert ids1.isdisjoint(ids2)
 
     @pytest.mark.asyncio
+    async def test_invalid_cursor_returns_400(self, message_app) -> None:
+        client, sf, _ = message_app
+        uid = await _create_user(sf)
+        tok = _token(uid)
+        sid = client.post("/api/v1/sessions", json={"name": "S"}, headers=_auth(tok)).json()[
+            "data"
+        ]["id"]
+
+        resp = client.get(
+            f"/api/v1/sessions/{sid}/messages?cursor=does-not-exist",
+            headers=_auth(tok),
+        )
+        assert resp.status_code == 400
+        assert resp.json()["error"]["code"] == "INVALID_CURSOR"
+
+    @pytest.mark.asyncio
     async def test_session_not_found_returns_404(self, message_app) -> None:
         client, sf, _ = message_app
         uid = await _create_user(sf)

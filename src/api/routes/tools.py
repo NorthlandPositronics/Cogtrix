@@ -122,7 +122,7 @@ def _classify_tool_status(name: str, session_state: Any) -> str:
     # Only report "auto_approved" when the tool is actually loaded —
     # an approval on an on-demand tool just means it won't need confirmation
     # when eventually expanded, not that it's active.
-    if name in session_state.approvals and name in session_state.loaded_tools:
+    if name in session_state.get_approvals_snapshot() and name in session_state.loaded_tools:
         return "auto_approved"
     if name in session_state.loaded_tools:
         return "active"
@@ -438,11 +438,11 @@ async def patch_session_tools(
         if body.auto_approve:
             for name in body.auto_approve:
                 _assert_tool_exists(name)
-                ss.approvals.add(name)
+                ss.add_approval(name)
 
         if body.revoke_approval:
             for name in body.revoke_approval:
-                ss.approvals.discard(name)
+                ss.revoke_approval(name)
 
     items = [
         _tool_to_summary(n, t, registry, _classify_tool_status(n, ss))

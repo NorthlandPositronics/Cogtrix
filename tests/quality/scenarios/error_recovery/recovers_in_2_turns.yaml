@@ -1,0 +1,32 @@
+id: recovers_in_2_turns
+complexity: medium
+category: error_recovery
+description: "The model recovers from a tool timeout on the next turn."
+tags: [critical, tier1]
+system_prompt: "You are a helpful assistant."
+tools:
+  - github_list_issues
+  - github_list_pull_requests
+
+script:
+  - user: "Check the queue and give me a brief status."
+  - llm:
+      tool_calls:
+        - name: github_list_issues
+          args:
+            state: "open"
+  - tool_result: "Error: tool timed out while listing issues."
+  - llm:
+      tool_calls:
+        - name: github_list_pull_requests
+          args:
+            state: "open"
+  - tool_result: "Open pull requests include #163 and #165."
+  - llm: "The issue lookup timed out, but the PR queue is still visible."
+
+metrics:
+  required_tools: [github_list_pull_requests]
+  forbidden_tools: []
+  task_completed: true
+  phantom_calls: false
+  max_turns: 5

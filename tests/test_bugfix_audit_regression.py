@@ -14,6 +14,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+os.environ.setdefault("COGTRIX_DATA_DIR", str(Path("/tmp") / "cogtrix-tests"))
+
 from src.orchestration.session_state import SessionState
 
 # ── SEC-01: copy removed from SAFE_MODULES (python_exec.py) ─────────────
@@ -211,9 +213,7 @@ class TestValidateJsonResponseFenceStripping:
         """Multiple code blocks after JSON — only first closing fence matters."""
         from src.tools.delegate import _validate_json_response
 
-        response = (
-            "```json\n[1, 2, 3]\n```\n\n" "```bash\necho hello\n```\n\n" "```python\nx = 1\n```"
-        )
+        response = "```json\n[1, 2, 3]\n```\n\n```bash\necho hello\n```\n\n```python\nx = 1\n```"
         valid, parsed = _validate_json_response(response)
         assert valid is True
         assert parsed == [1, 2, 3]
@@ -249,27 +249,58 @@ class TestValidateJsonResponseFenceStripping:
 class TestCircuitBreakerLockDiscipline:
     """_execute_single_task must call _check_availability_locked() inside the lock."""
 
-    def test_check_availability_locked_is_called(self):
-        """Verify _execute_single_task calls _check_availability_locked inside the lock."""
-        import inspect
+    def test_execute_single_task_uses_locked_availability_check(self):
+        """_execute_single_task must consult the locked helper before delegating."""
+        from src.tools import delegate
 
-        from src.tools.delegate import _execute_single_task
+        calls: list[float] = []
 
-        source = inspect.getsource(_execute_single_task)
-        assert "_check_availability_locked" in source, (
-            "_execute_single_task should call _check_availability_locked(), "
-            "not check_availability() which re-acquires the lock"
-        )
+        class FakeCircuitBreaker:
+            def _check_availability_locked(self, cooldown: float = 300.0):
+                calls.append(cooldown)
+                return False, "blocked"
+
+        def fake_get_circuit_breaker(provider: str, model: str):
+            return FakeCircuitBreaker()
+
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(delegate, "_get_circuit_breaker", fake_get_circuit_breaker)
+        monkeypatch.setitem(delegate._delegate_config, "circuit_breaker_cooldown", 123)
+        try:
+            result = delegate._execute_single_task(
+                "task",
+                provider="openai",
+                model="gpt-4.1-mini",
+            )
+        finally:
+            monkeypatch.undo()
+
+        assert calls == [123]
+        assert result.success is False
+        assert result.error == "blocked"
+        assert result.model_used == "gpt-4.1-mini"
 
     def test_check_availability_is_wrapper(self):
-        """Public check_availability() wraps _check_availability_locked() with its own lock."""
-        import inspect
-
+        """Public check_availability() must route through _check_availability_locked()."""
         from src.tools.delegate import ModelCircuitBreaker
 
-        source = inspect.getsource(ModelCircuitBreaker.check_availability)
-        assert "_check_availability_locked" in source
-        assert "_circuit_breaker_lock" in source
+        calls: list[float] = []
+
+        def fake_locked(self, cooldown: float = 300.0):
+            calls.append(cooldown)
+            return False, "locked"
+
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(ModelCircuitBreaker, "_check_availability_locked", fake_locked)
+        try:
+            breaker = ModelCircuitBreaker(is_unavailable=True)
+            available, reason = breaker.check_availability(cooldown=42.0)
+        finally:
+            monkeypatch.undo()
+
+        assert calls == [42.0]
+        assert available is False
+        assert reason == "locked"
 
 
 # ── SEC-05: config.py resolve_data_path returns resolved path ────────────
@@ -418,15 +449,30 @@ class TestThinkCatByNameModuleLevel:
             assert _THINK_CAT_BY_NAME[cat.name] is cat
 
     def test_classify_uses_module_level_dict(self):
-        """classify_think_task should not rebuild the dict on each call."""
-        import inspect
+        """classify_think_task should read the live module-level lookup table."""
+        from src.orchestration import intent
+        from src.orchestration.intent import ThinkCategory, classify_think_task
 
-        from src.orchestration.intent import classify_think_task
+        sentinel = ThinkCategory(
+            name="sentinel",
+            keywords=("unrelated",),
+            gather_template="gather",
+            analysis_preamble="analysis",
+            stage2_task_framing="frame",
+        )
 
-        source = inspect.getsource(classify_think_task)
-        # Old code had: _cat_by_name: dict = {c.name: c for c in THINK_CATEGORIES}
-        # inside the function body. Ensure it's gone.
-        assert "_cat_by_name" not in source or "_THINK_CAT_BY_NAME" in source
+        class FakeLLM:
+            def invoke(self, prompt: str):
+                return type("Resp", (), {"content": "sentinel"})()
+
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(intent, "_THINK_CAT_BY_NAME", {"sentinel": sentinel})
+        try:
+            result = classify_think_task("plain text without keyword matches", FakeLLM())
+        finally:
+            monkeypatch.undo()
+
+        assert result is sentinel
 
 
 # ── PERF-01: compression.py lazy pool initialization ─────────────────────
@@ -465,19 +511,24 @@ class TestCompressionPoolLazy:
 class TestEvictStaleTimingFix:
     """ToolCallLogger._evict_stale must use the `now` parameter for cutoff."""
 
-    def test_evict_stale_uses_now_param(self):
-        """Verify _evict_stale uses the `now` arg, not a separate time.monotonic() call."""
-        import inspect
-
+    def test_evict_stale_removes_only_expired_entries(self, monkeypatch):
+        """Verify stale tool-call entries are evicted while fresh ones stay."""
         from src.orchestration.runner import ToolCallLogger
 
-        source = inspect.getsource(ToolCallLogger._evict_stale)
-        # The fix changed: cutoff = time.monotonic() - self._STALE_TIMEOUT
-        # to:              cutoff = now - self._STALE_TIMEOUT
-        assert "cutoff = now - " in source, (
-            "_evict_stale must compute cutoff from `now` parameter, "
-            "not from a separate time.monotonic() call"
-        )
+        logger = ToolCallLogger()
+        logger._tool_start_times = {
+            "stale": 399.0,
+            "fresh": 999.0,
+        }
+        logger._last_evict = 0.0
+
+        monkeypatch.setattr(time, "monotonic", lambda: 1000.0)
+
+        logger._evict_stale()
+
+        assert "stale" not in logger._tool_start_times
+        assert logger._tool_start_times["fresh"] == 999.0
+        assert logger._last_evict == 1000.0
 
 
 # ── BUG-192: symlink traversal in _collect_faiss_dirs ─────────────────────
@@ -787,16 +838,43 @@ class TestApiTurnResetsPromptState:
 
     def test_turn_runner_calls_reset(self) -> None:
         """The inner turn execution must call session_state.reset_for_new_prompt()."""
-        import inspect
+        import asyncio
+        from unittest.mock import Mock, patch
 
         from src.api import turn_runner
+        from src.api.session_bridge import ApiSession
+        from src.orchestration.run_config import AgentRunConfig
 
-        # The public run_message_turn delegates to _run_message_turn_inner; check both.
-        full_source = inspect.getsource(turn_runner)
-        assert "reset_for_new_prompt" in full_source, (
-            "turn_runner module must call session_state.reset_for_new_prompt() "
-            "to clear ephemeral tools between API turns (BUG-198)"
+        session_state = Mock()
+        session_state.reset_for_new_prompt = Mock()
+        session_state.approvals = set()
+
+        session = ApiSession(
+            id="session-198",
+            user_id="user-198",
+            name="turn-runner-reset",
+            session_state=session_state,
+            run_config=AgentRunConfig(llm=object(), active_tools_list=[], available_tools={}),
+            memory_manager=None,
+            registry=None,
+            ws_queue=asyncio.Queue(),
         )
+
+        def fake_run_agent(*args, **kwargs) -> str:
+            return "turn output"
+
+        async def _run() -> None:
+            with patch("src.orchestration.runner.run_agent", side_effect=fake_run_agent):
+                await turn_runner._run_message_turn_inner(
+                    session=session,
+                    text="hello",
+                    mode="chat",
+                    db=None,
+                    app_state=None,
+                )
+
+        asyncio.run(_run())
+        session_state.reset_for_new_prompt.assert_called_once()
 
 
 # ── BUG-199: warm_session must populate all_tool_originals ────────────────
@@ -821,15 +899,42 @@ class TestWarmSessionPopulatesOriginals:
 
     def test_warm_session_bridge_assigns_originals(self) -> None:
         """warm_session() in session_bridge.py must assign all_tool_originals."""
-        import inspect
+        import asyncio
+        from types import SimpleNamespace
+        from unittest.mock import patch
 
         from src.api import session_bridge
 
-        source = inspect.getsource(session_bridge)
-        assert "all_tool_originals" in source, (
-            "session_bridge.warm_session must set session_state.all_tool_originals "
-            "from available_tools (BUG-199)"
+        record = SimpleNamespace(
+            id="session-199",
+            user_id="user-199",
+            name="warm-session-originals",
+            config_json="{}",
+            token_counts_json="{}",
+            state="idle",
         )
+        available_tools = {"tool_a": object(), "tool_b": object()}
+        app_state = SimpleNamespace(
+            config=None,
+            tool_registry=SimpleNamespace(tools=available_tools),
+        )
+        memory_manager = SimpleNamespace(
+            set_llm=lambda llm: None,
+            configure_compression=lambda *a, **k: None,
+        )
+
+        async def _run() -> None:
+            with (
+                patch.object(session_bridge, "_build_memory_manager", return_value=memory_manager),
+                patch.object(session_bridge, "_build_llm", return_value=MagicMock()),
+            ):
+                session = await session_bridge.warm_session(record, app_state)
+
+            assert session.session_state.all_tool_originals == available_tools
+            assert session.run_config.active_tools_list is not None
+            assert session.run_config.available_tools is not None
+
+        asyncio.run(_run())
 
     def test_originals_dict_is_a_copy(self) -> None:
         """all_tool_originals must be a new dict, not a reference to available_tools."""
@@ -943,38 +1048,204 @@ class TestTurnRunnerNonBlockingPuts:
     """error and done messages must not use blocking await put() on bounded queue."""
 
     def test_error_messages_use_put_nowait(self) -> None:
-        """Verify error message sends use put_nowait, not blocking put()."""
-        import ast
-        import inspect
+        """Error paths must enqueue via put_nowait and avoid blocking put()."""
+        import asyncio
+        from types import SimpleNamespace
+        from unittest.mock import Mock, patch
 
         from src.api import turn_runner
+        from src.api.session_bridge import ApiSession
+        from src.orchestration.run_config import AgentRunConfig
 
-        source = inspect.getsource(turn_runner._run_message_turn_inner)
-        tree = ast.parse(source)
+        class DummyQueue:
+            def __init__(self) -> None:
+                self.nowait_items: list[dict] = []
+                self.put_items: list[dict] = []
 
-        blocking_puts = []
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Attribute) and node.attr == "put":
-                if isinstance(node.value, ast.Attribute) and node.value.attr == "ws_queue":
-                    blocking_puts.append(ast.dump(node))
+            def put_nowait(self, item: dict) -> None:
+                self.nowait_items.append(item)
 
-        # The only blocking put allowed is the done message wrapped in wait_for
-        assert len(blocking_puts) <= 1, (
-            f"Found {len(blocking_puts)} blocking ws_queue.put() calls; "
-            "error messages must use put_nowait (BUG-209)"
+            async def put(self, item: dict) -> None:
+                self.put_items.append(item)
+                raise AssertionError("error path must not use blocking queue.put()")
+
+        queue = DummyQueue()
+        session_state = SimpleNamespace(reset_for_new_prompt=Mock(), approvals=set())
+        session = ApiSession(
+            id="session-209-error",
+            user_id="user-209",
+            name="turn-runner-nonblocking-error",
+            session_state=session_state,
+            run_config=AgentRunConfig(llm=object(), active_tools_list=[], available_tools={}),
+            memory_manager=None,
+            registry=None,
+            ws_queue=queue,
         )
 
-    def test_done_message_wrapped_in_wait_for(self) -> None:
-        """The done message put() must be wrapped in asyncio.wait_for with a timeout."""
-        import inspect
+        def fake_run_agent(*args, **kwargs) -> None:
+            raise RuntimeError("boom")
+
+        async def _run() -> None:
+            with (
+                patch("src.api.turn_runner.WebSocketCallbackHandler", autospec=True) as mock_ws,
+                patch("src.api.turn_runner.ApiConfirmationUI", autospec=True),
+                patch("src.orchestration.runner.run_agent", side_effect=fake_run_agent),
+            ):
+                mock_ws.return_value.input_tokens = 0
+                mock_ws.return_value.output_tokens = 0
+                mock_ws.return_value.tool_call_count = 0
+                await turn_runner._run_message_turn_inner(
+                    session=session,
+                    text="hello",
+                    mode="chat",
+                    db=None,
+                    app_state=None,
+                )
+
+        asyncio.run(_run())
+        assert any(item["type"] == "error" for item in queue.nowait_items)
+        assert any(item["type"] == "done" for item in queue.nowait_items)
+        assert queue.put_items == []
+
+    def test_done_message_uses_blocking_put_without_timeout(self) -> None:
+        """The done message must use await put() without asyncio.wait_for."""
+        import asyncio
+        from types import SimpleNamespace
+        from unittest.mock import Mock, patch
 
         from src.api import turn_runner
+        from src.api.session_bridge import ApiSession
+        from src.orchestration.run_config import AgentRunConfig
 
-        source = inspect.getsource(turn_runner._run_message_turn_inner)
-        assert "wait_for" in source, "done message must use asyncio.wait_for (BUG-209)"
-        assert (
-            "timeout=" in source or "timeout =" in source
-        ), "wait_for must have a timeout parameter"
+        class DummyQueue:
+            def __init__(self) -> None:
+                self.nowait_items: list[dict] = []
+                self.put_items: list[dict] = []
+
+            def put_nowait(self, item: dict) -> None:
+                self.nowait_items.append(item)
+
+            async def put(self, item: dict) -> None:
+                self.put_items.append(item)
+
+        queue = DummyQueue()
+        session_state = SimpleNamespace(reset_for_new_prompt=Mock(), approvals=set())
+        session = ApiSession(
+            id="session-209-done",
+            user_id="user-209",
+            name="turn-runner-nonblocking-done",
+            session_state=session_state,
+            run_config=AgentRunConfig(llm=object(), active_tools_list=[], available_tools={}),
+            memory_manager=None,
+            registry=None,
+            ws_queue=queue,
+        )
+
+        def fake_run_agent(*args, **kwargs) -> str:
+            return "turn output"
+
+        wait_for_calls: list[float] = []
+
+        async def fake_wait_for(coro, timeout):
+            wait_for_calls.append(timeout)
+            return await coro
+
+        async def _run() -> None:
+            with (
+                patch("src.api.turn_runner.WebSocketCallbackHandler", autospec=True) as mock_ws,
+                patch("src.api.turn_runner.ApiConfirmationUI", autospec=True),
+                patch("src.orchestration.runner.run_agent", side_effect=fake_run_agent),
+                patch("src.api.turn_runner.asyncio.wait_for", side_effect=fake_wait_for),
+            ):
+                mock_ws.return_value.input_tokens = 0
+                mock_ws.return_value.output_tokens = 0
+                mock_ws.return_value.tool_call_count = 0
+                await turn_runner._run_message_turn_inner(
+                    session=session,
+                    text="hello",
+                    mode="chat",
+                    db=None,
+                    app_state=None,
+                )
+
+        asyncio.run(_run())
+        assert wait_for_calls == []
+        assert any(item["type"] == "done" for item in queue.put_items)
+
+    def test_done_message_not_dropped_on_slow_queue(self) -> None:
+        """Regression for #1086: done message must not be dropped when queue is slow."""
+        import asyncio
+        from types import SimpleNamespace
+        from unittest.mock import Mock, patch
+
+        from src.api import turn_runner
+        from src.api.session_bridge import ApiSession
+        from src.orchestration.run_config import AgentRunConfig
+
+        class SlowQueue:
+            def __init__(self) -> None:
+                self.items: list[dict] = []
+                self.put_delay = 0.05
+
+            def put_nowait(self, item: dict) -> None:
+                self.items.append(item)
+
+            async def put(self, item: dict) -> None:
+                await asyncio.sleep(self.put_delay)
+                self.items.append(item)
+
+        queue = SlowQueue()
+        session_state = SimpleNamespace(reset_for_new_prompt=Mock(), approvals=set())
+        session = ApiSession(
+            id="session-1086",
+            user_id="user-1086",
+            name="turn-runner-slow-queue",
+            session_state=session_state,
+            run_config=AgentRunConfig(llm=object(), active_tools_list=[], available_tools={}),
+            memory_manager=None,
+            registry=None,
+            ws_queue=queue,
+        )
+
+        def fake_run_agent(*args, **kwargs) -> str:
+            return "turn output"
+
+        async def _run() -> None:
+            with (
+                patch("src.api.turn_runner.WebSocketCallbackHandler", autospec=True) as mock_ws,
+                patch("src.api.turn_runner.ApiConfirmationUI", autospec=True),
+                patch("src.orchestration.runner.run_agent", side_effect=fake_run_agent),
+            ):
+                mock_ws.return_value.input_tokens = 0
+                mock_ws.return_value.output_tokens = 0
+                mock_ws.return_value.tool_call_count = 0
+                await turn_runner._run_message_turn_inner(
+                    session=session,
+                    text="hello",
+                    mode="chat",
+                    db=None,
+                    app_state=None,
+                )
+
+        asyncio.run(_run())
+        done_items = [item for item in queue.items if item.get("type") == "done"]
+        assert len(done_items) == 1
+        assert done_items[0]["payload"]["text"] == "turn output"
+
+
+# ── BUG-209 — turn_runner must expose patchable API callback helpers ──────
+
+
+class TestTurnRunnerExports:
+    """turn_runner must re-export callback helpers for test patching."""
+
+    def test_callback_helpers_are_module_level_exports(self) -> None:
+        from src.api import turn_runner
+        from src.api.callbacks import WebSocketCallbackHandler
+        from src.api.confirmation import ApiConfirmationUI
+
+        assert turn_runner.WebSocketCallbackHandler is WebSocketCallbackHandler
+        assert turn_runner.ApiConfirmationUI is ApiConfirmationUI
 
 
 # ── BUG-211: rag OSError resilience ────────────────────────────────────────
@@ -1008,14 +1279,30 @@ class TestRagOSErrorResilience:
         assert count >= 0
         assert total_size == 0
 
-    def test_stats_has_oserror_guard_on_stat(self) -> None:
-        """knowledge_base_stats must catch OSError on individual f.stat() calls."""
-        import inspect
+    def test_stats_has_oserror_guard_on_stat(self, tmp_path: Path) -> None:
+        """knowledge_base_stats must skip files whose stat() raises OSError."""
+        from src.tools.rag import configure_rag, knowledge_base_stats
 
-        from src.tools.rag import knowledge_base_stats
+        idx = tmp_path / "faiss_index"
+        idx.mkdir()
+        (idx / "good.faiss").write_bytes(b"good")
+        bad = idx / "bad.faiss"
+        bad.write_bytes(b"bad")
 
-        source = inspect.getsource(knowledge_base_stats)
-        assert "OSError" in source, "knowledge_base_stats must catch OSError on stat() (BUG-211)"
+        configure_rag({"vectordb_dir": str(idx), "api_uploads_dir": str(idx / "uploads")})
+
+        original_stat = Path.stat
+
+        def _stat(self: Path, *args, **kwargs):
+            if self.name == "bad.faiss":
+                raise OSError("stat failed")
+            return original_stat(self, *args, **kwargs)
+
+        with patch.object(Path, "stat", _stat):
+            count, total_size = knowledge_base_stats()
+
+        assert count >= 1
+        assert total_size == 4
 
     @pytest.mark.usefixtures("_restore_rag_config")
     def test_build_description_survives_permission_error(self, tmp_path: Path) -> None:
@@ -1034,16 +1321,29 @@ class TestRagOSErrorResilience:
         assert isinstance(desc, str)
         assert len(desc) > 0
 
-    def test_configure_rag_tool_catches_oserror(self) -> None:
-        """configure_rag_tool must catch OSError, not just ImportError."""
-        import inspect
-
+    def test_configure_rag_tool_catches_oserror(self, tmp_path: Path) -> None:
+        """configure_rag_tool must swallow OSError from RAG configuration."""
         from src.tools.configure import configure_rag_tool
 
-        source = inspect.getsource(configure_rag_tool)
-        assert (
-            "OSError" in source
-        ), "configure_rag_tool except clause must include OSError (BUG-211)"
+        config = MagicMock()
+        config.data_dir = str(tmp_path)
+        config.rag = MagicMock()
+        config.rag.vectordb_dir = "vectordb"
+        config.rag.score_threshold = 0.0
+        config.resolve_embedding_config.return_value = (
+            "ollama",
+            "nomic-embed-text",
+            None,
+            None,
+        )
+        config.resolve_data_path.return_value = tmp_path
+
+        with patch(
+            "src.tools.rag.configure_rag", side_effect=OSError("boom")
+        ) as mock_configure_rag:
+            configure_rag_tool(config)
+
+        mock_configure_rag.assert_called_once()
 
 
 # ── BUG-212 / BUG-216 — workflow_id validation at API boundary ──────────
@@ -1078,31 +1378,117 @@ class TestWorkflowIdValidation:
         _validate_wf_id("a1")
 
     def test_all_workflow_endpoints_call_validate(self):
-        """Every endpoint with workflow_id path param must call _validate_wf_id."""
-        import inspect
+        """Every workflow_id endpoint must route through _validate_wf_id."""
+        import asyncio
+        from types import SimpleNamespace
 
+        from src.api.auth import TokenData
         from src.api.routes import workflows as mod
+        from src.api.schemas.workflow import WorkflowUpdate
 
-        for fn_name in [
-            "get_workflow",
-            "update_workflow",
-            "delete_workflow",
-            "upload_workflow_document",
-            "list_workflow_documents",
-            "delete_workflow_document",
-        ]:
-            fn = getattr(mod, fn_name)
-            fn_source = inspect.getsource(fn)
-            assert "_validate_wf_id" in fn_source, f"{fn_name} must call _validate_wf_id (BUG-212)"
+        class StopAfterValidate(RuntimeError):
+            pass
 
-    def test_upload_has_path_containment(self):
-        """upload_workflow_document must check is_relative_to (BUG-216)."""
-        import inspect
+        class FakeUploadFile:
+            def __init__(self) -> None:
+                self.filename = "report.pdf"
+
+            async def read(self) -> bytes:
+                return b"hello world"
+
+        request = SimpleNamespace(
+            app=SimpleNamespace(
+                state=SimpleNamespace(workflow_registry=MagicMock()),
+            )
+        )
+        current_user = TokenData("user-1", "admin", {})
+        body = WorkflowUpdate()
+
+        with patch.object(
+            mod, "_validate_wf_id", side_effect=StopAfterValidate("stop")
+        ) as mock_validate:
+            cases = [
+                lambda: asyncio.run(mod.get_workflow("bike-sales", request, current_user)),
+                lambda: asyncio.run(mod.update_workflow("bike-sales", body, request, current_user)),
+                lambda: asyncio.run(mod.delete_workflow("bike-sales", request, current_user)),
+                lambda: asyncio.run(
+                    mod.upload_workflow_document(
+                        "bike-sales",
+                        request,
+                        file=FakeUploadFile(),  # type: ignore[arg-type]
+                        current_user=current_user,
+                    )
+                ),
+                lambda: asyncio.run(
+                    mod.list_workflow_documents("bike-sales", request, current_user)
+                ),
+                lambda: asyncio.run(
+                    mod.delete_workflow_document("bike-sales", "doc-1", request, current_user)
+                ),
+            ]
+
+            for invoke in cases:
+                with pytest.raises(StopAfterValidate):
+                    invoke()
+
+        assert mock_validate.call_count == len(cases)
+
+    def test_upload_has_path_containment(self, tmp_path: Path) -> None:
+        """upload_workflow_document must reject path-escaping filenames (BUG-216)."""
+        import asyncio
+        from types import SimpleNamespace
+
+        from fastapi import HTTPException
 
         from src.api.routes.workflows import upload_workflow_document
+        from src.assistant.workflows import WorkflowDefinition
 
-        source = inspect.getsource(upload_workflow_document)
-        assert "is_relative_to" in source
+        class FakeUploadFile:
+            def __init__(self, filename: str, data: bytes) -> None:
+                self.filename = filename
+                self._data = data
+
+            async def read(self) -> bytes:
+                return self._data
+
+        class Registry:
+            def __init__(self, data_dir: Path) -> None:
+                self._data_dir = data_dir
+                self._workflows_dir = data_dir / "workflows"
+                self._workflows_dir.mkdir(parents=True, exist_ok=True)
+                self.workflow = WorkflowDefinition(id="bike-sales", name="Bike Sales")
+
+            def get_workflow(self, workflow_id: str) -> WorkflowDefinition:
+                assert workflow_id == self.workflow.id
+                return self.workflow
+
+        registry = Registry(tmp_path)
+        request = SimpleNamespace(
+            app=SimpleNamespace(
+                state=SimpleNamespace(workflow_registry=registry),
+            )
+        )
+        file = FakeUploadFile("report.pdf", b"hello world")
+        original_resolve = Path.resolve
+
+        def _fake_resolve(self: Path, *args: object, **kwargs: object) -> Path:
+            if self.name == "report.pdf":
+                return Path("/tmp/outside") / self.name
+            return original_resolve(self, *args, **kwargs)
+
+        with patch.object(Path, "resolve", _fake_resolve):
+            with pytest.raises(HTTPException) as exc_info:
+                asyncio.run(
+                    upload_workflow_document(
+                        "bike-sales",
+                        request,  # type: ignore[arg-type]
+                        file=file,  # type: ignore[arg-type]
+                        current_user=MagicMock(),
+                    )
+                )
+
+        assert exc_info.value.status_code == 400
+        assert "escapes workflow directory" in str(exc_info.value.detail["message"])
 
 
 # ── BUG-213 — update_workflow uses copy, not live object ─────────────────
@@ -1111,15 +1497,101 @@ class TestWorkflowIdValidation:
 class TestUpdateWorkflowCopy:
     """BUG-213: update_workflow route must not mutate the live registry object."""
 
-    def test_update_uses_dataclasses_replace(self):
-        import inspect
+    def test_update_returns_new_workflow_definition(self) -> None:
+        import asyncio
+        from types import SimpleNamespace
 
+        from src.api.auth import TokenData
         from src.api.routes.workflows import update_workflow
+        from src.api.schemas.workflow import (
+            WorkflowAutoDetectOut,
+            WorkflowToolPolicyOut,
+            WorkflowUpdate,
+        )
+        from src.assistant.workflows import (
+            WorkflowAutoDetect,
+            WorkflowDefinition,
+            WorkflowToolPolicy,
+        )
 
-        source = inspect.getsource(update_workflow)
-        assert (
-            "dataclasses.replace" in source
-        ), "update_workflow must use dataclasses.replace to avoid mutating live object"
+        original = WorkflowDefinition(
+            id="bike-sales",
+            name="Old",
+            description="old",
+            system_prompt="sys",
+            knowledge_base=False,
+            tool_policy=WorkflowToolPolicy(
+                excluded_tools=["calc"], additional_approved_tools=["shell"]
+            ),
+            auto_detect=WorkflowAutoDetect(
+                enabled=False,
+                keywords=["old"],
+                patterns=["old.*"],
+                min_confidence=2,
+            ),
+        )
+
+        class Registry:
+            def __init__(self, wf: WorkflowDefinition) -> None:
+                self.workflow = wf
+                self.updated: WorkflowDefinition | None = None
+
+            def get_workflow(self, workflow_id: str) -> WorkflowDefinition:
+                assert workflow_id == self.workflow.id
+                return self.workflow
+
+            def update_workflow(self, updated: WorkflowDefinition) -> None:
+                self.updated = updated
+
+        registry = Registry(original)
+        request = SimpleNamespace(
+            app=SimpleNamespace(
+                state=SimpleNamespace(workflow_registry=registry),
+            )
+        )
+        body = WorkflowUpdate(
+            name="New",
+            description="new",
+            system_prompt="updated",
+            knowledge_base=True,
+            tool_policy=WorkflowToolPolicyOut(
+                excluded_tools=["calc", "shell"],
+                additional_approved_tools=["rag"],
+            ),
+            auto_detect=WorkflowAutoDetectOut(
+                enabled=True,
+                keywords=["new"],
+                patterns=["new.*"],
+                min_confidence=7,
+            ),
+        )
+
+        result = asyncio.run(
+            update_workflow(
+                "bike-sales",
+                body,
+                request,  # type: ignore[arg-type]
+                TokenData("user-1", "admin", {}),
+            )
+        )
+
+        assert registry.updated is not None
+        assert registry.updated is not original
+        assert original.name == "Old"
+        assert original.description == "old"
+        assert original.system_prompt == "sys"
+        assert original.knowledge_base is False
+        assert original.tool_policy.excluded_tools == ["calc"]
+        assert original.auto_detect.keywords == ["old"]
+        assert registry.updated.name == "New"
+        assert registry.updated.description == "new"
+        assert registry.updated.system_prompt == "updated"
+        assert registry.updated.knowledge_base is True
+        assert registry.updated.tool_policy.excluded_tools == ["calc", "shell"]
+        assert registry.updated.tool_policy is not original.tool_policy
+        assert registry.updated.auto_detect is not original.auto_detect
+        assert registry.updated.auto_detect.min_confidence == 7
+        assert result.data.name == "New"
 
 
 # ── BUG-214 — _load_prompt_from_value relative path containment ──────────
@@ -1163,38 +1635,39 @@ class TestTokenFinalNotPremature:
     """BUG-218: final=True only when tools completed AND none in-flight."""
 
     def test_final_false_while_tools_active(self):
-        import asyncio
+        from unittest.mock import Mock
 
         from src.api.callbacks import WebSocketCallbackHandler
 
-        loop = asyncio.new_event_loop()
-        handler = WebSocketCallbackHandler(asyncio.Queue(), loop)
+        handler = WebSocketCallbackHandler(Mock(), Mock())
         # Simulate a tool starting
         handler.on_tool_start({"name": "test"}, "", run_id="run1")
         # tool_call_count is 1 but tool is still in-flight
         with handler._tool_starts_lock:
             assert handler.tool_call_count == 1
             assert len(handler._tool_starts) == 1
-        # on_llm_new_token should check _tool_starts length
-        import inspect as _inspect
-
-        source = _inspect.getsource(handler.on_llm_new_token)
-        assert "len(self._tool_starts)" in source
-        loop.close()
+        handler._enqueue = Mock()
+        handler.on_llm_new_token("token-1")
+        handler._enqueue.assert_called_once()
+        _, payload = handler._enqueue.call_args.args
+        assert payload["final"] is False
 
     def test_final_true_after_tools_complete(self):
-        import asyncio
+        from unittest.mock import Mock
 
         from src.api.callbacks import WebSocketCallbackHandler
 
-        loop = asyncio.new_event_loop()
-        handler = WebSocketCallbackHandler(asyncio.Queue(), loop)
+        handler = WebSocketCallbackHandler(Mock(), Mock())
         handler.on_tool_start({"name": "test"}, "", run_id="run1")
         handler.on_tool_end("result", run_id="run1")
         with handler._tool_starts_lock:
             assert handler.tool_call_count == 1
             assert len(handler._tool_starts) == 0
-        loop.close()
+        handler._enqueue = Mock()
+        handler.on_llm_new_token("token-2")
+        handler._enqueue.assert_called_once()
+        _, payload = handler._enqueue.call_args.args
+        assert payload["final"] is True
 
 
 # ── BUG-219 — compression per-future timeout not dead code ───────────────
@@ -1204,16 +1677,56 @@ class TestCompressionPerFutureTimeout:
     """BUG-219: future.result() must have a timeout so the inner except is reachable."""
 
     def test_future_result_has_timeout(self):
-        import inspect
-        import re
+        import concurrent.futures
+        from unittest.mock import patch
+
+        from langchain_core.messages import ToolMessage
 
         from src.orchestration import compression
 
-        source = inspect.getsource(compression.apply_message_compression)
-        # The timeout= kwarg may be on the same line or the next (black wraps long calls)
-        assert re.search(
-            r"\.result\(\s*timeout=", source
-        ), "future.result() must include a timeout parameter (BUG-219)"
+        timeout_calls: list[int | float | None] = []
+
+        class FakeFuture:
+            def __init__(self, idx: int) -> None:
+                self.idx = idx
+
+            def result(self, timeout=None):
+                timeout_calls.append(timeout)
+                return self.idx, "compressed"
+
+        class FakePool:
+            def submit(self, fn, idx):
+                return FakeFuture(idx)
+
+        def fake_as_completed(futures, timeout=None):
+            assert timeout is not None and timeout > 0
+            return list(futures.keys())
+
+        messages = [
+            ToolMessage(
+                content="x" * 5_000,
+                tool_call_id="call-1",
+                name="demo-tool",
+            )
+        ]
+
+        with (
+            patch.object(compression, "_get_compression_pool", return_value=FakePool()),
+            patch.object(concurrent.futures, "as_completed", side_effect=fake_as_completed),
+        ):
+            compression.apply_message_compression(
+                messages=messages,
+                call_count=5,
+                compression_cache={},
+                llm=object(),
+                max_context_tokens=16_384,
+                min_age_override=0,
+                min_age_cycles=0,
+                min_chars=0,
+                actual_input_tokens=12_000,
+            )
+
+        assert timeout_calls == [compression._COMPRESSION_PER_CALL_TIMEOUT_SECS]
 
 
 # ── BUG-220 — auto_detect returns highest-scoring, not first alphabetical ─
@@ -1362,15 +1875,91 @@ class TestValidateWfIdBoundary:
 class TestUpdateWorkflowReturnsUpdated:
     """update_workflow route must return _wf_to_out(updated), not _wf_to_out(wf)."""
 
-    def test_source_returns_updated(self):
-        import inspect
+    def test_update_returns_updated_workflow(self) -> None:
+        import asyncio
+        from types import SimpleNamespace
 
+        from src.api.auth import TokenData
         from src.api.routes.workflows import update_workflow
+        from src.api.schemas.workflow import (
+            WorkflowAutoDetectOut,
+            WorkflowToolPolicyOut,
+            WorkflowUpdate,
+        )
+        from src.assistant.workflows import (
+            WorkflowAutoDetect,
+            WorkflowDefinition,
+            WorkflowToolPolicy,
+        )
 
-        source = inspect.getsource(update_workflow)
-        assert (
-            "_wf_to_out(updated)" in source
-        ), "update_workflow must return _wf_to_out(updated), not _wf_to_out(wf)"
+        original = WorkflowDefinition(
+            id="bike-sales",
+            name="Old",
+            description="old",
+            system_prompt="sys",
+            knowledge_base=False,
+            tool_policy=WorkflowToolPolicy(excluded_tools=["calc"], additional_approved_tools=[]),
+            auto_detect=WorkflowAutoDetect(
+                enabled=False, keywords=["old"], patterns=[], min_confidence=3
+            ),
+        )
+
+        class Registry:
+            def __init__(self, wf: WorkflowDefinition) -> None:
+                self.workflow = wf
+                self.updated: WorkflowDefinition | None = None
+
+            def get_workflow(self, workflow_id: str) -> WorkflowDefinition:
+                assert workflow_id == self.workflow.id
+                return self.workflow
+
+            def update_workflow(self, updated: WorkflowDefinition) -> None:
+                self.updated = updated
+
+        registry = Registry(original)
+        request = SimpleNamespace(
+            app=SimpleNamespace(
+                state=SimpleNamespace(workflow_registry=registry),
+            )
+        )
+        body = WorkflowUpdate(
+            name="New",
+            description="new",
+            system_prompt="updated",
+            knowledge_base=True,
+            tool_policy=WorkflowToolPolicyOut(
+                excluded_tools=["calc", "shell"],
+                additional_approved_tools=["rag"],
+            ),
+            auto_detect=WorkflowAutoDetectOut(
+                enabled=True,
+                keywords=["new"],
+                patterns=["new.*"],
+                min_confidence=7,
+            ),
+        )
+
+        result = asyncio.run(
+            update_workflow(
+                "bike-sales",
+                body,
+                request,  # type: ignore[arg-type]
+                TokenData("user-1", "admin", {}),
+            )
+        )
+
+        assert registry.updated is not None
+        assert registry.updated is not original
+        assert original.name == "Old"
+        assert registry.updated.name == "New"
+        assert registry.updated.description == "new"
+        assert registry.updated.system_prompt == "updated"
+        assert registry.updated.knowledge_base is True
+        assert registry.updated.tool_policy.excluded_tools == ["calc", "shell"]
+        assert registry.updated.tool_policy is not original.tool_policy
+        assert registry.updated.auto_detect is not original.auto_detect
+        assert registry.updated.auto_detect.min_confidence == 7
+        assert result.data.name == "New"
 
 
 # ── Bug 6 — context_prefix must be injected as HumanMessage, not SystemMessage ──

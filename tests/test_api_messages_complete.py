@@ -179,7 +179,7 @@ class TestListMessages:
         ss.denials = set()
         ss.loaded_tools = set()
         ss.pinned_tools = set()
-        ss.approvals = set()
+        ss.reset_approvals()
 
         live = MagicMock()
         live.session_state = ss
@@ -282,7 +282,7 @@ class TestClearHistory:
         ss.denials = set()
         ss.loaded_tools = set()
         ss.pinned_tools = set()
-        ss.approvals = set()
+        ss.reset_approvals()
 
         live = MagicMock()
         live.session_state = ss
@@ -334,7 +334,7 @@ class TestClearHistory:
         ss.denials = set()
         ss.loaded_tools = set()
         ss.pinned_tools = set()
-        ss.approvals = set()
+        ss.reset_approvals()
 
         live = MagicMock()
         live.session_state = ss
@@ -518,7 +518,7 @@ class TestSendMessage:
         ss.denials = set()
         ss.loaded_tools = set()
         ss.pinned_tools = set()
-        ss.approvals = set()
+        ss.reset_approvals()
 
         live = MagicMock()
         live.session_state = ss
@@ -553,7 +553,7 @@ class TestSendMessage:
         ss.denials = set()
         ss.loaded_tools = set()
         ss.pinned_tools = set()
-        ss.approvals = set()
+        ss.reset_approvals()
 
         live = MagicMock()
         live.session_state = ss
@@ -695,7 +695,7 @@ class TestSendMessageSync:
         ss.denials = set()
         ss.loaded_tools = set()
         ss.pinned_tools = set()
-        ss.approvals = set()
+        ss.reset_approvals()
 
         live = MagicMock()
         live.session_state = ss

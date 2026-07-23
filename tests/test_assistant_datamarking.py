@@ -125,17 +125,18 @@ class TestDatamarkHistory:
         # Second HumanMessage datamarked
         assert "\u00abm1\u00bb" in result[2].content
 
-    def test_preserves_non_string_content(self):
+    def test_datamarks_list_content(self):
+        """HumanMessage with list content (multimodal) should be datamarked."""
         try:
             from langchain_core.messages import HumanMessage
         except ImportError:
             pytest.skip("langchain_core not installed")
         from src.assistant.handler import _datamark_history
 
-        # HumanMessage with list content (multimodal) should be untouched
+        # HumanMessage with list content (multimodal) should be datamarked
         msg = HumanMessage(content=[{"type": "text", "text": "hello world"}])
         result = _datamark_history([msg], "m1")
-        assert result[0].content == [{"type": "text", "text": "hello world"}]
+        assert result[0].content == [{"type": "text", "text": "hello «m1» world"}]
 
     def test_empty_history(self):
         from src.assistant.handler import _datamark_history

@@ -339,14 +339,38 @@ def test_config_tool_dirs_default_empty() -> None:
 
 
 def test_config_tool_dirs_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """COGTRIX_TOOL_DIRS env var populates tool_dirs (colon-separated)."""
+    """COGTRIX_TOOL_DIRS env var populates tool_dirs (comma-separated)."""
     from src.config import Config, _apply_env_vars
 
-    monkeypatch.setenv("COGTRIX_TOOL_DIRS", "/a/b:/c/d")
+    monkeypatch.setenv("COGTRIX_TOOL_DIRS", "/a/b,/c/d")
     config = Config()
     _apply_env_vars(config)
     assert "/a/b" in config.tool_dirs
     assert "/c/d" in config.tool_dirs
+
+
+def test_config_cron_from_file(tmp_path: Path) -> None:
+    """Config parses cron job definitions from a YAML config file."""
+    from src.config import Config, _apply_config_file
+
+    cfg_file = tmp_path / "config.yaml"
+    cfg_file.write_text(
+        "cron:\n"
+        "  - name: nightly\n"
+        "    schedule: '0 2 * * *'\n"
+        "    prompt: 'check status'\n"
+        "    context: inherit\n"
+    )
+    config = Config()
+    _apply_config_file(config, cfg_file)
+    assert config.cron == [
+        {
+            "name": "nightly",
+            "schedule": "0 2 * * *",
+            "prompt": "check status",
+            "context": "inherit",
+        }
+    ]
 
 
 # ── load_tools() threads config to registry ───────────────────────────────────

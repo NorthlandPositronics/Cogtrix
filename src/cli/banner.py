@@ -1,7 +1,7 @@
 import logging
 from typing import Any
 
-from src._version import __version__
+from src._version import get_version_string
 
 log = logging.getLogger("cogtrix")
 
@@ -34,9 +34,9 @@ def startup_compact(config: Any, **extra: Any) -> None:
     else:
         status = f"{msg_count} msgs"
 
-    ver = f"[bold steel_blue1]v{__version__}[/bold steel_blue1]"
+    ver = f"[bold steel_blue1]v{get_version_string()}[/bold steel_blue1]"
     status_styled = f"[bold steel_blue1]{status}[/bold steel_blue1]"
-    base = f"cogtrix v{__version__} · {provider_str}/{model_str} · {session_id} ({status})"
+    base = f"cogtrix v{get_version_string()} · {provider_str}/{model_str} · {session_id} ({status})"
     rich_base = (
         f"[dim]cogtrix {ver} · {provider_str}/{model_str} · {session_id} ({status_styled})[/dim]"
     )
@@ -107,7 +107,7 @@ def startup_rich(config: Any, **extra: Any) -> None:
 
     try:
         _console.rule(
-            f"[bold steel_blue1]cogtrix v{__version__}[/bold steel_blue1]",
+            f"[bold steel_blue1]cogtrix v{get_version_string()}[/bold steel_blue1]",
             style="steel_blue1",
         )
         _console.print()
@@ -168,7 +168,7 @@ def startup_plain(config: Any, **extra: Any) -> None:
         model_str = "unknown"
     session_id = extra.get("session_id", getattr(config, "session", "default"))
     msg_count = extra.get("msg_count", 0)
-    version_line = f"cogtrix v{__version__} · {model_str} · session: {session_id}"
+    version_line = f"cogtrix v{get_version_string()} · {model_str} · session: {session_id}"
     print("-" * len(version_line))
     print(version_line)
     print("-" * len(version_line))

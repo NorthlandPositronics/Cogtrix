@@ -41,7 +41,11 @@ The engine is a standalone tool (`src/tools/deep_think.py`) that makes multiple 
 /think Design a caching strategy for 50 microservices with mixed read/write workloads
 ```
 
-This runs a two-stage pipeline. First, the task is classified into one of 23 categories via `classify_think_task()`, which selects a domain-specific gather prompt. The agent then runs a Stage 1 pass using its tools to gather relevant information. Stage 2 feeds the gathered context into `deep_think()` for structured analysis. The result is displayed in a rich panel and saved to session memory so subsequent conversation has context.
+This runs a two-stage pipeline. First, the task is classified into one of 23 categories via
+`classify_think_task()`, which selects a domain-specific gather prompt. The agent then runs a Stage
+1 pass using its tools to gather relevant information. Stage 2 feeds the gathered context into
+`deep_think()` for structured analysis. The result is displayed in a rich panel and saved to session
+memory so subsequent conversation has context.
 
 ### 2. Agent (automatic)
 

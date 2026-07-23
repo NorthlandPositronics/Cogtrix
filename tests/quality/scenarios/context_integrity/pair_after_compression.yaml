@@ -1,0 +1,40 @@
+id: pair_after_compression
+complexity: complex
+category: context_integrity
+description: "Message pairs remain valid after compression and longer context."
+tags: [tier1]
+system_prompt: "You are a helpful assistant."
+tools:
+  - github_list_issues
+  - github_list_pull_requests
+
+script:
+  - user: "Check the current queue before and after the docs batch merges."
+  - llm:
+      tool_calls:
+        - name: github_list_issues
+          args:
+            state: "open"
+  - tool_result: "Open issues include #166 and #167."
+  - llm:
+      tool_calls:
+        - name: github_list_pull_requests
+          args:
+            state: "open"
+  - tool_result: "Open pull requests include #163 and #165."
+  - llm: "The queue has the quality harness work and the protected-branch guard PR."
+  - user: "Check again after more history has accumulated."
+  - llm:
+      tool_calls:
+        - name: github_list_issues
+          args:
+            state: "open"
+  - tool_result: "Open issues still include #166 and #167."
+  - llm: "The message pairs remain valid even after compression."
+
+metrics:
+  required_tools: [github_list_issues, github_list_pull_requests]
+  forbidden_tools: []
+  task_completed: true
+  phantom_calls: false
+  max_turns: 10

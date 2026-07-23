@@ -6,7 +6,6 @@ cancel-event checks in the think pipeline.
 from __future__ import annotations
 
 import asyncio
-import inspect
 import os
 import re
 import uuid
@@ -278,15 +277,21 @@ class TestTokenFinalField:
         queue = asyncio.Queue()
         handler = WebSocketCallbackHandler(queue, loop)
 
+        # Capture payloads synchronously by mocking _enqueue
+        payloads: list[dict] = []
+        handler._enqueue = lambda msg_type, payload: payloads.append(payload)
+
         # Before any tool calls, final should be False
         handler.tool_call_count = 0
-        source = inspect.getsource(handler.on_llm_new_token)
-        assert "final" in source, "on_llm_new_token should include 'final' in payload"
+        handler.on_llm_new_token("hello")
+        assert payloads[-1]["final"] is False
 
-        # After tool calls, tool_call_count > 0 → final=True
+        # After tool calls with no in-flight starts, final=True
         handler.tool_call_count = 2
-        # The logic should use tool_call_count > 0
-        assert "tool_call_count" in source
+        handler._tool_starts.clear()
+        handler.on_llm_new_token("world")
+        assert payloads[-1]["final"] is True
+
         loop.close()
 
 
@@ -314,10 +319,30 @@ class TestModelAliasFormat:
 
     def test_synthetic_fallback_uses_provider_slash_model(self):
         """The synthetic default alias uses 'provider/model' format."""
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
 
-        source_mod = inspect.getsource(__import__("src.config", fromlist=["load_config"]))
-        # Check the fallback pattern: f"{first_prov.name}/{default_model}"
-        assert "first_prov.name}/{default_model}" in source_mod
+        from src.config import load_config
+
+        yaml_content = """
+providers:
+  myprov:
+    type: ollama
+    base_url: http://localhost:11434
+"""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            f.write(yaml_content)
+            tmp_path = Path(f.name)
+
+        try:
+            with patch("src.config.find_config_file", return_value=tmp_path):
+                with patch("src.providers.get_default_model", return_value="qwen3:8b"):
+                    cfg = load_config()
+            assert cfg.active_model_alias == "myprov/qwen3:8b"
+            assert "myprov/qwen3:8b" in cfg.models
+        finally:
+            tmp_path.unlink(missing_ok=True)
 
 
 # ---------------------------------------------------------------------------
@@ -372,29 +397,21 @@ class TestConfigOutNewFields:
 
 
 class TestCancelEventChecks:
-    def test_think_pipeline_checks_cancel_event(self):
-        """_run_think_pipeline should check cancel_event.is_set() between phases."""
-        from src.api import turn_runner
+    @pytest.mark.asyncio
+    async def test_think_pipeline_raises_cancelled_error_when_cancel_event_set(self):
+        """_run_think_pipeline raises CancelledError when session.cancel_event is set."""
+        from unittest.mock import MagicMock, patch
 
-        source = inspect.getsource(turn_runner)
-        # Should check cancel_event between pipeline phases
-        assert "cancel_event.is_set()" in source
-        # Should raise CancelledError on cancel
-        assert "CancelledError" in source
+        from src.api.turn_runner import _run_think_pipeline
 
-    def test_cancel_check_between_classify_and_research(self):
-        """Cancel check should appear after classify_think_task call."""
-        from src.api import turn_runner
+        session = MagicMock()
+        session.cancel_event = asyncio.Event()
+        session.cancel_event.set()
+        session.ws_queue = asyncio.Queue(maxsize=100)
 
-        source = inspect.getsource(turn_runner)
-        # Find classify and subsequent cancel check
-        classify_pos = source.find("classify_think_task")
-        if classify_pos >= 0:
-            # There should be a cancel check after classify
-            next_cancel = source.find("cancel_event.is_set()", classify_pos)
-            assert (
-                next_cancel > classify_pos
-            ), "cancel_event check should appear after classify_think_task"
+        with patch("src.api.turn_runner._enqueue_agent_state"):
+            with pytest.raises(asyncio.CancelledError):
+                await _run_think_pipeline(session, "test", "", [], None)
 
     @pytest.mark.asyncio
     async def test_pipeline_cancelled_error_resets_agent_state(self):

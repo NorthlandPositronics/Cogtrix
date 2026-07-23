@@ -1,6 +1,6 @@
 # Cogtrix Agent
 
-A modular AI assistant with 79 built-in tools, multi-provider LLM support, and intelligent memory management.
+A modular AI assistant with 88 built-in tools, multi-provider LLM support, and intelligent memory management.
 
 ---
 
@@ -12,7 +12,7 @@ Cogtrix is an **interactive command-line AI assistant** that connects to large l
 
 **Highlights:**
 
-- 79 built-in tools across 7 search providers, file I/O, Git operations, shell, Python, HTTP, NLP, WhatsApp and Telegram messaging, and more
+- 88 built-in tools across 6+ search providers, file I/O, Git operations, shell, Python, HTTP, NLP, WhatsApp and Telegram messaging, and more
 - Three memory modes optimized for conversation, coding, or strategic reasoning — with hybrid memory (rolling summary + semantic recall)
 - Deep reasoning engine (Tree-of-Thought with iterative reflection) via `/think`
 - Task delegation across multiple LLM models via `/delegate`
@@ -38,10 +38,12 @@ Install optional provider and feature extras:
 ```bash
 uv pip install "cogtrix[anthropic]"    # Anthropic Claude
 uv pip install "cogtrix[google]"       # Google Gemini
-uv pip install "cogtrix[api]"          # REST API server
+uv pip install "cogtrix[api]"          # REST API server (includes Stripe billing)
 uv pip install "cogtrix[mcp]"          # MCP server support
 uv pip install "cogtrix[search]"       # Tavily, Exa, Brave, SerpAPI search
 uv pip install "cogtrix[rag]"          # RAG/knowledge-base support (requires C++ build tools)
+uv pip install "cogtrix[saml]"         # SAML 2.0 SSO (requires libxmlsec1-dev on Linux)
+uv pip install "cogtrix[ldap]"         # LDAP/Active Directory sync
 ```
 
 > **Prerequisite:** Python 3.13.x and [uv](https://docs.astral.sh/uv/) (recommended) or pip.
@@ -133,6 +135,7 @@ python cogtrix.py --activate-tools web_search,shell  # Pin tools as active on st
 python cogtrix.py --debug                    # Full debug logging
 python cogtrix.py --assistant                  # Headless messaging daemon (WhatsApp/Telegram)
 python cogtrix.py --assistant --debug          # Assistant mode with debug logging
+python cogtrix.py --system-prompt-file prompts/analyst.txt  # Load system prompt from file
 ```
 
 ---
@@ -231,7 +234,7 @@ Arrow keys, Home/End, and input history work out of the box (via `readline`).
 
 ---
 
-## Built-in Tools (79)
+## Built-in Tools (88)
 
 | Category | Tools |
 |----------|-------|
@@ -250,11 +253,21 @@ Arrow keys, Home/End, and input history work out of the box (via `readline`).
 | **WhatsApp** (4) | `whatsapp_send`, `whatsapp_send_image`, `whatsapp_check`, `whatsapp_contacts` |
 | **Telegram** (4) | `telegram_send`, `telegram_send_photo`, `telegram_check`, `telegram_contacts` |
 | **Reasoning** (3) | `deep_think`, `delegate_task`, `delegate_parallel` |
-| **Knowledge** (1) | `query_knowledge_base` (RAG) |
+| **Knowledge** (2) | `query_knowledge_base`, `save_to_knowledge_base` (RAG) |
 
-DuckDuckGo search works immediately with no setup. Premium search providers (Tavily, Exa, etc.) activate automatically when their API key is configured. WhatsApp messaging requires a [Waha](https://waha.devlike.pro/) container -- see the **[WhatsApp Guide](docs/WHATSAPP_GUIDE.md)**. Telegram requires a bot token from [@BotFather](https://t.me/BotFather) -- see the **[Telegram Guide](docs/TELEGRAM_GUIDE.md)**. See also [Search Providers](docs/CONFIGURATION.md#services-section) for details.
+DuckDuckGo search works immediately with no setup. Premium search providers (Tavily, Exa, etc.)
+activate automatically when their API key is configured. WhatsApp messaging requires a
+[Waha](https://waha.devlike.pro/) container -- see the **[WhatsApp Guide](docs/WHATSAPP_GUIDE.md)**.
+Telegram requires a bot token from [@BotFather](https://t.me/BotFather) -- see the **[Telegram
+Guide](docs/TELEGRAM_GUIDE.md)**. See also [Search
+Providers](docs/CONFIGURATION.md#services-section) for details.
 
-**On-demand tool loading:** At startup you'll see something like `Tools: [██████████░░] 41 on demand (3 unavailable)`. All tools start in an **on-demand pool** — the agent requests only the tools it needs for the current task via an internal `request_tools` meta-tool. This keeps the initial prompt lean and context usage efficient. Tools whose API keys are missing are marked as unavailable. You don't need to manage any of this — the agent handles it automatically. See [Tool Loading](docs/CONFIGURATION.md#tool-loading) for details.
+**On-demand tool loading:** At startup you'll see something like `Tools: [██████████░░] 41 on demand
+(3 unavailable)`. All tools start in an **on-demand pool** — the agent requests only the tools it
+needs for the current task via an internal `request_tools` meta-tool. This keeps the initial prompt
+lean and context usage efficient. Tools whose API keys are missing are marked as unavailable. You
+don't need to manage any of this — the agent handles it automatically. See [Tool
+Loading](docs/CONFIGURATION.md#tool-loading) for details.
 
 Full parameter reference: **[Tools Reference](docs/TOOLS_REFERENCE.md)**
 
@@ -323,7 +336,7 @@ Pass `api` as the final argument to start the FastAPI server instead of the inte
 
 ## API Server
 
-Cogtrix includes a REST + WebSocket API server built with FastAPI. It exposes 100 REST endpoints and 2 WebSocket streams, powering the React web frontend and enabling programmatic access from any HTTP client.
+Cogtrix includes a REST + WebSocket API server built with FastAPI. It exposes 140+ REST endpoints and 2 WebSocket streams, powering the React web frontend and enabling programmatic access from any HTTP client.
 
 ### Starting the API server
 
@@ -359,7 +372,7 @@ Once running, interactive API docs are available at `http://localhost:8000/api/v
 
 ### Authentication
 
-The API uses JWT bearer tokens (`Authorization: Bearer <token>`). The first registered user is automatically granted the `admin` role. API keys (prefix `cgx_live_`) are available for programmatic/CI access and are accepted on the same `Authorization` header.
+The API uses JWT bearer tokens (`Authorization: Bearer <token>`). The first registered user is automatically granted the `admin` role. API keys (prefix `cgx_live_`) can be created and revoked via `/api/v1/auth/api-keys`, but bearer-token authentication with API keys is not yet implemented — JWT tokens are required for all protected requests.
 
 WebSocket connections that cannot set custom headers may pass the token as a `?token=<jwt>` query parameter.
 
@@ -382,6 +395,18 @@ WebSocket connections that cannot set custom headers may pass the token as a `?t
 | `/api/v1/mcp/*` | 5 | List servers, connect, disconnect, restart, list tools |
 | `/api/v1/system/*` | 2 | Server info, shutdown |
 | `/api/v1/health` | 2 | Liveness and readiness probes |
+| `/api/v1/organizations/*` | 6 | Organization CRUD, plan assignment (multi-tenancy) |
+| `/api/v1/teams/*` | 8 | Team management, membership |
+| `/api/v1/workspaces/*` | 10 | Workspace CRUD, membership, scoped config |
+| `/api/v1/plans/*` | 8 | Plan CRUD, assign to org |
+| `/api/v1/usage/*` | 3 | Usage summary, per-event records, manual record |
+| `/api/v1/enforcement/*` | 1 | Plan limit snapshot and headroom |
+| `/api/v1/saml/*` | 4 | SAML 2.0 SSO: metadata, login, ACS, SLO |
+| `/api/v1/scim/v2/*` | 7 | SCIM 2.0 user provisioning (Okta, Azure AD) |
+| `/api/v1/ldap/*` | 3 | LDAP/AD sync: config, trigger, status |
+| `/api/v1/jit/*` | 3 | Just-in-time provisioning config and policies |
+| `/api/v1/cross-workspace/*` | 5 | Cross-workspace message bus |
+| `/api/v1/billing/*` | 4 | Stripe Checkout, Customer Portal, subscription summary, webhook |
 | `ws://host/ws/v1/sessions/{id}` | WS | Streaming agent turns, tool confirmation, token events |
 | `ws://host/ws/v1/logs` | WS | Live log stream (admin only) |
 
@@ -413,7 +438,7 @@ For detailed debugging, run with `--debug` (logs every LLM call, tool input/outp
 | **[Configuration](docs/CONFIGURATION.md)** | Every config option, environment variables, search providers |
 | **[Providers](docs/PROVIDERS.md)** | Step-by-step: Ollama, OpenAI, Anthropic, Google, DeepSeek, xAI, Groq, Together, vLLM |
 | **[Memory Modes](docs/MEMORY_MODES.md)** | Conversation, code, and reasoning modes + hybrid memory (summary + recall) |
-| **[Tools Reference](docs/TOOLS_REFERENCE.md)** | All 79 tools with parameters and examples |
+| **[Tools Reference](docs/TOOLS_REFERENCE.md)** | All 88 tools with parameters and examples |
 | **[WhatsApp Guide](docs/WHATSAPP_GUIDE.md)** | Use Cogtrix as a WhatsApp assistant (with Docker Compose) |
 | **[Telegram Guide](docs/TELEGRAM_GUIDE.md)** | Use Cogtrix as a Telegram assistant via a bot |
 | **[Assistant Mode](docs/CONFIGURATION.md#assistant-mode)** | Run Cogtrix as a headless WhatsApp/Telegram messaging daemon |
@@ -429,7 +454,7 @@ For detailed debugging, run with `--debug` (logs every LLM call, tool input/outp
 
 - Want to connect OpenAI, Groq, or another LLM? See [Providers](docs/PROVIDERS.md).
 - Want to customize settings, add search API keys, or set up messaging? See [Configuration](docs/CONFIGURATION.md).
-- Want to know what all 79 tools do? See [Tools Reference](docs/TOOLS_REFERENCE.md).
+- Want to know what all 88 tools do? See [Tools Reference](docs/TOOLS_REFERENCE.md).
 
 ---
 

@@ -426,6 +426,10 @@ python -m pytest tests/ -v
 | `live_llm` | Integration tests backed by the local Gemma 3 270M container | Container at `localhost:18080` |
 | `docker` | Tests that require a running Docker daemon | Running Docker daemon |
 | `benchmark` | Concurrency and performance benchmarks (no live LLM required) | — |
+| `quality` | Behavioural quality harness scenarios (no live LLM required) | — |
+| `critical` | Tier 1 hard-gate scenarios that block CI on failure | — |
+| `tier1` | All Tier 1 metric scenarios | — |
+| `tier2` | Tier 2 warning metric scenarios | — |
 
 To run the live LLM tests locally, start the Gemma container first:
 
@@ -756,7 +760,7 @@ cogtrix/
 3. Make changes with tests.
 4. Run all checks:
    ```bash
-   uv run black .
+   uv run black cogtrix.py src/ tests/
    uv run ruff check .
    uv run pytest tests/ -v
    ```

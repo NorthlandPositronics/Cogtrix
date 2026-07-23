@@ -1,0 +1,43 @@
+id: procurement_po_approval_basic
+domain: procurement
+title: PO Approval — Basic
+description: |
+  User asks the agent to create a purchase order from a supplier quote
+  ($487.50, 50 units) and route it for approval.
+
+  Required workflow:
+    1) Create PO with exact supplier, quantity, unit price, and total
+    2) Route the created PO to manager approval
+    3) Confirm the PO is pending approval
+user_prompt: |
+  I received a quote from Acme Supplies for 50 units of widget A at $9.75 each.
+  Please create a purchase order for $487.50 total and send it to my manager
+  for approval.
+system_prompt: |
+  You are a procurement assistant. When the user asks you to create a purchase
+  order, use the create_po tool with the correct vendor, amount, and quantity.
+  After creating the PO, route it for approval using route_approval_request.
+tools_required:
+  - create_po
+  - route_approval_request
+expected_outcome: |
+  A purchase order is created for vendor "Acme Supplies" with quantity 50,
+  unit price $9.75, and total amount $487.50. The PO is routed to manager
+  approval and the user receives a completion message that references pending
+  approval status.
+success_criteria:
+  - "contains: create_po"
+  - "contains: route_approval_request"
+  - "contains: Acme Supplies"
+  - "contains: 9.75"
+  - "contains: 487.50"
+  - "contains: 50"
+  - "contains: approval"
+  - "not_contains: error"
+max_turns: 20
+timeout_seconds: 120
+tags:
+  - smoke
+  - gate2
+  - procurement
+budget_usd_estimate: 0.05

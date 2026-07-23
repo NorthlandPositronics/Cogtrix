@@ -92,7 +92,10 @@ def session_tokens():
 
     _app = create_app()
 
-    # Disable rate limiting so fixture can register all 200 users sequentially.
+    # Disable per-route rate limiting so fixture can register all 200 users.
+    import src.api.rate_limit as _rl_module
+
+    _rl_module._per_route_disabled = True
     if hasattr(_app.state, "limiter"):
         _app.state.limiter.enabled = False
 
@@ -128,6 +131,7 @@ def session_tokens():
 
         yield client, tokens
 
+    _rl_module._per_route_disabled = False  # restore for subsequent tests
     asyncio.run(engine.dispose())
 
 

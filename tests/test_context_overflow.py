@@ -158,6 +158,92 @@ class TestOverflowRetryLogic:
             graph.invoke({"messages": [HumanMessage(content="hi")]})
 
 
+class TestContextMessageCapInvocation:
+    def test_cap_runs_before_model_call_and_keeps_tool_pair_intact(self):
+        from src.orchestration.graph import build_agent_graph
+
+        seen_messages = []
+
+        class RecordingLLM:
+            def bind_tools(self, tools):
+                return self
+
+            def invoke(self, messages, config=None):
+                seen_messages.append(messages)
+                return AIMessage(content="final answer")
+
+        graph = build_agent_graph(
+            llm=RecordingLLM(),
+            system_prompt="",
+            active_tools_list=[],
+            available_tools={},
+            max_context_tokens=16_384,
+            context_compression=False,
+            context_max_messages=3,
+        )
+
+        history = [
+            HumanMessage(content="oldest"),
+            AIMessage(content="", tool_calls=[{"id": "call_1", "name": "lookup", "args": {}}]),
+            ToolMessage(content="ok", tool_call_id="call_1"),
+            HumanMessage(content="latest"),
+        ]
+
+        graph.invoke({"messages": history})
+
+        assert len(seen_messages) == 1
+        invoked = seen_messages[0]
+        assert len(invoked) == 3
+        assert isinstance(invoked[0], AIMessage)
+        assert invoked[0].tool_calls[0]["id"] == "call_1"
+        assert isinstance(invoked[1], ToolMessage)
+        assert invoked[1].tool_call_id == "call_1"
+        assert isinstance(invoked[2], HumanMessage)
+        assert invoked[2].content == "latest"
+
+    def test_cap_uses_configured_token_budget(self):
+        from src.orchestration.graph import build_agent_graph
+        from src.orchestration.run_config import AgentRunConfig
+
+        seen_messages = []
+
+        class RecordingLLM:
+            def bind_tools(self, tools):
+                return self
+
+            def invoke(self, messages, config=None):
+                seen_messages.append(messages)
+                return AIMessage(content="final answer")
+
+        graph = build_agent_graph(
+            config=AgentRunConfig(
+                llm=RecordingLLM(),
+                system_prompt="",
+                active_tools_list=[],
+                available_tools={},
+                context_max_messages=10,
+                context_max_tokens=1,
+                context_compression=False,
+            ),
+        )
+
+        graph.invoke(
+            {
+                "messages": [
+                    HumanMessage(content="oldest"),
+                    HumanMessage(content="middle"),
+                    HumanMessage(content="latest"),
+                ]
+            }
+        )
+
+        assert len(seen_messages) == 1
+        invoked = seen_messages[0]
+        assert len(invoked) == 1
+        assert isinstance(invoked[0], HumanMessage)
+        assert invoked[0].content == "latest"
+
+
 # ---------------------------------------------------------------------------
 # Layer 3 — TinyContextLLM integration
 # ---------------------------------------------------------------------------

@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: "{{ include "cogtrix.fullname" . }}-test-connection"
+  labels:
+    {{- include "cogtrix.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": test
+spec:
+  containers:
+    - name: wget
+      image: busybox:1.37
+      command:
+        - wget
+        - -qO-
+        - "http://{{ include "cogtrix.fullname" . }}:{{ .Values.service.port }}/api/v1/health"
+  restartPolicy: Never

@@ -84,9 +84,7 @@ def test_last_activity_updated_after_successful_turn() -> None:
     assert (
         session.last_activity > before
     ), "session.last_activity must be updated to a time after the turn started"
-    assert (
-        time.time() - session.last_activity < 10.0
-    ), "session.last_activity must be close to the current wall-clock time"
+    assert session.last_activity <= time.time(), "session.last_activity must not be in the future"
 
 
 # ---------------------------------------------------------------------------

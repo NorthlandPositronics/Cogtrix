@@ -97,15 +97,12 @@ class ApiConfirmationUI:
             },
         }
         try:
-            # Use put_nowait() to avoid blocking the event loop if the queue is full.
-            # run_coroutine_threadsafe is called from the agent thread (inside
-            # asyncio.to_thread); blocking on put() would stall the event loop thread.
-            asyncio.run_coroutine_threadsafe(self._enqueue_nowait(msg), self._loop)
-        except Exception as exc:  # pragma: no cover
-            log.warning("ApiConfirmationUI.render_prompt enqueue failed: %s", exc)
+            self._loop.call_soon_threadsafe(self._try_enqueue_nowait, msg)
+        except RuntimeError:
+            pass  # event loop closed
 
-    async def _enqueue_nowait(self, msg: dict) -> None:
-        """Enqueue msg without blocking; drops silently on QueueFull."""
+    def _try_enqueue_nowait(self, msg: dict) -> None:
+        """Synchronous enqueue called from the event loop thread."""
         try:
             self._queue.put_nowait(msg)
         except asyncio.QueueFull:

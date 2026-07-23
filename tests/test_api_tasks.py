@@ -448,3 +448,105 @@ class TestTaskLog:
         r = client.get(f"/api/v1/tasks/{uuid.uuid4()}/log", headers=_auth(token))
         assert r.status_code == 404
         assert r.json()["error"]["code"] == "TASK_NOT_FOUND"
+
+
+# ---------------------------------------------------------------------------
+# Ownership / cross-user isolation (#316)
+# ---------------------------------------------------------------------------
+
+
+class TestTaskOwnership:
+    def test_submit_persists_user_id_and_org_id(self, client, queue):
+        token = _register_and_login(client)
+        r = client.post(
+            "/api/v1/tasks",
+            json={"agent_name": "a", "prompt": "p"},
+            headers=_auth(token),
+        )
+        assert r.status_code == 202
+        data = r.json()["data"]
+        assert "user_id" in data
+        assert data["user_id"] != ""
+
+    def test_list_filters_to_current_user_only(self, client, queue):
+        token_a = _register_and_login(client)
+        token_b = _register_and_login(client)
+
+        client.post(
+            "/api/v1/tasks",
+            json={"agent_name": "a", "prompt": "user A task"},
+            headers=_auth(token_a),
+        )
+        client.post(
+            "/api/v1/tasks",
+            json={"agent_name": "a", "prompt": "user B task"},
+            headers=_auth(token_b),
+        )
+
+        r_a = client.get("/api/v1/tasks", headers=_auth(token_a))
+        items_a = r_a.json()["data"]
+        assert len(items_a) == 1
+        assert items_a[0]["prompt"] == "user A task"
+
+        r_b = client.get("/api/v1/tasks", headers=_auth(token_b))
+        items_b = r_b.json()["data"]
+        assert len(items_b) == 1
+        assert items_b[0]["prompt"] == "user B task"
+
+    def test_get_cross_user_task_returns_403(self, client, queue):
+        token_a = _register_and_login(client)
+        token_b = _register_and_login(client)
+
+        r = client.post(
+            "/api/v1/tasks",
+            json={"agent_name": "a", "prompt": "secret"},
+            headers=_auth(token_a),
+        )
+        task_id = r.json()["data"]["task_id"]
+
+        r2 = client.get(f"/api/v1/tasks/{task_id}", headers=_auth(token_b))
+        assert r2.status_code == 403
+        assert r2.json()["error"]["code"] == "TASK_ACCESS_DENIED"
+
+    def test_cancel_cross_user_task_returns_403(self, client, queue):
+        token_a = _register_and_login(client)
+        token_b = _register_and_login(client)
+
+        r = client.post(
+            "/api/v1/tasks",
+            json={"agent_name": "a", "prompt": "cancel me"},
+            headers=_auth(token_a),
+        )
+        task_id = r.json()["data"]["task_id"]
+
+        r2 = client.delete(f"/api/v1/tasks/{task_id}", headers=_auth(token_b))
+        assert r2.status_code == 403
+        assert r2.json()["error"]["code"] == "TASK_ACCESS_DENIED"
+
+    def test_log_cross_user_task_returns_403(self, client, queue):
+        token_a = _register_and_login(client)
+        token_b = _register_and_login(client)
+
+        r = client.post(
+            "/api/v1/tasks",
+            json={"agent_name": "a", "prompt": "log me"},
+            headers=_auth(token_a),
+        )
+        task_id = r.json()["data"]["task_id"]
+
+        r2 = client.get(f"/api/v1/tasks/{task_id}/log", headers=_auth(token_b))
+        assert r2.status_code == 403
+        assert r2.json()["error"]["code"] == "TASK_ACCESS_DENIED"
+
+    def test_owner_can_access_own_task(self, client, queue):
+        token = _register_and_login(client)
+        r = client.post(
+            "/api/v1/tasks",
+            json={"agent_name": "a", "prompt": "mine"},
+            headers=_auth(token),
+        )
+        task_id = r.json()["data"]["task_id"]
+
+        r2 = client.get(f"/api/v1/tasks/{task_id}", headers=_auth(token))
+        assert r2.status_code == 200
+        assert r2.json()["data"]["prompt"] == "mine"

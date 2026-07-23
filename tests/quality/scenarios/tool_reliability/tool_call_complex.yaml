@@ -1,0 +1,34 @@
+id: tool_call_complex
+complexity: complex
+category: tool_reliability
+description: "A three-turn workflow uses two different tools and then responds in prose."
+tags: [tier1]
+system_prompt: "You are a helpful assistant."
+tools:
+  - github_search_issues
+  - slack_get_channel_history
+
+script:
+  - user: "Check whether the quality harness work has a linked issue and recent Slack update."
+  - llm:
+      tool_calls:
+        - name: github_search_issues
+          args:
+            q: "quality harness"
+            state: "open"
+  - tool_result: "Issue #166 is open and assigned to Bender."
+  - llm:
+      tool_calls:
+        - name: slack_get_channel_history
+          args:
+            channel_id: "C0AVAHW6HJS"
+            limit: 5
+  - tool_result: "Leela assigned #166 and #167 in #cogtrix-project-discussions."
+  - llm: "The harness work is tracked by issue #166, and Slack confirms the assignment."
+
+metrics:
+  required_tools: [github_search_issues, slack_get_channel_history]
+  forbidden_tools: []
+  task_completed: true
+  phantom_calls: false
+  max_turns: 6

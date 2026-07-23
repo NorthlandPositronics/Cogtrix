@@ -36,7 +36,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.api.auth import TokenData, get_current_user, require_admin
 from src.api.db.engine import get_db
 from src.api.db.models import RagDocument
+from src.api.db.repositories.organization import OrganizationRepository
+from src.api.org_context import get_org_context
 from src.api.pagination import decode_cursor, encode_cursor
+from src.api.rag_index import load_faiss_store
 from src.api.schemas.common import APIResponse, CursorPage
 from src.api.schemas.rag import DocumentOut, RAGChunkOut, RAGSearchRequest, RAGSearchResponse
 from src.api.tasks.rag import ingest_document_task
@@ -124,6 +127,17 @@ def _doc_to_out(doc: RagDocument) -> DocumentOut:
     )
 
 
+async def _resolve_rag_org_id(current_user: TokenData, db: AsyncSession) -> str:
+    """Return the caller's org id, falling back to the default org."""
+    ctx = await get_org_context(current_user, db)
+    if ctx.org_id is not None:
+        return ctx.org_id
+
+    org_repo = OrganizationRepository(db)
+    default_org = await org_repo.ensure_default_org()
+    return default_org.id
+
+
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
@@ -182,7 +196,7 @@ async def ingest_document(
     data = await file.read()
     if len(data) > _MAX_FILE_BYTES:
         raise HTTPException(
-            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
             detail={
                 "code": "VALIDATION_ERROR",
                 "message": f"File too large ({len(data)} bytes); maximum allowed is 50 MB.",
@@ -191,6 +205,7 @@ async def ingest_document(
 
     # Persist to disk — run in a thread to avoid blocking the event loop for
     # large uploads (up to 50 MB) with blocking mkdir + write_bytes calls.
+    org_id = await _resolve_rag_org_id(current_user, db)
     doc_id = str(uuid.uuid4())
     upload_dir = _get_uploads_dir() / doc_id
     file_path = upload_dir / filename
@@ -205,6 +220,7 @@ async def ingest_document(
     # Create DB record
     doc = RagDocument(
         id=doc_id,
+        org_id=org_id,
         filename=filename,
         status="pending",
         chunk_count=0,
@@ -252,6 +268,7 @@ async def list_documents(
     Error codes: UNAUTHORIZED, TOKEN_EXPIRED, INVALID_CURSOR.
     """
     limit = max(1, min(limit, 200))
+    org_id = await _resolve_rag_org_id(current_user, db)
 
     # Decode cursor (it encodes the last-seen doc created_at + id)
     after_id: str | None = None
@@ -265,7 +282,7 @@ async def list_documents(
             ) from exc
 
     # Count total (with optional status filter)
-    count_stmt = select(func.count()).select_from(RagDocument)
+    count_stmt = select(func.count()).select_from(RagDocument).where(RagDocument.org_id == org_id)
     if doc_status:
         count_stmt = count_stmt.where(RagDocument.status == doc_status)
     total_result = await db.execute(count_stmt)
@@ -273,20 +290,31 @@ async def list_documents(
 
     # Fetch page — compound keyset cursor on (created_at, id) to ensure stable ordering.
     stmt = select(RagDocument).order_by(RagDocument.created_at.asc(), RagDocument.id.asc())
+    stmt = stmt.where(RagDocument.org_id == org_id)
     if doc_status:
         stmt = stmt.where(RagDocument.status == doc_status)
     if after_id:
         # Resolve cursor document's (created_at, id) for a correct compound keyset.
         cursor_result = await db.execute(
-            select(RagDocument.created_at, RagDocument.id).where(RagDocument.id == after_id)
+            select(RagDocument.created_at, RagDocument.id).where(
+                RagDocument.id == after_id,
+                RagDocument.org_id == org_id,
+            )
         )
         cursor_row = cursor_result.one_or_none()
-        if cursor_row is not None:
-            cursor_ts, cursor_id = cursor_row
-            stmt = stmt.where(
-                (RagDocument.created_at > cursor_ts)
-                | ((RagDocument.created_at == cursor_ts) & (RagDocument.id > cursor_id))
+        if cursor_row is None:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": "INVALID_CURSOR",
+                    "message": "The pagination cursor does not reference a known document.",
+                },
             )
+        cursor_ts, cursor_id = cursor_row
+        stmt = stmt.where(
+            (RagDocument.created_at > cursor_ts)
+            | ((RagDocument.created_at == cursor_ts) & (RagDocument.id > cursor_id))
+        )
     stmt = stmt.limit(limit + 1)
 
     result = await db.execute(stmt)
@@ -334,7 +362,14 @@ async def get_document(
     Error codes: UNAUTHORIZED, TOKEN_EXPIRED, DOCUMENT_NOT_FOUND.
     """
     _validate_doc_id(document_id)
-    doc = await db.get(RagDocument, document_id)
+    org_id = await _resolve_rag_org_id(current_user, db)
+    result = await db.execute(
+        select(RagDocument).where(
+            RagDocument.id == document_id,
+            RagDocument.org_id == org_id,
+        )
+    )
+    doc = result.scalar_one_or_none()
     if doc is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -370,7 +405,14 @@ async def delete_document(
     Error codes: UNAUTHORIZED, TOKEN_EXPIRED, FORBIDDEN, DOCUMENT_NOT_FOUND.
     """
     _validate_doc_id(document_id)
-    doc = await db.get(RagDocument, document_id)
+    org_id = await _resolve_rag_org_id(current_user, db)
+    result = await db.execute(
+        select(RagDocument).where(
+            RagDocument.id == document_id,
+            RagDocument.org_id == org_id,
+        )
+    )
+    doc = result.scalar_one_or_none()
     if doc is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -392,9 +434,14 @@ async def delete_document(
             detail={"code": "INVALID_DOCUMENT_ID", "message": "Invalid document ID format."},
         )
     uploads_root = _get_uploads_dir().resolve()
-    upload_dir = uploads_root / safe_id
+    upload_dir = (uploads_root / safe_id).resolve()  # codeql[py/path-injection]
+    if not upload_dir.is_relative_to(uploads_root):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": "INVALID_DOCUMENT_ID", "message": "Invalid document ID format."},
+        )
     if upload_dir.exists():
-        shutil.rmtree(upload_dir, ignore_errors=True)
+        shutil.rmtree(upload_dir, ignore_errors=True)  # codeql[py/path-injection]
         log.info("rag_delete: removed upload dir %s", upload_dir)
 
     await db.delete(doc)
@@ -428,7 +475,8 @@ async def search_rag(
     Error codes: UNAUTHORIZED, TOKEN_EXPIRED, VALIDATION_ERROR.
     """
     # Determine which documents to search
-    stmt = select(RagDocument).where(RagDocument.status == "indexed")
+    org_id = await _resolve_rag_org_id(current_user, db)
+    stmt = select(RagDocument).where(RagDocument.status == "indexed", RagDocument.org_id == org_id)
     if body.document_ids:
         stmt = stmt.where(RagDocument.id.in_(body.document_ids))
     result = await db.execute(stmt)
@@ -479,11 +527,6 @@ def _search_faiss(
     returns ([], 0) rather than raising.
     """
     try:
-        from langchain_community.vectorstores import FAISS
-    except ImportError:
-        return [], 0
-
-    try:
         from src.tools.rag import _get_embeddings
 
         embeddings = _get_embeddings()
@@ -499,14 +542,9 @@ def _search_faiss(
         if not vectordb_dir.exists():
             continue
         try:
-            # allow_dangerous_deserialization is safe here: vectordb_dir is
-            # written exclusively by the server-side ingest pipeline and is
-            # never user-controlled after upload.
-            store = FAISS.load_local(
-                str(vectordb_dir),
-                embeddings,
-                allow_dangerous_deserialization=True,
-            )
+            store = load_faiss_store(vectordb_dir, embeddings)
+            if store is None:
+                continue
             results = store.similarity_search_with_score(query, k=top_k)
             docs_searched += 1
             for chunk_idx, (langchain_doc, score) in enumerate(results):

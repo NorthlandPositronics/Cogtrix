@@ -1,10 +1,12 @@
 """Tests for the delegate tool."""
 
 import threading
+from unittest import mock
 from unittest.mock import MagicMock, patch
 
 import pytest
 
+from src.agent.safety import UserCancelledRun  # noqa: E402
 from src.tools.delegate import (
     _MAX_CIRCUIT_BREAKERS,
     TOOL_CONFIGS,
@@ -263,7 +265,8 @@ class TestDelegateTaskWithMock:
     """Tests for delegate_task with mocked LLM."""
 
     def setup_method(self):
-        """Reset config before each test."""
+        """Reset config, circuit breakers, and delegate tools before each test."""
+        reset_model_status()
         configure_delegate(
             {
                 "enabled": True,
@@ -271,6 +274,15 @@ class TestDelegateTaskWithMock:
                 "allowed_providers": ["openai", "ollama"],
             }
         )
+        # Clear thread-local delegate tools so prior tests don't bleed through
+        set_delegate_tools([], {})
+        # Also patch get_delegate_tools at the module level: if tools somehow
+        # leak via thread-local from prior tests, the agent path is bypassed.
+        self._tools_patcher = mock.patch("src.tools.delegate.get_delegate_tools", return_value=[])
+        self._tools_patcher.start()
+
+    def teardown_method(self, _method=None):
+        self._tools_patcher.stop()
 
     @patch("src.tools.delegate.create_delegate_llm")
     def test_delegate_task_success(self, mock_create_llm):
@@ -288,6 +300,7 @@ class TestDelegateTaskWithMock:
             context="Long text here",
             provider="ollama",
             timeout=30,
+            use_tools=False,
         )
 
         assert "Delegated to:" in result
@@ -305,8 +318,10 @@ class TestDelegateTaskWithMock:
 
         result = delegate_task(
             task="Extract data",
+            context="Source data to extract from",
             response_format="json",
             provider="ollama",
+            use_tools=False,
         )
 
         assert "JSON Valid:** ✓" in result
@@ -322,8 +337,10 @@ class TestDelegateTaskWithMock:
 
         result = delegate_task(
             task="Extract data",
+            context="Source data to extract from",
             response_format="json",
             provider="ollama",
+            use_tools=False,
         )
 
         assert "JSON Valid:** ✗" in result
@@ -373,6 +390,14 @@ class TestDelegateTaskWithMock:
         result = delegate_task(task="Test", provider="ollama")
         assert "failed" in result.lower()
 
+    @patch("src.tools.delegate.create_delegate_llm")
+    def test_delegate_task_user_cancelled_propagates(self, mock_create_llm):
+        """UserCancelledRun raised during delegation must propagate to caller."""
+        mock_create_llm.side_effect = UserCancelledRun("User cancelled")
+
+        with pytest.raises(UserCancelledRun):
+            delegate_task(task="Test", provider="ollama")
+
 
 class TestDelegateParallelWithMock:
     """Tests for delegate_parallel with mocked LLM."""
@@ -411,6 +436,64 @@ class TestDelegateParallelWithMock:
         assert "Task 2" in result
         assert "Task 3" in result
 
+    @patch("src.tools.delegate._emit_status")
+    def test_parallel_honors_per_task_timeouts(self, mock_emit_status):
+        """Test that each task uses its own timeout instead of the batch timeout."""
+        from src.tools import delegate as delegate_mod
+
+        recorded_timeouts: list[float | None] = []
+
+        class FakeFuture:
+            def __init__(self, value):
+                self._value = value
+
+            def result(self, timeout=None):
+                recorded_timeouts.append(timeout)
+                return self._value
+
+            def cancel(self):
+                return True
+
+        class FakeExecutor:
+            def __init__(self, *args, **kwargs):
+                self._futures = []
+
+            def submit(self, fn, *args, **kwargs):
+                future = FakeFuture(fn(*args, **kwargs))
+                self._futures.append(future)
+                return future
+
+            def shutdown(self, wait=False, cancel_futures=False):
+                return None
+
+        mock_result = DelegateResult(
+            success=True,
+            response="ok",
+            format_valid=True,
+            parsed_json=None,
+            model_used="test-model",
+            provider="ollama",
+            duration_seconds=0,
+            error=None,
+        )
+
+        with (
+            patch.object(delegate_mod, "ThreadPoolExecutor", FakeExecutor),
+            patch.object(delegate_mod, "_execute_single_task", return_value=mock_result),
+            patch.object(delegate_mod.time, "time", return_value=1000.0),
+        ):
+            result = delegate_parallel(
+                tasks=[
+                    {"task": "Task 1", "timeout": 10},
+                    {"task": "Task 2", "timeout": 25},
+                ],
+                timeout=120,
+            )
+
+        assert recorded_timeouts == [10, 25]
+        assert "Parallel Delegation:** 2 tasks" in result
+        mock_emit_status.assert_called()
+
     def test_parallel_empty_tasks(self):
         """Test parallel with empty task list."""
         result = delegate_parallel(tasks=[])
@@ -438,7 +521,7 @@ class TestCircuitBreaker:
     """Tests for the circuit breaker functionality."""
 
     def setup_method(self):
-        """Reset circuit breakers and config before each test."""
+        """Reset circuit breakers, config, and delegate tools before each test."""
         reset_model_status()
         configure_delegate(
             {
@@ -452,6 +535,12 @@ class TestCircuitBreaker:
                 "circuit_breaker_cooldown": 300,
             }
         )
+        set_delegate_tools([], {})
+        self._tools_patcher = mock.patch("src.tools.delegate.get_delegate_tools", return_value=[])
+        self._tools_patcher.start()
+
+    def teardown_method(self, _method=None):
+        self._tools_patcher.stop()
 
     def test_circuit_breaker_initial_state(self):
         """Test that circuit breaker starts in available state."""
@@ -752,9 +841,17 @@ class TestSetDelegateTools:
         set_delegate_tools([])
 
     def test_filters_excluded_tools(self):
-        """Delegation/recursion tools should be excluded."""
+        """Recursion and destructive tools are excluded; safe tools pass through."""
         tools = []
-        for name in ("read_file", "delegate_task", "deep_think", "request_tools", "shell"):
+        for name in (
+            "read_file",
+            "delegate_task",
+            "deep_think",
+            "request_tools",
+            "execute_shell_command",
+            "write_file",
+            "execute_python",
+        ):
             tool = MagicMock()
             tool.name = name
             tools.append(tool)
@@ -764,11 +861,16 @@ class TestSetDelegateTools:
         import src.tools.delegate as mod
 
         names = [t.name for t in mod._delegate_tools]
+        # Safe research tool passes through
         assert "read_file" in names
-        assert "shell" in names
+        # Recursion / meta tools are excluded
         assert "delegate_task" not in names
         assert "deep_think" not in names
         assert "request_tools" not in names
+        # Destructive tools are sandboxed
+        assert "execute_shell_command" not in names
+        assert "write_file" not in names
+        assert "execute_python" not in names
 
     def test_empty_input_clears_tools(self):
         """Passing an empty list should clear delegate tools."""
@@ -796,23 +898,23 @@ class TestSetDelegateTools:
         """Active + available on-demand tools should be merged for delegates."""
         active = MagicMock()
         active.name = "read_file"
-        ondemand_shell = MagicMock()
-        ondemand_shell.name = "execute_shell_command"
-        ondemand_python = MagicMock()
-        ondemand_python.name = "execute_python"
+        ondemand_search = MagicMock()
+        ondemand_search.name = "search_web"
+        ondemand_calc = MagicMock()
+        ondemand_calc.name = "calculate"
 
         set_delegate_tools(
             [active],
             available_tools={
-                "execute_shell_command": ondemand_shell,
-                "execute_python": ondemand_python,
+                "search_web": ondemand_search,
+                "calculate": ondemand_calc,
             },
         )
 
         import src.tools.delegate as mod
 
         names = {t.name for t in mod._delegate_tools}
-        assert names == {"read_file", "execute_shell_command", "execute_python"}
+        assert names == {"read_file", "search_web", "calculate"}
 
     def test_deduplicates_across_active_and_available(self):
         """A tool in both active and available should appear only once."""
@@ -842,6 +944,98 @@ class TestSetDelegateTools:
         names = {t.name for t in mod._delegate_tools}
         assert "deep_think" not in names
         assert "read_file" in names
+
+    def test_excludes_destructive_tools(self):
+        """High-risk tools (shell, file write, code exec) are sandboxed."""
+        tools = []
+        for name in (
+            "read_file",
+            "execute_shell_command",
+            "execute_python",
+            "write_file",
+            "patch_file",
+            "append_file",
+            "http_post",
+            "send_email",
+            "self_improve",
+        ):
+            tool = MagicMock()
+            tool.name = name
+            tools.append(tool)
+
+        set_delegate_tools(tools)
+
+        import src.tools.delegate as mod
+
+        names = {t.name for t in mod._delegate_tools}
+        assert "read_file" in names
+        assert "execute_shell_command" not in names
+        assert "execute_python" not in names
+        assert "write_file" not in names
+        assert "patch_file" not in names
+        assert "append_file" not in names
+        assert "http_post" not in names
+        assert "send_email" not in names
+        assert "self_improve" not in names
+
+    def test_excludes_destructive_tools_from_available(self):
+        """Sandbox applies to available_tools as well as active tools."""
+        active = MagicMock()
+        active.name = "read_file"
+        shell = MagicMock()
+        shell.name = "execute_shell_command"
+        write = MagicMock()
+        write.name = "write_file"
+
+        set_delegate_tools(
+            [active],
+            available_tools={
+                "execute_shell_command": shell,
+                "write_file": write,
+            },
+        )
+
+        import src.tools.delegate as mod
+
+        names = {t.name for t in mod._delegate_tools}
+        assert names == {"read_file"}
+
+    def test_safe_tools_remain_available_to_delegates(self):
+        """Non-destructive research tools are still passed to delegates."""
+        safe_tools = []
+        for name in (
+            "read_file",
+            "search_web",
+            "search_news",
+            "http_get",
+            "git_status",
+            "git_diff",
+            "list_directory",
+            "file_info",
+            "calculate",
+            "get_current_datetime",
+        ):
+            tool = MagicMock()
+            tool.name = name
+            safe_tools.append(tool)
+
+        set_delegate_tools(safe_tools)
+
+        import src.tools.delegate as mod
+
+        names = {t.name for t in mod._delegate_tools}
+        assert names == {
+            "read_file",
+            "search_web",
+            "search_news",
+            "http_get",
+            "git_status",
+            "git_diff",
+            "list_directory",
+            "file_info",
+            "calculate",
+            "get_current_datetime",
+        }
 
 
 class TestExtractContent:

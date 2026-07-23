@@ -43,8 +43,8 @@ def test_searxng_returns_formatted_results():
     ):
         result = searxng_search("python", num_results=2)
 
-    assert "Python.org" in result
-    assert "https://python.org" in result
+    assert "Python.org" in result  # codeql[py/incomplete-url-substring-sanitization]
+    assert "https://python.org" in result  # codeql[py/incomplete-url-substring-sanitization]
     assert "SearXNG results for: python" in result
 
 

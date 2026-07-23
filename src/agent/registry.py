@@ -152,3 +152,48 @@ def merge_from_agents_md(agents: dict[str, Any]) -> None:
 def clear() -> None:
     """Clear the module-level registry."""
     _registry.clear()
+
+
+# ── Tool filtering ────────────────────────────────────────────────────────────
+
+
+def filter_tools_for_agent(
+    agent_name: str | None,
+    all_tools: dict[str, Any],
+) -> tuple[dict[str, Any], list[Any]]:
+    """Filter tools for an agent based on its configured tools_include/tools_exclude.
+
+    Args:
+        agent_name: Name of the agent to filter tools for. If None, all tools are allowed.
+        all_tools: Dictionary of all available tools (name -> tool object).
+
+    Returns:
+        Tuple of (filtered_tools_dict, filtered_tools_list) for the agent.
+    """
+    if agent_name is None:
+        return all_tools, list(all_tools.values())
+
+    agent_config = get(agent_name)
+    if agent_config is None:
+        # No agent config found — allow all tools (backward compatible)
+        return all_tools, list(all_tools.values())
+
+    include_list = agent_config.tools_include
+    exclude_list = agent_config.tools_exclude
+
+    # If tools_include is empty, all tools are allowed by default
+    if not include_list:
+        # Apply exclude list only
+        filtered = {name: tool for name, tool in all_tools.items() if name not in exclude_list}
+    else:
+        # Filter to only included tools, then apply exclude list
+        filtered = {
+            name: tool
+            for name, tool in all_tools.items()
+            if name in include_list and name not in exclude_list
+        }
+
+    # Build a list for active_tools_list (use original order from all_tools for determinism)
+    filtered_list = [all_tools[name] for name in filtered if name in all_tools]
+
+    return filtered, filtered_list

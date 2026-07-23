@@ -9,10 +9,17 @@ discovered at connection time and exposed as LangChain StructuredTool objects.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
+
+# CI trigger fix: blank line added to force CI re-run
+import ipaddress
+import os
 import re
+import socket
 import threading
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any, Literal, Optional
+from urllib.parse import urlparse
 
 from src.logging_config import get_logger
 
@@ -68,6 +75,84 @@ class MCPServerConfig:
     headers: dict[str, str] | None = None
     requires_confirmation: bool = True
     timeout: int = 30
+    pin: bool = True
+    allow_insecure: bool = False
+
+
+# ── SSRF validation helpers ───────────────────────────────────────────────────
+
+
+def _is_blocked_ip(ip_str: str) -> bool:
+    """Return True if *ip_str* resolves to a non-public address."""
+    try:
+        ip = ipaddress.ip_address(ip_str)
+    except ValueError:
+        return False
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        ip = ip.ipv4_mapped
+    return bool(
+        ip.is_loopback
+        or ip.is_private
+        or ip.is_link_local
+        or ip.is_reserved
+        or ip.is_multicast
+        or ip.is_unspecified
+    )
+
+
+def _validate_mcp_url(url: str, allow_insecure: bool = False) -> None:
+    """Raise ValueError if *url* is unsafe for MCP SSE connections.
+
+    Checks:
+      1. Scheme must be ``https`` (``http`` only when *allow_insecure* is True).
+      2. Host must not resolve to loopback, RFC1918, link-local, or multicast.
+    """
+    parsed = urlparse(url)
+    if not parsed.scheme or not parsed.netloc:
+        raise ValueError(f"Invalid MCP SSE URL: {url}")
+
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError(f"MCP SSE URL scheme must be http or https, got: {parsed.scheme}")
+
+    if parsed.scheme == "http" and not allow_insecure:
+        raise ValueError(
+            f"Insecure MCP SSE URL ({url}) rejected. "
+            "Set allow_insecure=True to permit http:// connections."
+        )
+
+    hostname = parsed.hostname or ""
+    if not hostname:
+        raise ValueError(f"Invalid MCP SSE URL (no host): {url}")
+
+    # When allow_insecure is explicitly set, skip all IP/host blocking.
+    # The caller has acknowledged that the target may be on an internal network.
+    if allow_insecure:
+        return
+
+    # Block well-known internal hostnames by name (defense-in-depth).
+    blocked_hosts = {
+        "localhost",
+        "metadata.google.internal",
+        "instance-data",
+        "169.254.169.254",
+    }
+    if hostname.lower() in blocked_hosts:
+        raise ValueError(f"MCP SSE URL points to internal host: {hostname}")
+
+    # If hostname is already a raw IP literal, validate it directly.
+    if _is_blocked_ip(hostname):
+        raise ValueError(f"MCP SSE URL resolves to blocked IP: {hostname}")
+
+    # Resolve hostname and validate returned addresses.
+    try:
+        addrinfo = socket.getaddrinfo(hostname, None)
+    except socket.gaierror as exc:
+        raise ValueError(f"MCP SSE URL host cannot be resolved: {hostname}") from exc
+
+    for _family, _socktype, _proto, _canonname, sockaddr in addrinfo:
+        ip_str = str(sockaddr[0])
+        if _is_blocked_ip(ip_str):
+            raise ValueError(f"MCP SSE URL resolves to blocked IP: {ip_str}")
 
 
 # ── Schema conversion ─────────────────────────────────────────────────────────
@@ -81,6 +166,36 @@ _JSON_SCHEMA_TYPE_MAP: dict[str, type] = {
     "object": dict,
     "null": type(None),
 }
+
+_PROTECTED_BRANCH_NAMES: frozenset[str] = frozenset({"next", "main"})
+_PROTECTED_BRANCH_TOOL_NAMES: frozenset[str] = frozenset({"create_or_update_file", "push_files"})
+
+
+def _resolve_ref(ref: str, root_schema: dict[str, Any]) -> type:
+    """Resolve a JSON Schema local $ref pointer to a Python type.
+
+    Only ``#/...`` pointers are supported.  External refs (``http://...``,
+    relative paths) fall back to ``str`` with a warning.
+    """
+    if not ref.startswith("#/"):
+        get_logger().warning("MCP: unsupported external $ref %r — falling back to str", ref)
+        return str
+    parts = ref[2:].split("/")
+    node: Any = root_schema
+    for part in parts:
+        part = part.replace("~1", "/").replace("~0", "~")
+        if not isinstance(node, dict) or part not in node:
+            return str
+        node = node[part]
+    if not isinstance(node, dict):
+        return str
+    if "const" in node:
+        return Literal[node["const"]]  # type: ignore[return-value]
+    raw_type = node.get("type", "string")
+    if isinstance(raw_type, list):
+        non_null = [t for t in raw_type if t != "null"]
+        return _JSON_SCHEMA_TYPE_MAP.get(non_null[0] if non_null else "string", str)
+    return _JSON_SCHEMA_TYPE_MAP.get(raw_type, str)
 
 
 def json_schema_to_pydantic(name: str, schema: dict[str, Any]) -> type:
@@ -134,10 +249,10 @@ def json_schema_to_pydantic(name: str, schema: dict[str, Any]) -> type:
             # enum values — all values as str (Pydantic Literal is impractical for
             # dynamic schema construction; str covers the common case)
             python_type = str
-        elif "$ref" in prop_schema or "const" in prop_schema:
-            # $ref requires schema resolution; const is a single fixed value — both
-            # fall back to str for simplicity since we can't resolve $ref at runtime
-            python_type = str
+        elif "$ref" in prop_schema:
+            python_type = _resolve_ref(prop_schema["$ref"], schema)
+        elif "const" in prop_schema:
+            python_type = Literal[prop_schema["const"]]  # type: ignore[assignment]
         else:
             python_type = _JSON_SCHEMA_TYPE_MAP.get(raw_type)
             if python_type is None:
@@ -179,7 +294,38 @@ def _result_to_str(result: Any) -> str:
     text = "\n".join(parts)
     if result.isError:
         text = f"Error: {text}"
+        # Enrich filesystem access-denied errors with actionable guidance so the
+        # agent can self-correct instead of retrying with the same wrong path.
+        if "path outside allowed directories" in text or (
+            "Access denied" in text and "allowed directories" in text
+        ):
+            workspace_prefix = _get_workspace_prefix()
+            text += (
+                f"\nHint: For Cogtrix workspace files prefix the path with {workspace_prefix}/ "
+                f"(e.g. {workspace_prefix}/src/tools/foo.py, "
+                f"{workspace_prefix}/.github/workflows/ci.yml). "
+                "For GitHub-hosted content use get_file_contents instead of read_text_file."
+            )
     return text
+
+
+def _reject_protected_branch_write(tool_name: str, arguments: dict[str, Any]) -> str | None:
+    """Block direct writes to protected branches."""
+    if tool_name not in _PROTECTED_BRANCH_TOOL_NAMES:
+        return None
+
+    branch = arguments.get("branch")
+    if not isinstance(branch, str):
+        return None
+
+    branch_name = branch.strip().lower()
+    if branch_name not in _PROTECTED_BRANCH_NAMES:
+        return None
+
+    return (
+        f"Error: Direct push to protected branch '{branch_name}' is not allowed. "
+        "Create a feature branch and open a PR instead."
+    )
 
 
 # ── Connection class ──────────────────────────────────────────────────────────
@@ -198,6 +344,10 @@ class MCPConnection:
     def tools(self) -> list[Any]:
         return self._tools
 
+    @property
+    def session(self) -> Any:
+        return self._session
+
     async def connect(self) -> None:
         """
         Open transport, start ClientSession, initialize, and list tools.
@@ -212,8 +362,24 @@ class MCPConnection:
 
         cfg = self._config
         if cfg.url is not None:
+            # Prevent SSRF via admin-controlled MCP config.
+            _validate_mcp_url(cfg.url, allow_insecure=cfg.allow_insecure)
+            # sse_client(timeout=N) sets the connect/write/pool timeout.
+            # sse_client(sse_read_timeout=X) controls how long to wait between
+            # 3600s balances two failure modes: the default 300s fires on
+            # legitimate idle gaps between tool calls in long sessions, while
+            # None disables liveness detection entirely — leaving half-open
+            # TCP connections (NAT idle-drop, server crash without FIN)
+            # invisible to the client for up to the OS keepalive period (~2h).
+            # One hour is long enough for any realistic idle period and short
+            # enough to detect network failures within a session.
             read_stream, write_stream = await self._exit_stack.enter_async_context(
-                sse_client(url=cfg.url, headers=cfg.headers)
+                sse_client(
+                    url=cfg.url,
+                    headers=cfg.headers,
+                    timeout=float(cfg.timeout),
+                    sse_read_timeout=3600,
+                )
             )
         elif cfg.command is not None:
             params = StdioServerParameters(
@@ -258,10 +424,102 @@ class MCPConnection:
         if self._exit_stack is not None:
             try:
                 await self._exit_stack.__aexit__(None, None, None)
+            except RuntimeError as exc:
+                # anyio cancel scopes are task-local.  When close() runs in a
+                # different asyncio Task than connect() (e.g. run_coroutine_threadsafe
+                # creates a new task per call), anyio raises this RuntimeError.
+                # The connection is being replaced immediately, so log at DEBUG only.
+                if "cancel scope" in str(exc):
+                    get_logger().debug("MCP: connection cleanup (anyio task boundary): %s", exc)
+                else:
+                    get_logger().warning("MCP: error during connection cleanup: %s", exc)
             except Exception as exc:
                 get_logger().warning("MCP: error during connection cleanup: %s", exc)
             self._exit_stack = None
         self._session = None
+
+
+# ── Filesystem path normalisation ────────────────────────────────────────────
+
+# Known MCP filesystem tool names (explicit allowlist to avoid matching
+# GitHub/remote tools such as create_or_update_file).
+_FILESYSTEM_TOOL_NAMES: frozenset[str] = frozenset(
+    {
+        "read_file",
+        "read_text_file",
+        "write_file",
+        "edit_file",
+        "create_file",
+        "delete_file",
+        "move_file",
+        "copy_file",
+        "search_files",
+        "list_files",
+        "get_file_info",
+        "create_directory",
+        "list_directory",
+        "directory_tree",
+        "delete_directory",
+        "move_directory",
+        "read_directory",
+        "write_directory",
+    }
+)
+
+_PATH_ARG_NAMES: frozenset[str] = frozenset(
+    {"path", "file_path", "directory", "dir", "src", "dest", "source", "target"}
+)
+
+_DEFAULT_MCP_WORKSPACE_PREFIX = "/workspace"
+_MCP_WORKSPACE_PREFIX_ENV = "COGTRIX_MCP_WORKSPACE_PREFIX"
+
+
+def _get_workspace_prefix() -> str:
+    """Resolve filesystem path prefix for MCP tools.
+
+    Reads ``COGTRIX_MCP_WORKSPACE_PREFIX`` and normalizes it to an absolute
+    path without trailing slash. Invalid values (empty or root ``/``) fall back
+    to ``/workspace``.
+    """
+    raw_prefix = os.getenv(_MCP_WORKSPACE_PREFIX_ENV, _DEFAULT_MCP_WORKSPACE_PREFIX).strip()
+    if not raw_prefix:
+        return _DEFAULT_MCP_WORKSPACE_PREFIX
+
+    normalized = raw_prefix if raw_prefix.startswith("/") else f"/{raw_prefix}"
+    normalized = normalized.rstrip("/")
+    if not normalized or normalized == "/":
+        return _DEFAULT_MCP_WORKSPACE_PREFIX
+    return normalized
+
+
+def _is_filesystem_tool(tool_name: str) -> bool:
+    """Return True when *tool_name* is a known filesystem MCP tool.
+
+    Handles collision-prefixed names (e.g. ``filesystem_read_file``) by
+    checking both exact match and suffix match.
+    """
+    lowered = tool_name.lower()
+    if lowered in _FILESYSTEM_TOOL_NAMES:
+        return True
+    return any(lowered.endswith(f"_{name}") for name in _FILESYSTEM_TOOL_NAMES)
+
+
+def _normalize_mcp_paths(tool_name: str, kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Auto-prepend ``/workspace/`` to relative paths for filesystem MCP tools.
+
+    Only touches arguments whose names are in ``_PATH_ARG_NAMES`` and whose
+    values are strings that do not already start with ``/``.
+    """
+    if not _is_filesystem_tool(tool_name):
+        return kwargs
+    workspace_prefix = _get_workspace_prefix()
+    normalized: dict[str, Any] = {}
+    for k, v in kwargs.items():
+        if k in _PATH_ARG_NAMES and isinstance(v, str) and v and not v.startswith("/"):
+            normalized[k] = f"{workspace_prefix}/{v.lstrip('/')}"
+        else:
+            normalized[k] = v
+    return normalized
 
 
 # ── Tool wrapper ──────────────────────────────────────────────────────────────
@@ -302,7 +560,16 @@ def _create_mcp_tool_wrapper(
         return None
 
     def _call_fn(**kwargs: Any) -> str:
-        return manager.call_tool(server_name, tool_name, kwargs)
+        # Strip None values before forwarding — MCP servers (e.g. GitHub) use
+        # strict Zod schemas that reject null for optional parameters.  The LLM
+        # may include optional params as None/null when it doesn't intend to set
+        # them; omitting them entirely matches the MCP server's expectations.
+        guard_error = _reject_protected_branch_write(tool_name, kwargs)
+        if guard_error is not None:
+            return guard_error
+        clean_kwargs = {k: v for k, v in kwargs.items() if v is not None}
+        clean_kwargs = _normalize_mcp_paths(tool_name, clean_kwargs)
+        return manager.call_tool(server_name, tool_name, clean_kwargs)
 
     _call_fn.__name__ = tool_name
     _call_fn.__doc__ = tool_description
@@ -325,6 +592,57 @@ def _create_mcp_tool_wrapper(
         return None
 
 
+# ── Connection error classifier ──────────────────────────────────────────────
+
+_CONNECTION_ERROR_TYPES: frozenset[str] = frozenset(
+    {
+        # asyncio / anyio
+        "CancelledError",
+        "TimeoutError",
+        # httpx / httpcore
+        "ReadTimeout",
+        "WriteTimeout",
+        "ConnectTimeout",
+        "PoolTimeout",
+        "ReadError",
+        "WriteError",
+        "RemoteProtocolError",
+        "LocalProtocolError",
+        # stdlib / OS
+        "ConnectionResetError",
+        "ConnectionRefusedError",
+        "BrokenPipeError",
+        "ConnectionAbortedError",
+    }
+)
+
+
+def _is_connection_error(exc: Exception) -> bool:
+    """Return True when *exc* indicates a broken or half-open SSE connection.
+
+    Checks both the direct exception type and the entire ``__cause__`` /
+    ``__context__`` chain so that wrapped exceptions are caught too.
+    """
+    current: BaseException | None = exc
+    while current is not None:
+        if type(current).__name__ in _CONNECTION_ERROR_TYPES:
+            return True
+        # Walk the chain: explicit cause first, then implicit context.
+        current = current.__cause__ or (
+            current.__context__ if not current.__suppress_context__ else None
+        )
+    return False
+
+
+# ── Startup retry constants ───────────────────────────────────────────────────
+
+# Number of additional connection attempts after the first failure at startup.
+# Applied per-server; retries run concurrently across servers.
+_STARTUP_MAX_RETRIES: int = 2
+# Seconds to wait before each successive retry attempt (index = attempt number).
+_STARTUP_RETRY_DELAYS: tuple[float, ...] = (2.0, 5.0)
+
+
 # ── Manager class ─────────────────────────────────────────────────────────────
 
 
@@ -336,6 +654,11 @@ class MCPManager:
     issued from the synchronous Cogtrix agent loop via run_coroutine_threadsafe.
     """
 
+    # Interval between heartbeat pings. Must be shorter than the SSE server's
+    # keepalive interval (30 s in docker-compose) so the connection is exercised
+    # before the server closes the idle SSE stream.
+    _HEARTBEAT_INTERVAL: int = 20  # seconds
+
     def __init__(self) -> None:
         self._connections: dict[str, MCPConnection] = {}
         self._configs: dict[str, MCPServerConfig] = {}
@@ -343,15 +666,60 @@ class MCPManager:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
         self._loop_lock = threading.Lock()
+        # Unified shutdown guard: set to True by close_all() under _loop_lock
+        # before teardown starts. _ensure_loop() checks this flag (under the
+        # same lock) and _reconnect_server_async() checks it before reconnecting,
+        # so both loop-start and reconnect paths are blocked by one coordinated
+        # state transition (#425, #546).
+        self._shutting_down: bool = False
+        # Heartbeat runs as a native asyncio Task inside the background loop so
+        # that list_tools() and reconnect close/connect calls share the same task
+        # context, avoiding anyio cancel-scope task-locality violations.
+        self._heartbeat_task: asyncio.Task[None] | None = None
+        # Per-server asyncio.Lock prevents the heartbeat coroutine and the
+        # call_tool() error-handler from racing on _connections for the same
+        # server (#427).  Locks are created lazily inside the event loop.
+        self._reconnect_locks: dict[str, asyncio.Lock] = {}
+        # Signals when the manager has finished rediscovering tools after a
+        # connect/reconnect cycle.  Callers may wait on this to avoid binding
+        # the model against stale tool state during MCP churn.
+        self.tools_ready = threading.Event()
+        self.tools_ready.set()
+        # Guard against auto-reconnect races during shutdown.
+        # API alias for restart method (used by mcp.py routes)
+        self.restart_server = self.restart
 
     # ── Internal event loop management ───────────────────────────────────────
 
     def _ensure_loop(self) -> None:
         """Start the background event loop thread if it is not already running."""
         with self._loop_lock:
+            if self._shutting_down:
+                raise RuntimeError(
+                    "MCP event loop cannot be started after close_all() has been called"
+                )
             if self._loop is not None and not self._loop.is_closed():
                 return
             self._loop = asyncio.new_event_loop()
+
+            # Suppress the benign shutdown-race RuntimeError so it never reaches
+            # the terminal.  When the thread-pool executor is torn down while an
+            # MCP SSE DNS lookup is still in flight the asyncio default handler
+            # would print the full traceback.  Route it to DEBUG instead.
+            _log = get_logger()
+
+            def _exception_handler(
+                loop: asyncio.AbstractEventLoop, context: dict  # type: ignore[type-arg]
+            ) -> None:
+                exc = context.get("exception")
+                if isinstance(
+                    exc, RuntimeError
+                ) and "cannot schedule new futures after shutdown" in str(exc):
+                    _log.debug("MCP: suppressed shutdown race in background loop: %s", exc)
+                    return
+                loop.default_exception_handler(context)
+
+            self._loop.set_exception_handler(_exception_handler)
 
             def _run_loop() -> None:
                 asyncio.set_event_loop(self._loop)
@@ -360,6 +728,91 @@ class MCPManager:
 
             self._thread = threading.Thread(target=_run_loop, daemon=True, name="mcp-event-loop")
             self._thread.start()
+            self._start_heartbeat()
+
+    def _start_heartbeat(self) -> None:
+        """Schedule the heartbeat coroutine on the background event loop.
+
+        Running as a native asyncio Task means list_tools() and reconnect
+        close/connect calls all execute inside the same task, avoiding anyio
+        cancel-scope task-locality violations that fire when the heartbeat ran
+        as a threading.Thread calling _run() (which creates a new Task per ping).
+        """
+        if self._heartbeat_task is not None and not self._heartbeat_task.done():
+            return
+
+        async def _schedule() -> None:
+            self._heartbeat_task = asyncio.ensure_future(self._heartbeat_coro())
+
+        assert self._loop is not None
+        asyncio.run_coroutine_threadsafe(_schedule(), self._loop).result(timeout=5)
+
+    async def _reconnect_server_async(self, server_name: str) -> None:
+        """Async reconnect — used by the heartbeat coroutine AND the sync error handler.
+
+        A per-server asyncio.Lock serialises concurrent reconnect attempts so
+        that the heartbeat and the call_tool() error-handler never race on
+        ``_connections`` for the same server (#427).  Without the lock both
+        paths pop the old connection and start ``await conn.connect()``;
+        whichever finishes last overwrites the winner's result and leaves the
+        winner's ``_exit_stack`` unclosed, leaking file descriptors.
+        """
+        log = get_logger()
+        if self._shutting_down:
+            log.debug("MCP: skipping reconnect for '%s' — manager is shutting down", server_name)
+            return
+        cfg = self._configs.get(server_name)
+        if cfg is None:
+            raise RuntimeError(f"Unknown server '{server_name}'")
+        # Lazy-create the per-server lock inside the event loop so it is
+        # always bound to the correct running loop.
+        lock = self._reconnect_locks.setdefault(server_name, asyncio.Lock())
+        async with lock:
+            if self._shutting_down:
+                return
+            old_conn = self._connections.pop(server_name, None)
+            if old_conn is not None:
+                try:
+                    await old_conn.close()
+                except Exception as exc:
+                    log.debug("MCP: error closing stale connection for '%s': %s", server_name, exc)
+            new_conn = MCPConnection(cfg)
+            await new_conn.connect()
+            self._connections[server_name] = new_conn
+            log.info(
+                "MCP: auto-reconnected server '%s' (%d tools)", server_name, len(new_conn.tools)
+            )
+
+    async def _heartbeat_coro(self) -> None:
+        """Ping each MCP server every _HEARTBEAT_INTERVAL seconds.
+
+        Runs as a long-lived asyncio Task so all connection operations share
+        the correct task context, preventing anyio cancel-scope violations.
+        """
+        log = get_logger()
+        while True:
+            try:
+                await asyncio.sleep(self._HEARTBEAT_INTERVAL)
+            except asyncio.CancelledError:
+                break
+            for name, conn in list(self._connections.items()):
+                try:
+                    await conn.session.list_tools()
+                    log.debug("MCP: heartbeat ok for server '%s'", name)
+                except Exception as exc:
+                    log.warning(
+                        "MCP: heartbeat failed for server '%s' (%s) — will reconnect",
+                        name,
+                        exc,
+                    )
+                    try:
+                        await self._reconnect_server_async(name)
+                    except Exception as reconnect_exc:
+                        log.error(
+                            "MCP: heartbeat reconnect for '%s' failed: %s",
+                            name,
+                            reconnect_exc,
+                        )
 
     def _run(self, coro: Any, timeout: int = 30) -> Any:
         """
@@ -394,19 +847,99 @@ class MCPManager:
 
     async def _connect_one_async(self, cfg: MCPServerConfig) -> tuple[str, MCPConnection | None]:
         """
-        Connect to a single MCP server asynchronously.
+        Connect to a single MCP server asynchronously, with startup retry.
+
+        On failure the failed MCPConnection is explicitly closed within this
+        task so that anyio cancel scopes are exited from the correct task
+        context.  Without explicit close(), Python's async-generator GC
+        finalizer creates a new task for cleanup, crossing the anyio task
+        boundary and raising "Attempted to exit cancel scope in a different
+        task" (#403).
+
+        Connection errors are retried up to _STARTUP_MAX_RETRIES times with
+        increasing back-off to handle containers that aren't ready yet (#393).
+        ValueError (URL validation) is never retried.
 
         Returns:
             Tuple of (server_name, MCPConnection) on success, or
-            (server_name, None) on failure.
+            (server_name, None) after all retries are exhausted.
         """
-        conn = MCPConnection(cfg)
-        try:
-            await asyncio.wait_for(conn.connect(), timeout=cfg.timeout)
-            return cfg.name, conn
-        except Exception as exc:
-            get_logger().warning("MCP: failed to connect to server '%s': %s", cfg.name, exc)
-            return cfg.name, None
+        log = get_logger()
+        for attempt in range(_STARTUP_MAX_RETRIES + 1):
+            conn = MCPConnection(cfg)
+            try:
+                await asyncio.wait_for(conn.connect(), timeout=cfg.timeout)
+                if attempt > 0:
+                    log.info("MCP: connected to server '%s' after %d retries", cfg.name, attempt)
+                return cfg.name, conn
+            except Exception as exc:
+                # ExceptionGroup (TaskGroup) hides the real cause in __exceptions__.
+                # Walk down to the deepest non-group exception so the log shows the
+                # actual error (e.g. FileNotFoundError) rather than the wrapper.
+                cause: BaseException = exc
+                while (
+                    hasattr(cause, "__exceptions__")
+                    and cause.__exceptions__  # type: ignore[union-attr]
+                ):
+                    cause = cause.__exceptions__[0]  # type: ignore[union-attr]
+
+                # Explicitly close the failed connection within this task so
+                # anyio cancel scopes are exited in the correct task context (#403).
+                try:
+                    await conn.close()
+                except Exception as close_exc:
+                    log.debug("MCP: cleanup after failed connect for '%s': %s", cfg.name, close_exc)
+
+                # Classify fail-fast causes: missing executable, bad config —
+                # retrying won't help and we shouldn't keep banging on it.
+                fail_fast = isinstance(exc, ValueError) or isinstance(
+                    cause, FileNotFoundError | PermissionError
+                )
+
+                if fail_fast:
+                    log.warning(
+                        "MCP: server '%s' will not be available: %s: %s",
+                        cfg.name,
+                        type(cause).__name__,
+                        cause,
+                    )
+                    # Stash the traceback at debug level for forensic use.
+                    log.debug(
+                        "MCP: full traceback for server '%s' connect failure",
+                        cfg.name,
+                        exc_info=(type(exc), exc, exc.__traceback__),
+                    )
+                    break
+
+                if attempt < _STARTUP_MAX_RETRIES:
+                    delay = _STARTUP_RETRY_DELAYS[attempt]
+                    log.warning(
+                        "MCP: failed to connect to server '%s': %s: %s "
+                        "— retrying in %.0fs (attempt %d/%d)",
+                        cfg.name,
+                        type(cause).__name__,
+                        cause,
+                        delay,
+                        attempt + 1,
+                        _STARTUP_MAX_RETRIES + 1,
+                    )
+                    await asyncio.sleep(delay)
+                else:
+                    # On final failure: one-line warning, traceback at debug.
+                    log.warning(
+                        "MCP: server '%s' unavailable after %d attempts: %s: %s",
+                        cfg.name,
+                        _STARTUP_MAX_RETRIES + 1,
+                        type(cause).__name__,
+                        cause,
+                    )
+                    log.debug(
+                        "MCP: full traceback for server '%s' final failure",
+                        cfg.name,
+                        exc_info=(type(exc), exc, exc.__traceback__),
+                    )
+
+        return cfg.name, None
 
     async def _connect_all_async(
         self, configs: list[MCPServerConfig]
@@ -454,24 +987,38 @@ class MCPManager:
         if not MCP_AVAILABLE:
             log = get_logger()
             log.warning("MCP SDK not installed; no MCP servers will be connected")
+            self.tools_ready.set()
             return {}
 
         log = get_logger()
         self._ensure_loop()
+        self.tools_ready.clear()
 
         for cfg in configs:
             self._configs[cfg.name] = cfg
 
         max_timeout = max((cfg.timeout for cfg in configs), default=30) if configs else 30
-        results: list[tuple[str, MCPConnection | None]] = self._run(
-            self._connect_all_async(configs),
-            timeout=max_timeout + 5,
-        )
+        try:
+            results: list[tuple[str, MCPConnection | None]] = self._run(
+                self._connect_all_async(configs),
+                timeout=max_timeout + 5,
+            )
+        except Exception:
+            # Unblock any waiters even when connection fails, so the
+            # orchestration graph doesn't hang indefinitely.
+            self.tools_ready.set()
+            raise
 
         for server_name, conn in results:
             if conn is not None:
                 self._connections[server_name] = conn
                 log.info("MCP: connected to server '%s' (%d tools)", server_name, len(conn.tools))
+
+        # Names that MCP servers must never shadow — they are core platform
+        # primitives that could be exploited if an untrusted server overwrites them.
+        _RESERVED_TOOL_NAMES: frozenset[str] = frozenset(
+            {"request_tools", "checkpoint", "query_knowledge_base"}
+        )
 
         all_tools: dict[str, Any] = {}
         for cfg in configs:
@@ -482,6 +1029,14 @@ class MCPManager:
             for mcp_tool in conn.tools:
                 original_name: str = mcp_tool.name
                 tool_name = original_name
+
+                if tool_name in _RESERVED_TOOL_NAMES:
+                    log.warning(
+                        "MCP: tool '%s' from server '%s' uses a reserved name and will be skipped",
+                        tool_name,
+                        cfg.name,
+                    )
+                    continue
 
                 if tool_name in all_tools or (
                     builtin_tool_names and tool_name in builtin_tool_names
@@ -515,11 +1070,33 @@ class MCPManager:
 
                 if tool_name != original_name:
                     lc_tool.name = tool_name
+                    loaded_as_note = f"(loaded as {tool_name})"
+                    if loaded_as_note not in lc_tool.description:
+                        lc_tool.description = (
+                            f"{lc_tool.description.rstrip()} {loaded_as_note}".strip()
+                        )
 
                 all_tools[tool_name] = lc_tool
                 self._tool_server_map[tool_name] = cfg.name
 
+        # Signal readiness AFTER wrappers and _tool_server_map are fully built.
+        # Do NOT move this earlier — the orchestration graph unblocks on this
+        # event and immediately starts binding tools.
+        self.tools_ready.set()
         return all_tools
+
+    def _reconnect_server(self, server_name: str) -> None:
+        """Force-reconnect a single server without rebuilding LangChain tools.
+
+        Delegates to ``_reconnect_server_async`` so that the per-server lock
+        is shared with the heartbeat coroutine, eliminating the race that
+        leaked ``_exit_stack`` file-descriptors (#427).
+        """
+        self.tools_ready.clear()
+        try:
+            self._run(self._reconnect_server_async(server_name), timeout=60)
+        finally:
+            self.tools_ready.set()
 
     def call_tool(self, server_name: str, mcp_tool_name: str, arguments: dict[str, Any]) -> str:
         """
@@ -551,23 +1128,170 @@ class MCPManager:
         except TimeoutError:
             return f"Error: MCP tool '{mcp_tool_name}' timed out after {timeout}s"
         except Exception as exc:
+            exc_type = type(exc).__name__
+            exc_msg = str(exc) or "(no details)"
             log.error(
-                "MCP tool call '%s' on server '%s' failed: %s", mcp_tool_name, server_name, exc
+                "MCP tool call '%s' on server '%s' failed: %s: %s",
+                mcp_tool_name,
+                server_name,
+                exc_type,
+                exc_msg,
+                exc_info=True,
             )
-            return f"Error: {exc}"
+            # Auto-reconnect on connection-layer failures and retry once.
+            if _is_connection_error(exc):
+                log.info(
+                    "MCP: connection error on server '%s' — attempting auto-reconnect",
+                    server_name,
+                )
+                try:
+                    self._reconnect_server(server_name)
+                    # Refresh conn reference after reconnect.
+                    new_conn = self._connections.get(server_name)
+                    if new_conn is not None:
+                        return self._run(
+                            new_conn.call_tool(mcp_tool_name, arguments), timeout=timeout
+                        )
+                except Exception as reconnect_exc:
+                    log.error(
+                        "MCP: auto-reconnect for server '%s' failed: %s",
+                        server_name,
+                        reconnect_exc,
+                    )
+            return f"Error: {exc_type}: {exc_msg}"
 
     def close_all(self) -> None:
         """Close all MCP connections and stop the background event loop."""
+        import io
+        import sys
+
         log = get_logger()
-        for name, conn in list(self._connections.items()):
+        # Set shutdown state under the loop lock BEFORE any teardown so a
+        # concurrent _ensure_loop() cannot race in and create a zombie loop.
+        with self._loop_lock:
+            self._shutting_down = True
+        # The MCP SSE library prints "Error in post_writer" + a full traceback
+        # to sys.stderr when its background task hits a shutdown race.  Capture
+        # that output and redirect it to the debug log so users never see it.
+        _stderr_buf = io.StringIO()
+        sys.stderr = _stderr_buf
+        try:
+            self._close_all_inner(log)
+        finally:
+            # Do NOT restore sys.stderr here. The post_writer background task
+            # fires async DNS resolution after _close_all_inner() returns, so
+            # restoring stderr before that task completes lets the traceback
+            # escape to the terminal. The process is always shutting down at
+            # this call site, so leaving stderr captured is safe.
+            _captured = _stderr_buf.getvalue().strip()
+            if _captured:
+                log.debug("MCP: suppressed shutdown stderr output:\n%s", _captured)
+
+    def _close_all_inner(self, log: Any) -> None:
+        # Cancel the heartbeat task before closing connections so it doesn't
+        # attempt reconnects on connections we are intentionally closing.
+        self.tools_ready.clear()
+        task = self._heartbeat_task
+        if task is not None and not task.done() and self._loop is not None:
+
+            async def _cancel_heartbeat() -> None:
+                task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):
+                    pass
+
             try:
-                self._run(conn.close(), timeout=10)
+                asyncio.run_coroutine_threadsafe(_cancel_heartbeat(), self._loop).result(timeout=5)
             except Exception as exc:
-                log.warning("MCP: error closing connection '%s': %s", name, exc)
-        self._connections.clear()
-        self._tool_server_map.clear()
+                log.debug("MCP: error cancelling heartbeat task: %s", exc)
+        self._heartbeat_task = None
 
         if self._loop is not None and not self._loop.is_closed():
+            # Cancel all pending tasks before stopping so that background
+            # coroutines like the MCP SSE post_writer do not attempt network
+            # I/O after the loop is stopped (→ RuntimeError: cannot schedule
+            # new futures after shutdown).
+            async def _cancel_all() -> None:
+                # Close connection transports first while the loop is still alive.
+                # This prevents SSE post_writer cleanup from attempting DNS/executor
+                # work after loop shutdown (#504).
+                for name, conn in list(self._connections.items()):
+                    exit_stack = getattr(conn, "_exit_stack", None)
+                    if exit_stack is None:
+                        continue
+                    closed_here = False
+                    try:
+                        await exit_stack.aclose()
+                        closed_here = True
+                    except RuntimeError as exc:
+                        if "cancel scope" in str(exc):
+                            log.debug(
+                                "MCP: connection '%s' pre-close hit anyio task boundary: %s",
+                                name,
+                                exc,
+                            )
+                        else:
+                            log.warning("MCP: error pre-closing connection '%s': %s", name, exc)
+                    except Exception as exc:
+                        log.warning("MCP: error pre-closing connection '%s': %s", name, exc)
+                    finally:
+                        if closed_here:
+                            conn._exit_stack = None
+                            conn._session = None
+
+                # Exclude ourselves to avoid self-cancellation.
+                #
+                # Python 3.13 changed Task.cancel() to propagate recursively
+                # into nested child tasks (_GatheringFuture).  With 3+ MCP SSE
+                # servers the anyio/httpx/sse_client task hierarchy easily
+                # exceeds 1000 frames.  The RecursionError fires in an asyncio
+                # event-loop callback (_asyncio.TaskStepMethWrapper), NOT in
+                # this coroutine, so try/except alone cannot catch it.
+                #
+                # Fix: (1) temporarily raise sys.setrecursionlimit so the chain
+                # completes; (2) pass msg=None to Task.cancel() which skips the
+                # recursive child-propagation path in Python 3.13.
+                import sys
+
+                current = asyncio.current_task()
+                tasks = [t for t in asyncio.all_tasks() if not t.done() and t is not current]
+                if not tasks:
+                    return
+                old_limit = sys.getrecursionlimit()
+                sys.setrecursionlimit(max(old_limit, 10_000))
+                try:
+                    for t in tasks:
+                        try:
+                            t.cancel(msg=None)  # msg=None skips child propagation in 3.13
+                        except RecursionError:
+                            pass
+                    try:
+                        await asyncio.gather(*tasks, return_exceptions=True)
+                    except RecursionError:
+                        pass
+                finally:
+                    sys.setrecursionlimit(old_limit)
+
+            try:
+                future = asyncio.run_coroutine_threadsafe(_cancel_all(), self._loop)
+                future.result(timeout=5)
+            except Exception as exc:
+                log.debug("MCP: error cancelling pending tasks during shutdown: %s", exc)
+
+            # Close connections AFTER background tasks are cancelled/awaited so
+            # the SSE post_writer task does not write to an already-closed connection.
+            for name, conn in list(self._connections.items()):
+                if getattr(conn, "_exit_stack", None) is None:
+                    continue
+                try:
+                    future = asyncio.run_coroutine_threadsafe(conn.close(), self._loop)
+                    future.result(timeout=10)
+                except Exception as exc:
+                    log.warning("MCP: error closing connection '%s': %s", name, exc)
+            self._connections.clear()
+            self._tool_server_map.clear()
+
             self._loop.call_soon_threadsafe(self._loop.stop)
 
         if self._thread is not None:
@@ -579,14 +1303,19 @@ class MCPManager:
                 )
             self._thread = None
 
+        # Close the loop after the thread has stopped to release fd resources.
         if self._loop is not None and not self._loop.is_closed():
-            self._loop.close()
+            try:
+                self._loop.close()
+            except Exception as exc:
+                get_logger().debug("MCP: error closing event loop: %s", exc)
         self._loop = None
 
     def restart(
         self,
         server_name: str | None = None,
         builtin_tool_names: set[str] | None = None,
+        timeout: float = 5.0,
     ) -> dict[str, Any]:
         """
         Reconnect one or all MCP servers and return rebuilt LangChain tools.
@@ -595,57 +1324,73 @@ class MCPManager:
             server_name: If given, reconnect only this server. Otherwise restart all.
             builtin_tool_names: Optional set of built-in (non-MCP) tool names to
                 include in collision detection when rebuilding tools.
+            timeout: Overall timeout in seconds for the entire restart operation.
 
         Returns:
             Dict mapping tool name to LangChain StructuredTool for every tool
             available on the restarted servers.
         """
         log = get_logger()
-        if server_name is not None:
-            targets = [server_name] if server_name in self._configs else []
-            if not targets:
-                log.warning("MCP: cannot restart unknown server '%s'", server_name)
-                return {}
-        else:
-            targets = list(self._configs.keys())
 
-        for name in targets:
-            # Purge stale tool-server mappings for this server
-            for key in [k for k, v in self._tool_server_map.items() if v == name]:
-                del self._tool_server_map[key]
-            old_conn = self._connections.pop(name, None)
-            if old_conn is not None:
+        async def _do_restart() -> dict[str, Any]:
+            """Inner async function to run restart with overall timeout."""
+            if server_name is not None:
+                targets = [server_name] if server_name in self._configs else []
+                if not targets:
+                    log.warning("MCP: cannot restart unknown server '%s'", server_name)
+                    return {}
+            else:
+                targets = list(self._configs.keys())
+
+            self.tools_ready.clear()
+            for name in targets:
+                # Purge stale tool-server mappings for this server
+                for key in [k for k, v in self._tool_server_map.items() if v == name]:
+                    del self._tool_server_map[key]
+                old_conn = self._connections.pop(name, None)
+                if old_conn is not None:
+                    try:
+                        self._run(old_conn.close(), timeout=10)
+                    except Exception as exc:
+                        log.warning("MCP: error closing '%s' during restart: %s", name, exc)
+
+                cfg = self._configs[name]
+                new_conn = MCPConnection(cfg)
                 try:
-                    self._run(old_conn.close(), timeout=10)
+                    self._run(new_conn.connect(), timeout=cfg.timeout)
+                    self._connections[name] = new_conn
+                    log.info("MCP: reconnected server '%s' (%d tools)", name, len(new_conn.tools))
                 except Exception as exc:
-                    log.warning("MCP: error closing '%s' during restart: %s", name, exc)
+                    log.warning("MCP: restart of server '%s' failed: %s", name, exc)
 
-            cfg = self._configs[name]
-            new_conn = MCPConnection(cfg)
-            try:
-                self._run(new_conn.connect(), timeout=cfg.timeout)
-                self._connections[name] = new_conn
-                log.info("MCP: reconnected server '%s' (%d tools)", name, len(new_conn.tools))
-            except Exception as exc:
-                log.warning("MCP: restart of server '%s' failed: %s", name, exc)
+            # Collect tool names from servers NOT being restarted
+            known_tool_names: set[str] = set()
+            for tool_name_key, srv in self._tool_server_map.items():
+                if srv not in targets:
+                    known_tool_names.add(tool_name_key)
 
-        # Collect tool names from servers NOT being restarted
-        known_tool_names: set[str] = set()
-        for tool_name_key, srv in self._tool_server_map.items():
-            if srv not in targets:
-                known_tool_names.add(tool_name_key)
+            new_tools: dict[str, Any] = {}
+            for name in targets:
+                if name in self._connections:
+                    server_tools = self.get_langchain_tools(
+                        server_name=name,
+                        builtin_tool_names=builtin_tool_names,
+                        known_tool_names=known_tool_names,
+                    )
+                    known_tool_names |= set(server_tools)
+                    new_tools.update(server_tools)
+            self.tools_ready.set()
+            return new_tools
 
-        new_tools: dict[str, Any] = {}
-        for name in targets:
-            if name in self._connections:
-                server_tools = self.get_langchain_tools(
-                    server_name=name,
-                    builtin_tool_names=builtin_tool_names,
-                    known_tool_names=known_tool_names,
-                )
-                known_tool_names |= set(server_tools)
-                new_tools.update(server_tools)
-        return new_tools
+        # Run with overall timeout to prevent hangs
+        try:
+            future = asyncio.run_coroutine_threadsafe(
+                asyncio.wait_for(_do_restart(), timeout=timeout), self._loop
+            )
+            return future.result(timeout=timeout + 1.0)  # Slightly more than timeout
+        except (TimeoutError, concurrent.futures.TimeoutError):
+            log.error("MCP: restart operation timed out after %.1f seconds", timeout)
+            return {}
 
     def get_langchain_tools(
         self,

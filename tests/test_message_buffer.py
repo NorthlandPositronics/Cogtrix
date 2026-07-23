@@ -236,6 +236,18 @@ class TestMessageBuffer:
         ch.name = "telegram"
         return ch
 
+    @staticmethod
+    def _wait_for_submit(executor: MagicMock, count: int = 1, timeout: float = 2.0) -> None:
+        """Poll until *executor.submit* has been called at least *count* times."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if executor.submit.call_count >= count:
+                return
+            time.sleep(0.01)
+        raise TimeoutError(
+            f"executor.submit called {executor.submit.call_count} times, expected {count}"
+        )
+
     def test_single_message_dispatched(self):
         """A single message is dispatched after the debounce window expires."""
         buf, handler, executor = self._make_buffer(debounce=0.1)
@@ -243,7 +255,7 @@ class TestMessageBuffer:
         msg = _make_msg()
 
         buf.add(msg, ch)
-        time.sleep(0.25)
+        self._wait_for_submit(executor, count=1)
 
         executor.submit.assert_called_once()
         _fn, dispatched_msgs, dispatched_ch = executor.submit.call_args[0]
@@ -261,7 +273,7 @@ class TestMessageBuffer:
         buf.add(msg1, ch)
         buf.add(msg2, ch)
         buf.add(msg3, ch)
-        time.sleep(0.4)
+        self._wait_for_submit(executor, count=1)
 
         assert executor.submit.call_count == 1
 
@@ -276,7 +288,7 @@ class TestMessageBuffer:
         buf.add(msg1, ch)
         buf.add(msg2, ch)
         buf.add(msg3, ch)
-        time.sleep(0.4)
+        self._wait_for_submit(executor, count=1)
 
         _fn, dispatched_msgs, _ch = executor.submit.call_args[0]
         assert dispatched_msgs == [msg1, msg2, msg3]
@@ -290,7 +302,7 @@ class TestMessageBuffer:
 
         buf.add(msg_a, ch)
         buf.add(msg_b, ch)
-        time.sleep(0.3)
+        self._wait_for_submit(executor, count=2)
 
         assert executor.submit.call_count == 2
 
@@ -303,7 +315,7 @@ class TestMessageBuffer:
 
         buf.add(msg_a, ch)
         buf.add(msg_b, ch)
-        time.sleep(0.3)
+        self._wait_for_submit(executor, count=2)
 
         all_batches = [c[0][1] for c in executor.submit.call_args_list]
         assert [msg_a] in all_batches
@@ -346,11 +358,11 @@ class TestMessageBuffer:
         buf.add(_make_msg(text="first"), ch)
         time.sleep(0.1)
         buf.add(_make_msg(text="second"), ch)
-        # Check before the reset timer fires
-        time.sleep(0.1)
+        # Check before the reset timer fires (must still be 0)
+        time.sleep(0.05)
         assert executor.submit.call_count == 0
         # Now wait for the reset timer to complete
-        time.sleep(0.2)
+        self._wait_for_submit(executor, count=1)
         assert executor.submit.call_count == 1
 
     def test_submit_uses_handle_batch_method(self):
@@ -359,7 +371,7 @@ class TestMessageBuffer:
         ch = self._make_channel()
 
         buf.add(_make_msg(), ch)
-        time.sleep(0.25)
+        self._wait_for_submit(executor, count=1)
 
         fn_arg = executor.submit.call_args[0][0]
         assert fn_arg == handler.handle_batch
@@ -1550,6 +1562,18 @@ class TestFlushAllTimerRace:
     that fires normally.
     """
 
+    @staticmethod
+    def _wait_for_submit(executor: MagicMock, count: int = 1, timeout: float = 2.0) -> None:
+        """Poll until *executor.submit* has been called at least *count* times."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if executor.submit.call_count >= count:
+                return
+            time.sleep(0.01)
+        raise TimeoutError(
+            f"executor.submit called {executor.submit.call_count} times, expected {count}"
+        )
+
     def _make_buf_msg(self, chat_id: str = "chat-1") -> IncomingMessage:
         return IncomingMessage(
             channel="telegram",
@@ -1589,7 +1613,7 @@ class TestFlushAllTimerRace:
 
         # Add a new message after flush_all — its timer should fire independently
         buf.add(msg2, channel)
-        time.sleep(0.2)
+        self._wait_for_submit(executor, count=2)
 
         assert executor.submit.call_count >= 2, (
             f"Expected at least 2 executor.submit calls, got {executor.submit.call_count}. "
@@ -1612,7 +1636,8 @@ class TestFlushAllTimerRace:
             buf.add(self._make_buf_msg("chat-B"), channel)
 
         buf.flush_all()
-        time.sleep(0.3)
+        # Give any orphaned timers a moment to fire, then assert no double-dispatch.
+        time.sleep(0.1)
 
         assert executor.submit.call_count == 1, (
             f"Expected exactly 1 executor.submit call, got {executor.submit.call_count}. "

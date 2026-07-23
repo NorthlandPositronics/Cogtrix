@@ -46,6 +46,7 @@ os.environ.setdefault("COGTRIX_DB_URL", "sqlite+aiosqlite:///:memory:")
 from src.api.auth import validate_api_key  # noqa: E402
 from src.api.db import models as _models  # noqa: E402, F401
 from src.api.db.engine import Base  # noqa: E402
+from src.api.db.models import ApiKey  # noqa: E402
 from src.api.db.repositories.api_keys import ApiKeyRepository  # noqa: E402
 from src.api.db.repositories.users import UserRepository  # noqa: E402
 
@@ -76,6 +77,7 @@ def test_app():
         from src.api.db.engine import get_db
 
         app = create_app()
+        app.state.test_session_factory = test_session_factory
 
         async def _override_get_db():
             async with test_session_factory() as session:
@@ -111,6 +113,16 @@ def _register(client: TestClient, username: str, email: str, password: str = "Pa
         json={"username": username, "email": email, "password": password},
     )
     assert resp.status_code == 201, resp.text
+    data = resp.json()["data"]
+    return data["access_token"], data["refresh_token"]
+
+
+def _login(client: TestClient, username: str, password: str = "Password1!"):
+    resp = client.post(
+        "/api/v1/auth/login",
+        json={"username": username, "password": password},
+    )
+    assert resp.status_code == 200, resp.text
     data = resp.json()["data"]
     return data["access_token"], data["refresh_token"]
 
@@ -172,6 +184,21 @@ class TestTokenExpiry:
         assert resp.status_code == 401
 
 
+class TestJwtSecretSnapshot:
+    """JWT auth should use the startup snapshot, not the live environment."""
+
+    def test_secret_remains_valid_after_env_is_cleared(self, client: TestClient) -> None:
+        from src.api.auth import _decode_jwt, create_access_token
+
+        user_id = str(uuid.uuid4())
+        with patch.dict(os.environ, {"COGTRIX_JWT_SECRET": ""}, clear=False):
+            token = create_access_token(user_id=user_id, role="user")
+
+        claims = _decode_jwt(token)
+        assert claims["sub"] == user_id
+        assert claims["role"] == "user"
+
+
 # ---------------------------------------------------------------------------
 # 2. TestRefreshTokenSecurity
 # ---------------------------------------------------------------------------
@@ -223,6 +250,52 @@ class TestRefreshTokenSecurity:
         assert resp.status_code == 401
 
 
+class TestAuthRateLimits:
+    """Auth-sensitive endpoints should be rate-limited more aggressively."""
+
+    def test_login_is_rate_limited_after_five_attempts(self, client: TestClient) -> None:
+        payload = {"username": "missing-user", "password": "Password1!"}
+        for _ in range(5):
+            resp = client.post("/api/v1/auth/login", json=payload)
+            assert resp.status_code == 401, resp.text
+
+        resp = client.post("/api/v1/auth/login", json=payload)
+        assert resp.status_code == 429, resp.text
+
+    def test_refresh_is_rate_limited_after_five_requests(self, client: TestClient) -> None:
+        _, refresh = _register(client, "rl_refresh", "rl_refresh@test.com")
+
+        for _ in range(5):
+            resp = client.post("/api/v1/auth/refresh", json={"refresh_token": refresh})
+            assert resp.status_code == 200, resp.text
+            refresh = resp.json()["data"]["refresh_token"]
+
+        resp = client.post("/api/v1/auth/refresh", json={"refresh_token": refresh})
+        assert resp.status_code == 429, resp.text
+
+    def test_register_is_rate_limited_after_three_attempts(self, client: TestClient) -> None:
+        for i in range(3):
+            resp = client.post(
+                "/api/v1/auth/register",
+                json={
+                    "username": f"rl_reg{i}",
+                    "email": f"rl_reg{i}@test.com",
+                    "password": "Password1!",
+                },
+            )
+            assert resp.status_code == 201, resp.text
+
+        resp = client.post(
+            "/api/v1/auth/register",
+            json={
+                "username": "rl_reg3",
+                "email": "rl_reg3@test.com",
+                "password": "Password1!",
+            },
+        )
+        assert resp.status_code == 429, resp.text
+
+
 # ---------------------------------------------------------------------------
 # 3. TestApiKeyAuth
 # ---------------------------------------------------------------------------
@@ -243,8 +316,8 @@ class TestApiKeyAuth:
         assert data["key"].startswith("cgx_live_")
         assert data["key_prefix"] == data["key"][:12]
 
-    def test_api_key_used_as_bearer_jwt_returns_401(self, client: TestClient) -> None:
-        """An API key is not a valid JWT and must be rejected by get_current_user."""
+    def test_api_key_used_as_bearer_returns_profile(self, client: TestClient) -> None:
+        """A live API key should authenticate through get_current_user."""
         access, _ = _register(client, "ak_bearer", "ak_bearer@test.com")
         create_resp = client.post(
             "/api/v1/auth/api-keys",
@@ -252,9 +325,12 @@ class TestApiKeyAuth:
             headers={"Authorization": f"Bearer {access}"},
         )
         raw_key = create_resp.json()["data"]["key"]
-        # Using the API key where a JWT is expected must fail.
         resp = client.get("/api/v1/auth/me", headers={"Authorization": f"Bearer {raw_key}"})
-        assert resp.status_code == 401
+        assert resp.status_code == 200
+        data = resp.json()["data"]
+        assert data["username"] == "ak_bearer"
+        assert data["email"] == "ak_bearer@test.com"
+        assert data["role"] == "admin"
 
     def test_invalid_prefix_api_key_as_bearer_returns_401(self, client: TestClient) -> None:
         bad_key = "invalid_prefix_" + secrets.token_urlsafe(32)
@@ -342,6 +418,154 @@ class TestApiKeyAuth:
 
         _asyncio.run(_run())
 
+    def test_api_key_debounce_skips_immediate_revalidation(self, test_app) -> None:
+        """validate_api_key debounces last_used_at writes within 60 s."""
+        import asyncio as _asyncio
+
+        from src.api.auth import _API_KEY_LAST_USED
+
+        engine = create_async_engine(
+            "sqlite+aiosqlite:///:memory:",
+            echo=False,
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+
+        async def _run():
+            async with engine.begin() as conn:
+                await conn.run_sync(Base.metadata.create_all)
+            session_factory = async_sessionmaker(engine, expire_on_commit=False)
+            async with session_factory() as db:
+                user_repo = UserRepository(db)
+                user = await user_repo.create(
+                    user_id=str(uuid.uuid4()),
+                    username="ak_debounce",
+                    email="ak_debounce@test.com",
+                    password_hash="x",
+                    role="user",
+                )
+                await db.commit()
+
+                raw_key = "cgx_live_" + secrets.token_urlsafe(32)
+                from src.api.auth import _hash_api_key
+
+                key_hash = _hash_api_key(raw_key)
+                key_repo = ApiKeyRepository(db)
+                key_record = await key_repo.create(
+                    key_id=str(uuid.uuid4()),
+                    user_id=user.id,
+                    key_hash=key_hash,
+                    key_prefix=raw_key[:12],
+                    label="test",
+                )
+                await db.commit()
+
+                # First call updates last_used_at.
+                await validate_api_key(raw_key, db)
+                await db.commit()
+                first = await key_repo.get_by_id(key_record.id)
+                assert first is not None
+                assert first.last_used_at is not None
+                first_ts = first.last_used_at
+
+                # Reset last_used_at in DB to detect whether second call writes.
+                from sqlalchemy import update
+
+                await db.execute(
+                    update(ApiKey).where(ApiKey.id == key_record.id).values(last_used_at=None)
+                )
+                await db.commit()
+
+                # Second call within debounce window should NOT write.
+                await validate_api_key(raw_key, db)
+                await db.commit()
+                second = await key_repo.get_by_id(key_record.id)
+                assert second is not None
+                assert second.last_used_at is None
+
+                # Clear debounce cache and call again — should write.
+                _API_KEY_LAST_USED.pop(key_record.id, None)
+                await validate_api_key(raw_key, db)
+                await db.commit()
+                third = await key_repo.get_by_id(key_record.id)
+                assert third is not None
+                assert third.last_used_at is not None
+                assert third.last_used_at > first_ts
+
+            await engine.dispose()
+
+        _asyncio.run(_run())
+
+    def test_validate_api_key_rejects_inactive_user(self, client: TestClient) -> None:
+        import asyncio as _asyncio
+
+        from fastapi import HTTPException
+
+        async def _run():
+            factory = client.app.state.test_session_factory
+            async with factory() as db:
+                user_repo = UserRepository(db)
+                user = await user_repo.create(
+                    user_id=str(uuid.uuid4()),
+                    username="ak_inactive",
+                    email="ak_inactive@test.com",
+                    password_hash="x",
+                    role="user",
+                )
+                await db.commit()
+
+                raw_key = "cgx_live_" + secrets.token_urlsafe(32)
+                from src.api.auth import _hash_api_key
+
+                key_hash = _hash_api_key(raw_key)
+                key_repo = ApiKeyRepository(db)
+                await key_repo.create(
+                    key_id=str(uuid.uuid4()),
+                    user_id=user.id,
+                    key_hash=key_hash,
+                    key_prefix=raw_key[:12],
+                    label="inactive",
+                )
+                await db.commit()
+
+                await user_repo.set_active(user.id, False)
+                await db.commit()
+
+                with pytest.raises(HTTPException) as exc_info:
+                    await validate_api_key(raw_key, db)
+                assert exc_info.value.status_code == 401
+
+        _asyncio.run(_run())
+
+    def test_inactive_user_jwt_is_rejected(self, client: TestClient) -> None:
+        import asyncio as _asyncio
+
+        async def _run() -> tuple[str, str]:
+            factory = client.app.state.test_session_factory
+            async with factory() as db:
+                user_repo = UserRepository(db)
+                user = await user_repo.create(
+                    user_id=str(uuid.uuid4()),
+                    username="jwt_inactive",
+                    email="jwt_inactive@test.com",
+                    password_hash="x",
+                    role="user",
+                )
+                await db.commit()
+                await user_repo.set_active(user.id, False)
+                await db.commit()
+                return user.id, user.role
+
+        user_id, role = _asyncio.run(_run())
+
+        from src.api.auth import create_access_token
+
+        with patch.dict(os.environ, {"COGTRIX_JWT_SECRET": _TEST_JWT_SECRET}):
+            token = create_access_token(user_id, role)
+
+        resp = client.get("/api/v1/auth/me", headers={"Authorization": f"Bearer {token}"})
+        assert resp.status_code == 401
+
     def test_admin_can_revoke_any_users_key(self, client: TestClient) -> None:
         # Admin is the first registered user.
         admin_access, _ = _register(client, "ak_admin", "ak_admin@test.com")
@@ -396,21 +620,57 @@ class TestLogoutSecurity:
         resp = client.post("/api/v1/auth/logout")
         assert resp.status_code == 401
 
-    def test_logout_revokes_refresh_token(self, client: TestClient) -> None:
-        access, refresh = _register(client, "lo_revoker", "lo_revoker@test.com")
-        resp = client.post("/api/v1/auth/logout", headers={"Authorization": f"Bearer {access}"})
+    def test_logout_revokes_only_specified_refresh_token(self, client: TestClient) -> None:
+        access1, refresh1 = _register(client, "lo_revoker", "lo_revoker@test.com")
+        access2, refresh2 = _login(client, "lo_revoker")
+
+        resp = client.post(
+            "/api/v1/auth/logout",
+            json={"refresh_token": refresh1},
+            headers={"Authorization": f"Bearer {access1}"},
+        )
         assert resp.status_code == 200
-        # Refresh token is now revoked.
-        resp2 = client.post("/api/v1/auth/refresh", json={"refresh_token": refresh})
-        assert resp2.status_code == 401
+        revoked_resp = client.post("/api/v1/auth/refresh", json={"refresh_token": refresh1})
+        assert revoked_resp.status_code == 401
+
+        still_valid_resp = client.post("/api/v1/auth/refresh", json={"refresh_token": refresh2})
+        assert still_valid_resp.status_code == 200
 
     def test_revoked_refresh_token_rejected_after_logout(self, client: TestClient) -> None:
         """Verify the revoked token returns UNAUTHORIZED (not 200 or 422)."""
         access, refresh = _register(client, "lo_postlogout", "lo_postlogout@test.com")
-        client.post("/api/v1/auth/logout", headers={"Authorization": f"Bearer {access}"})
+        client.post(
+            "/api/v1/auth/logout",
+            json={"refresh_token": refresh},
+            headers={"Authorization": f"Bearer {access}"},
+        )
         resp = client.post("/api/v1/auth/refresh", json={"refresh_token": refresh})
         assert resp.status_code == 401
         assert resp.json()["error"]["code"] in ("UNAUTHORIZED", "TOKEN_EXPIRED")
+
+    def test_logout_all_requires_password_and_revokes_all_tokens(self, client: TestClient) -> None:
+        access1, refresh1 = _register(client, "lo_logout_all", "lo_logout_all@test.com")
+        access2, refresh2 = _login(client, "lo_logout_all")
+
+        wrong = client.post(
+            "/api/v1/auth/logout-all",
+            json={"password": "wrong-pass"},
+            headers={"Authorization": f"Bearer {access1}"},
+        )
+        assert wrong.status_code == 401
+        assert wrong.json()["error"]["code"] == "UNAUTHORIZED"
+
+        resp = client.post(
+            "/api/v1/auth/logout-all",
+            json={"password": "Password1!"},
+            headers={"Authorization": f"Bearer {access2}"},
+        )
+        assert resp.status_code == 200
+
+        resp1 = client.post("/api/v1/auth/refresh", json={"refresh_token": refresh1})
+        resp2 = client.post("/api/v1/auth/refresh", json={"refresh_token": refresh2})
+        assert resp1.status_code == 401
+        assert resp2.status_code == 401
 
 
 # ---------------------------------------------------------------------------
@@ -514,8 +774,10 @@ class TestOwnershipEnforcement:
             f"/api/v1/sessions/{session_id}",
             headers={"Authorization": f"Bearer {admin_access}"},
         )
-        # Admin should get 200 (or 404 if session registry is not initialized, not 403)
-        assert resp.status_code != 403
+        # Admin should get 200 with the session data
+        assert resp.status_code == 200
+        data = resp.json()["data"]
+        assert data["id"] == session_id
 
 
 # ---------------------------------------------------------------------------
@@ -549,8 +811,10 @@ class TestAdminOnlyEndpoints:
             json={"debug": False},
             headers={"Authorization": f"Bearer {admin_access}"},
         )
-        # Admin may get 200 or 500 (config not available in test), never 403
-        assert resp.status_code != 403
+        # Admin should get 200 with the updated config snapshot
+        assert resp.status_code == 200
+        data = resp.json()["data"]
+        assert "debug" in data
 
     def test_reload_config_non_admin_returns_403(self, client: TestClient) -> None:
         _, user_access = self._admin_and_user_tokens(client, "rc")
@@ -567,7 +831,10 @@ class TestAdminOnlyEndpoints:
             "/api/v1/config/reload",
             headers={"Authorization": f"Bearer {admin_access}"},
         )
-        assert resp.status_code != 403
+        # Admin should get 200 with reload confirmation
+        assert resp.status_code == 200
+        data = resp.json()["data"]
+        assert data["reloaded"] is True
 
     def test_system_debug_non_admin_returns_403(self, client: TestClient) -> None:
         _, user_access = self._admin_and_user_tokens(client, "sd")

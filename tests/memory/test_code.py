@@ -46,6 +46,7 @@ class TestCodeDevelopmentMemoryManager:
         assert manager._mode_config["track_errors"] is True
         assert manager._mode_config["max_errors"] == 5
         assert manager._mode_config["max_files"] == 20
+        assert manager._mode_config["summary_max_age_hours"] is None
 
     def test_custom_config(self):
         """Test custom configuration overrides defaults."""

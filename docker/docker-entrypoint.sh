@@ -13,7 +13,9 @@ mkdir -p \
     "$DATA_DIR/vectordb" \
     "$DATA_DIR/api/uploads" \
     "$DATA_DIR/assistant" \
-    "$DATA_DIR/workflows"
+    "$DATA_DIR/workflows" \
+    "$DATA_DIR/output" \
+    "$DATA_DIR/log"
 
 # ── API server mode ──────────────────────────────────────────
 # Invoked as:
@@ -24,16 +26,18 @@ if [ "${1}" = "api" ] || [ "${1}" = "--api" ]; then
     shift
 
     # Run Alembic migrations before starting the server.
-    # A non-zero exit here is treated as a warning so an already-migrated DB
-    # (which returns exit 0) doesn't block startup, and partial failures are
-    # surfaced on stderr for visibility.
-    if ! alembic upgrade head 2>&1; then
-        echo "Warning: Alembic migration step returned non-zero (tables may already exist)" >&2
-    fi
+    # alembic upgrade head returns 0 for both "applied" and "already up to date",
+    # so a non-zero exit always indicates a genuine failure (locked table, schema
+    # conflict, missing revision). Let it propagate and kill the container rather
+    # than starting uvicorn against a potentially broken schema.
+    echo "Running database migrations..."
+    alembic upgrade head
+    echo "Migrations complete."
 
     # Mark API mode so the HEALTHCHECK can skip the HTTP probe in CLI mode
     # (BUG-236). The sentinel is created before exec so it persists across the
     # process replacement and is visible to subsequent `docker exec` probes.
+    mkdir -p /run/cogtrix
     touch /run/cogtrix/api-mode
 
     exec python -m src.api "$@"
@@ -55,6 +59,8 @@ fi
 _cogtrix_has_config() {
     [ -f "/app/.cogtrix.yaml" ] || [ -f "/app/.cogtrix.yml" ] || [ -f "/app/.cogtrix.json" ] || \
     [ -f "${HOME}/.cogtrix.yaml" ] || [ -f "${HOME}/.cogtrix.yml" ] || [ -f "${HOME}/.cogtrix.json" ] || \
+    [ -f "${XDG_CONFIG_HOME:-${HOME}/.config}/cogtrix/.cogtrix.yaml" ] || \
+    [ -f "${XDG_CONFIG_HOME:-${HOME}/.config}/cogtrix/.cogtrix.yml" ] || \
     [ -n "${COGTRIX_CONFIG_FILE:-}" ]
 }
 if [ $# -eq 0 ] && ! _cogtrix_has_config && [ -t 0 ]; then

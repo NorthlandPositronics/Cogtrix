@@ -354,3 +354,63 @@ def test_unsupported_style_returns_error(configured, source_file, tmp_path, monk
     result = generate_tests(str(source_file), style="unittest")
     assert result.startswith("Error:")
     assert "unsupported style" in result
+
+
+# ---------------------------------------------------------------------------
+# 15. LLM timeout returns error within bounded time
+# ---------------------------------------------------------------------------
+
+
+def test_llm_invoke_timeout_returns_error(configured, source_file, tmp_path, monkeypatch):
+    import threading
+    import time
+
+    import src.tools.generate_tests as mod
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "tests").mkdir(parents=True, exist_ok=True)
+
+    mock_llm = MagicMock()
+    stop_event = threading.Event()
+
+    def _never_return(prompt):
+        stop_event.wait(timeout=60)
+
+    mock_llm.invoke.side_effect = _never_return
+
+    with (
+        patch("src.tools.generate_tests.create_chat_model_from_configs", return_value=mock_llm),
+        patch.object(mod, "_GENERATE_TESTS_LLM_TIMEOUT_SECONDS", 0.1),
+    ):
+        from src.tools.generate_tests import generate_tests
+
+        start = time.monotonic()
+        result = generate_tests(str(source_file))
+        elapsed = time.monotonic() - start
+
+    stop_event.set()
+
+    assert elapsed < 5, f"Expected return within 5s, took {elapsed}s"
+    assert result.startswith("Error:")
+    assert "timed out" in result.lower()
+
+
+# ---------------------------------------------------------------------------
+# 16. UserCancelledRun is re-raised, not swallowed
+# ---------------------------------------------------------------------------
+
+
+def test_user_cancelled_run_is_raised(configured, source_file, tmp_path, monkeypatch):
+    from src.agent.safety import UserCancelledRun
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "tests").mkdir(parents=True, exist_ok=True)
+
+    mock_llm = MagicMock()
+    mock_llm.invoke.side_effect = UserCancelledRun("user cancelled")
+
+    with patch("src.tools.generate_tests.create_chat_model_from_configs", return_value=mock_llm):
+        from src.tools.generate_tests import generate_tests
+
+        with pytest.raises(UserCancelledRun):
+            generate_tests(str(source_file))

@@ -67,11 +67,21 @@ class TestProviderConfig:
         assert mc.model == "gpt-4.1"
 
     def test_to_dict_hides_api_key(self):
-        """Test that to_dict masks the API key."""
+        """Test that to_dict masks the API key with first-3+***+last-4."""
         cfg = ProviderConfig(
             name="openai",
             type="openai",
             api_key="sk-secret-key",
+        )
+        d = cfg.to_dict()
+        assert d["api_key"] == "sk-***-key"
+
+    def test_to_dict_masks_short_api_key(self):
+        """Test that to_dict masks short API keys entirely."""
+        cfg = ProviderConfig(
+            name="openai",
+            type="openai",
+            api_key="abc",
         )
         d = cfg.to_dict()
         assert d["api_key"] == "***"
@@ -839,6 +849,17 @@ class TestBuildSystemPrompt:
         assert "reasoning" in prompt
         assert "ollama/qwen3:4b" in prompt
 
+    def test_merge_guard_included_only_for_merge_tools(self):
+        """The merge CI guard is injected only when merge tools are active."""
+        from src.agent.core import build_system_prompt
+
+        guarded = build_system_prompt(active_tool_names={"merge_pull_request"})
+        assert "Before every `merge_pull_request` call" in guarded
+        assert "get_pull_request_status" in guarded
+
+        unguarded = build_system_prompt(active_tool_names={"report_progress"})
+        assert "Before every `merge_pull_request` call" not in unguarded
+
 
 class TestContextCompressionConfig:
     """Tests for context_compression config parsing."""
@@ -898,6 +919,46 @@ class TestContextCompressionConfig:
         assert config.context_compression is True
         assert config.context_compression_model == "fast"
         assert config.context_compression_min_age == 4
+
+
+class TestContextMessageCapConfig:
+    """Tests for context_max_messages config parsing."""
+
+    def test_context_max_messages_top_level_key(self):
+        import json
+        import tempfile
+        from pathlib import Path
+
+        from src.config import Config, _apply_config_file
+
+        data = {"context_max_messages": 144}
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            json.dump(data, f)
+            config_path = f.name
+        try:
+            config = Config()
+            _apply_config_file(config, Path(config_path))
+            assert config.context_max_messages == 144
+        finally:
+            Path(config_path).unlink()
+
+    def test_context_max_tokens_top_level_key(self):
+        import json
+        import tempfile
+        from pathlib import Path
+
+        from src.config import Config, _apply_config_file
+
+        data = {"context_max_tokens": 4096}
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            json.dump(data, f)
+            config_path = f.name
+        try:
+            config = Config()
+            _apply_config_file(config, Path(config_path))
+            assert config.context_max_tokens == 4096
+        finally:
+            Path(config_path).unlink()
 
 
 class TestConfigureRagVectordbDir:

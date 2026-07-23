@@ -106,6 +106,30 @@ class TestResolveDataPath:
         with pytest.raises(ConfigError, match="Path traversal detected"):
             config.resolve_data_path("subdir/../../..")
 
+    def test_resolve_data_path_data_prefix_bypass_raises(self):
+        """Legacy 'data/' prefix with embedded '..' bypass raises early (ISSUE-799).
+
+        Before the fix, ``data/../../../etc/passwd`` would have the ``data/``
+        prefix stripped, producing ``../../../etc/passwd``, which escapes
+        the data directory.  The early raw-string ``..`` guard now catches
+        traversal *before* the legacy prefix is removed.
+        """
+        config = Config()
+        with pytest.raises(ConfigError, match="Path traversal detected"):
+            config.resolve_data_path("data/../../../etc/passwd")
+
+    def test_resolve_data_path_data_prefix_double_bypass_raises(self):
+        """Legacy 'data/' prefix with double '..' that escapes two levels."""
+        config = Config()
+        with pytest.raises(ConfigError, match="Path traversal detected"):
+            config.resolve_data_path("data/../../secret")
+
+    def test_resolve_data_path_data_prefix_single_dotdot_raises(self):
+        """Even a single '..' after 'data/' prefix is rejected early."""
+        config = Config()
+        with pytest.raises(ConfigError, match="Path traversal detected"):
+            config.resolve_data_path("data/../outside")
+
 
 class TestRAGConfigDefaults:
     def test_rag_vectordb_dir_default(self):

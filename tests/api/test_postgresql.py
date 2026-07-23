@@ -3,39 +3,18 @@
 Covers:
   - validate_connection() happy path and error formatting
   - _sanitize_url() password redaction
-  - _connect_args dialect selection (SQLite vs PG)
+  - _connect_args_for() dialect selection (SQLite vs PG)
   - Migration 0002 upgrade/downgrade behaviour per dialect
   - pyproject.toml postgresql optional dependency presence
 """
 
 from __future__ import annotations
 
-import importlib
-import os
-import sys
 import tomllib
 from pathlib import Path
-from types import ModuleType
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest  # noqa: E402
-
-
-@pytest.fixture(autouse=True)
-def _restore_engine_module():
-    """Restore src.api.db.engine in sys.modules after each test.
-
-    _reimport_engine() deletes and reimports the module with a MagicMock engine.
-    Without this cleanup, the mock leaks into all subsequent API tests in the full
-    suite, causing 'no such table' failures.
-    """
-    key = "src.api.db.engine"
-    original = sys.modules.get(key)
-    yield
-    if original is not None:
-        sys.modules[key] = original
-    else:
-        sys.modules.pop(key, None)
 
 
 def _mock_connect_ok() -> MagicMock:
@@ -55,31 +34,7 @@ def _mock_connect_fail(exc: Exception) -> MagicMock:
     return cm
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
 _PROJECT_ROOT = Path(__file__).parent.parent.parent
-
-
-def _reimport_engine(db_url: str) -> ModuleType:
-    """Re-import engine with the given COGTRIX_DB_URL, bypassing config file.
-
-    create_async_engine is mocked to avoid loading optional drivers (asyncpg)
-    that may not be installed in the dev environment.
-    """
-    for key in list(sys.modules):
-        if "api.db.engine" in key or key == "src.api.db.engine":
-            del sys.modules[key]
-
-    mock_cfg = MagicMock()
-    mock_cfg.data_dir = "data"
-
-    with patch.dict(os.environ, {"COGTRIX_DB_URL": db_url}, clear=False):
-        with patch("src.config.load_config", return_value=mock_cfg):
-            with patch("sqlalchemy.ext.asyncio.create_async_engine", return_value=MagicMock()):
-                mod = importlib.import_module("src.api.db.engine")
-    return mod
 
 
 # ---------------------------------------------------------------------------
@@ -134,9 +89,10 @@ class TestValidateConnection:
 
         cm = _mock_connect_ok()
         mock_conn = cm.__aenter__.return_value
+        mock_engine = MagicMock()
+        mock_engine.connect.return_value = cm
 
-        with patch("src.api.db.engine.engine") as mock_engine:
-            mock_engine.connect.return_value = cm
+        with patch("src.api.db.engine._get_engine", return_value=mock_engine):
             await validate_connection()
 
         mock_conn.execute.assert_called_once()
@@ -147,9 +103,10 @@ class TestValidateConnection:
         from src.api.db.engine import validate_connection
 
         cm = _mock_connect_fail(OSError("connection refused"))
+        mock_engine = MagicMock()
+        mock_engine.connect.return_value = cm
 
-        with patch("src.api.db.engine.engine") as mock_engine:
-            mock_engine.connect.return_value = cm
+        with patch("src.api.db.engine._get_engine", return_value=mock_engine):
             with pytest.raises(RuntimeError):
                 await validate_connection()
 
@@ -159,12 +116,13 @@ class TestValidateConnection:
         from src.api.db.engine import validate_connection
 
         cm = _mock_connect_fail(OSError("connection refused"))
+        mock_engine = MagicMock()
+        mock_engine.connect.return_value = cm
 
-        with patch("src.api.db.engine.engine") as mock_engine:
-            mock_engine.connect.return_value = cm
+        with patch("src.api.db.engine._get_engine", return_value=mock_engine):
             with patch(
-                "src.api.db.engine._DB_URL",
-                "postgresql+asyncpg://user:secret@localhost/cogtrix",
+                "src.api.db.engine._get_db_url",
+                return_value="postgresql+asyncpg://user:secret@localhost/cogtrix",
             ):
                 with pytest.raises(RuntimeError) as exc_info:
                     await validate_connection()
@@ -180,12 +138,13 @@ class TestValidateConnection:
         from src.api.db.engine import validate_connection
 
         cm = _mock_connect_fail(OSError("no such file or directory"))
+        mock_engine = MagicMock()
+        mock_engine.connect.return_value = cm
 
-        with patch("src.api.db.engine.engine") as mock_engine:
-            mock_engine.connect.return_value = cm
+        with patch("src.api.db.engine._get_engine", return_value=mock_engine):
             with patch(
-                "src.api.db.engine._DB_URL",
-                "sqlite+aiosqlite:///./data/api/cogtrix.db",
+                "src.api.db.engine._get_db_url",
+                return_value="sqlite+aiosqlite:///./data/api/cogtrix.db",
             ):
                 with pytest.raises(RuntimeError) as exc_info:
                     await validate_connection()
@@ -201,9 +160,10 @@ class TestValidateConnection:
 
         original = ConnectionRefusedError("port 5432 not open")
         cm = _mock_connect_fail(original)
+        mock_engine = MagicMock()
+        mock_engine.connect.return_value = cm
 
-        with patch("src.api.db.engine.engine") as mock_engine:
-            mock_engine.connect.return_value = cm
+        with patch("src.api.db.engine._get_engine", return_value=mock_engine):
             with pytest.raises(RuntimeError) as exc_info:
                 await validate_connection()
 
@@ -217,12 +177,16 @@ class TestValidateConnection:
 
 class TestConnectArgs:
     def test_sqlite_url_sets_check_same_thread(self):
-        mod = _reimport_engine("sqlite+aiosqlite:///./data/api/cogtrix.db")
-        assert mod._connect_args == {"check_same_thread": False}
+        from src.api.db.engine import _connect_args_for
+
+        assert _connect_args_for("sqlite+aiosqlite:///./data/api/cogtrix.db") == {
+            "check_same_thread": False
+        }
 
     def test_postgresql_url_has_empty_connect_args(self):
-        mod = _reimport_engine("postgresql+asyncpg://user:pw@localhost:5432/cogtrix")
-        assert mod._connect_args == {}
+        from src.api.db.engine import _connect_args_for
+
+        assert _connect_args_for("postgresql+asyncpg://user:pw@localhost:5432/cogtrix") == {}
 
 
 # ---------------------------------------------------------------------------
@@ -253,18 +217,22 @@ class TestMigration0002:
         bind.dialect.name = dialect_name
         return bind
 
-    def test_upgrade_calls_alter_column_on_sqlite(self):
-        """On SQLite both Boolean columns get server_default corrected."""
+    def test_upgrade_calls_batch_alter_on_sqlite(self):
+        """On SQLite both Boolean columns get server_default corrected via batch mode."""
         m = _load_migration_0002()
         bind = self._make_bind("sqlite")
+        batch_ctx = MagicMock()
+        batch_ctx.__enter__ = MagicMock(return_value=batch_ctx)
+        batch_ctx.__exit__ = MagicMock(return_value=False)
         with patch.object(m.op, "get_bind", return_value=bind):
-            with patch.object(m.op, "alter_column") as mock_alter:
+            with patch.object(m.op, "batch_alter_table", return_value=batch_ctx) as mock_batch:
                 m.upgrade()
 
-        assert mock_alter.call_count == 2
-        tables_patched = {c.args[0] for c in mock_alter.call_args_list}
+        assert mock_batch.call_count == 2
+        tables_patched = {c.args[0] for c in mock_batch.call_args_list}
         assert "refresh_tokens" in tables_patched
         assert "api_keys" in tables_patched
+        assert batch_ctx.alter_column.call_count == 2
 
     def test_upgrade_skips_alter_column_on_postgresql(self):
         """On PostgreSQL upgrade() is a no-op — no ALTER TABLE emitted."""

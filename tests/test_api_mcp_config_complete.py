@@ -326,7 +326,8 @@ class TestMCPRemoveServer:
         app.state.mcp_client = mcp
 
     def test_remove_existing_returns_204(self, client, tokens):
-        r = client.delete("/api/v1/mcp/servers/py_server", headers=_ah(tokens))
+        with patch("src.api.routes.mcp._persist_mcp_servers"):
+            r = client.delete("/api/v1/mcp/servers/py_server", headers=_ah(tokens))
         assert r.status_code == 204
         assert r.content == b""
 
@@ -342,6 +343,25 @@ class TestMCPRemoveServer:
     def test_no_auth_returns_401(self, client):
         r = client.delete("/api/v1/mcp/servers/py_server")
         assert r.status_code == 401
+
+    def test_remove_persist_failure_returns_503(self, client, tokens, app_engine):
+        app, _ = app_engine
+        cfg = _make_mock_config()
+        cfg.mcp_servers = {
+            "py_server": {"command": "py", "args": [], "requires_confirmation": True}
+        }
+        app.state.config = cfg
+        app.state.mcp_client = None
+
+        with patch(
+            "src.api.routes.mcp._persist_mcp_servers",
+            side_effect=RuntimeError("No config file path"),
+        ):
+            r = client.delete("/api/v1/mcp/servers/py_server", headers=_ah(tokens))
+        assert r.status_code == 503
+        assert r.json()["error"]["code"] == "SERVICE_UNAVAILABLE"
+        # In-memory state must be rolled back on failure
+        assert "py_server" in cfg.mcp_servers
 
 
 class TestMCPRestartServer:

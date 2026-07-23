@@ -14,6 +14,7 @@ from src.agent.core import (
     _estimate_msg_tokens,
     _format_model_detail,
     _format_models_table,
+    _trim_to_token_budget,
     _truncate_content,
     build_system_prompt,
     format_milestone_instructions,
@@ -276,6 +277,12 @@ class TestTruncateContent:
         text = "a" * (max_tokens * 4)  # exactly at limit
         assert _truncate_content(text, max_tokens) == text
 
+    def test_non_positive_max_tokens_returns_unchanged(self):
+        text = "hello world"
+        assert _truncate_content(text, max_tokens=0) == text
+        assert _truncate_content(text, max_tokens=-1) == text
+        assert _truncate_content(text, max_tokens=-100) == text
+
 
 # ---------------------------------------------------------------------------
 # prepare_messages_with_context
@@ -349,3 +356,89 @@ class TestPrepareMessagesWithContext:
         last = result[-1]
         assert isinstance(last, dict)
         assert last["content"] == "new input"
+
+
+# ---------------------------------------------------------------------------
+# _trim_to_token_budget — role alternation guard
+# ---------------------------------------------------------------------------
+
+
+class TestTrimToTokenBudget:
+    """Verify _trim_to_token_budget never produces a leading AIMessage."""
+
+    def _human(self, text: str):
+        from langchain_core.messages import HumanMessage
+
+        return HumanMessage(content=text)
+
+    def _ai(self, text: str):
+        from langchain_core.messages import AIMessage
+
+        return AIMessage(content=text)
+
+    def _tool(self, text: str, tool_call_id: str = "tc1"):
+        from langchain_core.messages import ToolMessage
+
+        return ToolMessage(content=text, tool_call_id=tool_call_id)
+
+    def test_leading_ai_message_is_removed(self):
+        """If trimming exposes an AIMessage at the head, drop it."""
+        msgs = [
+            self._human("prefix"),
+            self._human("h1"),
+            self._ai("a1"),
+            self._human("h2"),
+            self._ai("a2"),
+            self._human("tail"),
+        ]
+        # Budget small enough that prefix + h1 are dropped, exposing a1
+        result = _trim_to_token_budget(msgs, max_context_tokens=64)
+        # First message after any internal dropping must not be AIMessage
+        assert not isinstance(result[0], type(self._ai("")))
+
+    def test_leading_tool_message_after_ai_removal_is_also_dropped(self):
+        """Dropping an AIMessage may orphan a following ToolMessage — remove both."""
+        msgs = [
+            self._human("prefix"),
+            self._human("h1"),
+            self._ai("a1"),
+            self._tool("t1"),
+            self._human("h2"),
+            self._ai("a2"),
+            self._human("tail"),
+        ]
+        result = _trim_to_token_budget(msgs, max_context_tokens=64)
+        assert not isinstance(result[0], type(self._ai("")))
+        assert not isinstance(result[0], type(self._tool("")))
+
+    def test_valid_history_unchanged_when_under_budget(self):
+        """When everything fits, the message order is preserved."""
+        msgs = [
+            self._human("h1"),
+            self._ai("a1"),
+            self._human("h2"),
+            self._ai("a2"),
+            self._human("tail"),
+        ]
+        result = _trim_to_token_budget(msgs, max_context_tokens=8192)
+        assert len(result) == len(msgs)
+        assert result[0].content == "h1"
+        assert result[-1].content == "tail"
+
+    def test_system_message_preserved_as_fixed_head(self):
+        """SystemMessage stays at position 0 even when history is trimmed."""
+        from langchain_core.messages import SystemMessage
+
+        msgs = [
+            SystemMessage(content="sys"),
+            self._human("h1"),
+            self._ai("a1"),
+            self._human("h2"),
+            self._ai("a2"),
+            self._human("tail"),
+        ]
+        result = _trim_to_token_budget(msgs, max_context_tokens=64)
+        assert isinstance(result[0], SystemMessage)
+        # Ensure no AIMessage immediately follows SystemMessage if h1 was dropped
+        if len(result) > 1:
+            assert not isinstance(result[1], type(self._ai("")))

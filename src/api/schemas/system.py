@@ -13,8 +13,13 @@ class SystemInfoOut(BaseModel):
 
     version: str = Field(
         ...,
-        description="Cogtrix version string.",
-        examples=["0.1.14"],
+        description="Cogtrix version string including commit hash when available.",
+        examples=["0.1.14", "0.2.6+abc1234"],
+    )
+    commit: str | None = Field(
+        default=None,
+        description="Short git commit hash (7 chars), or null when unavailable.",
+        examples=["abc1234"],
     )
     api_version: str = Field(
         ...,
@@ -134,4 +139,81 @@ class TurnStatsOut(BaseModel):
         ...,
         description="Number of tool calls made during this turn.",
         examples=[3],
+    )
+
+
+class SystemStats(BaseModel):
+    """Global system statistics for superadmin dashboards.
+
+    Includes database and Redis health, usage metrics, and server info.
+    """
+
+    total_orgs: int = Field(
+        ...,
+        description="Total number of organizations across all tenants.",
+        examples=[15],
+    )
+    total_users: int = Field(
+        ...,
+        description="Total number of registered users.",
+        examples=[247],
+    )
+    active_sessions: int = Field(
+        ...,
+        description="Number of active (non-archived) sessions.",
+        examples=[32],
+    )
+    estimated_token_usage_24h: int = Field(
+        ...,
+        description="Estimated total tokens consumed in the last 24 hours (based on API call count).",
+        examples=[1567890],
+    )
+    api_requests_24h: int = Field(
+        ...,
+        description="Total API requests in the last 24 hours.",
+        examples=[45678],
+    )
+    error_rate_24h: float | None = Field(
+        default=None,
+        description="Error rate (errors per request) over the last 24 hours. None when not tracked.",
+        ge=0.0,
+        le=1.0,
+        examples=[0.023],
+    )
+    db_pool_status: str = Field(
+        ...,
+        description="Database pool status: 'healthy', 'warning', or 'critical'.",
+        examples=["healthy"],
+    )
+    db_pool_size: int = Field(
+        ...,
+        description="Current database pool size.",
+        examples=[10],
+    )
+    db_pool_max: int = Field(
+        ...,
+        description="Maximum database pool size.",
+        examples=[10],
+    )
+    redis_connected: bool = Field(
+        ...,
+        description="True when Redis connection is active.",
+    )
+    redis_latency_ms: int | None = Field(
+        default=None,
+        description="Redis ping latency in milliseconds; null if not configured.",
+    )
+    uptime_s: float = Field(
+        ...,
+        description="API server uptime in seconds.",
+        examples=[3600.0],
+    )
+    version: str = Field(
+        ...,
+        description="Cogtrix version string.",
+        examples=["0.1.14"],
+    )
+    started_at: datetime = Field(
+        ...,
+        description="UTC timestamp when the API server started.",
     )

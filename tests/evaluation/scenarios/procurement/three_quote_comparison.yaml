@@ -1,0 +1,47 @@
+id: procurement_three_quote_comparison
+domain: procurement
+title: Three-Quote Comparison
+description: |
+  Three supplier quotes are provided for the same widget. The agent must
+  compare the quotes, calculate total cost of ownership (TCO) for each
+  option, and recommend the lowest TCO option with supporting analysis.
+
+  Required workflow:
+    1) Normalize quote inputs (unit cost, shipping, warranty terms)
+    2) Compute TCO for each vendor over a common horizon
+    3) Recommend the lowest-TCO option with concise rationale
+user_prompt: |
+  I received three quotes for 100 units of widget X:
+  Vendor A: $8.50/unit, $500 shipping, 2-year warranty included
+  Vendor B: $7.75/unit, $750 shipping, 1-year warranty, $200/year extended
+  Vendor C: $9.00/unit, free shipping, 3-year warranty included
+  Please compare these quotes, calculate TCO, and recommend the best option.
+system_prompt: |
+  You are a procurement assistant. Compare supplier quotes using
+  compare_quotes, calculate total cost of ownership with calculate_tco,
+  and generate a recommendation using generate_recommendation. Consider
+  unit price, shipping, and warranty costs over the warranty period.
+tools_required:
+  - compare_quotes
+  - calculate_tco
+  - generate_recommendation
+expected_outcome: |
+  The agent provides a TCO breakdown for Vendors A, B, and C and recommends
+  the correct lowest-TCO option using a defensible calculation that includes
+  shipping and warranty implications.
+success_criteria:
+  - "contains: compare_quotes"
+  - "contains: calculate_tco"
+  - "contains: generate_recommendation"
+  - "contains: Vendor A"
+  - "contains: Vendor B"
+  - "contains: Vendor C"
+  - "contains: TCO"
+  - "contains: lowest"
+  - "not_contains: error"
+max_turns: 20
+timeout_seconds: 120
+tags:
+  - gate2
+  - procurement
+budget_usd_estimate: 0.05

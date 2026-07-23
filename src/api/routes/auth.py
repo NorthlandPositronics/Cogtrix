@@ -4,7 +4,8 @@ Endpoints:
     POST /api/v1/auth/register          — create a new user account
     POST /api/v1/auth/login             — authenticate and receive a token pair
     POST /api/v1/auth/refresh           — silently renew an access token
-    POST /api/v1/auth/logout            — invalidate the current refresh token
+    POST /api/v1/auth/logout            — invalidate one refresh token supplied in the body
+    POST /api/v1/auth/logout-all        — invalidate all refresh tokens after password confirmation
     GET  /api/v1/auth/me                — retrieve the current user's profile
     GET  /api/v1/auth/api-keys          — list the current user's API keys
     POST /api/v1/auth/api-keys          — create a new API key
@@ -18,7 +19,7 @@ import secrets
 import uuid
 from datetime import UTC, datetime, timedelta
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -36,10 +37,13 @@ from src.api.db.repositories.api_keys import ApiKeyRepository
 from src.api.db.repositories.tokens import RefreshTokenRepository
 from src.api.db.repositories.users import UserRepository
 from src.api.pagination import decode_cursor, encode_cursor
+from src.api.rate_limit import per_route_rate_limit
 from src.api.schemas.auth import (
     APIKeyCreateRequest,
     APIKeyOut,
     LoginRequest,
+    LogoutAllRequest,
+    LogoutRequest,
     RefreshRequest,
     RegisterRequest,
     TokenPair,
@@ -101,11 +105,14 @@ async def _create_token_pair(
         201: {"description": "Account created; token pair returned."},
         409: {"description": "Username or email already exists (VALIDATION_ERROR)."},
         422: {"description": "Request body validation failed (VALIDATION_ERROR)."},
+        429: {"description": "Rate limit exceeded (RATE_LIMIT_EXCEEDED)."},
     },
 )
 async def register(
+    request: Request,
     body: RegisterRequest,
     db: AsyncSession = Depends(get_db),
+    _rl: None = Depends(per_route_rate_limit(3, 3600)),
 ) -> APIResponse[TokenPair]:
     """Create a new user account and return an access + refresh token pair.
 
@@ -172,8 +179,10 @@ async def register(
     },
 )
 async def login(
+    request: Request,
     body: LoginRequest,
     db: AsyncSession = Depends(get_db),
+    _rl: None = Depends(per_route_rate_limit(5, 60)),
 ) -> APIResponse[TokenPair]:
     """Authenticate with username/email + password and return a token pair.
 
@@ -193,7 +202,7 @@ async def login(
         detail={"code": "UNAUTHORIZED", "message": "Invalid username or password."},
     )
 
-    if user is None:
+    if user is None or not user.is_active:
         raise _invalid
 
     if not verify_password(body.password, user.password_hash):
@@ -219,8 +228,10 @@ async def login(
     },
 )
 async def refresh(
+    request: Request,
     body: RefreshRequest,
     db: AsyncSession = Depends(get_db),
+    _rl: None = Depends(per_route_rate_limit(5, 60)),
 ) -> APIResponse[TokenPair]:
     """Rotate the refresh token and issue a new access + refresh token pair.
 
@@ -242,7 +253,6 @@ async def refresh(
     now = datetime.now(UTC)
     expires = token_record.expires_at
     if expires.tzinfo is None:
-
         expires = expires.replace(tzinfo=UTC)
     if now > expires:
         raise HTTPException(
@@ -259,7 +269,7 @@ async def refresh(
     # Get user for role
     user_repo = UserRepository(db)
     user = await user_repo.get_by_id(token_record.user_id)
-    if user is None:
+    if user is None or not user.is_active:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail={"code": "UNAUTHORIZED", "message": "Missing or invalid bearer token."},
@@ -281,14 +291,59 @@ async def refresh(
     },
 )
 async def logout(
+    body: LogoutRequest,
     current_user: TokenData = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> APIResponse[None]:
-    """Revoke the current refresh token (server-side session invalidation).
+    """Revoke one refresh token for the current user.
 
     Auth: bearer token required.
-    Error codes: UNAUTHORIZED, TOKEN_EXPIRED.
+    Error codes: UNAUTHORIZED, TOKEN_EXPIRED, FORBIDDEN.
     """
+    token_repo = RefreshTokenRepository(db)
+    token_hash = hashlib.sha256(body.refresh_token.encode()).hexdigest()
+    token_record = await token_repo.get_by_hash(token_hash)
+
+    if token_record is None or token_record.revoked:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={"code": "UNAUTHORIZED", "message": "Missing or invalid bearer token."},
+        )
+    if token_record.user_id != current_user.user_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"code": "FORBIDDEN", "message": "You may only revoke your own refresh token."},
+        )
+
+    await token_repo.revoke(token_record.id)
+    await db.commit()
+    return APIResponse(data=None)
+
+
+@router.post(
+    "/logout-all",
+    summary="Invalidate all refresh tokens for the current user",
+    description="Revoke every refresh token for the current user after confirming the password.",
+    response_model=APIResponse[None],
+    responses={
+        200: {"description": "All refresh tokens revoked."},
+        401: {"description": "Invalid password or not authenticated."},
+    },
+)
+async def logout_all(
+    body: LogoutAllRequest,
+    current_user: TokenData = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> APIResponse[None]:
+    """Revoke all refresh tokens for the current user after password confirmation."""
+    user_repo = UserRepository(db)
+    user = await user_repo.get_by_id(current_user.user_id)
+    if user is None or not verify_password(body.password, user.password_hash):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={"code": "UNAUTHORIZED", "message": "Invalid username or password."},
+        )
+
     token_repo = RefreshTokenRepository(db)
     await token_repo.revoke_all_for_user(current_user.user_id)
     await db.commit()

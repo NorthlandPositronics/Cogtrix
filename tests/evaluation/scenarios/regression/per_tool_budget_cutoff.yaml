@@ -1,0 +1,77 @@
+id: regression_per_tool_budget_cutoff
+domain: regression
+title: Tool calls past per-tool budget must not leak phantom markup
+description: |
+  Tier-2 Metric 11 (post-cutoff phantom count) in
+  docs/quality/METRICS.md was filed in response to session 8422dbbf
+  (2026-04-28): when a tool exceeds its per-tool call budget, the
+  agent receives "<tool> has been disabled after N calls" — at that
+  point some models regress into emitting raw XML/JSON tool markup
+  as text instead of structured tool_calls.  The result is the same
+  user-visible disaster as the May 2026 Mattermost incident: the
+  reply contains foreign tool markup that the user can read.
+
+  This scenario forces the per-tool budget to fire by asking the
+  agent to perform 12 lookups against a single stubbed tool —
+  Cogtrix's hard stop kicks in around 8.  The assertion is that no
+  phantom XML/JSON markup leaks into the final user reply, and that
+  the agent produces a coherent summary of what it did manage to
+  fetch.
+
+  This is NOT in the smoke set: 12 tool calls + summarisation pushes
+  cost beyond the smoke budget.  Runs in the full nightly matrix.
+
+user_prompt: |
+  Please look up the names of all 12 of our active vendors.  The
+  vendor IDs are V001 through V012.  Use the lookup_vendor tool for
+  each one and then give me a short summary of what you found.
+
+system_prompt: |
+  You are a procurement assistant.  Use lookup_vendor(vendor_id) to
+  retrieve the registered name for each vendor.  When a tool stops
+  accepting calls, acknowledge that to the user and summarise what
+  you have gathered so far — do not retry indefinitely and do not
+  paste raw tool-call payloads into the reply.
+
+tools_required:
+  - lookup_vendor
+
+tool_descriptions:
+  lookup_vendor: |
+    Retrieve the registered name and contact details for a single
+    vendor by its V0xx identifier.
+
+expected_outcome: |
+  Agent calls lookup_vendor multiple times, eventually hits the
+  per-tool budget, then produces a coherent natural-language summary
+  of the vendors it could fetch.  The summary contains no raw
+  tool-call markup (XML, JSON, or DeepSeek special tokens) and no
+  legacy "persistent formatting issues" fallback.
+
+success_criteria:
+  # The required tool must have been called at least once.
+  - "contains: lookup_vendor"
+
+  # No phantom tool markup of any of the three known shapes leaks
+  # into the user-facing response after the budget cutoff.
+  - "response_not_contains: <tool_call>"
+  - "response_not_contains: <function="
+  - "response_not_contains: <｜tool▁call▁begin｜>"
+
+  # The legacy fallback string indicates the synthesizer gave up.
+  # Real research happened here; the user must get a real summary.
+  - "response_not_contains: persistent formatting issues"
+
+max_turns: 20
+timeout_seconds: 180
+
+tags:
+  - gate2
+  - regression
+  - tool-budget
+
+# Budget: ~12 tool calls × cumulative context growth.  Realistic
+# spend on Sonnet ~$0.10 nominal.  D2 ceiling = $0.30 — wide enough
+# to allow cheaper models to overshoot proportionally without
+# false-failing, narrow enough to catch a 30+ call loop.
+budget_usd_estimate: 0.10

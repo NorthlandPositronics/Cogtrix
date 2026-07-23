@@ -62,6 +62,13 @@ def datamark_history(messages: list, marker: str) -> list:
 
     Preserves ``[YYYY-MM-DD HH:MM:SS UTC]`` timestamp prefixes injected by
     the memory manager — only the user text after the prefix is datamarked.
+
+    Handles multiple content types:
+    - str: Single text content (original behavior)
+    - list: Multi-modal messages with text blocks (e.g., [{"type":"text",...},...])
+    - None: No content (e.g., tool messages)
+    - dict: Content with structured format
+    - Any other type: Passed through unchanged with debug log
     """
     try:
         from langchain_core.messages import HumanMessage as HM
@@ -70,14 +77,46 @@ def datamark_history(messages: list, marker: str) -> list:
 
     result = []
     for m in messages:
-        if isinstance(m, HM) and isinstance(m.content, str):
-            ts_match = _TS_PREFIX_RE.match(m.content)
-            if ts_match:
-                prefix = ts_match.group(0)
-                body = m.content[ts_match.end() :]
-                marked = prefix + apply_datamark(body, marker)
+        if isinstance(m, HM):
+            content = m.content
+            if isinstance(content, str):
+                # Original behavior for string content
+                ts_match = _TS_PREFIX_RE.match(content)
+                if ts_match:
+                    prefix = ts_match.group(0)
+                    body = content[ts_match.end() :]
+                    marked = prefix + apply_datamark(body, marker)
+                else:
+                    marked = apply_datamark(content, marker)
+            elif isinstance(content, list):
+                # Handle list of content blocks (multi-modal messages)
+                marked_content = []
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "text":
+                        text = block.get("text", "")
+                        marked_text = apply_datamark(text, marker)
+                        marked_content.append({**block, "text": marked_text})
+                    elif isinstance(block, str):
+                        marked_content.append(apply_datamark(block, marker))
+                    else:
+                        marked_content.append(block)
+                marked = marked_content
+            elif content is None:
+                marked = None
+            elif isinstance(content, dict):
+                # Handle dict content (e.g., structured data)
+                marked = content
             else:
-                marked = apply_datamark(m.content, marker)
+                # Unknown type - log debug and pass through
+                import logging
+
+                log = logging.getLogger("cogtrix")
+                log.debug(
+                    "Skipping datamarking for non-string/non-list content type: %s",
+                    type(content).__name__,
+                )
+                marked = content
+
             if hasattr(m, "model_copy"):
                 result.append(m.model_copy(update={"content": marked}))
             else:

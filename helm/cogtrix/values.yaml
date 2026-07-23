@@ -1,0 +1,374 @@
+# Default values for cogtrix.
+# This is a YAML-formatted file.
+# Declare variables to be passed into your templates.
+#
+# SECURITY WARNING: Never commit files containing secrets to git.
+# For production, use External Secrets Operator, helm-secrets + SOPS,
+# Sealed Secrets, or Vault — see README.md "Secrets Management".
+# The inline `secrets` stanza below is intended for development only.
+
+# ── Global Settings ───────────────────────────────────────────
+nameOverride: ""
+fullnameOverride: ""
+
+# ── Image ─────────────────────────────────────────────────────
+image:
+  repository: northlandpositronics/cogtrix
+  pullPolicy: IfNotPresent
+  tag: ""
+  # digest: "sha256:..."
+
+imagePullSecrets: []
+
+# ── Service Account ───────────────────────────────────────────
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+  rbac:
+    enabled: true
+
+# ── Pod Security ──────────────────────────────────────────────
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroup: 1000
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+  seccompProfile:
+    type: RuntimeDefault
+
+# ── Main Application (Cogtrix API) ────────────────────────────
+replicaCount: 1
+
+deployment:
+  annotations: {}
+  labels: {}
+
+service:
+  type: ClusterIP
+  port: 8000
+  annotations: {}
+
+resources:
+  limits:
+    cpu: 2000m
+    memory: 4Gi
+  requests:
+    cpu: 500m
+    memory: 1Gi
+
+# ── Autoscaling ───────────────────────────────────────────────
+# WARNING: Cogtrix sessions are stateful — each pod keeps live LLM state,
+# memory manager, and local SQLite/vector DB in its own process and disk.
+# Enabling HPA without session affinity or external shared state will break
+# existing sessions when load balancing routes requests to different pods.
+#
+# To safely enable HPA you need ONE of:
+#   1. Ingress/sessionAffinity: ClientIP (same user always hits same pod)
+#   2. External Postgres + Redis for full session state (not just presence)
+#   3. Accept that scaling only helps NEW sessions; existing ones die with pods
+#
+# NOTE: A valid use case for HPA is running multiple independent agent
+# instances that do NOT share sessions — e.g. one deployment per tenant,
+# or a pool of identical agents where each client pins to one instance.
+# In that case, users must configure their own load-balancing strategy.
+#
+# The current chart defaults to replicaCount=1 for safety.
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+  targetMemoryUtilizationPercentage: 80
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Percent
+          value: 10
+          periodSeconds: 60
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 15
+        - type: Pods
+          value: 4
+          periodSeconds: 15
+      selectPolicy: Max
+
+# ── Health Probes ─────────────────────────────────────────────
+# The /api/v1/health endpoint returns 200 as long as the process is alive.
+# The /api/v1/health/ready endpoint returns 200 when DB is reachable, 503 otherwise.
+livenessProbe:
+  httpGet:
+    path: /api/v1/health
+    port: http
+  initialDelaySeconds: 30
+  periodSeconds: 30
+  timeoutSeconds: 5
+  failureThreshold: 3
+  successThreshold: 1
+
+readinessProbe:
+  httpGet:
+    path: /api/v1/health/ready
+    port: http
+  initialDelaySeconds: 10
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 3
+  successThreshold: 1
+
+startupProbe:
+  httpGet:
+    path: /api/v1/health
+    port: http
+  initialDelaySeconds: 10
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 30
+  successThreshold: 1
+
+# ── Persistence (/data volume) ────────────────────────────────
+# Cogtrix is stateful by default: it stores SQLite DB, vector indices,
+# message history, and file uploads on local disk under /data.
+#
+# You can run it statelessly by configuring:
+#   - DATABASE_URL pointing to external Postgres (instead of local SQLite)
+#   - redis_url in .cogtrix.yaml for session presence (optional)
+#   - S3/GCS for file storage (if you use file upload tools)
+# In stateless mode, set persistence.enabled=false and rely on emptyDir
+# for temporary /data (or mount external storage drivers).
+#
+# WARNING: Disabling persistence without external DB means all data is
+# ephemeral — pod restarts destroy sessions, users, and history.
+persistence:
+  enabled: true
+  storageClass: ""
+  accessMode: ReadWriteOnce
+  size: 10Gi
+  annotations: {}
+  existingClaim: ""
+
+# ── Configuration ─────────────────────────────────────────────
+# Cogtrix runtime configuration (merged into /app/.cogtrix.yaml via ConfigMap).
+# Only keys listed here are mounted; all other config is env-driven or defaults.
+config:
+  # If true, the ConfigMap is mounted at /app/.cogtrix.yaml
+  enabled: false
+  # Raw YAML content for .cogtrix.yaml
+  content: |
+    # Cogtrix configuration — adjust for your environment
+    # For stateless mode, configure external DB:
+    # database:
+    #   url: "postgresql+asyncpg://user:pass@postgres:5432/cogtrix"
+    # redis_url: "redis://redis:6379/0"
+    memory:
+      mode: reasoning
+      modes:
+        reasoning:
+          working_memory_size: 30
+          vector_recall_k: 2
+
+# ── Environment Variables ─────────────────────────────────────
+# Non-secret env vars. Secrets (API keys, JWT) go in `secrets` below.
+env:
+  COGTRIX_DATA_DIR: "/data"
+  COGTRIX_ALLOWED_WRITE_PATHS: "/tmp,/data/output,/data/log"
+  TZ: "UTC"
+  PYTHONUNBUFFERED: "1"
+  PYTHONDONTWRITEBYTECODE: "1"
+
+# ── External Secrets (recommended for production) ─────────────
+# Integrates with External Secrets Operator (ESO) to fetch secrets
+# from a secret manager (Vault, AWS Secrets Manager, GCP Secret
+# Manager, Azure Key Vault, etc.) instead of storing them in Helm.
+# When enabled, the chart creates an ExternalSecret resource and
+# the Deployment references the generated Secret.
+externalSecrets:
+  enabled: false
+  # Name of the ExternalSecret resource to create.
+  name: ""
+  # Reference to the ESO SecretStore or ClusterSecretStore.
+  secretStoreRef:
+    name: ""
+    kind: SecretStore
+  # Target Secret name that ESO will create/populate.
+  # If empty, defaults to the chart fullname.
+  target:
+    name: ""
+  # Mapping of remote secret keys to local Kubernetes Secret keys.
+  # Each entry must match the keys expected by templates/deployment.yaml.
+  data: []
+    # - secretKey: jwt-secret
+    #   remoteRef:
+    #     key: cogtrix/jwt
+    #     property: secret
+    # - secretKey: openai-api-key
+    #   remoteRef:
+    #     key: cogtrix/llm
+    #     property: openai
+
+# ── Secrets ───────────────────────────────────────────────────
+# Kubernetes Secret values. Set `enabled: true` and provide values.
+# These are mounted as env vars from a Secret resource.
+#
+# WARNING: Development only. Never commit a values file with secrets
+# to version control. For production use externalSecrets (above).
+secrets:
+  enabled: false
+  # JWT secret — required for API auth. Must be 32+ random chars.
+  jwtSecret: ""
+  # LLM provider API keys — at least one is required.
+  openaiApiKey: ""
+  anthropicApiKey: ""
+  geminiApiKey: ""
+  xaiApiKey: ""
+  deepseekApiKey: ""
+  # Database URL (if using external DB; otherwise SQLite in /data is used)
+  databaseUrl: ""
+  # Ollama base URL (optional)
+  ollamaBaseUrl: ""
+
+# ── Ingress ───────────────────────────────────────────────────
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+    # kubernetes.io/ingress.class: nginx
+    # kubernetes.io/tls-acme: "true"
+  hosts:
+    - host: cogtrix.local
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+    # - secretName: cogtrix-tls
+    #   hosts:
+    #     - cogtrix.local
+
+# ── Pod Disruption Budget ─────────────────────────────────────
+podDisruptionBudget:
+  enabled: false
+  minAvailable: 1
+  # maxUnavailable: 1
+
+# ── Node Affinity / Tolerations / Topology ────────────────────
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}
+
+topologySpreadConstraints: []
+
+# ── Init Container ────────────────────────────────────────────
+# Creates /data subdirectories with correct ownership before the app starts.
+initContainer:
+  enabled: true
+  image:
+    repository: busybox
+    tag: "1.37"
+    pullPolicy: IfNotPresent
+  resources:
+    limits:
+      cpu: 100m
+      memory: 64Mi
+    requests:
+      cpu: 10m
+      memory: 16Mi
+
+# ── Optional Sidecars ─────────────────────────────────────────
+# WAHA WhatsApp gateway sidecar (disabled by default).
+waha:
+  enabled: false
+  image:
+    repository: devlikeapro/waha
+    # Pinned to a specific version for reproducible builds and supply-chain
+    # auditability. Update intentionally after reviewing release notes.
+    tag: "gows-2026.4.2"
+    # Optional: pin to an immutable digest for additional supply-chain security.
+    # digest: "sha256:..."
+    pullPolicy: IfNotPresent
+  service:
+    port: 3000
+  resources:
+    limits:
+      cpu: 500m
+      memory: 512Mi
+    requests:
+      cpu: 100m
+      memory: 128Mi
+
+# ── Monitoring / Observability ────────────────────────────────
+serviceMonitor:
+  enabled: false
+  interval: 30s
+  path: /metrics
+  labels: {}
+
+podMonitor:
+  enabled: false
+
+# ── Network Policy ────────────────────────────────────────────
+networkPolicy:
+  enabled: true
+  # Allow the API pod to receive traffic from in-cluster sources, including
+  # ingress controllers and monitoring agents, on the public HTTP port.
+  ingress:
+    - from:
+        - namespaceSelector: {}
+      ports:
+        - protocol: TCP
+          port: 8000
+  # Allow DNS and outbound HTTPS so the app can resolve names and call
+  # external services such as LLM APIs.
+  egress:
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - protocol: UDP
+          port: 53
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - protocol: TCP
+          port: 443
+
+# ── Linkerd Service Mesh ──────────────────────────────────────
+# Linkerd provides mTLS between internal services, retries/timeouts on
+# outbound HTTP calls, and traffic observability. It does NOT mTLS to
+# external LLM APIs (OpenAI, Anthropic, etc.) — those are plain HTTPS.
+linkerd:
+  enabled: false
+  # Inject the Linkerd proxy sidecar into Cogtrix pods.
+  inject: true
+  # ServiceProfile for the Cogtrix API — configures retries/timeouts.
+  profile:
+    enabled: false
+    retries:
+      # Retry failed requests to internal services (e.g. WAHA).
+      budget:
+        retryRatio: 0.2
+        minRetriesPerSecond: 10
+        ttl: 10s
+    timeouts:
+      # Timeout for LLM API calls (OpenAI, Anthropic, etc.).
+      # Linkerd applies this to outbound HTTP requests.
+      api: 120s
+      # Timeout for internal health/readiness probes.
+      health: 5s
+
+# ── Extra Objects ─────────────────────────────────────────────
+# Raw YAML manifests to deploy alongside this chart (e.g., ExternalSecret).
+extraManifests: []

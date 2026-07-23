@@ -430,7 +430,7 @@ def test_refresh_token_rotation(client: TestClient) -> None:
 
 
 def test_logout_revokes_refresh_tokens(client: TestClient) -> None:
-    """POST /auth/logout: revokes all refresh tokens for user."""
+    """POST /auth/logout: revokes only the supplied refresh token."""
     reg = client.post(
         "/api/v1/auth/register",
         json={"username": "logouter", "email": "logout@test.com", "password": "Password1!"},
@@ -441,6 +441,7 @@ def test_logout_revokes_refresh_tokens(client: TestClient) -> None:
 
     resp = client.post(
         "/api/v1/auth/logout",
+        json={"refresh_token": refresh},
         headers={"Authorization": f"Bearer {access}"},
     )
     assert resp.status_code == 200

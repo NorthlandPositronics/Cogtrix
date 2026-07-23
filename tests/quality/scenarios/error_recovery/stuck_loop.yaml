@@ -1,0 +1,37 @@
+id: stuck_loop
+complexity: complex
+category: error_recovery
+description: "The model repeats the same failing tool call and should trigger stuck detection."
+tags: [tier1]
+system_prompt: "You are a helpful assistant."
+tools:
+  - github_merge_pull_request
+
+script:
+  - user: "Merge the reconnect gate PR."
+  - llm:
+      tool_calls:
+        - name: github_merge_pull_request
+          args:
+            pull_number: 149
+  - tool_result: "Error: Repository rule violations found."
+  - llm:
+      tool_calls:
+        - name: github_merge_pull_request
+          args:
+            pull_number: 149
+  - tool_result: "Error: Repository rule violations found."
+  - llm:
+      tool_calls:
+        - name: github_merge_pull_request
+          args:
+            pull_number: 149
+  - tool_result: "Error: Repository rule violations found."
+  - llm: "The merge is still blocked, and I should stop retrying the exact same action."
+
+metrics:
+  required_tools: [github_merge_pull_request]
+  forbidden_tools: []
+  task_completed: false
+  phantom_calls: false
+  max_turns: 4

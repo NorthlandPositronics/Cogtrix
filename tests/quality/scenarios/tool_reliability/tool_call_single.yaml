@@ -1,0 +1,23 @@
+id: tool_call_single
+complexity: simple
+category: tool_reliability
+description: "Agent makes a single tool call and produces a coherent final response"
+tags: [critical, tier1]
+system_prompt: "You are a helpful assistant with access to tools."
+tools: [search_web]
+
+script:
+  - user: "Search for the latest Python version."
+  - llm:
+      tool_calls:
+        - name: search_web
+          args: {query: "latest Python version"}
+  - tool_result: "Python 3.13 is the latest stable release."
+  - llm: "The latest Python version is Python 3.13."
+
+metrics:
+  required_tools: [search_web]
+  forbidden_tools: []
+  task_completed: true
+  phantom_calls: false
+  max_turns: 5

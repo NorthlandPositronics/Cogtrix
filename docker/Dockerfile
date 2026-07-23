@@ -13,6 +13,13 @@ WORKDIR /app
 
 ENV PYTHONDONTWRITEBYTECODE=1
 
+# Build-time system libraries required by python3-saml (xmlsec C extension).
+# These headers are only needed during wheel compilation; the runtime stage
+# installs only the shared libraries (libxmlsec1, libxml2) instead.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libxmlsec1-dev libxml2-dev pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
 # Dependency manifests first — changes here bust only the install layer.
 COPY pyproject.toml uv.lock ./
 
@@ -26,7 +33,10 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     --extra google \
     --extra mcp \
     --extra science \
-    --extra api && \
+    --extra api \
+    --extra saml \
+    --extra ldap \
+    --extra rag && \
     find /app/.venv -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true && \
     find /app/.venv -type d -name tests     -exec rm -rf {} + 2>/dev/null || true && \
     find /app/.venv -type d -name test      -exec rm -rf {} + 2>/dev/null || true && \
@@ -44,6 +54,13 @@ LABEL org.opencontainers.image.title="Cogtrix" \
       org.opencontainers.image.source="https://github.com/NorthlandPositronics/Cogtrix" \
       org.opencontainers.image.licenses="LicenseRef-Cogtrix-Source-Available-1.0"
 
+# Runtime shared libraries for python3-saml's xmlsec C extension.
+# libxmlsec1-dev is builder-only; libxmlsec1 + libxml2 are needed at runtime.
+# python:3.13-slim already ships libxml2; libxmlsec1 must be added explicitly.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libxmlsec1 \
+    && rm -rf /var/lib/apt/lists/*
+
 # --no-log-init prevents sparse utmp/wtmp files for high-numbered UIDs
 RUN groupadd --gid 1000 cogtrix && \
     useradd --uid 1000 --gid cogtrix --no-log-init --create-home cogtrix
@@ -52,12 +69,14 @@ WORKDIR /app
 
 # PYTHONPATH ensures "python -m src.api" and "import src.*" resolve from /app
 # COGTRIX_DATA_DIR=/data moves all runtime writes outside /app, keeping /app read-only.
+# COGTRIX_ALLOWED_WRITE_PATHS uses comma separators to match file_ops.py runtime parser.
 ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONPATH="/app" \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
+    TZ=UTC \
     COGTRIX_DATA_DIR="/data" \
-    COGTRIX_ALLOWED_WRITE_PATHS="/tmp:/data/output"
+    COGTRIX_ALLOWED_WRITE_PATHS="/tmp,/data/output,/data/log"
 
 # Virtual environment from builder — --link enables independent layer caching.
 # Root-owned so /app/.venv is read-only for the cogtrix runtime user.
@@ -72,7 +91,9 @@ RUN mkdir -p \
         /data/vectordb \
         /data/api/uploads \
         /data/assistant \
-        /data/workflows && \
+        /data/workflows \
+        /data/output \
+        /data/log && \
     chown -R cogtrix:cogtrix /data && \
     # Pre-create the API-mode sentinel directory in /run so the cogtrix user
     # can write /run/cogtrix/ at runtime without needing root.
@@ -82,12 +103,13 @@ RUN mkdir -p \
 # Application source — root-owned so /app is read-only for the cogtrix runtime user.
 # Ordering: least-to-most-frequently-changed for cache efficiency.
 # alembic.ini is included so "python -m alembic" works inside the container.
+# docs/ is intentionally excluded — no runtime code imports from it, and
+# including it would expose internal architecture documents in production images.
 COPY docker/docker-entrypoint.sh alembic.ini ./
 RUN chmod +x /app/docker-entrypoint.sh
 COPY alembic/ ./alembic/
 COPY cogtrix.py ./
 COPY src/ ./src/
-COPY docs/ ./docs/
 
 VOLUME /data
 
@@ -101,7 +123,7 @@ STOPSIGNAL SIGTERM
 # In CLI mode the HTTP server is not running, so the probe exits 0 immediately
 # (healthy by convention — the process is simply not a server). In API mode the
 # entrypoint creates /run/cogtrix/api-mode before exec, which signals that the
-# HTTP endpoint must be reachable (BUG-236).
+# HTTP endpoint must be reachable.
 # Uses Python's built-in urllib — no curl/wget required in the slim image.
 # The 4-second socket timeout keeps the probe within Docker's 5-second deadline.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \

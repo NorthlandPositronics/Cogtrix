@@ -76,7 +76,9 @@ class ChatSessionManager:
         try:
             with self._lock:
                 if key in self._sessions:
-                    return self._sessions[key]
+                    session = self._sessions[key]
+                    session.last_activity = time.monotonic()
+                    return session
 
                 if len(self._sessions) >= self._max_sessions:
                     # Inline idle eviction: collect candidates and remove from registry

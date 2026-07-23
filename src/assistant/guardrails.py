@@ -768,6 +768,7 @@ class ToolCallGuard:
         symlink pointing into a sensitive directory does not bypass the prefix
         check.
         """
+        raw = os.path.expanduser(raw)
         try:
             resolved = os.path.realpath(raw)
         except (OSError, ValueError):
@@ -837,8 +838,21 @@ class ToolCallGuard:
             targets: list[str] = []
             if isinstance(value, str):
                 targets.append(value)
-            elif isinstance(value, list):
+            elif isinstance(value, (list, tuple, set)):
                 targets.extend(v for v in value if isinstance(v, str))
+            elif hasattr(value, "values") and callable(getattr(value, "values", None)):
+                # It's a dict-like object - check its values
+                targets.extend(v for v in value.values() if isinstance(v, str))
+            elif hasattr(value, "__iter__") and not isinstance(value, (bytes,)):
+                # Fallback for other iterables (generators, deques, etc.)
+                targets.extend(v for v in value if isinstance(v, str))
+            else:
+                log.debug(
+                    "Tool argument type %s not handled for exfiltration check in %s.%s",
+                    type(value).__name__,
+                    tool_name,
+                    key,
+                )
             for target in targets:
                 for pattern in _EXFIL_PATTERNS:
                     if pattern.search(target):

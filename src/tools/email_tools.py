@@ -24,6 +24,7 @@ import email as _email_stdlib
 import email.header as _email_header
 import imaplib
 import logging
+import re
 import smtplib
 import ssl
 from email.mime.multipart import MIMEMultipart
@@ -231,6 +232,7 @@ def read_email(limit: int = 10, folder: str = "INBOX") -> str:
         Formatted string listing each message, or an error string.
     """
     limit = max(1, min(limit, 50))
+    folder = _sanitize_imap_value(folder)
 
     try:
         conn = _get_imap_connection()
@@ -360,6 +362,16 @@ def send_email(to: str, subject: str, body: str, cc: str = "") -> str:
         return f"Error sending email: {exc}"
 
 
+def _sanitize_imap_value(value: str) -> str:
+    """Strip CRLF and ASCII control characters to prevent IMAP protocol injection.
+
+    IMAP is line-oriented and uses CRLF as a command delimiter.
+    Raw newlines in search criteria could split a single SEARCH command
+    into multiple IMAP commands, allowing protocol injection.
+    """
+    return re.sub(r"[\r\n\x00-\x1f]", "", value)
+
+
 def search_email(
     subject: str = "",
     sender: str = "",
@@ -385,6 +397,7 @@ def search_email(
         Formatted list of matching messages, or an error message.
     """
     limit = max(1, min(limit, 50))
+    folder = _sanitize_imap_value(folder)
 
     try:
         conn = _get_imap_connection()
@@ -398,17 +411,25 @@ def search_email(
         if status != "OK":
             return f"Error selecting folder {folder!r}: {data}"
 
-        # Build IMAP SEARCH criteria
+        # Build IMAP SEARCH criteria (sanitize inputs to prevent injection)
         criteria_parts: list[str] = []
-        if subject.strip():
+        clean_subject = _sanitize_imap_value(subject).strip()
+        if clean_subject:
             # IMAP SEARCH SUBJECT uses quoted strings
-            escaped = subject.replace('"', '\\"')
+            escaped = clean_subject.replace('"', '\\"')
             criteria_parts.append(f'SUBJECT "{escaped}"')
-        if sender.strip():
-            escaped = sender.replace('"', '\\"')
+        clean_sender = _sanitize_imap_value(sender).strip()
+        if clean_sender:
+            escaped = clean_sender.replace('"', '\\"')
             criteria_parts.append(f'FROM "{escaped}"')
-        if since.strip():
-            criteria_parts.append(f"SINCE {since.strip()}")
+        clean_since = _sanitize_imap_value(since).strip()
+        if clean_since:
+            if not re.match(r"^\d{2}-[A-Za-z]{3}-\d{4}$", clean_since):
+                return (
+                    f"Error: 'since' must be in DD-Mon-YYYY format "
+                    f"(e.g. '01-Jan-2024'), got {clean_since!r}"
+                )
+            criteria_parts.append(f"SINCE {clean_since}")
 
         criteria = " ".join(criteria_parts) if criteria_parts else "ALL"
 

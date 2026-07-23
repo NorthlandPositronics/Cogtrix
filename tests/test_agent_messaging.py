@@ -229,6 +229,125 @@ class TestToolConfigs:
         assert names == {"send_to_agent", "read_agent_inbox"}
 
 
+# ── Concurrency / lost-update race (#973) ────────────────────────────────────
+
+
+class TestConcurrencyRace:
+    """Demonstrate lost-update race between send_to_agent and read_agent_inbox.
+
+    BUG #973: there is no file-level locking.  When two threads interleave
+    read→modify→write, the second write overwrites the first and messages
+    are silently lost.
+    """
+
+    def test_concurrent_sends_lose_messages(self, data_dir, tmp_path):
+        """Many parallel sends to the same inbox — some messages disappear."""
+        import threading
+
+        from src.tools.agent_messaging import send_to_agent
+
+        NUM_THREADS = 20
+        barrier = threading.Barrier(NUM_THREADS)
+        errors = []
+
+        def _send(i: int) -> None:
+            try:
+                barrier.wait(timeout=2)
+                send_to_agent("alice", f"msg-{i}")
+            except Exception as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        threads = [threading.Thread(target=_send, args=(i,)) for i in range(NUM_THREADS)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=5)
+
+        inbox = data_dir / "tasks" / "inbox" / "alice.json"
+        messages = json.loads(inbox.read_text()) if inbox.exists() else []
+        actual_count = len(messages)
+        # With no locking we expect *some* messages to be lost.
+        # We assert the current buggy behaviour: count < NUM_THREADS.
+        assert actual_count < NUM_THREADS, (
+            f"Expected lost messages due to race, but all {NUM_THREADS} preserved. "
+            "Race may need a slower environment or artificial delay."
+        )
+
+    @pytest.mark.xfail(
+        strict=False,
+        reason="Race is non-deterministic — may not manifest on fast CI runners. "
+        "Documents BUG #973 (no file locking in agent_messaging).",
+    )
+    def test_concurrent_send_and_read_lose_messages(self, data_dir, tmp_path):
+        """Send while reading — new message may be overwritten by read's writeback."""
+        import threading
+
+        from src.tools.agent_messaging import read_agent_inbox, send_to_agent
+
+        # Seed one message so read_agent_inbox has something to write back
+        send_to_agent("alice", "seed")
+
+        barrier = threading.Barrier(2)
+        lost = []
+
+        def _reader() -> None:
+            barrier.wait(timeout=2)
+            read_agent_inbox("alice")
+
+        def _sender() -> None:
+            barrier.wait(timeout=2)
+            send_to_agent("alice", "new")
+
+        # Run the race many times to make it likely
+        for _ in range(50):
+            t1 = threading.Thread(target=_reader)
+            t2 = threading.Thread(target=_sender)
+            t1.start()
+            t2.start()
+            t1.join(timeout=2)
+            t2.join(timeout=2)
+
+            inbox = data_dir / "tasks" / "inbox" / "alice.json"
+            messages = json.loads(inbox.read_text()) if inbox.exists() else []
+            texts = {m["message"] for m in messages}
+            if "new" not in texts:
+                lost.append(True)
+                break
+
+        assert any(lost), (
+            "Expected at least one race where 'new' message was lost, but none occurred. "
+            "Race may need a slower environment or artificial delay."
+        )
+
+    def test_concurrent_reads_do_not_duplicate(self, data_dir, tmp_path):
+        """Multiple parallel reads should not corrupt the file (no duplicates)."""
+        import threading
+
+        from src.tools.agent_messaging import read_agent_inbox, send_to_agent
+
+        for i in range(3):
+            send_to_agent("alice", f"msg-{i}")
+
+        NUM_READERS = 10
+        barrier = threading.Barrier(NUM_READERS)
+
+        def _read() -> None:
+            barrier.wait(timeout=2)
+            read_agent_inbox("alice")
+
+        threads = [threading.Thread(target=_read) for _ in range(NUM_READERS)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=5)
+
+        inbox = data_dir / "tasks" / "inbox" / "alice.json"
+        messages = json.loads(inbox.read_text()) if inbox.exists() else []
+        # Should still be exactly 3 messages; duplicates would indicate corruption
+        assert len(messages) == 3
+        assert all(m["read"] is True for m in messages)
+
+
 # ── TOOL_SETUP ────────────────────────────────────────────────────────────────
 
 

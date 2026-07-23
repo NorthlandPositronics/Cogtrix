@@ -1,7 +1,9 @@
 """Tests for src/logging_config — secret scrubbing, observability handler, stream routing."""
 
+import json
 import logging
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -9,6 +11,13 @@ from src.logging_config import (
     LLMObservabilityHandler,
     _MaxLevelFilter,
     _scrub_secrets,
+    clear_request_id,
+    clear_session_id,
+    get_request_id,
+    get_session_id,
+    log_tool_call,
+    new_request_id,
+    set_session_id,
     setup_logging,
 )
 
@@ -32,6 +41,33 @@ class TestScrubSecrets:
     def test_passthrough_plain_text(self) -> None:
         raw = "hello world"
         assert _scrub_secrets(raw) == raw
+
+    def test_passthrough_benign_token_word(self) -> None:
+        """Standalone 'token' in prose must NOT be redacted (#994)."""
+        raw = "Generating auth token for user"
+        assert _scrub_secrets(raw) == raw
+
+    def test_passthrough_benign_password_word(self) -> None:
+        """Standalone 'password' in prose must NOT be redacted (#994)."""
+        raw = "Password reset email sent"
+        assert _scrub_secrets(raw) == raw
+
+    def test_passthrough_benign_secret_word(self) -> None:
+        """Standalone 'secret' in prose must NOT be redacted (#994)."""
+        raw = "Checking secret store availability"
+        assert _scrub_secrets(raw) == raw
+
+    def test_redacts_key_name_with_colon(self) -> None:
+        """Key names followed by ':' must still be redacted."""
+        raw = "Authorization: Bearer xxx"
+        result = _scrub_secrets(raw)
+        assert "Authorization" not in result
+
+    def test_redacts_key_name_with_equals(self) -> None:
+        """Key names followed by '=' must still be redacted."""
+        raw = "api_key=short"
+        result = _scrub_secrets(raw)
+        assert "api_key" not in result
 
 
 @pytest.mark.skipif(
@@ -206,3 +242,101 @@ class TestSetupLoggingStreamOutput:
         lg = logging.getLogger("cogtrix")
         assert any(isinstance(h, logging.NullHandler) for h in lg.handlers)
         self._fresh_logger()
+
+
+class TestLogToolCallSecurityLevel:
+    """Regression tests for #410 — security enforcement logs at WARNING not ERROR."""
+
+    def _capture_records(self, tool: str, error: str) -> list[logging.LogRecord]:
+        records: list[logging.LogRecord] = []
+
+        class Capture(logging.Handler):
+            def emit(self, record: logging.LogRecord) -> None:
+                records.append(record)
+
+        handler = Capture()
+        handler.setLevel(logging.DEBUG)
+        lg = logging.getLogger("cogtrix")
+        lg.addHandler(handler)
+        try:
+            log_tool_call(tool, error=error)
+        finally:
+            lg.removeHandler(handler)
+        return records
+
+    def test_access_denied_logs_warning_not_error(self) -> None:
+        records = self._capture_records(
+            "read_text_file", error="Access denied - path outside allowed directories"
+        )
+        levels = {r.levelno for r in records if r.levelno >= logging.WARNING}
+        assert logging.ERROR not in levels, "Access denied should not be ERROR"
+        assert logging.WARNING in levels, "Access denied must be WARNING"
+
+    def test_path_outside_allowed_logs_warning(self) -> None:
+        records = self._capture_records(
+            "list_directory", error="path outside allowed directories: /etc/passwd"
+        )
+        levels = {r.levelno for r in records if r.levelno >= logging.WARNING}
+        assert logging.ERROR not in levels
+        assert logging.WARNING in levels
+
+    def test_unexpected_tool_failure_still_errors(self) -> None:
+        records = self._capture_records("search_web", error="ConnectionRefusedError: [Errno 111]")
+        levels = {r.levelno for r in records if r.levelno >= logging.WARNING}
+        assert logging.ERROR in levels, "Unexpected failures must still be ERROR"
+
+
+class TestStructuredJsonLogging:
+    def _fresh_logger(self) -> logging.Logger:
+        lg = logging.getLogger("cogtrix")
+        lg.handlers.clear()
+        return lg
+
+    def test_json_mode_emits_context_fields(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setenv("LOG_FORMAT", "json")
+        log_path = tmp_path / "structured.log"
+        request_id = new_request_id()
+        set_session_id("sess-123")
+        try:
+            setup_logging(log_file=str(log_path), debug=False)
+            logging.getLogger("cogtrix").info("hello world")
+
+            records = [json.loads(line) for line in log_path.read_text().splitlines()]
+            record = next(item for item in records if item["message"] == "hello world")
+            assert record["level"] == "INFO"
+            assert record["logger"] == "cogtrix"
+            assert record["session_id"] == "sess-123"
+            assert record["request_id"] == request_id
+            assert record["timestamp"].endswith("Z")
+        finally:
+            clear_request_id()
+            clear_session_id()
+            self._fresh_logger()
+
+    def test_text_mode_remains_plain_text(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.delenv("LOG_FORMAT", raising=False)
+        log_path = tmp_path / "plain.log"
+        setup_logging(log_file=str(log_path), debug=False)
+        logging.getLogger("cogtrix").info("hello world")
+
+        line = log_path.read_text().splitlines()[-1]
+        assert "[INFO] hello world" in line
+        assert not line.lstrip().startswith("{")
+        assert '"session_id"' not in line
+        self._fresh_logger()
+
+    def test_session_context_helpers_round_trip(self) -> None:
+        set_session_id("sess-999")
+        assert get_session_id() == "sess-999"
+        clear_session_id()
+        assert get_session_id() == "-"
+
+    def test_request_context_helpers_round_trip(self) -> None:
+        req_id = new_request_id()
+        assert get_request_id() == req_id
+        clear_request_id()
+        assert get_request_id() == "-"

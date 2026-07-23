@@ -5,6 +5,7 @@ creates embeddings, and stores in a FAISS vector database.
 """
 
 import json
+import logging
 import re
 import threading
 from collections import Counter
@@ -17,9 +18,11 @@ from langchain_community.vectorstores import FAISS
 from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
+from src.api.rag_index import save_faiss_store
 from src.utils.atomic_write import atomic_write_json
 
 _entity_index_lock = threading.Lock()
+_log = logging.getLogger("cogtrix.ingest")
 
 _STOP_WORDS: frozenset[str] = frozenset(
     {
@@ -300,9 +303,8 @@ def ingest_documents(config: IngestConfig) -> IngestResult:
     try:
         vector_store = FAISS.from_documents(chunks, embeddings)
 
-        config.vectordb_dir.mkdir(parents=True, exist_ok=True)
         persist_path = config.vectordb_dir / "faiss_index"
-        vector_store.save_local(str(persist_path))
+        save_faiss_store(vector_store, persist_path)
 
         result.vector_store_path = persist_path
         result.success = True
@@ -314,30 +316,41 @@ def ingest_documents(config: IngestConfig) -> IngestResult:
     return result
 
 
-def _ingest_one_file(path: Path, config: IngestConfig) -> bool:
-    """Ingest a single file into the vector store.
-
-    Returns True on success, False on any error.
-    """
+def _prepare_ingest_file(path: Path, config: IngestConfig) -> tuple[str, list[Document]] | None:
+    """Load and split a single document file for a later combined ingest."""
     try:
         loader = _get_loader(path)
         if loader is None:
-            return False
+            return None
         docs = loader.load()
         if not docs:
-            return False
+            return None
         splitter = RecursiveCharacterTextSplitter(
             chunk_size=config.chunk_size,
             chunk_overlap=config.chunk_overlap,
         )
         chunks = splitter.split_documents(docs)
         if not chunks:
+            return None
+        return str(path), chunks
+    except Exception:
+        return None
+
+
+def _ingest_one_file(path: Path, config: IngestConfig) -> bool:
+    """Ingest a single file into the vector store.
+
+    Returns True on success, False on any error.
+    """
+    try:
+        prepared = _prepare_ingest_file(path, config)
+        if prepared is None:
             return False
+        _, chunks = prepared
         embeddings = _create_embeddings(config)
         vector_store = FAISS.from_documents(chunks, embeddings)
-        config.vectordb_dir.mkdir(parents=True, exist_ok=True)
         persist_path = config.vectordb_dir / "faiss_index"
-        vector_store.save_local(str(persist_path))
+        save_faiss_store(vector_store, persist_path)
         return True
     except Exception:
         return False
@@ -363,14 +376,50 @@ def ingest_many(
 
     actual_workers = min(len(paths), workers, 8)
     results: dict[str, bool] = {}
+    prepared_chunks: list[Document] = []
+    successful_paths: list[str] = []
 
-    with ThreadPoolExecutor(max_workers=actual_workers) as pool:
-        future_to_path = {pool.submit(_ingest_one_file, Path(p), config): str(p) for p in paths}
+    # Use explicit ThreadPoolExecutor (not `with`) so shutdown(wait=False)
+    # can be used on timeout — `__exit__` calls shutdown(wait=True) which
+    # blocks on hung threads.
+    pool = ThreadPoolExecutor(max_workers=actual_workers)
+    try:
+        future_to_path = {pool.submit(_prepare_ingest_file, Path(p), config): str(p) for p in paths}
         for future, path_str in future_to_path.items():
             try:
-                results[path_str] = future.result()
+                prepared = future.result(timeout=60)
+            except TimeoutError:
+                future.cancel()
+                _log.warning("Ingest file %s timed out after 60s — marking as failed", path_str)
+                results[path_str] = False
+                continue
             except Exception:
                 results[path_str] = False
+                continue
+
+            if prepared is None:
+                results[path_str] = False
+                continue
+
+            _, chunks = prepared
+            results[path_str] = True
+            successful_paths.append(path_str)
+            prepared_chunks.extend(chunks)
+    finally:
+        pool.shutdown(wait=False)
+
+    if not prepared_chunks:
+        return results
+
+    try:
+        embeddings = _create_embeddings(config)
+        vector_store = FAISS.from_documents(prepared_chunks, embeddings)
+        persist_path = config.vectordb_dir / "faiss_index"
+        save_faiss_store(vector_store, persist_path)
+    except Exception:
+        for path_str in successful_paths:
+            results[path_str] = False
+        return results
 
     return results
 

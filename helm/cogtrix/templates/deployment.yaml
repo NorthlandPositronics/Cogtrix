@@ -1,0 +1,233 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "cogtrix.fullname" . }}
+  labels:
+    {{- include "cogtrix.labels" . | nindent 4 }}
+    {{- with .Values.deployment.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- with .Values.deployment.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "cogtrix.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "cogtrix.selectorLabels" . | nindent 8 }}
+      {{- if or .Values.podAnnotations .Values.linkerd.enabled .Values.linkerd.inject }}
+      annotations:
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+        {{- if and .Values.linkerd.enabled .Values.linkerd.inject }}
+        linkerd.io/inject: enabled
+        {{- end }}
+      {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "cogtrix.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- if .Values.initContainer.enabled }}
+      initContainers:
+        - name: init-data
+          image: "{{ .Values.initContainer.image.repository }}:{{ .Values.initContainer.image.tag }}"
+          imagePullPolicy: {{ .Values.initContainer.image.pullPolicy }}
+          command:
+            - sh
+            - -c
+            - |
+              mkdir -m 770 -p \
+                /data/history \
+                /data/knowledge \
+                /data/vectordb \
+                /data/api/uploads \
+                /data/assistant \
+                /data/workflows \
+                /data/output \
+                /data/log \
+                /data/documents
+              chown -R {{ .Values.podSecurityContext.runAsUser }}:{{ .Values.podSecurityContext.runAsGroup }} /data
+          securityContext:
+            runAsUser: 0
+            runAsNonRoot: false
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          resources:
+            {{- toYaml .Values.initContainer.resources | nindent 12 }}
+      {{- end }}
+      containers:
+        - name: {{ .Chart.Name }}
+          image: {{ include "cogtrix.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          {{- if .Values.config.enabled }}
+          command:
+            - /app/docker-entrypoint.sh
+            - api
+          {{- else }}
+          args:
+            - api
+          {{- end }}
+          env:
+            {{- range $key, $value := .Values.env }}
+            - name: {{ $key }}
+              value: {{ $value | quote }}
+            {{- end }}
+            {{- $secretName := include "cogtrix.fullname" . }}
+            {{- if .Values.externalSecrets.enabled }}
+            {{- $secretName = .Values.externalSecrets.target.name | default $secretName }}
+            {{- end }}
+            {{- if or .Values.secrets.enabled .Values.externalSecrets.enabled }}
+            {{- if or .Values.secrets.jwtSecret .Values.externalSecrets.enabled }}
+            - name: COGTRIX_JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretName }}
+                  key: jwt-secret
+            {{- end }}
+            {{- if or .Values.secrets.openaiApiKey .Values.externalSecrets.enabled }}
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretName }}
+                  key: openai-api-key
+            {{- end }}
+            {{- if or .Values.secrets.anthropicApiKey .Values.externalSecrets.enabled }}
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretName }}
+                  key: anthropic-api-key
+            {{- end }}
+            {{- if or .Values.secrets.geminiApiKey .Values.externalSecrets.enabled }}
+            - name: GEMINI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretName }}
+                  key: gemini-api-key
+            {{- end }}
+            {{- if or .Values.secrets.xaiApiKey .Values.externalSecrets.enabled }}
+            - name: XAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretName }}
+                  key: xai-api-key
+            {{- end }}
+            {{- if or .Values.secrets.deepseekApiKey .Values.externalSecrets.enabled }}
+            - name: DEEPSEEK_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretName }}
+                  key: deepseek-api-key
+            {{- end }}
+            {{- if or .Values.secrets.databaseUrl .Values.externalSecrets.enabled }}
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretName }}
+                  key: database-url
+            {{- end }}
+            {{- if or .Values.secrets.ollamaBaseUrl .Values.externalSecrets.enabled }}
+            - name: OLLAMA_BASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretName }}
+                  key: ollama-base-url
+            {{- end }}
+            {{- end }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+          livenessProbe:
+            {{- toYaml .Values.livenessProbe | nindent 12 }}
+          readinessProbe:
+            {{- toYaml .Values.readinessProbe | nindent 12 }}
+          startupProbe:
+            {{- toYaml .Values.startupProbe | nindent 12 }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            {{- if .Values.config.enabled }}
+            - name: config
+              mountPath: /app/.cogtrix.yaml
+              subPath: .cogtrix.yaml
+              readOnly: true
+            {{- end }}
+            {{- with .Values.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- with .Values.lifecycle }}
+          lifecycle:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+        {{- if .Values.waha.enabled }}
+        - name: waha
+          image: {{ include "cogtrix.wahaImage" . }}
+          imagePullPolicy: {{ .Values.waha.image.pullPolicy }}
+          env:
+            - name: WHATSAPP_DEFAULT_ENGINE
+              value: "WEBJS"
+          ports:
+            - name: waha
+              containerPort: 3000
+              protocol: TCP
+          resources:
+            {{- toYaml .Values.waha.resources | nindent 12 }}
+        {{- end }}
+      volumes:
+        - name: data
+          {{- if .Values.persistence.enabled }}
+          {{- if .Values.persistence.existingClaim }}
+          persistentVolumeClaim:
+            claimName: {{ .Values.persistence.existingClaim }}
+          {{- else }}
+          persistentVolumeClaim:
+            claimName: {{ include "cogtrix.fullname" . }}-data
+          {{- end }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        {{- if .Values.config.enabled }}
+        - name: config
+          configMap:
+            name: {{ include "cogtrix.fullname" . }}-config
+        {{- end }}
+        {{- with .Values.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

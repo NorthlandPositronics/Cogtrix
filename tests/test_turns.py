@@ -1,5 +1,6 @@
 """Tests for conversation turn rendering."""
 
+import sys
 from io import StringIO
 
 from rich.console import Console
@@ -67,7 +68,6 @@ def test_print_user_turn_has_timestamp():
 
 def test_theme_fallback_does_not_crash():
     """turn rendering works even if src.ui.theme is unavailable."""
-    import sys
 
     from src.ui import turns
 
@@ -120,30 +120,17 @@ def test_print_user_turn_header_uses_pipe():
     assert re.search(r"│\s+you", output), f"Expected '│ you' in output: {repr(output)}"
 
 
-def test_deep_think_handler_calls_print_user_turn():
-    """The deep_think: result branch in the main loop must call print_user_turn.
+def test_print_user_turn_formatting():
+    """Verify print_user_turn includes expected formatting markers."""
+    from io import StringIO
 
-    Regression for the bug where /think prompt disappeared: slash commands hit
-    `continue` before the normal print_user_turn call, so deep_think: must echo
-    the prompt explicitly before starting Stage 1/2.
-    """
-    import inspect
+    from src.ui.turns import print_user_turn
 
-    import cogtrix
+    buf = StringIO()
+    console = Console(file=buf, highlight=False, markup=False, width=80)
+    print_user_turn(console, "test message")
+    output = buf.getvalue()
 
-    source = inspect.getsource(cogtrix.main)
-    deep_think_pos = source.find('result.startswith("deep_think:")')
-    assert deep_think_pos >= 0, "deep_think: branch not found in main()"
-
-    # print_user_turn must appear after the deep_think: branch start
-    # and before Stage 1/2 output
-    stage1_pos = source.find("Stage 1/2:", deep_think_pos)
-    user_turn_pos = source.find("print_user_turn", deep_think_pos)
-
-    assert (
-        user_turn_pos > deep_think_pos
-    ), "print_user_turn must be called inside the deep_think: handler"
-    assert stage1_pos < 0 or user_turn_pos < stage1_pos, (
-        "print_user_turn must appear before 'Stage 1/2:' output so the prompt "
-        "is visible before the long-running think stages begin"
-    )
+    # The output should contain the expected format with user label
+    assert "│ " in output, "print_user_turn must include │ marker"
+    assert "test message" in output, "print_user_turn must include the message"

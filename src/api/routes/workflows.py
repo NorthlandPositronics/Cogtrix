@@ -340,7 +340,7 @@ async def upload_workflow_document(
     data = await file.read()
     if len(data) > _MAX_DOC_BYTES:
         raise HTTPException(
-            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
             detail={
                 "code": "VALIDATION_ERROR",
                 "message": f"File too large ({len(data)} bytes); maximum is 50 MB.",

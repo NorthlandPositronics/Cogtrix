@@ -72,11 +72,19 @@ class TestMessageToDict:
         assert d["tool_call_id"] == "tc1"
 
     def test_tool_message_non_string_content(self):
+        """ToolMessage with list content must survive round-trip as a list."""
         if not _LC_AVAILABLE:
             pytest.skip("langchain not installed")
         msg = ToolMessage(content=["list", "content"], name="t", tool_call_id="tc2")
         d = _message_to_dict(msg)
-        assert isinstance(d["content"], str)
+        # Content should remain a list, not be converted to string
+        assert isinstance(d["content"], list)
+        assert d["content"] == ["list", "content"]
+        # Full round-trip
+        restored = _dict_to_message(d)
+        assert isinstance(restored, ToolMessage)
+        assert isinstance(restored.content, list)
+        assert restored.content == ["list", "content"]
 
     def test_plain_dict_human(self):
         d = _message_to_dict({"type": "human", "content": "hi"})
@@ -126,6 +134,21 @@ class TestMessageToDict:
         msg = HumanMessage(content="question")
         d = _message_to_dict(msg)
         assert "reasoning_content" not in d
+
+    def test_reasoning_content_truncated_at_8192_chars(self):
+        """Long reasoning_content is capped to prevent unbounded JSON growth."""
+        if not _LC_AVAILABLE:
+            pytest.skip("langchain not installed")
+        long_rc = "x" * 10_000
+        msg = AIMessage(content="hi", additional_kwargs={"reasoning_content": long_rc})
+        d = _message_to_dict(msg)
+        rc = d.get("reasoning_content", "")
+        assert (
+            len(rc) <= 8192 + 20
+        ), f"reasoning_content should be capped near 8192 chars, got {len(rc)}"
+        assert (
+            "truncated" in rc or len(rc) <= 8192
+        ), "reasoning_content must contain a truncation marker or be at most 8192 chars"
 
 
 # ---------------------------------------------------------------------------
@@ -239,6 +262,30 @@ class TestJsonFileMemoryStore:
         assert loaded[0].content == "hi"
         assert loaded[1].content == "hello"
 
+    def test_save_and_load_roundtrip_list_content(self, tmp_path):
+        """Verify ToolMessage with list content survives save/load round-trip."""
+        if not _LC_AVAILABLE:
+            pytest.skip("langchain not installed")
+        store = JsonFileMemoryStore(base_dir=str(tmp_path))
+        # ToolMessage with list content (from LangChain)
+        msgs = [
+            HumanMessage(content="hi"),
+            AIMessage(content="response"),
+            ToolMessage(content=["list", "content"], name="tool1", tool_call_id="tc1"),
+        ]
+        store.save_history("session-list", msgs)
+        loaded = store.load_history("session-list")
+        assert len(loaded) == 3
+        assert isinstance(loaded[0], HumanMessage)
+        assert loaded[0].content == "hi"
+        assert isinstance(loaded[1], AIMessage)
+        assert loaded[1].content == "response"
+        assert isinstance(loaded[2], ToolMessage)
+        # The list content should be preserved as a list
+        assert loaded[2].content == ["list", "content"]
+        assert loaded[2].name == "tool1"
+        assert loaded[2].tool_call_id == "tc1"
+
     def test_load_corrupt_json_returns_empty(self, tmp_path):
         store = JsonFileMemoryStore(base_dir=str(tmp_path))
         session_file = tmp_path / "corrupt.json"
@@ -298,4 +345,5 @@ class TestJsonFileMemoryStore:
         store = JsonFileMemoryStore(base_dir=str(tmp_path))
         long_id = "a" * 300
         path = store._session_path(long_id)
-        assert len(path.stem) <= 128
+        # Path truncation is capped at 200 chars per path_safety.py
+        assert len(path.stem) <= 200

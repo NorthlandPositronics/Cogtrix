@@ -284,7 +284,7 @@ class TestCompactReportsAICompression:
         reg.memory_manager = mm
         reg.max_context_tokens = 16_384
 
-        with patch("cogtrix.apply_message_compression", return_value=[compressed_msg]):
+        with patch("src.cli.commands.apply_message_compression", return_value=[compressed_msg]):
             reg.dispatch("/compact")
 
         out, _ = capsys.readouterr()
@@ -310,7 +310,7 @@ class TestCompactReportsAICompression:
         reg.memory_manager = mm
         reg.max_context_tokens = 16_384
 
-        with patch("cogtrix.apply_message_compression", return_value=[comp_tool, comp_ai]):
+        with patch("src.cli.commands.apply_message_compression", return_value=[comp_tool, comp_ai]):
             reg.dispatch("/compact")
 
         out, _ = capsys.readouterr()
@@ -338,7 +338,7 @@ class TestCompactNothingWhenTrulyEmpty:
         reg.memory_manager = mm
         reg.max_context_tokens = 16_384
 
-        with patch("cogtrix.apply_message_compression", return_value=[msg]):
+        with patch("src.cli.commands.apply_message_compression", return_value=[msg]):
             reg.dispatch("/compact")
 
         out, _ = capsys.readouterr()

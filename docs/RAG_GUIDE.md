@@ -206,6 +206,22 @@ The `query_knowledge_base` tool can be used explicitly:
 You: Search the knowledge base for "vacation policy"
 ```
 
+### Saving Notes
+
+Use `save_to_knowledge_base` to persist a note, fact, or decision for later retrieval by the agent.
+
+```
+You: Save this: the deployment window is Friday at 18:00 UTC.
+```
+
+The tool accepts:
+
+- `content` - required note text to store
+- `source` - optional origin label, default `agent`
+- `tags` - optional list of topic tags
+
+Saved notes go to the dedicated agent-notes sub-index when FAISS is available. If FAISS is unavailable, Cogtrix falls back to a JSONL log so the information is still preserved.
+
 ### Query Parameters
 
 | Parameter | Default | Description |

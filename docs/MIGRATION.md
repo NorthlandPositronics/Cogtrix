@@ -90,6 +90,34 @@ alembic upgrade head
 The Docker entrypoint runs `alembic upgrade head` automatically when started
 in API mode (`docker run ... api`).
 
+### Enterprise Phase 1 migrations (0003–0010)
+
+The following migrations ship with the current codebase and are applied by
+`alembic upgrade head`. Each is safe to apply incrementally or all at once.
+
+| Migration | Table(s) created / changed | Notes |
+|-----------|---------------------------|-------|
+| `0003_organization` | `organizations` | Multi-tenancy root table |
+| `0004_user_org_fk` | `users.org_id` FK | Links every user to an org |
+| `0005_default_org_migration` | — | Data migration: seeds a default org and moves all existing users into it |
+| `0006_teams` | `teams`, `team_memberships` | Team management |
+| `0007_workspaces` | `workspaces`, `workspace_memberships`, `workspace_configs` | Workspace layer |
+| `0008_plans` | `plans` | Billing plan definitions; seeds free/pro/team/enterprise defaults |
+| `0009_usage_records` | `usage_records` | Per-event usage metering |
+| `0010_perf_indexes` | — | Composite and covering indexes for plan enforcement hot queries |
+| `0011_stripe_fields` | `organizations` | Adds `stripe_customer_id`, `stripe_subscription_id`, `stripe_subscription_status` for Stripe billing integration |
+
+**0005 note for existing deployments:** migration 0005 is a data migration that
+creates a `default` organization and reassigns all existing `users` rows to it.
+It is idempotent — if a `default` org already exists the migration skips the
+insert. No data is lost; `org_id` is added as a nullable FK and backfilled.
+
+After running migrations, verify the organization was seeded:
+
+```sql
+SELECT id, name, slug FROM organizations WHERE slug = 'default';
+```
+
 ---
 
 ## 3. Configuration Changes
@@ -162,6 +190,8 @@ oidc:
   enabled: false
   issuer: "https://your-idp.example.com/realms/cogtrix"
   audience: "cogtrix-api"
+  # Optional: allow http:// issuer/JWKS only for non-production debug use.
+  # allow_insecure_oidc: false
 
 # Audit log (M5.4) — enabled by default
 audit_log:
@@ -198,8 +228,8 @@ COGTRIX_DB_URL=postgresql+asyncpg://cogtrix:secret@localhost:5432/cogtrix
 # Data directory (relocates SQLite file and audit log)
 COGTRIX_DATA_DIR=/var/cogtrix
 
-# Redis (optional; enables horizontal scaling)
-# COGTRIX_REDIS_URL=redis://localhost:6379/0
+# Redis is configured via the redis_url key in .cogtrix.yaml, not via an
+# environment variable. There is no COGTRIX_REDIS_URL environment variable.
 
 # Model selection
 COGTRIX_MODEL=openai/gpt-4.1-mini

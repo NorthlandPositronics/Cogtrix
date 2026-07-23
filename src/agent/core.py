@@ -7,8 +7,8 @@ Supports multiple LLM providers: OpenAI, Ollama, and OpenAI-compatible APIs.
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Annotated, Any, Protocol, TypedDict, runtime_checkable
 
+from src.common.types import AgentRunConfig
 from src.logging_config import get_logger
-from src.orchestration.run_config import AgentRunConfig
 
 if TYPE_CHECKING:
     from src.config import ModelConfig, ProviderConfig
@@ -68,6 +68,13 @@ calling any tools. Reserve tools for tasks that genuinely require:
 - Base answers strictly on tool results. Do not fill gaps with assumptions.
 - Note when information was not available; distinguish facts from inferences.
 - Cite URLs/sources from tool results for factual claims.
+
+## Time and Date Handling — CRITICAL
+**ALWAYS use the `get_current_datetime` tool to get the current UTC time before reporting any timestamp. Never estimate, calculate, or fabricate time values.**
+
+If the agent output contains any time or date information (e.g., "Status Update — 17:50 UTC"), the agent MUST have called `get_current_datetime` in the current turn. If no `get_current_datetime` call exists in the tool history, the agent MUST NOT report any time or date.
+
+This is non-negotiable. Fabricated timestamps are catastrophic for time-sensitive decisions, especially in procurement and financial operations.
 
 ## Forbidden
 - Never say "I'm ready to help!" — do the work.
@@ -304,6 +311,14 @@ def format_milestone_instructions(milestones: list) -> str:
 
 
 _DELEGATE_TOOL_NAMES: frozenset[str] = frozenset({"delegate_task", "delegate_parallel"})
+_MERGE_TOOL_NAMES: frozenset[str] = frozenset({"merge_pull_request", "github_merge_pull_request"})
+_MERGE_CI_GUARD_PROMPT = """### GitHub Merge Safety
+
+- Before every `merge_pull_request` call, fetch the current CI status first with `get_pull_request_status`.
+- Only proceed if the CI Summary check is `completed/success`.
+- If any check is `in_progress`, `queued`, `failure`, or missing, do not attempt the merge.
+- After `Repository rule violations`, do not retry the merge in the same session unless CI state has changed.
+"""
 
 
 def build_system_prompt(
@@ -381,6 +396,10 @@ def build_system_prompt(
     if milestone_instructions:
         parts.append(milestone_instructions)
 
+    merge_guard_enabled = bool(active_tool_names and active_tool_names & _MERGE_TOOL_NAMES)
+    if merge_guard_enabled:
+        parts.append(_MERGE_CI_GUARD_PROMPT)
+
     if decision_accountability_prompt:
         parts.append(decision_accountability_prompt)
 
@@ -412,6 +431,8 @@ def _estimate_msg_tokens(msg: Any) -> int:
 
 def _truncate_content(content: str, max_tokens: int) -> str:
     """Truncate a string to roughly *max_tokens* (at ~4 chars/token)."""
+    if max_tokens <= 0:
+        return content
     max_chars = max_tokens * 4
     if len(content) <= max_chars:
         return content
@@ -530,21 +551,30 @@ def _trim_to_token_budget(
     history = history[drop_count:]
     dropped = drop_count
 
-    # Remove orphaned ToolMessages at the head of the trimmed history.
+    # Remove orphaned messages at the head of the trimmed history.
     # A ToolMessage is orphaned if no preceding AIMessage carries its tool_call_id.
+    # An AIMessage at the head is orphaned because there is no preceding user
+    # message, violating role-alternation constraints (llama.cpp Jinja, etc.).
     try:
         from langchain_core.messages import ToolMessage as _ToolMessage
     except ImportError:
         _ToolMessage = None  # type: ignore[assignment, misc]
 
-    if _ToolMessage is not None and AIMessage is not None:
-        orphan_count = 0
-        while orphan_count < len(history) and isinstance(history[orphan_count], _ToolMessage):
-            total_history -= _estimate_msg_tokens(history[orphan_count])
-            orphan_count += 1
-        if orphan_count:
-            history = history[orphan_count:]
-            dropped += orphan_count
+    removed = 0
+    while removed < len(history):
+        msg = history[removed]
+        if _ToolMessage is not None and isinstance(msg, _ToolMessage):
+            total_history -= _estimate_msg_tokens(msg)
+            removed += 1
+            continue
+        if AIMessage is not None and isinstance(msg, AIMessage):
+            total_history -= _estimate_msg_tokens(msg)
+            removed += 1
+            continue
+        break
+    if removed:
+        history = history[removed:]
+        dropped += removed
 
     if dropped:
         _log.info(
@@ -744,5 +774,6 @@ class AgentRunner(Protocol):
         callbacks: list | None = None,
         result_messages: list | None = None,
         *,
-        config: AgentRunConfig | None = None,
+        config: AgentRunConfig,
+        task_complexity: Any | None = None,
     ) -> str: ...

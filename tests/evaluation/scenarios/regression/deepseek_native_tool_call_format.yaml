@@ -1,0 +1,75 @@
+id: regression_deepseek_native_tool_call_format
+domain: regression
+title: DeepSeek-V3 native tool-call format must be normalized
+description: |
+  Reproduces the May 2026 bug fixed in PR #1255: DeepSeek-V3 routed
+  through OpenRouter emits tool calls in its native special-token
+  format
+
+      <｜tool▁call▁begin｜>...<｜tool▁sep｜>name<｜tool▁call▁end｜>
+
+  inside message.content rather than via langchain-openai's
+  structured tool_calls field.  Without
+  normalize_native_tool_calls() in src/orchestration/phases.py, the
+  agent loop sees zero tool_calls, the call surfaces as raw text in
+  the user reply, and Gate 2 scores tools=0 / final_response=''.
+
+  The task is intentionally minimal — one classification call — so
+  the failure mode (zero structured calls AND raw special tokens
+  bleeding into content) is unmistakable when the regression returns.
+
+  Today this regression is unit-tested only
+  (tests/orchestration/test_giveup_synthesis.py
+  ::TestExtractDeepseekNativeToolCalls).  This scenario adds an
+  end-to-end guard against a DeepSeek-V3 user actually seeing the
+  failure in production.
+
+user_prompt: |
+  I received an invoice #INV-2026-0510 from Beta Supplies for $7,500.
+  Please classify this invoice by amount tier.
+
+system_prompt: |
+  You are a finance assistant.  Use classify_invoice to determine the
+  amount tier of incoming invoices.
+
+tools_required:
+  - classify_invoice
+
+expected_outcome: |
+  classify_invoice is called as a structured tool call (the
+  amount 7500 reaches the args).  No DeepSeek special tokens and no
+  langchain phantom markup leak into the user-visible reply.
+
+success_criteria:
+  # Tool was called and the dollar amount was passed through.  When
+  # the regression bites, neither of these would appear because the
+  # call rendered as text and never hit the stub.
+  - "contains: classify_invoice"
+  - "contains: 7500"
+
+  # The DeepSeek special tokens use FULLWIDTH VERTICAL LINE U+FF5C
+  # and LOWER ONE EIGHTH BLOCK U+2581 — these unicode glyphs should
+  # NEVER appear in a user reply.  Checked with response-scope so a
+  # tool whose input legitimately includes the glyphs (none today)
+  # would not false-positive.
+  - "response_not_contains: <｜tool▁call▁begin｜>"
+  - "response_not_contains: <｜tool▁sep｜>"
+  - "response_not_contains: <｜tool▁call▁end｜>"
+
+  # Belt-and-braces: the qwen3-coder XML form must also stay out of
+  # the user-visible reply.  The same normalize_native_tool_calls()
+  # path handles both formats.
+  - "response_not_contains: <tool_call>"
+
+max_turns: 5
+timeout_seconds: 60
+
+tags:
+  - gate2
+  - smoke
+  - regression
+  - deepseek
+
+# Budget: one tool call + one summarisation turn.  ~$0.01–$0.02
+# nominal on Sonnet, less on DeepSeek itself.  D2 ceiling = $0.06.
+budget_usd_estimate: 0.02

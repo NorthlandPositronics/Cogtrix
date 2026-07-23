@@ -222,8 +222,11 @@ class DiscordChannel(Channel):
                         self._last_seen[ch_id] = str(msgs[0]["id"])
                 except Exception as exc:
                     log.debug("Discord cold-start seed failed for %s: %s", ch_id, exc)
-            self._seeded = True
-            log.debug("Discord cold-start: seeded %d channel(s)", len(self._channel_guilds))
+            if self._channel_guilds:
+                self._seeded = True
+                log.debug("Discord cold-start: seeded %d channel(s)", len(self._channel_guilds))
+            else:
+                log.warning("Discord cold-start: no channels discovered, will retry next poll")
             return []
 
         result: list[IncomingMessage] = []

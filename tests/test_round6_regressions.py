@@ -30,6 +30,9 @@ class TestScheduledMessageAdminAuth:
     @pytest.fixture(autouse=True)
     def _set_jwt_secret(self, monkeypatch):
         monkeypatch.setenv("COGTRIX_JWT_SECRET", "a" * 64)
+        from src.api.auth import configure_jwt_secret
+
+        configure_jwt_secret("a" * 64)
 
     def _admin_headers(self) -> dict[str, str]:
         from src.api.auth import create_access_token
@@ -142,8 +145,10 @@ class TestDeepThinkSemaphoreLeak:
 
         initial = _deep_think_sem._value  # type: ignore[attr-defined]
 
+        _hang_event = threading.Event()
+
         def _hang(*args, **kwargs):
-            time.sleep(30)  # hang longer than timeout
+            _hang_event.wait()  # block indefinitely until timeout cancels us
             return MagicMock(content="late")
 
         mock_llm = MagicMock()
@@ -155,6 +160,7 @@ class TestDeepThinkSemaphoreLeak:
         # Give the pool a moment to clean up
         time.sleep(0.5)
         assert _deep_think_sem._value == initial  # type: ignore[attr-defined]
+        _hang_event.set()  # release any still-blocked workers
 
     def test_call_llm_single_releases_semaphore_on_timeout(self):
         """Single-call path releases semaphore on timeout."""
@@ -162,8 +168,10 @@ class TestDeepThinkSemaphoreLeak:
 
         initial = _deep_think_sem._value  # type: ignore[attr-defined]
 
+        _hang_event = threading.Event()
+
         def _hang(*args, **kwargs):
-            time.sleep(30)
+            _hang_event.wait()  # block indefinitely until timeout cancels us
             return MagicMock(content="late")
 
         mock_llm = MagicMock()
@@ -173,6 +181,7 @@ class TestDeepThinkSemaphoreLeak:
 
         assert _deep_think_sem._value == initial  # type: ignore[attr-defined]
         assert "Timeout" in result
+        _hang_event.set()  # release any still-blocked worker
 
     def test_semaphore_not_over_released(self):
         """Semaphore value must not exceed initial capacity after calls."""
@@ -355,6 +364,9 @@ class TestReloadConfigUsesLoadConfig:
     @pytest.fixture(autouse=True)
     def _set_jwt_secret(self, monkeypatch):
         monkeypatch.setenv("COGTRIX_JWT_SECRET", "a" * 64)
+        from src.api.auth import configure_jwt_secret
+
+        configure_jwt_secret("a" * 64)
 
     def test_reload_preserves_models_registry(self, tmp_path):
         """After reload, app.state.config.models must contain parsed aliases."""
@@ -448,3 +460,102 @@ class TestBuildLlmNoSharedMutation:
             _build_llm({"model": "oss"}, FakeState())
 
         assert cfg.providers["spark"].api_key == original_spark_key
+
+
+# ── deep_think context pollution guard (#250) ──────────────────────────────
+
+
+class TestDeepThinkContextPollutionGuard:
+    """Session-history pollution detector strips cross-domain context dumps
+    from deep_think calls, regardless of task domain (regression for #250)."""
+
+    def test_clean_research_context_passes_through(self):
+        """Focused web research with few unique artifacts is not stripped."""
+        from src.tools.deep_think import configure_deep_think, deep_think
+
+        mock_llm = MagicMock()
+        mock_llm.invoke.return_value = MagicMock(content="analysis result")
+        configure_deep_think({"providers": {"mock": {}}})
+
+        clean_context = (
+            "MIITE 2026 Startup Program: Applications open Jan 15 – Mar 30. "
+            "Requirements: registered UAE company, < 5 years old, pitch deck. "
+            "Source: https://miite.ae/startups/apply"
+        )
+        result = deep_think(
+            task="What are the requirements to participate as a startup in MIITE 2026?",
+            context=clean_context,
+            max_iterations=1,
+            num_branches=2,
+            llm=mock_llm,
+        )
+        assert result != ""
+
+    def test_session_history_dump_stripped_for_any_task_domain(self):
+        """Session history with many unique artifacts is stripped regardless of task domain."""
+        from unittest.mock import patch
+
+        from src.tools.deep_think import configure_deep_think, deep_think
+
+        mock_llm = MagicMock()
+        mock_llm.invoke.return_value = MagicMock(content="analysis result")
+        configure_deep_think({"providers": {"mock": {}}})
+
+        # Many UNIQUE SHAs, PR numbers, Slack IDs — hallmark of a session history dump
+        session_dump = (
+            "PR #246 merged c278d37. PR #247 merged 9f14c80. "
+            "PR #248 merged dceb2b2. PR #249 merged b1ef61e. "
+            "PR #250 merged d5781c1. PR #251 merged ecb7a66. "
+            "SHA abc1234 def5678 9ab0cd1 2ef3456 78abc90. "
+            "U08K4SB05PU approved. U0B0JE40U0Z confirmed. U0B04M1SLSX merged. "
+            "U0AV0EDDN3H reviewed. U0B0FG2DE8H validated. "
+        )
+
+        for task in [
+            "What are the startup participation requirements for MIITE 2026?",
+            "Debug the CI failure on the cross-org isolation branch",
+            "Analyse Q1 procurement spend by supplier category",
+        ]:
+            with patch("src.tools.deep_think.log") as mock_log:
+                deep_think(
+                    task=task,
+                    context=session_dump,
+                    max_iterations=1,
+                    num_branches=2,
+                    llm=mock_llm,
+                )
+                warning_calls = [str(c) for c in mock_log.warning.call_args_list]
+                assert any(
+                    "pollution" in w.lower() for w in warning_calls
+                ), f"Expected pollution warning for task: {task!r}"
+
+    def test_small_number_of_unique_artifacts_not_stripped(self):
+        """Focused context with only a few unique references is not stripped."""
+        from unittest.mock import patch
+
+        from src.tools.deep_think import configure_deep_think, deep_think
+
+        mock_llm = MagicMock()
+        mock_llm.invoke.return_value = MagicMock(content="analysis result")
+        configure_deep_think({"providers": {"mock": {}}})
+
+        # Only 2 unique SHAs, 1 unique PR — well below the threshold
+        focused_context = (
+            "PR #246 introduced the regression. "
+            "Commit abc1234 is the likely culprit; diff shows it removes the org scope. "
+            "Revert candidate: def5678. PR #246 also affects the JIT path."
+        )
+
+        with patch("src.tools.deep_think.log") as mock_log:
+            deep_think(
+                task="Find the root cause of the cross-org auth regression",
+                context=focused_context,
+                max_iterations=1,
+                num_branches=2,
+                llm=mock_llm,
+            )
+            warning_calls = [str(c) for c in mock_log.warning.call_args_list]
+            pollution_warnings = [w for w in warning_calls if "pollution" in w.lower()]
+            assert (
+                len(pollution_warnings) == 0
+            ), "Focused context with few unique artifacts must not be stripped"

@@ -7,6 +7,7 @@ Phase 3 — background roll-forward via ``roll_forward()`` and ``compress_to_tie
 
 from __future__ import annotations
 
+import concurrent.futures
 import logging
 import math
 from dataclasses import dataclass, field
@@ -28,6 +29,11 @@ except ImportError:  # pragma: no cover
 _CHARS_PER_TOKEN: int = 2
 
 _TIER_CACHE_VERSION = 1
+
+# Seconds to wait for a single LLM compression call before treating it as hung.
+# Background compression runs on a thread pool with max_workers=4; a hung call
+# would permanently consume one worker.  This timeout prevents pool exhaustion.
+_COMPRESSION_TIMEOUT_SECONDS: int = 60
 
 
 @dataclass
@@ -187,7 +193,7 @@ def compress_to_tier(
     import re
     import secrets
 
-    from src.orchestration.compression import _FALLBACK_MAX_CHARS, truncate_tool_output
+    from src.utils.text import _FALLBACK_MAX_CHARS, truncate_tool_output
 
     safe_name = re.sub(r"[\r\n\x00]", "", tool_name)[:100]
 
@@ -208,7 +214,23 @@ def compress_to_tier(
             f"{content}\n"
             f"<<<END_{nonce}>>>"
         )
-        response = llm.invoke(prompt)
+        # Wrap the LLM call in a temporary executor so we can enforce a timeout.
+        # Python threads cannot be cancelled; shutdown(wait=False) lets the
+        # hung thread die in the background without blocking the caller.
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(llm.invoke, prompt)
+            try:
+                response = future.result(timeout=_COMPRESSION_TIMEOUT_SECONDS)
+            except concurrent.futures.TimeoutError:
+                future.cancel()
+                pool.shutdown(wait=False)
+                log.warning(
+                    "compress_to_tier(%d): LLM call timed out after %ds — "
+                    "falling back to truncation",
+                    tier,
+                    _COMPRESSION_TIMEOUT_SECONDS,
+                )
+                raise
         raw = getattr(response, "content", str(response))
         if isinstance(raw, list):
             raw = " ".join(str(c.get("text", c) if isinstance(c, dict) else c) for c in raw)
@@ -234,7 +256,7 @@ def compress_to_tier(
     except Exception as exc:
         log.warning("compress_to_tier(%d) failed for %r: %s", tier, safe_name, exc)
         fallback_len = max(len(content) * 3 // 4, min(len(content), 200))
-        from src.orchestration.compression import _FALLBACK_MAX_CHARS, truncate_tool_output
+        from src.utils.text import _FALLBACK_MAX_CHARS, truncate_tool_output
 
         return truncate_tool_output(content, min(fallback_len, _FALLBACK_MAX_CHARS))
 
@@ -267,7 +289,7 @@ def roll_forward(
     Returns a new :class:`TierCacheSnapshot` with updated boundaries and
     token counts.
     """
-    from src.orchestration.compression import _FALLBACK_MAX_CHARS, truncate_tool_output
+    from src.utils.text import _FALLBACK_MAX_CHARS, truncate_tool_output
 
     if not messages:
         return TierCacheSnapshot()
@@ -285,7 +307,13 @@ def roll_forward(
         if isinstance(c, str):
             return _chars_to_tokens(len(c))
         if isinstance(c, list):
-            return _chars_to_tokens(sum(len(s) for s in c if isinstance(s, str)))
+            total = 0
+            for item in c:
+                if isinstance(item, str):
+                    total += len(item)
+                elif isinstance(item, dict):
+                    total += len(item.get("text", ""))
+            return _chars_to_tokens(total)
         return 0
 
     def _is_tool_message(msg: Any) -> bool:

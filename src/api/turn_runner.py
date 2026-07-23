@@ -26,6 +26,10 @@ import time
 import uuid
 from typing import TYPE_CHECKING, Any
 
+from src.api.callbacks import WebSocketCallbackHandler
+from src.api.confirmation import ApiConfirmationUI
+from src.logging_config import clear_session_id, set_session_id
+
 log = logging.getLogger("cogtrix.api.turn_runner")
 
 if TYPE_CHECKING:
@@ -308,22 +312,28 @@ async def run_message_turn(
         db: Async DB session for persisting the AI message.
         app_state: FastAPI app.state (unused currently; reserved for future hooks).
     """
-    if mode not in ("normal", "think", "delegate"):
-        log.warning("run_message_turn: unknown mode %r — treating as 'normal'", mode)
-        mode = "normal"
+    set_session_id(session.id)
+    try:
+        if mode not in ("normal", "think", "delegate"):
+            log.warning("run_message_turn: unknown mode %r — treating as 'normal'", mode)
+            mode = "normal"
 
-    # Auto-promote COMPLEX_RESEARCH tasks to delegation when the caller did not
-    # explicitly request a mode.  This mirrors the interactive-loop promotion in
-    # cogtrix.py so API sessions benefit from the same adaptive strategy.
-    if mode == "normal":
-        from src.orchestration.intent import TaskComplexity, classify_task_complexity
+        # Auto-promote COMPLEX_RESEARCH tasks to delegation when the caller did not
+        # explicitly request a mode.  This mirrors the interactive-loop promotion in
+        # cogtrix.py so API sessions benefit from the same adaptive strategy.
+        if mode == "normal":
+            from src.orchestration.intent import TaskComplexity, classify_task_complexity
 
-        if classify_task_complexity(text) == TaskComplexity.COMPLEX_RESEARCH:
-            log.info("Complex research task detected — auto-promoting API turn to delegate mode")
-            mode = "delegate"
+            if classify_task_complexity(text) == TaskComplexity.COMPLEX_RESEARCH:
+                log.info(
+                    "Complex research task detected — auto-promoting API turn to delegate mode"
+                )
+                mode = "delegate"
 
-    async with session.turn_lock:
-        await _run_message_turn_inner(session, text, mode, db, app_state)
+        async with session.turn_lock:
+            await _run_message_turn_inner(session, text, mode, db, app_state)
+    finally:
+        clear_session_id()
 
 
 async def _run_message_turn_inner(
@@ -338,8 +348,6 @@ async def _run_message_turn_inner(
     Separated from ``run_message_turn`` so the lock scope is obvious and
     tests can call this directly when they already hold the lock.
     """
-    from src.api.callbacks import WebSocketCallbackHandler
-    from src.api.confirmation import ApiConfirmationUI
     from src.orchestration.runner import run_agent
 
     turn_start = time.monotonic()
@@ -515,7 +523,10 @@ async def _run_message_turn_inner(
                 try:
                     await db.rollback()
                 except Exception:
-                    pass
+                    log.error(
+                        "Rollback failed for session %s — DB session may be broken",
+                        session.id,
+                    )
 
         # Update session token counts from the callback accumulator.
         # Use .get() with a default for the LHS so a missing key (e.g. from an
@@ -556,10 +567,7 @@ async def _run_message_turn_inner(
                 "text": response_text,
             },
         }
-        try:
-            await asyncio.wait_for(session.ws_queue.put(done_msg), timeout=5.0)
-        except TimeoutError:
-            log.warning("Queue put timeout, dropping done message for session %s", session.id)
+        await session.ws_queue.put(done_msg)
     finally:
         # Clear the active confirmation UI so stale references never linger
         # after the turn completes or is cancelled (BUG-FORGE-001).

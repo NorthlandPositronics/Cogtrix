@@ -13,12 +13,16 @@ Covers:
 - get_current_user OIDC fallback (local fail → OIDC success)
 - get_current_user expired local JWT not retried via OIDC
 - get_current_user both validators fail → 401
+- Async/event-loop safety: validate() must be offloaded via asyncio.to_thread
+- Thread safety: concurrent cache access does not corrupt state
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
+import threading
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -107,8 +111,21 @@ def _urlopen_for_jwks(private_key: Any, kid: str):
     return _urlopen_returning(_jwks_body(private_key, kid))
 
 
-def _make_validator(*, jwks_uri: str = "https://auth.example.com/jwks") -> OIDCValidator:
-    return OIDCValidator(OIDCConfig(issuer=_ISSUER, audience=_AUDIENCE, jwks_uri=jwks_uri))
+def _make_validator(
+    *,
+    jwks_uri: str = "https://auth.example.com/jwks",
+    allow_insecure_oidc: bool = False,
+    production_mode: bool = True,
+) -> OIDCValidator:
+    return OIDCValidator(
+        OIDCConfig(
+            issuer=_ISSUER,
+            audience=_AUDIENCE,
+            jwks_uri=jwks_uri,
+            allow_insecure_oidc=allow_insecure_oidc,
+            production_mode=production_mode,
+        )
+    )
 
 
 # ===========================================================================
@@ -174,6 +191,23 @@ class TestValidate:
             with pytest.raises(jwt.InvalidTokenError):
                 validator.validate(token)
 
+    def test_http_jwks_uri_rejected_by_default(self) -> None:
+        token = _make_token(_RSA_KEY)
+        validator = _make_validator(jwks_uri="http://auth.example.com/jwks")
+        with pytest.raises(ValueError, match="JWKS URI uses disallowed scheme 'http'"):
+            validator.validate(token)
+
+    def test_http_jwks_uri_allowed_only_in_non_production_when_explicitly_enabled(self) -> None:
+        token = _make_token(_RSA_KEY)
+        validator = _make_validator(
+            jwks_uri="http://auth.example.com/jwks",
+            allow_insecure_oidc=True,
+            production_mode=False,
+        )
+        with patch(_PATCH_URLOPEN, _urlopen_for_jwks(_RSA_KEY, _KID)):
+            claims = validator.validate(token)
+        assert claims["sub"] == "user-123"
+
 
 # ===========================================================================
 # JWKS key resolution
@@ -181,8 +215,8 @@ class TestValidate:
 
 
 class TestSigningKeyResolution:
-    def test_no_kid_in_header_uses_first_key(self) -> None:
-        """Token without a kid header — validator falls back to first JWKS key."""
+    def test_no_kid_in_header_is_rejected(self) -> None:
+        """Token without a kid header must be rejected explicitly."""
         now = datetime.now(UTC)
         claims = {
             "sub": "no-kid-user",
@@ -195,8 +229,8 @@ class TestSigningKeyResolution:
 
         validator = _make_validator()
         with patch(_PATCH_URLOPEN, _urlopen_for_jwks(_RSA_KEY, _KID)):
-            result = validator.validate(token)
-        assert result["sub"] == "no-kid-user"
+            with pytest.raises(jwt.InvalidTokenError, match="kid header required"):
+                validator.validate(token)
 
     def test_kid_not_found_forces_cache_refresh(self) -> None:
         """When kid is absent from cached JWKS, validator fetches once more."""
@@ -294,6 +328,25 @@ class TestDiscovery:
         with patch(_PATCH_URLOPEN, _urlopen_returning(doc)):
             with pytest.raises(RuntimeError, match="missing 'jwks_uri'"):
                 validator.discover_jwks_uri(_ISSUER)
+
+    def test_http_issuer_rejected_by_default(self) -> None:
+        validator = OIDCValidator(OIDCConfig(issuer="http://auth.example.com", audience=_AUDIENCE))
+        with pytest.raises(ValueError, match="OIDC issuer uses disallowed scheme 'http'"):
+            validator.discover_jwks_uri("http://auth.example.com")
+
+    def test_http_issuer_allowed_only_in_non_production_when_explicitly_enabled(self) -> None:
+        doc = json.dumps({"jwks_uri": "https://auth.example.com/jwks"}).encode()
+        validator = OIDCValidator(
+            OIDCConfig(
+                issuer="http://auth.example.com",
+                audience=_AUDIENCE,
+                allow_insecure_oidc=True,
+                production_mode=False,
+            )
+        )
+        with patch(_PATCH_URLOPEN, _urlopen_returning(doc)):
+            uri = validator.discover_jwks_uri("http://auth.example.com")
+        assert uri == "https://auth.example.com/jwks"
 
     def test_discovery_cache_reused_within_ttl(self) -> None:
         """_resolve_jwks_uri calls discover_jwks_uri at most once per TTL."""
@@ -428,6 +481,7 @@ class TestConfigOIDCParsing:
         assert cfg.oidc_issuer == "https://auth.example.com"
         assert cfg.oidc_audience == "my-app"
         assert cfg.oidc_jwks_uri == "https://auth.example.com/jwks"
+        assert cfg.oidc_allow_insecure_oidc is False
         assert cfg.oidc_role_claim == "grp"
         assert cfg.oidc_default_role == "admin"
 
@@ -437,6 +491,7 @@ class TestConfigOIDCParsing:
         assert cfg.oidc_issuer is None
         assert cfg.oidc_audience is None
         assert cfg.oidc_jwks_uri is None
+        assert cfg.oidc_allow_insecure_oidc is False
         assert cfg.oidc_role_claim == "roles"
         assert cfg.oidc_default_role == "user"
 
@@ -451,6 +506,159 @@ class TestConfigOIDCParsing:
         assert cfg.oidc_issuer is None
         assert cfg.oidc_audience is None
         assert cfg.oidc_jwks_uri is None
+
+    def test_allow_insecure_oidc_parsed_from_config(self, tmp_path: Path) -> None:
+        cfg = self._load_from_yaml(
+            tmp_path,
+            "oidc:\n"
+            "  enabled: true\n"
+            "  issuer: http://auth.example.com\n"
+            "  audience: my-app\n"
+            "  allow_insecure_oidc: true\n",
+        )
+        assert cfg.oidc_enabled is True
+        assert cfg.oidc_allow_insecure_oidc is True
+
+
+# ===========================================================================
+# Event-loop blocking
+# ===========================================================================
+
+
+class TestEventLoopBlocking:
+    """Verify that OIDCValidator.validate() blocks the event loop when called
+    directly from async code, and that asyncio.to_thread() prevents blocking.
+
+    Regression for PR #1024 — src/api/routes/messages.py called
+    validator.validate(raw_token) directly inside an async handler, freezing
+    the event loop for up to _HTTP_TIMEOUT seconds on every OIDC fallback.
+    """
+
+    @pytest.mark.asyncio
+    async def test_direct_validate_call_blocks_event_loop(self) -> None:
+        """Calling validate() directly from async code blocks the event loop."""
+        token = _make_token(_RSA_KEY)
+        validator = _make_validator()
+        progress = asyncio.Event()
+
+        def _slow_urlopen(*args: Any, **kwargs: Any) -> Any:
+            time.sleep(0.2)
+            return _urlopen_returning(_jwks_body(_RSA_KEY, _KID))()
+
+        async def _background() -> None:
+            await asyncio.sleep(0.01)
+            progress.set()
+
+        with patch(_PATCH_URLOPEN, _slow_urlopen):
+            bg_task = asyncio.create_task(_background())
+            validator.validate(token)
+            # validate() blocked the loop, so background hasn't run yet
+            assert not progress.is_set()
+            await bg_task
+
+        assert progress.is_set()
+
+    @pytest.mark.asyncio
+    async def test_validate_via_to_thread_keeps_loop_responsive(self) -> None:
+        """Offloading validate() via asyncio.to_thread lets other tasks run."""
+        token = _make_token(_RSA_KEY)
+        validator = _make_validator()
+        progress = asyncio.Event()
+
+        def _slow_urlopen(*args: Any, **kwargs: Any) -> Any:
+            time.sleep(0.2)
+            return _urlopen_returning(_jwks_body(_RSA_KEY, _KID))()
+
+        async def _background() -> None:
+            await asyncio.sleep(0.01)
+            progress.set()
+
+        with patch(_PATCH_URLOPEN, _slow_urlopen):
+            bg_task = asyncio.create_task(_background())
+            await asyncio.to_thread(validator.validate, token)
+            # background ran while validate() executed on a worker thread
+            assert progress.is_set()
+            await bg_task
+
+
+# ===========================================================================
+# Thread safety
+# ===========================================================================
+
+
+class TestThreadSafety:
+    """Verify OIDCValidator internal caches tolerate concurrent access."""
+
+    def test_concurrent_validate_calls_with_cache_miss(self) -> None:
+        """Multiple threads with JWKS cache miss should not raise or corrupt state."""
+        token = _make_token(_RSA_KEY)
+        validator = _make_validator()
+        call_count = [0]
+        lock = threading.Lock()
+
+        def _urlopen(url: str, timeout: int = 5) -> Any:
+            with lock:
+                call_count[0] += 1
+            time.sleep(0.01)
+            return _urlopen_returning(_jwks_body(_RSA_KEY, _KID))()
+
+        results: list[Any] = []
+        errors: list[Exception] = []
+
+        def _worker() -> None:
+            try:
+                with patch(_PATCH_URLOPEN, _urlopen):
+                    results.append(validator.validate(token))
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=_worker) for _ in range(10)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert not errors
+        assert len(results) == 10
+        assert all(r["sub"] == "user-123" for r in results)
+        # Duplicate fetches are acceptable; verify no unbounded growth
+        assert 1 <= call_count[0] <= 10
+
+    def test_concurrent_discovery_calls_with_cache_miss(self) -> None:
+        """Multiple threads with discovery cache miss should not raise or corrupt state."""
+        validator = _make_validator(jwks_uri=None)
+        call_count = [0]
+        lock = threading.Lock()
+
+        def _urlopen(url: str, timeout: int = 5) -> Any:
+            with lock:
+                call_count[0] += 1
+            time.sleep(0.01)
+            if "openid-configuration" in url:
+                doc = json.dumps({"jwks_uri": "https://auth.example.com/jwks"}).encode()
+                return _urlopen_returning(doc)()
+            return _urlopen_returning(_jwks_body(_RSA_KEY, _KID))()
+
+        results: list[Any] = []
+        errors: list[Exception] = []
+
+        def _worker() -> None:
+            try:
+                with patch(_PATCH_URLOPEN, _urlopen):
+                    token = _make_token(_RSA_KEY)
+                    results.append(validator.validate(token))
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=_worker) for _ in range(10)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert not errors
+        assert len(results) == 10
+        assert all(r["sub"] == "user-123" for r in results)
 
 
 # ===========================================================================

@@ -49,6 +49,9 @@ _ASSISTANT_SYSTEM_PROMPT = (
     "delivery queue. Before scheduling a new message for a contact, check "
     "list_scheduled_messages to avoid duplicates. When information changes, "
     "edit or cancel the outdated scheduled message rather than sending a new one.\n"
+    "Before posting a recurring status update to Slack, check recent channel "
+    "history and skip or edit if you already posted the same or a near-identical "
+    "update within the last 25 minutes.\n"
     "If a queue_reply tool is available, use it to send multiple messages in "
     "sequence. Each call appends after the last pending message for this chat. "
     "Use schedule_reply for a specific delay; use queue_reply when order matters "
@@ -258,7 +261,7 @@ class AssistantService:
             _exec = self._executor
             _handler = self._handler
 
-            def _reprocess_callback(msgs: Any, ch: Any, depth: int) -> None:
+            def _reprocess_callback(msgs: Any, ch: Any, depth: int, session_key: str) -> None:
                 fut = _exec.submit(
                     _handler.handle_batch,
                     msgs,
@@ -267,7 +270,7 @@ class AssistantService:
                     deferral_depth=depth + 1,
                 )
 
-                def _log_future_exc(f: Any) -> None:
+                def _handle_future_completion(f: Any) -> None:
                     exc = f.exception()
                     if exc is not None:
                         log.error(
@@ -275,8 +278,15 @@ class AssistantService:
                             exc,
                             exc_info=exc,
                         )
+                        # Signal failure to deferral manager for retry
+                        if self._deferral_mgr is not None:
+                            self._deferral_mgr._on_reprocess_failure(session_key)
+                    else:
+                        # Signal success - record can be removed
+                        if self._deferral_mgr is not None:
+                            self._deferral_mgr._on_reprocess_success(session_key)
 
-                fut.add_done_callback(_log_future_exc)
+                fut.add_done_callback(_handle_future_completion)
                 # Use a near-zero timeout to catch immediate executor rejection or
                 # a synchronous coding error raised before any I/O (BUG-109).
                 try:
@@ -325,21 +335,44 @@ class AssistantService:
             return
         self._shutting_down = True
         log.info("Shutdown signal received")
-        self._poller.stop()
-        self._scheduler.stop()
-        self._scheduler.save()
-        if self._deferral_mgr is not None:
-            self._deferral_mgr.stop()
-            self._deferral_mgr.save()
-        if self._campaign_mgr is not None:
-            self._campaign_mgr.stop()
-            self._campaign_mgr.save()
-        self._executor.shutdown(wait=True, cancel_futures=False)
-        self._session_mgr.save_all()
-        if self._knowledge_store is not None:
-            self._knowledge_store.save()
-        log.info("Assistant mode stopped")
-        self._stop_event.set()
+        try:
+            if self._poller:
+                self._poller.stop()
+            try:
+                if self._scheduler:
+                    self._scheduler.stop()
+                    self._scheduler.save()
+            except Exception as exc:
+                log.error("Failed to stop/schedule: %s", exc, exc_info=exc)
+            try:
+                if self._deferral_mgr is not None:
+                    self._deferral_mgr.stop()
+                    self._deferral_mgr.save()
+            except Exception as exc:
+                log.error("Failed to stop/save deferrals: %s", exc, exc_info=exc)
+            try:
+                if self._campaign_mgr is not None:
+                    self._campaign_mgr.stop()
+                    self._campaign_mgr.save()
+            except Exception as exc:
+                log.error("Failed to stop/save campaigns: %s", exc, exc_info=exc)
+            self._executor.shutdown(wait=True, cancel_futures=False)
+            try:
+                self._session_mgr.save_all()
+            except Exception as exc:
+                log.error("Failed to save sessions: %s", exc, exc_info=exc)
+            if self._knowledge_store is not None:
+                try:
+                    self._knowledge_store.save()
+                except Exception as exc:
+                    log.error("Failed to save knowledge store: %s", exc, exc_info=exc)
+                try:
+                    self._knowledge_store.flush()
+                except Exception as exc:
+                    log.error("Failed to flush knowledge store: %s", exc, exc_info=exc)
+            log.info("Assistant mode stopped")
+        finally:
+            self._stop_event.set()
 
     def _discover_channels(self, config: Any) -> list[Channel]:
         asst_cfg: dict[str, Any] = (
@@ -354,7 +387,11 @@ class AssistantService:
         sl_merged: dict[str, Any] = {**svc.get("slack", {}), **ch_cfgs.get("slack", {})}
 
         futures: dict[str, Any] = {}
-        with ThreadPoolExecutor(max_workers=4) as pool:
+        # Use explicit ThreadPoolExecutor (not `with`) so shutdown(wait=False)
+        # can be used on timeout — `__exit__` calls shutdown(wait=True) which
+        # blocks on hung threads.
+        pool = ThreadPoolExecutor(max_workers=4)
+        try:
             if ch_cfgs.get("whatsapp", {}).get("enabled", True):
                 futures["whatsapp"] = pool.submit(self._init_whatsapp, config, ch_cfgs)
             if ch_cfgs.get("telegram", {}).get("enabled", True):
@@ -364,13 +401,20 @@ class AssistantService:
             if sl_merged.get("bot_token") and ch_cfgs.get("slack", {}).get("enabled", True):
                 futures["slack"] = pool.submit(self._init_slack, config, ch_cfgs)
 
-        channels: list[Channel] = []
-        for name in ("whatsapp", "telegram", "discord", "slack"):
-            if name in futures:
-                ch = futures[name].result()
-                if ch is not None:
-                    channels.append(ch)
-        return channels
+            channels: list[Channel] = []
+            for name in ("whatsapp", "telegram", "discord", "slack"):
+                if name in futures:
+                    try:
+                        ch = futures[name].result(timeout=30)
+                    except TimeoutError:
+                        futures[name].cancel()
+                        log.warning("Channel init %s timed out after 30s — skipping", name)
+                        continue
+                    if ch is not None:
+                        channels.append(ch)
+            return channels
+        finally:
+            pool.shutdown(wait=False)
 
     @staticmethod
     def _init_whatsapp(config: Any, ch_cfgs: dict[str, Any]) -> Channel | None:
@@ -457,14 +501,33 @@ class AssistantService:
 
         prompt_file: str | None = asst_cfg.get("system_prompt_file")
         if prompt_file:
+            # Resolve symlinks to their targets, then check if the resolved path
+            # is within allowed directories. This prevents symlinks from pointing
+            # outside data_dir or cwd to read arbitrary files.
+            #
+            # Note: Path.resolve() follows symlinks at the END of the path.
+            # If prompt_file is /data/prompts/secret (a symlink to /etc/passwd),
+            # resolve() returns /etc/passwd, and is_relative_to() correctly rejects it.
+            # The check is atomic with resolve() - no additional TOCTOU window.
             path = Path(prompt_file).expanduser().resolve()
+            cwd = Path.cwd().resolve()
 
+            # Always enforce path containment to prevent symlinks from pointing
+            # outside allowed directories, even when data_dir is None.
             if data_dir is not None:
-                cwd = Path.cwd().resolve()
                 resolved_data_dir = Path(data_dir).resolve()
+                # After resolving symlinks, verify the final path is within allowed dirs
                 if not (path.is_relative_to(cwd) or path.is_relative_to(resolved_data_dir)):
                     log.warning(
                         "system_prompt_file %s is outside allowed directories, skipping", path
+                    )
+                    return _ASSISTANT_SYSTEM_PROMPT
+            else:
+                # When data_dir is None, only allow paths relative to cwd
+                if not path.is_relative_to(cwd):
+                    log.warning(
+                        "system_prompt_file %s is outside allowed directories (data_dir=None), skipping",
+                        path,
                     )
                     return _ASSISTANT_SYSTEM_PROMPT
 

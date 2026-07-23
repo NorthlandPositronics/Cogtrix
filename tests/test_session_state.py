@@ -176,3 +176,91 @@ def test_concurrent_deny_and_is_denied() -> None:
     for t in threads:
         t.join()
     assert not errors, f"Concurrent access raised: {errors}"
+
+
+# ── Approval methods tests ────────────────────────────────────────────────────
+
+
+def test_add_approval_adds_to_approvals() -> None:
+    ss = SessionState()
+    ss.add_approval("write_file")
+    assert "write_file" in ss.get_approvals_snapshot()
+
+
+def test_revoke_approval_removes_from_approvals() -> None:
+    ss = SessionState()
+    ss.add_approval("write_file")
+    ss.revoke_approval("write_file")
+    assert "write_file" not in ss.get_approvals_snapshot()
+
+
+def test_revoke_approval_is_idempotent_for_absent_tool() -> None:
+    ss = SessionState()
+    ss.revoke_approval("write_file")  # never approved — must not raise
+    assert "write_file" not in ss.get_approvals_snapshot()
+
+
+def test_get_approvals_snapshot_is_frozenset() -> None:
+    ss = SessionState()
+    ss.add_approval("a")
+    ss.add_approval("b")
+    snap = ss.get_approvals_snapshot()
+    assert isinstance(snap, frozenset)
+    assert snap == frozenset({"a", "b"})
+
+
+def test_get_approvals_snapshot_is_immutable_copy() -> None:
+    ss = SessionState()
+    ss.add_approval("a")
+    snap = ss.get_approvals_snapshot()
+    ss.add_approval("b")  # modify after snapshot
+    assert "b" not in snap  # snapshot is not affected
+
+
+def test_concurrent_add_approval_and_snapshot() -> None:
+    """Basic race-free test: parallel add_approval and get_approvals_snapshot calls must not raise."""
+    import threading
+
+    ss = SessionState()
+    errors: list[Exception] = []
+
+    def _writer() -> None:
+        for i in range(200):
+            ss.add_approval(f"tool_{i % 10}")
+
+    def _reader() -> None:
+        for _i in range(200):
+            try:
+                ss.get_approvals_snapshot()
+            except Exception as e:
+                errors.append(e)
+
+    threads = [threading.Thread(target=_writer), threading.Thread(target=_reader)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert not errors, f"Concurrent access raised: {errors}"
+
+
+def test_concurrent_add_and_revoke_approval() -> None:
+    """Race-free test: parallel add_approval and revoke_approval calls must not raise."""
+    import threading
+
+    ss = SessionState()
+    errors: list[Exception] = []
+
+    def _adder() -> None:
+        for i in range(200):
+            ss.add_approval(f"tool_{i % 10}")
+
+    def _revoke() -> None:
+        for i in range(200):
+            ss.revoke_approval(f"tool_{i % 10}")
+
+    threads = [threading.Thread(target=_adder), threading.Thread(target=_revoke)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert not errors, f"Concurrent access raised: {errors}"

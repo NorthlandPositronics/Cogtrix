@@ -1,0 +1,30 @@
+{{- if and .Values.linkerd.enabled .Values.linkerd.profile.enabled }}
+# ServiceProfile for Cogtrix API — configures Linkerd retries and timeouts.
+# See: https://linkerd.io/2/reference/service-profiles/
+apiVersion: linkerd.io/v1alpha2
+kind: ServiceProfile
+metadata:
+  name: {{ include "cogtrix.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local
+  labels:
+    {{- include "cogtrix.labels" . | nindent 4 }}
+spec:
+  routes:
+    - name: api
+      condition:
+        method: GET
+        pathRegex: /api/.*
+      {{- with .Values.linkerd.profile.retries }}
+      retryBudget:
+        {{- toYaml .budget | nindent 8 }}
+      {{- end }}
+      {{- with .Values.linkerd.profile.timeouts }}
+      timeout: {{ .api | quote }}
+      {{- end }}
+    - name: health
+      condition:
+        method: GET
+        pathRegex: /api/v1/health.*
+      {{- with .Values.linkerd.profile.timeouts }}
+      timeout: {{ .health | quote }}
+      {{- end }}
+{{- end }}

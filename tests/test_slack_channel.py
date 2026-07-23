@@ -29,6 +29,7 @@ def _make_channel(config: dict[str, Any] | None = None) -> Any:
         patch("src.assistant.channels.slack.WebClient") as mock_cls,
     ):
         mock_client = MagicMock()
+        mock_client.conversations_history.return_value = {"messages": []}
         mock_cls.return_value = mock_client
         ch = SlackChannel(cfg)
         ch._client = mock_client  # re-attach so tests can inspect calls
@@ -133,6 +134,33 @@ class TestPollColdStart:
         # Watermarks must be set to the latest message ts in each channel
         assert ch._last_ts["C001"] == recent_ts
         assert ch._last_ts["C002"] == recent_ts
+
+    def test_cold_start_discovery_failure_no_seed(self):
+        ch = _make_channel()
+        ch._joined_channels = []
+        ch._seeded = False
+
+        # Simulate conversations_list returning empty (discovery failed)
+        ch._client.conversations_list.return_value = {"channels": []}
+
+        result = ch.poll()
+
+        assert result == []
+        # _seeded remains False so the next poll retries
+        assert ch._seeded is False
+
+    def test_cold_start_discovery_exception_no_seed(self):
+        ch = _make_channel()
+        ch._seeded = False
+
+        # Simulate conversations_list raising an exception
+        ch._client.conversations_list.side_effect = RuntimeError("network error")
+
+        result = ch.poll()
+
+        assert result == []
+        # _seeded remains False so the next poll retries
+        assert ch._seeded is False
 
 
 # ---------------------------------------------------------------------------
@@ -378,7 +406,42 @@ class TestSend:
 
         result = ch.send("C001", "Hello Slack")
 
-        ch._client.chat_postMessage.assert_called_once_with(channel="C001", text="Hello Slack")
+        ch._client.chat_postMessage.assert_called_once_with(
+            channel="C001", text="Hello Slack", mrkdwn=True
+        )
+        assert result.ok is True
+        assert result.message_id == send_ts
+
+    def test_send_skips_recent_duplicate_bot_message(self):
+        ch = _make_channel()
+        now = time.time()
+        recent_ts = f"{now - 60:.6f}"
+        ch._client.conversations_history.return_value = {
+            "messages": [{"ts": recent_ts, "bot_id": "B999", "text": "Hello   Slack"}]
+        }
+
+        result = ch.send("C001", "Hello Slack")
+
+        ch._client.conversations_history.assert_called_once_with(channel="C001", limit=3)
+        ch._client.chat_postMessage.assert_not_called()
+        assert result.ok is True
+        assert result.message_id is None
+
+    def test_send_allows_old_duplicate_message_after_cooldown(self):
+        ch = _make_channel()
+        now = time.time()
+        old_ts = f"{now - 2000:.6f}"
+        ch._client.conversations_history.return_value = {
+            "messages": [{"ts": old_ts, "bot_id": "B999", "text": "Hello Slack"}]
+        }
+        send_ts = _ts()
+        ch._client.chat_postMessage.return_value = {"ok": True, "ts": send_ts}
+
+        result = ch.send("C001", "Hello Slack")
+
+        ch._client.chat_postMessage.assert_called_once_with(
+            channel="C001", text="Hello Slack", mrkdwn=True
+        )
         assert result.ok is True
         assert result.message_id == send_ts
 

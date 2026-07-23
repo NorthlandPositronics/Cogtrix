@@ -60,12 +60,26 @@ class TestIngestMany:
         config = _make_ingest_config(tmp_path)
         paths: list[str | Path] = [tmp_path / f"file{i}.txt" for i in range(3)]
 
-        with patch("src.rag.ingest._ingest_one_file", return_value=True) as mock_ingest:
+        prepared = {str(path): (str(path), [_fake_document(source=path.name)]) for path in paths}
+
+        mock_store = MagicMock()
+
+        def fake_prepare(path, cfg):
+            return prepared.get(str(path))
+
+        with (
+            patch("src.rag.ingest._prepare_ingest_file", side_effect=fake_prepare) as mock_prepare,
+            patch("src.rag.ingest._create_embeddings", return_value=MagicMock()),
+            patch("src.rag.ingest.FAISS.from_documents", return_value=mock_store) as mock_faiss,
+            patch("src.rag.ingest.save_faiss_store") as mock_save_store,
+        ):
             result = ingest_many(paths, config)
 
         assert len(result) == 3
         assert all(result.values())
-        assert mock_ingest.call_count == 3
+        assert mock_prepare.call_count == 3
+        mock_faiss.assert_called_once()
+        mock_save_store.assert_called_once_with(mock_store, config.vectordb_dir / "faiss_index")
 
     def test_partial_failure(self, tmp_path: Path):
         """When some files fail, successes and failures are reported correctly."""
@@ -77,9 +91,18 @@ class TestIngestMany:
         def alternating(path, cfg):
             nonlocal call_count
             call_count += 1
-            return call_count % 2 == 1  # odd calls succeed
+            if call_count % 2 == 1:
+                return str(path), [_fake_document(source=Path(path).name)]
+            return None
 
-        with patch("src.rag.ingest._ingest_one_file", side_effect=alternating):
+        mock_store = MagicMock()
+
+        with (
+            patch("src.rag.ingest._prepare_ingest_file", side_effect=alternating),
+            patch("src.rag.ingest._create_embeddings", return_value=MagicMock()),
+            patch("src.rag.ingest.FAISS.from_documents", return_value=mock_store),
+            patch("src.rag.ingest.save_faiss_store") as mock_save_store,
+        ):
             paths: list[str | Path] = [tmp_path / f"file{i}.txt" for i in range(4)]
             result = ingest_many(paths, config)
 
@@ -87,6 +110,32 @@ class TestIngestMany:
         failures = len(result) - successes
         assert successes == 2
         assert failures == 2
+        mock_save_store.assert_called_once_with(mock_store, config.vectordb_dir / "faiss_index")
+
+    def test_builds_single_index_from_all_chunks(self, tmp_path: Path):
+        from src.rag.ingest import ingest_many
+
+        config = _make_ingest_config(tmp_path)
+        paths: list[str | Path] = [tmp_path / "a.txt", tmp_path / "b.txt"]
+
+        def fake_prepare(path, cfg):
+            return str(path), [_fake_document(source=Path(path).name)]
+
+        mock_store = MagicMock()
+
+        with (
+            patch("src.rag.ingest._prepare_ingest_file", side_effect=fake_prepare),
+            patch("src.rag.ingest._create_embeddings", return_value=MagicMock()),
+            patch("src.rag.ingest.FAISS.from_documents", return_value=mock_store) as mock_faiss,
+            patch("src.rag.ingest.save_faiss_store") as mock_save_store,
+        ):
+            result = ingest_many(paths, config)
+
+        assert all(result.values())
+        mock_faiss.assert_called_once()
+        docs_arg, _embeddings_arg = mock_faiss.call_args.args
+        assert len(docs_arg) == 2
+        mock_save_store.assert_called_once_with(mock_store, config.vectordb_dir / "faiss_index")
 
     def test_worker_cap_at_eight(self, tmp_path: Path):
         """Workers are capped at min(len(paths), workers, 8)."""
@@ -105,7 +154,7 @@ class TestIngestMany:
                 super().__init__(max_workers=max_workers, **kw)
 
         with patch("src.rag.ingest.ThreadPoolExecutor", CapturingTPE):
-            with patch("src.rag.ingest._ingest_one_file", return_value=True):
+            with patch("src.rag.ingest._prepare_ingest_file", return_value=None):
                 paths: list[str | Path] = [tmp_path / f"f{i}.txt" for i in range(12)]
                 ingest_many(paths, config, workers=20)
 
@@ -128,7 +177,7 @@ class TestIngestMany:
                 super().__init__(max_workers=max_workers, **kw)
 
         with patch("src.rag.ingest.ThreadPoolExecutor", CapTPE):
-            with patch("src.rag.ingest._ingest_one_file", return_value=True):
+            with patch("src.rag.ingest._prepare_ingest_file", return_value=None):
                 paths: list[str | Path] = [tmp_path / "only_one.txt"]
                 ingest_many(paths, config, workers=8)
 
@@ -141,7 +190,7 @@ class TestIngestMany:
         config = _make_ingest_config(tmp_path)
         paths: list[str | Path] = [tmp_path / "bad.txt"]
 
-        with patch("src.rag.ingest._ingest_one_file", side_effect=RuntimeError("boom")):
+        with patch("src.rag.ingest._prepare_ingest_file", side_effect=RuntimeError("boom")):
             result = ingest_many(paths, config)
 
         assert list(result.values()) == [False]
@@ -287,10 +336,9 @@ class TestScoreThreshold:
 
         with (
             patch("src.tools.rag.FAISS_AVAILABLE", True),
-            patch("src.tools.rag.FAISS") as mock_faiss,
+            patch("src.tools.rag.load_faiss_store_safe", return_value=mock_store),
             patch("src.tools.rag._get_embeddings", return_value=MagicMock()),
         ):
-            mock_faiss.load_local.return_value = mock_store
             # threshold 0.8 → only similarity >= 0.8 passes (distance <= 0.25)
             result = query_knowledge_base("test", k=5, score_threshold=0.8)
 
@@ -315,10 +363,9 @@ class TestScoreThreshold:
 
         with (
             patch("src.tools.rag.FAISS_AVAILABLE", True),
-            patch("src.tools.rag.FAISS") as mock_faiss,
+            patch("src.tools.rag.load_faiss_store_safe", return_value=mock_store),
             patch("src.tools.rag._get_embeddings", return_value=MagicMock()),
         ):
-            mock_faiss.load_local.return_value = mock_store
             result = query_knowledge_base("test", k=5, score_threshold=0.9)
 
         assert "threshold" in result.lower()
@@ -342,10 +389,9 @@ class TestScoreThreshold:
 
         with (
             patch("src.tools.rag.FAISS_AVAILABLE", True),
-            patch("src.tools.rag.FAISS") as mock_faiss,
+            patch("src.tools.rag.load_faiss_store_safe", return_value=mock_store),
             patch("src.tools.rag._get_embeddings", return_value=MagicMock()),
         ):
-            mock_faiss.load_local.return_value = mock_store
             result = query_knowledge_base("test", k=5, score_threshold=0.0)
 
         assert "any result" in result

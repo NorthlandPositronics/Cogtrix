@@ -130,6 +130,12 @@ class TestDockerBuild:
 @pytest.mark.timeout(30)
 class TestDockerDataDirectories:
     def test_data_directory_tree_exists(self, docker_image: str) -> None:
+        # The Dockerfile creates the runtime data tree at /data (see
+        # docker/Dockerfile: ``COGTRIX_DATA_DIR=/data``, ``mkdir -p /data/...``,
+        # ``VOLUME /data``).  Commit dca9e30 updated the expected list to
+        # reference /data/* but left the find argument pointing at the old
+        # /app/data path, producing empty output and a self-defeating
+        # assertion.  The find target is aligned with the actual layout.
         r = subprocess.run(
             [
                 "docker",
@@ -138,7 +144,7 @@ class TestDockerDataDirectories:
                 "--entrypoint",
                 "find",
                 docker_image,
-                "/app/data",
+                "/data",
                 "-type",
                 "d",
             ],
@@ -147,12 +153,12 @@ class TestDockerDataDirectories:
         )
         output = r.stdout.decode()
         expected = [
-            "/app/data/history",
-            "/app/data/knowledge",
-            "/app/data/vectordb",
-            "/app/data/api/uploads",
-            "/app/data/assistant",
-            "/app/data/workflows",
+            "/data/history",
+            "/data/knowledge",
+            "/data/vectordb",
+            "/data/api/uploads",
+            "/data/assistant",
+            "/data/workflows",
         ]
         for d in expected:
             assert d in output, f"Missing data directory: {d}\nActual:\n{output}"
@@ -167,7 +173,7 @@ class TestDockerDataDirectories:
                 "sh",
                 docker_image,
                 "-c",
-                "touch /app/data/test_write && echo ok",
+                "touch /data/test_write && echo ok",
             ],
             capture_output=True,
             timeout=10,
@@ -188,7 +194,7 @@ class TestDockerDataDirectories:
             timeout=10,
         )
         volumes = json.loads(r.stdout.decode())
-        assert volumes and "/app/data" in volumes, f"Expected VOLUME at /app/data, got: {volumes}"
+        assert volumes and "/data" in volumes, f"Expected VOLUME at /data, got: {volumes}"
 
 
 # ── CLI mode tests ────────────────────────────────────────────────

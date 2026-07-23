@@ -1,0 +1,10 @@
+{
+  "tool_selection_rate": 0.0,
+  "parameter_name_f1": 0.0,
+  "parameter_value_match_rate": 0.0,
+  "phantom_call_count": 0,
+  "task_completion_rate": 0.0,
+  "orphaned_pair_count": 0,
+  "tool_readiness_violations": 0,
+  "error_recovery_turns": 0
+}

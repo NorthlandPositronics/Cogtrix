@@ -21,6 +21,8 @@ Covers:
 from __future__ import annotations
 
 import json
+import threading
+import time
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -218,6 +220,65 @@ class TestDetectPhase:
         ):
             mock_run.return_value = (0, "[]", "")
             mod.self_improve(target=str(tmp_path))
+        mock_llm.assert_not_called()
+
+    def test_bandit_nonzero_rc_empty_output_warns(self, tmp_path: Path, monkeypatch):
+        import src.tools.self_improve as mod
+
+        monkeypatch.chdir(tmp_path)
+        mod._config = _DUMMY_CONFIG
+        with patch("src.tools.self_improve._run") as mock_run:
+            mock_run.side_effect = lambda cmd, **kw: (
+                (0, "[]", "") if "ruff" in cmd else (127, "", "command not found: bandit")
+            )
+            result = mod.self_improve(target=str(tmp_path))
+        assert "No issues found" not in result
+        assert "bandit exited with code 127" in result
+        assert "command not found" in result
+
+    def test_ruff_nonzero_rc_empty_output_warns(self, tmp_path: Path, monkeypatch):
+        import src.tools.self_improve as mod
+
+        monkeypatch.chdir(tmp_path)
+        mod._config = _DUMMY_CONFIG
+        with patch("src.tools.self_improve._run") as mock_run:
+            mock_run.side_effect = lambda cmd, **kw: (
+                (127, "", "command not found: ruff") if "ruff" in cmd else (0, '{"results":[]}', "")
+            )
+            result = mod.self_improve(target=str(tmp_path))
+        assert "No issues found" not in result
+        assert "ruff exited with code 127" in result
+        assert "command not found" in result
+
+    def test_both_linters_nonzero_rc_warns(self, tmp_path: Path, monkeypatch):
+        import src.tools.self_improve as mod
+
+        monkeypatch.chdir(tmp_path)
+        mod._config = _DUMMY_CONFIG
+        with patch("src.tools.self_improve._run") as mock_run:
+            mock_run.side_effect = lambda cmd, **kw: (
+                (127, "", "command not found: ruff") if "ruff" in cmd else (1, "", "bandit crashed")
+            )
+            result = mod.self_improve(target=str(tmp_path))
+        assert "ruff exited with code 127" in result
+        assert "bandit exited with code 1" in result
+
+    def test_nonzero_rc_with_valid_findings_no_warning(self, tmp_path: Path, monkeypatch):
+        import src.tools.self_improve as mod
+
+        monkeypatch.chdir(tmp_path)
+        mod._config = _DUMMY_CONFIG
+        ruff_out = _ruff_stdout([_RUFF_ISSUE])
+        with (
+            patch("src.tools.self_improve._run") as mock_run,
+            patch("src.tools.self_improve.create_chat_model_from_configs") as mock_llm,
+        ):
+            mock_run.side_effect = lambda cmd, **kw: (
+                (1, ruff_out, "") if "ruff" in cmd else (0, '{"results":[]}', "")
+            )
+            result = mod.self_improve(target=str(tmp_path), dry_run=True)
+        assert "Warning: ruff exited" not in result
+        assert "E501" in result
         mock_llm.assert_not_called()
 
 
@@ -629,6 +690,96 @@ class TestToolRegistry:
             mod._config = original
         assert "Error" in result
         assert "not configured" in result
+
+
+# ---------------------------------------------------------------------------
+# Tests: LLM timeout
+# ---------------------------------------------------------------------------
+
+
+class TestPatchTimeout:
+    def test_llm_invoke_timeout_skips_finding(self, tmp_path: Path, monkeypatch):
+        import src.tools.self_improve as mod
+
+        monkeypatch.chdir(tmp_path)
+        mod._config = _DUMMY_CONFIG
+
+        src_file = tmp_path / "src" / "foo.py"
+        src_file.parent.mkdir(parents=True)
+        src_file.write_text("x = 1\n", encoding="utf-8")
+
+        ruff_issue = dict(_RUFF_ISSUE, filename=str(src_file))
+        ruff_out = _ruff_stdout([ruff_issue])
+
+        mock_llm = MagicMock()
+        stop_event = threading.Event()
+
+        def _never_return(prompt):
+            stop_event.wait(timeout=60)
+
+        mock_llm.invoke.side_effect = _never_return
+
+        with (
+            patch("src.tools.self_improve._run") as mock_run,
+            patch(
+                "src.tools.self_improve.create_chat_model_from_configs",
+                return_value=mock_llm,
+            ),
+            patch("src.tools.self_improve._safe_patch_target", return_value=True),
+            patch("src.tools.self_improve._SELF_IMPROVE_LLM_TIMEOUT_SECONDS", 0.1),
+        ):
+            mock_run.side_effect = lambda cmd, **kw: (
+                (1, ruff_out, "")
+                if "ruff" in cmd
+                else ((0, '{"results":[]}', "") if "bandit" in cmd else (0, "1 passed", ""))
+            )
+            start = time.monotonic()
+            result = mod.self_improve(target=str(tmp_path))
+            elapsed = time.monotonic() - start
+
+        stop_event.set()
+
+        assert elapsed < 5, f"Expected return within 5s, took {elapsed}s"
+        assert "timed out" in result.lower() or "timeout" in result.lower()
+
+    def test_hung_thread_returns_within_guard_timeout(self, tmp_path: Path, monkeypatch):
+        import src.tools.self_improve as mod
+
+        monkeypatch.chdir(tmp_path)
+        mod._config = _DUMMY_CONFIG
+
+        src_file = tmp_path / "src" / "foo.py"
+        src_file.parent.mkdir(parents=True)
+        src_file.write_text("x = 1\n", encoding="utf-8")
+
+        ruff_issue = dict(_RUFF_ISSUE, filename=str(src_file))
+        ruff_out = _ruff_stdout([ruff_issue])
+
+        mock_llm = MagicMock()
+        stop_event = threading.Event()
+        mock_llm.invoke.side_effect = lambda *_a, **_kw: stop_event.wait(timeout=60)
+
+        with (
+            patch("src.tools.self_improve._run") as mock_run,
+            patch(
+                "src.tools.self_improve.create_chat_model_from_configs",
+                return_value=mock_llm,
+            ),
+            patch("src.tools.self_improve._safe_patch_target", return_value=True),
+            patch("src.tools.self_improve._SELF_IMPROVE_LLM_TIMEOUT_SECONDS", 0.1),
+        ):
+            mock_run.side_effect = lambda cmd, **kw: (
+                (1, ruff_out, "")
+                if "ruff" in cmd
+                else ((0, '{"results":[]}', "") if "bandit" in cmd else (0, "1 passed", ""))
+            )
+            start = time.monotonic()
+            mod.self_improve(target=str(tmp_path))
+            elapsed = time.monotonic() - start
+
+        stop_event.set()
+
+        assert elapsed < 5, f"Expected return within 5s, took {elapsed}s"
 
 
 # ---------------------------------------------------------------------------

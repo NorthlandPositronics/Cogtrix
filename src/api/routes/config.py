@@ -24,6 +24,7 @@ import asyncio
 import logging
 import pathlib
 import tempfile
+import threading
 import time
 import uuid
 from typing import Any
@@ -855,13 +856,21 @@ async def switch_model(
 # Serialises concurrent provider CRUD operations to prevent TOCTOU races on
 # the config file (read-modify-write) between concurrent admin requests (BUG-237).
 _provider_write_lock: asyncio.Lock | None = None
+_provider_write_lock_guard = threading.Lock()
 
 
 def _get_provider_write_lock() -> asyncio.Lock:
-    """Return (lazily initialising) the module-level provider write lock."""
+    """Return the module-level provider write lock.
+
+    Uses double-checked locking with a ``threading.Lock`` guard to prevent
+    the TOCTOU race that occurs when two concurrent requests both see
+    ``_provider_write_lock is None`` and create different locks (BUG-237).
+    """
     global _provider_write_lock
     if _provider_write_lock is None:
-        _provider_write_lock = asyncio.Lock()
+        with _provider_write_lock_guard:
+            if _provider_write_lock is None:
+                _provider_write_lock = asyncio.Lock()
     return _provider_write_lock
 
 
@@ -872,6 +881,7 @@ def _get_provider_write_lock() -> asyncio.Lock:
 
 _wizard_sessions: dict[str, dict[str, Any]] = {}
 _wizard_sessions_lock: asyncio.Lock | None = None
+_wizard_sessions_lock_guard: threading.Lock | None = None
 _WIZARD_TTL = 1800  # 30 minutes
 # Shown when the first LLM call fails or returns no content (provider soft-fail).
 _WIZARD_DEFAULT_FIRST_QUESTION = (
@@ -883,9 +893,13 @@ _WIZARD_DEFAULT_FIRST_QUESTION = (
 
 def _get_wizard_sessions_lock() -> asyncio.Lock:
     """Return (lazily initialising) the module-level wizard sessions lock."""
-    global _wizard_sessions_lock
+    global _wizard_sessions_lock, _wizard_sessions_lock_guard
+    if _wizard_sessions_lock_guard is None:
+        _wizard_sessions_lock_guard = threading.Lock()
     if _wizard_sessions_lock is None:
-        _wizard_sessions_lock = asyncio.Lock()
+        with _wizard_sessions_lock_guard:
+            if _wizard_sessions_lock is None:
+                _wizard_sessions_lock = asyncio.Lock()
     return _wizard_sessions_lock
 
 
@@ -900,7 +914,6 @@ def _get_wizard(wizard_id: str) -> dict[str, Any] | None:
     if session is None:
         return None
     if time.monotonic() - session["created_mono"] > _WIZARD_TTL:
-        _wizard_sessions.pop(wizard_id, None)
         return None
     return session
 
@@ -941,19 +954,20 @@ async def start_wizard(
     # and to resolve stored API keys when reconnecting to an already-configured provider.
     existing_yaml = await asyncio.to_thread(_wizard_load_existing)
 
-    _wizard_sessions[wid] = {
-        "created_mono": time.monotonic(),
-        "step": 0,
-        "env": env,
-        "existing_yaml": existing_yaml,
-        "bootstrap_info": None,
-        "llm": None,
-        "messages": [],
-        "docs_url": body.docs_url,
-        # Per-session lock: serialises concurrent advance_wizard calls to prevent
-        # duplicate LLM invocations and message history corruption (BUG-239).
-        "lock": asyncio.Lock(),
-    }
+    async with _get_wizard_sessions_lock():
+        _wizard_sessions[wid] = {
+            "created_mono": time.monotonic(),
+            "step": 0,
+            "env": env,
+            "existing_yaml": existing_yaml,
+            "bootstrap_info": None,
+            "llm": None,
+            "messages": [],
+            "docs_url": body.docs_url,
+            # Per-session lock: serialises concurrent advance_wizard calls to prevent
+            # duplicate LLM invocations and message history corruption (BUG-239).
+            "lock": asyncio.Lock(),
+        }
 
     return APIResponse(
         data=WizardStepOut(
@@ -999,18 +1013,7 @@ async def advance_wizard(
     Auth: admin bearer token required.
     Error codes: UNAUTHORIZED, TOKEN_EXPIRED, FORBIDDEN, NOT_FOUND, WIZARD_STEP_ERROR.
     """
-    ws = _get_wizard(wizard_id)
-    if ws is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail={"code": "NOT_FOUND", "message": "Wizard session not found or expired."},
-        )
-
-    # Serialise concurrent advance_wizard calls for the same session to prevent
-    # duplicate LLM calls and message history corruption (BUG-239).
-    async with ws["lock"]:
-        # Re-check after acquiring the lock — a concurrent call may have
-        # expired or completed the session while we were waiting.
+    async with _get_wizard_sessions_lock():
         ws = _get_wizard(wizard_id)
         if ws is None:
             raise HTTPException(
@@ -1018,7 +1021,19 @@ async def advance_wizard(
                 detail={"code": "NOT_FOUND", "message": "Wizard session not found or expired."},
             )
 
-        return await _advance_wizard_locked(wizard_id, ws, body, request)
+        # Serialise concurrent advance_wizard calls for the same session to prevent
+        # duplicate LLM calls and message history corruption (BUG-239).
+        async with ws["lock"]:
+            # Re-check after acquiring the lock — a concurrent call may have
+            # expired or completed the session while we were waiting.
+            ws = _get_wizard(wizard_id)
+            if ws is None:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail={"code": "NOT_FOUND", "message": "Wizard session not found or expired."},
+                )
+
+            return await _advance_wizard_locked(wizard_id, ws, body, request)
 
 
 async def _advance_wizard_locked(
@@ -1269,12 +1284,13 @@ async def cancel_wizard(
     Auth: admin bearer token required.
     Error codes: UNAUTHORIZED, TOKEN_EXPIRED, FORBIDDEN, NOT_FOUND.
     """
-    ws = _wizard_sessions.pop(wizard_id, None)
-    if ws is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail={"code": "NOT_FOUND", "message": "Wizard session not found or expired."},
-        )
+    async with _get_wizard_sessions_lock():
+        ws = _wizard_sessions.pop(wizard_id, None)
+        if ws is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={"code": "NOT_FOUND", "message": "Wizard session not found or expired."},
+            )
     return APIResponse(data=None)
 
 
@@ -1431,7 +1447,13 @@ def _wizard_invoke_llm(llm: Any, messages: list[Any]) -> str:
 async def _wizard_save(
     wizard_id: str, ws: dict[str, Any], request: Request
 ) -> APIResponse[WizardStepOut]:
-    """Extract YAML from conversation, validate, write, and reload config."""
+    """Extract YAML from conversation, validate, write, and reload config.
+
+    .. note::
+        The caller must already hold ``_get_wizard_sessions_lock()`` when
+        calling this function.  Re-acquiring the lock here would deadlock
+        because ``asyncio.Lock`` is not reentrant (BUG-239).
+    """
     from src.setup_wizard import _extract_yaml, _has_yaml_block, _mask_secrets
 
     # Find the last AI message with YAML
@@ -1479,7 +1501,7 @@ async def _wizard_save(
     except Exception as exc:
         warnings.append(f"Config saved but reload failed: {exc}")
 
-    # Cleanup wizard session
+    # Cleanup wizard session — caller already holds _get_wizard_sessions_lock().
     _wizard_sessions.pop(wizard_id, None)
 
     return APIResponse(

@@ -1,0 +1,20 @@
+apiVersion: v2
+name: cogtrix
+description: A Helm chart for Cogtrix — Modular AI assistant platform with FastAPI backend, hybrid memory, and multi-provider LLM support.
+type: application
+version: 0.1.0
+appVersion: "0.2.6"
+home: https://northlandpositronics.com
+sources:
+  - https://github.com/NorthlandPositronics/Cogtrix
+maintainers:
+  - name: Northland Positronics (FZE)
+    email: developers@northlandpositronics.com
+keywords:
+  - ai
+  - llm
+  - assistant
+  - fastapi
+  - langchain
+annotations:
+  category: AI/ML

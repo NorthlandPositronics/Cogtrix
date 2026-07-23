@@ -297,7 +297,114 @@ def test_search_email_not_configured() -> None:
     assert "Error" in result or "not configured" in result.lower()
 
 
+def test_search_email_crlf_injection_prevention(monkeypatch) -> None:
+    """Issue #870: IMAP protocol injection via CRLF in subject/sender."""
+    imap_cls = _make_imap_cls()
+    monkeypatch.setattr(imaplib, "IMAP4_SSL", imap_cls)
+
+    # Malicious subject with CRLF injection payload
+    search_email(
+        subject='test"\r\nDELETE INBOX',
+        sender="evil\r\nSTATUS INBOX (MESSAGES)",
+        since="\x00\x1f",
+        folder="INBOX",
+        limit=5,
+    )
+
+    search_args = imap_cls._conn.search.call_args[0]
+    criteria_str = " ".join(str(a) for a in search_args)
+
+    # CRLF and control characters must be stripped from all fields
+    assert "\r" not in criteria_str
+    assert "\n" not in criteria_str
+    assert "\x00" not in criteria_str
+    assert "\x1f" not in criteria_str
+    # The SEARCH command must remain a single logical line (no IMAP command injection)
+    # After sanitization, the text is just search content, not new IMAP commands
+    assert "SUBJECT" in criteria_str
+    assert "FROM" in criteria_str
+    # Since was all control chars so it's stripped away to empty
+    assert "SINCE" not in criteria_str
+
+
 # ── TOOL_CONFIGS integrity ────────────────────────────────────────────────────
+
+
+# ── folder sanitization (issue #883) ──────────────────────────────────────────
+
+
+def test_read_email_sanitizes_folder_crlf(monkeypatch) -> None:
+    """Issue #883: Ensure folder CRLF is stripped before conn.select()."""
+    imap_cls = _make_imap_cls()
+    monkeypatch.setattr(imaplib, "IMAP4_SSL", imap_cls)
+
+    read_email(limit=1, folder="INBOX\r\nDELETE INBOX")
+
+    # CRLF must be stripped (prevents IMAP command splitting)
+    select_arg = imap_cls._conn.select.call_args[0][0]
+    assert "\r" not in select_arg
+    assert "\n" not in select_arg
+
+
+def test_search_email_sanitizes_folder_crlf(monkeypatch) -> None:
+    """Issue #883: Ensure folder CRLF is stripped before conn.select() in search_email."""
+    imap_cls = _make_imap_cls()
+    monkeypatch.setattr(imaplib, "IMAP4_SSL", imap_cls)
+
+    search_email(
+        subject="test", sender="", since="", folder="Sent\r\nSTATUS INBOX (MESSAGES)", limit=5
+    )
+
+    select_arg = imap_cls._conn.select.call_args[0][0]
+    assert "\r" not in select_arg
+    assert "\n" not in select_arg
+
+
+# ── since date validation (issue #883) ────────────────────────────────────────
+
+
+def test_search_email_since_valid_date_passes(monkeypatch) -> None:
+    """Valid DD-Mon-YYYY dates should be accepted."""
+    imap_cls = _make_imap_cls()
+    monkeypatch.setattr(imaplib, "IMAP4_SSL", imap_cls)
+
+    result = search_email(subject="", sender="", since="01-Jan-2024", folder="INBOX", limit=5)
+    assert "Error" not in result
+
+
+def test_search_email_since_invalid_with_extra_terms(monkeypatch) -> None:
+    """Invalid since with injection payload should be rejected with error."""
+    imap_cls = _make_imap_cls()
+    monkeypatch.setattr(imaplib, "IMAP4_SSL", imap_cls)
+
+    result = search_email(
+        subject="",
+        sender="",
+        since='01-Jan-2024 ALL OR FROM "evil@evil.com"',
+        folder="INBOX",
+        limit=5,
+    )
+    assert "Error" in result or "DD-Mon-YYYY" in result
+
+
+def test_search_email_since_invalid_garbage(monkeypatch) -> None:
+    """Non-date since values should be rejected."""
+    imap_cls = _make_imap_cls()
+    monkeypatch.setattr(imaplib, "IMAP4_SSL", imap_cls)
+
+    result = search_email(subject="", sender="", since="not-a-date", folder="INBOX", limit=5)
+    assert "Error" in result or "DD-Mon-YYYY" in result
+
+
+def test_search_email_since_empty_is_allowed(monkeypatch) -> None:
+    """Empty since should default to ALL search (no date filter)."""
+    imap_cls = _make_imap_cls()
+    monkeypatch.setattr(imaplib, "IMAP4_SSL", imap_cls)
+
+    result = search_email(subject="", sender="", since="", folder="INBOX", limit=5)
+    assert "Error" not in result
+    search_args = imap_cls._conn.search.call_args[0]
+    assert any("ALL" in str(a) for a in search_args)
 
 
 def test_tool_configs_structure() -> None:

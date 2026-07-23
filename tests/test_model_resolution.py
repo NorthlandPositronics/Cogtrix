@@ -299,6 +299,7 @@ class TestCreateChatModelFromConfigs:
                 num_ctx=None,
                 max_tokens=None,
                 streaming=False,
+                max_retries=None,
             )
 
     def test_temperature_defaults_to_half_when_none(self) -> None:

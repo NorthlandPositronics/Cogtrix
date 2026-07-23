@@ -1,9 +1,12 @@
 """Tests for hybrid memory: summarization + vector recall."""
 
-from unittest.mock import MagicMock
+import threading
+from datetime import UTC, datetime, timedelta
+from unittest.mock import MagicMock, patch
 
 from langchain_core.messages import AIMessage, HumanMessage
 
+from src.memory.distillation import distill_summary
 from src.memory.json_store import JsonFileMemoryStore
 from src.memory.modes.code import CodeDevelopmentMemoryManager
 from src.memory.modes.conversation import ConversationMemoryManager
@@ -100,6 +103,140 @@ class TestGenerateSummary:
         msgs = [HumanMessage(content="Hello")]
         result = generate_summary(mock_llm, msgs, existing_summary="existing")
         assert result == "existing"
+
+    def test_generate_summary_returns_quickly_on_hung_llm(self, monkeypatch):
+        """generate_summary must not block indefinitely when llm.invoke hangs.
+
+        Regression guard: a naive implementation that calls llm.invoke() without
+        a timeout wrapper will block this test's join() for the full hang
+        duration and the outer assert will fire.  The fix must ensure the call
+        returns (with the existing_summary fallback) within a bounded time.
+
+        This test will be RED before a timeout fix lands in summarizer.py and
+        GREEN once generate_summary wraps llm.invoke in an executor with a
+        real timeout and does NOT use ``with ThreadPoolExecutor(...) as pool:``
+        (which overrides pool.shutdown(wait=False) and blocks anyway).
+        """
+        import src.memory.summarizer as _summarizer_mod
+
+        # Shorten the module timeout so the test completes in < 3 s.
+        monkeypatch.setattr(_summarizer_mod, "_SUMMARIZE_TIMEOUT_SECONDS", 0.5)
+
+        # Block that never resolves — simulates a hung LLM call.
+        _never = threading.Event()
+
+        def _hang(*_args, **_kwargs):
+            _never.wait(timeout=10)  # blocks up to 10 s inside the thread
+            return MagicMock(content="late response")
+
+        mock_llm = MagicMock()
+        mock_llm.invoke.side_effect = _hang
+
+        msgs = [
+            HumanMessage(content="Tell me something interesting."),
+            AIMessage(content="Here is a fact."),
+        ]
+
+        result_holder: list = []
+        exc_holder: list = []
+
+        def _run():
+            try:
+                result_holder.append(
+                    generate_summary(mock_llm, msgs, existing_summary="prior summary")
+                )
+            except Exception as exc:  # noqa: BLE001
+                exc_holder.append(exc)
+
+        t = threading.Thread(target=_run, daemon=True)
+        t.start()
+        t.join(timeout=3)
+
+        assert not t.is_alive(), (
+            "generate_summary blocked for > 3 s with a hung LLM — "
+            "the function must apply a timeout to llm.invoke() and return early"
+        )
+        assert not exc_holder, f"generate_summary raised an unexpected exception: {exc_holder[0]}"
+        assert result_holder, "generate_summary returned no result"
+        assert (
+            result_holder[0] == "prior summary"
+        ), f"Expected existing_summary fallback on timeout, got {result_holder[0]!r}"
+
+
+class TestDistillSummary:
+    def test_extracts_facts_from_llm_response(self):
+        mock_llm = MagicMock()
+        mock_llm.invoke.return_value = MagicMock(
+            content="- User prefers Python\n- Deadline is Friday"
+        )
+
+        facts = distill_summary(mock_llm, "Some session summary")
+        assert facts == ["User prefers Python", "Deadline is Friday"]
+        mock_llm.invoke.assert_called_once()
+
+    def test_returns_empty_list_on_llm_failure(self):
+        mock_llm = MagicMock()
+        mock_llm.invoke.side_effect = RuntimeError("API error")
+
+        facts = distill_summary(mock_llm, "Some session summary")
+        assert facts == []
+
+    def test_returns_empty_list_on_llm_timeout(self):
+        import time
+
+        mock_llm = MagicMock()
+
+        def _slow_invoke(_prompt) -> MagicMock:
+            time.sleep(2)
+            return MagicMock(content="fact")
+
+        mock_llm.invoke.side_effect = _slow_invoke
+
+        with patch("src.memory.distillation._DISTILL_TIMEOUT_SECONDS", 0.1):
+            facts = distill_summary(mock_llm, "Some session summary")
+
+        assert facts == []
+
+    def test_returns_empty_list_for_empty_summary(self):
+        mock_llm = MagicMock()
+        facts = distill_summary(mock_llm, "   ")
+        assert facts == []
+        mock_llm.invoke.assert_not_called()
+
+    def test_hung_thread_returns_within_guard_timeout(self):
+        """A truly hung LLM thread must not block the caller on __exit__.
+
+        Regression for Ami Wong review finding: ``with ThreadPoolExecutor``
+        calls ``shutdown(wait=True)`` in ``__exit__``, which blocks on the
+        hung thread.  Using manual ``finally: pool.shutdown(wait=False)``
+        must return within a few seconds even when the mock blocks forever.
+        """
+        import threading
+        import time
+
+        mock_llm = MagicMock()
+        stop_event = threading.Event()
+
+        def _never_return(_prompt):
+            # Use a long timeout so the thread eventually exits on its own,
+            # avoiding a non-daemon thread that blocks pytest shutdown.
+            stop_event.wait(timeout=60)
+            return MagicMock(content="fact")
+
+        mock_llm.invoke.side_effect = _never_return
+
+        start = time.monotonic()
+        with patch("src.memory.distillation._DISTILL_TIMEOUT_SECONDS", 0.1):
+            facts = distill_summary(mock_llm, "Some session summary")
+        elapsed = time.monotonic() - start
+
+        # Release the worker thread so pytest can exit cleanly.
+        stop_event.set()
+
+        # Must return quickly — the internal timeout is 0.1s and shutdown is
+        # non-blocking, so anything > 5s means __exit__ is still joining.
+        assert elapsed < 5, f"Function blocked for {elapsed:.1f}s — likely __exit__ hang"
+        assert facts == []
 
 
 # ── SessionVectorStore unit tests ───────────────────────────────────
@@ -332,6 +469,97 @@ class TestHybridPersistence:
         assert not meta_path.exists()
         assert mgr._summary is None
         assert mgr._summary_msg_idx == 0
+
+    def test_summary_timestamp_persists_and_round_trips(self, tmp_path):
+        store = JsonFileMemoryStore(base_dir=str(tmp_path))
+        mgr = ConversationMemoryManager(store, "ts-test", {"working_memory_size": 4})
+        mgr.update("hello", "hi")
+        mgr.update("second", "reply")
+        stamp = datetime.now(UTC).replace(microsecond=0)
+        mgr._summary = "Timestamped summary"
+        mgr._summary_msg_idx = 4
+        mgr._summary_last_updated_at = stamp
+        mgr.save()
+
+        meta = mgr._hybrid_meta_path()
+        assert meta.exists()
+
+        mgr2 = ConversationMemoryManager(store, "ts-test", {"working_memory_size": 4})
+        mgr2.load()
+
+        assert mgr2._summary == "Timestamped summary"
+        assert mgr2._summary_msg_idx == 4
+        assert mgr2._summary_last_updated_at == stamp
+
+    def test_summary_ttl_expires_on_reasoning_load(self, tmp_path):
+        store = JsonFileMemoryStore(base_dir=str(tmp_path))
+        mgr = ReasoningMemoryManager(store, "ttl-test", {"summary_max_age_hours": 24})
+        mgr.update("hello", "hi")
+        mgr.update("second", "reply")
+        expired_at = datetime.now(UTC) - timedelta(hours=25)
+        mgr._summary = "Expired summary"
+        mgr._summary_msg_idx = 4
+        mgr._summary_last_updated_at = expired_at
+        mgr.save()
+
+        meta = mgr._hybrid_meta_path()
+        assert meta.exists()
+
+        mgr2 = ReasoningMemoryManager(store, "ttl-test", {"summary_max_age_hours": 24})
+        mgr2.load()
+
+        assert mgr2._summary is None
+        assert mgr2._summary_msg_idx == 0
+        assert mgr2._summary_last_updated_at is None
+        assert not meta.exists()
+
+    def test_summary_ttl_disabled_preserves_old_summary(self, tmp_path):
+        store = JsonFileMemoryStore(base_dir=str(tmp_path))
+        mgr = ConversationMemoryManager(
+            store,
+            "ttl-disabled",
+            {"summary_max_age_hours": None, "working_memory_size": 4},
+        )
+        mgr.update("hello", "hi")
+        mgr.update("second", "reply")
+        expired_at = datetime.now(UTC) - timedelta(days=365)
+        mgr._summary = "Persistent summary"
+        mgr._summary_msg_idx = 4
+        mgr._summary_last_updated_at = expired_at
+        mgr.save()
+
+        mgr2 = ConversationMemoryManager(
+            store,
+            "ttl-disabled",
+            {"summary_max_age_hours": None, "working_memory_size": 4},
+        )
+        mgr2.load()
+
+        assert mgr2._summary == "Persistent summary"
+        assert mgr2._summary_msg_idx == 4
+        assert mgr2._summary_last_updated_at == expired_at
+
+    def test_run_slow_path_refreshes_summary_timestamp(self, tmp_path):
+        from datetime import UTC, datetime
+
+        store = JsonFileMemoryStore(base_dir=str(tmp_path))
+        mgr = ConversationMemoryManager(store, "slow-path", {"working_memory_size": 4})
+        mgr.set_llm(MagicMock())
+        mgr._ensure_embeddings_initialized = MagicMock()
+
+        before = datetime.now(UTC)
+        with patch("src.memory.summarizer.generate_summary", return_value="Fresh summary"):
+            mgr._run_slow_path([HumanMessage(content="hello")], unsummarized_end=1)
+
+        assert mgr._summary == "Fresh summary"
+        assert mgr._summary_msg_idx == 1
+        assert mgr._summary_last_updated_at is not None
+        assert mgr._summary_last_updated_at >= before
+
+        meta = mgr._hybrid_meta_path()
+        assert meta.exists()
+        payload = meta.read_text(encoding="utf-8")
+        assert "_summary_last_updated_at" in payload
 
     def test_load_without_meta_file(self, tmp_path):
         """Loading when no meta file exists is graceful."""

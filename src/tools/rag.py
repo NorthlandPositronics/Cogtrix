@@ -1,14 +1,18 @@
 """
-RAG tool: query_knowledge_base
+RAG tool: query_knowledge_base, save_to_knowledge_base
 Uses FAISS index stored at data/vectordb/faiss_index.
 Supports multiple embedding providers via the ``src.providers`` registry.
 """
 
+import json
 import os
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, Field
+
+from src.api.rag_index import load_faiss_store_safe, save_faiss_store
 
 # Try to import required modules
 try:
@@ -21,6 +25,7 @@ except ImportError:
 
 
 VECTOR_DIR = Path("data/vectordb/faiss_index")
+_AGENT_NOTES_SUBDIR = "agent_notes"
 
 # Default configuration from environment variables
 _DEFAULT_EMBEDDING_PROVIDER = os.getenv("COGTRIX_EMBEDDING_PROVIDER", "ollama")
@@ -63,6 +68,15 @@ def configure_rag(config: dict) -> None:
                 raise ValueError(
                     f"Path traversal detected in vectordb_dir: {config['vectordb_dir']!r}"
                 )
+    if "api_uploads_dir" in config and config["api_uploads_dir"] is not None:
+        uploads = Path(str(config["api_uploads_dir"]))
+        if not uploads.is_absolute():
+            resolved = (Path.cwd() / uploads).resolve()
+            cwd_resolved = Path.cwd().resolve()
+            if not resolved.is_relative_to(cwd_resolved):
+                raise ValueError(
+                    f"Path traversal detected in api_uploads_dir: {config['api_uploads_dir']!r}"
+                )
     # Atomic reference swap — safe for concurrent readers without a lock
     global _rag_config
     _rag_config = {**_rag_config, **config}
@@ -73,6 +87,20 @@ class KnowledgeQueryInput(BaseModel):
 
     question: str = Field(description="The question or topic to search for")
     k: int = Field(default=4, description="Number of results to return (1-10)")
+
+
+class SaveToKnowledgeBaseInput(BaseModel):
+    """Input schema for saving a note to the agent knowledge base."""
+
+    content: str = Field(description="The fact, finding, or note to persist")
+    source: str = Field(
+        default="agent",
+        description="Origin label for this entry (e.g. 'agent', 'user', tool name)",
+    )
+    tags: list[str] = Field(
+        default_factory=list,
+        description="Optional topic tags to attach to the entry",
+    )
 
 
 def _get_embeddings():
@@ -90,6 +118,82 @@ def _get_embeddings():
     return create_embeddings(provider, model=model, base_url=base_url, api_key=api_key)
 
 
+def save_to_knowledge_base(
+    content: str,
+    source: str = "agent",
+    tags: list[str] | None = None,
+) -> str:
+    """Persist a fact or note to the agent knowledge base for future retrieval.
+
+    Embeds *content* and appends it to a dedicated agent-notes FAISS sub-index
+    (``{vectordb_dir}/../agent_notes/``).  Falls back to a plain JSONL file when
+    FAISS is not installed.
+
+    Args:
+        content: The fact, finding, or note to persist.
+        source: Origin label for this entry.
+        tags: Optional topic tags.
+
+    Returns:
+        Confirmation string on success, or an error message.
+    """
+    from src.logging_config import get_logger
+
+    log = get_logger()
+
+    if not content or not content.strip():
+        return "Error: content must be non-empty."
+
+    tags = tags or []
+    metadata: dict[str, Any] = {
+        "source": source,
+        "tags": tags,
+        "timestamp": datetime.now(UTC).isoformat(),
+        "type": "agent_note",
+    }
+
+    notes_dir = _agent_notes_faiss_dir()
+
+    if not FAISS_AVAILABLE:
+        # Plain-text fallback: JSONL file alongside where the FAISS dir would be
+        jsonl_path = notes_dir.parent / f"{_AGENT_NOTES_SUBDIR}.jsonl"
+        try:
+            jsonl_path.parent.mkdir(parents=True, exist_ok=True)
+            entry = {"content": content.strip(), **metadata}
+            with jsonl_path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+            log.debug("Agent note written to fallback JSONL: %s", jsonl_path)
+            return "Saved to knowledge base."
+        except OSError as exc:
+            return f"Error saving to knowledge base: {exc}"
+
+    try:
+        from langchain_core.documents import Document
+
+        embeddings = _get_embeddings()
+        doc = Document(page_content=content.strip(), metadata=metadata)
+
+        notes_dir.mkdir(parents=True, exist_ok=True)
+
+        if _has_faiss_index(notes_dir):
+            store = load_faiss_store_safe(notes_dir, embeddings)
+            if store is None:
+                return (
+                    "Error: failed to load existing knowledge base index. "
+                    "Try rebuilding it with `python cogtrix.py --ingest`."
+                )
+            store.add_documents([doc])
+        else:
+            store = FAISS.from_documents([doc], embeddings)
+
+        save_faiss_store(store, notes_dir)
+        log.debug("Agent note saved to FAISS index: %s", notes_dir)
+        return "Saved to knowledge base."
+
+    except Exception as exc:
+        return f"Error saving to knowledge base: {exc}"
+
+
 def _has_faiss_index(directory: Path) -> bool:
     """Return True if *directory* contains at least one FAISS index file."""
     return directory.is_dir() and (
@@ -97,13 +201,20 @@ def _has_faiss_index(directory: Path) -> bool:
     )
 
 
+def _agent_notes_faiss_dir() -> Path:
+    """Return the FAISS sub-index path for agent notes."""
+    vectordb_dir = Path(_rag_config["vectordb_dir"] or str(VECTOR_DIR))
+    return vectordb_dir.parent / _AGENT_NOTES_SUBDIR
+
+
 def _collect_faiss_dirs() -> list[Path]:
     """Return all FAISS index directories to search.
 
-    Checks both:
+    Checks:
     1. The global CLI-ingest path (``_rag_config["vectordb_dir"]``).
     2. Per-document indexes created by the API ingestion pipeline
        (``_rag_config["api_uploads_dir"]/{doc_id}/vectordb/faiss_index``).
+    3. The agent-notes sub-index (``{vectordb_dir}/../agent_notes/``).
     """
     dirs: list[Path] = []
 
@@ -132,6 +243,11 @@ def _collect_faiss_dirs() -> list[Path]:
                     continue
                 if _has_faiss_index(idx):
                     dirs.append(idx)
+
+    # Agent-notes sub-index
+    notes_dir = _agent_notes_faiss_dir()
+    if _has_faiss_index(notes_dir):
+        dirs.append(notes_dir)
 
     return sorted(dirs)
 
@@ -178,11 +294,10 @@ def query_knowledge_base(
         errors: list[str] = []
         for vector_dir in faiss_dirs:
             try:
-                store = FAISS.load_local(
-                    str(vector_dir),
-                    embeddings,
-                    allow_dangerous_deserialization=True,
-                )
+                store = load_faiss_store_safe(vector_dir, embeddings)
+                if store is None:
+                    errors.append(f"{vector_dir}: index not loadable")
+                    continue
                 pairs = store.similarity_search_with_score(question, k=k)
                 scored_docs.extend(pairs)
             except Exception as exc:
@@ -437,19 +552,38 @@ def rag_ingest(paths: str) -> str:
     return "\n".join(parts)
 
 
-# Main tool config
-TOOL_CONFIG = {
-    "name": "query_knowledge_base",
-    "description": (
-        "Search the knowledge base for information. "
-        "Use this to find answers from uploaded documents."
-    ),
-    "input_schema": KnowledgeQueryInput,
-    "requires_confirmation": False,
-}
+TOOL_CONFIGS = [
+    {
+        "name": "query_knowledge_base",
+        "description": (
+            "Search the knowledge base for information. "
+            "Use this to find answers from uploaded documents."
+        ),
+        "input_schema": KnowledgeQueryInput,
+        "requires_confirmation": False,
+        "function": query_knowledge_base,
+    },
+    {
+        "name": "save_to_knowledge_base",
+        "description": (
+            "Persist a fact, finding, or note to the agent knowledge base so it can be "
+            "retrieved in future sessions. Use this when you discover information worth "
+            "keeping across conversations: key facts, research results, decisions, or "
+            "reusable knowledge. Do not use for transient scratchpad notes."
+        ),
+        "input_schema": SaveToKnowledgeBaseInput,
+        "requires_confirmation": False,
+        "function": save_to_knowledge_base,
+    },
+]
+
+# Backward-compatible alias — callers that import TOOL_CONFIG (e.g. configure.py)
+# still get the query tool config dict.
+TOOL_CONFIG = TOOL_CONFIGS[0]
 
 __all__ = [
     "query_knowledge_base",
+    "save_to_knowledge_base",
     "rag_find_entity",
     "rag_ingest",
     "get_knowledge_base_info",
@@ -457,5 +591,7 @@ __all__ = [
     "knowledge_base_exists",
     "knowledge_base_stats",
     "KnowledgeQueryInput",
+    "SaveToKnowledgeBaseInput",
     "TOOL_CONFIG",
+    "TOOL_CONFIGS",
 ]

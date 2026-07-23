@@ -28,6 +28,7 @@ from src.api.auth import TokenData, get_current_user
 from src.api.db.engine import get_db
 from src.api.db.models import ApiSessionRecord
 from src.api.db.repositories.sessions import SessionRepository
+from src.api.plan_enforcement import maybe_require_api_call_capacity
 from src.api.schemas.common import APIResponse, CursorPage
 from src.api.schemas.session import (
     SessionConfig,
@@ -194,6 +195,7 @@ async def create_session(
     body: SessionCreateRequest,
     current_user: TokenData = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    _plan: None = Depends(maybe_require_api_call_capacity),
 ) -> APIResponse[SessionOut]:
     """Create a new agent session owned by the current user.
 
@@ -266,9 +268,20 @@ async def create_session(
                             tool_obj = avail.pop(name)
                             atl = getattr(rc, "active_tools_list", None)
                             if atl is not None:
+                                # Apply safety wrapper if required (for audit trail even in no_confirm mode)
+                                if tool_registry.requires_confirmation(name):
+                                    from src.agent.safety import create_safe_tool_wrapper
+
+                                    tool_obj = create_safe_tool_wrapper(
+                                        tool_obj,
+                                        name,
+                                        tool_registry,
+                                        set(),  # no pre-approved set for initial load
+                                        session_state=ss,
+                                    )
                                 atl.append(tool_obj)
                 for name in body.auto_approve_tools:
-                    ss.approvals.add(name)
+                    ss.add_approval(name)
 
     return APIResponse(data=_record_to_out(record, live_session))
 

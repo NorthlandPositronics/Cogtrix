@@ -10,6 +10,7 @@ This is the default memory mode, providing:
 """
 
 import logging
+import threading
 from typing import Any
 
 from src.logging_config import log_memory_context
@@ -49,6 +50,10 @@ class ConversationMemoryManager(BaseMemoryManager):
     DEFAULT_CONFIG: dict[str, Any] = {
         "working_memory_size": 25,
         "summary_threshold": 35,
+        "summary_max_age_hours": None,
+        "summary_max_uncovered_tokens": 16_000,
+        "distill_on_expire": False,
+        "facts_ttl_days": 7,
         "entity_extraction": False,
         "rag_enabled": False,
         "rag_top_k": 3,
@@ -82,6 +87,9 @@ class ConversationMemoryManager(BaseMemoryManager):
         # Topics discussed (future feature)
         self._topics: list[str] = []
 
+        # Lock protecting mode-specific mutable state (_messages, _entities, _topics)
+        self._mode_lock = threading.Lock()
+
     @property
     def mode_name(self) -> str:
         """Return mode identifier."""
@@ -92,6 +100,8 @@ class ConversationMemoryManager(BaseMemoryManager):
         self._messages = self.store.load_history(self.session_id)
         self._messages = self.sanitize_history(self._messages)
         self._load_hybrid_meta()
+        self._check_summary_ttl()
+        self._check_summary_token_ttl()
         self._load_tier_cache()
         self._load_mode_meta()
         self._clamp_summary_idx()
@@ -99,13 +109,49 @@ class ConversationMemoryManager(BaseMemoryManager):
 
     def _restore_mode_state(self, data: dict) -> None:
         """Restore conversation-specific state from mode_state.json."""
-        self._entities = data.get("entities", {})
-        self._topics = data.get("topics", [])
+        with self._mode_lock:
+            self._entities = data.get("entities", {})
+            self._topics = data.get("topics", [])
 
     def save(self) -> None:
         """Save conversation history to storage."""
         self.store.save_history(self.session_id, self._messages)
         super().save()
+
+    def _pending_path(self) -> "Any":
+        from pathlib import Path
+
+        from src.memory.manager import _sanitize_session_id
+
+        base = getattr(self.store, "base_path", None) or Path("data/history")
+        sanitized = _sanitize_session_id(self.session_id)
+        return Path(str(base)) / f"{sanitized}_pending.json"
+
+    def prerecord_user(self, text: str) -> None:
+        """Write user message to disk as a pending turn for shutdown durability.
+
+        Does not call update() so existing call-count assertions are unaffected.
+        The pending file is cleaned up by the subsequent update() call or by
+        discard_prerecord() on deferral/suppress paths.
+        """
+        import json
+        import time
+
+        try:
+            path = self._pending_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps({"user": text, "ts": time.time()}))
+        except Exception:
+            pass
+
+    def discard_prerecord(self) -> None:
+        """Remove the pending pre-record without affecting message history."""
+        try:
+            path = self._pending_path()
+            if path.exists():
+                path.unlink()
+        except Exception:
+            pass
 
     def prepare_context(self, user_input: str) -> MemoryContext:
         """
@@ -134,9 +180,11 @@ class ConversationMemoryManager(BaseMemoryManager):
         if hybrid:
             prefix_parts.append(hybrid)
 
-        if self._entities:
-            entity_str = ", ".join(f"{k}: {v}" for k, v in self._entities.items())
-            prefix_parts.append(f"Known facts: {entity_str}")
+        # Acquire mode lock for safe reads of mode-specific state
+        with self._mode_lock:
+            if self._entities:
+                entity_str = ", ".join(f"{k}: {v}" for k, v in self._entities.items())
+                prefix_parts.append(f"Known facts: {entity_str}")
 
         context_prefix = "\n\n".join(prefix_parts) if prefix_parts else None
 
@@ -182,8 +230,13 @@ class ConversationMemoryManager(BaseMemoryManager):
             )
 
         # ── Sliding window fallback (cold cache) ─────────────────────────
-        window_size = self._mode_config["working_memory_size"]
-        context_messages = self._messages[-window_size:] if self._messages else []
+        # Return all messages to the LLM on cold-cache paths. The 25-message
+        # cap was applied BEFORE summarization, causing messages outside the
+        # window to be lost (never seen by the LLM) before they could be
+        # compressed into the summary. Now we let the LLM see all messages;
+        # background summarization will compress older messages into the tier
+        # cache, and subsequent turns will use the compressed tiers instead.
+        context_messages = list(self._messages) if self._messages else []
 
         # Inject timestamps so the LLM has temporal awareness
         context_messages = self._inject_timestamps(context_messages)
@@ -262,6 +315,16 @@ class ConversationMemoryManager(BaseMemoryManager):
             self._set_msg_ts(ai_msg)
             self._messages.append(ai_msg)
 
+        # Layer-1a: accumulate tokens since last summary update
+        from src.memory.manager import _msg_tokens
+
+        self._tokens_since_summary += _msg_tokens(human_msg)
+        if agent_messages is not None:
+            self._tokens_since_summary += _msg_tokens(agent_messages[-1])
+        else:
+            self._tokens_since_summary += _msg_tokens(ai_msg)
+        self._check_summary_token_ttl()
+
         # Incrementally summarize messages outside the sliding window
         window_size = self._mode_config["working_memory_size"]
         self._schedule_slow_path(self._messages, window_size)
@@ -277,6 +340,9 @@ class ConversationMemoryManager(BaseMemoryManager):
             except Exception as exc:
                 log.debug("Tier roll-forward scheduling failed: %s", exc)
 
+        # Clean up any pending pre-record file now that the turn completed.
+        self.discard_prerecord()
+
     def get_system_prompt_additions(self) -> str | None:
         """Return conversation-mode system prompt additions."""
         # Reinforce task completion and accuracy in conversation mode
@@ -289,14 +355,16 @@ class ConversationMemoryManager(BaseMemoryManager):
 
     def clear(self) -> None:
         """Clear all conversation memory."""
-        super().clear()
-        self._messages = []
-        self._entities = {}
-        self._topics = []
+        with self._mode_lock:
+            super().clear()
+            self._messages = []
+            self._entities = {}
+            self._topics = []
 
     def get_message_count(self) -> int:
         """Return total number of messages stored."""
-        return len(self._messages)
+        with self._mode_lock:
+            return len(self._messages)
 
     def pop_last_turn(self) -> int:
         """Remove the last user+assistant exchange from memory.
@@ -326,18 +394,19 @@ class ConversationMemoryManager(BaseMemoryManager):
 
     def get_stats(self) -> dict[str, Any]:
         """Return conversation memory statistics."""
-        base_stats = super().get_stats()
-        vs = self._vector_store
-        return {
-            **base_stats,
-            "total_messages": len(self._messages),
-            "working_memory_size": self._mode_config["working_memory_size"],
-            "has_summary": self._summary is not None,
-            "summary_coverage": self._summary_msg_idx,
-            "vector_recall_ready": vs is not None and vs.ready,
-            "entity_count": len(self._entities),
-            "topic_count": len(self._topics),
-        }
+        with self._mode_lock:
+            base_stats = super().get_stats()
+            vs = self._vector_store
+            return {
+                **base_stats,
+                "total_messages": len(self._messages),
+                "working_memory_size": self._mode_config["working_memory_size"],
+                "has_summary": self._summary is not None,
+                "summary_coverage": self._summary_msg_idx,
+                "vector_recall_ready": vs is not None and vs.ready,
+                "entity_count": len(self._entities),
+                "topic_count": len(self._topics),
+            }
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize conversation state."""
@@ -350,6 +419,13 @@ class ConversationMemoryManager(BaseMemoryManager):
         return {
             **base,
             "messages": messages_data,
+            "entities": self._entities,
+            "topics": self._topics,
+        }
+
+    def _mode_state_dict(self) -> dict[str, Any]:
+        """Persist conversation-specific state without messages or hybrid data."""
+        return {
             "entities": self._entities,
             "topics": self._topics,
         }

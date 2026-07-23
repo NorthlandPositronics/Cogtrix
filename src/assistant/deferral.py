@@ -299,6 +299,40 @@ class DeferralManager:
         """Set (or replace) the reprocess callback after construction."""
         self._reprocess_callback = callback
 
+    def _on_reprocess_success(self, session_key: str) -> None:
+        """Called by the done callback when reprocessing completes successfully."""
+        with self._lock:
+            current = self._records.get(session_key)
+            if current is not None and current.status == "firing":
+                self._records.pop(session_key, None)
+            # Call save inside the lock to avoid TOCTOU between pop and persistence
+            self._save_locked()
+        log.info("DeferralManager: reprocessing completed for %s", session_key)
+
+    def _on_reprocess_failure(self, session_key: str) -> None:
+        """Called by the done callback when reprocessing fails."""
+        retry_scheduled = False
+        with self._lock:
+            current = self._records.get(session_key)
+            if current is not None and current.status == "firing":
+                current.status = "pending"
+                current.fire_at = time.time() + _BACKOFF_SECONDS
+                retry_scheduled = True
+            # Call save inside the lock to avoid TOCTOU between status change and persistence
+            self._save_locked()
+        if retry_scheduled:
+            log.warning(
+                "DeferralManager: reprocessing failed for %s, retrying in %.0fs",
+                session_key,
+                _BACKOFF_SECONDS,
+            )
+        else:
+            log.debug(
+                "DeferralManager: reprocess failed for %s but record was already "
+                "cancelled/completed; no retry scheduled",
+                session_key,
+            )
+
     def defer(
         self,
         msg: Any,  # IncomingMessage at runtime
@@ -435,6 +469,18 @@ class DeferralManager:
             snapshot = {key: rec.to_dict() for key, rec in self._records.items()}
         self._atomic_write(snapshot)
 
+    def _save_locked(self) -> None:
+        """Persist all records to disk while already holding the lock.
+
+        This avoids a TOCTOU window where status changes are made outside the lock
+        and then save() is called, which would acquire the lock again and potentially
+        overwrite those changes made by another thread in between.
+        """
+        if self._persist_path is None:
+            return
+        snapshot = {key: rec.to_dict() for key, rec in self._records.items()}
+        self._atomic_write(snapshot)
+
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
@@ -442,6 +488,12 @@ class DeferralManager:
     @staticmethod
     def _msg_to_dict(msg: Any) -> dict[str, Any]:
         """Convert an IncomingMessage to a JSON-serialisable dict."""
+        # Normalize metadata to dict or empty dict, handling non-dict values gracefully
+        meta_raw = msg.metadata
+        try:
+            meta_dict: dict[str, Any] = dict(meta_raw) if meta_raw else {}
+        except (TypeError, ValueError):
+            meta_dict = {}
         return {
             "channel": msg.channel,
             "chat_id": msg.chat_id,
@@ -450,7 +502,7 @@ class DeferralManager:
             "sender_name": msg.sender_name,
             "text": msg.text,
             "timestamp": msg.timestamp,
-            "metadata": dict(msg.metadata) if msg.metadata else {},
+            "metadata": meta_dict,
             "resolved_phone": msg.resolved_phone,
         }
 
@@ -623,16 +675,9 @@ class DeferralManager:
                     "DeferralManager._fire_record called with no reprocess callback set; "
                     "ensure set_reprocess_callback() is called before start()."
                 )
-            self._reprocess_callback(messages, channel, depth)
-            # Success: remove the record.
-            with self._lock:
-                self._records.pop(session_key, None)
-            self.save()
-            log.info(
-                "DeferralManager: fired reprocess callback for %s (%d message(s))",
-                session_key,
-                n,
-            )
+            self._reprocess_callback(messages, channel, depth, session_key)
+            # Success: the record will be removed by _on_reprocess_success via the done callback.
+            # Do NOT pop or save here - that would create a TOCTOU with the callback's state update.
         except Exception as exc:
             log.error(
                 "DeferralManager: reprocess callback raised on submit for %s: %s — retrying in %.0fs",

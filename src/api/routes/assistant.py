@@ -5,26 +5,26 @@ Endpoints:
     POST   /api/v1/assistant/start                     — start the assistant service (admin)
     POST   /api/v1/assistant/stop                      — stop the assistant service (admin)
     POST   /api/v1/assistant/outbound                  — send an outbound message (admin)
-    POST   /api/v1/assistant/simulate                  — simulate a message turn (no delivery)
-    GET    /api/v1/assistant/chats                     — list active chat sessions (paginated)
-    GET    /api/v1/assistant/chats/{key}/messages      — per-chat conversation history
-    GET    /api/v1/assistant/scheduled                 — list scheduled messages (paginated)
-    PATCH  /api/v1/assistant/scheduled/{id}            — edit a scheduled message
-    DELETE /api/v1/assistant/scheduled/{id}            — cancel a scheduled message
-    GET    /api/v1/assistant/deferred                  — list deferred re-processing records
-    DELETE /api/v1/assistant/deferred/{session_key}    — cancel a deferred record
-    GET    /api/v1/assistant/contacts                  — list phonebook contacts
-    GET    /api/v1/assistant/guardrails                — guardrail pipeline status
+    POST   /api/v1/assistant/simulate                  — simulate a message turn (admin, no delivery)
+    GET    /api/v1/assistant/chats                     — list active chat sessions (admin, paginated)
+    GET    /api/v1/assistant/chats/{key}/messages      — per-chat conversation history (admin)
+    GET    /api/v1/assistant/scheduled                 — list scheduled messages (admin, paginated)
+    PATCH  /api/v1/assistant/scheduled/{id}            — edit a scheduled message (admin)
+    DELETE /api/v1/assistant/scheduled/{id}            — cancel a scheduled message (admin)
+    GET    /api/v1/assistant/deferred                  — list deferred re-processing records (admin)
+    DELETE /api/v1/assistant/deferred/{session_key}    — cancel a deferred record (admin)
+    GET    /api/v1/assistant/contacts                  — list phonebook contacts (admin)
+    GET    /api/v1/assistant/guardrails                — guardrail pipeline status (admin)
     DELETE /api/v1/assistant/guardrails/blacklist/{chat_id} — remove from blacklist (admin)
-    GET    /api/v1/assistant/knowledge                 — list knowledge store facts (paginated)
-    POST   /api/v1/assistant/knowledge/search          — semantic search over facts
+    GET    /api/v1/assistant/knowledge                 — list knowledge store facts (admin, paginated)
+    POST   /api/v1/assistant/knowledge/search          — semantic search over facts (admin)
     DELETE /api/v1/assistant/knowledge/{fact_id}       — delete a fact (admin)
-    GET    /api/v1/assistant/campaigns                 — list campaigns
+    GET    /api/v1/assistant/campaigns                 — list campaigns (admin)
     POST   /api/v1/assistant/campaigns                 — create a campaign (admin)
-    GET    /api/v1/assistant/campaigns/{id}             — get a campaign
-    PATCH  /api/v1/assistant/campaigns/{id}             — update a campaign (admin)
-    DELETE /api/v1/assistant/campaigns/{id}             — delete a campaign (admin)
-    POST   /api/v1/assistant/campaigns/{id}/launch      — launch a campaign (admin)
+    GET    /api/v1/assistant/campaigns/{id}            — get a campaign (admin)
+    PATCH  /api/v1/assistant/campaigns/{id}            — update a campaign (admin)
+    DELETE /api/v1/assistant/campaigns/{id}            — delete a campaign (admin)
+    POST   /api/v1/assistant/campaigns/{id}/launch     — launch a campaign (admin)
 """
 
 from __future__ import annotations
@@ -495,6 +495,7 @@ async def simulate_turn(
     responses={
         200: {"description": "Chat session list returned."},
         401: {"description": "Not authenticated."},
+        403: {"description": "Admin required (FORBIDDEN)."},
     },
 )
 async def list_chats(
@@ -502,17 +503,17 @@ async def list_chats(
     cursor: str | None = None,
     limit: int = 50,
     channel: str | None = None,
-    current_user: TokenData = Depends(get_current_user),
+    current_user: TokenData = Depends(require_admin),
 ) -> APIResponse[CursorPage[ChatSessionOut]]:
-    """List active assistant chat sessions (paginated).
+    """List active assistant chat sessions (paginated, admin only).
 
     Query parameters:
         cursor  — pagination cursor.
         limit   — page size (1–200, default 50).
         channel — filter to a specific channel ('whatsapp' or 'telegram').
 
-    Auth: bearer token required.
-    Error codes: UNAUTHORIZED, TOKEN_EXPIRED, INVALID_CURSOR.
+    Auth: admin bearer token required.
+    Error codes: UNAUTHORIZED, TOKEN_EXPIRED, FORBIDDEN, INVALID_CURSOR.
     """
     svc = _get_service(request)
     if svc is None:
@@ -633,6 +634,7 @@ async def list_chats(
     responses={
         200: {"description": "Message history returned."},
         401: {"description": "Not authenticated."},
+        403: {"description": "Admin required (FORBIDDEN)."},
         404: {"description": "Chat session not found (NOT_FOUND)."},
     },
 )
@@ -641,12 +643,12 @@ async def get_chat_messages(
     request: Request,
     cursor: str | None = None,
     limit: int = 50,
-    current_user: TokenData = Depends(get_current_user),
+    current_user: TokenData = Depends(require_admin),
 ) -> APIResponse[CursorPage[MessageOut]]:
-    """Return message history for an assistant chat session (paginated).
+    """Return message history for an assistant chat session (paginated, admin only).
 
-    Auth: bearer token required.
-    Error codes: UNAUTHORIZED, TOKEN_EXPIRED, NOT_FOUND, INVALID_CURSOR.
+    Auth: admin bearer token required.
+    Error codes: UNAUTHORIZED, TOKEN_EXPIRED, FORBIDDEN, NOT_FOUND, INVALID_CURSOR.
     """
     svc = _require_service(request)
     session_mgr = getattr(svc, "_session_mgr", None)
@@ -782,6 +784,7 @@ def _scheduled_msg_to_out(msg: Any) -> ScheduledMessageOut:
     responses={
         200: {"description": "Scheduled message list returned."},
         401: {"description": "Not authenticated."},
+        403: {"description": "Admin required (FORBIDDEN)."},
     },
 )
 async def list_scheduled(
@@ -790,9 +793,9 @@ async def list_scheduled(
     limit: int = 50,
     channel: str | None = None,
     chat_id: str | None = None,
-    current_user: TokenData = Depends(get_current_user),
+    current_user: TokenData = Depends(require_admin),
 ) -> APIResponse[CursorPage[ScheduledMessageOut]]:
-    """List pending scheduled messages (paginated).
+    """List pending scheduled messages (paginated, admin only).
 
     Query parameters:
         cursor  — pagination cursor.
@@ -800,8 +803,8 @@ async def list_scheduled(
         channel — filter to a specific channel.
         chat_id — filter to a specific chat.
 
-    Auth: bearer token required.
-    Error codes: UNAUTHORIZED, TOKEN_EXPIRED, INVALID_CURSOR.
+    Auth: admin bearer token required.
+    Error codes: UNAUTHORIZED, TOKEN_EXPIRED, FORBIDDEN, INVALID_CURSOR.
     """
     svc = _get_service(request)
     if svc is None:
@@ -868,6 +871,7 @@ async def list_scheduled(
     responses={
         200: {"description": "Scheduled message updated."},
         401: {"description": "Not authenticated."},
+        403: {"description": "Admin required (FORBIDDEN)."},
         404: {
             "description": "Scheduled message not found or not editable (SCHEDULED_MSG_NOT_FOUND)."
         },
@@ -945,6 +949,7 @@ async def edit_scheduled(
     responses={
         200: {"description": "Scheduled message cancelled."},
         401: {"description": "Not authenticated."},
+        403: {"description": "Admin required (FORBIDDEN)."},
         404: {
             "description": "Scheduled message not found or already sent/cancelled (SCHEDULED_MSG_NOT_FOUND)."
         },
@@ -1025,17 +1030,18 @@ def _deferred_record_to_out(session_key: str, record: Any) -> DeferredRecordOut:
     responses={
         200: {"description": "Deferred record list returned."},
         401: {"description": "Not authenticated."},
+        403: {"description": "Admin required (FORBIDDEN)."},
     },
 )
 async def list_deferred(
     request: Request,
     channel: str | None = None,
-    current_user: TokenData = Depends(get_current_user),
+    current_user: TokenData = Depends(require_admin),
 ) -> APIResponse[list[DeferredRecordOut]]:
-    """List pending deferred re-processing records.
+    """List pending deferred re-processing records (admin only).
 
-    Auth: bearer token required.
-    Error codes: UNAUTHORIZED, TOKEN_EXPIRED.
+    Auth: admin bearer token required.
+    Error codes: UNAUTHORIZED, TOKEN_EXPIRED, FORBIDDEN.
     """
     svc = _get_service(request)
     if svc is None:
@@ -1067,18 +1073,19 @@ async def list_deferred(
     responses={
         200: {"description": "Deferred record cancelled."},
         401: {"description": "Not authenticated."},
+        403: {"description": "Admin required (FORBIDDEN)."},
         404: {"description": "Deferred record not found (DEFERRED_MSG_NOT_FOUND)."},
     },
 )
 async def cancel_deferred(
     session_key: str,
     request: Request,
-    current_user: TokenData = Depends(get_current_user),
+    current_user: TokenData = Depends(require_admin),
 ) -> APIResponse[None]:
-    """Cancel a pending deferred record.
+    """Cancel a pending deferred record (admin only).
 
-    Auth: bearer token required.
-    Error codes: UNAUTHORIZED, TOKEN_EXPIRED, DEFERRED_MSG_NOT_FOUND.
+    Auth: admin bearer token required.
+    Error codes: UNAUTHORIZED, TOKEN_EXPIRED, FORBIDDEN, DEFERRED_MSG_NOT_FOUND.
     """
     svc = _require_service(request)
     deferral_mgr = getattr(svc, "_deferral_mgr", None)
@@ -1117,19 +1124,20 @@ async def cancel_deferred(
     responses={
         200: {"description": "Contact list returned."},
         401: {"description": "Not authenticated."},
+        403: {"description": "Admin required (FORBIDDEN)."},
     },
 )
 async def list_contacts(
     request: Request,
-    current_user: TokenData = Depends(get_current_user),
+    current_user: TokenData = Depends(require_admin),
 ) -> APIResponse[list[ContactOut]]:
-    """Return the merged phonebook from all channels.
+    """Return the merged phonebook from all channels (admin only).
 
     Each contact includes identifiers across channels, the per-contact
     system prompt (if configured), and which channels it appears in.
 
-    Auth: bearer token required.
-    Error codes: UNAUTHORIZED, TOKEN_EXPIRED.
+    Auth: admin bearer token required.
+    Error codes: UNAUTHORIZED, TOKEN_EXPIRED, FORBIDDEN.
     """
     svc = _get_service(request)
     if svc is None:
@@ -1360,6 +1368,7 @@ def _fact_to_out(fact: Any, relevance: float | None = None) -> KnowledgeFactOut:
     responses={
         200: {"description": "Fact list returned."},
         401: {"description": "Not authenticated."},
+        403: {"description": "Admin required (FORBIDDEN)."},
     },
 )
 async def list_knowledge(
@@ -1367,17 +1376,17 @@ async def list_knowledge(
     cursor: str | None = None,
     limit: int = 50,
     source_chat: str | None = None,
-    current_user: TokenData = Depends(get_current_user),
+    current_user: TokenData = Depends(require_admin),
 ) -> APIResponse[CursorPage[KnowledgeFactOut]]:
-    """List facts in the shared knowledge store (paginated).
+    """List facts in the shared knowledge store (paginated, admin only).
 
     Query parameters:
         cursor      — pagination cursor.
         limit       — page size (1–200, default 50).
         source_chat — filter to facts extracted from a specific chat session key.
 
-    Auth: bearer token required.
-    Error codes: UNAUTHORIZED, TOKEN_EXPIRED, INVALID_CURSOR.
+    Auth: admin bearer token required.
+    Error codes: UNAUTHORIZED, TOKEN_EXPIRED, FORBIDDEN, INVALID_CURSOR.
     """
     svc = _get_service(request)
     if svc is None:
@@ -1446,18 +1455,19 @@ async def list_knowledge(
     responses={
         200: {"description": "Search results returned."},
         401: {"description": "Not authenticated."},
+        403: {"description": "Admin required (FORBIDDEN)."},
         422: {"description": "Validation error (VALIDATION_ERROR)."},
     },
 )
 async def search_knowledge(
     body: KnowledgeSearchRequest,
     request: Request,
-    current_user: TokenData = Depends(get_current_user),
+    current_user: TokenData = Depends(require_admin),
 ) -> APIResponse[list[KnowledgeFactOut]]:
-    """Semantic search over the shared knowledge store.
+    """Semantic search over the shared knowledge store (admin only).
 
-    Auth: bearer token required.
-    Error codes: UNAUTHORIZED, TOKEN_EXPIRED, VALIDATION_ERROR.
+    Auth: admin bearer token required.
+    Error codes: UNAUTHORIZED, TOKEN_EXPIRED, FORBIDDEN, VALIDATION_ERROR.
     """
     svc = _get_service(request)
     if svc is None:
@@ -1712,17 +1722,18 @@ def _campaign_to_out(campaign: Any) -> CampaignOut:
     responses={
         200: {"description": "Campaign list returned."},
         401: {"description": "Not authenticated."},
+        403: {"description": "Admin required (FORBIDDEN)."},
         409: {"description": "Service not running."},
     },
 )
 async def list_campaigns(
     request: Request,
     status_filter: CampaignStatus | None = Query(default=None, description="Filter by status."),
-    current_user: TokenData = Depends(get_current_user),
+    current_user: TokenData = Depends(require_admin),
 ) -> APIResponse[list[CampaignOut]]:
-    """List all campaigns.
+    """List all campaigns (admin only).
 
-    Auth: bearer token required.
+    Auth: admin bearer token required.
     """
     mgr = _get_campaign_mgr(request)
     campaigns = mgr.list_all(status_filter=status_filter)
@@ -1800,6 +1811,7 @@ async def create_campaign(
     responses={
         200: {"description": "Campaign returned."},
         401: {"description": "Not authenticated."},
+        403: {"description": "Admin required (FORBIDDEN)."},
         404: {"description": "Campaign not found."},
         409: {"description": "Service not running."},
     },
@@ -1807,11 +1819,11 @@ async def create_campaign(
 async def get_campaign(
     request: Request,
     campaign_id: str,
-    current_user: TokenData = Depends(get_current_user),
+    current_user: TokenData = Depends(require_admin),
 ) -> APIResponse[CampaignOut]:
-    """Get a campaign by ID.
+    """Get a campaign by ID (admin only).
 
-    Auth: bearer token required.
+    Auth: admin bearer token required.
     """
     _validate_campaign_id(campaign_id)
     mgr = _get_campaign_mgr(request)

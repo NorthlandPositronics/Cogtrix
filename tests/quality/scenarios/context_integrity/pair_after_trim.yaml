@@ -1,0 +1,33 @@
+id: pair_after_trim
+complexity: medium
+category: context_integrity
+description: "Message pairs remain valid after the history is trimmed."
+tags: [critical, tier1]
+system_prompt: "You are a helpful assistant."
+tools:
+  - github_list_issues
+
+script:
+  - user: "Check the open quality issues."
+  - llm:
+      tool_calls:
+        - name: github_list_issues
+          args:
+            state: "open"
+  - tool_result: "Open issues include #166 and #167."
+  - llm: "The quality work is split across issues #166 and #167."
+  - user: "Summarize the queue again after the history trims."
+  - llm:
+      tool_calls:
+        - name: github_list_issues
+          args:
+            state: "open"
+  - tool_result: "Open issues still include #166 and #167."
+  - llm: "The queue still points at #166 and #167 after trim."
+
+metrics:
+  required_tools: [github_list_issues]
+  forbidden_tools: []
+  task_completed: true
+  phantom_calls: false
+  max_turns: 6

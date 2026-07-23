@@ -106,6 +106,24 @@ class RefreshRequest(BaseModel):
     )
 
 
+class LogoutRequest(BaseModel):
+    """Request body for POST /api/v1/auth/logout."""
+
+    refresh_token: str = Field(
+        ...,
+        description="Refresh token for the session to revoke.",
+    )
+
+
+class LogoutAllRequest(BaseModel):
+    """Request body for POST /api/v1/auth/logout-all."""
+
+    password: str = Field(
+        ...,
+        description="Current account password used to confirm full sign-out.",
+    )
+
+
 # ---------------------------------------------------------------------------
 # Current user
 # ---------------------------------------------------------------------------

@@ -17,6 +17,7 @@ Features:
 
 import logging
 import re
+import threading
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -75,6 +76,10 @@ class CodeDevelopmentMemoryManager(BaseMemoryManager):
         "track_errors": True,
         "max_errors": 5,
         "max_files": 20,
+        "summary_max_age_hours": None,
+        "summary_max_uncovered_tokens": 16_000,
+        "distill_on_expire": False,
+        "facts_ttl_days": 7,
     }
 
     # Patterns for extracting file references
@@ -121,6 +126,9 @@ class CodeDevelopmentMemoryManager(BaseMemoryManager):
         # Change tracking
         self._changes_made: list[str] = []
 
+        # Lock protecting mode-specific mutable state (_messages, _files, _current_task, etc.)
+        self._mode_lock = threading.Lock()
+
     @property
     def mode_name(self) -> str:
         return "code"
@@ -129,22 +137,26 @@ class CodeDevelopmentMemoryManager(BaseMemoryManager):
 
     def set_task(self, description: str) -> None:
         """Set the current coding task."""
-        self._current_task = TaskProgress(description=description)
+        with self._mode_lock:
+            self._current_task = TaskProgress(description=description)
 
     def add_progress(self, step: str) -> None:
         """Record a completed step."""
-        if self._current_task:
-            self._current_task.steps_completed.append(step)
+        with self._mode_lock:
+            if self._current_task:
+                self._current_task.steps_completed.append(step)
 
     def set_current_step(self, step: str) -> None:
         """Set what we're currently working on."""
-        if self._current_task:
-            self._current_task.current_step = step
+        with self._mode_lock:
+            if self._current_task:
+                self._current_task.current_step = step
 
     def add_blocker(self, blocker: str) -> None:
         """Record a blocker."""
-        if self._current_task:
-            self._current_task.blockers.append(blocker)
+        with self._mode_lock:
+            if self._current_task:
+                self._current_task.blockers.append(blocker)
 
     def set_file_context(
         self,
@@ -153,41 +165,46 @@ class CodeDevelopmentMemoryManager(BaseMemoryManager):
         line_range: tuple | None = None,
     ) -> None:
         """Set context for a specific file."""
-        max_files = self._mode_config["max_files"]
+        with self._mode_lock:
+            max_files = self._mode_config["max_files"]
 
-        # If file not already tracked and at limit, remove oldest
-        if path not in self._files and len(self._files) >= max_files:
-            oldest = min(
-                self._files,
-                key=lambda p: self._files[p].last_accessed,
+            # If file not already tracked and at limit, remove oldest
+            if path not in self._files and len(self._files) >= max_files:
+                oldest = min(
+                    self._files,
+                    key=lambda p: self._files[p].last_accessed,
+                )
+                del self._files[oldest]
+
+            self._files[path] = FileContext(
+                path=path,
+                snippet=snippet,
+                line_range=line_range,
             )
-            del self._files[oldest]
-
-        self._files[path] = FileContext(
-            path=path,
-            snippet=snippet,
-            line_range=line_range,
-        )
-        self._current_file = path
+            self._current_file = path
 
     def add_error(self, error: str) -> None:
         """Record an error."""
-        max_errors = self._mode_config["max_errors"]
-        self._recent_errors.append(error)
-        self._recent_errors = self._recent_errors[-max_errors:]
+        with self._mode_lock:
+            max_errors = self._mode_config["max_errors"]
+            self._recent_errors.append(error)
+            self._recent_errors = self._recent_errors[-max_errors:]
 
     def record_change(self, description: str) -> None:
         """Record a file change."""
-        timestamp = datetime.now(UTC).strftime("%H:%M")
-        self._changes_made.append(f"{timestamp} - {description}")
+        with self._mode_lock:
+            timestamp = datetime.now(UTC).strftime("%H:%M")
+            self._changes_made.append(f"{timestamp} - {description}")
 
     def get_tracked_files(self) -> list[str]:
         """Return list of tracked file paths."""
-        return list(self._files.keys())
+        with self._mode_lock:
+            return list(self._files.keys())
 
     def get_recent_errors(self) -> list[str]:
         """Return list of recent errors."""
-        return list(self._recent_errors)
+        with self._mode_lock:
+            return list(self._recent_errors)
 
     # --- Memory Manager Interface ---
 
@@ -196,6 +213,8 @@ class CodeDevelopmentMemoryManager(BaseMemoryManager):
         self._messages = self.store.load_history(self.session_id)
         self._messages = self.sanitize_history(self._messages)
         self._load_hybrid_meta()
+        self._check_summary_ttl()
+        self._check_summary_token_ttl()
         self._load_tier_cache()
         self._load_mode_meta()
         self._clamp_summary_idx()
@@ -203,31 +222,32 @@ class CodeDevelopmentMemoryManager(BaseMemoryManager):
 
     def _restore_mode_state(self, data: dict) -> None:
         """Restore code-specific state from mode_state.json."""
-        task_data = data.get("task")
-        if task_data:
-            self._current_task = TaskProgress(
-                description=task_data["description"],
-                started_at=datetime.fromisoformat(task_data["started_at"]),
-                steps_completed=task_data.get("steps_completed", []),
-                current_step=task_data.get("current_step"),
-                blockers=task_data.get("blockers", []),
-            )
-        else:
-            self._current_task = None
+        with self._mode_lock:
+            task_data = data.get("task")
+            if task_data:
+                self._current_task = TaskProgress(
+                    description=task_data["description"],
+                    started_at=datetime.fromisoformat(task_data["started_at"]),
+                    steps_completed=task_data.get("steps_completed", []),
+                    current_step=task_data.get("current_step"),
+                    blockers=task_data.get("blockers", []),
+                )
+            else:
+                self._current_task = None
 
-        self._files = {}
-        for path, fc_data in data.get("files", {}).items():
-            line_range = fc_data.get("line_range")
-            self._files[path] = FileContext(
-                path=fc_data["path"],
-                last_accessed=datetime.fromisoformat(fc_data["last_accessed"]),
-                snippet=fc_data.get("snippet"),
-                line_range=tuple(line_range) if line_range else None,
-            )
+            self._files = {}
+            for path, fc_data in data.get("files", {}).items():
+                line_range = fc_data.get("line_range")
+                self._files[path] = FileContext(
+                    path=fc_data["path"],
+                    last_accessed=datetime.fromisoformat(fc_data["last_accessed"]),
+                    snippet=fc_data.get("snippet"),
+                    line_range=tuple(line_range) if line_range else None,
+                )
 
-        self._current_file = data.get("current_file")
-        self._recent_errors = data.get("recent_errors", [])
-        self._changes_made = data.get("changes_made", [])
+            self._current_file = data.get("current_file")
+            self._recent_errors = data.get("recent_errors", [])
+            self._changes_made = data.get("changes_made", [])
 
     def save(self) -> None:
         """Save code session to storage."""
@@ -248,59 +268,70 @@ class CodeDevelopmentMemoryManager(BaseMemoryManager):
         if hybrid:
             prefix_parts.append(hybrid)
 
-        # Task context
-        if self._current_task:
-            task_desc = self._current_task.description
-            task_lines = [f"**Current Task:** {task_desc}"]
+        # Acquire mode lock for safe reads of mode-specific state
+        with self._mode_lock:
+            # Task context
+            if self._current_task:
+                task_desc = self._current_task.description
+                task_lines = [f"**Current Task:** {task_desc}"]
 
-            if self._current_task.steps_completed:
-                steps = self._current_task.steps_completed[-5:]
-                steps_text = "\n".join(f"  \u2713 {s}" for s in steps)
-                task_lines.append(f"**Completed:**\n{steps_text}")
+                if self._current_task.steps_completed:
+                    steps = self._current_task.steps_completed[-5:]
+                    steps_text = "\n".join(f"  \u2713 {s}" for s in steps)
+                    task_lines.append(f"**Completed:**\n{steps_text}")
 
-            if self._current_task.current_step:
-                task_lines.append(f"**Working on:** {self._current_task.current_step}")
+                if self._current_task.current_step:
+                    task_lines.append(f"**Working on:** {self._current_task.current_step}")
 
-            if self._current_task.blockers:
-                blockers = "\n".join(f"  \u26a0 {b}" for b in self._current_task.blockers)
-                task_lines.append(f"**Blockers:**\n{blockers}")
+                if self._current_task.blockers:
+                    blockers = "\n".join(f"  \u26a0 {b}" for b in self._current_task.blockers)
+                    task_lines.append(f"**Blockers:**\n{blockers}")
 
-            prefix_parts.append("\n".join(task_lines))
+                prefix_parts.append("\n".join(task_lines))
 
-        # File context
-        if self._files:
-            recent_files = sorted(
-                self._files.values(),
-                key=lambda f: f.last_accessed,
-                reverse=True,
-            )[:5]
-            files_list = ", ".join(f"`{f.path}`" for f in recent_files)
-            prefix_parts.append(f"**Recent files:** {files_list}")
+            # File context
+            if self._files:
+                recent_files = sorted(
+                    self._files.values(),
+                    key=lambda f: f.last_accessed,
+                    reverse=True,
+                )[:5]
+                files_list = ", ".join(f"`{f.path}`" for f in recent_files)
+                prefix_parts.append(f"**Recent files:** {files_list}")
 
-        # Current file with snippet
-        if self._current_file and self._current_file in self._files:
-            fc = self._files[self._current_file]
-            if fc.snippet:
-                snippet_preview = fc.snippet[:500] + "..." if len(fc.snippet) > 500 else fc.snippet
-                lines_info = ""
-                if fc.line_range:
-                    start, end = fc.line_range
-                    lines_info = f" (lines {start}-{end})"
-                prefix_parts.append(
-                    f"**Current file:** `{fc.path}`{lines_info}\n```\n{snippet_preview}\n```"
-                )
+            # Current file with snippet
+            if self._current_file and self._current_file in self._files:
+                fc = self._files[self._current_file]
+                if fc.snippet:
+                    snippet_preview = (
+                        fc.snippet[:500] + "..." if len(fc.snippet) > 500 else fc.snippet
+                    )
+                    lines_info = ""
+                    if fc.line_range:
+                        start, end = fc.line_range
+                        lines_info = f" (lines {start}-{end})"
+                    prefix_parts.append(
+                        f"**Current file:** `{fc.path}`{lines_info}\n```\n{snippet_preview}\n```"
+                    )
 
-        # Recent errors
-        if self._recent_errors:
-            errors_text = "\n".join(f"  \u2022 {e[:100]}" for e in self._recent_errors)
-            prefix_parts.append(f"**Recent errors:**\n{errors_text}")
+            # Recent errors
+            if self._recent_errors:
+                errors_text = "\n".join(f"  \u2022 {e[:100]}" for e in self._recent_errors)
+                prefix_parts.append(f"**Recent errors:**\n{errors_text}")
 
-        # Recent changes
-        if self._changes_made:
-            changes_text = "\n".join(f"  \u2022 {c}" for c in self._changes_made[-5:])
-            prefix_parts.append(f"**Recent changes:**\n{changes_text}")
+            # Recent changes
+            if self._changes_made:
+                changes_text = "\n".join(f"  \u2022 {c}" for c in self._changes_made[-5:])
+                prefix_parts.append(f"**Recent changes:**\n{changes_text}")
 
         context_prefix = "\n\n".join(prefix_parts) if prefix_parts else None
+
+        # ── Tiered context assembly ──────────────────────────────────────
+        with self._hybrid_lock:
+            tier_ready = self._tier_cache_ready
+            tier_cache = self._tier_cache
+            summary = self._summary or ""
+            summary_msg_idx = self._summary_msg_idx
 
         # ── Tiered context assembly ──────────────────────────────────────
         with self._hybrid_lock:
@@ -339,7 +370,14 @@ class CodeDevelopmentMemoryManager(BaseMemoryManager):
 
         # ── Sliding window fallback (cold cache) ─────────────────────────
         window_size = self._mode_config["working_memory_size"]
-        context_messages = self._messages[-window_size:] if self._messages else []
+
+        # Read mode-specific state for metadata (protected by _mode_lock)
+        with self._mode_lock:
+            context_messages = self._messages[-window_size:] if self._messages else []
+            files_tracked = len(self._files)
+            current_file = self._current_file
+            has_task = self._current_task is not None
+            error_count = len(self._recent_errors)
 
         # Inject timestamps so the LLM has temporal awareness
         context_messages = self._inject_timestamps(context_messages)
@@ -358,10 +396,10 @@ class CodeDevelopmentMemoryManager(BaseMemoryManager):
             context_messages_count=len(context_messages),
             token_estimate=token_estimate,
             metadata={
-                "files_tracked": len(self._files),
-                "current_file": self._current_file,
-                "has_task": self._current_task is not None,
-                "error_count": len(self._recent_errors),
+                "files_tracked": files_tracked,
+                "current_file": current_file,
+                "has_task": has_task,
+                "error_count": error_count,
             },
         )
 
@@ -372,30 +410,41 @@ class CodeDevelopmentMemoryManager(BaseMemoryManager):
         agent_messages: list[Any] | None = None,
     ) -> None:
         """Update memory and extract code-related information."""
-        # --- Build the human message (always needed) ----------------
-        if HumanMessage is not None:
-            human_msg: Any = HumanMessage(content=user_input)
-        else:
-            human_msg = {"type": "human", "content": user_input}
-        self._set_msg_ts(human_msg, self._pending_user_ts)
-        self._pending_user_ts = None
-
-        self._messages.append(human_msg)
-
-        # --- Append the agent's messages ---------------------------
-        if agent_messages is not None:
-            for m in agent_messages:
-                self._messages.append(m)
-            last = agent_messages[-1]
-            if hasattr(last, "content") or isinstance(last, dict):
-                self._set_msg_ts(last)
-        else:
-            if AIMessage is not None:
-                ai_msg: Any = AIMessage(content=ai_response)
+        with self._mode_lock:
+            # --- Build the human message (always needed) ----------------
+            if HumanMessage is not None:
+                human_msg: Any = HumanMessage(content=user_input)
             else:
-                ai_msg = {"type": "ai", "content": ai_response}
-            self._set_msg_ts(ai_msg)
-            self._messages.append(ai_msg)
+                human_msg = {"type": "human", "content": user_input}
+            self._set_msg_ts(human_msg, self._pending_user_ts)
+            self._pending_user_ts = None
+
+            self._messages.append(human_msg)
+
+            # --- Append the agent's messages ---------------------------
+            if agent_messages is not None:
+                for m in agent_messages:
+                    self._messages.append(m)
+                last = agent_messages[-1]
+                if hasattr(last, "content") or isinstance(last, dict):
+                    self._set_msg_ts(last)
+            else:
+                if AIMessage is not None:
+                    ai_msg: Any = AIMessage(content=ai_response)
+                else:
+                    ai_msg = {"type": "ai", "content": ai_response}
+                self._set_msg_ts(ai_msg)
+                self._messages.append(ai_msg)
+
+        # Layer-1a: accumulate tokens since last summary update (protected by _hybrid_lock in base)
+        from src.memory.manager import _msg_tokens
+
+        self._tokens_since_summary += _msg_tokens(human_msg)
+        if agent_messages is not None:
+            self._tokens_since_summary += _msg_tokens(agent_messages[-1])
+        else:
+            self._tokens_since_summary += _msg_tokens(ai_msg)
+        self._check_summary_token_ttl()
 
         # Incrementally summarize messages outside the sliding window
         window_size = self._mode_config["working_memory_size"]
@@ -432,69 +481,103 @@ class CodeDevelopmentMemoryManager(BaseMemoryManager):
 
     def clear(self) -> None:
         """Clear all code development memory."""
-        super().clear()
-        self._messages = []
-        self._current_task = None
-        self._files = {}
-        self._current_file = None
-        self._recent_errors = []
-        self._changes_made = []
+        with self._mode_lock:
+            super().clear()
+            self._messages = []
+            self._current_task = None
+            self._files = {}
+            self._current_file = None
+            self._recent_errors = []
+            self._changes_made = []
 
     def get_message_count(self) -> int:
         """Return total number of messages stored."""
-        return len(self._messages)
+        with self._mode_lock:
+            return len(self._messages)
 
     def get_stats(self) -> dict[str, Any]:
         """Return code development statistics."""
-        return {
-            **super().get_stats(),
-            "total_messages": len(self._messages),
-            "working_memory_size": self._mode_config["working_memory_size"],
-            "files_tracked": len(self._files),
-            "current_file": self._current_file,
-            "has_task": self._current_task is not None,
-            "error_count": len(self._recent_errors),
-            "changes_count": len(self._changes_made),
-        }
+        with self._mode_lock:
+            return {
+                **super().get_stats(),
+                "total_messages": len(self._messages),
+                "working_memory_size": self._mode_config["working_memory_size"],
+                "files_tracked": len(self._files),
+                "current_file": self._current_file,
+                "has_task": self._current_task is not None,
+                "error_count": len(self._recent_errors),
+                "changes_count": len(self._changes_made),
+            }
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize code development state."""
         from src.memory.json_store import _message_to_dict
 
-        base = super().to_dict()
+        with self._mode_lock:
+            base = super().to_dict()
 
-        messages_data = [_message_to_dict(m) for m in self._messages]
+            messages_data = [_message_to_dict(m) for m in self._messages]
 
-        # Serialize task
-        task_data = None
-        if self._current_task:
-            task_data = {
-                "description": self._current_task.description,
-                "started_at": self._current_task.started_at.isoformat(),
-                "steps_completed": self._current_task.steps_completed,
-                "current_step": self._current_task.current_step,
-                "blockers": self._current_task.blockers,
+            # Serialize task
+            task_data = None
+            if self._current_task:
+                task_data = {
+                    "description": self._current_task.description,
+                    "started_at": self._current_task.started_at.isoformat(),
+                    "steps_completed": self._current_task.steps_completed,
+                    "current_step": self._current_task.current_step,
+                    "blockers": self._current_task.blockers,
+                }
+
+            # Serialize files
+            files_data = {}
+            for path, fc in self._files.items():
+                files_data[path] = {
+                    "path": fc.path,
+                    "last_accessed": fc.last_accessed.isoformat(),
+                    "snippet": fc.snippet,
+                    "line_range": list(fc.line_range) if fc.line_range else None,
+                }
+
+            return {
+                **base,
+                "messages": messages_data,
+                "task": task_data,
+                "files": files_data,
+                "current_file": self._current_file,
+                "recent_errors": self._recent_errors,
+                "changes_made": self._changes_made,
             }
 
-        # Serialize files
-        files_data = {}
-        for path, fc in self._files.items():
-            files_data[path] = {
-                "path": fc.path,
-                "last_accessed": fc.last_accessed.isoformat(),
-                "snippet": fc.snippet,
-                "line_range": list(fc.line_range) if fc.line_range else None,
-            }
+    def _mode_state_dict(self) -> dict[str, Any]:
+        """Persist code-specific state without messages or hybrid data."""
+        with self._mode_lock:
+            task_data = None
+            if self._current_task:
+                task_data = {
+                    "description": self._current_task.description,
+                    "started_at": self._current_task.started_at.isoformat(),
+                    "steps_completed": self._current_task.steps_completed,
+                    "current_step": self._current_task.current_step,
+                    "blockers": self._current_task.blockers,
+                }
 
-        return {
-            **base,
-            "messages": messages_data,
-            "task": task_data,
-            "files": files_data,
-            "current_file": self._current_file,
-            "recent_errors": self._recent_errors,
-            "changes_made": self._changes_made,
-        }
+            files_data = {}
+            for path, fc in self._files.items():
+                files_data[path] = {
+                    "path": fc.path,
+                    "last_accessed": fc.last_accessed.isoformat(),
+                    "snippet": fc.snippet,
+                    "line_range": list(fc.line_range) if fc.line_range else None,
+                }
+
+            return {
+                "task": task_data,
+                "files": files_data,
+                "current_file": self._current_file,
+                "recent_errors": self._recent_errors,
+                "changes_made": self._changes_made,
+            }
 
     def from_dict(self, data: dict[str, Any]) -> None:
         """Restore code development state."""
@@ -502,36 +585,37 @@ class CodeDevelopmentMemoryManager(BaseMemoryManager):
 
         super().from_dict(data)
 
-        self._messages = [_dict_to_message(d) for d in data.get("messages", [])]
+        with self._mode_lock:
+            self._messages = [_dict_to_message(d) for d in data.get("messages", [])]
 
-        # Restore task
-        task_data = data.get("task")
-        if task_data:
-            self._current_task = TaskProgress(
-                description=task_data["description"],
-                started_at=datetime.fromisoformat(task_data["started_at"]),
-                steps_completed=task_data.get("steps_completed", []),
-                current_step=task_data.get("current_step"),
-                blockers=task_data.get("blockers", []),
-            )
-        else:
-            self._current_task = None
+            # Restore task
+            task_data = data.get("task")
+            if task_data:
+                self._current_task = TaskProgress(
+                    description=task_data["description"],
+                    started_at=datetime.fromisoformat(task_data["started_at"]),
+                    steps_completed=task_data.get("steps_completed", []),
+                    current_step=task_data.get("current_step"),
+                    blockers=task_data.get("blockers", []),
+                )
+            else:
+                self._current_task = None
 
-        # Restore files
-        self._files = {}
-        for path, fc_data in data.get("files", {}).items():
-            line_range = fc_data.get("line_range")
-            self._files[path] = FileContext(
-                path=fc_data["path"],
-                last_accessed=datetime.fromisoformat(fc_data["last_accessed"]),
-                snippet=fc_data.get("snippet"),
-                line_range=tuple(line_range) if line_range else None,
-            )
+            # Restore files
+            self._files = {}
+            for path, fc_data in data.get("files", {}).items():
+                line_range = fc_data.get("line_range")
+                self._files[path] = FileContext(
+                    path=fc_data["path"],
+                    last_accessed=datetime.fromisoformat(fc_data["last_accessed"]),
+                    snippet=fc_data.get("snippet"),
+                    line_range=tuple(line_range) if line_range else None,
+                )
 
-        self._current_file = data.get("current_file")
-        self._recent_errors = data.get("recent_errors", [])
-        self._changes_made = data.get("changes_made", [])
-        self._loaded = True
+            self._current_file = data.get("current_file")
+            self._recent_errors = data.get("recent_errors", [])
+            self._changes_made = data.get("changes_made", [])
+            self._loaded = True
 
     # --- Private methods ---
 

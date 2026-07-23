@@ -15,7 +15,11 @@ from typing import Any
 
 from sqlalchemy import update
 
-from src.api.db.engine import AsyncSessionLocal
+# Import the engine module (cheap) rather than the AsyncSessionLocal
+# attribute (lazy — touches the filesystem on first access).  We resolve
+# AsyncSessionLocal at call time via _db.AsyncSessionLocal so module import
+# stays side-effect free.
+from src.api.db import engine as _db
 from src.api.db.models import RagDocument
 
 log = logging.getLogger("cogtrix.api.tasks.rag")
@@ -81,7 +85,7 @@ async def ingest_document_task(doc_id: str, file_path: Path) -> None:
     3. On success: sets status ``indexed``, ``indexed_at``, ``chunk_count``.
     4. On failure: sets status ``failed``, ``error``.
     """
-    async with AsyncSessionLocal() as db:
+    async with _db.AsyncSessionLocal() as db:
         await db.execute(
             update(RagDocument).where(RagDocument.id == doc_id).values(status="processing")
         )
@@ -96,7 +100,7 @@ async def ingest_document_task(doc_id: str, file_path: Path) -> None:
         error_msg = f"Unexpected error: {exc}"
         log.exception("rag_ingest: doc_id=%s unexpected error", doc_id)
 
-    async with AsyncSessionLocal() as db:
+    async with _db.AsyncSessionLocal() as db:
         if success:
             await db.execute(
                 update(RagDocument)

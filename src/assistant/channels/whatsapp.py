@@ -288,8 +288,20 @@ class WhatsAppChannel(Channel):
             self._resolve_lid(next(iter(uncached)))
             return
 
-        with ThreadPoolExecutor(max_workers=min(len(uncached), 8)) as pool:
-            list(pool.map(self._resolve_lid, uncached))
+        # Use explicit ThreadPoolExecutor (not `with`) so shutdown(wait=False)
+        # can be used on timeout — `__exit__` calls shutdown(wait=True) which
+        # blocks on hung threads.
+        pool = ThreadPoolExecutor(max_workers=min(len(uncached), 8))
+        try:
+            futures = [pool.submit(self._resolve_lid, number) for number in uncached]
+            for future in futures:
+                try:
+                    future.result(timeout=10)
+                except TimeoutError:
+                    future.cancel()
+                    log.warning("LID resolution timed out after 10s — skipping one number")
+        finally:
+            pool.shutdown(wait=False)
 
     def poll(self) -> list[IncomingMessage]:
         self._ensure_session()

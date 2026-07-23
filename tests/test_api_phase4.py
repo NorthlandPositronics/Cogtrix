@@ -68,8 +68,8 @@ def _make_tool_registry() -> MagicMock:
     registry.requires_confirmation.side_effect = lambda n: registry.tool_metadata.get(n, {}).get(
         "requires_confirmation", False
     )
-    registry.is_mcp_tool.side_effect = (
-        lambda n: registry.tool_metadata.get(n, {}).get("source") == "mcp"
+    registry.is_mcp_tool.side_effect = lambda n: (
+        registry.tool_metadata.get(n, {}).get("source") == "mcp"
     )
     registry.get_tool_server.side_effect = lambda n: registry.tool_metadata.get(n, {}).get("server")
     return registry
@@ -824,10 +824,11 @@ class TestMCPEndpoints:
             config.mcp_servers = {
                 "srv1": {"command": "python", "args": [], "requires_confirmation": True}
             }
-            resp = client.delete(
-                "/api/v1/mcp/servers/srv1",
-                headers={"Authorization": f"Bearer {admin_token}"},
-            )
+            with patch("src.api.routes.mcp._persist_mcp_servers"):
+                resp = client.delete(
+                    "/api/v1/mcp/servers/srv1",
+                    headers={"Authorization": f"Bearer {admin_token}"},
+                )
         assert resp.status_code == 204
 
     def test_list_mcp_servers_requires_auth(self) -> None:
@@ -858,14 +859,14 @@ class TestSystemEndpoints:
         assert "platform" in data
 
     def test_system_info_version_matches(self) -> None:
-        from src._version import __version__
+        from src._version import get_version_string
 
         with _api_client() as (client, registry, config, admin_token, _):
             resp = client.get(
                 "/api/v1/system/info",
                 headers={"Authorization": f"Bearer {admin_token}"},
             )
-        assert resp.json()["data"]["version"] == __version__
+        assert resp.json()["data"]["version"] == get_version_string()
 
     def test_system_info_requires_auth(self) -> None:
         with _api_client() as (client, *_):

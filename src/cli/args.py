@@ -2,7 +2,7 @@ import argparse
 import os
 import sys
 
-from src._version import __version__
+from src._version import get_version_string
 
 
 def color_enabled() -> bool:
@@ -66,10 +66,10 @@ def build_parser() -> argparse.ArgumentParser:
         f"    cogtrix.py -c config.yml -m my-model        {D('Config file + model override')}\n"
         f"\n"
         f"  {B('Non-interactive (scripting):')}\n"
-        f"    cogtrix.py --prompt \"What is 2+2?\"         {D('Single prompt, print result, exit')}\n"
-        f"    cogtrix.py --prompt \"...\" -o out.md        {D('Save response to file')}\n"
+        f'    cogtrix.py --prompt "What is 2+2?"         {D("Single prompt, print result, exit")}\n'
+        f'    cogtrix.py --prompt "..." -o out.md        {D("Save response to file")}\n'
         f"    cogtrix.py --prompt-file task.txt -o res.md {D('Read prompt from file, save result')}\n"
-        f"    cogtrix.py --prompt \"...\" --no-stream      {D('Suppress streaming (clean stdout)')}\n"
+        f'    cogtrix.py --prompt "..." --no-stream      {D("Suppress streaming (clean stdout)")}\n'
         f"\n"
         f"  {B('Assistant mode:')}\n"
         f"    cogtrix.py --assistant                     {D('Start headless messaging daemon')}\n"
@@ -142,7 +142,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--version",
         action="version",
-        version=f"cogtrix {__version__}",
+        version=f"cogtrix {get_version_string()}",
     )
 
     # ── Getting started ──────────────────────────────────────────────

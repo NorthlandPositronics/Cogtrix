@@ -24,11 +24,12 @@ Additionally covers previously untested ApiConfirmationUI edge cases:
 
 from __future__ import annotations
 
-import ast
 import asyncio
-import inspect
 import threading
 import time
+from types import SimpleNamespace
+from typing import Any
+from unittest.mock import patch
 
 import pytest
 
@@ -42,43 +43,23 @@ from src.api.confirmation import (  # noqa: E402
     ApiConfirmationUI,
 )
 
-# ---------------------------------------------------------------------------
-# Shared AST helpers
-# ---------------------------------------------------------------------------
 
-
-def _handler_names(exc_type: ast.expr | None) -> list[str]:
-    """Return the unqualified name(s) in an except-handler type node."""
-    if exc_type is None:  # bare except
-        return []
-    if isinstance(exc_type, ast.Name):
-        return [exc_type.id]
-    if isinstance(exc_type, ast.Attribute):
-        return [exc_type.attr]
-    if isinstance(exc_type, ast.Tuple):
-        names: list[str] = []
-        for elt in exc_type.elts:
-            if isinstance(elt, ast.Name):
-                names.append(elt.id)
-            elif isinstance(elt, ast.Attribute):
-                names.append(elt.attr)
-        return names
-    return []
-
-
-def _body_has_wait_for(body: list[ast.stmt]) -> bool:
-    """Return True if any node in *body* contains an asyncio.wait_for call."""
-    for stmt in body:
-        for child in ast.walk(stmt):
-            if not isinstance(child, ast.Call):
-                continue
-            func = child.func
-            is_wait_for = (isinstance(func, ast.Attribute) and func.attr == "wait_for") or (
-                isinstance(func, ast.Name) and func.id == "wait_for"
-            )
-            if is_wait_for:
-                return True
-    return False
+def _make_turn_runner_session(ws_queue: asyncio.Queue) -> Any:
+    """Build a minimal session object accepted by _run_message_turn_inner."""
+    return SimpleNamespace(
+        id="test-session-forge-regression",
+        turn_lock=asyncio.Lock(),
+        session_state=None,
+        run_config=None,
+        memory_manager=None,
+        cancel_event=asyncio.Event(),
+        ws_queue=ws_queue,
+        active_confirmation_ui=None,
+        agent_state="idle",
+        token_counts={"input_tokens": 0, "output_tokens": 0},
+        last_activity=0.0,
+        registry=None,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -105,32 +86,36 @@ class TestPollIntervalModuleLevel:
         """_TIMEOUT_SECONDS is 300 (5 minutes)."""
         assert _TIMEOUT_SECONDS == 300
 
-    def test_poll_interval_not_assigned_inside_function(self) -> None:
-        """AST guard: _POLL_INTERVAL must not be assigned inside any function body.
+    @pytest.mark.asyncio
+    async def test_read_choice_uses_module_poll_interval(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Behavior: read_choice honors monkeypatched module poll/timeout constants.
 
-        Before the fix the assignment lived inside read_choice()'s while loop,
-        meaning it was re-evaluated up to 600 times per 5-minute confirmation.
+        If read_choice reassigns _POLL_INTERVAL inside the loop, monkeypatching
+        _confirmation_mod._POLL_INTERVAL would have no effect and this call would
+        block for far longer than the small timeout below.
         """
-        source = inspect.getsource(_confirmation_mod)
-        tree = ast.parse(source)
+        queue: asyncio.Queue = asyncio.Queue()
+        loop = asyncio.get_running_loop()
+        ui = ApiConfirmationUI(ws_queue=queue, loop=loop)
 
-        for node in ast.walk(tree):
-            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                continue
-            for child in ast.walk(node):
-                if isinstance(child, ast.Assign):
-                    for tgt in child.targets:
-                        if isinstance(tgt, ast.Name) and tgt.id == "_POLL_INTERVAL":
-                            pytest.fail(
-                                f"_POLL_INTERVAL assigned inside function '{node.name}' "
-                                "— must be a module-level constant (BUG-AUDIT-002)"
-                            )
-                if isinstance(child, ast.AnnAssign):
-                    if isinstance(child.target, ast.Name) and child.target.id == "_POLL_INTERVAL":
-                        pytest.fail(
-                            f"_POLL_INTERVAL annotated-assigned inside function '{node.name}' "
-                            "— must be a module-level constant (BUG-AUDIT-002)"
-                        )
+        ui.render_prompt("shell", {}, frozenset(), 300)
+        await asyncio.sleep(0.05)
+        await queue.get()
+
+        monkeypatch.setattr(_confirmation_mod, "_POLL_INTERVAL", 0.01)
+        monkeypatch.setattr(_confirmation_mod, "_TIMEOUT_SECONDS", 0.06)
+
+        started = time.monotonic()
+        choice = await asyncio.to_thread(ui.read_choice)
+        elapsed = time.monotonic() - started
+
+        assert choice == "n"
+        assert elapsed < 0.2, (
+            "read_choice did not honor module-level _POLL_INTERVAL/_TIMEOUT_SECONDS; "
+            "possible loop-local reassignment regression"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -138,81 +123,53 @@ class TestPollIntervalModuleLevel:
 # ---------------------------------------------------------------------------
 
 
-class TestDoneMsgNoQueueFull:
-    """The done-message wait_for(put()) must NOT catch QueueFull.
+class TestDoneMsgBlockingPut:
+    """Behavioral regression tests for done-message queue handling (blocking put)."""
 
-    asyncio.Queue.put() blocks until space is available; it never raises
-    QueueFull.  Only put_nowait() raises QueueFull.  The other three
-    QueueFull catches in the same function are legitimate because they
-    guard put_nowait() calls.
-    """
+    @pytest.mark.asyncio
+    async def test_done_message_delivered_with_blocking_put(self) -> None:
+        """Done message is enqueued via blocking put and turn completes normally."""
+        from src.api.turn_runner import _run_message_turn_inner
 
-    def test_no_queuefull_in_wait_for_except(self) -> None:
-        """AST: no Try block containing wait_for() catches QueueFull."""
-        from src.api import turn_runner
+        queue = asyncio.Queue(maxsize=10)
+        session = _make_turn_runner_session(queue)
+        ws_callback = SimpleNamespace(input_tokens=0, output_tokens=0, tool_call_count=0)
 
-        source = inspect.getsource(turn_runner._run_message_turn_inner)
-        tree = ast.parse(source)
+        with patch("src.orchestration.runner.run_agent", return_value="ok"):
+            with patch("src.api.callbacks.WebSocketCallbackHandler", return_value=ws_callback):
+                await _run_message_turn_inner(session, "hello", "chat", None, None)
 
-        bad_handlers: list[ast.ExceptHandler] = []
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Try):
-                continue
-            if not _body_has_wait_for(node.body):
-                continue
-            for handler in node.handlers:
-                if "QueueFull" in _handler_names(handler.type):
-                    bad_handlers.append(handler)
+        assert session.agent_state == "idle"
+        assert session.active_confirmation_ui is None
+        # Verify done message was enqueued
+        assert any(item.get("type") == "done" for item in queue._queue)
 
-        assert len(bad_handlers) == 0, (
-            f"Found {len(bad_handlers)} except handler(s) catching QueueFull inside a "
-            "try block that contains asyncio.wait_for().  Queue.put() never raises "
-            "QueueFull — this is dead code (BUG-AUDIT-001)."
-        )
+    @pytest.mark.asyncio
+    async def test_done_message_blocks_until_space_available(self) -> None:
+        """Blocking put waits until queue space is available, then delivers."""
+        from src.api.turn_runner import _run_message_turn_inner
 
-    def test_done_msg_uses_wait_for_with_timeout_error(self) -> None:
-        """AST: the done-message put() is wrapped in wait_for and catches TimeoutError."""
-        from src.api import turn_runner
+        full_queue = asyncio.Queue(maxsize=1)
+        full_queue.put_nowait({"sentinel": True})
+        session = _make_turn_runner_session(full_queue)
+        ws_callback = SimpleNamespace(input_tokens=0, output_tokens=0, tool_call_count=0)
 
-        source = inspect.getsource(turn_runner._run_message_turn_inner)
+        async def consumer() -> None:
+            """Simulate a consumer that frees up queue space."""
+            await asyncio.sleep(0.05)
+            full_queue.get_nowait()
 
-        assert (
-            "wait_for" in source
-        ), "done message must use asyncio.wait_for() to bound the wait (BUG-209)"
-        assert (
-            "TimeoutError" in source
-        ), "done message must catch TimeoutError from asyncio.wait_for"
+        with patch("src.orchestration.runner.run_agent", return_value="ok"):
+            with patch("src.api.callbacks.WebSocketCallbackHandler", return_value=ws_callback):
+                await asyncio.gather(
+                    consumer(),
+                    _run_message_turn_inner(session, "hello", "chat", None, None),
+                )
 
-    def test_put_nowait_handlers_are_legitimate(self) -> None:
-        """Sanity: the remaining QueueFull catches are all around put_nowait calls.
-
-        Verifies that each Try block catching QueueFull uses put_nowait(), not put().
-        """
-        from src.api import turn_runner
-
-        source = inspect.getsource(turn_runner._run_message_turn_inner)
-        tree = ast.parse(source)
-
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Try):
-                continue
-            has_queuefull = any("QueueFull" in _handler_names(h.type) for h in node.handlers)
-            if not has_queuefull:
-                continue
-            # Verify the body uses put_nowait, not put().
-            for stmt in node.body:
-                for child in ast.walk(stmt):
-                    if not isinstance(child, ast.Call):
-                        continue
-                    func = child.func
-                    if isinstance(func, ast.Attribute) and func.attr == "put":
-                        # This Try catches QueueFull AND has a plain .put() call —
-                        # that is the dead-code pattern we fixed.
-                        pytest.fail(
-                            "Found a Try block that catches QueueFull and also "
-                            "calls .put() — only put_nowait() can raise QueueFull "
-                            "(BUG-AUDIT-001)."
-                        )
+        assert session.agent_state == "idle"
+        assert session.active_confirmation_ui is None
+        # The done message should now be in the queue
+        assert any(item.get("type") == "done" for item in full_queue._queue)
 
 
 # ---------------------------------------------------------------------------
@@ -234,16 +191,22 @@ class TestApiConfirmationUICancel:
         await asyncio.sleep(0.05)
         await queue.get()  # consume the queued request
 
+        proceed = threading.Event()
+
         def _cancel_after_brief_delay() -> None:
-            time.sleep(0.05)
+            proceed.wait(timeout=5.0)
             ui.cancel()
 
         t = threading.Thread(target=_cancel_after_brief_delay, daemon=True)
         t.start()
 
+        # Give the background thread a moment to reach the wait, then signal it.
+        await asyncio.sleep(0.01)
+        proceed.set()
+
         choice = await asyncio.to_thread(ui.read_choice)
         assert choice == "n", "cancel() should default to deny ('n')"
-        t.join()
+        t.join(timeout=5.0)
 
     @pytest.mark.asyncio
     async def test_cancel_sets_flag_and_event(self) -> None:
@@ -304,19 +267,25 @@ class TestApiConfirmationUIRenderPromptReset:
         item = await queue.get()
         conf_id = item["payload"]["confirmation_id"]
 
+        proceed = threading.Event()
+
         def _resolve() -> None:
-            time.sleep(0.02)
+            proceed.wait(timeout=5.0)
             ui.resolve(conf_id, "allow")
 
         t = threading.Thread(target=_resolve, daemon=True)
         t.start()
+
+        # Let the background thread reach the wait, then signal it.
+        await asyncio.sleep(0.01)
+        proceed.set()
 
         choice = await asyncio.to_thread(ui.read_choice)
         assert choice == "y", (
             "render_prompt must reset _cancel_requested so the next confirmation "
             "waits for resolution instead of defaulting to 'n'"
         )
-        t.join()
+        t.join(timeout=5.0)
 
     @pytest.mark.asyncio
     async def test_render_prompt_resets_cancel_requested_flag_directly(self) -> None:
@@ -362,18 +331,23 @@ class TestApiConfirmationUIDisplacement:
         await queue.get()
 
         choice_holder: list[str] = []
+        entered = threading.Event()
+        orig_read_choice = ui.read_choice
 
         def _read_first() -> None:
-            choice_holder.append(ui.read_choice())
+            entered.set()
+            choice_holder.append(orig_read_choice())
 
+        ui.read_choice = _read_first
         reader = threading.Thread(target=_read_first, daemon=True)
         reader.start()
 
-        await asyncio.sleep(0.1)
+        entered.wait(timeout=2.0)
         ui.render_prompt("write_file", {"content": "x"}, frozenset(), 300)
-        await asyncio.sleep(0.1)
+        await asyncio.sleep(0.05)
 
         reader.join(timeout=3.0)
+        ui.read_choice = orig_read_choice
         assert not reader.is_alive(), "read_choice hung after displacement"
         assert choice_holder == ["n"], "Displaced read_choice must return 'n'"
 
@@ -393,16 +367,21 @@ class TestApiConfirmationUIDisplacement:
         item2 = await queue.get()
         conf_id2 = item2["payload"]["confirmation_id"]
 
+        proceed = threading.Event()
+
         def _resolve() -> None:
-            time.sleep(0.02)
+            proceed.wait(timeout=5.0)
             ui.resolve(conf_id2, "allow_all")
 
         t = threading.Thread(target=_resolve, daemon=True)
         t.start()
 
+        await asyncio.sleep(0.01)
+        proceed.set()
+
         choice = await asyncio.to_thread(ui.read_choice)
         assert choice == "a"
-        t.join()
+        t.join(timeout=5.0)
 
 
 # ---------------------------------------------------------------------------
@@ -425,15 +404,21 @@ class TestApiConfirmationUIUnknownAction:
         item = await queue.get()
         conf_id = item["payload"]["confirmation_id"]
 
+        proceed = threading.Event()
+
         def _resolve() -> None:
+            proceed.wait(timeout=5.0)
             ui.resolve(conf_id, "totally_unknown_action")
 
         t = threading.Thread(target=_resolve, daemon=True)
         t.start()
 
+        await asyncio.sleep(0.01)
+        proceed.set()
+
         choice = await asyncio.to_thread(ui.read_choice)
         assert choice == "n", "_ACTION_MAP.get(unknown, 'n') must default to 'n'"
-        t.join()
+        t.join(timeout=5.0)
 
     def test_action_map_covers_all_six_actions(self) -> None:
         """_ACTION_MAP covers the six documented WebSocket actions."""
@@ -524,7 +509,7 @@ class TestApiConfirmationUIEnqueueNowait:
         ui = ApiConfirmationUI(ws_queue=full_queue, loop=loop)
 
         # Must not raise; drops the new message silently.
-        await ui._enqueue_nowait(
+        ui._try_enqueue_nowait(
             {"type": "tool_confirm_request", "payload": {"confirmation_id": "x"}}
         )
 

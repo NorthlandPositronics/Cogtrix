@@ -13,8 +13,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from src.logging_config import get_logger
-from src.orchestration.compression import truncate_tool_output
 from src.tools.resolver import resolve_tool_name as _resolve_tool_name
+from src.utils.text import truncate_tool_output
 
 if TYPE_CHECKING:
     from src.config import Config
@@ -29,8 +29,7 @@ try:
         add: list[str] = Field(
             default_factory=list,
             description=(
-                "Tool names to load from the available catalog. "
-                "They become available immediately."
+                "Tool names to load from the available catalog. They become available immediately."
             ),
         )
         remove: list[str] = Field(
@@ -351,9 +350,10 @@ def configure_google_search_tool(config: Config) -> None:
 def configure_python_exec_tool(config: Config) -> None:
     """Configure the Python execution tool with session ID for persistent state."""
     try:
-        from src.tools.python_exec import set_session
+        from src.tools.python_exec import configure_datascience_modules, set_session
 
         set_session(config.session)
+        configure_datascience_modules(config.enable_datascience_modules)
     except ImportError:
         pass
 
@@ -375,6 +375,7 @@ def configure_file_read_dirs(config: Config) -> None:
 def configure_cron_tool(
     config: Config,
     llm_factory: Callable[[], Any] | None = None,
+    job_runner: Callable[[Any], str] | None = None,
 ) -> None:
     """Configure the cron scheduling tool.
 
@@ -388,7 +389,13 @@ def configure_cron_tool(
         from src.tools.cron_tools import configure_cron
 
         data_dir = config.resolve_data_path("cron")
-        configure_cron(data_dir=str(data_dir), llm_factory=llm_factory)
+        configure_cron(
+            data_dir=str(data_dir),
+            llm_factory=llm_factory,
+            job_runner=job_runner,
+            initial_jobs=list(config.cron) if getattr(config, "cron", None) else None,
+            llm_timeout=getattr(config, "cron_llm_timeout", None),
+        )
     except (ImportError, OSError):
         pass
 
@@ -566,15 +573,27 @@ def filter_unconfigured_tools(registry: ToolRegistry) -> None:
         log.debug("Removed unconfigured tool: %s", tool_name)
 
     if to_remove:
-        log.info(
-            f"Filtered {len(to_remove)} unconfigured tool(s): " f"{', '.join(sorted(to_remove))}"
-        )
+        log.info(f"Filtered {len(to_remove)} unconfigured tool(s): {', '.join(sorted(to_remove))}")
 
+
+# Tools that are pre-loaded without requiring request_tools.
+# get_current_datetime is pinned because the agent must never estimate or
+# hallucinate timestamps — having it available from turn 0 removes the incentive
+# to fabricate times rather than calling the tool (#267).
+_ALWAYS_ACTIVE: frozenset[str] = frozenset({"get_current_datetime"})
+
+# Cron tools must be auto-loaded in reasoning mode so the agent can schedule
+# jobs without a request_tools detour when it is already operating in a
+# planning-heavy turn. This keeps cron creation deterministic and avoids the
+# "tool available but not loaded" failure mode from #516.
+_REASONING_ACTIVE: frozenset[str] = frozenset(
+    set(_ALWAYS_ACTIVE) | {"cron_add", "cron_list", "cron_remove"}
+)
 
 TOOL_PRESETS: dict[str, set[str]] = {
-    "reasoning": set(),
-    "code": set(),
-    "conversation": set(),
+    "reasoning": set(_REASONING_ACTIVE),
+    "code": set(_ALWAYS_ACTIVE),
+    "conversation": set(_ALWAYS_ACTIVE),
 }
 
 
@@ -593,10 +612,18 @@ def apply_tool_preset(
     """
     preset = TOOL_PRESETS.get(mode, set())
 
+    # LazyToolProxy instances must be resolved before entering the active dict
+    # because bind_tools() (called immediately after) cannot handle unresolved
+    # proxies. request_tools normally calls _resolve() when loading on demand,
+    # but pinned tools in TOOL_PRESETS skip that path entirely (#274).
+    from src.registry import LazyToolProxy
+
     active: dict[str, Any] = {}
     available: dict[str, Any] = {}
     for name, tool in registry.tools.items():
         if name in preset:
+            if isinstance(tool, LazyToolProxy):
+                tool = tool._resolve()
             active[name] = tool
         else:
             available[name] = tool
@@ -610,6 +637,7 @@ def create_request_tools_tool(
     protected_names: set[str] | None = None,
     tool_index: Any = None,
     denials: frozenset[str] | set[str] | None = None,
+    compact_catalog_threshold: int = 10,
 ) -> Any:
     """
     Create the ``request_tools`` meta-tool.
@@ -638,15 +666,27 @@ def create_request_tools_tool(
     _active: set[str] = active_names or set()
 
     # ── Catalog text: tools available to add ──
-    add_lines = []
-    for name in sorted(available_tools):
-        desc = catalog.get(name, "")
-        add_lines.append(f"  - {name}: {desc}")
-    add_catalog = "\n".join(add_lines) if add_lines else "  (none)"
+    active_non_request_count = len(_active - _protected - {"request_tools"})
+    compact_mode = active_non_request_count >= compact_catalog_threshold
+    if compact_mode:
+        add_catalog = (
+            f"  ({len(available_tools)} tool(s) available on demand. "
+            "Use add=[...] to load specific tools you need.)"
+        )
+    else:
+        add_lines = []
+        for name in sorted(available_tools):
+            desc = catalog.get(name, "")
+            add_lines.append(f"  - {name}: {desc}")
+        add_catalog = "\n".join(add_lines) if add_lines else "  (none)"
 
     # ── Releasable list: active tools that are NOT protected ──
     releasable = sorted(_active - _protected - {"request_tools"})
-    if releasable:
+    if compact_mode:
+        remove_catalog = (
+            f"  ({len(releasable)} active tool(s). Use remove=[...] to release specific tools.)"
+        )
+    elif releasable:
         remove_catalog = "\n".join(f"  - {n}" for n in releasable)
     else:
         remove_catalog = "  (none — all active tools are core to this mode)"
@@ -735,8 +775,7 @@ def create_request_tools_tool(
         unknown_remove = [n for n in remove if n not in _protected and n not in _active]
         if valid_remove:
             parts.append(
-                f"Releasing: {', '.join(valid_remove)}. "
-                "They will be removed from the active set."
+                f"Releasing: {', '.join(valid_remove)}. They will be removed from the active set."
             )
         if blocked:
             parts.append(f"Cannot release (core to this mode): {', '.join(blocked)}.")

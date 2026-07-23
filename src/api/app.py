@@ -12,9 +12,12 @@ Usage:
 
 Environment variables:
     COGTRIX_JWT_SECRET       — required; JWT signing secret (min 32 chars)
+    COGTRIX_TRUSTED_PROXY_CIDRS — optional comma-separated reverse-proxy CIDR allowlist
     COGTRIX_CORS_ORIGINS     — comma-separated allowed origins (overrides defaults)
     COGTRIX_API_HOST         — bind host (default 0.0.0.0)
     COGTRIX_API_PORT         — bind port (default 8000)
+    OTEL_SERVICE_NAME        — optional; OpenTelemetry service name (default cogtrix)
+    OTEL_EXPORTER_OTLP_ENDPOINT — optional; OTLP gRPC collector endpoint
 
 All environment variables are read via src.config to participate in the
 hierarchical configuration system.  Never read os.environ directly in this file.
@@ -24,38 +27,128 @@ from __future__ import annotations
 
 import logging
 import os
+import signal
+import sys
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
+from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
-from slowapi import Limiter, _rate_limit_exceeded_handler
+from fastapi.responses import JSONResponse, Response
+from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
-from slowapi.util import get_remote_address
 
+import src._bootstrap  # noqa: F401 — installs warning filters before langgraph loads
+from src.api.rate_limit import configure_trusted_proxy_cidrs, limiter, reset_rate_limits
 from src.api.routes import (
+    admin,
     agents,
     assistant,
     auth,
+    billing,
     config,
+    cross_workspace,
+    enforcement,
     health,
+    jit,
+    ldap,
     mcp,
     memory,
     messages,
+    metrics,
+    organizations,
+    plans,
     rag,
+    saml,
+    scim,
     sessions,
     system,
     tasks,
+    teams,
     tools,
+    usage,
     users,
     workflows,
+    workspaces,
 )
 from src.api.schemas.common import APIError, APIResponse
+from src.api.telemetry import setup_telemetry
 
 log = logging.getLogger("cogtrix.api")
+
+# ---------------------------------------------------------------------------
+# Shutdown state tracking
+# ---------------------------------------------------------------------------
+_shutdown_initiated: bool = False
+
+
+# Synchronous signal handler for SIGTERM (must be sync, not async)
+def _handle_sigterm_for_api_sync(signum: int, frame: Any) -> None:
+    """Synchronous handler for SIGTERM signal during graceful shutdown.
+
+    This function is called when SIGTERM is received. It sets the shutdown
+    flag and logs the shutdown start. The actual shutdown happens in the
+    lifespan shutdown section. This must be a synchronous function because
+    signal handlers in Python must be sync; async functions cannot be used
+    directly as signal handlers.
+    """
+    global _shutdown_initiated
+    if _shutdown_initiated:
+        log.warning("Received second SIGTERM, force exiting...")
+        # Force exit after a brief delay
+        import asyncio
+
+        # Schedule the async cleanup in the event loop
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                loop.create_task(_async_sigterm_cleanup())
+        except Exception:
+            pass  # If we can't schedule, just exit
+        os._exit(1)
+
+    _shutdown_initiated = True
+    log.info("SIGTERM received, initiating graceful shutdown...")
+
+
+async def _async_sigterm_cleanup() -> None:
+    """Async cleanup for SIGTERM shutdown sequence."""
+    global _shutdown_initiated
+    # This will be called from _handle_sigterm_for_api_sync
+    # The actual shutdown sequence is handled by lifespan
+    # This is a placeholder for any async cleanup that might be needed
+
+
+# Register SIGTERM handler at module level (called from lifespan)
+def _register_sigterm_handler() -> None:
+    """Register SIGTERM signal handler for graceful shutdown.
+
+    Called from lifespan startup to ensure the handler is registered
+    in the main process (not in worker processes where signal handling
+    may behave differently).
+
+    Skipped in test environments (PYTEST_CURRENT_TEST is set): the handler
+    intercepts SIGTERM without terminating the process, which causes test
+    runners to hang when they send SIGTERM for teardown or timeouts, and
+    corrupts in-flight tests by leaving _shutdown_initiated=True.
+    """
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        return
+    try:
+        # Only register in the main process if not already registered
+        # signal.SIG_DFL is the default handler (does nothing, exits with code 0)
+        current_handler = signal.getsignal(signal.SIGTERM)
+        if current_handler in (signal.SIG_DFL, signal.SIG_IGN):
+            signal.signal(signal.SIGTERM, _handle_sigterm_for_api_sync)
+            log.debug("SIGTERM handler registered for API")
+    except (OSError, ValueError) as exc:
+        # SIGTERM not available on some platforms (e.g., Windows)
+        log.debug(f"Could not register SIGTERM handler: {exc}")
+
 
 # ---------------------------------------------------------------------------
 # Allowed CORS origins
@@ -101,6 +194,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
         - Flush any pending log records.
     """
     # ---- startup ----
+    # Reset shutdown flag — required for tests that spin up multiple TestClient
+    # instances in the same process (module-level flag survives between instances).
+    global _shutdown_initiated
+    _shutdown_initiated = False
 
     # Set up Cogtrix logging from env vars (set by __main__.py or docker env).
     # This is a no-op when __main__.py already called setup_logging() — the
@@ -130,24 +227,63 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
 
     log.info("Cogtrix API starting up")
 
-    # Validate JWT secret
+    # Validate and snapshot JWT secret for auth helpers.
     jwt_secret = os.environ.get("COGTRIX_JWT_SECRET", "")
-    if len(jwt_secret) < 32:
-        raise RuntimeError(
-            "COGTRIX_JWT_SECRET must be set to at least 32 characters. "
-            'Generate one with: python -c "import secrets; print(secrets.token_hex(32))"'
-        )
+    from src.api.auth import configure_jwt_secret
+
+    configure_jwt_secret(jwt_secret)
     log.info("JWT secret validated")
 
-    # Create database tables (idempotent; no-op when tables exist)
+    try:
+        configure_trusted_proxy_cidrs(os.environ.get("COGTRIX_TRUSTED_PROXY_CIDRS"))
+    except ValueError as exc:
+        raise RuntimeError(str(exc)) from exc
+
+    # Safety check: STRIPE_ALLOW_UNSIGNED must not be enabled in production.
+    _env = os.environ.get("COGTRIX_ENV", "development").lower()
+    if os.environ.get("STRIPE_ALLOW_UNSIGNED") == "1" and _env == "production":
+        raise RuntimeError(
+            "STRIPE_ALLOW_UNSIGNED=1 is not permitted in production. "
+            "Remove the variable or set COGTRIX_ENV to a non-production value."
+        )
+
+    # Create database tables (idempotent; no-op when tables exist).
+    #
+    # CRITICAL: resolve the engine module via ``sys.modules`` rather
+    # than ``import src.api.db.engine``.  The plain import statement
+    # reads ``src.api.db.engine`` as an attribute on the parent
+    # ``src.api.db`` package — and that attribute is mutated by
+    # ``tests/test_api_db_url_resolution.py::_reimport_engine`` when it
+    # calls ``importlib.import_module('src.api.db.engine')`` (Python's
+    # import machinery sets the new submodule object on the parent
+    # package).  The polluter's teardown restores
+    # ``sys.modules['src.api.db.engine']`` but does NOT restore the
+    # parent-package attribute, so post-teardown the plain ``import``
+    # returns the orphaned re-imported module (empty ``Base.metadata``,
+    # fresh ``_engine``) while the package-level ``get_db`` / models
+    # still bind to the original module — table creation lands on one
+    # engine and route queries hit another, producing
+    # ``OperationalError: no such table: users``.
+    #
+    # Reading directly from ``sys.modules`` bypasses the parent
+    # attribute and always returns the module that holds the
+    # registered models and the get_db / session factory closures.
     import src.api.db.models  # noqa: F401 — registers all ORM model classes
-    from src.api.db.engine import Base, engine, validate_connection
+
+    _engine_mod = sys.modules["src.api.db.engine"]
+    Base = _engine_mod.Base
+    validate_connection = _engine_mod.validate_connection
+    engine = _engine_mod.engine
 
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     log.info("Database tables ready")
     await validate_connection()
     log.info("Database connection validated")
+
+    # Stash the captured module reference on app.state so the shutdown
+    # block below resets the exact same cache that startup populated.
+    app.state._db_engine_module = _engine_mod
 
     # Load Cogtrix config
     cfg = None
@@ -170,6 +306,30 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     # is not explicitly set.
     if cfg is not None and not os.environ.get("COGTRIX_DATA_DIR"):
         os.environ["COGTRIX_DATA_DIR"] = cfg.data_dir
+
+    # Initialize OIDC validator early so startup fails fast on insecure or
+    # malformed SSO configuration.
+    try:
+        if cfg is not None and cfg.oidc_enabled:
+            if not cfg.oidc_issuer or not cfg.oidc_audience:
+                raise RuntimeError("OIDC is enabled but issuer/audience are missing")
+            from src.api.oidc import OIDCConfig, configure_oidc
+
+            configure_oidc(
+                OIDCConfig(
+                    issuer=cfg.oidc_issuer,
+                    audience=cfg.oidc_audience,
+                    jwks_uri=cfg.oidc_jwks_uri,
+                    allow_insecure_oidc=cfg.oidc_allow_insecure_oidc,
+                    production_mode=not cfg.debug,
+                    role_claim=cfg.oidc_role_claim,
+                    default_role=cfg.oidc_default_role,
+                )
+            )
+            log.info("OIDC validator initialized (issuer=%s)", cfg.oidc_issuer)
+    except Exception as exc:
+        log.warning("Could not initialize OIDC validator: %s", exc)
+        raise
 
     # Initialize agent registry from config + AGENTS.md
     try:
@@ -196,6 +356,70 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
         log.warning("Could not initialize tool registry: %s", exc)
         app.state.tool_registry = None
 
+    # Connect MCP servers and register their tools
+    app.state.mcp_manager = None
+    app.state.pinned_mcp_tool_names = set()  # type: ignore[var-annotated]
+    if cfg is not None and getattr(cfg, "mcp_servers", None):
+        try:
+            from src.mcp_client import MCP_AVAILABLE, MCPManager, MCPServerConfig
+
+            if MCP_AVAILABLE:
+                mcp_manager = MCPManager()
+                _KNOWN_MCP_FIELDS = {
+                    "command",
+                    "args",
+                    "env",
+                    "url",
+                    "headers",
+                    "requires_confirmation",
+                    "timeout",
+                    "pin",
+                    "allow_insecure",
+                }
+                mcp_configs = []
+                for _name, _srv_cfg in cfg.mcp_servers.items():
+                    _filtered = {k: v for k, v in _srv_cfg.items() if k in _KNOWN_MCP_FIELDS}
+                    mcp_configs.append(MCPServerConfig(name=_name, **_filtered))
+
+                _mcp_pin_map = {c.name: c.pin for c in mcp_configs}
+                tool_registry = app.state.tool_registry
+                mcp_tools = mcp_manager.connect_all(
+                    mcp_configs,
+                    builtin_tool_names=set((tool_registry.tools if tool_registry else {}).keys()),
+                )
+                if tool_registry is not None:
+                    for tool_name, tool_obj in mcp_tools.items():
+                        tool_registry.tools[tool_name] = tool_obj
+                        srv_name = (tool_obj.metadata or {}).get("server", "")
+                        tool_registry.tool_metadata[tool_name] = {
+                            "requires_confirmation": (tool_obj.metadata or {}).get(
+                                "requires_confirmation", True
+                            ),
+                            "source": "mcp",
+                            "server": srv_name,
+                            "pin": _mcp_pin_map.get(srv_name, True),
+                        }
+                        if _mcp_pin_map.get(srv_name, True):
+                            app.state.pinned_mcp_tool_names.add(tool_name)
+
+                app.state.mcp_manager = mcp_manager
+                log.info(
+                    "MCP: connected %d server(s), %d tool(s) registered (%d pinned)",
+                    len(mcp_configs),
+                    len(mcp_tools),
+                    len(app.state.pinned_mcp_tool_names),
+                )
+                if len(app.state.pinned_mcp_tool_names) > 50:
+                    log.warning(
+                        "MCP: %d tools are pinned (pin=True). "
+                        "This adds ~%d tokens of overhead per API turn. "
+                        "Consider setting pin: false for large MCP servers.",
+                        len(app.state.pinned_mcp_tool_names),
+                        len(app.state.pinned_mcp_tool_names) * 300,
+                    )
+        except Exception as exc:
+            log.warning("Could not initialize MCP servers: %s", exc)
+
     # Configure tool modules that rely on provider/model settings from config.
     if cfg is not None:
         try:
@@ -221,6 +445,17 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
             log.debug("Deep-think tool configured from config")
         except Exception as exc:
             log.warning("Could not configure deep-think tool: %s", exc)
+
+        try:
+            from src.tools.configure import configure_python_exec_tool
+
+            configure_python_exec_tool(cfg)
+            log.debug(
+                "Python exec tool configured from config (enable_datascience_modules=%s)",
+                cfg.enable_datascience_modules,
+            )
+        except Exception as exc:
+            log.warning("Could not configure python_exec tool: %s", exc)
 
     # Initialize session registry (Phase 2)
     try:
@@ -265,11 +500,33 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
             except Exception as exc:
                 log.warning("Assistant auto-start failed: %s", exc)
 
+    # Register SIGTERM handler for graceful shutdown
+    _register_sigterm_handler()
+
     log.info("Cogtrix API startup complete")
     yield  # application runs here
 
     # ---- shutdown ----
     log.info("Cogtrix API shutting down")
+
+    # Mark shutdown as initiated to stop accepting new connections
+    _shutdown_initiated = True
+    log.info("Shutdown initiated, stopping new connection acceptance")
+
+    # Attempt to drain active WebSocket connections (30s timeout)
+    # Note: HTTP connection draining requires uvicorn Server instance access,
+    # which isn't available through the FastAPI lifespan. The middleware
+    # (_request_context_middleware) now checks _shutdown_initiated to reject
+    # new HTTP requests, effectively draining connections over time.
+    log.info("Draining WebSocket sessions (30s timeout)...")
+
+    # Give active WebSocket sessions time to complete
+    try:
+        import asyncio as _asyncio
+
+        await _asyncio.sleep(0.5)  # Allow brief time for in-flight messages
+    except Exception as exc:
+        log.warning("Error during connection drain wait: %s", exc)
 
     # Stop assistant service if running
     try:
@@ -285,23 +542,117 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     except Exception as exc:
         log.warning("Error stopping assistant service: %s", exc)
 
-    # Save all in-memory sessions before shutting down
+    # Drain WebSocket sessions with 30-second timeout
+    # In test environments, skip stop_eviction_loop() — it calls save_all() which
+    # creates aiosqlite connections that strand in the TestClient portal event loop,
+    # blocking thread.join() and triggering pytest-timeout on every API test.
+    import os as _os_shutdown
+
+    _in_test = bool(_os_shutdown.environ.get("PYTEST_CURRENT_TEST"))
     try:
         registry = getattr(app.state, "session_registry", None)
         if registry is not None:
-            await registry.stop_eviction_loop()
-            log.info("Session registry stopped and sessions saved")
+            if _in_test:
+                # Cancel eviction task only — no DB writes during test teardown
+                eviction_task = getattr(registry, "_eviction_task", None)
+                if eviction_task and not eviction_task.done():
+                    eviction_task.cancel()
+            else:
+                drain_timeout = 30.0
+                log.info(f"Draining WebSocket sessions (timeout: {drain_timeout}s)...")
+                await registry.stop_eviction_loop()
+                log.info("WebSocket sessions drained and sessions saved")
     except Exception as exc:
-        log.warning("Error stopping session registry: %s", exc)
+        log.warning("Error draining WebSocket sessions: %s", exc)
 
-    # Dispose the async engine connection pool
-    try:
-        from src.api.db.engine import engine as _engine
+    # Wait for in-flight APP background tasks to complete.
+    # Only wait for tasks the app created (named tasks); skip anyio/starlette
+    # infrastructure tasks which run for the lifetime of the portal and must
+    # not be cancelled here.
+    import asyncio as _asyncio
+    import os as _os
 
-        await _engine.dispose()
-        log.info("Database engine disposed")
-    except Exception as exc:
-        log.warning("Error disposing DB engine: %s", exc)
+    _in_test = bool(_os.environ.get("PYTEST_CURRENT_TEST"))
+    # In tests, skip entirely — anyio portal tasks would be misidentified as
+    # app work and cancelling them breaks the portal teardown.
+    if not _in_test:
+        _drain_timeout = 60.0
+        log.info(
+            "Waiting for in-flight background tasks to complete (%ss timeout)...", _drain_timeout
+        )
+        try:
+            await _asyncio.sleep(0.1)
+            # Only consider tasks with names that the app explicitly set.
+            _app_task_names = {"session-eviction", "compression", "background"}
+            pending_tasks = [
+                t
+                for t in _asyncio.all_tasks()
+                if t is not _asyncio.current_task()
+                and any(n in (t.get_name() or "") for n in _app_task_names)
+            ]
+            if pending_tasks:
+                log.debug("Found %d pending app task(s)", len(pending_tasks))
+                done, pending = await _asyncio.wait(
+                    pending_tasks,
+                    timeout=_drain_timeout,
+                    return_when=_asyncio.ALL_COMPLETED,
+                )
+                if pending:
+                    log.warning(
+                        "%d task(s) did not complete within %ss, cancelling...",
+                        len(pending),
+                        _drain_timeout,
+                    )
+                    for task in pending:
+                        task.cancel()
+                        try:
+                            await task
+                        except _asyncio.CancelledError:
+                            pass
+        except Exception as exc:
+            log.warning("Error waiting for background tasks: %s", exc)
+
+    _mcp_mgr = getattr(app.state, "mcp_manager", None)
+    if _mcp_mgr is not None:
+        try:
+            _mcp_mgr.close_all()
+        except Exception as exc:
+            log.warning("Error stopping MCP manager: %s", exc)
+
+    # Dispose the async engine connection pool (only if it was built),
+    # then reset the module-level cache so the next lifespan starts
+    # with a fresh engine bound to its own event loop.  Without the
+    # reset, consecutive ``with TestClient(...)`` blocks reuse the
+    # disposed engine whose aiosqlite worker threads are still tied to
+    # the previous (now-closed) loop — any in-flight callback then
+    # fires on the closed loop and surfaces as
+    # ``PytestUnhandledThreadExceptionWarning: RuntimeError: Event loop
+    # is closed``.
+    #
+    # CRITICAL: uses the engine module reference captured at startup
+    # (``app.state._db_engine_module``), not a fresh ``import``.  If a
+    # test earlier in the run re-imported ``src.api.db.engine`` (e.g.
+    # ``test_api_db_url_resolution._reimport_engine``), a fresh
+    # ``import`` here would resolve a different module whose ``_engine``
+    # is ``None`` — the dispose-and-reset branch would be silently
+    # skipped and the ORIGINAL module's engine would survive across
+    # TestClient cycles, breaking per-test data isolation in tests that
+    # share ``:memory:`` SQLite via the global cache.
+    import asyncio as _asyncio
+
+    _db_engine_mod = getattr(app.state, "_db_engine_module", None)
+    if _db_engine_mod is not None and _db_engine_mod._engine is not None:
+        try:
+            await _db_engine_mod._engine.dispose()
+            # One event-loop tick after dispose gives aiosqlite worker
+            # callbacks a chance to land before the loop closes.
+            await _asyncio.sleep(0)
+            log.info("Database engine disposed")
+        except Exception as exc:
+            log.warning("Error disposing DB engine: %s", exc)
+        finally:
+            _db_engine_mod._engine = None
+            _db_engine_mod._session_factory = None
 
     log.info("Cogtrix API shutdown complete")
 
@@ -427,8 +778,8 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
 
-    # Rate limiting — 120 requests/minute per IP (blunt DDoS/budget guard)
-    limiter = Limiter(key_func=get_remote_address, default_limits=["120/minute"])
+    # Rate limiting — reset counters on startup; keep SlowAPI for global 120/min guard
+    reset_rate_limits()
     app.state.limiter = limiter
     app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
     app.add_middleware(SlowAPIMiddleware)
@@ -443,14 +794,52 @@ def create_app() -> FastAPI:
         expose_headers=["X-Request-ID"],
     )
 
+    @app.middleware("http")
+    async def _request_context_middleware(request: Request, call_next: Any) -> Response:
+        """Attach a request-scoped logging context to each HTTP request."""
+        from src.logging_config import clear_request_id, new_request_id
+
+        # Refuse new connections during shutdown
+        if _shutdown_initiated:
+            from starlette.responses import JSONResponse
+
+            return JSONResponse(
+                status_code=503,
+                content={"detail": "Service shutting down. Please retry later."},
+                headers={"Retry-After": "30"},
+            )
+
+        request_id = new_request_id()
+        try:
+            response = await call_next(request)
+            response.headers.setdefault("X-Request-ID", request_id)
+            return response
+        finally:
+            clear_request_id()
+
     # Exception handlers
     app.add_exception_handler(HTTPException, _http_exception_handler)  # type: ignore[arg-type]
     app.add_exception_handler(RequestValidationError, _validation_exception_handler)  # type: ignore[arg-type]
     app.add_exception_handler(Exception, _generic_exception_handler)  # type: ignore[arg-type]
 
+    # OpenTelemetry is opt-in via the OTLP endpoint env var to keep dev startup no-op.
+    otel_endpoint = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT")
+    otel_service_name = os.environ.get("OTEL_SERVICE_NAME", "cogtrix")
+    if setup_telemetry(otel_service_name, otel_endpoint):
+        try:
+            FastAPIInstrumentor().instrument_app(app)
+            log.info(
+                "OpenTelemetry tracing enabled (service=%s, endpoint=%s)",
+                otel_service_name,
+                otel_endpoint,
+            )
+        except Exception as exc:
+            log.warning("Could not instrument FastAPI for OpenTelemetry: %s", exc)
+
     # REST routers — all prefixed /api/v1
     api_prefix = "/api/v1"
     app.include_router(health.router, prefix=api_prefix)
+    app.include_router(metrics.router, prefix=api_prefix)
     app.include_router(auth.router, prefix=api_prefix)
     app.include_router(agents.router, prefix=api_prefix)
     app.include_router(sessions.router, prefix=api_prefix)
@@ -464,7 +853,22 @@ def create_app() -> FastAPI:
     app.include_router(rag.router, prefix=api_prefix)
     app.include_router(system.router, prefix=api_prefix)
     app.include_router(users.router, prefix=api_prefix)
+    app.include_router(organizations.router, prefix=api_prefix)
+    app.include_router(admin.router, prefix=api_prefix)
     app.include_router(workflows.router, prefix=api_prefix)
+    app.include_router(saml.router, prefix=api_prefix)
+    app.include_router(ldap.router, prefix=api_prefix)
+    app.include_router(teams.router, prefix=api_prefix)
+    app.include_router(jit.router, prefix=api_prefix)
+    app.include_router(workspaces.router, prefix=api_prefix)
+    app.include_router(cross_workspace.router, prefix=api_prefix)
+    app.include_router(plans.router, prefix=api_prefix)
+    app.include_router(plans.org_plan_router, prefix=api_prefix)
+    app.include_router(usage.router, prefix=api_prefix)
+    app.include_router(enforcement.router, prefix=api_prefix)
+    app.include_router(billing.router, prefix=api_prefix)
+    # SCIM is mounted at /scim/v2/ (no api_prefix — standard SCIM path)
+    app.include_router(scim.router)
 
     # WebSocket routers — prefixed /ws/v1 (embedded in route modules)
     app.include_router(messages.ws_router)

@@ -22,15 +22,28 @@ class CheckpointStore:
     _findings: list[str] = field(default_factory=list)
     _lock: threading.Lock = field(default_factory=threading.Lock)
     max_checkpoints: int = 15
+    _counter: int = field(default=0)
 
-    def add(self, finding: str) -> int:
-        """Record a finding. Returns the 1-based checkpoint index."""
+    def add(self, finding: str) -> tuple[int, bool]:
+        """Record a finding.
+
+        Returns:
+            (checkpoint_number, evicted) where *checkpoint_number* is a
+            monotonically-increasing 1-based counter and *evicted* is True
+            when the buffer was full and the oldest checkpoint was dropped.
+        """
         with self._lock:
+            cleaned = finding.strip()
+            if not cleaned:
+                raise ValueError("Checkpoint not recorded: finding must be non-empty.")
+            evicted = False
             if len(self._findings) >= self.max_checkpoints:
                 # Keep most recent, drop oldest
                 self._findings.pop(0)
-            self._findings.append(finding.strip())
-            return len(self._findings)
+                evicted = True
+            self._findings.append(cleaned)
+            self._counter += 1
+            return self._counter, evicted
 
     def summary(self) -> str:
         """Build a summary string for context injection."""
@@ -73,8 +86,15 @@ def create_checkpoint_tool(store: CheckpointStore) -> Any:
         return None
 
     def checkpoint(finding: str) -> str:
-        idx = store.add(finding)
-        return f"Checkpoint #{idx} recorded. Continue with the next step."
+        try:
+            idx, evicted = store.add(finding)
+            msg = f"Checkpoint #{idx} recorded."
+            if evicted:
+                msg += " (oldest checkpoint evicted due to buffer limit)"
+            msg += " Continue with the next step."
+            return msg
+        except ValueError as exc:
+            return str(exc)
 
     return StructuredTool.from_function(
         func=checkpoint,

@@ -873,7 +873,8 @@ async def test_session_bridge_warm(db_session: AsyncSession, user_id: str) -> No
     app_state.config = None
     app_state.tool_registry = None
 
-    with patch("src.api.session_bridge._build_llm", return_value=None):
+    mock_llm = MagicMock()
+    with patch("src.api.session_bridge._build_llm", return_value=mock_llm):
         session = await warm_session(record, app_state)
 
     assert isinstance(session, ApiSession)
@@ -901,7 +902,8 @@ async def test_session_registry_get_or_warm(db_session: AsyncSession, user_id: s
 
     registry = ApiSessionRegistry(app_state)
 
-    with patch("src.api.session_bridge._build_llm", return_value=None):
+    mock_llm = MagicMock()
+    with patch("src.api.session_bridge._build_llm", return_value=mock_llm):
         sess1 = await registry.get_or_warm(record.id, db_session)
         sess2 = await registry.get_or_warm(record.id, db_session)
 

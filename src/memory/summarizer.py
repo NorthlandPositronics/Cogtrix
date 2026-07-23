@@ -9,10 +9,13 @@ The function is intentionally stateless; all state (existing summary,
 messages to summarize) is passed in and the result is returned.
 """
 
+import concurrent.futures
 import logging
 from typing import Any
 
 log = logging.getLogger("cogtrix")
+
+_SUMMARIZE_TIMEOUT_SECONDS = 60
 
 _SUMMARIZE_SYSTEM = (
     "You are a concise conversation summarizer.  Your output is "
@@ -113,7 +116,22 @@ def generate_summary(
     ]
 
     try:
-        response = llm.invoke(prompt)
+        # Use an explicit pool (not `with`) so that shutdown(wait=False) in the
+        # timeout branch is not overridden by the context-manager __exit__, which
+        # always calls shutdown(wait=True) and would block on a hung LLM thread.
+        pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        try:
+            future = pool.submit(llm.invoke, prompt)
+            try:
+                response = future.result(timeout=_SUMMARIZE_TIMEOUT_SECONDS)
+            except concurrent.futures.TimeoutError:
+                log.warning(
+                    "generate_summary: LLM call timed out after %ds — returning existing summary",
+                    _SUMMARIZE_TIMEOUT_SECONDS,
+                )
+                return existing_summary
+        finally:
+            pool.shutdown(wait=False)
         summary = (response.content or "").strip()
         if not summary:
             log.warning("Summarizer returned empty response")

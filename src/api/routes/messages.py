@@ -12,7 +12,7 @@ WebSocket Endpoint:
     WS /ws/v1/sessions/{id}                      — stream agent output for the session
 
 The WebSocket handler:
-1. Validates the bearer token (header or ?token= query param).
+1. Validates the bearer token (Authorization header).
 2. Verifies the user owns the session.
 3. Registers the connection in the ConnectionManager.
 4. Starts the ping/pong keepalive loop (client sends ping every 30 s).
@@ -40,11 +40,22 @@ from fastapi import (
     WebSocketDisconnect,
     status,
 )
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.api.auth import TokenData, _decode_jwt, get_current_user, verify_session_owner
-from src.api.db.engine import AsyncSessionLocal, get_db
+from src.api.auth import (
+    TokenData,
+    _decode_jwt,
+    _reject_inactive_user,
+    get_current_user,
+    validate_api_key,
+    verify_session_owner,
+)
+from src.api.db import engine as _db
+from src.api.db.engine import get_db
+from src.api.db.models import Message
 from src.api.db.repositories.messages import MessageRepository
+from src.api.plan_enforcement import maybe_require_api_call_capacity
 from src.api.schemas.common import APIResponse, CursorPage
 from src.api.schemas.message import ClearHistoryRequest, MessageOut, SendMessageRequest, SyncTurnOut
 from src.api.turn_runner import run_message_turn
@@ -75,8 +86,8 @@ def _message_to_out(msg: Any) -> MessageOut:
     if msg.tool_calls_json:
         try:
             tool_calls = json.loads(msg.tool_calls_json) or []
-        except Exception:
-            pass
+        except (json.JSONDecodeError, TypeError):
+            tool_calls = []
 
     return MessageOut(
         id=msg.id,
@@ -146,6 +157,7 @@ async def send_message(
     response: Response,
     db: AsyncSession = Depends(get_db),
     current_user: TokenData = Depends(get_current_user),
+    _plan: None = Depends(maybe_require_api_call_capacity),
     sync: bool = Query(
         default=False,
         description=(
@@ -209,7 +221,7 @@ async def send_message(
             # Async path: launch background task, return 202 immediately.
             async def _run() -> None:
                 try:
-                    async with AsyncSessionLocal() as turn_db:
+                    async with _db.AsyncSessionLocal() as turn_db:
                         await run_message_turn(
                             session=sess,
                             text=body.content,
@@ -236,7 +248,7 @@ async def send_message(
     # Sync path: run the turn inline and return the assembled response.
     # run_message_turn acquires turn_lock internally; releasing it above is correct.
     try:
-        async with AsyncSessionLocal() as turn_db:
+        async with _db.AsyncSessionLocal() as turn_db:
             await run_message_turn(
                 session=sess,
                 text=body.content,
@@ -350,7 +362,20 @@ async def list_messages(
         )
 
     # The cursor is the message UUID of the last seen item (raw, not base64-encoded).
-    after_id: str | None = cursor if cursor is not None else None
+    after_id: str | None = None
+    if cursor is not None:
+        cursor_result = await db.execute(
+            select(Message.id).where(Message.session_id == session_id, Message.id == cursor)
+        )
+        if cursor_result.scalar_one_or_none() is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": "INVALID_CURSOR",
+                    "message": "The pagination cursor is malformed or stale.",
+                },
+            )
+        after_id = cursor
 
     msg_repo = MessageRepository(db)
     rows = await msg_repo.list_by_session(session_id, after_id=after_id, limit=limit)
@@ -382,6 +407,7 @@ async def list_messages(
         200: {"description": "History cleared."},
         401: {"description": "Not authenticated."},
         403: {"description": "Forbidden (FORBIDDEN)."},
+        409: {"description": "Agent turn in progress (TURN_IN_PROGRESS)."},
         404: {"description": "Session not found (SESSION_NOT_FOUND)."},
     },
 )
@@ -416,35 +442,44 @@ async def clear_history(
 
     msg_repo = MessageRepository(db)
 
-    if keep_last > 0:
-        # Bulk delete: fetch only message IDs (not full rows), then issue a
-        # single DELETE … WHERE id IN (…) rather than a per-row loop.  This
-        # avoids loading large message payloads into memory for large sessions.
-        from sqlalchemy import delete as _delete
-        from sqlalchemy import select as _select
-
-        from src.api.db.models import Message
-
-        id_rows = await db.execute(
-            _select(Message.id)
-            .where(Message.session_id == session_id)
-            .order_by(Message.created_at.asc(), Message.id.asc())
-        )
-        all_ids = [r[0] for r in id_rows.all()]
-        ids_to_delete = all_ids[: max(0, len(all_ids) - keep_last)]
-        if ids_to_delete:
-            await db.execute(_delete(Message).where(Message.id.in_(ids_to_delete)))
-            await db.flush()
-    else:
-        await msg_repo.delete_by_session(session_id)
-
-    await db.commit()
-
-    # Clear or trim in-memory memory manager if session is warm.
-    # clear() joins the background summarization thread and unlinks files — run in thread.
     registry = getattr(request.app.state, "session_registry", None)
-    if registry is not None:
-        sess = await registry.get_cached(session_id)
+    sess = await registry.get_cached(session_id) if registry is not None else None
+    if sess is not None and sess.turn_lock.locked():
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "TURN_IN_PROGRESS",
+                "message": "An agent turn is already in progress for this session.",
+            },
+        )
+
+    async def _apply_clear() -> None:
+        if keep_last > 0:
+            # Bulk delete: fetch only message IDs (not full rows), then issue a
+            # single DELETE … WHERE id IN (…) rather than a per-row loop.  This
+            # avoids loading large message payloads into memory for large sessions.
+            from sqlalchemy import delete as _delete
+            from sqlalchemy import select as _select
+
+            from src.api.db.models import Message
+
+            id_rows = await db.execute(
+                _select(Message.id)
+                .where(Message.session_id == session_id)
+                .order_by(Message.created_at.asc(), Message.id.asc())
+            )
+            all_ids = [r[0] for r in id_rows.all()]
+            ids_to_delete = all_ids[: max(0, len(all_ids) - keep_last)]
+            if ids_to_delete:
+                await db.execute(_delete(Message).where(Message.id.in_(ids_to_delete)))
+                await db.flush()
+        else:
+            await msg_repo.delete_by_session(session_id)
+
+        await db.commit()
+
+        # Clear or trim in-memory memory manager if session is warm.
+        # clear() joins the background summarization thread and unlinks files — run in thread.
         if sess is not None and sess.memory_manager is not None:
             mm = sess.memory_manager
             try:
@@ -454,6 +489,12 @@ async def clear_history(
                     await asyncio.to_thread(mm.trim, keep_last)
             except Exception as exc:
                 log.warning("Memory clear/trim failed for session %s: %s", session_id, exc)
+
+    if sess is not None:
+        async with sess.turn_lock:
+            await _apply_clear()
+    else:
+        await _apply_clear()
 
     return APIResponse(data=None)
 
@@ -470,10 +511,6 @@ ws_router = APIRouter(tags=["WebSocket"])
 async def session_websocket(
     session_id: str,
     websocket: WebSocket,
-    token: str | None = Query(
-        default=None,
-        description="JWT bearer token (query param fallback for browser WebSocket API).",
-    ),
     last_seq: int | None = Query(
         default=None,
         description="Last sequence number received; triggers replay of buffered messages.",
@@ -482,7 +519,7 @@ async def session_websocket(
     """WebSocket endpoint for streaming agent output.
 
     Connection lifecycle:
-        1. Client connects with Authorization header OR ?token= query param.
+        1. Client connects with Authorization: Bearer <token> header.
         2. Server validates the JWT and session ownership.
            On failure, server sends close code 4001 (unauthorized) or 4003 (forbidden).
         3. Server registers the connection and sends the first agent_state message.
@@ -498,30 +535,15 @@ async def session_websocket(
     # 1. Accept the WebSocket connection so we can send close codes.
     await websocket.accept()
 
-    # 2. Validate JWT from header or query param.
-    raw_token: str | None = token
-    if raw_token is None:
-        auth_header = websocket.headers.get("authorization", "")
-        if auth_header.lower().startswith("bearer "):
-            raw_token = auth_header[7:]
+    # 2. Extract raw token from Authorization header.
+    raw_token: str | None = None
+    auth_header = websocket.headers.get("authorization", "")
+    if auth_header.lower().startswith("bearer "):
+        raw_token = auth_header[7:]
 
     if raw_token is None:
         await websocket.close(code=4001, reason="Missing bearer token")
         return
-
-    try:
-        claims = _decode_jwt(raw_token)
-    except HTTPException:
-        await websocket.close(code=4001, reason="Invalid or expired token")
-        return
-
-    user_id: str = claims.get("sub", "")
-    role: str = claims.get("role", "user")
-    if not user_id:
-        await websocket.close(code=4001, reason="Invalid token claims")
-        return
-
-    current_user = TokenData(user_id=user_id, role=role, raw_claims=claims)
 
     # 3. Verify session ownership + warm session (single DB session).
     registry = getattr(websocket.app.state, "session_registry", None)
@@ -529,7 +551,54 @@ async def session_websocket(
         await websocket.close(code=4000, reason="Session registry unavailable")
         return
 
-    async with AsyncSessionLocal() as db:
+    async with _db.AsyncSessionLocal() as db:
+        try:
+            if raw_token.startswith("cgx_live_"):
+                current_user = await validate_api_key(raw_token, db)
+                await _reject_inactive_user(current_user.user_id, db)
+            else:
+                try:
+                    claims = _decode_jwt(raw_token)
+                except HTTPException as local_exc:
+                    detail = local_exc.detail
+                    code = detail.get("code") if isinstance(detail, dict) else None
+                    if code == "TOKEN_EXPIRED":
+                        raise
+                    # UNAUTHORIZED: try OIDC fallback if configured.
+                    from src.api.oidc import get_validator
+
+                    validator = get_validator()
+                    if validator is None:
+                        raise
+                    try:
+                        oidc_claims = validator.validate(raw_token)
+                    except Exception:
+                        raise local_exc from None
+                    oidc_role = validator.map_role(oidc_claims)
+                    oidc_user_id = str(oidc_claims.get("sub", ""))
+                    if not oidc_user_id:
+                        raise local_exc from None
+                    current_user = TokenData(
+                        user_id=oidc_user_id, role=oidc_role, raw_claims=oidc_claims
+                    )
+                    await _reject_inactive_user(current_user.user_id, db)
+                else:
+                    user_id: str = claims.get("sub", "")
+                    role: str = claims.get("role", "user")
+                    if not user_id:
+                        raise HTTPException(
+                            status_code=status.HTTP_401_UNAUTHORIZED,
+                            detail={
+                                "code": "UNAUTHORIZED",
+                                "message": "Missing or invalid bearer token.",
+                            },
+                        )
+                    current_user = TokenData(user_id=user_id, role=role, raw_claims=claims)
+                    await _reject_inactive_user(current_user.user_id, db)
+        except HTTPException:
+            await websocket.close(code=4001, reason="Invalid or expired token")
+            return
+
         try:
             await verify_session_owner(session_id, current_user, db)
         except HTTPException as exc:
@@ -622,7 +691,7 @@ async def session_websocket(
 
                     # Persist user message to DB.
                     try:
-                        async with AsyncSessionLocal() as db:
+                        async with _db.AsyncSessionLocal() as db:
                             msg_repo = MessageRepository(db)
                             await msg_repo.create(
                                 session_id=session_id,
@@ -651,11 +720,17 @@ async def session_websocket(
                         )
                         continue
                     except Exception as _quota_exc:
-                        log.warning("WS quota check error: %s", _quota_exc)
+                        log.error("WS quota check error (blocking turn): %s", _quota_exc)
+                        await manager.send(
+                            session_id,
+                            "error",
+                            {"code": "QUOTA_CHECK_ERROR", "message": "Quota check failed"},
+                        )
+                        continue
 
                     async def _run_turn(t: str = text, m: str = mode) -> None:
                         try:
-                            async with AsyncSessionLocal() as turn_db:
+                            async with _db.AsyncSessionLocal() as turn_db:
                                 await run_message_turn(
                                     session=sess,
                                     text=t,
@@ -712,7 +787,7 @@ async def session_websocket(
 
         # Auto-delete empty sessions (0 messages) on disconnect.
         try:
-            async with AsyncSessionLocal() as cleanup_db:
+            async with _db.AsyncSessionLocal() as cleanup_db:
                 from src.api.db.repositories.sessions import SessionRepository
 
                 msg_repo = MessageRepository(cleanup_db)

@@ -77,6 +77,20 @@ class TestSubmitGet:
         assert task_id in record.log_path
         assert record.log_path.endswith(".log")
 
+    def test_submit_persists_user_id_and_org_id(self, queue):
+        task_id = queue.submit("agent", "prompt", user_id="user-123", org_id="org-456")
+        record = queue.get(task_id)
+        assert record is not None
+        assert record.user_id == "user-123"
+        assert record.org_id == "org-456"
+
+    def test_submit_defaults_user_id_and_org_id(self, queue):
+        task_id = queue.submit("agent", "prompt")
+        record = queue.get(task_id)
+        assert record is not None
+        assert record.user_id == ""
+        assert record.org_id is None
+
 
 # ---------------------------------------------------------------------------
 # list
@@ -121,6 +135,19 @@ class TestList:
         for i in range(10):
             queue.submit("a", f"p{i}")
         assert len(queue.list(limit=5)) == 5
+
+    def test_list_filtered_by_user_id(self, queue):
+        queue.submit("a", "user-a-task", user_id="user-a")
+        queue.submit("a", "user-b-task", user_id="user-b")
+
+        a_tasks = queue.list(user_id="user-a")
+        b_tasks = queue.list(user_id="user-b")
+
+        assert len(a_tasks) == 1
+        assert a_tasks[0].prompt == "user-a-task"
+
+        assert len(b_tasks) == 1
+        assert b_tasks[0].prompt == "user-b-task"
 
 
 # ---------------------------------------------------------------------------

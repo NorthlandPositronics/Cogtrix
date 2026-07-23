@@ -7,23 +7,34 @@ Supports multiple LLM providers: OpenAI, Ollama.
 
 import atexit
 import concurrent.futures as _cf
-import difflib
 import os
 import re
+import signal
 import sys
 import time as _time_mod
 import warnings
 from pathlib import Path
 from typing import Any
 
+import src._bootstrap  # noqa: F401 — installs warning filters before langgraph loads
+import src.cli.commands as commands
+import src.ui.confirmation as confirmation
 from src._version import __copyright__, __version__  # noqa: F401
 from src.agent.core import (
     build_system_prompt,
     format_milestone_instructions,
 )
 from src.agent.safety import UserCancelledRun
+from src.analysis.session_metrics import write_session_metrics
 from src.cli.args import color_enabled, parse_arguments
 from src.cli.banner import print_startup
+
+# Slash command system - extracted to src/cli/commands.py
+from src.cli.commands import (  # noqa: F401
+    SlashCommand,
+    SlashCommandRegistry,
+    configure,
+)
 from src.cli.input import (
     load_input_history,
     prefill_next_input,
@@ -48,9 +59,6 @@ from src.memory import JsonFileMemoryStore, MemoryFactory
 from src.memory.context import MemoryContext
 from src.memory.mode_selector import classify_memory_mode, should_switch_mode
 from src.orchestration.compression import (
-    _CHARS_PER_TOKEN,
-    COMPRESSION_MIN_AGE_CYCLES,
-    COMPRESSION_MIN_CHARS,
     apply_message_compression,
     compress_tool_message,
     create_compression_llm,
@@ -62,6 +70,8 @@ from src.orchestration.graph import (  # noqa: F401
     build_agent_graph,
 )
 from src.orchestration.intent import (  # noqa: F401
+    _COMPLEX_QUERY_MARKERS,
+    _SIMPLE_QUERY_KEYWORDS,
     ACTION_TARGETS,
     ACTION_VERBS,
     DEEP_THINK_TRIGGERS,
@@ -106,6 +116,7 @@ from src.orchestration.reflection_delegate import (
     ACCOUNTABILITY_PROMPT,
     PRE_ACTION_CONFIRMATION_PROMPT,
 )
+from src.orchestration.run_config import AgentRunConfig
 from src.orchestration.runner import (  # noqa: F401
     ToolCallLogger,
     build_tool_results_response,
@@ -162,6 +173,7 @@ from src.tools.report_progress import (
 from src.tools.report_progress import (
     set_progress_callback as set_milestone_callback,
 )
+from src.ui.confirmation import _RichConfirmationUI, _TokenAccumulator
 from src.ui.input_session import create_session as _create_input_session
 from src.ui.spinner import _spinner
 
@@ -201,6 +213,33 @@ except ImportError:
     MCPManager = None  # type: ignore[misc, assignment]
     MCPServerConfig = None  # type: ignore[misc, assignment]
 
+
+# Global flag to track if shutdown has been initiated
+_shutdown_initiated: bool = False
+
+
+def _handle_sigterm(signum: int, frame: Any) -> None:
+    """Handle SIGTERM signal for graceful shutdown.
+
+    Raises KeyboardInterrupt to trigger the existing cleanup path.
+    This ensures SIGTERM and Ctrl+C share the same shutdown logic.
+    """
+    global _shutdown_initiated
+    if _shutdown_initiated:
+        # Second SIGTERM - force exit immediately
+        log = get_logger()
+        log.info("Received second SIGTERM, force exiting...")
+        import os as _os_exit
+
+        _os_exit._exit(1)
+
+    _shutdown_initiated = True
+    log = get_logger()
+    log.info("Received SIGTERM, initiating graceful shutdown...")
+    # Raise KeyboardInterrupt to trigger the existing cleanup path
+    raise KeyboardInterrupt("SIGTERM received")
+
+
 # Initialize rich console if available
 if Console is not None:
 
@@ -233,6 +272,37 @@ def _tool_expansion_ui(added: list[str], released: list[str], total: int) -> Non
         parts.append(f"Released: {', '.join(released)}")
     get_logger().debug("[tools] %s (%d total)", "; ".join(parts), total)
     _spinner.resume()
+
+
+def _load_cli_system_prompt(args: Any) -> str | None:
+    """Return a CLI system prompt override from ``args`` if one was supplied.
+
+    ``--system-prompt`` wins over ``--system-prompt-file`` because the parser
+    already enforces mutual exclusion, and inline text avoids a file read.
+    """
+    inline_prompt = getattr(args, "system_prompt", None)
+    if inline_prompt:
+        return inline_prompt
+
+    prompt_file = getattr(args, "system_prompt_file", None)
+    if not prompt_file:
+        return None
+
+    path = Path(prompt_file)
+    if not path.exists():
+        raise FileNotFoundError(
+            f"System prompt file not found: {prompt_file} "
+            "(provide a valid file path with --system-prompt-file)"
+        )
+
+    prompt_text = path.read_text(encoding="utf-8").strip()
+    if not prompt_text:
+        raise ValueError(
+            f"System prompt file is empty: {prompt_file} "
+            "(provide a file with non-empty content or omit --system-prompt-file)"
+        )
+
+    return prompt_text
 
 
 # ── Tool display categories ──────────────────────────────────────────
@@ -299,6 +369,7 @@ _TOOL_CATEGORIES: dict[str, list[str]] = {
     ],
     "Knowledge Base": [
         "query_knowledge_base",
+        "save_to_knowledge_base",
     ],
 }
 
@@ -376,69 +447,6 @@ _extract_response = extract_response
 _build_tool_results_response = build_tool_results_response
 _log_tool_calls_from_result = log_tool_calls_from_result
 
-try:
-    from langchain_core.callbacks import BaseCallbackHandler as _BaseCallback
-except ImportError:
-    _BaseCallback = object  # type: ignore[misc, assignment]
-
-
-class _TokenAccumulator(_BaseCallback):  # type: ignore[misc]
-    """Accumulates token usage across LLM calls within a single agent run."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.input_tokens: int = 0
-        self.output_tokens: int = 0
-        self.last_input_tokens: int = 0
-
-    def on_llm_end(self, response: Any, **kwargs: Any) -> None:
-        if not hasattr(self, "input_tokens"):
-            return
-        llm_output = getattr(response, "llm_output", None)
-        if llm_output:
-            usage = llm_output.get("token_usage") or llm_output.get("usage")
-            if usage:
-                prompt = usage.get("prompt_tokens", 0)
-                self.input_tokens += prompt
-                self.output_tokens += usage.get("completion_tokens", 0)
-                if prompt > 0:
-                    self.last_input_tokens = prompt
-                return
-        gens = getattr(response, "generations", None)
-        if gens:
-            for gen_list in gens:
-                for gen in gen_list:
-                    msg = getattr(gen, "message", None)
-                    if msg:
-                        um = getattr(msg, "usage_metadata", None)
-                        if um:
-                            # UsageMetadata is a dict subclass — use dict access
-                            inp = (
-                                um.get("input_tokens", 0)
-                                if isinstance(um, dict)
-                                else getattr(um, "input_tokens", 0)
-                            )
-                            out = (
-                                um.get("output_tokens", 0)
-                                if isinstance(um, dict)
-                                else getattr(um, "output_tokens", 0)
-                            )
-                            self.input_tokens += inp
-                            self.output_tokens += out
-                            if inp > 0:
-                                self.last_input_tokens = inp
-                            return
-                        # Ollama returns prompt_eval_count in response_metadata
-                        rm = getattr(msg, "response_metadata", None)
-                        if rm and isinstance(rm, dict):
-                            inp = rm.get("prompt_eval_count", 0)
-                            out = rm.get("eval_count", 0)
-                            if inp or out:
-                                self.input_tokens += inp
-                                self.output_tokens += out
-                                if inp > 0:
-                                    self.last_input_tokens = inp
-
 
 def _format_stats_line(
     elapsed: float,
@@ -493,11 +501,14 @@ def _apply_profile(config: "Config", profile_name: str) -> None:
         elif key == "no_confirm":
             pass  # applied separately via _session.no_confirm
         elif key == "banner":
-            _banner_val = str(value).lower().strip()
-            if _banner_val in ("full", "compact", "off", "none", "false", "0"):
-                config.banner = (
-                    "off" if _banner_val in ("off", "none", "false", "0") else _banner_val
-                )
+            if value is None or (isinstance(value, str) and value.strip() == ""):
+                config.banner = "off"
+            else:
+                _banner_val = str(value).lower().strip()
+                if _banner_val in ("full", "compact", "off", "none", "false", "0"):
+                    config.banner = (
+                        "off" if _banner_val in ("off", "none", "false", "0") else _banner_val
+                    )
         elif hasattr(config, key):
             try:
                 setattr(config, key, type(getattr(config, key))(value))
@@ -538,153 +549,10 @@ def _context_advisory(
 
 
 _session = SessionState()
+commands.configure(console, _session)
+confirmation.configure(console)
 _session_tokens = _TokenAccumulator()
 _active_milestones: list = []
-
-
-class _RichConfirmationUI:
-    """ConfirmationUI implementation using Rich panels and stdin."""
-
-    # Keys hidden from the confirmation panel: LangChain tool_call envelope
-    # metadata and default-valued parameters that add noise.
-    _HIDDEN_KEYS = frozenset({"timeout", "type", "name", "id"})
-
-    def render_prompt(
-        self, tool_name: str, tool_input: dict, last_keys: frozenset[str], preview_limit: int
-    ) -> None:
-        def _preview(val: object) -> str:
-            s = str(val)
-            if len(s) <= preview_limit:
-                return s
-            return s[:preview_limit] + f"… ({len(s)} chars total)"
-
-        def _is_hidden(key: str, value: object) -> bool:
-            if key in self._HIDDEN_KEYS:
-                return True
-            if value is None or str(value).strip() in ("", "None"):
-                return True
-            return False
-
-        # Unwrap LangChain tool_call envelope if present
-        if (
-            isinstance(tool_input, dict)
-            and "args" in tool_input
-            and isinstance(tool_input["args"], dict)
-        ):
-            tool_input = tool_input["args"]
-
-        if console:
-            visible: list[tuple[str, object]] = []
-            if isinstance(tool_input, dict) and tool_input:
-                sorted_keys = sorted(
-                    tool_input.keys(),
-                    key=lambda k: (k in last_keys, len(str(tool_input[k]))),
-                )
-                for key in sorted_keys:
-                    value = tool_input[key]
-                    if not _is_hidden(key, value):
-                        visible.append((key, value))
-
-            if len(visible) == 1:
-                _, value = visible[0]
-                val_str = _preview(value).replace("[", chr(92) + "[")
-                params_text = f"  {val_str}"
-            elif visible:
-                lines = []
-                for key, value in visible:
-                    val_str = _preview(value).replace("[", chr(92) + "[")
-                    lines.append(f"  [dim cyan]{key:<18s}[/dim cyan] {val_str}")
-                params_text = "\n".join(lines)
-            else:
-                params_text = "  [dim](no parameters)[/dim]"
-
-            panel_title = Text()
-            panel_title.append(tool_name, style="bold cyan")
-            action_msg = "[bold white]Agent wants to execute:[/bold white]"
-            hint_msg = (
-                "[bright_green underline]Y[/bright_green underline][white]es[/white]  "
-                "[bright_red underline]N[/bright_red underline][white]o[/white]  "
-                "[bright_yellow underline]A[/bright_yellow underline][white]llow all[/white]  "
-                "[bright_red underline]D[/bright_red underline][white]isable[/white]  "
-                "[bright_red underline]F[/bright_red underline][white]orbid all[/white]  "
-                "[bright_red underline]C[/bright_red underline][white]ancel[/white]"
-            )
-            full_body = action_msg + "\n\n" + params_text + "\n\n" + hint_msg
-            console.print()
-            console.print(
-                Panel(
-                    Text.from_markup(full_body),
-                    title=panel_title,
-                    border_style="cyan",
-                    padding=(1, 2),
-                )
-            )
-        else:
-            print(f"\n--- {tool_name} ---")
-            if isinstance(tool_input, dict) and tool_input:
-                sorted_keys_p = sorted(
-                    tool_input.keys(),
-                    key=lambda k: (k in last_keys, len(str(tool_input[k]))),
-                )
-                visible_p = [
-                    (k, tool_input[k]) for k in sorted_keys_p if not _is_hidden(k, tool_input[k])
-                ]
-                if len(visible_p) == 1:
-                    _, value = visible_p[0]
-                    print(f"  {_preview(value)}")
-                elif visible_p:
-                    for key, value in visible_p:
-                        print(f"  {key:<18s} {_preview(value)}")
-                else:
-                    print("  (no parameters)")
-            elif tool_input:
-                print(f"  {_preview(tool_input)}")
-            else:
-                print("  (no parameters)")
-            print("  Yes  No  Allow all  Disable  Forbid all  Cancel")
-
-    def read_choice(self) -> str:
-        return input("> ")
-
-    def show_message(self, message: str, style: str) -> None:
-        if console:
-            console.print(f"[{style}]{message}[/{style}]")
-        else:
-            print(message)
-
-    def show_diff_preview(self, path: str, diff_lines: list[str]) -> None:
-        if not diff_lines:
-            return
-        if console:
-            from rich.syntax import Syntax
-
-            diff_text = "\n".join(diff_lines)
-            syntax = Syntax(
-                diff_text,
-                "diff",
-                theme="monokai",
-                line_numbers=False,
-                word_wrap=False,
-            )
-            console.print(
-                Panel(
-                    syntax,
-                    title=f"[bold]Proposed changes to[/bold] [cyan]{path}[/cyan]",
-                    border_style="cyan",
-                    padding=(0, 1),
-                )
-            )
-        else:
-            print(f"\nProposed changes to {path}:")
-            for line in diff_lines:
-                print(line)
-            print()
-
-    def pause_spinner(self) -> None:
-        _spinner.pause()
-
-    def resume_spinner(self) -> None:
-        _spinner.resume()
 
 
 _rich_ui = _RichConfirmationUI()
@@ -792,64 +660,6 @@ def _load_project_context() -> tuple[str, str | None]:
 _AT_FILE_RE = re.compile(r"@([\w./\-]+)")
 _AT_MAX_FILE_CHARS = 50_000
 _AT_MAX_FILES = 5
-
-_SIMPLE_QUERY_KEYWORDS = frozenset(
-    {
-        "fix",
-        "what",
-        "list",
-        "show",
-        "rename",
-        "explain",
-        "format",
-        "define",
-        "find",
-        "count",
-        "print",
-        "display",
-        "describe",
-        "translate",
-        "summarize",
-        "convert",
-        "check",
-        "get",
-        "set",
-        "is",
-        "are",
-        "can",
-        "does",
-        "do",
-        "tell",
-        "how",
-        "why",
-        "when",
-        "where",
-        "which",
-        "who",
-    }
-)
-
-_COMPLEX_QUERY_MARKERS = frozenset(
-    {
-        "implement",
-        "build",
-        "create",
-        "write",
-        "design",
-        "refactor",
-        "migrate",
-        "analyze",
-        "debug",
-        "optimize",
-        "architect",
-        "develop",
-        "generate",
-        "test",
-        "deploy",
-        "integrate",
-        "research",
-    }
-)
 
 
 def _build_completion_script(shell: str, data_dir: str | None = None) -> str:
@@ -1003,6 +813,8 @@ def _classify_query_complexity(text: str) -> str:
 
     Heuristic:
     - Any complex marker → complex
+    - Prompts that already look like code/reasoning or non-simple task work
+      → complex
     - Word count > 80 → complex (long query likely needs deep reasoning)
     - First word is a simple keyword AND word count <= 30 → simple
     - Otherwise → complex (conservative default)
@@ -1010,6 +822,14 @@ def _classify_query_complexity(text: str) -> str:
     words = text.lower().split()
     if not words:
         return "simple"
+
+    # Cross-validate against the other prompt classifiers so this router does
+    # not contradict established code / reasoning / task-complexity signals.
+    if classify_memory_mode(text) != "conversation":
+        return "complex"
+    if classify_task_complexity(text) != TaskComplexity.SIMPLE:
+        return "complex"
+
     if any(w in _COMPLEX_QUERY_MARKERS for w in words):
         return "complex"
     if len(words) > 80:
@@ -1137,12 +957,15 @@ def _expand_at_references(text: str) -> tuple[str, list[str]]:
             count[0] += 1
             lines = [f"[Directory: {ref}]"]
             try:
-                all_entries = sorted(path.rglob("*"))
+                all_entries = sorted(path.rglob("*", recurse_symlinks=False))
                 for entry in all_entries[:60]:
-                    if entry.is_file():
+                    if _should_include_entry(entry, path):
                         rel = entry.relative_to(path)
-                        size = entry.stat().st_size
-                        lines.append(f"  {rel}  ({size:,} bytes)")
+                        if entry.is_file():
+                            size = entry.stat().st_size
+                            lines.append(f"  {rel}  ({size:,} bytes)")
+                        elif entry.is_dir():
+                            lines.append(f"  {rel}/")
                 if len(all_entries) > 60:
                     lines.append("  ... (truncated)")
             except OSError:
@@ -1166,6 +989,32 @@ def _expand_at_references(text: str) -> tuple[str, list[str]]:
 
     expanded = _AT_FILE_RE.sub(_replace, text)
     return expanded, injected
+
+
+def _should_include_entry(entry: Path, root: Path) -> bool:
+    """Check if an entry should be included in directory listing.
+
+    Applies bounded traversal rules:
+    - Hidden files (dotfiles) are excluded
+    - Directory depth limited to 3 levels
+    - Symlinks to directories are excluded to prevent infinite loops
+    """
+    # Skip hidden files (dotfiles)
+    if entry.name.startswith("."):
+        return False
+
+    # Depth check: relative path must have at most 3 directory components
+    # e.g., level1/file.txt has 1 dir component, level1/level2/file.txt has 2
+    rel = entry.relative_to(root)
+    dir_parts = rel.parts[:-1] if rel.parts else ()
+    if len(dir_parts) > 3:
+        return False
+
+    # Skip symlinks to directories to prevent infinite loops
+    if entry.is_symlink() and entry.is_dir():
+        return False
+
+    return True
 
 
 def _cleanup():
@@ -1270,1918 +1119,6 @@ def _close_llm(llm_instance: Any) -> None:
 # ---------------------------------------------------------------------------
 # Slash command system
 # ---------------------------------------------------------------------------
-
-
-class SlashCommand:
-    """Definition of a single slash command."""
-
-    def __init__(
-        self,
-        name: str,
-        handler,
-        short_help: str,
-        long_help: str = "",
-        aliases: list | None = None,
-    ):
-        self.name = name
-        self.handler = handler
-        self.short_help = short_help
-        self.long_help = long_help or short_help
-        self.aliases = aliases or []
-
-
-class SlashCommandRegistry:
-    """
-    Registry and dispatcher for interactive slash commands.
-
-    Commands are prefixed with '/' and dispatched before any input reaches
-    the LLM.  The registry also owns the '/help' command which auto-generates
-    output from the registered metadata.
-    """
-
-    def __init__(self):
-        self._commands: dict[str, SlashCommand] = {}
-        self._alias_map: dict[str, str] = {}  # alias -> canonical name
-        # Context references set by main() before the loop starts
-        self.config: Any | None = None
-        self.memory_manager: Any | None = None
-        self.registry: Any | None = None
-        self.approvals: set[str] = set()  # tool auto-approval set
-        self.available_tools: dict[str, Any] = {}
-        self.system_prompt: str | None = None
-        self.mcp_manager: Any = None
-        self.project_context_path: str | None = None
-        self.last_input: str | None = None  # last user prompt, for /retry
-        self.compression_llm: Any = None
-        self.max_context_tokens: int | None = None
-        self.last_input_tokens: int = 0
-
-    # -- registration -------------------------------------------------------
-
-    def register(self, cmd: SlashCommand) -> None:
-        """Register a slash command."""
-        self._commands[cmd.name] = cmd
-        for alias in cmd.aliases:
-            self._alias_map[alias] = cmd.name
-
-    def _resolve(self, name: str) -> SlashCommand | None:
-        """Resolve a command name or alias to its SlashCommand.
-
-        Aliases are matched **case-sensitively** (so ``/m`` and ``/M`` can
-        map to different commands).  Full command names use a
-        case-insensitive fallback for convenience.
-        """
-        # 1. Exact alias match (case-sensitive — critical for /m vs /M)
-        canonical = self._alias_map.get(name)
-        if canonical:
-            return self._commands.get(canonical)
-        # 2. Exact command name match
-        if name in self._commands:
-            return self._commands[name]
-        # 3. Case-insensitive fallback for full command names
-        return self._commands.get(name.lower())
-
-    # -- dispatch -----------------------------------------------------------
-
-    def is_command(self, text: str) -> bool:
-        """Return True if *text* looks like a slash command."""
-        return text.startswith("/")
-
-    def dispatch(self, text: str) -> str | None:
-        """
-        Execute a slash command.
-
-        Returns:
-            A string signal: "break" to exit the loop, "continue" to skip
-            sending to the agent, or None if the command was not found.
-        """
-        parts = text.lstrip("/").split(None, 1)
-        # Preserve original case for alias resolution (/m ≠ /M)
-        cmd_name = parts[0] if parts else ""
-        cmd_args = parts[1].strip() if len(parts) > 1 else ""
-
-        cmd = self._resolve(cmd_name)
-        if cmd is None:
-            print(f"Unknown command: /{cmd_name}")
-            # Suggest closest known command using difflib
-            known_commands = list(self._commands.keys()) + [
-                a for aliases in [c.aliases for c in self._commands.values()] for a in aliases
-            ]
-            suggestions = difflib.get_close_matches(
-                cmd_name.lower(), [c.lower() for c in known_commands], n=3, cutoff=0.3
-            )
-            if suggestions:
-                sug_list = ", ".join("/" + s for s in suggestions)
-                print(f"Did you mean one of: {sug_list}?")
-            else:
-                print("Type /help for a list of commands.")
-            return "continue"
-
-        return cmd.handler(self, cmd_args)
-
-    # -- built-in command handlers ------------------------------------------
-
-    @staticmethod
-    def _cmd_quit(_self, _args: str) -> str:
-        """Handler for /quit."""
-        from src.logging_config import get_logger as _get_log
-
-        _get_log().info("Session ended by user (/quit)")
-        print("\nGoodbye!")
-        return "break"
-
-    @staticmethod
-    def _cmd_help(self, args: str) -> str:
-        """Handler for /help [command]."""
-        if args:
-            # Detailed help for a specific command.
-            # Try original case first (aliases are case-sensitive),
-            # then fall back to lowercase for full command names.
-            cmd = self._resolve(args)
-            if cmd is None:
-                cmd = self._resolve(args.lower())
-            if cmd is None:
-                print(f"Unknown command: {args}")
-                # Suggest closest known command using difflib
-                known_commands = list(self._commands.keys()) + [
-                    a for aliases in [c.aliases for c in self._commands.values()] for a in aliases
-                ]
-                suggestions = difflib.get_close_matches(
-                    args.lower(), [c.lower() for c in known_commands], n=3, cutoff=0.3
-                )
-                if suggestions:
-                    sug_list = ", ".join("/" + s for s in suggestions)
-                    print(f"Did you mean one of: {sug_list}?")
-                else:
-                    print("Type /help for a list of commands.")
-                return "continue"
-
-            if console is not None:
-                aliases = (
-                    f"[dim]Aliases: {', '.join('/' + a for a in cmd.aliases)}[/dim]\n"
-                    if cmd.aliases
-                    else ""
-                )
-                body = f"[bold]/{cmd.name}[/bold]  {cmd.short_help}\n{aliases}\n{cmd.long_help}"
-                console.print(Panel(body, border_style="cyan", padding=(1, 2)))
-            else:
-                aliases = (
-                    f"  Aliases: {', '.join('/' + a for a in cmd.aliases)}\n" if cmd.aliases else ""
-                )
-                print(f"\n  /{cmd.name} — {cmd.short_help}")
-                if aliases:
-                    print(aliases)
-                print(f"\n{cmd.long_help}")
-            return "continue"
-
-        # General help listing
-        if console is not None:
-            _help_rich(self)
-        else:
-            _help_plain(self)
-        return "continue"
-
-    @staticmethod
-    def _cmd_info(self, _args: str) -> str:
-        """Handler for /info."""
-        cfg = self.config
-        mm = self.memory_manager
-        if not cfg or not mm:
-            print("Session information not available.")
-            return "continue"
-
-        stats = mm.get_stats()
-        msg_count = stats.get("total_messages", mm.get_message_count())
-
-        try:
-            provider_cfg, model_cfg = cfg.resolve_llm_config()
-        except (ValueError, KeyError, AttributeError, ConfigError) as exc:
-            if console is not None:
-                console.print(f"[red]Provider configuration error:[/red] {exc}")
-            else:
-                print(f"Provider configuration error: {exc}")
-            return "continue"
-
-        sp = self.system_prompt
-        mm_mcp = self.mcp_manager
-        pcp = self.project_context_path
-        if console is not None and Panel is not None:
-            _info_rich(cfg, provider_cfg, model_cfg, stats, msg_count, sp, mm_mcp, pcp)
-        else:
-            _info_plain(cfg, provider_cfg, model_cfg, stats, msg_count, sp, mm_mcp, pcp)
-        return "continue"
-
-    @staticmethod
-    def _cmd_tools(self, args: str) -> str:
-        """Handler for /tools [search | enable <name> | disable <name>]."""
-        reg = self.registry
-        if not reg:
-            print("Tool registry not available.")
-            return "continue"
-
-        available = self.available_tools
-
-        if args.startswith("enable") and (len(args) == 6 or args[6] == " "):
-            term = args[6:].strip()
-            if not term:
-                if console is not None:
-                    console.print("[dim]Usage: /tools enable <tool-name>[/dim]")
-                else:
-                    print("Usage: /tools enable <tool-name>")
-                return "continue"
-            enabled_name: str | None = None
-            if term in _session.denials:
-                _session.denials.discard(term)
-                enabled_name = term
-            else:
-                matches = [n for n in _session.denials if term in n]
-                if len(matches) == 1:
-                    _session.denials.discard(matches[0])
-                    enabled_name = matches[0]
-                elif len(matches) > 1:
-                    msg = f"Ambiguous: '{term}' matches {', '.join(matches)}. Be more specific."
-                    if console is not None:
-                        console.print(f"[yellow]{msg}[/yellow]")
-                    else:
-                        print(msg)
-                else:
-                    if console is not None:
-                        console.print(f"[dim]Tool '{term}' is not disabled.[/dim]")
-                    else:
-                        print(f"Tool '{term}' is not disabled.")
-            if enabled_name is not None:
-                if console is not None:
-                    console.print(f"[green]✓ Tool '{enabled_name}' re-enabled.[/green]")
-                else:
-                    print(f"Tool '{enabled_name}' re-enabled.")
-                tool_obj = (
-                    _session.all_tool_originals.get(enabled_name)
-                    or available.get(enabled_name)
-                    or reg.tools.get(enabled_name)
-                )
-                if tool_obj is not None:
-                    desc = getattr(tool_obj, "description", "") or ""
-                    short_desc = desc.split(". ")[0].split(".\n")[0]
-                    if len(short_desc) > 120:
-                        short_desc = short_desc[:117] + "..."
-                    if short_desc:
-                        if console is not None:
-                            console.print(f"  [dim]{short_desc}[/dim]")
-                        else:
-                            print(f"  {short_desc}")
-                    func = getattr(tool_obj, "_uncapped_func", None) or getattr(
-                        tool_obj, "func", None
-                    )
-                    module_name = getattr(func, "__module__", "") if func is not None else ""
-                    module = sys.modules.get(module_name) if module_name else None
-                    checker = getattr(module, "is_configured", None) if module is not None else None
-                    if checker is not None:
-                        try:
-                            configured = checker()
-                        except Exception:  # noqa: BLE001
-                            configured = True
-                        if not configured:
-                            _not_cfg = "  ⚠ Not configured — check environment variables or config."
-                            if console is not None:
-                                console.print(f"  [yellow]{_not_cfg.strip()}[/yellow]")
-                            else:
-                                print(_not_cfg)
-            return "continue"
-
-        if args.startswith("disable") and (len(args) == 7 or args[7] == " "):
-            term = args[7:].strip()
-            if not term:
-                if console is not None:
-                    console.print("[dim]Usage: /tools disable <tool-name>[/dim]")
-                else:
-                    print("Usage: /tools disable <tool-name>")
-                return "continue"
-            all_known = (
-                set(reg.tools.keys())
-                | set(available.keys())
-                | set(_session.all_tool_originals.keys())
-            )
-            if term in all_known:
-                _session.denials.add(term)
-                _session.pinned_tools.discard(term)
-                _session.loaded_tools.discard(term)
-                if console is not None:
-                    console.print(f"[yellow]Tool '{term}' disabled for this session.[/yellow]")
-                else:
-                    print(f"Tool '{term}' disabled for this session.")
-            else:
-                matches = [n for n in all_known if term in n]
-                if len(matches) == 1:
-                    _session.denials.add(matches[0])
-                    _session.pinned_tools.discard(matches[0])
-                    _session.loaded_tools.discard(matches[0])
-                    if console is not None:
-                        console.print(
-                            f"[yellow]Tool '{matches[0]}' disabled for this session.[/yellow]"
-                        )
-                    else:
-                        print(f"Tool '{matches[0]}' disabled for this session.")
-                elif len(matches) > 1:
-                    msg = f"Ambiguous: '{term}' matches {', '.join(matches)}. Be more specific."
-                    if console is not None:
-                        console.print(f"[yellow]{msg}[/yellow]")
-                    else:
-                        print(msg)
-                else:
-                    if console is not None:
-                        console.print(f"[red]Unknown tool '{term}'.[/red]")
-                    else:
-                        print(f"Unknown tool '{term}'.")
-            return "continue"
-
-        if args.startswith("load") and (len(args) == 4 or args[4] == " "):
-            term = args[4:].strip()
-            if not term:
-                if console is not None:
-                    console.print("[dim]Usage: /tools load <tool-name>[/dim]")
-                else:
-                    print("Usage: /tools load <tool-name>")
-                return "continue"
-            if term in reg.tools:
-                if term not in _session.pinned_tools:
-                    # Promote agent-loaded tool to pinned
-                    _session.pinned_tools.add(term)
-                    _session.loaded_tools.add(term)
-                    if console is not None:
-                        console.print(
-                            f"[green]✓ Tool '{term}' pinned"
-                            " (was agent-loaded, now persists).[/green]"
-                        )
-                    else:
-                        print(f"Tool '{term}' pinned (was agent-loaded, now persists).")
-                else:
-                    if console is not None:
-                        console.print(f"[dim]Tool '{term}' is already loaded and pinned.[/dim]")
-                    else:
-                        print(f"Tool '{term}' is already loaded and pinned.")
-                return "continue"
-            if term in _session.denials:
-                msg = f"Tool '{term}' is disabled. Use '/tools enable {term}' first."
-                if console is not None:
-                    console.print(f"[yellow]{msg}[/yellow]")
-                else:
-                    print(msg)
-                return "continue"
-            if term in available:
-                return f"load_tool:{term}"
-            matches = [n for n in available if term in n]
-            if len(matches) == 1:
-                return f"load_tool:{matches[0]}"
-            if len(matches) > 1:
-                msg = f"Ambiguous: '{term}' matches {', '.join(matches)}. Be more specific."
-                if console is not None:
-                    console.print(f"[yellow]{msg}[/yellow]")
-                else:
-                    print(msg)
-            else:
-                # Check if already active via substring
-                active_matches = [n for n in reg.tools if term in n]
-                if len(active_matches) == 1:
-                    if console is not None:
-                        console.print(f"[dim]Tool '{active_matches[0]}' is already loaded.[/dim]")
-                    else:
-                        print(f"Tool '{active_matches[0]}' is already loaded.")
-                else:
-                    if console is not None:
-                        console.print(f"[red]Unknown or unavailable tool '{term}'.[/red]")
-                    else:
-                        print(f"Unknown or unavailable tool '{term}'.")
-            return "continue"
-
-        if args.startswith("unload") and (len(args) == 6 or args[6] == " "):
-            term = args[6:].strip()
-            if not term:
-                if console is not None:
-                    console.print("[dim]Usage: /tools unload <tool-name>[/dim]")
-                else:
-                    print("Usage: /tools unload <tool-name>")
-                return "continue"
-            if term in _session.pinned_tools:
-                return f"unload_tool:{term}"
-            # Fuzzy match against pinned tools
-            matches = [n for n in _session.pinned_tools if term in n]
-            if len(matches) == 1:
-                return f"unload_tool:{matches[0]}"
-            if len(matches) > 1:
-                msg = f"Ambiguous: '{term}' matches {', '.join(matches)}. Be more specific."
-                if console is not None:
-                    console.print(f"[yellow]{msg}[/yellow]")
-                else:
-                    print(msg)
-            elif term in _session.loaded_tools:
-                msg = f"Tool '{term}' was loaded by the agent and will be auto-unloaded next turn."
-                if console is not None:
-                    console.print(f"[dim]{msg}[/dim]")
-                else:
-                    print(msg)
-            else:
-                if console is not None:
-                    console.print(f"[dim]Tool '{term}' is not currently loaded.[/dim]")
-                else:
-                    print(f"Tool '{term}' is not currently loaded.")
-            return "continue"
-
-        active_names: set[str] = set(reg.tools.keys())
-        all_names = sorted(active_names | set(available.keys()) | _session.denials)
-        search_mode = False
-        if args:
-            search = args.lower()
-            all_names = [n for n in all_names if search in n.lower()]
-            if not all_names:
-                print(f"No tools matching '{args}'.")
-                return "continue"
-            search_mode = True
-
-        if console is not None and Table is not None:
-            _tools_rich(reg, all_names, search_mode, args, available, active_names)
-        else:
-            _tools_plain(reg, all_names, search_mode, args, available, active_names)
-        return "continue"
-
-    @staticmethod
-    def _cmd_clear(self, _args: str) -> str:
-        """Handler for /clear."""
-        mm = self.memory_manager
-        if not mm:
-            print("Memory manager not available.")
-            return "continue"
-
-        stats = mm.get_stats()
-        count = stats.get("total_messages", mm.get_message_count())
-        mm.clear()
-        mm.save()
-        if console is not None:
-            console.print(f"[green]✓ Cleared [bold]{count}[/bold] messages from memory.[/green]")
-        else:
-            print(f"✓ Cleared {count} messages from memory.")
-        return "continue"
-
-    def _cmd_undo(self, _args: str) -> str:
-        """Handler for /undo — remove the last exchange from memory."""
-        mm = self.memory_manager
-        if not mm:
-            print("Memory manager not available.")
-            return "continue"
-        removed = mm.pop_last_turn()
-        if removed == 0:
-            if console is not None:
-                console.print("[dim]Nothing to undo — no previous exchange in memory.[/dim]")
-            else:
-                print("Nothing to undo — no previous exchange in memory.")
-        else:
-            if console is not None:
-                console.print(
-                    f"[green]✓ Undone:[/green] removed last exchange "
-                    f"([dim]{removed} message(s) removed[/dim])"
-                )
-            else:
-                print(f"✓ Undone: removed last exchange ({removed} message(s) removed)")
-        return "continue"
-
-    @staticmethod
-    def _cmd_compact(self, args: str) -> str:
-        """Handler for /compact — manually trigger context compression."""
-        mm = self.memory_manager
-        if not mm:
-            print("Memory manager not available.")
-            return "continue"
-
-        messages = getattr(mm, "_messages", None)
-        if not messages:
-            if console is not None:
-                console.print("[dim]Nothing to compress — no messages in memory.[/dim]")
-            else:
-                print("Nothing to compress — no messages in memory.")
-            return "continue"
-
-        aggressive = args.strip().lower() == "aggressive"
-
-        llm = self.compression_llm or getattr(mm, "_llm", None)
-        max_ctx = self.max_context_tokens or 16_384
-
-        # For aggressive mode force the threshold trigger by computing effective max_context_tokens
-        # from the actual message content so that total_chars >= threshold_chars always holds.
-        if aggressive:
-            total_chars = sum(
-                len(c) for m in messages if isinstance((c := getattr(m, "content", "")), str)
-            )
-            if total_chars > 0:
-                # threshold_chars = int(max_ctx * 4 * 0.72); we want total_chars >= threshold_chars
-                # Setting max_ctx = total_chars // 3 gives threshold_chars ≈ total_chars * 0.96
-                max_ctx = max(16_384, total_chars // 3)
-
-        before_contents = [getattr(m, "content", None) for m in messages]
-
-        _timeout_info: dict = {}
-
-        # Show a percentage progress bar while compression LLM calls complete.
-        def _run_compression(_on_progress=None):
-            if aggressive:
-                return apply_message_compression(
-                    messages,
-                    call_count=999,
-                    compression_cache={},
-                    llm=llm,
-                    max_context_tokens=max_ctx,
-                    min_age_cycles=0,
-                    min_chars=0,
-                    emergency_threshold=0.0,
-                    timeout_info=_timeout_info,
-                    progress_callback=_on_progress,
-                )
-            else:
-                return apply_message_compression(
-                    messages,
-                    call_count=999,
-                    compression_cache={},
-                    llm=llm,
-                    max_context_tokens=max_ctx,
-                    min_age_cycles=COMPRESSION_MIN_AGE_CYCLES,
-                    min_chars=COMPRESSION_MIN_CHARS,
-                    timeout_info=_timeout_info,
-                    progress_callback=_on_progress,
-                )
-
-        if console is not None:
-            try:
-                from rich.align import Align
-                from rich.progress import BarColumn, Progress, TaskProgressColumn, TextColumn
-                from rich.rule import Rule
-
-                class _RightProgress(Progress):
-                    """Progress bar with a teal rule above, right-aligned."""
-
-                    def get_renderables(self):
-                        yield Rule(style="dim blue")
-                        yield Align.right(self.make_tasks_table(self.tasks))
-
-                with _RightProgress(
-                    TextColumn("[cyan]Compressing context:[/cyan]"),
-                    BarColumn(bar_width=20),
-                    TaskProgressColumn(),
-                    console=console,
-                    transient=True,
-                ) as progress:
-                    task_id = progress.add_task("compress", total=None)
-
-                    def _on_progress(completed: int, total: int) -> None:
-                        progress.update(task_id, total=total, completed=completed)
-
-                    compressed = _run_compression(_on_progress)
-            except Exception:
-                compressed = _run_compression()
-        else:
-            compressed = _run_compression()
-
-        changed_indices = [
-            i
-            for i, (before, after) in enumerate(zip(before_contents, compressed, strict=False))
-            if before != getattr(after, "content", before)
-        ]
-        changed = len(changed_indices)
-
-        if changed == 0:
-            last_tokens = self.last_input_tokens
-            pct = int(last_tokens / max_ctx * 100) if max_ctx and last_tokens else 0
-            # Print directly to stdout so prompt_toolkit's post-dispatch
-            # redraw doesn't erase the message.
-            print(
-                f"Nothing to compress. (Messages are too recent or too short. Context at {pct}%.)"
-            )
-            return "continue"
-
-        mm._messages = compressed
-        mm.save()
-
-        tool_changed = sum(
-            1 for i in changed_indices if type(messages[i]).__name__ == "ToolMessage"
-        )
-        ai_changed = sum(1 for i in changed_indices if type(messages[i]).__name__ == "AIMessage")
-
-        before_chars = sum(len(getattr(m, "content", "") or "") for m in messages)
-        after_chars = sum(len(getattr(m, "content", "") or "") for m in compressed)
-        reduction = int((1 - after_chars / before_chars) * 100) if before_chars else 0
-
-        prefix = "Aggressive compression:" if aggressive else "Compressed:"
-        if tool_changed > 0 or ai_changed > 0:
-            parts = []
-            if tool_changed > 0:
-                parts.append(f"{tool_changed} tool result{'s' if tool_changed != 1 else ''}")
-            if ai_changed > 0:
-                parts.append(f"{ai_changed} assistant response{'s' if ai_changed != 1 else ''}")
-            summary_str = " + ".join(parts) + " summarised."
-        else:
-            summary_str = f"{changed} message(s) summarised."
-
-        # Timeout note computed later in the print() output path
-
-        # Proportional scaling from the last real token count is far more
-        # accurate than chars/_CHARS_PER_TOKEN (which assumes a fixed ratio
-        # that varies wildly between prose ~4 and URLs ~1.5 chars/token).
-        if self.last_input_tokens > 0 and before_chars > 0:
-            estimated_tokens = int(self.last_input_tokens * (after_chars / before_chars))
-        else:
-            estimated_tokens = after_chars // _CHARS_PER_TOKEN
-        self.last_input_tokens = estimated_tokens
-
-        # Update toolbar stats so the next prompt shows updated context %
-        try:
-            from src.ui.stats import print_stats_footer as _print_stats_footer_compact
-
-            _print_stats_footer_compact(
-                console=console,
-                session_tokens=estimated_tokens,
-                max_context_tokens=self.max_context_tokens or 16_384,
-            )
-        except Exception:
-            pass
-
-        # Use print() not console.print() — prompt_toolkit's post-dispatch
-        # redraw erases console.print() output but leaves print() visible.
-        _timeout_note_plain = ""
-        if _timeout_info.get("timed_out"):
-            _done = _timeout_info.get("completed", 0)
-            _ttotal = _timeout_info.get("total", 0)
-            _timeout_note_plain = f" ⚠ Timed out — {_done}/{_ttotal} items."
-        print(f"✓ {prefix} {summary_str}{_timeout_note_plain}")
-        print(f"  Context reduced by ~{reduction}% ({before_chars:,} → {after_chars:,} chars)")
-        return "continue"
-
-    def _cmd_retry(self, _args: str) -> str:
-        """Handler for /retry — re-run the last prompt.
-
-        Returns a special signal that is handled in the main loop,
-        which sets user_input = last_input and falls through to processing.
-        """
-        if not self.last_input:
-            if console is not None:
-                console.print("[dim]Nothing to retry — no previous prompt in this session.[/dim]")
-            else:
-                print("Nothing to retry — no previous prompt in this session.")
-            return "continue"
-        # Signal to main loop (handled specially alongside /paste)
-        return f"retry:{self.last_input}"
-
-    @staticmethod
-    def _cmd_think(self, args: str) -> str:
-        """Handler for /think <task>.
-
-        Returns a ``deep_think:<task>`` signal so the main loop can
-        execute the hybrid gather → analyze → synthesize pipeline
-        (the handler itself doesn't have access to the agent/tools).
-        """
-        if not args:
-            if console is not None:
-                console.print(
-                    "[dim]Usage:[/dim] [bold]/think[/bold] <task description>\n"
-                    "[dim]  Example: /think Design a caching strategy for microservices[/dim]"
-                )
-            else:
-                print("Usage: /think <task description>")
-                print("  Example: /think Design a caching strategy for microservices")
-            return "continue"
-
-        try:
-            from src.tools.deep_think import deep_think  # noqa: F401
-
-            del deep_think  # only checking availability
-        except ImportError:
-            if console is not None:
-                console.print("[red]Deep Think tool is not available.[/red]")
-            else:
-                print("Deep Think tool is not available.")
-            return "continue"
-
-        return f"deep_think:{args}"
-
-    @staticmethod
-    def _cmd_delegate(self, args: str) -> str:
-        """Handler for /delegate <task>.
-
-        Returns a ``delegate:<task>`` signal so the main loop can
-        execute the forced delegation pipeline.
-        """
-        if not args:
-            if console is not None:
-                console.print(
-                    "[dim]Usage:[/dim] [bold]/delegate[/bold] <task description>\n"
-                    "[dim]  Example: /delegate Research top 10 AI companies and their market cap[/dim]"
-                )
-            else:
-                print("Usage: /delegate <task description>")
-                print("  Example: /delegate Research top 10 AI companies and their market cap")
-            return "continue"
-
-        try:
-            from src.tools.delegate import delegate_task  # noqa: F401
-
-            del delegate_task
-        except ImportError:
-            if console is not None:
-                console.print("[red]Delegate tool is not available.[/red]")
-            else:
-                print("Delegate tool is not available.")
-            return "continue"
-
-        # Check if delegation is enabled in config
-        cfg = self.config
-        if cfg and not getattr(cfg, "delegate_enabled", True):
-            if console is not None:
-                console.print("[yellow]Delegation is disabled in configuration.[/yellow]")
-            else:
-                print("Delegation is disabled in configuration.")
-            return "continue"
-
-        return f"delegate:{args}"
-
-    @staticmethod
-    def _cmd_mode(self, args: str) -> str:
-        """Handler for /mode [name]."""
-        cfg = self.config
-        if not cfg:
-            print("Config not available.")
-            return "continue"
-
-        # Defaults from each memory mode class
-        _DEFAULT_WM: dict[str, int] = {
-            "conversation": 25,
-            "code": 30,
-            "reasoning": 40,
-        }
-
-        _VALID_MODES = {
-            "conversation": "General chat, Q&A, research",
-            "code": "Programming, debugging, file tracking",
-            "reasoning": "Strategic planning, decision tracking",
-        }
-
-        # ── Switch mode if an argument was given ──────────────────
-        if args:
-            target = args.strip().lower()
-            if target not in _VALID_MODES:
-                valid = ", ".join(_VALID_MODES)
-                if console is not None:
-                    console.print(f"[red]Unknown mode:[/red] [bold]{target}[/bold]")
-                    console.print(f"[dim]Available modes: {valid}[/dim]")
-                else:
-                    print(f"Unknown mode: {target}")
-                    print(f"Available modes: {valid}")
-                return "continue"
-            if target == cfg.memory_mode:
-                if console is not None:
-                    console.print(f"[dim]Already in [bold]{target}[/bold] mode.[/dim]")
-                else:
-                    print(f"Already in {target} mode.")
-                return "continue"
-            # Signal the main loop to perform the actual switch
-            return f"switch_mode:{target}"
-
-        # ── Display modes (no argument) ───────────────────────────
-        # Populate working memory sizes — use live value for the active mode
-        wm_sizes: dict[str, int | None] = dict(_DEFAULT_WM)
-        mm = self.memory_manager
-        if mm:
-            stats = mm.get_stats()
-            live_wm = stats.get("working_memory_size")
-            if live_wm is not None:
-                wm_sizes[cfg.memory_mode] = live_wm
-
-        if console is not None and Panel is not None:
-            _mode_rich(cfg, _VALID_MODES, wm_sizes)
-        else:
-            _mode_plain(cfg, _VALID_MODES, wm_sizes)
-        return "continue"
-
-    @staticmethod
-    def _cmd_memory(self, _args: str) -> str:
-        """Handler for /memory."""
-        mm = self.memory_manager
-        cfg = self.config
-        if not mm or not cfg:
-            print("Memory not available.")
-            return "continue"
-
-        stats = mm.get_stats()
-        msg_count = stats.get("total_messages", mm.get_message_count())
-        session_id = stats.get("session_id", cfg.session)
-
-        if msg_count == 0 and not stats.get("has_summary"):
-            if console is not None:
-                console.print(
-                    "\n  [bold]Memory[/bold] — fresh session [dim](no history loaded)[/dim]\n"
-                )
-            else:
-                print("\nMemory — fresh session (no history loaded)\n")
-            return "continue"
-
-        has_summary = stats.get("has_summary", False)
-        vector_ready = stats.get("vector_recall_ready", False)
-        summary_text: str | None = getattr(mm, "_summary", None)
-
-        if console is not None and Panel is not None:
-            lines: list[str] = []
-            lines.append(f"[bold cyan]Memory[/bold cyan] — session: {session_id}")
-            lines.append(f"  [bold]{'Mode':<16s}[/bold]  {stats.get('mode', cfg.memory_mode)}")
-            lines.append(f"  [bold]{'Messages':<16s}[/bold]  {msg_count} in history")
-            summary_status = "✓ Rolling summary active" if has_summary else "✗ No summary yet"
-            summary_style = "green" if has_summary else "dim"
-            lines.append(
-                f"  [bold]{'Summary':<16s}[/bold]  [{summary_style}]{summary_status}[/{summary_style}]"
-            )
-            if vector_ready:
-                vec_count = stats.get("vector_count", "")
-                vec_detail = f" ({vec_count} embeddings)" if vec_count else ""
-                lines.append(
-                    f"  [bold]{'Semantic recall':<16s}[/bold]  [green]✓ Active{vec_detail}[/green]"
-                )
-            else:
-                lines.append(
-                    f"  [bold]{'Semantic recall':<16s}[/bold]  [dim]✗ Not configured[/dim]"
-                )
-            if summary_text:
-                truncated = len(summary_text) > 200
-                if truncated:
-                    tail = summary_text[-200:]
-                    # Snap to the next word boundary so we don't cut mid-word
-                    space_idx = tail.find(" ")
-                    if 0 < space_idx < 40:
-                        tail = tail[space_idx + 1 :]
-                    preview = f"…{tail.strip()}"
-                else:
-                    preview = summary_text.strip()
-                lines.append("")
-                lines.append("[bold]Summary preview[/bold]:")
-                lines.append(f'  [dim]"{preview}"[/dim]')
-            body = "\n".join(lines)
-            console.print()
-            console.print(Panel(body, border_style="cyan", padding=(1, 2)))
-            console.print()
-        else:
-            print(f"\nMemory — session: {session_id}")
-            print(f"  {'Mode':<16s}{stats.get('mode', cfg.memory_mode)}")
-            print(f"  {'Messages':<16s}{msg_count} in history")
-            summary_status = "✓ Rolling summary active" if has_summary else "✗ No summary yet"
-            print(f"  {'Summary':<16s}{summary_status}")
-            if vector_ready:
-                vec_count = stats.get("vector_count", "")
-                vec_detail = f" ({vec_count} embeddings)" if vec_count else ""
-                print(f"  {'Semantic recall':<16s}✓ Active{vec_detail}")
-            else:
-                print(f"  {'Semantic recall':<16s}✗ Not configured")
-            if summary_text:
-                if len(summary_text) > 200:
-                    _tail = summary_text[-200:]
-                    _si = _tail.find(" ")
-                    if 0 < _si < 40:
-                        _tail = _tail[_si + 1 :]
-                    preview = f"…{_tail.strip()}"
-                else:
-                    preview = summary_text.strip()
-                print(f'\nSummary preview:\n  "{preview}"')
-            print()
-        return "continue"
-
-    def _cmd_export(self, args: str) -> str:
-        """Handler for /export."""
-        from datetime import datetime as _dt
-
-        mm = self.memory_manager
-        cfg = self.config
-        if not mm or not cfg:
-            if console is not None:
-                console.print("[red]Memory not available.[/red]")
-            else:
-                print("Memory not available.")
-            return "continue"
-
-        # Collect (human, ai) turn pairs from _messages
-        raw_messages = getattr(mm, "_messages", [])
-        turns: list[tuple[str, str]] = []
-        pending_human: str | None = None
-        for msg in raw_messages:
-            content = ""
-            if hasattr(msg, "content") and msg.content:
-                c = msg.content
-                content = c if isinstance(c, str) else str(c)
-            cls_name = type(msg).__name__
-            if cls_name == "HumanMessage":
-                pending_human = content
-            elif cls_name == "AIMessage" and pending_human is not None:
-                turns.append((pending_human, content))
-                pending_human = None
-
-        if not turns:
-            if console is not None:
-                console.print("[dim]No conversation to export yet.[/dim]")
-            else:
-                print("No conversation to export yet.")
-            return "continue"
-
-        # Parse args: optional format keyword and/or path
-        args = args.strip()
-        fmt = "md"
-        out_path: str | None = None
-
-        parts = args.split() if args else []
-        if parts and parts[0].lower() in ("html", "md", "markdown"):
-            fmt = "html" if parts[0].lower() == "html" else "md"
-            parts = parts[1:]
-        if parts:
-            out_path = " ".join(parts)
-
-        session_id = cfg.session or "default"
-        timestamp = _dt.now().strftime("%Y%m%d-%H%M%S")
-        ext = ".html" if fmt == "html" else ".md"
-        default_name = f"conversation-{session_id}-{timestamp}{ext}"
-
-        if out_path:
-            path = Path(out_path).expanduser()
-            if path.is_dir():
-                path = path / default_name
-        else:
-            path = Path.cwd() / default_name
-
-        content_str = (
-            _export_html(turns, session_id, timestamp)
-            if fmt == "html"
-            else _export_markdown(turns, session_id, timestamp)
-        )
-
-        try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(content_str, encoding="utf-8")
-            n = len(turns)
-            label = f"{n} turn{'s' if n != 1 else ''}"
-            if console is not None:
-                console.print(
-                    f"  [green]\u2713[/green] Exported to [cyan]{path}[/cyan] [dim]({label})[/dim]"
-                )
-            else:
-                print(f"  \u2713 Exported to {path} ({label})")
-        except OSError as e:
-            if console is not None:
-                console.print(f"[red]Export failed: {e}[/red]")
-            else:
-                print(f"Export failed: {e}")
-
-        return "continue"
-
-    @staticmethod
-    def _cmd_model(self, args: str) -> str:
-        """Handler for /model [name]."""
-        cfg = self.config
-        if not cfg:
-            print("Config not available.")
-            return "continue"
-
-        if args:
-            target = args.strip()
-            # Signal the main loop to perform the model switch
-            return f"switch_model:{target}"
-
-        # ── No argument: show current model + available aliases ────
-        alias = cfg.active_model_alias
-        try:
-            _active_mc = cfg.get_active_model()
-            current = alias or _active_mc.model
-        except (ValueError, KeyError, AttributeError, ConfigError):
-            current = alias or "unknown"
-        models = cfg.models or {}
-
-        if console is not None:
-            lines_out: list[str] = []
-            lines_out.append(f"  [bold green]{current}[/bold green]  [green]● active[/green]")
-            if models:
-                lines_out.append("")
-                for mname, mcfg in models.items():
-                    detail = f"{mcfg.provider}/{mcfg.model}"
-                    is_current = mname == alias
-                    if is_current:
-                        name_fmt = f"[bold green]{mname:<16s}[/bold green]"
-                        marker = "  [green]● active[/green]"
-                    else:
-                        name_fmt = f"[bold]{mname:<16s}[/bold]"
-                        marker = ""
-                    lines_out.append(f"  {name_fmt} [dim]{detail}[/dim]{marker}")
-            lines_out.append("")
-            lines_out.append(
-                "[dim]Switch: [bold]/model[/bold] <name>   (e.g. [bold]/model fast[/bold])[/dim]"
-            )
-            console.print(
-                Panel(
-                    "\n".join(lines_out),
-                    title="Model",
-                    border_style="cyan",
-                    padding=(1, 2),
-                )
-            )
-        else:
-            print(f"\n  Current model: {current}")
-            if models:
-                print()
-                for mname, mcfg in models.items():
-                    detail = f"{mcfg.provider}/{mcfg.model}"
-                    marker = " ● active" if mname == alias else ""
-                    print(f"    {mname:<16s} {detail}{marker}")
-            print("\n  Switch: /model <name>   (e.g. /model fast)")
-            print()
-        return "continue"
-
-    @staticmethod
-    def _cmd_provider(self, args: str) -> str:
-        """Handler for /provider [name]."""
-        cfg = self.config
-        if not cfg:
-            print("Config not available.")
-            return "continue"
-
-        if args:
-            if console is not None:
-                console.print(
-                    "[dim]Provider switching is no longer supported. "
-                    "Use [bold]/model[/bold] <alias> to switch models — "
-                    "the provider is derived from the model configuration.[/dim]"
-                )
-            else:
-                print("Provider switching is no longer supported.")
-                print(
-                    "Use /model <alias> to switch models — "
-                    "the provider is derived from the model configuration."
-                )
-            return "continue"
-
-        # ── No argument: show available providers (read-only) ────
-        available = cfg.list_providers()
-        try:
-            active_provider = cfg.get_active_model().provider
-        except (ValueError, KeyError, AttributeError, ConfigError):
-            active_provider = None
-        if console is not None:
-            lines_out = []
-            for pname in available:
-                try:
-                    pcfg = cfg.get_provider_config(pname)
-                    ptype = pcfg.type
-                    base_url = getattr(pcfg, "base_url", None)
-                    detail = f"type: {ptype}"
-                    if base_url:
-                        detail += f", url: {base_url}"
-                except (ValueError, KeyError):
-                    detail = "unconfigured"
-                is_current = pname == active_provider
-                if is_current:
-                    name_fmt = f"[bold green]{pname:<20s}[/bold green]"
-                    marker = " [green]● active model's provider[/green]"
-                else:
-                    name_fmt = f"[bold]{pname:<20s}[/bold]"
-                    marker = ""
-                lines_out.append(f"  {name_fmt} [dim]{detail}[/dim]{marker}")
-            lines_out.append("")
-            lines_out.append("[dim]Use [bold]/model[/bold] <alias> to switch models.[/dim]")
-            body = "\n".join(lines_out)
-            console.print()
-            console.print(Panel(body, title="Providers", border_style="cyan", padding=(1, 2)))
-            console.print()
-        else:
-            print("\n  Providers:")
-            for pname in available:
-                marker = " ● active model's provider" if pname == active_provider else ""
-                try:
-                    pcfg = cfg.get_provider_config(pname)
-                    base_url = getattr(pcfg, "base_url", None)
-                    detail = f"type: {pcfg.type}"
-                    if base_url:
-                        detail += f", url: {base_url}"
-                except (ValueError, KeyError):
-                    detail = "unconfigured"
-                print(f"    {pname:<20s} {detail}{marker}")
-            print("\n  Use /model <alias> to switch models.")
-            print()
-        return "continue"
-
-    @staticmethod
-    def _cmd_session_switch(self, args: str) -> str:
-        """Handler for /session [id]."""
-        cfg = self.config
-        mm = self.memory_manager
-        if not cfg or not mm:
-            print("Session info not available.")
-            return "continue"
-
-        if args:
-            target = args.strip()
-            if target == cfg.session:
-                if console is not None:
-                    console.print(f"[dim]Already in session [bold]{target}[/bold].[/dim]")
-                else:
-                    print(f"Already in session {target}.")
-                return "continue"
-            return f"switch_session:{target}"
-
-        # No argument: show info (delegate to existing display logic)
-        stats = mm.get_stats()
-        msg_count = stats.get("total_messages", mm.get_message_count())
-
-        # Use last real token count if available; otherwise call
-        # prepare_context() for a calibrated estimate (tier cache when warm,
-        # chars-based heuristic on cold start).
-        _ctx_tokens = self.last_input_tokens
-        _tier_counts: dict | None = None
-        if not _ctx_tokens and msg_count > 0:
-            try:
-                ctx = mm.prepare_context("")
-                _ctx_tokens = getattr(ctx, "token_estimate", 0) or 0
-                _tier_counts = getattr(ctx, "tier_token_counts", None) or None
-                if not _ctx_tokens:
-                    _total_chars = sum(len(getattr(m, "content", "") or "") for m in ctx.messages)
-                    _ctx_tokens = _total_chars // _CHARS_PER_TOKEN
-            except Exception:
-                pass
-        elif msg_count > 0:
-            try:
-                ctx = mm.prepare_context("")
-                _tier_counts = getattr(ctx, "tier_token_counts", None) or None
-            except Exception:
-                pass
-
-        if console is not None and Panel is not None:
-            _session_rich(
-                cfg,
-                stats,
-                msg_count,
-                session_tokens=_ctx_tokens,
-                max_context_tokens=self.max_context_tokens,
-                tier_token_counts=_tier_counts,
-            )
-        else:
-            _session_plain(
-                cfg,
-                msg_count,
-                session_tokens=_ctx_tokens,
-                max_context_tokens=self.max_context_tokens,
-            )
-        return "continue"
-
-    @staticmethod
-    def _cmd_debug(self, _args: str) -> str:
-        """Handler for /debug [0-3] — cycle or set verbosity level."""
-        from src.logging_config import get_verbosity, set_verbosity
-
-        cfg = self.config
-        if not cfg:
-            print("Config not available.")
-            return "continue"
-
-        arg = _args.strip()
-        if arg in ("0", "1", "2", "3"):
-            new_level = int(arg)
-        else:
-            # Cycle: 0→1→2→3→0
-            new_level = (get_verbosity() + 1) % 4
-
-        cfg.verbosity = new_level
-        cfg.debug = new_level >= 1
-        cfg.verbose = new_level >= 2
-        if cfg.debug and cfg.log_file is None:
-            cfg.log_file = ""
-
-        setup_logging(
-            log_file=cfg.log_file,
-            debug=cfg.debug,
-            verbose=cfg.verbose,
-            verbosity=new_level,
-        )
-        set_verbosity(new_level)
-
-        _LEVEL_NAMES = {0: "normal", 1: "debug", 2: "verbose", 3: "trace"}
-        label = _LEVEL_NAMES[new_level]
-        msg = f"Verbosity: {label} ({new_level})"
-        if console is not None:
-            color = "green" if new_level > 0 else "yellow"
-            console.print(f"[{color}]{msg}[/{color}]")
-        else:
-            print(msg)
-        return "rebuild_callbacks"
-
-    @staticmethod
-    def _cmd_verbose(self, _args: str) -> str:
-        """Handler for /verbose — toggle verbose logging."""
-        cfg = self.config
-        if not cfg:
-            print("Config not available.")
-            return "continue"
-
-        cfg.verbose = not cfg.verbose
-        setup_logging(log_file=cfg.log_file, debug=cfg.debug, verbose=cfg.verbose)
-        state = "ON" if cfg.verbose else "OFF"
-        if console is not None:
-            color = "green" if cfg.verbose else "yellow"
-            console.print(f"[{color}]Verbose logging [bold]{state}[/bold][/{color}]")
-        else:
-            print(f"Verbose logging {state}")
-        # Signal main loop to rebuild callbacks with new verbose setting
-        return "rebuild_callbacks"
-
-    @staticmethod
-    def _cmd_approve(self, _args: str) -> str:
-        """Handler for /approve — toggle auto-approval for tools."""
-        _session.no_confirm = not _session.no_confirm
-        state = "ON" if _session.no_confirm else "OFF"
-
-        reg = self.registry
-        if _session.no_confirm and reg:
-            # Auto-approve all confirmation-requiring tools
-            for name in reg.list_tools():
-                if reg.requires_confirmation(name):
-                    self.approvals.add(name)
-        elif not _session.no_confirm:
-            # Revoke auto-approvals (tools will prompt again)
-            self.approvals.clear()
-            _session.deny_all = False
-
-        if console is not None:
-            color = "yellow" if _session.no_confirm else "green"
-            desc = (
-                "all tools auto-approved"
-                if _session.no_confirm
-                else "tools will prompt for confirmation"
-            )
-            console.print(
-                f"[{color}]Auto-approve [bold]{state}[/bold][/{color}] [dim]({desc})[/dim]"
-            )
-        else:
-            desc = (
-                "all tools auto-approved"
-                if _session.no_confirm
-                else "tools will prompt for confirmation"
-            )
-            print(f"Auto-approve {state} ({desc})")
-        return "continue"
-
-    @staticmethod
-    def _cmd_optimizer(self, args: str) -> str:
-        """Handler for /optimizer — toggle or force-optimize a prompt."""
-        if args:
-            return f"optimize:{args}"
-
-        cfg = self.config
-        if not cfg:
-            print("Config not available.")
-            return "continue"
-
-        cfg.prompt_optimizer = not cfg.prompt_optimizer
-        state = "ON" if cfg.prompt_optimizer else "OFF"
-        if console is not None:
-            color = "green" if cfg.prompt_optimizer else "yellow"
-            console.print(f"[{color}]Prompt optimizer [bold]{state}[/bold][/{color}]")
-        else:
-            print(f"Prompt optimizer {state}")
-        return "continue"
-
-    @staticmethod
-    def _cmd_setup(self, _args: str) -> str:
-        """Handler for /setup — launch the interactive setup wizard."""
-        return "run_setup"
-
-    @staticmethod
-    def _cmd_system_prompt(self, _args: str) -> str:
-        """Handler for /system_prompt — display the full system prompt."""
-        sp = self.system_prompt
-        if not sp:
-            print("System prompt not available.")
-            return "continue"
-
-        sp_chars = len(sp)
-        sp_tokens = sp_chars // 4  # rough estimate
-
-        if console is not None and Panel is not None:
-            try:
-                from rich.markdown import Markdown as _Md
-
-                body = _Md(sp)
-            except ImportError:
-                body = sp.replace("[", "\\[")
-            title = f"System Prompt  ~{sp_tokens:,} tokens ({sp_chars:,} chars)"
-            console.print()
-            console.print(Panel(body, title=title, border_style="cyan", padding=(1, 2)))
-            console.print()
-        else:
-            print(f"\n  System Prompt  ~{sp_tokens:,} tokens ({sp_chars:,} chars)")
-            print("  " + "-" * 50)
-            for line in sp.split("\n"):
-                print(f"  {line}")
-            print()
-        return "continue"
-
-    @staticmethod
-    def _cmd_mcp(self, args: str) -> str:
-        """Handler for /mcp [restart [server-name]] — list or restart MCP servers."""
-        mgr = self.mcp_manager
-        if mgr is None:
-            print("No MCP servers configured.")
-            return "continue"
-
-        if args.startswith("restart") and (len(args) == 7 or args[7] == " "):
-            target = args[len("restart") :].strip() or None
-            _reg = self.registry
-            _builtin_names: set[str] = set()
-            if _reg is not None:
-                for _tname in list(_reg.tools):
-                    if _reg.tool_metadata.get(_tname, {}).get("source") != "mcp":
-                        _builtin_names.add(_tname)
-                for _tname in list(self.available_tools):
-                    if _reg.tool_metadata.get(_tname, {}).get("source") != "mcp":
-                        _builtin_names.add(_tname)
-            mgr.restart(target, builtin_tool_names=_builtin_names or None)
-
-            reg = self.registry
-            if reg is not None:
-                # Track which tools were active vs on-demand before purge
-                previously_active: set[str] = set()
-                for tname in list(reg.tools):
-                    meta = reg.tool_metadata.get(tname, {})
-                    if meta.get("source") == "mcp":
-                        srv = meta.get("server", "")
-                        if target is None or srv == target:
-                            previously_active.add(tname)
-                            del reg.tools[tname]
-                            reg.tool_metadata.pop(tname, None)
-                            _session.all_tool_originals.pop(tname, None)
-                            _session.all_tool_descriptions.pop(tname, None)
-                for tname in list(self.available_tools):
-                    meta = reg.tool_metadata.get(tname, {})
-                    if meta.get("source") == "mcp":
-                        srv = meta.get("server", "")
-                        if target is None or srv == target:
-                            self.available_tools.pop(tname, None)
-                            reg.tool_metadata.pop(tname, None)
-                            _session.all_tool_originals.pop(tname, None)
-                            _session.all_tool_descriptions.pop(tname, None)
-
-                new_tools = mgr.get_langchain_tools(server_name=target)
-                for tname, tool_obj in new_tools.items():
-                    meta = {
-                        "requires_confirmation": (tool_obj.metadata or {}).get(
-                            "requires_confirmation", True
-                        ),
-                        "source": "mcp",
-                        "server": (tool_obj.metadata or {}).get("server", ""),
-                    }
-                    reg.tool_metadata[tname] = meta
-                    _session.all_tool_originals[tname] = tool_obj
-                    desc = getattr(tool_obj, "description", "") or ""
-                    short = desc.split(". ")[0].split(".\n")[0]
-                    if len(short) > 120:
-                        short = short[:117] + "..."
-                    _session.all_tool_descriptions[tname] = short
-                    # Restore to same pool: active stays active, rest goes on-demand
-                    if tname in previously_active:
-                        reg.tools[tname] = tool_obj
-                    else:
-                        self.available_tools[tname] = tool_obj
-
-            if target:
-                print(f"MCP server '{target}' restarted.")
-            else:
-                print("All MCP servers restarted.")
-            return "continue"
-
-        server_info = mgr.get_server_info()
-        if not server_info:
-            print("No MCP servers configured.")
-            return "continue"
-
-        if console is not None and Panel is not None and Table is not None:
-            tbl = Table(
-                show_header=True,
-                header_style="bold cyan",
-                box=rich_box.SIMPLE if rich_box else None,
-            )
-            tbl.add_column("Server", style="bold")
-            tbl.add_column("Status")
-            tbl.add_column("Transport")
-            tbl.add_column("Endpoint", overflow="fold")
-            tbl.add_column("Tools", justify="right")
-            for srv in server_info:
-                status = (
-                    "[bright_green]connected[/bright_green]"
-                    if srv["connected"]
-                    else "[red]disconnected[/red]"
-                )
-                tool_names = ", ".join(srv["tools"]) if srv["tools"] else "[dim]none[/dim]"
-                tbl.add_row(
-                    srv["name"],
-                    status,
-                    srv["transport"],
-                    srv["endpoint"],
-                    str(srv["tool_count"]),
-                )
-                if srv["tools"]:
-                    tbl.add_row("", "", "", f"  [dim]{tool_names}[/dim]", "")
-            console.print()
-            console.print(Panel(tbl, title="MCP Servers", border_style="cyan", padding=(0, 1)))
-            console.print()
-        else:
-            print("\n  MCP Servers")
-            print("  " + "-" * 50)
-            for srv in server_info:
-                status = "connected" if srv["connected"] else "disconnected"
-                print(f"  {srv['name']}  [{status}]  {srv['transport']}  {srv['endpoint']}")
-                if srv["tools"]:
-                    print(f"    Tools ({srv['tool_count']}): {', '.join(srv['tools'])}")
-            print()
-        return "continue"
-
-    @staticmethod
-    def _cmd_agents(_self, args: str) -> str:
-        """Handler for /agents [name | reload]."""
-        from src.agent.agents_md import (  # codeql[py/clear-text-logging-sensitive-data] no sensitive data logged here; agent metadata contains no credentials
-            get_agent,
-            list_agents,
-            load_default_agents,
-        )
-
-        args = args.strip()
-
-        if args == "reload":
-            agents = load_default_agents()
-            count = len(agents)
-            if console is not None:
-                console.print(f"[dim]Reloaded AGENTS.md — {count} agent(s) loaded.[/dim]")
-            else:
-                print(f"Reloaded AGENTS.md — {count} agent(s) loaded.")
-            return "continue"
-
-        if args:
-            # Show details of one agent
-            agent = get_agent(args)
-            if agent is None:
-                if console is not None:
-                    console.print(f"[red]Unknown agent:[/red] [bold]{args}[/bold]")
-                    console.print("[dim]Use /agents to list available agents.[/dim]")
-                else:
-                    print(f"Unknown agent: {args}")
-                    print("Use /agents to list available agents.")
-                return "continue"
-            if console is not None and Panel is not None and Table is not None:
-                tbl = Table(show_header=False, box=None, padding=(0, 1))
-                tbl.add_column("Field", style="bold cyan", min_width=14)
-                tbl.add_column("Value")
-                tbl.add_row("Name", agent.name)
-                tbl.add_row("Model alias", agent.model_alias or "[dim]default[/dim]")
-                tbl.add_row("Memory mode", agent.memory_mode or "[dim]default[/dim]")
-                if agent.tools_include:
-                    tbl.add_row("Tools include", ", ".join(agent.tools_include))
-                if agent.tools_exclude:
-                    tbl.add_row("Tools exclude", ", ".join(agent.tools_exclude))
-                if agent.prompt_file:
-                    tbl.add_row("Prompt file", agent.prompt_file)
-                if agent.description:
-                    tbl.add_row("Description", agent.description)
-                if agent.system_prompt:
-                    preview = agent.system_prompt[:200]
-                    if len(agent.system_prompt) > 200:
-                        preview += "…"
-                    tbl.add_row("System prompt", preview)
-                console.print()
-                console.print(
-                    Panel(tbl, title=f"Agent: {agent.name}", border_style="cyan", padding=(0, 1))
-                )
-                console.print()
-            else:
-                print(f"\n  Agent: {agent.name}")
-                print(f"  Model alias  : {agent.model_alias or '(default)'}")
-                print(f"  Memory mode  : {agent.memory_mode or '(default)'}")
-                if agent.tools_include:
-                    print(f"  Tools include: {', '.join(agent.tools_include)}")
-                if agent.tools_exclude:
-                    print(f"  Tools exclude: {', '.join(agent.tools_exclude)}")
-                if agent.prompt_file:
-                    print(f"  Prompt file  : {agent.prompt_file}")
-                if agent.description:
-                    print(f"  Description  : {agent.description}")
-                if agent.system_prompt:
-                    preview = agent.system_prompt[:200]
-                    if len(agent.system_prompt) > 200:
-                        preview += "..."
-                    print(f"  System prompt: {preview}")
-                print()
-            return "continue"
-
-        # List all agents
-        agents = list_agents()
-        if not agents:
-            if console is not None:
-                console.print(
-                    "[dim]No agents loaded. Create an AGENTS.md in your project directory.[/dim]"
-                )
-            else:
-                print("No agents loaded. Create an AGENTS.md in your project directory.")
-            return "continue"
-
-        if console is not None and Panel is not None and Table is not None:
-            tbl = Table(show_header=True, box=None, padding=(0, 1))
-            tbl.add_column("Name", style="bold")
-            tbl.add_column("Model", style="cyan")
-            tbl.add_column("Mode", style="green")
-            tbl.add_column("Description", style="dim")
-            for a in agents:
-                desc_line = a.description.splitlines()[0] if a.description else ""
-                tbl.add_row(
-                    a.name,
-                    a.model_alias or "-",
-                    a.memory_mode or "-",
-                    desc_line[:60],
-                )
-            console.print()
-            console.print(Panel(tbl, title="Agents", border_style="cyan", padding=(0, 1)))
-            console.print("[dim]  /agents <name>    — show agent details[/dim]")
-            console.print("[dim]  /agents reload    — reload from AGENTS.md[/dim]")
-            console.print()
-        else:
-            print("\n  Agents")
-            print("  " + "-" * 60)
-            for a in agents:
-                desc_line = a.description.splitlines()[0] if a.description else ""
-                model = a.model_alias or "-"
-                mode = a.memory_mode or "-"
-                print(f"  {a.name:<20}  {model:<10}  {mode:<14}  {desc_line[:40]}")
-            print()
-            print("  /agents <name>  — show agent details")
-            print("  /agents reload  — reload from AGENTS.md")
-            print()
-        return "continue"
-
-    @staticmethod
-    def _cmd_tasks(self, args: str) -> str:
-        """Handler for /tasks [status | task_id]."""
-        try:
-            from src.tasks.queue import TaskStatus, get_task_queue
-        except ImportError:
-            if console is not None:
-                console.print("[red]Task queue module not available.[/red]")
-            else:
-                print("Task queue module not available.")
-            return "continue"
-
-        args = args.strip()
-
-        try:
-            queue = get_task_queue()
-        except RuntimeError as exc:
-            if console is not None:
-                console.print(f"[dim]{exc}[/dim]")
-            else:
-                print(str(exc))
-            return "continue"
-
-        _STATUS_STYLE: dict[str, str] = {
-            "PENDING": "yellow",
-            "RUNNING": "blue",
-            "COMPLETED": "green",
-            "FAILED": "red",
-            "CANCELLED": "dim",
-        }
-
-        # Check if args looks like a task ID (8+ hex chars, not a known status word)
-        _args_lower = args.lower()
-        _is_id_lookup = (
-            args
-            and len(args) >= 8
-            and all(c in "0123456789abcdefABCDEF-" for c in args)
-            and _args_lower not in {s.value.lower() for s in TaskStatus}
-        )
-        if _is_id_lookup:
-            task = queue.get(args)
-            if task is None:
-                # Try prefix match
-                all_tasks = queue.list(limit=200)
-                matches = [t for t in all_tasks if t.task_id.startswith(args)]
-                task = matches[0] if len(matches) == 1 else None
-            if task is None:
-                if console is not None:
-                    console.print(f"[red]Task not found:[/red] {args}")
-                else:
-                    print(f"Task not found: {args}")
-                return "continue"
-
-            sty = _STATUS_STYLE.get(task.status.value, "")
-            status_str = f"[{sty}]{task.status.value}[/{sty}]" if sty else task.status.value
-            duration_str = ""
-            if task.started_at is not None and task.finished_at is not None:
-                duration_str = f"  duration: {task.finished_at - task.started_at:.1f}s"
-            elif task.started_at is not None:
-                import time as _time
-
-                duration_str = f"  running for {_time.time() - task.started_at:.1f}s"
-
-            if console is not None and Panel is not None:
-                import datetime
-
-                def _fmt_ts(ts: float | None) -> str:
-                    if ts is None:
-                        return "—"
-                    return datetime.datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
-
-                lines = [
-                    f"[bold]ID[/bold]      {task.task_id}",
-                    f"[bold]Agent[/bold]   [cyan]{task.agent_name}[/cyan]",
-                    f"[bold]Status[/bold]  {status_str}",
-                    f"[bold]Created[/bold] {_fmt_ts(task.created_at)}",
-                    f"[bold]Started[/bold] {_fmt_ts(task.started_at)}",
-                    f"[bold]Finished[/bold] {_fmt_ts(task.finished_at)}"
-                    + (
-                        f"  ({task.finished_at - task.started_at:.1f}s)"
-                        if task.started_at and task.finished_at
-                        else ""
-                    ),
-                    "",
-                    "[bold]Prompt[/bold]",
-                    task.prompt,
-                ]
-                if task.error:
-                    lines += ["", f"[bold][red]Error[/red][/bold]  {task.error}"]
-
-                from rich.console import Group
-
-                parts: list = ["\n".join(lines)]
-                if task.result:
-                    try:
-                        from rich.markdown import Markdown as _TaskMd
-
-                        parts.append("")
-                        parts.append("[bold]Result[/bold]")
-                        parts.append(_TaskMd(task.result))
-                    except ImportError:
-                        parts.append(f"\n[bold]Result[/bold]\n{task.result}")
-
-                console.print()
-                console.print(
-                    Panel(
-                        Group(*parts),
-                        title=f"Task {task.task_id[:8]}",
-                        border_style="cyan",
-                        padding=(0, 1),
-                    )
-                )
-                console.print()
-            else:
-                print(f"\n  Task {task.task_id}")
-                print(f"  Agent:   {task.agent_name}")
-                print(f"  Status:  {task.status.value}{duration_str}")
-                print(f"  Prompt:  {task.prompt}")
-                if task.result:
-                    print(f"  Result:  {task.result}")
-                if task.error:
-                    print(f"  Error:   {task.error}")
-                print()
-            return "continue"
-
-        # Otherwise treat args as a status filter
-        status_filter: TaskStatus | None = None
-        if args:
-            try:
-                status_filter = TaskStatus(_args_lower.upper())
-            except ValueError:
-                valid = ", ".join(s.value.lower() for s in TaskStatus)
-                if console is not None:
-                    console.print(f"[red]Unknown status or task ID:[/red] {args}")
-                    console.print(f"[dim]Valid statuses: {valid}[/dim]")
-                else:
-                    print(f"Unknown status: {args}")
-                    print(f"Valid statuses: {valid}")
-                return "continue"
-
-        _sid = getattr(self.config, "session", "default") if self.config else "default"
-        tasks = queue.list(status=status_filter, limit=50, session_id=_sid)
-        if not tasks:
-            msg = "No tasks found." if not args else f"No {_args_lower.upper()} tasks found."
-            if console is not None:
-                console.print(f"[dim]{msg}[/dim]")
-            else:
-                print(msg)
-            return "continue"
-
-        if console is not None and Panel is not None and Table is not None:
-            tbl = Table(show_header=True, box=None, padding=(0, 1))
-            tbl.add_column("ID", style="bold", min_width=10)
-            tbl.add_column("Agent", style="cyan")
-            tbl.add_column("Status", min_width=12)
-            tbl.add_column("Prompt", style="dim")
-            for t in tasks:
-                sty = _STATUS_STYLE.get(t.status.value, "")
-                status_cell = f"[{sty}]{t.status.value}[/{sty}]" if sty else t.status.value
-                tbl.add_row(t.task_id[:8], t.agent_name, status_cell, t.prompt)
-            title = f"Tasks ({len(tasks)})" + (f" — {_args_lower.upper()}" if args else "")
-            console.print()
-            console.print(Panel(tbl, title=title, border_style="cyan", padding=(0, 1)))
-            console.print("[dim]  /spawn <agent> <desc>   — submit a new task[/dim]")
-            console.print("[dim]  /tasks <id>             — view task details and result[/dim]")
-            console.print()
-        else:
-            print(f"\n  Tasks ({len(tasks)})")
-            print("  " + "-" * 70)
-            for t in tasks:
-                print(f"  {t.task_id[:8]}  {t.agent_name:<20}  {t.status.value:<12}  {t.prompt}")
-            print()
-        return "continue"
-
-    @staticmethod
-    def _cmd_spawn(self, args: str) -> str:
-        """Handler for /spawn <agent_name> <task_description>."""
-        try:
-            from src.tasks.queue import get_task_queue, submit_task
-        except ImportError:
-            if console is not None:
-                console.print("[red]Task queue module not available.[/red]")
-            else:
-                print("Task queue module not available.")
-            return "continue"
-
-        args = args.strip()
-        if not args:
-            if console is not None:
-                console.print("[red]Usage:[/red] /spawn <agent_name> <task_description>")
-            else:
-                print("Usage: /spawn <agent_name> <task_description>")
-            return "continue"
-
-        parts = args.split(None, 1)
-        if len(parts) < 2:
-            if console is not None:
-                console.print("[red]Usage:[/red] /spawn <agent_name> <task_description>")
-            else:
-                print("Usage: /spawn <agent_name> <task_description>")
-            return "continue"
-
-        agent_name, prompt = parts[0], parts[1]
-        try:
-            get_task_queue()
-        except RuntimeError as exc:
-            if console is not None:
-                console.print(f"[dim]{exc}[/dim]")
-            else:
-                print(str(exc))
-            return "continue"
-
-        _sid = getattr(self.config, "session", "default") if self.config else "default"
-        task_id = submit_task(agent_name, prompt, session_id=_sid)
-        if console is not None:
-            console.print(
-                f"[green]Task submitted:[/green] [bold]{task_id[:8]}[/bold]"
-                f"  agent=[cyan]{agent_name}[/cyan]"
-            )
-            console.print(f"[dim]  {prompt}[/dim]")
-        else:
-            print(f"Task submitted: {task_id[:8]}  agent={agent_name}")
-            print(f"  {prompt}")
-        return "continue"
-
-    def _cmd_goal(self, args: str) -> str:
-        """Handler for /goal [set <desc> | complete <id> | abandon <id> | list]."""
-        try:
-            from src.tasks.goal_tracker import get_goal_stack
-        except ImportError:
-            if console is not None:
-                console.print("[red]Goal tracker module not available.[/red]")
-            else:
-                print("Goal tracker module not available.")
-            return "continue"
-
-        cfg = self.config
-        session_id = cfg.session if cfg else "default"
-        data_dir = cfg.data_dir if cfg else "data"
-
-        stack = get_goal_stack(session_id, data_dir)
-
-        args_stripped = args.strip()
-        subcmd, _, rest = args_stripped.partition(" ")
-        subcmd = subcmd.lower()
-        rest = rest.strip()
-
-        if not args_stripped or subcmd == "list":
-            goals = stack.list_active()
-            if not goals:
-                if console is not None:
-                    console.print(
-                        "[dim]No active goals. Use /goal set <description> to add one.[/dim]"
-                    )
-                else:
-                    print("No active goals. Use /goal set <description> to add one.")
-                return "continue"
-            if console is not None and Panel is not None and Table is not None:
-                tbl = Table(show_header=True, box=None, padding=(0, 1))
-                tbl.add_column("ID", style="bold", min_width=8)
-                tbl.add_column("Status", style="green", min_width=10)
-                tbl.add_column("Description")
-                for g in goals:
-                    indent = "  " if g.parent_id else ""
-                    tbl.add_row(g.goal_id, g.status.value, f"{indent}{g.description}")
-                console.print()
-                console.print(
-                    Panel(
-                        tbl,
-                        title=f"Active Goals ({len(goals)})",
-                        border_style="green",
-                        padding=(0, 1),
-                    )
-                )
-                console.print()
-            else:
-                print(f"\n  Active Goals ({len(goals)})")
-                print("  " + "-" * 60)
-                for g in goals:
-                    indent = "    " if g.parent_id else "  "
-                    print(f"{indent}{g.goal_id}  {g.status.value:<12}  {g.description}")
-                print()
-            return "continue"
-
-        if subcmd == "set":
-            if not rest:
-                if console is not None:
-                    console.print("[red]Usage:[/red] /goal set <description>")
-                else:
-                    print("Usage: /goal set <description>")
-                return "continue"
-            goal_id = stack.push(rest)
-            if console is not None:
-                console.print(f"[green]Goal set:[/green] [bold]{goal_id}[/bold]  {rest[:80]}")
-            else:
-                print(f"Goal set: {goal_id}  {rest[:80]}")
-            return "continue"
-
-        if subcmd == "complete":
-            if not rest:
-                if console is not None:
-                    console.print("[red]Usage:[/red] /goal complete <goal_id>")
-                else:
-                    print("Usage: /goal complete <goal_id>")
-                return "continue"
-            if stack.complete(rest):
-                if console is not None:
-                    console.print(f"[green]Goal completed:[/green] {rest}")
-                else:
-                    print(f"Goal completed: {rest}")
-            else:
-                if console is not None:
-                    console.print(f"[red]Unknown goal:[/red] {rest}")
-                else:
-                    print(f"Unknown goal: {rest}")
-            return "continue"
-
-        if subcmd == "abandon":
-            if not rest:
-                if console is not None:
-                    console.print("[red]Usage:[/red] /goal abandon <goal_id>")
-                else:
-                    print("Usage: /goal abandon <goal_id>")
-                return "continue"
-            if stack.abandon(rest):
-                if console is not None:
-                    console.print(f"[dim]Goal abandoned: {rest}[/dim]")
-                else:
-                    print(f"Goal abandoned: {rest}")
-            else:
-                if console is not None:
-                    console.print(f"[red]Unknown goal:[/red] {rest}")
-                else:
-                    print(f"Unknown goal: {rest}")
-            return "continue"
-
-        # Unknown subcommand
-        if console is not None:
-            console.print(f"[red]Unknown subcommand:[/red] {subcmd}")
-            console.print(
-                "[dim]Usage: /goal [set <desc> | complete <id> | abandon <id> | list][/dim]"
-            )
-        else:
-            print(f"Unknown subcommand: {subcmd}")
-            print("Usage: /goal [set <desc> | complete <id> | abandon <id> | list]")
-        return "continue"
-
-    @staticmethod
-    def _cmd_paste(_self, _args: str) -> str:
-        """Handler for /paste (normally intercepted in the main loop)."""
-        # /paste is intercepted before dispatch() so this handler is a
-        # documentation-only fallback.  Print instructions just in case.
-        if console is not None:
-            console.print(
-                "[dim]Multi-line paste mode:[/dim]\n"
-                '  Type or paste text, then enter [yellow bold]"""[/yellow bold]'
-                " on a new line to send.\n"
-                '  Tip: you can also start any message with [yellow bold]"""'
-                "[/yellow bold] to enter this mode."
-            )
-        else:
-            print("\nMulti-line paste mode:")
-            print('  Type or paste text, then enter """ on a new line to send.')
-            print('  Tip: you can also start any message with """ to enter this mode.')
-        return "continue"
 
 
 def _help_rich(self_reg: SlashCommandRegistry) -> None:
@@ -3733,12 +1670,12 @@ def _session_plain(
 
 def _build_slash_commands() -> SlashCommandRegistry:
     """Create and populate the slash command registry."""
-    reg = SlashCommandRegistry()
+    reg = commands.SlashCommandRegistry()
 
     reg.register(
         SlashCommand(
             name="help",
-            handler=SlashCommandRegistry._cmd_help,
+            handler=commands.SlashCommandRegistry._cmd_help,
             short_help="Show available commands",
             long_help=(
                 "Usage: /help [command]\n\n"
@@ -3756,7 +1693,7 @@ def _build_slash_commands() -> SlashCommandRegistry:
     reg.register(
         SlashCommand(
             name="quit",
-            handler=SlashCommandRegistry._cmd_quit,
+            handler=commands.SlashCommandRegistry._cmd_quit,
             short_help="Exit the session",
             long_help=(
                 "Usage: /quit\n\n"
@@ -3773,7 +1710,7 @@ def _build_slash_commands() -> SlashCommandRegistry:
     reg.register(
         SlashCommand(
             name="info",
-            handler=SlashCommandRegistry._cmd_info,
+            handler=commands.SlashCommandRegistry._cmd_info,
             short_help="Show session information",
             long_help=(
                 "Usage: /info\n\n"
@@ -3791,7 +1728,7 @@ def _build_slash_commands() -> SlashCommandRegistry:
     reg.register(
         SlashCommand(
             name="tools",
-            handler=SlashCommandRegistry._cmd_tools,
+            handler=commands.SlashCommandRegistry._cmd_tools,
             short_help="List / manage tools",
             long_help=(
                 "Usage: /tools [search | load | unload | enable | disable]\n\n"
@@ -3827,7 +1764,7 @@ def _build_slash_commands() -> SlashCommandRegistry:
     reg.register(
         SlashCommand(
             name="mcp",
-            handler=SlashCommandRegistry._cmd_mcp,
+            handler=commands.SlashCommandRegistry._cmd_mcp,
             short_help="List / restart MCP servers",
             long_help=(
                 "Usage: /mcp [restart [server-name]]\n\n"
@@ -3847,7 +1784,7 @@ def _build_slash_commands() -> SlashCommandRegistry:
     reg.register(
         SlashCommand(
             name="clear",
-            handler=SlashCommandRegistry._cmd_clear,
+            handler=commands.SlashCommandRegistry._cmd_clear,
             short_help="Clear conversation history",
             long_help=(
                 "Usage: /clear\n\n"
@@ -3864,7 +1801,7 @@ def _build_slash_commands() -> SlashCommandRegistry:
     reg.register(
         SlashCommand(
             name="think",
-            handler=SlashCommandRegistry._cmd_think,
+            handler=commands.SlashCommandRegistry._cmd_think,
             short_help="Force deep-reasoning pipeline",
             long_help=(
                 "Usage: /think <task description>\n\n"
@@ -3890,7 +1827,7 @@ def _build_slash_commands() -> SlashCommandRegistry:
     reg.register(
         SlashCommand(
             name="delegate",
-            handler=SlashCommandRegistry._cmd_delegate,
+            handler=commands.SlashCommandRegistry._cmd_delegate,
             short_help="Force task delegation",
             long_help=(
                 "Usage: /delegate <task description>\n\n"
@@ -3915,7 +1852,7 @@ def _build_slash_commands() -> SlashCommandRegistry:
     reg.register(
         SlashCommand(
             name="mode",
-            handler=SlashCommandRegistry._cmd_mode,
+            handler=commands.SlashCommandRegistry._cmd_mode,
             short_help="Show / switch memory mode",
             long_help=(
                 "Usage: /mode [name]\n\n"
@@ -3924,7 +1861,7 @@ def _build_slash_commands() -> SlashCommandRegistry:
                 "Modes:\n"
                 "  conversation  General chat, entity tracking    (25 msgs)\n"
                 "  code          Programming, file/error tracking (30 msgs)\n"
-                "  reasoning     Planning, decision tracking      (40 msgs)\n\n"
+                "  reasoning     Planning, decision tracking      (30 msgs)\n\n"
                 "Examples:\n"
                 "  /mode           Show all modes\n"
                 "  /mode code      Switch to code mode\n"
@@ -3939,7 +1876,7 @@ def _build_slash_commands() -> SlashCommandRegistry:
     reg.register(
         SlashCommand(
             name="memory",
-            handler=SlashCommandRegistry._cmd_memory,
+            handler=commands.SlashCommandRegistry._cmd_memory,
             short_help="Show memory state for the current session",
             long_help=(
                 "Usage: /memory\n\n"
@@ -3954,7 +1891,7 @@ def _build_slash_commands() -> SlashCommandRegistry:
     reg.register(
         SlashCommand(
             name="agents",
-            handler=SlashCommandRegistry._cmd_agents,
+            handler=commands.SlashCommandRegistry._cmd_agents,
             short_help="List / inspect named agents from AGENTS.md",
             long_help=(
                 "Usage: /agents [name | reload]\n\n"
@@ -3985,7 +1922,7 @@ def _build_slash_commands() -> SlashCommandRegistry:
     reg.register(
         SlashCommand(
             name="tasks",
-            handler=SlashCommandRegistry._cmd_tasks,
+            handler=commands.SlashCommandRegistry._cmd_tasks,
             short_help="List background tasks or view task details",
             long_help=(
                 "Usage: /tasks [status | task_id]\n\n"
@@ -4007,7 +1944,7 @@ def _build_slash_commands() -> SlashCommandRegistry:
     reg.register(
         SlashCommand(
             name="spawn",
-            handler=SlashCommandRegistry._cmd_spawn,
+            handler=commands.SlashCommandRegistry._cmd_spawn,
             short_help="Submit a background task to the task queue",
             long_help=(
                 "Usage: /spawn <agent_name> <task_description>\n\n"
@@ -4023,7 +1960,7 @@ def _build_slash_commands() -> SlashCommandRegistry:
     reg.register(
         SlashCommand(
             name="goal",
-            handler=SlashCommandRegistry._cmd_goal,
+            handler=commands.SlashCommandRegistry._cmd_goal,
             short_help="Manage session goals",
             long_help=(
                 "Usage: /goal [set <desc> | complete <id> | abandon <id> | list]\n\n"
@@ -4047,7 +1984,7 @@ def _build_slash_commands() -> SlashCommandRegistry:
     reg.register(
         SlashCommand(
             name="model",
-            handler=SlashCommandRegistry._cmd_model,
+            handler=commands.SlashCommandRegistry._cmd_model,
             short_help="Show / switch model",
             long_help=(
                 "Usage: /model [name]\n\n"
@@ -4070,7 +2007,7 @@ def _build_slash_commands() -> SlashCommandRegistry:
     reg.register(
         SlashCommand(
             name="provider",
-            handler=SlashCommandRegistry._cmd_provider,
+            handler=commands.SlashCommandRegistry._cmd_provider,
             short_help="List configured LLM providers",
             long_help=(
                 "Usage: /provider\n\n"
@@ -4092,7 +2029,7 @@ def _build_slash_commands() -> SlashCommandRegistry:
     reg.register(
         SlashCommand(
             name="session",
-            handler=SlashCommandRegistry._cmd_session_switch,
+            handler=commands.SlashCommandRegistry._cmd_session_switch,
             short_help="Show / switch session",
             long_help=(
                 "Usage: /session [id]\n\n"
@@ -4113,7 +2050,7 @@ def _build_slash_commands() -> SlashCommandRegistry:
     reg.register(
         SlashCommand(
             name="debug",
-            handler=SlashCommandRegistry._cmd_debug,
+            handler=commands.SlashCommandRegistry._cmd_debug,
             short_help="Cycle or set verbosity level (0–3)",
             long_help=(
                 "Usage: /debug [0|1|2|3]\n\n"
@@ -4132,7 +2069,7 @@ def _build_slash_commands() -> SlashCommandRegistry:
     reg.register(
         SlashCommand(
             name="verbose",
-            handler=SlashCommandRegistry._cmd_verbose,
+            handler=commands.SlashCommandRegistry._cmd_verbose,
             short_help="Toggle verbose logging",
             long_help=(
                 "Usage: /verbose\n\n"
@@ -4148,7 +2085,7 @@ def _build_slash_commands() -> SlashCommandRegistry:
     reg.register(
         SlashCommand(
             name="approve",
-            handler=SlashCommandRegistry._cmd_approve,
+            handler=commands.SlashCommandRegistry._cmd_approve,
             short_help="Toggle tool auto-approval",
             long_help=(
                 "Usage: /approve\n\n"
@@ -4166,7 +2103,7 @@ def _build_slash_commands() -> SlashCommandRegistry:
     reg.register(
         SlashCommand(
             name="optimizer",
-            handler=SlashCommandRegistry._cmd_optimizer,
+            handler=commands.SlashCommandRegistry._cmd_optimizer,
             short_help="Toggle prompt optimizer",
             long_help=(
                 "Usage: /optimizer [prompt]\n\n"
@@ -4186,7 +2123,7 @@ def _build_slash_commands() -> SlashCommandRegistry:
     reg.register(
         SlashCommand(
             name="paste",
-            handler=SlashCommandRegistry._cmd_paste,
+            handler=commands.SlashCommandRegistry._cmd_paste,
             short_help="Enter multi-line paste mode",
             long_help=(
                 "Usage: /paste [optional first line]\n\n"
@@ -4208,7 +2145,7 @@ def _build_slash_commands() -> SlashCommandRegistry:
     reg.register(
         SlashCommand(
             name="undo",
-            handler=SlashCommandRegistry._cmd_undo,
+            handler=commands.SlashCommandRegistry._cmd_undo,
             short_help="Remove the last exchange from memory",
             long_help=(
                 "Usage: /undo\n\n"
@@ -4225,7 +2162,7 @@ def _build_slash_commands() -> SlashCommandRegistry:
     reg.register(
         SlashCommand(
             name="compact",
-            handler=SlashCommandRegistry._cmd_compact,
+            handler=commands.SlashCommandRegistry._cmd_compact,
             short_help="Compress context in place — summarise old messages",
             long_help=(
                 "Usage: /compact [aggressive]\n\n"
@@ -4244,7 +2181,7 @@ def _build_slash_commands() -> SlashCommandRegistry:
     reg.register(
         SlashCommand(
             name="retry",
-            handler=SlashCommandRegistry._cmd_retry,
+            handler=commands.SlashCommandRegistry._cmd_retry,
             short_help="Re-run the last prompt through the agent",
             long_help=(
                 "Usage: /retry\n\n"
@@ -4263,7 +2200,7 @@ def _build_slash_commands() -> SlashCommandRegistry:
     reg.register(
         SlashCommand(
             name="setup",
-            handler=SlashCommandRegistry._cmd_setup,
+            handler=commands.SlashCommandRegistry._cmd_setup,
             short_help="Launch the setup wizard",
             long_help=(
                 "Usage: /setup\n\n"
@@ -4282,7 +2219,7 @@ def _build_slash_commands() -> SlashCommandRegistry:
     reg.register(
         SlashCommand(
             name="export",
-            handler=SlashCommandRegistry._cmd_export,
+            handler=commands.SlashCommandRegistry._cmd_export,
             short_help="Export conversation to markdown or HTML",
             long_help=(
                 "Usage: /export [html|md] [path]\n\n"
@@ -4308,7 +2245,7 @@ def _build_slash_commands() -> SlashCommandRegistry:
     reg.register(
         SlashCommand(
             name="system_prompt",
-            handler=SlashCommandRegistry._cmd_system_prompt,
+            handler=commands.SlashCommandRegistry._cmd_system_prompt,
             short_help="Display the full system prompt",
             aliases=[],
         )
@@ -4530,12 +2467,18 @@ def run_ingest(args, config: Config) -> int:
     else:
         print("📚 RAG Document Ingestion\n")
         print(f"  Documents directory: {ingest_config.docs_dir}")
-        print(f"  Vector DB output:    {ingest_config.vectordb_dir}")
-        print(f"  Embedding provider:  {emb_type}")
+        print(  # codeql[py/clear-text-logging-sensitive-data]
+            f"  Vector DB output:    {ingest_config.vectordb_dir}"
+        )
+        print(f"  Embedding provider:  {emb_type}")  # codeql[py/clear-text-logging-sensitive-data]
         if ingest_config.embedding_model:
-            print(f"  Embedding model:     {ingest_config.embedding_model}")
+            print(  # codeql[py/clear-text-logging-sensitive-data]
+                f"  Embedding model:     {ingest_config.embedding_model}"
+            )
         if emb_base_url:
-            print(f"  Base URL:            {emb_base_url}")
+            print(  # codeql[py/clear-text-logging-sensitive-data]
+                f"  Base URL:            {emb_base_url}"
+            )
         print()
 
     # Run ingestion
@@ -4595,9 +2538,33 @@ def create_safe_tool_wrapper(
     )
 
 
+def _maybe_skip_force_deep_think_for_tool_intensive_task(
+    wants_deep: bool,
+    original_input: str,
+    llm: Any,
+    log: Any = None,
+) -> bool:
+    """Disable force-deep-think for tool-intensive tasks so delegation can still run."""
+    if not wants_deep or llm is None:
+        return wants_deep
+
+    task_cat = classify_think_task(original_input, llm)
+    if task_cat and task_cat.tool_intensive:
+        if log:
+            log.info(
+                "Skipping force deep_think: task classified as '%s' "
+                "(tool-intensive — agent's tool work is the primary output)",
+                task_cat.name,
+            )
+        return False
+
+    return wants_deep
+
+
 # Backward-compat aliases: graph builder and constants moved to src/orchestration/graph.py
 _build_agent_graph = build_agent_graph
 _EMPTY_RESPONSE_MSG = EMPTY_RESPONSE_MSG
+_MCP_TOOLS_READY_EVENT: Any | None = None
 
 
 def run_single_prompt(
@@ -4664,17 +2631,33 @@ def run_single_prompt(
         _spinner.start()
         try:
             if config and config.prompt_optimizer:
-                with _cf.ThreadPoolExecutor(max_workers=2, thread_name_prefix="prep") as _pool:
+                # Use explicit ThreadPoolExecutor (not `with`) so shutdown(wait=False)
+                # can be used on timeout — `__exit__` calls shutdown(wait=True) which
+                # blocks on hung threads.
+                _pool = _cf.ThreadPoolExecutor(max_workers=2, thread_name_prefix="prep")
+                try:
                     _ctx_future = _pool.submit(memory_manager.prepare_context, prompt_text)
                     _opt_future = _pool.submit(
                         optimize_prompt, prompt_text, llm, plan_milestones=True
                     )
-                    context = _ctx_future.result()
-                    plan = _opt_future.result()
-                prompt_text = plan.text
-                _progress_tool, _run_sys_prompt = _inject_milestones(
-                    plan, _al, _active_milestones, system_prompt or ""
-                )
+                    try:
+                        context = _ctx_future.result(timeout=60)
+                        plan = _opt_future.result(timeout=60)
+                    except _cf.TimeoutError:
+                        _ctx_future.cancel()
+                        _opt_future.cancel()
+                        _pool.shutdown(wait=False)
+                        log.warning(
+                            "Prompt prep timed out after 60s — falling back to sequential path"
+                        )
+                        context = memory_manager.prepare_context(prompt_text)
+                    else:
+                        prompt_text = plan.text
+                        _progress_tool, _run_sys_prompt = _inject_milestones(
+                            plan, _al, _active_milestones, system_prompt or ""
+                        )
+                finally:
+                    _pool.shutdown(wait=False)
             else:
                 context = memory_manager.prepare_context(prompt_text)
 
@@ -4739,6 +2722,23 @@ def run_single_prompt(
             if _preflight_output:
                 output = _preflight_output
             else:
+                _run_config = AgentRunConfig.from_app_config(config)
+                _run_config.llm = llm
+                _run_config.system_prompt = _run_sys_prompt
+                _run_config.available_tools = (
+                    dict(available_tools) if available_tools else available_tools
+                )
+                _run_config.active_tools_list = active_tools_list
+                _run_config.max_context_tokens = max_context_tokens
+                _run_config.preset_tools = (
+                    TOOL_PRESETS.get(config.memory_mode, set()) if config else set()
+                )
+                _run_config.compression_llm = compression_llm
+                _run_config.session_state = _session
+                _run_config.memory_manager = memory_manager
+                _run_config.confirmation_ui = _rich_ui
+                _run_config.on_tool_expansion = _tool_expansion_ui
+                _run_config.tools_ready = _MCP_TOOLS_READY_EVENT
                 output = run_agent(
                     prompt_text,
                     context.messages,
@@ -4747,48 +2747,13 @@ def run_single_prompt(
                     context_prefix=context.context_prefix,
                     callbacks=_agent_cbs,
                     result_messages=agent_msgs,
-                    llm=llm,
-                    system_prompt=_run_sys_prompt,
-                    available_tools=dict(available_tools) if available_tools else available_tools,
-                    active_tools_list=active_tools_list,
-                    max_context_tokens=max_context_tokens,
-                    preset_tools=(TOOL_PRESETS.get(config.memory_mode, set()) if config else set()),
-                    context_compression=config.context_compression if config else True,
-                    compression_min_age=(
-                        config.context_compression_min_age if config else COMPRESSION_MIN_AGE_CYCLES
-                    ),
-                    compression_min_chars=(
-                        config.context_compression_min_chars if config else COMPRESSION_MIN_CHARS
-                    ),
-                    compression_llm=compression_llm,
-                    session_state=_session,
-                    confirmation_ui=_rich_ui,
-                    on_tool_expansion=_tool_expansion_ui,
-                    parallel_tool_execution=config.parallel_tool_execution if config else True,
-                    git_native=config.git_native if config else False,
-                    tool_context_limit_pct=config.tool_context_limit_pct if config else 0.80,
-                    decision_accountability_enabled=(
-                        config.decision_accountability_enabled if config else False
-                    ),
-                    decision_accountability_report_uncertainty=(
-                        config.decision_accountability_report_uncertainty if config else True
-                    ),
-                    decision_accountability_min_confidence=(
-                        config.decision_accountability_min_confidence if config else 7.0
-                    ),
-                    task_ownership_classifier_enabled=(
-                        config.task_ownership_classifier_enabled if config else True
-                    ),
-                    task_ownership_classifier_llm_fallback=(
-                        config.task_ownership_classifier_llm_fallback if config else False
-                    ),
-                    task_ownership_ambiguous_action=(
-                        config.task_ownership_ambiguous_action if config else "ask"
-                    ),
+                    config=_run_config,
                 )
         finally:
             _spinner.stop()
             _cleanup_milestones(_progress_tool, _al, _active_milestones)
+
+        _maybe_write_session_metrics(getattr(config, "log_file", None))
 
         # ── Enforce deep_think when the user requested it ────────
         # Force-call if: (a) agent skipped deep_think entirely, OR
@@ -4798,64 +2763,57 @@ def run_single_prompt(
         # "think deeply" is treated as a quality hint — the agent's
         # actual tool work is more valuable than isolated reasoning.
         _research_output: str = ""
+        wants_deep = _maybe_skip_force_deep_think_for_tool_intensive_task(
+            wants_deep, original_input, llm, log
+        )
         if wants_deep and output:
-            _task_cat = classify_think_task(original_input, llm) if llm else None
-            if _task_cat and _task_cat.tool_intensive:
-                log.info(
-                    "Skipping force deep_think: task classified as '%s' "
-                    "(tool-intensive — agent's tool work is the primary output)",
-                    _task_cat.name,
-                )
-            else:
-                called = was_deep_think_called(agent_msgs)
-                if not called or not deep_think_had_good_context(agent_msgs):
-                    if called:
-                        log.info(
-                            "deep_think was called but with inadequate context "
-                            "(<%d chars) — forcing re-call with full data",
-                            MIN_GOOD_CONTEXT_LEN,
-                        )
-                    tool_data = collect_tool_outputs(agent_msgs)
-
-                    # Run research delegate if web tools were used to get
-                    # high-fidelity content for deep_think.
-                    _rd_enabled = (
-                        getattr(config, "research_delegate_enabled", True) if config else True
+            called = was_deep_think_called(agent_msgs)
+            if not called or not deep_think_had_good_context(agent_msgs):
+                if called:
+                    log.info(
+                        "deep_think was called but with inadequate context "
+                        "(<%d chars) — forcing re-call with full data",
+                        MIN_GOOD_CONTEXT_LEN,
                     )
-                    if _rd_enabled and agent_used_web_tools(agent_msgs):
-                        fetched_urls = extract_fetched_urls(agent_msgs)
-                        if fetched_urls:
-                            _rd_timeout = (
-                                getattr(config, "research_delegate_timeout", 300) if config else 300
-                            )
-                            _rd_cap = (
-                                getattr(config, "research_delegate_cap_ratio", RESEARCH_CAP_RATIO)
-                                if config
-                                else RESEARCH_CAP_RATIO
-                            )
-                            _spinner.start()
-                            try:
-                                _research_output = run_research_delegate(
-                                    fetched_urls,
-                                    original_input,
-                                    max_context_tokens=max_context_tokens,
-                                    timeout=_rd_timeout,
-                                    cap_ratio=_rd_cap,
-                                )
-                            finally:
-                                _spinner.stop()
+                tool_data = collect_tool_outputs(agent_msgs)
 
-                    _spinner.start()
-                    try:
-                        output = force_deep_think(
-                            original_input,
-                            output,
-                            tool_data,
-                            log,
-                            research_context=_research_output or None,
+                # Run research delegate if web tools were used to get
+                # high-fidelity content for deep_think.
+                _rd_enabled = getattr(config, "research_delegate_enabled", True) if config else True
+                if _rd_enabled and agent_used_web_tools(agent_msgs):
+                    fetched_urls = extract_fetched_urls(agent_msgs)
+                    if fetched_urls:
+                        _rd_timeout = (
+                            getattr(config, "research_delegate_timeout", 300) if config else 300
                         )
-                    finally:
-                        _spinner.stop()
+                        _rd_cap = (
+                            getattr(config, "research_delegate_cap_ratio", RESEARCH_CAP_RATIO)
+                            if config
+                            else RESEARCH_CAP_RATIO
+                        )
+                        _spinner.start()
+                        try:
+                            _research_output = run_research_delegate(
+                                fetched_urls,
+                                original_input,
+                                max_context_tokens=max_context_tokens,
+                                timeout=_rd_timeout,
+                                cap_ratio=_rd_cap,
+                            )
+                        finally:
+                            _spinner.stop()
+
+                _spinner.start()
+                try:
+                    output = force_deep_think(
+                        original_input,
+                        output,
+                        tool_data,
+                        log,
+                        research_context=_research_output or None,
+                    )
+                finally:
+                    _spinner.stop()
 
         # ── Enforce delegation when the query warrants it ────────
         # Skip if the model already produced a substantial response.
@@ -4900,6 +2858,19 @@ def run_single_prompt(
             )
             _spinner.start()
             try:
+                _exec_run_config = AgentRunConfig.from_app_config(config)
+                _exec_run_config.llm = llm
+                _exec_run_config.system_prompt = system_prompt
+                _exec_run_config.available_tools = (
+                    dict(available_tools) if available_tools else available_tools
+                )
+                _exec_run_config.active_tools_list = active_tools_list
+                _exec_run_config.max_context_tokens = max_context_tokens
+                _exec_run_config.preset_tools = (
+                    TOOL_PRESETS.get(config.memory_mode, set()) if config else set()
+                )
+                _exec_run_config.session_state = _session
+                _exec_run_config.on_tool_expansion = _tool_expansion_ui
                 exec_output, exec_msgs = run_execution_phase(
                     output,
                     prompt_text,
@@ -4908,16 +2879,7 @@ def run_single_prompt(
                     approvals,
                     context_prefix=context.context_prefix,
                     callbacks=_agent_cbs,
-                    llm=llm,
-                    system_prompt=system_prompt,
-                    available_tools=dict(available_tools) if available_tools else available_tools,
-                    active_tools_list=active_tools_list,
-                    max_context_tokens=max_context_tokens,
-                    preset_tools=(TOOL_PRESETS.get(config.memory_mode, set()) if config else set()),
-                    session_state=_session,
-                    on_tool_expansion=_tool_expansion_ui,
-                    parallel_tool_execution=config.parallel_tool_execution if config else True,
-                    git_native=config.git_native if config else False,
+                    config=_exec_run_config,
                 )
             finally:
                 _spinner.stop()
@@ -5047,6 +3009,23 @@ def _cleanup_milestones(
     _spinner.clear_context()
 
 
+def _maybe_write_session_metrics(log_file: str | None) -> None:
+    """Write session metrics after a run if a log file is configured.
+
+    This is a best-effort operation: failures are silently ignored so
+    metrics never crash the CLI.
+    """
+    if log_file is None:
+        return
+    resolved = log_file if log_file else "cogtrix.log"
+    try:
+        p = Path(resolved)
+        if p.exists():
+            write_session_metrics(str(p))
+    except Exception:
+        pass
+
+
 def main():
     """Main CLI loop."""
     # Parse command line arguments
@@ -5157,6 +3136,15 @@ def main():
         verbosity=config.verbosity,
     )
     log = get_logger()
+
+    # Register SIGTERM handler for graceful shutdown
+    # SIGTERM should behave like Ctrl+C (KeyboardInterrupt)
+    try:
+        signal.signal(signal.SIGTERM, _handle_sigterm)
+        log.debug("SIGTERM handler registered")
+    except (OSError, ValueError) as exc:
+        # SIGTERM not available on some platforms (e.g., Windows)
+        log.debug(f"Could not register SIGTERM handler: {exc}")
 
     if config.log_file is not None:
         log_file_display = config.log_file or "cogtrix.log"
@@ -5272,7 +3260,60 @@ def main():
     # Wire cron tools: LLM factory always reflects the current llm variable
     # (which is a mutable reference updated on model/provider switches).
     _cron_llm_ref: list = []  # [llm] — updated after each model switch
-    configure_cron_tool(config, llm_factory=lambda: _cron_llm_ref[0] if _cron_llm_ref else None)
+
+    def _clone_session_state(source: SessionState) -> SessionState:
+        clone = SessionState(no_confirm=source.no_confirm)
+        clone.denials = set(source.denials)
+        clone.deny_all = source.deny_all
+        clone.approvals = set(source.approvals)
+        clone.loaded_tools = set(source.loaded_tools)
+        clone.pinned_tools = set(source.pinned_tools)
+        clone.all_tool_descriptions = dict(source.all_tool_descriptions)
+        clone.all_tool_originals = dict(source.all_tool_originals)
+        clone.checkpoint_store = source.checkpoint_store
+        return clone
+
+    def _run_inherited_cron_job(job: Any) -> str:
+        try:
+            cron_context = memory_manager.prepare_context(job.prompt)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Cron job %s context preparation failed: %s", job.id, exc)
+            cron_context = None
+
+        inherited_session = _clone_session_state(_session)
+        inherited_system_prompt = system_prompt
+        if cron_context is not None and getattr(cron_context, "system_additions", None):
+            inherited_system_prompt = (
+                f"{inherited_system_prompt}\n{cron_context.system_additions}"
+                if inherited_system_prompt
+                else str(cron_context.system_additions)
+            )
+
+        _cron_run_config = AgentRunConfig.from_app_config(config)
+        _cron_run_config.llm = _cron_llm_ref[0] if _cron_llm_ref else llm
+        _cron_run_config.system_prompt = inherited_system_prompt
+        _cron_run_config.available_tools = dict(available_tools) if available_tools else None
+        _cron_run_config.active_tools_list = list(tools) if tools else None
+        _cron_run_config.max_context_tokens = max_context_tokens
+        _cron_run_config.preset_tools = TOOL_PRESETS.get(config.memory_mode, set())
+        _cron_run_config.compression_llm = compression_llm
+        _cron_run_config.session_state = inherited_session
+        _cron_run_config.tools_ready = _MCP_TOOLS_READY_EVENT
+        _cron_run_config.checkpoint_store = _session.checkpoint_store
+        return run_agent(
+            job.prompt,
+            cron_context.messages if cron_context is not None else [],
+            registry,
+            set(approvals),
+            context_prefix=(cron_context.context_prefix if cron_context is not None else None),
+            config=_cron_run_config,
+        )
+
+    configure_cron_tool(
+        config,
+        llm_factory=lambda: _cron_llm_ref[0] if _cron_llm_ref else None,
+        job_runner=_run_inherited_cron_job,
+    )
     configure_email_tool(config)
 
     # Load named agent definitions from AGENTS.md (cwd or home dir)
@@ -5360,7 +3401,9 @@ def main():
 
     # ── Connect to MCP servers ───────────────────────────────────────────────
     _mcp_manager: MCPManager | None = None  # type: ignore[assignment]
-    if MCP_AVAILABLE and config.mcp_servers:
+    global _MCP_TOOLS_READY_EVENT
+    _MCP_TOOLS_READY_EVENT = None
+    if MCP_AVAILABLE and config.mcp_servers and tool_filter != "none":
         _mcp_manager = MCPManager()
         _KNOWN_MCP_FIELDS = {
             "command",
@@ -5370,6 +3413,8 @@ def main():
             "headers",
             "requires_confirmation",
             "timeout",
+            "pin",
+            "allow_insecure",
         }
         _mcp_configs = []
         for _mcp_name, _srv_cfg in config.mcp_servers.items():
@@ -5382,20 +3427,25 @@ def main():
                 )
             _filtered = {k: v for k, v in _srv_cfg.items() if k in _KNOWN_MCP_FIELDS}
             _mcp_configs.append(MCPServerConfig(name=_mcp_name, **_filtered))
+        # Build a map of server_name -> pin so we can tag each tool's metadata.
+        _mcp_pin_map = {cfg.name: cfg.pin for cfg in _mcp_configs}
         mcp_tools = _mcp_manager.connect_all(_mcp_configs, builtin_tool_names=set(registry.tools))
         for tool_name, tool_obj in mcp_tools.items():
             registry.tools[tool_name] = tool_obj
+            _srv_name = (tool_obj.metadata or {}).get("server", "")
             registry.tool_metadata[tool_name] = {
                 "requires_confirmation": (tool_obj.metadata or {}).get(
                     "requires_confirmation", True
                 ),
                 "source": "mcp",
-                "server": (tool_obj.metadata or {}).get("server", ""),
+                "server": _srv_name,
+                "pin": _mcp_pin_map.get(_srv_name, True),
             }
         if mcp_tools:
             log.info(
                 "Loaded %d MCP tool(s) from %d server(s)", len(mcp_tools), len(config.mcp_servers)
             )
+        _MCP_TOOLS_READY_EVENT = _mcp_manager.tools_ready
         atexit.register(lambda: _mcp_manager.close_all() if _mcp_manager else None)
     elif not MCP_AVAILABLE and config.mcp_servers:
         log.warning(
@@ -5429,6 +3479,39 @@ def main():
         if available_tools:
             # Apply preset: only active tools stay in registry
             registry.tools = active_dict
+
+        # Auto-pin MCP tools whose server config has pin=True (the default).
+        # apply_tool_preset() moves every tool into available_tools because all
+        # mode presets are empty. The LLM never discovers on-demand tools that
+        # are not in its training data, so MCP tools would be permanently invisible.
+        # This pass promotes them back into the active set so the LLM sees them
+        # in its bound function list from the very first turn.
+        for _mcp_tool_name in list(available_tools):
+            if registry.tool_metadata.get(_mcp_tool_name, {}).get("pin", False):
+                _mcp_tool = available_tools.pop(_mcp_tool_name)
+                registry.tools[_mcp_tool_name] = _mcp_tool
+                _session.loaded_tools.add(_mcp_tool_name)
+                _session.pinned_tools.add(_mcp_tool_name)
+                log.debug(
+                    "Auto-pinned MCP tool '%s' from server '%s'",
+                    _mcp_tool_name,
+                    registry.tool_metadata[_mcp_tool_name].get("server", "?"),
+                )
+
+        # Warn when too many MCP tools are pinned — each schema consumes ~300 tokens
+        _pinned_mcp_count = sum(
+            1
+            for n in _session.pinned_tools
+            if registry.tool_metadata.get(n, {}).get("source") == "mcp"
+        )
+        if _pinned_mcp_count > 50:
+            log.warning(
+                "MCP: %d tools are pinned into the active set (pin=True). "
+                "This adds ~%d tokens of tool schema overhead per turn. "
+                "Consider setting pin: false for large MCP servers.",
+                _pinned_mcp_count,
+                _pinned_mcp_count * 300,
+            )
 
         # Auto-activate query_knowledge_base when a knowledge base exists
         if rag_should_auto_activate() and "query_knowledge_base" in available_tools:
@@ -5617,6 +3700,19 @@ def main():
         log.debug("Mode additions: %s", mode_adds if mode_adds else "None")
         log.debug("=== System prompt ===\n%s\n=== End system prompt ===", system_prompt)
 
+        _cli_system_prompt: str | None = None
+        try:
+            _cli_system_prompt = _load_cli_system_prompt(args)
+        except FileNotFoundError as e:
+            print(f"\n⚠️  {e}")
+            sys.exit(1)
+        except ValueError as e:
+            print(f"\n⚠️  {e}")
+            sys.exit(1)
+
+        if _cli_system_prompt:
+            system_prompt = _cli_system_prompt
+
         # Create LLM from provider and model configs.
         # Apply a default max_tokens cap for the main agent to prevent
         # runaway generations (e.g. 12K+ token phantom tool calls).
@@ -5688,6 +3784,7 @@ def main():
 
                 def _task_runner(record: Any) -> str:
                     from src.agent import registry as _ar
+                    from src.agent.registry import filter_tools_for_agent
                     from src.orchestration.session_state import SessionState
 
                     agent_cfg = _ar.get(record.agent_name)
@@ -5699,43 +3796,49 @@ def main():
                     try:
                         # Start with just request_tools — the agent loads
                         # what it needs on demand (same as a fresh session).
+                        _tq_run_config = AgentRunConfig.from_app_config(config)
+                        _tq_run_config.llm = _tq_llm
+                        _tq_run_config.system_prompt = _sp
+
+                        # Filter tools based on the agent's include/exclude config
+                        _tq_avail = dict(_tq_available_tools) if _tq_available_tools else {}
+                        if agent_cfg is not None and (
+                            agent_cfg.tools_include or agent_cfg.tools_exclude
+                        ):
+                            _tq_avail, _tq_filtered_list = filter_tools_for_agent(
+                                record.agent_name, _tq_avail
+                            )
+                            _tq_run_config.available_tools = _tq_avail if _tq_avail else None
+                            _tq_run_config.active_tools_list = (
+                                _tq_filtered_list if _tq_filtered_list else None
+                            )
+                            log.info(
+                                "Task agent %r tool filtering: %d tools after filtering "
+                                "(include: %s, exclude: %s)",
+                                record.agent_name,
+                                len(_tq_avail),
+                                agent_cfg.tools_include,
+                                agent_cfg.tools_exclude,
+                            )
+                        else:
+                            _tq_run_config.available_tools = _tq_avail if _tq_avail else None
+                            _tq_run_config.active_tools_list = (
+                                list(_tq_tools) if _tq_tools else None
+                            )
+                        _tq_run_config.max_context_tokens = _tq_max_context_tokens
+                        _tq_run_config.session_state = SessionState(no_confirm=True)
+                        _tq_run_config.memory_manager = memory_manager
+                        _tq_run_config.parallel_tool_execution = (
+                            _tq_config.parallel_tool_execution if _tq_config else True
+                        )
+                        _tq_run_config.checkpoint_store = _session.checkpoint_store
+                        _tq_run_config.tools_ready = _MCP_TOOLS_READY_EVENT
                         result = run_agent(
                             record.prompt,
                             [],
                             _tq_registry,
                             set(),
-                            llm=_tq_llm,
-                            system_prompt=_sp,
-                            available_tools=(
-                                dict(_tq_available_tools) if _tq_available_tools else None
-                            ),
-                            active_tools_list=list(_tq_tools) if _tq_tools else None,
-                            max_context_tokens=_tq_max_context_tokens,
-                            session_state=SessionState(no_confirm=True),
-                            parallel_tool_execution=(
-                                _tq_config.parallel_tool_execution if _tq_config else True
-                            ),
-                            checkpoint_store=_session.checkpoint_store,
-                            decision_accountability_enabled=(
-                                config.decision_accountability_enabled if config else False
-                            ),
-                            decision_accountability_report_uncertainty=(
-                                config.decision_accountability_report_uncertainty
-                                if config
-                                else True
-                            ),
-                            decision_accountability_min_confidence=(
-                                config.decision_accountability_min_confidence if config else 7.0
-                            ),
-                            task_ownership_classifier_enabled=(
-                                config.task_ownership_classifier_enabled if config else True
-                            ),
-                            task_ownership_classifier_llm_fallback=(
-                                config.task_ownership_classifier_llm_fallback if config else False
-                            ),
-                            task_ownership_ambiguous_action=(
-                                config.task_ownership_ambiguous_action if config else "ask"
-                            ),
+                            config=_tq_run_config,
                         )
                         return result or "[no output]"
                     except Exception as _exc:  # noqa: BLE001
@@ -5768,7 +3871,7 @@ def main():
         prov = (
             model_config.provider
             if model_config
-            else provider_config.name if provider_config else "unknown"
+            else (provider_config.name if provider_config else "unknown")
         )
         log_error(e, context=f"Provider '{prov}' not available", include_trace=True)
         print(f"\n⚠️  Provider '{prov}' not available: {e}")
@@ -5799,19 +3902,6 @@ def main():
         if config.context_compression_model:
             _asst_compression_llm = create_compression_llm(config.context_compression_model, config)
 
-        _asst_system_prompt: str | None = None
-        if getattr(args, "system_prompt", None):
-            _asst_system_prompt = args.system_prompt
-        elif getattr(args, "system_prompt_file", None):
-            _sp_path = Path(args.system_prompt_file)
-            if not _sp_path.exists():
-                print(f"\n⚠️  System prompt file not found: {args.system_prompt_file}")
-                sys.exit(1)
-            _asst_system_prompt = _sp_path.read_text(encoding="utf-8").strip()
-            if not _asst_system_prompt:
-                print(f"\n⚠️  System prompt file is empty: {args.system_prompt_file}")
-                sys.exit(1)
-
         service = AssistantService(
             config=config,
             llm=llm,
@@ -5821,7 +3911,7 @@ def main():
             active_tools=tools,
             max_context_tokens=max_context_tokens,
             compression_llm=_asst_compression_llm,
-            cli_system_prompt=_asst_system_prompt,
+            cli_system_prompt=_cli_system_prompt,
             agent_runner=run_agent,
         )
         service.run()
@@ -6120,6 +4210,15 @@ def main():
                 user_input = input(_prompt).strip()
 
             if not user_input:
+                # Guard against a tight busy-loop when stdin is an orphaned
+                # PTY slave (e.g. `docker compose run` with the terminal
+                # subsequently disconnected).  In that state, input() returns
+                # "" immediately instead of blocking, which would peg one CPU
+                # core at ~100%.  A short sleep keeps the loop alive for cron
+                # jobs while consuming negligible CPU.  See issue #100.
+                import time as _time
+
+                _time.sleep(0.05)
                 continue
 
             already_optimized = False
@@ -6511,6 +4610,26 @@ def main():
 
                             _spinner.start()
                             try:
+                                _gather_run_config = AgentRunConfig.from_app_config(config)
+                                _gather_run_config.llm = llm
+                                _gather_run_config.system_prompt = system_prompt
+                                _gather_run_config.available_tools = (
+                                    dict(available_tools)
+                                    if (available_tools or TOOL_PRESETS.get(config.memory_mode))
+                                    else None
+                                )
+                                _gather_run_config.active_tools_list = tools
+                                _gather_run_config.max_context_tokens = max_context_tokens
+                                _gather_run_config.preset_tools = TOOL_PRESETS.get(
+                                    config.memory_mode, set()
+                                )
+                                _gather_run_config.compression_llm = _think_compression_llm
+                                _gather_run_config.session_state = _session
+                                _gather_run_config.memory_manager = memory_manager
+                                _gather_run_config.confirmation_ui = _rich_ui
+                                _gather_run_config.on_tool_expansion = _tool_expansion_ui
+                                _gather_run_config.tools_ready = _MCP_TOOLS_READY_EVENT
+                                _gather_run_config.checkpoint_store = _session.checkpoint_store
                                 gather_output = run_agent(
                                     gather_prompt,
                                     gather_context.messages,
@@ -6519,26 +4638,7 @@ def main():
                                     context_prefix=gather_context.context_prefix,
                                     callbacks=callbacks if callbacks else None,
                                     result_messages=gather_msgs,
-                                    llm=llm,
-                                    system_prompt=system_prompt,
-                                    available_tools=(
-                                        dict(available_tools)
-                                        if (available_tools or TOOL_PRESETS.get(config.memory_mode))
-                                        else None
-                                    ),
-                                    active_tools_list=tools,
-                                    max_context_tokens=max_context_tokens,
-                                    preset_tools=TOOL_PRESETS.get(config.memory_mode, set()),
-                                    context_compression=config.context_compression,
-                                    compression_min_age=config.context_compression_min_age,
-                                    compression_min_chars=config.context_compression_min_chars,
-                                    compression_llm=_think_compression_llm,
-                                    session_state=_session,
-                                    confirmation_ui=_rich_ui,
-                                    on_tool_expansion=_tool_expansion_ui,
-                                    parallel_tool_execution=config.parallel_tool_execution,
-                                    git_native=_git_native,
-                                    checkpoint_store=_session.checkpoint_store,
+                                    config=_gather_run_config,
                                 )
                             finally:
                                 _spinner.stop()
@@ -6920,18 +5020,34 @@ def main():
                 if _quick_mode:
                     context = MemoryContext(mode="quick")
                 elif config.prompt_optimizer and not already_optimized:
-                    with _cf.ThreadPoolExecutor(max_workers=2, thread_name_prefix="prep") as _pool:
+                    # Use explicit ThreadPoolExecutor (not `with`) so shutdown(wait=False)
+                    # can be used on timeout — `__exit__` calls shutdown(wait=True) which
+                    # blocks on hung threads.
+                    _pool = _cf.ThreadPoolExecutor(max_workers=2, thread_name_prefix="prep")
+                    try:
                         _ctx_future = _pool.submit(memory_manager.prepare_context, user_input)
                         _opt_future = _pool.submit(
                             optimize_prompt, user_input, llm, plan_milestones=True
                         )
-                        context = _ctx_future.result()
-                        plan = _opt_future.result()
-                    user_input = plan.text
-                    already_optimized = True
-                    _progress_tool_interactive, _run_sys_prompt_interactive = _inject_milestones(
-                        plan, tools, _active_milestones, system_prompt
-                    )
+                        try:
+                            context = _ctx_future.result(timeout=60)
+                            plan = _opt_future.result(timeout=60)
+                        except _cf.TimeoutError:
+                            _ctx_future.cancel()
+                            _opt_future.cancel()
+                            _pool.shutdown(wait=False)
+                            log.warning(
+                                "Prompt prep timed out after 60s — falling back to sequential path"
+                            )
+                            context = memory_manager.prepare_context(user_input)
+                        else:
+                            user_input = plan.text
+                            already_optimized = True
+                            _progress_tool_interactive, _run_sys_prompt_interactive = (
+                                _inject_milestones(plan, tools, _active_milestones, system_prompt)
+                            )
+                    finally:
+                        _pool.shutdown(wait=False)
                 elif _pending_plan is not None:
                     context = memory_manager.prepare_context(user_input)
                     _progress_tool_interactive, _run_sys_prompt_interactive = _inject_milestones(
@@ -7034,6 +5150,27 @@ def main():
                     output = _preflight_output_i
                     _spinner.stop()
                 else:
+                    _repl_run_config = AgentRunConfig.from_app_config(config)
+                    _repl_run_config.llm = _routed_llm
+                    _repl_run_config.system_prompt = _run_sys_prompt_interactive
+                    _repl_run_config.available_tools = (
+                        dict(available_tools)
+                        if (available_tools or TOOL_PRESETS.get(config.memory_mode))
+                        else None
+                    )
+                    _repl_run_config.active_tools_list = tools
+                    _repl_run_config.max_context_tokens = max_context_tokens
+                    _repl_run_config.preset_tools = TOOL_PRESETS.get(config.memory_mode, set())
+                    _repl_run_config.context_compression = (
+                        False if _quick_mode else config.context_compression
+                    )
+                    _repl_run_config.compression_llm = compression_llm
+                    _repl_run_config.session_state = _session
+                    _repl_run_config.memory_manager = memory_manager
+                    _repl_run_config.confirmation_ui = _rich_ui
+                    _repl_run_config.on_tool_expansion = _tool_expansion_ui
+                    _repl_run_config.tools_ready = _MCP_TOOLS_READY_EVENT
+                    _repl_run_config.checkpoint_store = _session.checkpoint_store
                     output = run_agent(
                         user_input,
                         context.messages,
@@ -7042,100 +5179,69 @@ def main():
                         context_prefix=context.context_prefix,
                         callbacks=_agent_cbs,
                         result_messages=agent_msgs,
-                        llm=_routed_llm,
-                        system_prompt=_run_sys_prompt_interactive,
-                        available_tools=(
-                            dict(available_tools)
-                            if (available_tools or TOOL_PRESETS.get(config.memory_mode))
-                            else None
-                        ),
-                        active_tools_list=tools,
-                        max_context_tokens=max_context_tokens,
-                        preset_tools=TOOL_PRESETS.get(config.memory_mode, set()),
-                        context_compression=False if _quick_mode else config.context_compression,
-                        compression_min_age=config.context_compression_min_age,
-                        compression_min_chars=config.context_compression_min_chars,
-                        compression_llm=compression_llm,
-                        session_state=_session,
-                        confirmation_ui=_rich_ui,
-                        on_tool_expansion=_tool_expansion_ui,
-                        parallel_tool_execution=config.parallel_tool_execution,
-                        git_native=_git_native,
-                        tool_context_limit_pct=config.tool_context_limit_pct,
-                        tier_cache_enabled=config.tier_cache_enabled,
-                        checkpoint_store=_session.checkpoint_store,
-                        decision_accountability_enabled=config.decision_accountability_enabled,
-                        decision_accountability_report_uncertainty=config.decision_accountability_report_uncertainty,
-                        decision_accountability_min_confidence=config.decision_accountability_min_confidence,
-                        task_ownership_classifier_enabled=config.task_ownership_classifier_enabled,
-                        task_ownership_classifier_llm_fallback=config.task_ownership_classifier_llm_fallback,
-                        task_ownership_ambiguous_action=config.task_ownership_ambiguous_action,
+                        config=_repl_run_config,
+                        task_complexity=_task_complexity_i,
                     )
                 log.debug(
                     "⏱ run_agent total: %.0fms",
                     (_time_mod.monotonic() - _t0_agent) * 1000,
                 )
                 _spinner.stop()
+                _maybe_write_session_metrics(getattr(config, "log_file", None))
 
                 # ── Enforce deep_think when the user requested it ──
                 # Force-call if agent skipped it OR called with bad context.
                 # Skip for tool-intensive tasks where the agent's tool
                 # work is the primary deliverable.
                 _research_output: str = ""
+                wants_deep = _maybe_skip_force_deep_think_for_tool_intensive_task(
+                    wants_deep, original_input, llm, log
+                )
                 if wants_deep and output:
-                    _task_cat = classify_think_task(original_input, llm)
-                    if _task_cat.tool_intensive:
-                        log.info(
-                            "Skipping force deep_think: task classified "
-                            "as '%s' (tool-intensive — agent's tool work "
-                            "is the primary output)",
-                            _task_cat.name,
-                        )
-                    else:
-                        called = was_deep_think_called(agent_msgs)
-                        if not called or not deep_think_had_good_context(agent_msgs):
-                            if called:
-                                log.info(
-                                    "deep_think was called but with "
-                                    "inadequate context — forcing "
-                                    "re-call with full data"
-                                )
-                            tool_data = collect_tool_outputs(agent_msgs)
+                    called = was_deep_think_called(agent_msgs)
+                    if not called or not deep_think_had_good_context(agent_msgs):
+                        if called:
+                            log.info(
+                                "deep_think was called but with "
+                                "inadequate context — forcing "
+                                "re-call with full data"
+                            )
+                        tool_data = collect_tool_outputs(agent_msgs)
 
-                            # Run research delegate for web-sourced data
-                            _rd_enabled = getattr(config, "research_delegate_enabled", True)
-                            if _rd_enabled and agent_used_web_tools(agent_msgs):
-                                fetched_urls = extract_fetched_urls(agent_msgs)
-                                if fetched_urls:
-                                    _rd_timeout = getattr(config, "research_delegate_timeout", 300)
-                                    _rd_cap = getattr(
-                                        config,
-                                        "research_delegate_cap_ratio",
-                                        RESEARCH_CAP_RATIO,
+                        # Run research delegate for web-sourced data
+                        _rd_enabled = getattr(config, "research_delegate_enabled", True)
+                        if _rd_enabled and agent_used_web_tools(agent_msgs):
+                            fetched_urls = extract_fetched_urls(agent_msgs)
+                            if fetched_urls:
+                                _rd_timeout = getattr(config, "research_delegate_timeout", 300)
+                                _rd_cap = getattr(
+                                    config,
+                                    "research_delegate_cap_ratio",
+                                    RESEARCH_CAP_RATIO,
+                                )
+                                _spinner.start()
+                                try:
+                                    _research_output = run_research_delegate(
+                                        fetched_urls,
+                                        original_input,
+                                        max_context_tokens=max_context_tokens,
+                                        timeout=_rd_timeout,
+                                        cap_ratio=_rd_cap,
                                     )
-                                    _spinner.start()
-                                    try:
-                                        _research_output = run_research_delegate(
-                                            fetched_urls,
-                                            original_input,
-                                            max_context_tokens=max_context_tokens,
-                                            timeout=_rd_timeout,
-                                            cap_ratio=_rd_cap,
-                                        )
-                                    finally:
-                                        _spinner.stop()
+                                finally:
+                                    _spinner.stop()
 
-                            _spinner.start()
-                            try:
-                                output = force_deep_think(
-                                    original_input,
-                                    output,
-                                    tool_data,
-                                    log,
-                                    research_context=_research_output or None,
-                                )
-                            finally:
-                                _spinner.stop()
+                        _spinner.start()
+                        try:
+                            output = force_deep_think(
+                                original_input,
+                                output,
+                                tool_data,
+                                log,
+                                research_context=_research_output or None,
+                            )
+                        finally:
+                            _spinner.stop()
 
                 # ── Enforce delegation when the query warrants it ──
                 # Skip if the model already produced a substantial response.
@@ -7178,6 +5284,17 @@ def main():
                     )
                     _spinner.start()
                     try:
+                        _exec_run_config = AgentRunConfig.from_app_config(config)
+                        _exec_run_config.llm = llm
+                        _exec_run_config.system_prompt = system_prompt
+                        _exec_run_config.available_tools = (
+                            dict(available_tools) if available_tools else available_tools
+                        )
+                        _exec_run_config.active_tools_list = tools
+                        _exec_run_config.max_context_tokens = max_context_tokens
+                        _exec_run_config.preset_tools = TOOL_PRESETS.get(config.memory_mode, set())
+                        _exec_run_config.session_state = _session
+                        _exec_run_config.on_tool_expansion = _tool_expansion_ui
                         exec_output, exec_msgs = run_execution_phase(
                             output,
                             user_input,
@@ -7186,18 +5303,7 @@ def main():
                             approvals,
                             context_prefix=context.context_prefix,
                             callbacks=_agent_cbs,
-                            llm=llm,
-                            system_prompt=system_prompt,
-                            available_tools=(
-                                dict(available_tools) if available_tools else available_tools
-                            ),
-                            active_tools_list=tools,
-                            max_context_tokens=max_context_tokens,
-                            preset_tools=TOOL_PRESETS.get(config.memory_mode, set()),
-                            session_state=_session,
-                            on_tool_expansion=_tool_expansion_ui,
-                            parallel_tool_execution=config.parallel_tool_execution,
-                            git_native=_git_native,
+                            config=_exec_run_config,
                         )
                     finally:
                         _spinner.stop()
@@ -7332,6 +5438,18 @@ def main():
             log_error(e, context="Unexpected error", include_trace=True)
             print(f"\nError: {e}")
             sys.exit(1)
+
+    # Close MCP connections BEFORE shutting down the thread-pool executor.
+    # The atexit-registered close_all() fires too late (after Python has
+    # already torn down the executor), which causes the MCP SSE post_writer
+    # to raise "RuntimeError: cannot schedule new futures after shutdown"
+    # and print a full traceback to the terminal.  Calling it here, while
+    # the executor is still live, gives MCP a clean shutdown window.
+    if _mcp_manager is not None:
+        try:
+            _mcp_manager.close_all()
+        except Exception:  # noqa: BLE001
+            pass  # best-effort; process is exiting
 
     # Cancel any in-flight background summarization and persist memory,
     # then force-exit.  Python's internal _python_exit() joins ALL

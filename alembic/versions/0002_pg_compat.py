@@ -30,20 +30,21 @@ depends_on: str | tuple[str, ...] | None = None
 def upgrade() -> None:
     bind = op.get_bind()
     if bind.dialect.name == "sqlite":
+        # SQLite requires batch mode for column alterations (no ALTER COLUMN support).
         # Fix revoked column in refresh_tokens (was server_default=text("0"))
-        op.alter_column(
-            "refresh_tokens",
-            "revoked",
-            server_default=sa.false(),
-            existing_type=sa.Boolean(),
-        )
+        with op.batch_alter_table("refresh_tokens") as batch_op:
+            batch_op.alter_column(
+                "revoked",
+                server_default=sa.false(),
+                existing_type=sa.Boolean(),
+            )
         # Fix revoked column in api_keys (was server_default=text("0"))
-        op.alter_column(
-            "api_keys",
-            "revoked",
-            server_default=sa.false(),
-            existing_type=sa.Boolean(),
-        )
+        with op.batch_alter_table("api_keys") as batch_op:
+            batch_op.alter_column(
+                "revoked",
+                server_default=sa.false(),
+                existing_type=sa.Boolean(),
+            )
     # PostgreSQL: no-op — correct server_default was used in 0001 onward
 
 

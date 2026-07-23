@@ -348,13 +348,24 @@ async def remove_mcp_server(
             },
         )
 
+    entry = servers_dict.get(server_name)
+
     if cfg is not None:
         cfg.mcp_servers.pop(server_name, None)
 
     try:
         await asyncio.to_thread(_persist_mcp_servers, cfg)
-    except RuntimeError:
-        log.warning("Could not persist MCP server removal for '%s'", server_name)
+    except RuntimeError as exc:
+        # Roll back the in-memory change and surface a clear error.
+        if entry is not None and cfg is not None:
+            cfg.mcp_servers[server_name] = entry
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "code": "SERVICE_UNAVAILABLE",
+                "message": str(exc),
+            },
+        ) from exc
 
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 

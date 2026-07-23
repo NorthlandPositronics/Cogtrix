@@ -1,0 +1,102 @@
+id: regression_recovery_synthesis_no_meta_analysis
+domain: regression
+title: Recovery synthesis must surface the answer, not the meta-analysis
+description: |
+  Reproduces the May 2026 user-experience disaster where qwen3-coder
+  successfully researched Mattermost (recorded checkpoints with the
+  actual answer) but the user UI rendered the model's stuck-thinking
+  meta-analysis instead, complete with malformed <tool_call> XML.
+
+  This scenario exercises the on-demand tool-loading path and the
+  recovery synthesis branch.  A model that loads search_web cleanly
+  and answers in one pass also passes — the assertions are about what
+  reaches the user, not about which internal path was taken.
+
+  Failure modes guarded against:
+  • Foreign tool-call XML (<tool_call>, <function=) leaking into the
+    user reply.  Fixed by strip_foreign_tool_call_xml() applied in
+    extract_response and the recovery synthesizer.
+  • The thinking-break meta-analysis ("What has WORKED so far",
+    "Three categorically different strategies you haven't tried")
+    surfacing as the user's final response.  Fixed by the action-
+    intent give-up branch synthesizing from accumulated checkpoints.
+  • The stale "persistent formatting issues" or step-limit message
+    appearing when the agent in fact gathered a real answer.
+
+user_prompt: |
+  Please check if Mattermost messenger has "applications" support
+  similar to Slack.  I'm looking at using Mattermost for AI agent
+  communication and want an API key associated with a user or app.
+  Search the web and summarise what's available.
+
+system_prompt: |
+  You are a research assistant.  Use request_tools to load search_web
+  if it isn't already active, then search the web and summarise the
+  findings concisely.  Record key findings with the checkpoint tool.
+
+# search_web is the only essential tool — without it the agent cannot
+# fetch a real answer about Mattermost.  request_tools is the on-demand
+# loading path; some models (Sonnet, GPT-4o, Cerebras Llama) reach for
+# it before search_web, others (DeepSeek-V3) jump straight to search_web
+# because it's already active.  Both paths are explicitly accepted by
+# this scenario's description ("A model that loads search_web cleanly
+# and answers in one pass also passes").  Under the strict gate from
+# issue #1268, the YAML must encode this intent honestly: search_web
+# is required; request_tools is available but optional.
+tools_required:
+  - search_web
+tools_available:
+  - request_tools
+
+expected_outcome: |
+  The user receives a coherent summary mentioning at least one of:
+  OAuth, bot accounts, personal access tokens, webhooks.  The reply
+  contains no XML tool-call markup and no thinking-break preamble
+  ("What has WORKED so far", etc.).
+
+success_criteria:
+  # Positive: the answer must mention the subject.  This is broad on
+  # purpose — any real summary about Mattermost integrations will say
+  # the word "Mattermost".
+  - "contains: mattermost"
+
+  # Symptom B — foreign tool-call XML must NOT leak into the reply.
+  # response_not_contains scopes the check to the user-visible text
+  # so a tool whose input legitimately contains XML (e.g. write_file
+  # with HTML content) doesn't cause a false positive.
+  - "response_not_contains: <tool_call>"
+  - "response_not_contains: <function="
+
+  # Symptom A — the qwen3-coder thinking-break preamble has very
+  # specific signature phrases.  These appear in the model's stuck-
+  # thinking output but never in a coherent answer about Mattermost.
+  - "response_not_contains: what has worked so far"
+  - "response_not_contains: what has failed and why"
+  - "response_not_contains: three categorically different strategies"
+
+  # Symptom C — the bare "I encountered persistent formatting issues"
+  # fallback must never reach the user when real research happened.
+  # The new fallback when no work was done is "rephrase" — that's also
+  # a regression if it appears alongside successful searches.
+  - "response_not_contains: persistent formatting issues"
+
+max_turns: 25
+timeout_seconds: 240
+
+tags:
+  - gate2
+  - smoke
+  - regression
+  - recovery
+
+# Budget: claude-sonnet-4-6 is the heaviest model on this scenario.
+# Empirically it runs 11–18 turns of search_web (the stub returns
+# zero results, so the model retries) before producing a synthesis
+# from its training knowledge.  Local baseline: $0.1295 (under the
+# 3× = $0.15 ceiling).  CI variance pushed it to $0.1515 (just over)
+# in the May 2026 run on this branch, failing the ceiling check.
+# Bumping the budget to $0.07 raises the ceiling to $0.21, leaving
+# ~40 % headroom for run-to-run variance.  Cheaper models (gpt-4o,
+# deepseek-v3, kimi-k2-5, llama-cerebras) all land < $0.01 and are
+# unaffected.
+budget_usd_estimate: 0.07

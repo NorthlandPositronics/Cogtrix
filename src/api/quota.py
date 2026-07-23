@@ -90,6 +90,50 @@ class UsageTracker:
                 return 0
             return entry[1]
 
+    def cleanup_stale_entries(self, max_idle_days: int = 7) -> int:
+        """Remove entries for users who have been idle for max_idle_days.
+
+        This prevents unbounded growth of the _requests and _daily_tokens dicts
+        in long-running processes with many unique users.
+
+        Returns:
+            Number of entries removed.
+        """
+        import time
+
+        now = time.time()
+        max_idle_seconds = max_idle_days * 24 * 60 * 60
+        cutoff = now - max_idle_seconds
+
+        removed = 0
+        with self._lock:
+            # Clean up _requests - remove users with no recent requests
+            users_to_remove = []
+            for user_id, q in self._requests.items():
+                if not q or (q and q[-1] < cutoff):
+                    users_to_remove.append(user_id)
+            for user_id in users_to_remove:
+                del self._requests[user_id]
+                removed += 1
+
+            # Clean up _daily_tokens - remove entries older than max_idle_days
+            # We use the date_str as a proxy for recency
+            today = date.today().isoformat()
+            users_to_remove = []
+            for user_id, (date_str, _) in self._daily_tokens.items():
+                # Simple heuristic: if the date_str is from a previous day
+                # and the user also has no recent requests (handled above),
+                # remove it. We can't easily determine "last activity" from
+                # _daily_tokens alone, so we keep entries for today and
+                # remove entries from older dates.
+                if date_str < today:
+                    users_to_remove.append(user_id)
+            for user_id in users_to_remove:
+                del self._daily_tokens[user_id]
+                removed += 1
+
+        return removed
+
 
 # ---------------------------------------------------------------------------
 # QuotaEnforcer
@@ -163,12 +207,18 @@ _enforcer_lock = threading.Lock()
 
 
 def get_tracker() -> UsageTracker:
-    """Return (creating on demand) the process-level UsageTracker."""
+    """Return (creating on demand) the process-level UsageTracker.
+
+    Also performs cleanup of stale entries to prevent memory leaks in
+    long-running processes with many unique users.
+    """
     global _tracker
     if _tracker is None:
         with _tracker_lock:
             if _tracker is None:
                 _tracker = UsageTracker()
+                # Clean up any stale entries on first initialization
+                _tracker.cleanup_stale_entries(max_idle_days=7)
     return _tracker
 
 
@@ -202,6 +252,22 @@ def get_user_quota_status(user_id: str, config: QuotaConfig) -> dict:
             "requests_last_hour": tracker.get_requests_in_window(user_id, _HOUR_SECONDS),
         },
     }
+
+
+def cleanup_stale_entries(max_idle_days: int = 7) -> int:
+    """Cleanup stale entries across all tracked users.
+
+    Call this periodically (e.g., via a background task) or at application
+    startup to prevent unbounded memory growth from accumulated user entries.
+
+    Args:
+        max_idle_days: Number of days of inactivity before an entry is removed.
+
+    Returns:
+        Number of entries removed.
+    """
+    tracker = get_tracker()
+    return tracker.cleanup_stale_entries(max_idle_days=max_idle_days)
 
 
 def _quota_config_from_app_config(app_config: object) -> QuotaConfig:

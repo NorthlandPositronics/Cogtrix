@@ -125,3 +125,32 @@ class TestClassifyThinkTaskPromptFormat:
         llm.invoke.side_effect = RuntimeError("connection error")
         result = classify_think_task("some task", llm)
         assert result == THINK_DEFAULT_CATEGORY
+
+
+class TestClassifyThinkTaskTimeout:
+    """Regression: hung LLM must not block classify_think_task indefinitely."""
+
+    def test_returns_default_category_on_llm_timeout(self):
+        """A mock LLM that sleeps longer than the timeout should return default."""
+        import time
+        from unittest.mock import patch
+
+        from src.orchestration.intent import THINK_DEFAULT_CATEGORY, classify_think_task
+
+        llm = MagicMock()
+
+        def _slow_invoke(_prompt: str) -> MagicMock:
+            # sleeps longer than the patched timeout but short enough
+            # that shutdown(wait=True) does not stall the test suite
+            time.sleep(2)
+            return MagicMock(content="general")
+
+        llm.invoke.side_effect = _slow_invoke
+
+        # Patch timeout to a very small value so the test completes quickly.
+        with patch("src.orchestration.intent._CLASSIFY_TIMEOUT_SECONDS", 0.1):
+            # Use a task that does not match any single keyword category,
+            # forcing the LLM fallback path.
+            result = classify_think_task("compare and plan a project", llm)
+
+        assert result == THINK_DEFAULT_CATEGORY

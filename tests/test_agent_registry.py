@@ -2,7 +2,15 @@
 
 from __future__ import annotations
 
-from src.agent.registry import AgentConfig, AgentRegistry, clear, get, list_agents, register
+from src.agent.registry import (
+    AgentConfig,
+    AgentRegistry,
+    clear,
+    filter_tools_for_agent,
+    get,
+    list_agents,
+    register,
+)
 
 # ---------------------------------------------------------------------------
 # AgentConfig defaults
@@ -260,3 +268,94 @@ class TestModuleSingleton:
         a = get("md_agent")
         assert a is not None
         assert a.description == "from md"
+
+
+# ---------------------------------------------------------------------------
+# filter_tools_for_agent
+# ---------------------------------------------------------------------------
+
+
+def _make_tool_dict(names: list[str]) -> dict[str, object]:
+    """Create a fake tool dict keyed by name."""
+    return {n: object() for n in names}
+
+
+class TestFilterToolsForAgent:
+    def setup_method(self) -> None:
+        clear()
+
+    def teardown_method(self) -> None:
+        clear()
+
+    def test_none_agent_name_returns_all(self) -> None:
+        tools = _make_tool_dict(["a", "b", "c"])
+        f_dict, f_list = filter_tools_for_agent(None, tools)
+        assert f_dict == tools
+        assert len(f_list) == 3
+
+    def test_unknown_agent_returns_all(self) -> None:
+        tools = _make_tool_dict(["a", "b", "c"])
+        f_dict, f_list = filter_tools_for_agent("unknown", tools)
+        assert f_dict == tools
+        assert len(f_list) == 3
+
+    def test_empty_include_allows_all_with_excludes(self) -> None:
+        register(AgentConfig(name="agent1", tools_exclude=["b"]))
+        tools = _make_tool_dict(["a", "b", "c"])
+        f_dict, f_list = filter_tools_for_agent("agent1", tools)
+        assert set(f_dict.keys()) == {"a", "c"}
+        assert len(f_list) == 2
+
+    def test_include_restricts_and_exclude_removes(self) -> None:
+        register(
+            AgentConfig(
+                name="agent2",
+                tools_include=["a", "b", "c"],
+                tools_exclude=["b"],
+            )
+        )
+        tools = _make_tool_dict(["a", "b", "c", "d", "e"])
+        f_dict, f_list = filter_tools_for_agent("agent2", tools)
+        assert set(f_dict.keys()) == {"a", "c"}
+        assert len(f_list) == 2
+
+    def test_include_only_keeps_listed(self) -> None:
+        register(AgentConfig(name="agent3", tools_include=["a", "c"]))
+        tools = _make_tool_dict(["a", "b", "c", "d"])
+        f_dict, f_list = filter_tools_for_agent("agent3", tools)
+        assert set(f_dict.keys()) == {"a", "c"}
+        assert len(f_list) == 2
+
+    def test_no_filters_returns_all(self) -> None:
+        register(AgentConfig(name="agent4"))
+        tools = _make_tool_dict(["a", "b", "c"])
+        f_dict, f_list = filter_tools_for_agent("agent4", tools)
+        assert f_dict == tools
+        assert len(f_list) == 3
+
+    def test_exclude_only_removes_specified(self) -> None:
+        register(AgentConfig(name="agent5", tools_exclude=["a", "c"]))
+        tools = _make_tool_dict(["a", "b", "c", "d"])
+        f_dict, f_list = filter_tools_for_agent("agent5", tools)
+        assert set(f_dict.keys()) == {"b", "d"}
+        assert len(f_list) == 2
+
+    def test_include_nonexistent_tool_handled_gracefully(self) -> None:
+        register(AgentConfig(name="agent6", tools_include=["a", "zzz"]))
+        tools = _make_tool_dict(["a", "b"])
+        f_dict, f_list = filter_tools_for_agent("agent6", tools)
+        assert set(f_dict.keys()) == {"a"}
+        assert len(f_list) == 1
+
+    def test_empty_tools_dict(self) -> None:
+        register(AgentConfig(name="agent7", tools_include=["a"]))
+        f_dict, f_list = filter_tools_for_agent("agent7", {})
+        assert f_dict == {}
+        assert f_list == []
+
+    def test_filter_preserves_object_identity(self) -> None:
+        register(AgentConfig(name="agent8", tools_include=["a"]))
+        tools = _make_tool_dict(["a", "b"])
+        f_dict, f_list = filter_tools_for_agent("agent8", tools)
+        assert f_dict["a"] is tools["a"]
+        assert f_list[0] is tools["a"]

@@ -10,6 +10,7 @@ from __future__ import annotations
 import threading
 import time
 from collections import OrderedDict
+from concurrent.futures import Future
 from typing import Any
 
 from src.agent.core import prepare_messages_with_context
@@ -18,6 +19,7 @@ from src.logging_config import get_logger, is_trace, is_verbose, log_tool_call
 from src.orchestration.compression import (
     COMPRESSION_MIN_AGE_CYCLES,
     COMPRESSION_MIN_CHARS,
+    _get_compression_pool,
     apply_message_compression,
 )
 from src.orchestration.graph import DEFAULT_RECURSION_LIMIT, build_agent_graph
@@ -43,6 +45,9 @@ _persistent_compression_cache: OrderedDict = OrderedDict()
 _cached_llm_id: tuple[int, int] | None = None
 _cache_lock = threading.Lock()
 _llm_generation: int = 0
+_pending_background_compression_jobs: list[
+    tuple[Future[OrderedDict[str, str]], OrderedDict[str, str]]
+] = []
 
 # Compiled graph cache — avoids the ~25ms StateGraph.compile() cost per turn.
 # Keyed by (llm_id, llm_generation, active_fingerprint, available_fingerprint,
@@ -53,12 +58,20 @@ _llm_generation: int = 0
 _MAX_GRAPH_CACHE_SIZE = 4
 _persistent_graph_cache: OrderedDict = OrderedDict()  # key → compiled graph
 
+_SIMPLE_PRELOAD_TOOLS: tuple[str, ...] = (
+    "calculate",
+    "search_web",
+    "read_file",
+    "get_current_datetime",
+)
+
 
 def advance_llm_generation() -> None:
     """Increment the LLM generation counter when the LLM is switched."""
     global _llm_generation
     with _cache_lock:
         _llm_generation += 1
+        _pending_background_compression_jobs.clear()
 
 
 def invalidate_llm_caches() -> None:
@@ -74,6 +87,140 @@ def invalidate_llm_caches() -> None:
         _persistent_bound_cache.clear()
         _persistent_compression_cache.clear()
         _persistent_graph_cache.clear()
+        _pending_background_compression_jobs.clear()
+
+
+def _clear_pending_background_compression_jobs() -> None:
+    """Drop any queued background compression jobs after an LLM reset."""
+    _pending_background_compression_jobs.clear()
+
+
+def _merge_compression_cache(
+    target_cache: OrderedDict[str, str], source_cache: dict[str, str]
+) -> None:
+    """Merge compressed cache entries into an LRU cache with size bounds."""
+    for key, value in source_cache.items():
+        target_cache[key] = value
+        target_cache.move_to_end(key)
+    while len(target_cache) > _MAX_COMPRESSION_CACHE_SIZE:
+        target_cache.popitem(last=False)
+
+
+def _drain_background_compression_jobs(
+    target_cache: OrderedDict[str, str] | None = None,
+) -> None:
+    """Merge any finished warm-up jobs into their target caches without waiting.
+
+    When *target_cache* is supplied, only jobs queued for that exact cache
+    object are processed.  This prevents one API session's ``finally`` block
+    from draining jobs belonging to another concurrent session.
+    """
+    log = get_logger()
+    finished: list[tuple[Future[OrderedDict[str, str]], OrderedDict[str, str]]] = []
+    with _cache_lock:
+        if not _pending_background_compression_jobs:
+            return
+        still_pending: list[tuple[Future[OrderedDict[str, str]], OrderedDict[str, str]]] = []
+        for future, job_target_cache in _pending_background_compression_jobs:
+            if target_cache is not None and job_target_cache is not target_cache:
+                still_pending.append((future, job_target_cache))
+                continue
+            if future.done():
+                finished.append((future, job_target_cache))
+            else:
+                still_pending.append((future, job_target_cache))
+        _pending_background_compression_jobs[:] = still_pending
+
+    for future, job_target_cache in finished:
+        try:
+            snapshot = future.result()
+        except Exception as exc:  # pragma: no cover - defensive background logging
+            log.debug("Background compression warm-up failed: %s", exc, exc_info=True)
+            continue
+        if snapshot:
+            with _cache_lock:
+                _merge_compression_cache(job_target_cache, snapshot)
+
+
+def _queue_background_compression(
+    messages: list,
+    target_cache: OrderedDict[str, str],
+    *,
+    call_count: int,
+    llm: Any,
+    max_context_tokens: int | None,
+    min_age_cycles: int,
+    min_chars: int,
+    emergency_threshold: float,
+    human_msg_max_chars: int,
+    actual_input_tokens: int = 0,
+    min_age_override: int | None = None,
+) -> None:
+    """Warm the compression cache in the background without delaying the turn."""
+    if llm is None or max_context_tokens is None or max_context_tokens < 16_384:
+        return
+
+    messages_snapshot = list(messages)
+    cache_snapshot = OrderedDict(target_cache)
+
+    def _warm() -> OrderedDict[str, str]:
+        apply_message_compression(
+            messages_snapshot,
+            call_count=call_count,
+            compression_cache=cache_snapshot,
+            llm=llm,
+            max_context_tokens=max_context_tokens,
+            min_age_cycles=min_age_cycles,
+            min_chars=min_chars,
+            emergency_threshold=emergency_threshold,
+            human_msg_max_chars=human_msg_max_chars,
+            actual_input_tokens=actual_input_tokens,
+            min_age_override=min_age_override,
+        )
+        return cache_snapshot
+
+    future = _get_compression_pool().submit(_warm)
+    with _cache_lock:
+        _pending_background_compression_jobs.append((future, target_cache))
+
+
+def _auto_load_simple_tools(config: AgentRunConfig) -> None:
+    """Preload a small default tool set for simple tasks.
+
+    The agent still starts lean for complex work, but short/simple prompts
+    can skip the request_tools bootstrap round-trip when the common tools
+    are already in the active tool list.
+    """
+    available_tools = config.available_tools
+    active_tools_list = config.active_tools_list
+    if not available_tools or active_tools_list is None:
+        return
+
+    active_names = {getattr(tool, "name", "") for tool in active_tools_list}
+    loaded: list[str] = []
+    for tool_name in _SIMPLE_PRELOAD_TOOLS:
+        if tool_name in active_names or tool_name not in available_tools:
+            continue
+
+        tool = available_tools.pop(tool_name)
+        if hasattr(tool, "_resolve"):
+            try:
+                tool = tool._resolve()
+            except Exception as exc:
+                get_logger().warning("Failed to resolve preload tool %r: %s", tool_name, exc)
+                available_tools[tool_name] = tool
+                continue
+
+        if tool is None:
+            available_tools[tool_name] = tool
+            continue
+
+        active_tools_list.append(tool)
+        active_names.add(tool_name)
+        loaded.append(tool_name)
+
+    if loaded:
+        get_logger().info("Auto-loaded common tools for simple task: %s", ", ".join(loaded))
 
 
 class ToolCallLogger:
@@ -151,9 +298,9 @@ def is_valid_response(output: str) -> bool:
     if not output or not output.strip():
         return False
 
-    from src.memory.manager import _is_bad_ai_content
+    from src.common.message_validation import is_bad_ai_content
 
-    return not _is_bad_ai_content(output)
+    return not is_bad_ai_content(output)
 
 
 _SDK_MARKERS = (
@@ -414,6 +561,10 @@ def extract_response(result: Any, log: Any = None, prior_count: int = 0) -> str 
     # Only search messages produced this turn (after prior_count)
     turn_messages = messages[prior_count:] if prior_count > 0 else messages
 
+    # Imported here so the tests don't pay the import cost when extract_response
+    # isn't on the hot path.
+    from src.orchestration.phases import strip_foreign_tool_call_xml
+
     for msg in reversed(turn_messages):
         if isinstance(msg, ToolMessage):
             continue
@@ -421,13 +572,19 @@ def extract_response(result: Any, log: Any = None, prior_count: int = 0) -> str 
         if isinstance(msg, AIMessage):
             text = extract_ai_content(msg)
             if text:
-                return text
+                cleaned = strip_foreign_tool_call_xml(text)
+                # Only return cleaned text if there's still meaningful content
+                # after stripping; an all-XML response should fall through.
+                if isinstance(cleaned, str) and cleaned.strip():
+                    return cleaned
             continue
 
         if isinstance(msg, dict) and msg.get("type") in ("ai", "aimessage"):
             text = extract_ai_content(msg)
             if text:
-                return text
+                cleaned = strip_foreign_tool_call_xml(text)
+                if isinstance(cleaned, str) and cleaned.strip():
+                    return cleaned
 
     if log:
         if log.isEnabledFor(10):  # logging.DEBUG
@@ -518,11 +675,17 @@ def log_tool_calls_from_result(result: dict, prior_count: int = 0) -> None:
                 tool_name = pending_tool_calls.pop(tool_call_id)
 
             if tool_name:
+                from src.api.routes.metrics import TOOL_CALLS_TOTAL
+
                 if isinstance(content, str) and content.startswith("Error"):
                     _tool_logger.on_tool_error(tool_name, content, call_id=tool_call_id)
+                    if TOOL_CALLS_TOTAL is not None:
+                        TOOL_CALLS_TOTAL.labels(tool_name=tool_name, status="error").inc()
                 else:
                     output_str = str(content) if content else ""
                     _tool_logger.on_tool_end(tool_name, output_str, call_id=tool_call_id)
+                    if TOOL_CALLS_TOTAL is not None:
+                        TOOL_CALLS_TOTAL.labels(tool_name=tool_name, status="success").inc()
 
 
 _EXTEND_CONTINUE_LIMIT = 300  # step budget for continuation after extend_run(mode="continue")
@@ -694,32 +857,8 @@ def run_agent(
     callbacks: list | None = None,
     result_messages: list | None = None,
     *,
-    config: AgentRunConfig | None = None,
-    llm: Any = None,
-    system_prompt: str | None = None,
-    available_tools: dict | None = None,
-    active_tools_list: list | None = None,
-    max_context_tokens: int | None = None,
-    preset_tools: set[str] | None = None,
-    context_compression: bool = True,
-    compression_min_age: int | None = None,
-    compression_min_chars: int | None = None,
-    compression_llm: Any = None,
-    tool_call_guard: Any | None = None,
-    session_state: Any = None,
-    confirmation_ui: Any | None = None,
-    on_tool_expansion: Any | None = None,
-    parallel_tool_execution: bool = True,
-    git_native: bool = False,
-    tool_context_limit_pct: float = 0.80,
-    tier_cache_enabled: bool = True,
-    checkpoint_store: Any | None = None,
-    decision_accountability_enabled: bool = False,
-    decision_accountability_report_uncertainty: bool = True,
-    decision_accountability_min_confidence: float = 7.0,
-    task_ownership_classifier_enabled: bool = True,
-    task_ownership_classifier_llm_fallback: bool = False,
-    task_ownership_ambiguous_action: str = "ask",
+    config: AgentRunConfig,
+    task_complexity: TaskComplexity | None = None,
 ) -> str:
     """Run agent using a custom LangGraph StateGraph.
 
@@ -736,53 +875,23 @@ def run_agent(
         recursion_limit: Maximum graph node visits (default: 150, ~75 tool calls)
         callbacks: Optional callback handlers for LLM observability
         result_messages: Optional output list for caller inspection
-        config: Session-constant parameters bundle (preferred over individual kwargs)
-        llm: Pre-created LLM instance (fallback when config is None)
-        system_prompt: System prompt (fallback when config is None)
-        available_tools: {name: tool} of tools available on request (fallback when config is None)
-        active_tools_list: List of tool objects currently active (fallback when config is None)
-        max_context_tokens: Context budget (fallback when config is None)
-        preset_tools: Tool names that cannot be released (fallback when config is None)
+        config: Session-constant parameters bundle (required)
+        task_complexity: Optional precomputed complexity; when omitted the
+            function classifies the task automatically.
 
     Returns:
         Agent response as string
     """
     from src.orchestration.phases import is_step_limit_apology, recover_from_step_limit
 
-    if config is None:
-        config = AgentRunConfig(
-            llm=llm,
-            system_prompt=system_prompt,
-            available_tools=available_tools,
-            active_tools_list=active_tools_list,
-            max_context_tokens=max_context_tokens,
-            preset_tools=preset_tools,
-            context_compression=context_compression,
-            compression_min_age=compression_min_age,
-            compression_min_chars=compression_min_chars,
-            compression_llm=compression_llm,
-            tool_call_guard=tool_call_guard,
-            session_state=session_state,
-            confirmation_ui=confirmation_ui,
-            on_tool_expansion=on_tool_expansion,
-            parallel_tool_execution=parallel_tool_execution,
-            git_native=git_native,
-            tool_context_limit_pct=tool_context_limit_pct,
-            tier_cache_enabled=tier_cache_enabled,
-            checkpoint_store=checkpoint_store,
-            decision_accountability_enabled=decision_accountability_enabled,
-            decision_accountability_report_uncertainty=decision_accountability_report_uncertainty,
-            decision_accountability_min_confidence=decision_accountability_min_confidence,
-            task_ownership_classifier_enabled=task_ownership_classifier_enabled,
-            task_ownership_classifier_llm_fallback=task_ownership_classifier_llm_fallback,
-            task_ownership_ambiguous_action=task_ownership_ambiguous_action,
-        )
+    _base_system_prompt = config.system_prompt
+    _run_system_prompt = _base_system_prompt
 
     _compression_min_age = config.compression_min_age
     _compression_min_chars = config.compression_min_chars
 
     if recursion_limit is None:
-        _complexity = classify_task_complexity(user_input)
+        _complexity = task_complexity or classify_task_complexity(user_input)
         if _complexity == TaskComplexity.COMPLEX_ACTION:
             recursion_limit = 300  # ~150 tool-call cycles for builds/installs
             get_logger().info(
@@ -796,11 +905,14 @@ def run_agent(
         else:
             recursion_limit = DEFAULT_RECURSION_LIMIT
 
+        if _complexity == TaskComplexity.SIMPLE:
+            _auto_load_simple_tools(config)
+
         # Auto-load search_web for complex tasks so the agent has web
         # search available from the first round without needing to call
         # request_tools.  Addresses RBA (Research-Before-Action) gap where
         # agents skip loading search when they're confident in training data.
-        if _complexity in (TaskComplexity.COMPLEX_ACTION, TaskComplexity.COMPLEX_RESEARCH):
+        elif _complexity in (TaskComplexity.COMPLEX_ACTION, TaskComplexity.COMPLEX_RESEARCH):
             _avail = config.available_tools
             _active = config.active_tools_list
             if _avail and _active is not None and "search_web" in _avail:
@@ -812,8 +924,8 @@ def run_agent(
                     if hasattr(_search_tool, "_resolve"):
                         try:
                             _search_tool = _search_tool._resolve()
-                        except Exception:
-                            # Resolution failed — put it back and skip
+                        except Exception as exc:
+                            get_logger().warning("Failed to resolve search_web tool: %s", exc)
                             _avail["search_web"] = _search_tool
                             _search_tool = None
                     if _search_tool is not None:
@@ -854,10 +966,10 @@ def run_agent(
                     "intent before doing anything. Do not execute, install, "
                     "delete, or modify anything until the intent is confirmed."
                 )
-                if config.system_prompt:
-                    config.system_prompt = config.system_prompt + _ambiguous_constraint
+                if _run_system_prompt:
+                    _run_system_prompt = _run_system_prompt + _ambiguous_constraint
                 else:
-                    config.system_prompt = _ambiguous_constraint
+                    _run_system_prompt = _ambiguous_constraint
             elif _toc_ambiguous_action == "inform":
                 _ownership = OwnershipResult(
                     mode=OwnershipMode.INFORM,
@@ -870,10 +982,12 @@ def run_agent(
 
         if _ownership.mode in (OwnershipMode.INFORM, OwnershipMode.ADVISE):
             _constraint = _build_ownership_constraint(_ownership.mode)
-            if config.system_prompt:
-                config.system_prompt = config.system_prompt + _constraint
+            if _run_system_prompt:
+                _run_system_prompt = _run_system_prompt + _constraint
             else:
-                config.system_prompt = _constraint
+                _run_system_prompt = _constraint
+
+        config.system_prompt = _run_system_prompt
 
     if _compression_min_age is None:
         _compression_min_age = COMPRESSION_MIN_AGE_CYCLES
@@ -909,8 +1023,8 @@ def run_agent(
                     content = msg["content"]
                 log.debug("  [%d] %s: %s", i, msg_type, content)
 
-        # Mid-run self-extension is handled automatically by stuck detection
-        # and checkpoint-based detection in the graph (no agent-facing tool needed).
+        # extend_run tool is wired into the graph below so the agent can call it
+        # explicitly to request more steps or delegate subtasks mid-run.
         _extend_state = ExtendRunState()
 
         invoke_config: dict[str, Any] = {"recursion_limit": recursion_limit}
@@ -935,9 +1049,16 @@ def run_agent(
                 )
             local_bound_cache = OrderedDict(config.bound_cache)
             local_compression_cache = OrderedDict(config.compression_cache)
+            compression_cache_target = config.compression_cache
             current_llm_id = (id(config.llm), 0)
         else:
             global _persistent_bound_cache, _persistent_compression_cache, _cached_llm_id
+
+            # Drain finished background compression warm-up jobs BEFORE the
+            # snapshot so their results are included in local_compression_cache.
+            # Must run outside _cache_lock — _drain acquires the same lock
+            # internally and threading.Lock is non-reentrant.
+            _drain_background_compression_jobs()
 
             llm_changed: bool
             with _cache_lock:
@@ -946,9 +1067,11 @@ def run_agent(
                 if llm_changed:
                     _persistent_bound_cache.clear()
                     _persistent_compression_cache.clear()
+                    _clear_pending_background_compression_jobs()
                 _cached_llm_id = current_llm_id
                 local_bound_cache = OrderedDict(_persistent_bound_cache)
                 local_compression_cache = OrderedDict(_persistent_compression_cache)
+                compression_cache_target = _persistent_compression_cache
 
         _mark("cache_setup")
 
@@ -971,6 +1094,7 @@ def run_agent(
                     config.available_tools or {},
                     local_bound_cache,
                     local_compression_cache,
+                    extend_run_state=_extend_state,
                 )
                 graph = _cached_graph
                 log.debug("Graph cache hit — reusing compiled graph")
@@ -984,6 +1108,7 @@ def run_agent(
                     bound_cache=local_bound_cache,
                     compression_cache_in=local_compression_cache,
                     tool_context_limit_pct=getattr(config, "tool_context_limit_pct", 0.80),
+                    extend_run_state=_extend_state,
                 )
                 with _cache_lock:
                     _persistent_graph_cache[_graph_key] = graph
@@ -1000,14 +1125,15 @@ def run_agent(
                 bound_cache=local_bound_cache,
                 compression_cache_in=local_compression_cache,
                 tool_context_limit_pct=getattr(config, "tool_context_limit_pct", 0.80),
+                extend_run_state=_extend_state,
             )
         _mark("build_graph")
 
         if config.context_compression:
-            input_messages = apply_message_compression(
+            _queue_background_compression(
                 input_messages,
+                compression_cache_target,
                 call_count=0,
-                compression_cache=local_compression_cache,
                 llm=config.compression_llm or config.llm,
                 max_context_tokens=config.max_context_tokens,
                 min_age_cycles=_compression_min_age,
@@ -1040,25 +1166,26 @@ def run_agent(
 
             log_tool_calls_from_result(result, prior_count=prior_msg_count)
 
-            # Post-turn compression: compress the final message list so the
-            # memory manager stores a compact context and the next turn starts
-            # within budget.  Without this, the context bar shows the raw
-            # uncompressed size and the next turn inherits inflated history.
-            # When TCC is active the background roll-forward handles compression
-            # incrementally, so this O(N) bulk pass is redundant.
+            # Post-turn compression: warm the next turn's cache without holding
+            # response delivery. The current turn already has its answer; the
+            # compressed copy is only needed for future turns.
             _tcc_active = getattr(config, "tier_cache_enabled", False)
             if config.context_compression and result.get("messages") and not _tcc_active:
-                _post_llm = config.compression_llm or config.llm
-                if _post_llm is not None:
-                    result["messages"] = apply_message_compression(
-                        result["messages"],
-                        call_count=999,  # high count ensures all messages are "old enough"
-                        compression_cache=local_compression_cache,
-                        llm=_post_llm,
-                        max_context_tokens=config.max_context_tokens,
-                        min_age_cycles=1,
-                        min_chars=_compression_min_chars,
-                    )
+                _queue_background_compression(
+                    result["messages"],
+                    compression_cache_target,
+                    call_count=999,  # ensures all messages are "old enough"
+                    llm=config.compression_llm or config.llm,
+                    max_context_tokens=config.max_context_tokens,
+                    min_age_cycles=1,
+                    min_chars=_compression_min_chars,
+                    emergency_threshold=getattr(
+                        config, "context_compression_emergency_threshold", 0.85
+                    ),
+                    human_msg_max_chars=getattr(
+                        config, "context_compression_human_msg_max_chars", 20_000
+                    ),
+                )
 
             if result_messages is not None:
                 result_messages.extend(result.get("messages", []))
@@ -1092,20 +1219,18 @@ def run_agent(
 
             return recover_from_step_limit(graph, result, input_messages, invoke_config, log)
         finally:
+            _drain_background_compression_jobs(compression_cache_target)
             if use_per_session_caches:
                 # Merge local snapshots back into the per-session caches.
                 if config.bound_cache is None or config.compression_cache is None:
                     raise RuntimeError("run_agent: per-session caches became None during execution")
-                for key, value in local_bound_cache.items():
-                    config.bound_cache[key] = value
-                    config.bound_cache.move_to_end(key)
-                while len(config.bound_cache) > _MAX_BOUND_CACHE_SIZE:
-                    config.bound_cache.popitem(last=False)
-                for key, value in local_compression_cache.items():
-                    config.compression_cache[key] = value
-                    config.compression_cache.move_to_end(key)
-                while len(config.compression_cache) > _MAX_COMPRESSION_CACHE_SIZE:
-                    config.compression_cache.popitem(last=False)
+                with config.cache_lock:
+                    for key, value in local_bound_cache.items():
+                        config.bound_cache[key] = value
+                        config.bound_cache.move_to_end(key)
+                    while len(config.bound_cache) > _MAX_BOUND_CACHE_SIZE:
+                        config.bound_cache.popitem(last=False)
+                    _merge_compression_cache(config.compression_cache, local_compression_cache)
             else:
                 with _cache_lock:
                     if _cached_llm_id == current_llm_id:
@@ -1114,11 +1239,10 @@ def run_agent(
                             _persistent_bound_cache.move_to_end(key)
                         while len(_persistent_bound_cache) > _MAX_BOUND_CACHE_SIZE:
                             _persistent_bound_cache.popitem(last=False)
-                        for key, value in local_compression_cache.items():
-                            _persistent_compression_cache[key] = value
-                            _persistent_compression_cache.move_to_end(key)
-                        while len(_persistent_compression_cache) > _MAX_COMPRESSION_CACHE_SIZE:
-                            _persistent_compression_cache.popitem(last=False)
+                        _merge_compression_cache(
+                            _persistent_compression_cache, local_compression_cache
+                        )
+            config.system_prompt = _base_system_prompt
 
     except UserCancelledRun:
         raise

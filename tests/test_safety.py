@@ -159,6 +159,22 @@ class TestCreateSafeToolWrapper:
         with pytest.raises(UserCancelledRun):
             wrapped.invoke({})
 
+    def test_user_cancelled_run_propagates_rather_than_being_swallowed(self):
+        """Regression #1193: UserCancelledRun must not be caught by broad except Exception."""
+        tool = self._make_tool()
+        reg = self._make_registry(confirms=False)  # No confirmation needed, tool executes directly
+        ss = SessionState()
+
+        # Simulate the tool raising UserCancelledRun directly
+        def raise_cancel():
+            raise UserCancelledRun("user pressed 'c'")
+
+        tool.func = raise_cancel
+
+        wrapped = create_safe_tool_wrapper(tool, "test_tool", reg, set(), session_state=ss, ui=None)
+        with pytest.raises(UserCancelledRun):
+            wrapped.invoke({})
+
     def test_deny_all_sets_session_flag(self):
         """Choosing 'f' sets ss.deny_all = True."""
         tool = self._make_tool()
@@ -241,6 +257,18 @@ class TestCreateSafeToolWrapper:
         wrapped = create_safe_tool_wrapper(tool, "test_tool", reg, set(), session_state=ss, ui=None)
         result = wrapped.invoke({})
         assert "PermissionError" in result
+
+    def test_error_message_sanitizes_absolute_path(self):
+        """When the underlying tool raises with an absolute path, the path is masked with <path>."""
+        tool = self._make_tool()
+        tool.func = MagicMock(side_effect=FileNotFoundError("No such file: /etc/passwd"))
+        reg = self._make_registry(confirms=False)
+        ss = SessionState()
+        wrapped = create_safe_tool_wrapper(tool, "test_tool", reg, set(), session_state=ss, ui=None)
+        result = wrapped.invoke({})
+        assert "/etc/passwd" not in result
+        assert "<path>" in result
+        assert "FileNotFoundError" in result
 
 
 class TestComputeDiff:
@@ -346,3 +374,174 @@ class TestRunConfirmationPromptExtended:
         ui = self._make_ui("d")
         result = run_confirmation_prompt("shell", {}, ui)
         assert result == ConfirmationResult.DENIED_DISABLE
+
+    def test_none_choice_denies_once(self):
+        """read_choice() returning None must yield DENIED_ONCE without crashing."""
+
+        class _NoneUI:
+            def render_prompt(self, tool_name, tool_input, last_keys, preview_limit):
+                pass
+
+            def read_choice(self):
+                return None
+
+            def show_message(self, message, style):
+                pass
+
+            def show_diff_preview(self, path, diff_lines):
+                pass
+
+            def pause_spinner(self):
+                pass
+
+            def resume_spinner(self):
+                pass
+
+        result = run_confirmation_prompt("my_tool", {}, _NoneUI())
+        assert (
+            result == ConfirmationResult.DENIED_ONCE
+        ), "None from read_choice() must return DENIED_ONCE"
+
+    def test_none_choice_logs_warning(self, caplog):
+        """read_choice() returning None must log a WARNING mentioning the tool name."""
+        import logging
+
+        class _NoneUI:
+            def render_prompt(self, tool_name, tool_input, last_keys, preview_limit):
+                pass
+
+            def read_choice(self):
+                return None
+
+            def show_message(self, message, style):
+                pass
+
+            def show_diff_preview(self, path, diff_lines):
+                pass
+
+            def pause_spinner(self):
+                pass
+
+            def resume_spinner(self):
+                pass
+
+        with caplog.at_level(logging.WARNING, logger="cogtrix"):
+            run_confirmation_prompt("dangerous_tool", {}, _NoneUI())
+
+        warning_records = [r for r in caplog.records if r.levelno >= logging.WARNING]
+        assert warning_records, "Expected at least one WARNING log record when read_choice is None"
+        combined = " ".join(r.getMessage() for r in warning_records)
+        assert (
+            "dangerous_tool" in combined
+        ), f"WARNING must mention the tool name 'dangerous_tool'; got: {combined!r}"
+
+
+class TestConfirmationLockModel:
+    """Validate the simplified single-lock confirmation model.
+
+    With the current design a single ``_confirmation_lock`` is held for the
+    entire check-prompt-commit window.  These tests verify that the lock is
+    correctly shared (not per-thread) and that the approvals set is protected
+    against concurrent races.
+    """
+
+    def _make_tool(self, name="test_tool"):
+        tool = MagicMock()
+        tool.name = name
+        tool.description = "A test tool"
+        tool.args_schema = None
+        tool.func = lambda *args, **kwargs: "executed"
+        return tool
+
+    def _make_registry(self, confirms=True):
+        reg = MagicMock()
+        reg.requires_confirmation.return_value = confirms
+        return reg
+
+    def test_lock_is_shared_module_singleton(self):
+        """Same lock object is visible from all call sites."""
+        assert isinstance(_confirmation_lock, type(threading.Lock()))
+        # Read again — must be the same object (singleton)
+        from src.agent import safety as _safety_mod
+
+        assert _safety_mod._confirmation_lock is _confirmation_lock
+
+    def test_lock_protects_approvals_mutation(self):
+        """Concurrent mutation of the approvals set under the lock is safe."""
+        tool_a = self._make_tool("tool_a")
+        tool_b = self._make_tool("tool_b")
+        reg = self._make_registry(confirms=True)
+        ss = SessionState()
+        approvals: set[str] = set()
+        ui_a = _StubUI("a")
+        ui_b = _StubUI("a")
+
+        wrapped_a = create_safe_tool_wrapper(
+            tool_a, "tool_a", reg, approvals, session_state=ss, ui=ui_a
+        )
+        wrapped_b = create_safe_tool_wrapper(
+            tool_b, "tool_b", reg, approvals, session_state=ss, ui=ui_b
+        )
+
+        errors: list[Exception] = []
+
+        def _run_a():
+            try:
+                wrapped_a.invoke({})
+            except Exception as exc:
+                errors.append(exc)
+
+        def _run_b():
+            try:
+                wrapped_b.invoke({})
+            except Exception as exc:
+                errors.append(exc)
+
+        t_a = threading.Thread(target=_run_a)
+        t_b = threading.Thread(target=_run_b)
+        t_a.start()
+        t_b.start()
+        t_a.join()
+        t_b.join()
+
+        assert not errors, f"Unexpected exceptions: {errors}"
+        # Both tools were approved — approvals set must contain both
+        assert "tool_a" in approvals
+        assert "tool_b" in approvals
+
+    def test_second_thread_sees_existing_approval(self):
+        """Thread B sees an approval added by thread A and skips the prompt."""
+        from unittest.mock import patch
+
+        tool = self._make_tool("test_tool")
+        reg = self._make_registry(confirms=True)
+        ss = SessionState()
+        approvals: set[str] = set()
+
+        prompt_count = 0
+
+        def _counting_prompt(name, inp, ui):
+            nonlocal prompt_count
+            prompt_count += 1
+            return run_confirmation_prompt(name, inp, ui)
+
+        wrapped = create_safe_tool_wrapper(
+            tool, "test_tool", reg, approvals, session_state=ss, ui=_StubUI("a")
+        )
+
+        def _run():
+            with patch("src.agent.safety.run_confirmation_prompt", _counting_prompt):
+                wrapped.invoke({})
+
+        # Thread A runs to completion
+        _run()
+        assert prompt_count == 1
+        assert "test_tool" in approvals
+
+        # Thread B starts after A has fully added to approvals
+        t2 = threading.Thread(target=_run)
+        t2.start()
+        t2.join()
+
+        # With the shared lock, B sees the existing approval and skips prompting
+        assert prompt_count == 1, f"expected 1 prompt, got {prompt_count}"

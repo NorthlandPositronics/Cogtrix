@@ -208,6 +208,21 @@ class TestCampaignLaunch:
         results = mgr.launch(campaign.id)
         assert results["Alice"] == "handler_not_available"
 
+    def test_launch_resets_target_to_pending_on_send_failure(self, tmp_path) -> None:
+        """BUG-853: Target must be reset to 'pending' if handle_outbound raises."""
+        mgr = CampaignManager(tmp_path / "campaigns.json")
+        campaign = _make_campaign()
+        mgr.create(campaign)
+
+        mock_handler = MagicMock()
+        mock_handler.handle_outbound.side_effect = RuntimeError("network down")
+        mgr.set_handler(mock_handler)
+        mgr.set_channels({"whatsapp": MagicMock()})
+
+        results = mgr.launch(campaign.id)
+        assert "error" in results["Alice"]
+        assert campaign.targets[0].status == "pending"
+
 
 class TestCampaignReplyTracking:
     """Reply tracking and goal classification."""
@@ -888,6 +903,25 @@ class TestCampaignBugfixRegressions:
 
         mgr.launch(campaign.id)
         assert statuses_during_send == ["active"]
+
+    def test_update_rejects_property_names(self, tmp_path) -> None:
+        """BUG-854: update() must not crash on computed property names.
+
+        hasattr() matches @property attributes like is_terminal, but these
+        have no setter. Using __dataclass_fields__ scopes updates to actual
+        writable fields.
+        """
+        mgr = CampaignManager(tmp_path / "campaigns.json")
+        campaign = _make_campaign(status="active")
+        mgr.create(campaign)
+
+        # This used to raise AttributeError: can't set attribute
+        mgr.update(campaign.id, is_terminal=True, name="Still active")
+
+        updated = mgr.get(campaign.id)
+        assert updated is not None
+        assert updated.name == "Still active"
+        assert updated.status == "active"  # is_terminal was ignored
 
 
 class TestCampaignAPIBugfixRegressions:

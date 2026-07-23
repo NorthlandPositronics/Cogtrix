@@ -198,7 +198,9 @@ def _print_config_box(yaml_text: str) -> None:
     masked = _mask_secrets(yaml_text)
     for line in masked.rstrip().split("\n"):
         padded = line.ljust(inner_w)
-        print(f"  {_C('\u2502')}{padded}{_C('\u2502')}")
+        print(  # codeql[py/clear-text-logging-sensitive-data] yaml_text is passed through _mask_secrets() before this display; only redacted text reaches here
+            f"  {_C('\u2502')}{padded}{_C('\u2502')}"
+        )
     print(f"  {_C('\u2570')}{_C('\u2500' * inner_w)}{_C('\u256f')}")
 
 
@@ -721,7 +723,7 @@ def _list_ollama_models(base_url: str) -> list[str]:
                 size_s = f"{size / 1e9:.1f}GB"
             else:
                 size_s = f"{size / 1e6:.0f}MB"
-            print(f"    {name} {_D(chr(0x00b7))} {_D(size_s)}")
+            print(f"    {name} {_D(chr(0x00B7))} {_D(size_s)}")
             names.append(name)
         print()
         return names
@@ -1476,10 +1478,18 @@ def _inject_bootstrap(
 def _mask_secrets(yaml_text: str) -> str:
     """Mask API keys and tokens in YAML text for display."""
     _SECRET_KEYS = r"api_key|api_secret|token|password|secret"
-    # Inline values (plain, single-quoted, double-quoted) — trailing quote consumed
+
+    def _replace_inline(m: re.Match[str]) -> str:
+        key = m.group(1)
+        quote = m.group(2)
+        val = m.group(3)
+        masked = _mask_api_key(val)
+        return f"{key}: {quote}{masked}{quote}"
+
+    # Inline values (plain, single-quoted, double-quoted)
     result = re.sub(
-        rf"({_SECRET_KEYS}):\s*[\"']?[^\s\"'#]+[\"']?",
-        lambda m: f"{m.group(1)}: ***",
+        rf"({_SECRET_KEYS}):\s*([\"']?)([^\s\"'#]+)\2",
+        _replace_inline,
         yaml_text,
         flags=re.IGNORECASE,
     )

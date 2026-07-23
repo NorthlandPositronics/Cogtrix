@@ -18,7 +18,9 @@ import time
 from pathlib import Path
 from typing import Any
 
+from src.api.rag_index import load_faiss_store_safe, save_faiss_store
 from src.memory.manager import _sanitize_session_id
+from src.utils.atomic_write import atomic_write_json
 
 log = logging.getLogger("cogtrix")
 
@@ -110,14 +112,30 @@ class SessionVectorStore:
     # Recall
     # ------------------------------------------------------------------
 
-    def recall(self, query: str, k: int = 3) -> list[str]:
-        """Return top-k relevant past exchanges for *query*."""
+    def recall(
+        self,
+        query: str,
+        k: int = 3,
+        score_threshold: float | None = None,
+    ) -> list[str]:
+        """Return top-k relevant past exchanges for *query*.
+
+        When *score_threshold* is provided (0–1, higher = stricter), only
+        exchanges that meet the minimum cosine-like similarity are returned.
+        This prevents unrelated past exchanges from bleeding into the context
+        when FAISS finds no genuinely similar matches (#277).
+        """
         with self._lock:
             if not self._ready or self._vectorstore is None:
                 return []
 
             try:
-                results = self._vectorstore.similarity_search(query, k=k)
+                if score_threshold is not None and score_threshold > 0.0:
+                    # Use L2 distance and convert: similarity = 1 / (1 + dist)
+                    scored = self._vectorstore.similarity_search_with_score(query, k=k)
+                    results = [doc for doc, dist in scored if 1.0 / (1.0 + dist) >= score_threshold]
+                else:
+                    results = self._vectorstore.similarity_search(query, k=k)
                 return [doc.page_content for doc in results]
             except Exception as exc:
                 log.warning("Vector recall: search failed: %s", exc)
@@ -135,11 +153,12 @@ class SessionVectorStore:
 
             try:
                 self._index_dir.mkdir(parents=True, exist_ok=True)
-                self._vectorstore.save_local(str(self._index_dir))
+                save_faiss_store(self._vectorstore, self._index_dir)
 
                 meta = {"embedding_model": self._embedding_model}
                 meta_path = self._index_dir / "meta.json"
-                meta_path.write_text(json.dumps(meta), encoding="utf-8")
+                with atomic_write_json(meta_path) as fh:
+                    json.dump(meta, fh)
             except Exception as exc:
                 log.warning("Vector recall: save failed: %s", exc)
 
@@ -147,6 +166,9 @@ class SessionVectorStore:
         """Load a persisted index if it exists and is compatible."""
         meta_path = self._index_dir / "meta.json"
         if not meta_path.exists():
+            if self._index_dir.exists() and any(self._index_dir.iterdir()):
+                self._load_index_without_meta()
+                return
             self._ready = True
             return
 
@@ -167,18 +189,22 @@ class SessionVectorStore:
             self._ready = True
             return
 
-        # Compatible — try to load
+        # Compatible — try to load safely
         try:
-            from langchain_community.vectorstores import FAISS
-
-            self._vectorstore = FAISS.load_local(
-                str(self._index_dir),
-                self._embedding_fn,
-                allow_dangerous_deserialization=True,
-            )
+            self._vectorstore = load_faiss_store_safe(self._index_dir, self._embedding_fn)
             self._ready = True
         except Exception as exc:
             log.warning("Vector recall: failed to load index: %s", exc)
+            self._reset_index()
+            self._ready = True
+
+    def _load_index_without_meta(self) -> None:
+        """Attempt to load a persisted index even if meta.json is missing."""
+        try:
+            self._vectorstore = load_faiss_store_safe(self._index_dir, self._embedding_fn)
+            self._ready = True
+        except Exception as exc:
+            log.warning("Vector recall: failed to load index without meta: %s", exc)
             self._reset_index()
             self._ready = True
 

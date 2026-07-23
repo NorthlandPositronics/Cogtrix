@@ -54,6 +54,37 @@ def test_create_session_returns_session():
     assert isinstance(s, PromptSession)
 
 
+def test_create_output_disables_cpr(monkeypatch):
+    import src.ui.input_session as m
+
+    class FakeOutput:
+        def __init__(self) -> None:
+            self.enable_cpr = True
+
+    monkeypatch.setattr(m, "Vt100_Output", FakeOutput)
+    monkeypatch.setattr(m, "create_output", lambda: FakeOutput())
+
+    output = m._create_output()
+
+    assert output.enable_cpr is False
+
+
+def test_create_session_uses_output_helper(monkeypatch):
+    from prompt_toolkit.output.base import DummyOutput
+
+    import src.ui.input_session as m
+
+    sentinel = DummyOutput()
+    calls: list[object] = []
+
+    monkeypatch.setattr(m, "_create_output", lambda: calls.append(sentinel) or sentinel)
+
+    session = m.create_session()
+
+    assert calls == [sentinel]
+    assert session.output is sentinel
+
+
 def test_create_session_with_history():
     from prompt_toolkit.history import InMemoryHistory
 

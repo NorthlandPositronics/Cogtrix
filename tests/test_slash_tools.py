@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
-from cogtrix import _SECONDARY_CATEGORY_ORDER, _TOOL_CATEGORY_MAP, _categorize_tools
+from cogtrix import (
+    _SECONDARY_CATEGORY_ORDER,
+    _TOOL_CATEGORIES,
+    _TOOL_CATEGORY_MAP,
+    _categorize_tools,
+)
 
 
 def _groups(tool_names: list[str]) -> dict[str, list[str]]:
@@ -47,6 +52,16 @@ def test_tasks_agents_tools_grouped():
     groups = _groups(ta_tools)
     assert "Tasks & Agents" in groups
     assert set(groups["Tasks & Agents"]) == set(ta_tools)
+    assert "Other" not in groups
+
+
+def test_knowledge_base_tools_grouped():
+    """Knowledge base tools appear under 'Knowledge Base', not 'Other'."""
+    kb_tools = _TOOL_CATEGORIES["Knowledge Base"]
+    assert kb_tools, "No 'Knowledge Base' tools in _TOOL_CATEGORIES"
+    groups = _groups(kb_tools)
+    assert "Knowledge Base" in groups
+    assert set(groups["Knowledge Base"]) == set(kb_tools)
     assert "Other" not in groups
 
 

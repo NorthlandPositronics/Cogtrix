@@ -31,7 +31,7 @@ RUN uv sync --frozen --no-dev --no-install-project \
     find /app/.venv -type d -name test      -exec rm -rf {} + 2>/dev/null || true && \
     find /app/.venv -name '*.dist-info/RECORD' -delete 2>/dev/null || true && \
     find /app/.venv -name 'direct_url.json' -delete 2>/dev/null || true && \
-    rm -rf /root/.cache/uv /root/.cache/pip
+    rm -rf /root/.cache/uv
 
 # ── Stage 2: Runtime ─────────────────────────────────────────
 FROM python:3.13-slim@sha256:a0779d7c12fc20be6ec6b4ddc901a4fd7657b8a6bc9def9d3fde89ed5efe0a3d AS runtime
@@ -90,7 +90,7 @@ ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     COGTRIX_DATA_DIR="/data" \
-    COGTRIX_ALLOWED_WRITE_PATHS="/tmp:/data/output"
+    COGTRIX_ALLOWED_WRITE_PATHS="/tmp,/data/output,/data/log"
 
 # Virtual environment from builder — --link enables independent layer caching.
 # Root-owned so /app/.venv is read-only for the cogtrix runtime user.
@@ -104,7 +104,10 @@ RUN mkdir -p \
         /data/vectordb \
         /data/api/uploads \
         /data/assistant \
-        /data/workflows && \
+        /data/workflows \
+        /data/output \
+        /data/log \
+        /data/documents && \
     chown -R cogtrix:cogtrix /data && \
     mkdir -p /run/cogtrix && \
     chown cogtrix:cogtrix /run/cogtrix

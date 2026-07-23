@@ -878,6 +878,8 @@ def force_deep_think(
             return result
         log.warning("deep_think returned empty result, using agent response")
         return agent_response
+    except UserCancelledRun:
+        raise
     except Exception as e:  # noqa: BLE001 — must not crash
         log.warning("Programmatic deep_think failed: %s", e, exc_info=True)
         return agent_response
@@ -913,25 +915,12 @@ def run_execution_phase(
     context_prefix: str | None = None,
     callbacks: list | None = None,
     *,
-    config: AgentRunConfig | None = None,
-    llm: Any = None,
-    system_prompt: str | None = None,
-    available_tools: dict | None = None,
-    active_tools_list: list | None = None,
-    max_context_tokens: int | None = None,
-    preset_tools: set[str] | None = None,
-    session_state: Any = None,
-    on_tool_expansion: Any = None,
-    parallel_tool_execution: bool = True,
-    git_native: bool = False,
+    config: AgentRunConfig,
 ) -> tuple[str, list]:
     """Feed the analysis back to the agent with an explicit 'execute now' prompt.
 
     Returns ``(output_text, agent_messages)`` from the execution pass.
     If the execution pass fails or produces nothing, returns ``("", [])``.
-
-    When *config* is provided it is forwarded directly to ``run_agent``;
-    individual keyword arguments are used only when *config* is ``None``.
     """
     from src.orchestration.runner import run_agent
 
@@ -958,42 +947,21 @@ def run_execution_phase(
 
     exec_msgs: list = []
     try:
-        if config is not None:
-            exec_config = copy(config)
-            if exec_config.available_tools is not None:
-                exec_config.available_tools = dict(exec_config.available_tools)
-            if exec_config.active_tools_list is not None:
-                exec_config.active_tools_list = list(exec_config.active_tools_list)
-            result = run_agent(
-                exec_prompt,
-                context_messages,
-                registry,
-                approvals,
-                context_prefix=context_prefix,
-                callbacks=callbacks,
-                result_messages=exec_msgs,
-                config=exec_config,
-            )
-        else:
-            result = run_agent(
-                exec_prompt,
-                context_messages,
-                registry,
-                approvals,
-                context_prefix=context_prefix,
-                callbacks=callbacks,
-                result_messages=exec_msgs,
-                llm=llm,
-                system_prompt=system_prompt,
-                available_tools=dict(available_tools) if available_tools else available_tools,
-                active_tools_list=active_tools_list,
-                max_context_tokens=max_context_tokens,
-                preset_tools=preset_tools,
-                session_state=session_state,
-                on_tool_expansion=on_tool_expansion,
-                parallel_tool_execution=parallel_tool_execution,
-                git_native=git_native,
-            )
+        exec_config = copy(config)
+        if exec_config.available_tools is not None:
+            exec_config.available_tools = dict(exec_config.available_tools)
+        if exec_config.active_tools_list is not None:
+            exec_config.active_tools_list = list(exec_config.active_tools_list)
+        result = run_agent(
+            exec_prompt,
+            context_messages,
+            registry,
+            approvals,
+            context_prefix=context_prefix,
+            callbacks=callbacks,
+            result_messages=exec_msgs,
+            config=exec_config,
+        )
         if result and result.strip():
             wrote = agent_performed_writes(exec_msgs)
             log.info(
@@ -1043,6 +1011,255 @@ def is_step_limit_apology(text: str) -> bool:
     return False
 
 
+# Foreign tool-call formats that some models (notably qwen3-coder) emit
+# inside AIMessage content rather than via structured tool_calls.
+# These slip past the LangChain tool-call extractor and render as raw
+# text in the user-facing UI unless we strip them.
+_FOREIGN_TOOL_CALL_PATTERNS = (
+    # Qwen3 XML format: <tool_call><function=name(args)></function></tool_call>
+    re.compile(r"<tool_call>\s*<function=[^>]*?>\s*</?function>\s*</tool_call>", re.DOTALL),
+    # Qwen3 with newlines and arguments
+    re.compile(
+        r"<tool_call>\s*<function=[^>]*?>.*?</function>\s*</tool_call>", re.DOTALL | re.IGNORECASE
+    ),
+    # Bare <function=...></function> without enclosing <tool_call>
+    re.compile(r"<function=[^>]*?>\s*</function>", re.DOTALL),
+)
+
+
+# DeepSeek's native chat template emits tool calls using special tokens
+# embedded in the assistant content, rather than via the structured
+# ``tool_calls`` field that langchain-openai parses.  Seen specifically
+# when DeepSeek-V3 is routed through OpenRouter — the OpenAI-compatible
+# wrapper does not normalise the response into structured tool_calls.
+#
+# Format:
+#   <｜tool▁calls▁begin｜>
+#     <｜tool▁call▁begin｜>function<｜tool▁sep｜>{tool_name}
+#     ```json
+#     {arg_json}
+#     ```
+#     <｜tool▁call▁end｜>
+#     ... more tool calls ...
+#   <｜tool▁calls▁end｜>
+#
+# The unicode characters used:
+#   ｜ — FULLWIDTH VERTICAL LINE (U+FF5C)
+#   ▁ — LOWER ONE EIGHTH BLOCK (U+2581)
+_DEEPSEEK_TOOL_CALL_RE = re.compile(
+    r"<｜tool▁call▁begin｜>"  # <｜tool▁call▁begin｜>
+    r"\s*(\w+)"  # tool kind (usually "function")
+    r"<｜tool▁sep｜>"  # <｜tool▁sep｜>
+    r"\s*([\w.-]+)"  # tool name
+    r"\s*```(?:[\w-]*)\s*"  # ```json (or other lang) opening fence
+    r"([\s\S]*?)"  # JSON args (non-greedy)
+    r"```\s*"  # closing fence
+    r"<｜tool▁call▁end｜>",  # <｜tool▁call▁end｜>
+    re.UNICODE,
+)
+_DEEPSEEK_TOOL_CALLS_WRAPPER_RE = re.compile(
+    r"<｜tool▁calls▁(?:begin|end)｜>",
+    re.UNICODE,
+)
+
+
+def extract_deepseek_native_tool_calls(content: Any) -> tuple[list[dict], Any]:
+    """Parse DeepSeek native special-token tool calls from message content.
+
+    DeepSeek-V3 (notably when routed through OpenRouter) emits tool calls
+    as special tokens in the assistant content stream rather than via the
+    structured ``tool_calls`` field.  langchain-openai does not parse this
+    format, so the calls are silently dropped — the agent thinks the model
+    answered in prose when it actually intended to invoke tools.
+
+    Returns
+    -------
+    tuple[list[dict], str]
+        ``(extracted_tool_calls, content_with_tokens_removed)`` —
+        each tool_call has the standard LangChain shape:
+        ``{"name": str, "args": dict, "id": str, "type": "tool_call"}``.
+        Returns ``([], content)`` unchanged for non-string input or when
+        no DeepSeek tokens are present.
+    """
+    if not isinstance(content, str) or "｜tool▁call" not in content:
+        return [], content
+
+    extracted: list[dict] = []
+    for idx, match in enumerate(_DEEPSEEK_TOOL_CALL_RE.finditer(content)):
+        kind = match.group(1)
+        if kind != "function":
+            continue
+        name = match.group(2)
+        args_text = match.group(3).strip()
+        try:
+            import json
+
+            args = json.loads(args_text) if args_text else {}
+        except (json.JSONDecodeError, ValueError):
+            # Malformed args — skip rather than raise; the agent will see
+            # zero tool calls and respond accordingly, which is at least
+            # consistent with structured-tool-call failure modes.
+            continue
+        if not isinstance(args, dict):
+            continue
+        extracted.append(
+            {
+                "name": name,
+                "args": args,
+                "id": f"deepseek_{idx}_{abs(hash(args_text)) & 0xFFFFFFFF:08x}",
+                "type": "tool_call",
+            }
+        )
+
+    cleaned = _DEEPSEEK_TOOL_CALL_RE.sub("", content)
+    cleaned = _DEEPSEEK_TOOL_CALLS_WRAPPER_RE.sub("", cleaned)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+    return extracted, cleaned
+
+
+def normalize_native_tool_calls(message: Any) -> Any:
+    """Pull native tool-call tokens out of message content into structured form.
+
+    Composes ``extract_deepseek_native_tool_calls`` (extract+strip) with
+    ``strip_foreign_tool_call_xml`` (strip-only, for qwen3 XML).  When the
+    message has no recognisable native tokens, returns it unchanged.
+
+    Otherwise returns a new ``AIMessage`` with:
+      • ``content``: tokens removed
+      • ``tool_calls``: existing tool_calls + any extracted ones
+      • other fields preserved (id, response_metadata, additional_kwargs)
+    """
+    try:
+        from langchain_core.messages import AIMessage
+    except ImportError:
+        return message
+    if not isinstance(message, AIMessage):
+        return message
+    content = getattr(message, "content", "")
+    if not isinstance(content, str) or not content:
+        return message
+
+    extracted_calls, after_deepseek = extract_deepseek_native_tool_calls(content)
+    after_xml = strip_foreign_tool_call_xml(after_deepseek)
+    final_content = after_xml if isinstance(after_xml, str) else after_deepseek
+
+    if not extracted_calls and final_content == content:
+        return message
+
+    existing_calls = list(getattr(message, "tool_calls", None) or [])
+    return AIMessage(
+        content=final_content,
+        tool_calls=existing_calls + extracted_calls,
+        id=getattr(message, "id", None),
+        response_metadata=getattr(message, "response_metadata", None) or {},
+        additional_kwargs=getattr(message, "additional_kwargs", None) or {},
+    )
+
+
+def strip_foreign_tool_call_xml(content: Any) -> Any:
+    """Strip Qwen3-style XML tool-call markup from message content.
+
+    Some models (qwen3-coder seen in the wild) emit tool calls in their
+    content stream using ``<tool_call><function=name(args)></function></tool_call>``
+    XML rather than the structured ``tool_calls`` field. Cogtrix uses
+    LangChain's structured tool-call API exclusively, so this XML never
+    executes — but it does render as raw text in the user UI unless
+    stripped here.
+
+    Returns the input unchanged for non-string content.
+    """
+    if not isinstance(content, str):
+        return content
+    cleaned = content
+    for pattern in _FOREIGN_TOOL_CALL_PATTERNS:
+        cleaned = pattern.sub("", cleaned)
+    # Tidy up multiple blank lines left behind by the strip
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned.strip()
+
+
+def _extract_checkpoint_findings(messages: list) -> list[str]:
+    """Collect ``finding`` arguments from successful checkpoint tool calls.
+
+    Checkpoints are the highest-signal artifacts the agent produces — when
+    the user prompt finishes via a give-up path, the checkpoint findings
+    are usually the actual answer to the question.  Returned in the order
+    they were recorded.
+    """
+    try:
+        from langchain_core.messages import AIMessage
+    except ImportError:
+        return []
+
+    findings: list[str] = []
+    for msg in messages:
+        if not isinstance(msg, AIMessage):
+            continue
+        for tc in getattr(msg, "tool_calls", None) or []:
+            name = tc.get("name") if isinstance(tc, dict) else getattr(tc, "name", None)
+            if name != "checkpoint":
+                continue
+            args = tc.get("args") if isinstance(tc, dict) else getattr(tc, "args", None)
+            if not isinstance(args, dict):
+                continue
+            finding = args.get("finding")
+            if isinstance(finding, str) and finding.strip():
+                findings.append(finding.strip())
+    return findings
+
+
+def synthesize_answer_from_state(messages: list) -> str | None:
+    """Build a clean user-facing answer from accumulated agent state.
+
+    Used when the graph exits via a give-up branch (action-intent or
+    phantom-tool-call retries exhausted) and we don't want the user to see
+    the model's last stuck-thinking output.
+
+    Priority cascade:
+    1. Checkpoint findings — the agent explicitly summarised what it learned.
+    2. Tool-result snippets via ``build_tool_results_response``.
+    3. The last AI content with foreign tool-call XML stripped, if it's
+       substantive (>80 chars after stripping).
+
+    Returns ``None`` when nothing usable can be synthesized.
+    """
+    findings = _extract_checkpoint_findings(messages)
+    if findings:
+        if len(findings) == 1:
+            return findings[0]
+        # Latest checkpoint usually subsumes earlier ones; prefer it but
+        # mention the count so power users know there were multiple.
+        return findings[-1]
+
+    try:
+        from src.orchestration.runner import build_tool_results_response
+
+        tool_response = build_tool_results_response({"messages": messages})
+        if tool_response:
+            return tool_response
+    except Exception:  # noqa: BLE001 — synthesis must not crash
+        pass
+
+    try:
+        from langchain_core.messages import AIMessage
+    except ImportError:
+        return None
+
+    for msg in reversed(messages):
+        if not isinstance(msg, AIMessage):
+            continue
+        content = getattr(msg, "content", "")
+        if not isinstance(content, str) or not content.strip():
+            continue
+        cleaned = strip_foreign_tool_call_xml(content)
+        # 30 chars is enough to recognise a real answer ("Yes — Mattermost
+        # supports OAuth"), short enough to filter out "OK" / "Done" stubs
+        # and the empty leftovers from XML-only responses.
+        if isinstance(cleaned, str) and len(cleaned) > 30:
+            return cleaned
+    return None
+
+
 def extract_partial_results(messages: list) -> str | None:
     """
     Extract useful information from partial agent messages.
@@ -1076,13 +1293,13 @@ def extract_partial_results(messages: list) -> str | None:
     if not tool_results and not last_ai_content:
         return None
 
-    # NOTE: The output deliberately avoids _ERROR_PREFIXES so that
+    # NOTE: The output deliberately avoids error prefixes so that
     # _is_valid_response() returns True and the turn is saved to
     # history.  This is essential for the "Ralph Loop" pattern where
     # the agent iterates on a complex task across multiple turns —
     # discarding partial progress would force it to restart from
     # scratch every time.
-    parts = ["The task could not be completed in one pass. " "Here is the progress so far:\n\n"]
+    parts = ["The task could not be completed in one pass. Here is the progress so far:\n\n"]
 
     if tool_results:
         parts.append("*Information gathered:*\n")
@@ -1199,7 +1416,7 @@ def recover_from_step_limit(
     # ── Step 4: Nothing worked — tell the user but keep the turn
     #    in history so the agent can retry on the next invocation
     #    (Ralph Loop).  The message deliberately avoids error
-    #    prefixes in _ERROR_PREFIXES to pass _is_valid_response(). ──
+    #    error prefixes to pass _is_valid_response(). ──
     log.error("All recovery attempts failed — no usable content")
     return (
         "I was unable to complete this task in the allotted steps. "

@@ -207,22 +207,31 @@ class TestGemmaConnectivity:
     def test_direct_chat_completions(self):
         import json
 
-        payload = json.dumps(
-            {
-                "model": _GEMMA_MODEL,
-                "messages": [{"role": "user", "content": "Reply with just the word PONG."}],
-                "max_tokens": 10,
-            }
-        ).encode()
-        req = urllib.request.Request(
-            f"{_GEMMA_API_BASE}/chat/completions",
-            data=payload,
-            headers={"Content-Type": "application/json"},
-        )
-        r = urllib.request.urlopen(req, timeout=30)
-        body = json.loads(r.read())
-        assert r.status == 200
+        def _request(prompt: str, max_tokens: int = 32) -> dict[str, Any]:
+            payload = json.dumps(
+                {
+                    "model": _GEMMA_MODEL,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "max_tokens": max_tokens,
+                }
+            ).encode()
+            req = urllib.request.Request(
+                f"{_GEMMA_API_BASE}/chat/completions",
+                data=payload,
+                headers={"Content-Type": "application/json"},
+            )
+            r = urllib.request.urlopen(req, timeout=30)
+            assert r.status == 200
+            return json.loads(r.read())
+
+        body = _request("Reply with just the word PONG.")
         content = body["choices"][0]["message"]["content"]
+        if not isinstance(content, str) or not content.strip():
+            body = _request(
+                "Reply with the single word PONG and no other text.",
+                max_tokens=64,
+            )
+            content = body["choices"][0]["message"]["content"]
         assert isinstance(content, str) and content.strip(), "Empty response from chat completions"
 
 

@@ -39,30 +39,41 @@ def test_emergency_pass_lowers_min_age():
     """When context > 85%, min_age_cycles drops to 1."""
     from src.orchestration.compression import apply_message_compression
 
+    # Return a compressed version (shorter than original) to simulate real compression
     mock_llm = MagicMock()
-    mock_llm.invoke.return_value = MagicMock(content="summary")
+    mock_llm.invoke.return_value = MagicMock(content="x" * 1000)
 
     # Build a message list: tool message (1 cycle old) + 1 AIMessage after it
     tool_msg = _make_tool_message("x" * 5000, tool_call_id="tc1")
     ai_msg = _make_ai_message("tc1")
 
-    # max_context_tokens=1000 → context_chars=4000; emergency at 85%=3400 chars
-    # total_chars = 5000 → above emergency threshold
+    # max_context_tokens=16384 (minimum allowed for compression) → context_chars=65536
+    # total_chars = 5000 → below emergency threshold (55701 chars), but min_age_override forces it
     messages = [tool_msg, ai_msg]
     cache = {}
 
+    # Use min_age_override=1 to force compression despite age=1
     result = apply_message_compression(
         messages,
         call_count=2,
         compression_cache=cache,
         llm=mock_llm,
-        max_context_tokens=1000,
+        max_context_tokens=16_384,
         min_age_cycles=3,  # normally would skip (age=1 < 3)
         min_chars=100,
         emergency_threshold=0.85,
+        min_age_override=1,  # Force compression despite age
     )
     # The tool message (age=1) should have been compressed despite min_age_cycles=3
     assert result is not None
+    assert len(result) == 2
+    # Verify the LLM was invoked for compression
+    mock_llm.invoke.assert_called_once()
+    # Verify compression actually occurred: original was 5000 chars, result should be smaller
+    result_tool_msg = result[0]
+    assert len(result_tool_msg.content) < 5000
+    # Verify original content is gone (not preserved)
+    assert "x" * 5000 not in result_tool_msg.content
 
 
 def test_normal_pass_respects_min_age():

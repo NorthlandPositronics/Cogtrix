@@ -1,0 +1,27 @@
+id: json_phantom
+complexity: medium
+category: phantom_detection
+description: "The model emits JSON tool-array phantom markup and then recovers."
+tags: [critical, tier1]
+system_prompt: "You are a helpful assistant."
+tools:
+  - github_search_issues
+
+script:
+  - user: "Search for the issue that mentions the quality metrics specification."
+  - llm_phantom: '[{"tool": "search_web", "arguments": {"query": "quality metrics"}}]'
+  - llm:
+      tool_calls:
+        - name: github_search_issues
+          args:
+            q: "quality metrics"
+            state: "open"
+  - tool_result: "Issue #164 is open and describes the quality metrics specification."
+  - llm: "Issue #164 tracks the quality metrics specification."
+
+metrics:
+  required_tools: [github_search_issues]
+  forbidden_tools: []
+  task_completed: true
+  phantom_calls: true
+  max_turns: 4

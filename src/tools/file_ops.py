@@ -150,8 +150,62 @@ def _validate_path(path: str, is_write: bool = False) -> tuple[bool, str, Path |
         Tuple of (is_valid, error_message, resolved_path)
     """
     try:
-        p = Path(path).resolve()
-        cwd = Path.cwd().resolve()
+        # First, check for symlinks in path components before resolving
+        # This prevents symlink attacks where a symlink points outside allowed dirs
+        p = Path(path)
+        cwd = Path.cwd()
+
+        # Check if any component of the path is a symlink
+        # Walk up the path and check each component
+        current = p
+        visited = set()
+        while str(current) != str(current.parent) and str(current) != "/":
+            if current in visited:
+                # Circular symlink detected
+                return False, "Path contains circular symlink", None
+            visited.add(current)
+            try:
+                if current.is_symlink():
+                    # Symlink detected - check if it points within allowed directories
+                    try:
+                        link_target = current.resolve()
+                    except (OSError, PermissionError):
+                        # Dangling symlink or unreadable link target - cannot verify
+                        return False, "Dangling symlink not allowed", None
+                    try:
+                        link_target.relative_to(cwd)
+                    except ValueError:
+                        # Not relative to cwd, check other allowed dirs
+                        in_allowed = False
+                        try:
+                            link_target.relative_to(_APP_DIR)
+                            in_allowed = True
+                        except ValueError:
+                            pass
+                        if not in_allowed:
+                            for extra_dir in _extra_write_dirs:
+                                try:
+                                    link_target.relative_to(extra_dir)
+                                    in_allowed = True
+                                except ValueError:
+                                    pass
+                            if not in_allowed:
+                                for extra_read_dir in _extra_read_dirs:
+                                    try:
+                                        link_target.relative_to(extra_read_dir)
+                                        in_allowed = True
+                                    except ValueError:
+                                        pass
+                        if not in_allowed:
+                            return False, "Symlink target escapes allowed directories", None
+            except (OSError, PermissionError):
+                # Can't stat the path component
+                pass
+            current = current.parent
+
+        # Now resolve the path and check final location
+        p = p.resolve()
+        cwd = cwd.resolve()
 
         # Check for path traversal attempts
         if ".." in path:
@@ -281,10 +335,7 @@ def read_file(
 
         if start_line > 0 or max_lines is not None:
             if start_line >= total_lines:
-                return (
-                    f"Error: start_line {start_line} is beyond end of file "
-                    f"({total_lines} lines)"
-                )
+                return f"Error: start_line {start_line} is beyond end of file ({total_lines} lines)"
             end = min(start_line + max_lines, total_lines) if max_lines is not None else total_lines
             selected = all_lines[start_line:end]
             header = (
@@ -335,6 +386,17 @@ def write_file(path: str, content: str, encoding: str = "utf-8") -> str:
     Returns:
         Success or error message
     """
+    # Handle alternative parameter name from agent (e.g., absolute_path instead of path)
+    if isinstance(path, dict):
+        if "absolute_path" in path:
+            path = path["absolute_path"]
+        elif "file_path" in path:
+            path = path["file_path"]
+        elif "path" in path:
+            path = path["path"]
+        else:
+            return "Error: Invalid arguments for write_file"
+
     is_valid, error, resolved = _validate_path(path, is_write=True)
     if not is_valid:
         return f"Error: {error}"
@@ -370,6 +432,17 @@ def append_file(path: str, content: str, encoding: str = "utf-8") -> str:
     Returns:
         Success or error message
     """
+    # Handle alternative parameter name from agent (e.g., absolute_path instead of path)
+    if isinstance(path, dict):
+        if "absolute_path" in path:
+            path = path["absolute_path"]
+        elif "file_path" in path:
+            path = path["file_path"]
+        elif "path" in path:
+            path = path["path"]
+        else:
+            return "Error: Invalid arguments for append_file"
+
     is_valid, error, resolved = _validate_path(path, is_write=True)
     if not is_valid:
         return f"Error: {error}"
@@ -436,7 +509,9 @@ def list_directory(
 
     try:
         entries = []
-        for item in sorted(resolved.glob(pattern)):
+        for item in sorted(resolved.glob(pattern, recurse_symlinks=False)):
+            if item.is_symlink():
+                continue
             if not item.resolve().is_relative_to(resolved):
                 continue
             name = item.name
@@ -488,8 +563,19 @@ def patch_file(path: str, old_str: str, new_str: str) -> str:
         new_str: Replacement string (may be empty to delete the match).
 
     Returns:
-        Success message or a descriptive error string.
+        Success or error message
     """
+    # Handle alternative parameter name from agent (e.g., absolute_path instead of path)
+    if isinstance(path, dict):
+        if "absolute_path" in path:
+            path = path["absolute_path"]
+        elif "file_path" in path:
+            path = path["file_path"]
+        elif "path" in path:
+            path = path["path"]
+        else:
+            return "Error: Invalid arguments for patch_file"
+
     is_valid, error, resolved = _validate_path(path, is_write=True)
     if not is_valid:
         return f"Error: {error}"
@@ -503,33 +589,37 @@ def patch_file(path: str, old_str: str, new_str: str) -> str:
     if not resolved.is_file():
         return f"Error: Not a file: {path}"
 
-    try:
-        content = resolved.read_text(encoding="utf-8")
-    except PermissionError:
-        return f"Error: Permission denied reading: {path}"
-    except Exception as e:
-        return f"Error reading file: {e}"
+    lock = _get_append_lock(str(resolved))
+    with lock:
+        try:
+            content = resolved.read_text(encoding="utf-8")
+        except PermissionError:
+            return f"Error: Permission denied reading: {path}"
+        except Exception as e:
+            return f"Error reading file: {e}"
 
-    count = content.count(old_str)
-    if count == 0:
-        return f"Error: old_str not found in {path}. " "Check for exact whitespace and indentation."
-    if count > 1:
-        return (
-            f"Error: old_str found {count} times in {path} — ambiguous. "
-            "Add more surrounding context to make the match unique."
-        )
+        count = content.count(old_str)
+        if count == 0:
+            return (
+                f"Error: old_str not found in {path}. Check for exact whitespace and indentation."
+            )
+        if count > 1:
+            return (
+                f"Error: old_str found {count} times in {path} — ambiguous. "
+                "Add more surrounding context to make the match unique."
+            )
 
-    new_content = content.replace(old_str, new_str, 1)
+        new_content = content.replace(old_str, new_str, 1)
 
-    try:
-        from src.utils.atomic_write import atomic_write_json
+        try:
+            from src.utils.atomic_write import atomic_write_json
 
-        with atomic_write_json(resolved, encoding="utf-8") as f:
-            f.write(new_content)
-    except PermissionError:
-        return f"Error: Permission denied writing: {path}"
-    except Exception as e:
-        return f"Error writing file: {e}"
+            with atomic_write_json(resolved, encoding="utf-8") as f:
+                f.write(new_content)
+        except PermissionError:
+            return f"Error: Permission denied writing: {path}"
+        except Exception as e:
+            return f"Error writing file: {e}"
 
     old_lines = content.count("\n") + 1
     new_lines = new_content.count("\n") + 1
@@ -668,8 +758,7 @@ TOOL_CONFIGS = [
     {
         "name": "file_info",
         "description": (
-            "Get detailed information about a file or directory "
-            "(size, dates, permissions, etc.)."
+            "Get detailed information about a file or directory (size, dates, permissions, etc.)."
         ),
         "input_schema": FileInfoInput,
         "requires_confirmation": False,

@@ -1,0 +1,48 @@
+id: finance_budget_variance_report
+domain: finance
+title: Budget Variance Report
+description: |
+  The agent receives spreadsheet data with budget vs. actual figures.
+  It must identify all line items with variances greater than 10%,
+  explain each variance, and generate a summary report.
+
+  Required workflow:
+    1) Parse budget and actual values for all departments
+    2) Compute percentage variance per line item
+    3) Flag all |variance| > 10% and summarize findings
+user_prompt: |
+  Here is our Q1 budget vs actual data:
+  Marketing: budget $50,000, actual $62,000
+  Engineering: budget $120,000, actual $118,500
+  Sales: budget $80,000, actual $95,000
+  Operations: budget $40,000, actual $38,200
+  Please read the data, calculate variances, identify any over 10%,
+  and generate a variance report.
+system_prompt: |
+  You are a finance assistant. Read spreadsheet data using read_spreadsheet,
+  calculate variances with calculate_variance, and generate a report with
+  generate_report. Flag any line items with variances exceeding 10%.
+tools_required:
+  - read_spreadsheet
+  - calculate_variance
+  - generate_report
+expected_outcome: |
+  A report is generated that identifies Marketing (+24%) and Sales (+18.75%)
+  as variances exceeding 10%, with correct calculations and plain-language
+  explanations for each flagged department.
+success_criteria:
+  - "contains: read_spreadsheet"
+  - "contains: calculate_variance"
+  - "contains: generate_report"
+  - "contains: Marketing"
+  - "contains: Sales"
+  - "contains: 24%"
+  - "contains: 18.75%"
+  - "contains: 10%"
+  - "not_contains: error"
+max_turns: 20
+timeout_seconds: 120
+tags:
+  - gate2
+  - finance
+budget_usd_estimate: 0.05

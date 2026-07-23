@@ -301,11 +301,14 @@ def _ensure_str_list(value: Any) -> list[str]:
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
-    """Coerce *value* to float, returning *default* on failure."""
-    if isinstance(value, (int, float)):
-        return float(value)
+    """Coerce *value* to float, returning *default* on failure or NaN/Inf."""
+    import math
+
     try:
-        return float(value)
+        result = float(value)
+        if math.isnan(result) or math.isinf(result):
+            return default
+        return result
     except (TypeError, ValueError):
         return default
 
@@ -873,6 +876,36 @@ def deep_think(
         context = context[:_MAX_CONTEXT]
         log.warning("deep_think context truncated to %d characters", _MAX_CONTEXT)
 
+    # Guard: session-history pollution detection.
+    # When an agent passes its full session history as context instead of
+    # task-specific research, the resulting context contains many DISTINCT
+    # artifacts from multiple unrelated turns.  Legitimate focused research
+    # for any task domain has at most a handful of unique cross-references;
+    # a session dump has dozens.
+    #
+    # Signal: count UNIQUE artifact patterns — a session history dump from
+    # any domain (engineering, procurement, travel, finance, ...) produces
+    # many unique identifiers, while focused research produces few.
+    _SHA_RE = re.compile(r"\b[0-9a-f]{7,40}\b")
+    _PR_REF_RE = re.compile(r"\bPR #(\d+)\b", re.IGNORECASE)
+    _SLACK_ID_RE = re.compile(r"\bU[0-9A-Z]{8,11}\b")
+    _unique_shas = len(set(_SHA_RE.findall(context)))
+    _unique_prs = len(set(_PR_REF_RE.findall(context)))
+    _unique_slack = len(set(_SLACK_ID_RE.findall(context)))
+    _pollution_score = _unique_shas + _unique_prs * 3 + _unique_slack * 2
+    if _pollution_score >= 15:
+        log.warning(
+            "deep_think: session-history pollution detected "
+            "(score=%d, unique_shas=%d, unique_prs=%d, unique_slack_ids=%d) "
+            "— context stripped to prevent cross-domain hallucination. "
+            "Pass only research data gathered for the current task.",
+            _pollution_score,
+            _unique_shas,
+            _unique_prs,
+            _unique_slack,
+        )
+        context = ""
+
     # Clamp parameters
     max_iterations = max(1, min(int(max_iterations), 5))
     num_branches = max(2, min(int(num_branches), 5))
@@ -987,13 +1020,15 @@ class DeepThinkInput(BaseModel):
     context: str = Field(
         default="",
         description=(
-            "CRITICAL: This tool runs in isolation — it cannot see your "
-            "conversation history or previous tool results. You MUST paste "
-            "the FULL text of any relevant data (search results, web page "
-            "content, file contents, etc.) into this field verbatim. "
-            "Do NOT pass references like 'see search result 1' or "
-            "'the data from the previous step' — the tool will hallucinate "
-            "if it doesn't have the actual data."
+            "CRITICAL: Paste ONLY the research data gathered for THIS SPECIFIC "
+            "TASK (web search results, fetched page content, documents). "
+            "Do NOT include prior session history or data from any previous "
+            "unrelated turns, regardless of domain — engineering, procurement, "
+            "travel, financial, or otherwise. Injecting session history from "
+            "a co-running task causes the model to reason over the wrong domain "
+            "entirely. This tool runs in isolation and cannot see your "
+            "conversation — paste actual source text, not references like "
+            "'see search result 1'."
         ),
     )
     max_iterations: int = Field(
@@ -1027,14 +1062,17 @@ TOOL_CONFIG = {
         "  'thorough analysis', 'deep analysis', 'deep reasoning'.\n"
         "These are explicit requests for THIS tool, not general instructions.\n"
         "\n"
-        "⚠ ISOLATION WARNING: This tool runs as an independent reasoning "
-        "engine with its OWN LLM calls. It CANNOT see your conversation "
-        "history, previous tool results, or any data you have gathered. "
-        "You MUST paste ALL relevant data (full search result text, web "
-        "page content, file contents, etc.) into the `context` parameter "
-        "VERBATIM. If you pass references like 'see above results' or "
-        "'search result 1,2,3' instead of the actual text, the tool will "
-        "hallucinate because it has no data to reason about.\n"
+        "⚠ ISOLATION + CONTEXT PURITY WARNING: This tool runs as an "
+        "independent reasoning engine with its OWN LLM calls. It CANNOT "
+        "see your conversation history. You MUST paste the research data "
+        "gathered FOR THIS TASK into `context` VERBATIM (web search "
+        "results, fetched pages, documents). NEVER include: prior session "
+        "history, engineering context (commit SHAs, PR IDs, Slack data, "
+        "CI output), or data from unrelated prior tasks. Injecting "
+        "engineering session history into a business/research query "
+        "causes catastrophic domain confusion — the model will reason "
+        "about the WRONG domain entirely. For external research tasks, "
+        "`context` should contain ONLY web/document data from THIS query.\n"
         "\n"
         "ALSO USE THIS TOOL WHEN:\n"
         "- The problem has multiple valid approaches and you need to find "

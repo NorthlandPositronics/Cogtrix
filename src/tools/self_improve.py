@@ -13,6 +13,7 @@ Configuration:
 from __future__ import annotations
 
 import ast
+import concurrent.futures
 import dataclasses
 import json
 import logging
@@ -48,6 +49,9 @@ _config: Config | None = None
 
 # Pre-compiled fence regex for stripping markdown code blocks from LLM output
 _FENCE_RE = re.compile(r"^```(?:python)?\s*\n?(.*?)```\s*$", re.DOTALL)
+
+# Timeout for LLM invoke calls during patch generation (seconds)
+_SELF_IMPROVE_LLM_TIMEOUT_SECONDS = 120
 
 
 # ── Configuration ─────────────────────────────────────────────────────────────
@@ -263,7 +267,7 @@ class SelfImproveInput(BaseModel):
     target: str = Field(
         default="src/",
         description=(
-            "Directory or file to scan for issues " "(must be within the working directory)."
+            "Directory or file to scan for issues (must be within the working directory)."
         ),
     )
     max_fixes: int = Field(
@@ -322,9 +326,20 @@ def self_improve(
     ruff_findings = _parse_ruff(ruff_out, max_fixes)
     bandit_findings = _parse_bandit(bandit_out, max_fixes)
 
+    # Surface linter failures that produced no parseable findings.
+    warnings: list[str] = []
+    if _ruff_rc != 0 and not ruff_findings:
+        warnings.append(f"Warning: ruff exited with code {_ruff_rc}. stderr: {_ruff_err[:200]}")
+    if _bandit_rc != 0 and not bandit_findings:
+        warnings.append(
+            f"Warning: bandit exited with code {_bandit_rc}. stderr: {_bandit_err[:200]}"
+        )
+
     combined = _deduplicate(ruff_findings + bandit_findings)[:max_fixes]
 
     if not combined:
+        if warnings:
+            return "\n".join(warnings)
         return f"No issues found in {target}. Nothing to improve."
 
     # ── 3. Dry-run: report findings and exit ───────────────────────────────────
@@ -332,6 +347,8 @@ def self_improve(
         lines = [f"Dry-run findings in {target} ({len(combined)} issue(s)):"]
         for f in combined:
             lines.append(f"  [{f.linter}] {f.file}:{f.line} [{f.code}] {f.message}")
+        if warnings:
+            lines.extend([""] + warnings)
         return "\n".join(lines)
 
     # ── 4. Patch phase ─────────────────────────────────────────────────────────
@@ -363,12 +380,20 @@ def self_improve(
 
         # Build LLM prompt and call
         prompt = _build_patch_prompt(finding, original_content)
+        pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
         try:
-            response = llm.invoke([_HumanMessage(content=prompt)])
+            future = pool.submit(llm.invoke, [_HumanMessage(content=prompt)])
+            response = future.result(timeout=_SELF_IMPROVE_LLM_TIMEOUT_SECONDS)
             raw = getattr(response, "content", str(response))
+        except concurrent.futures.TimeoutError:
+            pool.shutdown(wait=False)
+            skipped.append((finding, "LLM call timed out"))
+            continue
         except Exception as exc:
             skipped.append((finding, f"LLM call failed: {exc}"))
             continue
+        finally:
+            pool.shutdown(wait=False)
 
         patched_code = _extract_code(str(raw))
 
@@ -441,6 +466,8 @@ def self_improve(
         f"  Reverted: {len(reverted)} (tests failed)",
         f"  Skipped:  {len(skipped)} (LLM or file errors)",
     ]
+    if warnings:
+        lines.extend([""] + warnings)
     if auto_commit:
         if committed:
             lines.append(f"  Committed: {len(patched_files)} file(s)")
