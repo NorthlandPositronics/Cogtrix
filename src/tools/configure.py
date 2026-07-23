@@ -313,6 +313,13 @@ def configure_python_exec_tool(config: Config) -> None:
         pass
 
 
+def configure_file_ops_tool(config: Config) -> None:
+    """Configure file operations tool with allowed write directories."""
+    from src.tools.file_ops import set_allowed_write_dirs
+
+    set_allowed_write_dirs(config.allowed_write_paths)
+
+
 def configure_rag_tool(config: Config) -> None:
     """Configure the RAG tool with runtime settings from config."""
     try:

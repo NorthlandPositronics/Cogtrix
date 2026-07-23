@@ -26,6 +26,7 @@ from src.orchestration.run_config import AgentRunConfig
 # _cached_llm_id tracks which LLM generation the bound cache was built for;
 # when the LLM changes, advance_llm_generation() is called and the cache is cleared.
 _MAX_COMPRESSION_CACHE_SIZE = 256
+_MAX_BOUND_CACHE_SIZE = 16
 _persistent_bound_cache: OrderedDict = OrderedDict()
 _persistent_compression_cache: OrderedDict = OrderedDict()
 _cached_llm_id: tuple[int, int] | None = None
@@ -38,6 +39,15 @@ def advance_llm_generation() -> None:
     global _llm_generation
     with _cache_lock:
         _llm_generation += 1
+
+
+def invalidate_llm_caches() -> None:
+    """Clear all LLM-related caches — call on provider/model switch."""
+    global _llm_generation
+    with _cache_lock:
+        _llm_generation += 1
+        _persistent_bound_cache.clear()
+        _persistent_compression_cache.clear()
 
 
 class ToolCallLogger:
@@ -284,12 +294,14 @@ def has_phantom_tool_call(result: dict) -> bool:
 
     Returns True if the *last* AIMessage exhibits this pattern.
     """
+    from langchain_core.messages import AIMessage
+
     messages = result.get("messages", [])
     if not messages:
         return False
 
     for msg in reversed(messages):
-        if type(msg).__name__ != "AIMessage":
+        if not isinstance(msg, AIMessage):
             continue
 
         content = getattr(msg, "content", "")
@@ -337,13 +349,13 @@ def extract_response(result: Any, log: Any = None) -> str | None:
     if not messages:
         return None
 
-    for msg in reversed(messages):
-        msg_type = type(msg).__name__
+    from langchain_core.messages import AIMessage, ToolMessage
 
-        if msg_type == "ToolMessage":
+    for msg in reversed(messages):
+        if isinstance(msg, ToolMessage):
             continue
 
-        if msg_type == "AIMessage":
+        if isinstance(msg, AIMessage):
             text = extract_ai_content(msg)
             if text:
                 return text
@@ -375,10 +387,12 @@ def build_tool_results_response(result: Any) -> str | None:
     if not isinstance(result, dict) or "messages" not in result:
         return None
 
+    from langchain_core.messages import ToolMessage
+
     tool_results: list[tuple[str, str]] = []
 
     for msg in result["messages"]:
-        if type(msg).__name__ == "ToolMessage":
+        if isinstance(msg, ToolMessage):
             name = getattr(msg, "name", None) or "tool"
             content = getattr(msg, "content", "")
             if content and isinstance(content, str) and len(content) > 10:
@@ -617,6 +631,8 @@ def run_agent(
             with _cache_lock:
                 if _cached_llm_id == current_llm_id:
                     _persistent_bound_cache.update(local_bound_cache)
+                    while len(_persistent_bound_cache) > _MAX_BOUND_CACHE_SIZE:
+                        _persistent_bound_cache.popitem(last=False)
                     _persistent_compression_cache.update(local_compression_cache)
                     while len(_persistent_compression_cache) > _MAX_COMPRESSION_CACHE_SIZE:
                         _persistent_compression_cache.popitem(last=False)

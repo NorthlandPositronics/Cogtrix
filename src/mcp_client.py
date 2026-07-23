@@ -361,6 +361,33 @@ class MCPManager:
 
     # ── Public API ────────────────────────────────────────────────────────────
 
+    async def _connect_one_async(self, cfg: MCPServerConfig) -> tuple[str, MCPConnection | None]:
+        """
+        Connect to a single MCP server asynchronously.
+
+        Returns:
+            Tuple of (server_name, MCPConnection) on success, or
+            (server_name, None) on failure.
+        """
+        conn = MCPConnection(cfg)
+        try:
+            await asyncio.wait_for(conn.connect(), timeout=cfg.timeout)
+            return cfg.name, conn
+        except Exception as exc:
+            get_logger().warning("MCP: failed to connect to server '%s': %s", cfg.name, exc)
+            return cfg.name, None
+
+    async def _connect_all_async(
+        self, configs: list[MCPServerConfig]
+    ) -> list[tuple[str, MCPConnection | None]]:
+        """Connect to all servers concurrently and return per-server results."""
+        return list(
+            await asyncio.gather(
+                *[self._connect_one_async(cfg) for cfg in configs],
+                return_exceptions=False,
+            )
+        )
+
     def connect_all(
         self,
         configs: list[MCPServerConfig],
@@ -370,7 +397,8 @@ class MCPManager:
         Connect to all configured MCP servers and return LangChain tools.
 
         Servers that fail to connect are skipped with a warning — they do not
-        prevent other servers from being used.
+        prevent other servers from being used. All servers are connected
+        concurrently to minimise startup latency.
 
         Args:
             configs: List of MCPServerConfig objects.
@@ -388,17 +416,25 @@ class MCPManager:
 
         log = get_logger()
         self._ensure_loop()
-        all_tools: dict[str, Any] = {}
 
         for cfg in configs:
             self._configs[cfg.name] = cfg
-            conn = MCPConnection(cfg)
-            try:
-                self._run(conn.connect(), timeout=cfg.timeout)
-                self._connections[cfg.name] = conn
-                log.info("MCP: connected to server '%s' (%d tools)", cfg.name, len(conn.tools))
-            except Exception as exc:
-                log.warning("MCP: failed to connect to server '%s': %s", cfg.name, exc)
+
+        max_timeout = max((cfg.timeout for cfg in configs), default=30) if configs else 30
+        results: list[tuple[str, MCPConnection | None]] = self._run(
+            self._connect_all_async(configs),
+            timeout=max_timeout + 5,
+        )
+
+        for server_name, conn in results:
+            if conn is not None:
+                self._connections[server_name] = conn
+                log.info("MCP: connected to server '%s' (%d tools)", server_name, len(conn.tools))
+
+        all_tools: dict[str, Any] = {}
+        for cfg in configs:
+            conn = self._connections.get(cfg.name)
+            if conn is None:
                 continue
 
             for mcp_tool in conn.tools:
@@ -435,7 +471,6 @@ class MCPManager:
                     )
                     continue
 
-                # Rename StructuredTool if we had a collision
                 if tool_name != original_name:
                     lc_tool.name = tool_name
 

@@ -445,8 +445,8 @@ def _trim_to_token_budget(
         )
         return fixed_head + fixed_tail
 
-    # Truncate individual oversized messages in history.
-    # Create copies to avoid mutating the caller's original messages.
+    # Truncate individual oversized messages and collect token costs in a single pass.
+    token_costs: list[int] = []
     for idx, msg in enumerate(history):
         est = _estimate_msg_tokens(msg)
         if est > _MAX_SINGLE_MESSAGE_TOKENS:
@@ -461,9 +461,8 @@ def _trim_to_token_budget(
                     history[idx] = {**msg, "content": trimmed}
                 else:
                     history[idx] = _copy_with_content(msg, trimmed)
-
-    # Drop oldest history messages until we fit
-    token_costs = [_estimate_msg_tokens(m) for m in history]
+                est = _estimate_msg_tokens(history[idx])
+        token_costs.append(est)
     total_history = sum(token_costs)
     drop_count = 0
     while drop_count < len(history) and total_history > history_budget:

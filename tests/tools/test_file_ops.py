@@ -5,7 +5,13 @@ from unittest.mock import patch
 
 import pytest
 
-from src.tools.file_ops import append_file, list_directory, read_file, write_file
+from src.tools.file_ops import (
+    append_file,
+    list_directory,
+    read_file,
+    set_allowed_write_dirs,
+    write_file,
+)
 
 
 @pytest.fixture()
@@ -133,3 +139,97 @@ class TestListDirectory:
         result = list_directory(".", pattern="*.py")
         assert "main.py" in result
         assert "notes.txt" not in result
+
+
+class TestAllowedWritePaths:
+    """Tests for --allow-write-path / set_allowed_write_dirs() feature."""
+
+    @pytest.fixture(autouse=True)
+    def _cleanup_extra_dirs(self) -> None:
+        """Reset extra write dirs after each test."""
+        yield
+        set_allowed_write_dirs(None)
+
+    def test_write_to_extra_dir_succeeds(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Writing to an allowed extra dir should succeed."""
+        work_dir = tmp_path / "work"
+        extra_dir = tmp_path / "extra"
+        work_dir.mkdir()
+        extra_dir.mkdir()
+        monkeypatch.chdir(work_dir)
+        set_allowed_write_dirs([str(extra_dir)])
+        result = write_file(str(extra_dir / "out.txt"), "hello")
+        assert "Successfully wrote" in result
+        assert (extra_dir / "out.txt").read_text() == "hello"
+
+    def test_write_outside_all_dirs_rejected(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Writing outside cwd and extra dirs should be rejected."""
+        work_dir = tmp_path / "work"
+        extra_dir = tmp_path / "extra"
+        forbidden_dir = tmp_path / "forbidden"
+        work_dir.mkdir()
+        extra_dir.mkdir()
+        forbidden_dir.mkdir()
+        monkeypatch.chdir(work_dir)
+        set_allowed_write_dirs([str(extra_dir)])
+        result = write_file(str(forbidden_dir / "evil.txt"), "bad")
+        assert result.startswith("Error:")
+
+    def test_read_from_extra_write_dir_succeeds(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Reading from an allowed extra write dir should work too."""
+        work_dir = tmp_path / "work"
+        extra_dir = tmp_path / "extra"
+        work_dir.mkdir()
+        extra_dir.mkdir()
+        (extra_dir / "data.txt").write_text("content")
+        monkeypatch.chdir(work_dir)
+        set_allowed_write_dirs([str(extra_dir)])
+        result = read_file(str(extra_dir / "data.txt"))
+        assert result == "content"
+
+    def test_set_allowed_write_dirs_none_clears(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Passing None should clear all extra dirs."""
+        work_dir = tmp_path / "work"
+        extra_dir = tmp_path / "extra"
+        work_dir.mkdir()
+        extra_dir.mkdir()
+        monkeypatch.chdir(work_dir)
+        set_allowed_write_dirs([str(extra_dir)])
+        set_allowed_write_dirs(None)
+        result = write_file(str(extra_dir / "file.txt"), "data")
+        assert result.startswith("Error:")
+
+    def test_set_allowed_write_dirs_empty_list_clears(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Passing an empty list should clear all extra dirs."""
+        work_dir = tmp_path / "work"
+        extra_dir = tmp_path / "extra"
+        work_dir.mkdir()
+        extra_dir.mkdir()
+        monkeypatch.chdir(work_dir)
+        set_allowed_write_dirs([str(extra_dir)])
+        set_allowed_write_dirs([])
+        result = write_file(str(extra_dir / "file.txt"), "data")
+        assert result.startswith("Error:")
+
+    def test_traversal_in_extra_dir_rejected(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Path traversal out of extra dir should be rejected."""
+        work_dir = tmp_path / "work"
+        extra_dir = tmp_path / "extra"
+        work_dir.mkdir()
+        extra_dir.mkdir()
+        monkeypatch.chdir(work_dir)
+        set_allowed_write_dirs([str(extra_dir)])
+        result = write_file(str(extra_dir / ".." / "escape.txt"), "bad")
+        assert result.startswith("Error:")

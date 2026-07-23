@@ -104,11 +104,13 @@ def _detect_invalid_tool_calls(
 
     Returns a de-duplicated, ordered list of tool names the LLM tried.
     """
+    from langchain_core.messages import ToolMessage
+
     found: list[str] = []
     seen: set[str] = set()
     for i in range(start_idx, len(messages)):
         msg = messages[i]
-        if type(msg).__name__ != "ToolMessage":
+        if not isinstance(msg, ToolMessage):
             continue
         content = getattr(msg, "content", "")
         if not isinstance(content, str):
@@ -130,11 +132,13 @@ def _strip_failed_tool_messages(messages: list, tool_names: set[str]) -> list:
     This cleans up the conversation history after auto-activation so the
     resumed agent doesn't see the failed "is not a valid tool" attempts.
     """
+    from langchain_core.messages import AIMessage, ToolMessage
+
     tool_call_ids_to_remove: set[str] = set()
     cleaned: list = []
 
     for msg in messages:
-        if type(msg).__name__ == "ToolMessage":
+        if isinstance(msg, ToolMessage):
             name = getattr(msg, "name", "")
             content = getattr(msg, "content", "")
             if name in tool_names and isinstance(content, str) and "is not a valid tool" in content:
@@ -149,29 +153,24 @@ def _strip_failed_tool_messages(messages: list, tool_names: set[str]) -> list:
 
     final: list = []
     for msg in cleaned:
-        if type(msg).__name__ == "AIMessage":
+        if isinstance(msg, AIMessage):
             tool_calls = getattr(msg, "tool_calls", None)
             if tool_calls:
                 remaining = [tc for tc in tool_calls if tc.get("id") not in tool_call_ids_to_remove]
                 if len(remaining) != len(tool_calls):
-                    try:
-                        from langchain_core.messages import AIMessage as AI
-
-                        extra = dict(getattr(msg, "additional_kwargs", {}))
-                        extra.pop("tool_calls", None)
-                        new_msg = AI(
-                            content=getattr(msg, "content", ""),
-                            tool_calls=remaining,
-                            additional_kwargs=extra,
-                        )
-                        if not remaining and not (
-                            isinstance(new_msg.content, str) and new_msg.content.strip()
-                        ):
-                            continue
-                        final.append(new_msg)
+                    extra = dict(getattr(msg, "additional_kwargs", {}))
+                    extra.pop("tool_calls", None)
+                    new_msg = AIMessage(
+                        content=getattr(msg, "content", ""),
+                        tool_calls=remaining,
+                        additional_kwargs=extra,
+                    )
+                    if not remaining and not (
+                        isinstance(new_msg.content, str) and new_msg.content.strip()
+                    ):
                         continue
-                    except ImportError:
-                        pass
+                    final.append(new_msg)
+                    continue
         final.append(msg)
     return final
 
@@ -816,7 +815,7 @@ def build_agent_graph(
             return END
 
         last = msgs[-1]
-        if type(last).__name__ == "AIMessage":
+        if isinstance(last, AIMessage):
             content = getattr(last, "content", "")
             has_content = isinstance(content, str) and bool(content.strip())
             tool_calls = getattr(last, "tool_calls", None)

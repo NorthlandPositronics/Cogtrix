@@ -93,12 +93,12 @@ from src.orchestration.phases import (  # noqa: F401
 )
 from src.orchestration.runner import (  # noqa: F401
     ToolCallLogger,
-    advance_llm_generation,
     build_tool_results_response,
     extract_ai_content,
     extract_response,
     format_agent_error,
     has_phantom_tool_call,
+    invalidate_llm_caches,
     is_valid_response,
     log_tool_calls_from_result,
     run_agent,
@@ -119,6 +119,7 @@ from src.tools.configure import (
     configure_delegate_tool,
     configure_delegate_tools,
     configure_exa_tool,
+    configure_file_ops_tool,
     configure_google_search_tool,
     configure_python_exec_tool,
     configure_rag_tool,
@@ -2954,6 +2955,8 @@ def main():
     configure_python_exec_tool(config)
     configure_deep_think_tool(config)
 
+    configure_file_ops_tool(config)
+
     try:
         from src.tools.deep_think import set_progress_callback
 
@@ -3575,7 +3578,7 @@ def main():
 
                             # Close old LLM last — it's no longer referenced
                             _close_llm(old_llm)
-                            advance_llm_generation()
+                            invalidate_llm_caches()
                             if old_llm in _cleanup_resources:
                                 _cleanup_resources.remove(old_llm)
 
@@ -3654,7 +3657,7 @@ def main():
 
                             # Close old LLM last — it's no longer referenced
                             _close_llm(old_llm)
-                            advance_llm_generation()
+                            invalidate_llm_caches()
                             if old_llm in _cleanup_resources:
                                 _cleanup_resources.remove(old_llm)
 
@@ -4019,7 +4022,7 @@ def main():
                             provider_config = config.resolve_provider_config()
                             new_llm = create_llm_from_provider_config(provider_config)
                             _close_llm(llm)
-                            advance_llm_generation()
+                            invalidate_llm_caches()
                             if llm in _cleanup_resources:
                                 _cleanup_resources.remove(llm)
                             llm = new_llm

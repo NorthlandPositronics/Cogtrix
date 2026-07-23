@@ -452,7 +452,7 @@ Summarizes old, large `ToolMessage` objects before each LLM call to reduce token
 | `compress_tool_message(content, tool_name, llm)` | One-shot LLM summarization; falls back to `truncate_tool_output()` |
 | `truncate_tool_output(text, max_chars)` | Middle-truncation with informative ellipsis |
 
-Compression is skipped entirely for providers with fewer than 16,384 context tokens (where simple truncation is cheaper). Once compressed, results are cached by `tool_call_id` and reused. The compression pass operates on a copy of the message list — graph state is never mutated.
+Compression is skipped entirely for providers with fewer than 16,384 context tokens (where simple truncation is cheaper). Eligible messages are compressed in parallel using `concurrent.futures.ThreadPoolExecutor` (up to 4 workers) rather than sequentially, so large batches of stale tool outputs are summarized in a single wall-clock pass. Once compressed, results are cached by `tool_call_id` and reused. The compression pass operates on a copy of the message list — graph state is never mutated.
 
 #### 3g. Session State (`src/orchestration/session_state.py`)
 
@@ -653,7 +653,7 @@ Config: mcp_servers section
     ▼
 MCPManager.connect_all()
     │
-    ├── For each server:
+    ├── asyncio.gather(*[connect(s) for s in servers])  ← parallel connections
     │   ├── Start process (stdio) or connect (SSE)
     │   ├── ClientSession.initialize()
     │   └── session.list_tools() → MCP Tool objects
@@ -668,6 +668,8 @@ Convert each MCP Tool → LangChain StructuredTool
     ▼
 Register in ToolRegistry → available_tools pool (on-demand)
 ```
+
+**Parallel startup:** `connect_all()` launches all server connections concurrently via `asyncio.gather()`, reducing total startup time from N×timeout to max(individual timeouts) when multiple servers are configured.
 
 **Name collision handling:** When an MCP tool has the same name as a built-in tool (e.g., `read_file`), it is automatically prefixed with the server name to prevent shadowing.
 
@@ -1212,6 +1214,21 @@ memory_manager.save()
 | External | `http_post` | Yes |
 
 Tool confirmation checks are serialized inside `_confirmation_lock` in `create_safe_tool_wrapper()` to eliminate TOCTOU races between `deny_all` / `denials` checks and the prompt display.
+
+### File Path Safety
+
+All file operations (`read_file`, `write_file`, `append_file`, `list_directory`, `file_info`) validate paths through `_validate_path()` in `src/tools/file_ops.py` before any filesystem access.
+
+**Allowed roots:**
+
+| Operation | Allowed directories |
+|-----------|---------------------|
+| **Read** | Current working directory (`cwd`) **and** the application install directory (`_APP_DIR`) |
+| **Write** | Current working directory (`cwd`) only |
+
+The dual-root model exists for Docker deployments where the working directory is set to a scratch path (e.g., `-w /tmp`) while the application source lives at `/app`. Without `_APP_DIR`, the agent cannot read project documentation or source files, forcing expensive web searches instead.
+
+**Path traversal protection:** Paths containing `..` are resolved and must still fall within an allowed root after resolution. Symlinks are followed by `Path.resolve()` before the containment check.
 
 ### HTTP Request SSRF Protection
 

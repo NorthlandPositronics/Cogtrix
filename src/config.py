@@ -252,6 +252,9 @@ class Config:
     # Parallel tool execution — run independent tool calls concurrently
     parallel_tool_execution: bool = True
 
+    # File operations — extra directories allowed for write operations
+    allowed_write_paths: list[str] = field(default_factory=list)
+
     # Context compression — summarize old ToolMessages during agent loop
     context_compression: bool = True
     context_compression_min_age: int = 6
@@ -753,6 +756,16 @@ def _apply_config_file(config: Config, path: Path) -> None:
     if "parallel_tool_execution" in data:
         config.parallel_tool_execution = bool(data["parallel_tool_execution"])
 
+    # ── Allowed write paths ──────────────────────────────────────
+    if "allowed_write_paths" in data:
+        val = data["allowed_write_paths"]
+        if isinstance(val, str):
+            config.allowed_write_paths = [val]
+        elif isinstance(val, list):
+            config.allowed_write_paths = [str(p) for p in val]
+        else:
+            _log.warning("allowed_write_paths must be a string or list, ignoring")
+
     # ── Context compression ──────────────────────────────────────
     if "context_compression" in data:
         cc = data["context_compression"]
@@ -1101,6 +1114,10 @@ def _apply_env_vars(config: Config) -> None:
         tg = config.services.setdefault("telegram", {})
         tg["token"] = tg_token
 
+    # Allowed write paths
+    if env_val := os.getenv("COGTRIX_ALLOWED_WRITE_PATHS"):
+        config.allowed_write_paths = [p.strip() for p in env_val.split(":") if p.strip()]
+
 
 def _apply_cli_args(config: Config, args) -> None:
     """Apply settings from command line arguments."""
@@ -1129,3 +1146,7 @@ def _apply_cli_args(config: Config, args) -> None:
     # --log can be used without --debug
     if hasattr(args, "log") and args.log is not None:
         config.log_file = args.log
+
+    # Allowed write paths
+    if hasattr(args, "allow_write_path") and args.allow_write_path:
+        config.allowed_write_paths = list(args.allow_write_path)

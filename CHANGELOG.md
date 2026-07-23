@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.1.7](https://github.com/NorthlandPositronics/Cogtrix/compare/v0.1.6...v0.1.7) (2026-02-28)
+
+
+### Features
+
+* add --allow-write-path flag to permit writes outside cwd ([dcd64ea](https://github.com/NorthlandPositronics/Cogtrix/commit/dcd64ea252e1ebbd83b31a7972dcd5af8f9a85e7))
+* Rounds 19-25 — parallel execution, security hardening, and performance optimizations ([1510cb9](https://github.com/NorthlandPositronics/Cogtrix/commit/1510cb9fe488af7cbe3032d3aab027ae4b461b57))
+
+
+### Bug Fixes
+
+* **docker:** add missing extras for Anthropic, Google, MCP, and science ([4d6d33d](https://github.com/NorthlandPositronics/Cogtrix/commit/4d6d33df31a120733bed5f074d81c27c8635ba12))
+* **file_ops:** allow read access to app install directory outside cwd ([9f362b4](https://github.com/NorthlandPositronics/Cogtrix/commit/9f362b4c558527bfdd0606e667a4c7b1b53cd57e))
+* handle string allowed_write_paths, cap bound cache, copy config.available_tools ([aedab52](https://github.com/NorthlandPositronics/Cogtrix/commit/aedab5214730d24c6f5bddbc6ccc8b634f12a6aa))
+
+
+### Performance Improvements
+
+* connect MCP servers concurrently in connect_all() ([415ac13](https://github.com/NorthlandPositronics/Cogtrix/commit/415ac1362f16fe438a81bc5dfbc5de7437d9cd15))
+* single-pass token estimation and parallel compression LLM calls ([1182068](https://github.com/NorthlandPositronics/Cogtrix/commit/1182068c77c1845007b35f3c020444676eb67a41))
+
+
+### Documentation
+
+* update documentation for Round 25 bug fixes and performance improvements ([66377ad](https://github.com/NorthlandPositronics/Cogtrix/commit/66377ade33372f78dbb696e9b2f22afb55b771f1))
+
 ## [0.1.6](https://github.com/NorthlandPositronics/Cogtrix/compare/v0.1.5...v0.1.6) (2026-02-28)
 
 

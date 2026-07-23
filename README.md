@@ -258,7 +258,7 @@ docker pull ghcr.io/northlandpositronics/cogtrix:latest
 docker run -it --network host ghcr.io/northlandpositronics/cogtrix:latest
 ```
 
-The container includes all optional search packages (Tavily, Exa, SerpAPI). Use `--network host` so it can reach a local Ollama server.
+The container includes all optional packages — search providers (Tavily, Exa, SerpAPI), Anthropic Claude, Google Gemini, MCP server support, and scientific computing (NumPy, SciPy). Use `--network host` so it can reach a local Ollama server.
 
 **Passing configuration via environment variables:**
 

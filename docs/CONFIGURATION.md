@@ -397,6 +397,30 @@ parallel_tool_execution: true
 - Set `parallel_tool_execution: false` if you experience issues with tools that have hidden shared state or if you need deterministic tool execution order.
 - Models that support parallel tool calls (GPT-4o, Claude, Gemini) benefit most from this feature. Models that emit one call per response (some open-source/vLLM models) are unaffected.
 
+### Allowed Write Paths
+
+By default, file write operations (`write_file`, `append_file`) are restricted to the current working directory. You can extend this with additional directories:
+
+```yaml
+allowed_write_paths:
+  - /data/output
+  - /shared/workspace
+```
+
+This is especially useful in Docker deployments where the working directory differs from the application install path:
+
+```bash
+# Via environment variable (colon-separated)
+docker run -it -e COGTRIX_ALLOWED_WRITE_PATHS="/app:/data" -w /tmp ghcr.io/northlandpositronics/cogtrix:latest
+
+# Via CLI flag (repeatable)
+cogtrix.py --allow-write-path /data/output --allow-write-path /shared/workspace
+```
+
+Read operations are not affected — they already allow access to both the working directory and the application install directory.
+
+**Priority:** CLI (`--allow-write-path`) > env var (`COGTRIX_ALLOWED_WRITE_PATHS`) > config file.
+
 ### MCP Servers
 
 Cogtrix can connect to external tool servers via the [Model Context Protocol (MCP)](https://modelcontextprotocol.io). Configure servers in the `mcp_servers` section — each key is a server name:

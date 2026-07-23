@@ -268,6 +268,12 @@ def parse_arguments():
         metavar="LIST",
         help="all, none, minimal, or comma-separated",
     )
+    tool_group.add_argument(
+        "--allow-write-path",
+        action="append",
+        metavar="DIR",
+        help="Allow file writes to DIR (repeatable)",
+    )
 
     # ── RAG ──────────────────────────────────────────────────────────
     rag_group = parser.add_argument_group("RAG")

@@ -276,15 +276,18 @@ def extract_turn_messages(all_messages: list, boundary: object | None = None) ->
 
 def was_deep_think_called(messages: list) -> bool:
     """Check whether the `deep_think` tool was invoked in the agent messages."""
+    try:
+        from langchain_core.messages import ToolMessage
+    except ImportError:
+        ToolMessage = None  # type: ignore[assignment, misc]
+
     for msg in messages:
-        # AIMessage with tool_calls
         tool_calls = getattr(msg, "tool_calls", None)
         if tool_calls:
             for tc in tool_calls:
                 if isinstance(tc, dict) and tc.get("name") == "deep_think":
                     return True
-        # ToolMessage from deep_think
-        if type(msg).__name__ == "ToolMessage":
+        if ToolMessage is not None and isinstance(msg, ToolMessage):
             if getattr(msg, "name", None) == "deep_think":
                 return True
     return False
@@ -379,9 +382,14 @@ def preserve_tables_for_markdown(text: str) -> str:
 
 def collect_tool_outputs(messages: list) -> str:
     """Concatenate all non-error ToolMessage outputs into a single string."""
+    try:
+        from langchain_core.messages import ToolMessage
+    except ImportError:
+        ToolMessage = None  # type: ignore[assignment, misc]
+
     parts: list[str] = []
     for msg in messages:
-        if type(msg).__name__ != "ToolMessage":
+        if ToolMessage is None or not isinstance(msg, ToolMessage):
             continue
         name = getattr(msg, "name", "tool")
         content = getattr(msg, "content", "")
@@ -397,12 +405,15 @@ def extract_fetched_urls(messages: list) -> list[str]:
     ``http_get`` (``url`` arg), and ``exa_search``/``exa_find_similar``/
     ``search_web`` (extracts URLs from the corresponding ToolMessage results).
     """
+    try:
+        from langchain_core.messages import AIMessage, ToolMessage
+    except ImportError:
+        AIMessage = ToolMessage = None  # type: ignore[assignment, misc]
+
     urls: list[str] = []
 
     for msg in messages:
-        msg_type = type(msg).__name__
-
-        if msg_type == "AIMessage":
+        if AIMessage is not None and isinstance(msg, AIMessage):
             for call in getattr(msg, "tool_calls", []):
                 name = call.get("name", "")
                 args = call.get("args", {})
@@ -414,7 +425,7 @@ def extract_fetched_urls(messages: list) -> list[str]:
                         urls.append(url)
 
         # Also harvest URLs from exa_search/search_web result text (lines starting with "   URL: ")
-        if msg_type == "ToolMessage":
+        if ToolMessage is not None and isinstance(msg, ToolMessage):
             name = getattr(msg, "name", "")
             if name in ("exa_search", "exa_find_similar", "search_web"):
                 content = getattr(msg, "content", "")
@@ -442,8 +453,13 @@ def extract_fetched_urls(messages: list) -> list[str]:
 
 def agent_used_web_tools(messages: list) -> bool:
     """Return True if any web/content retrieval tool was called."""
+    try:
+        from langchain_core.messages import ToolMessage
+    except ImportError:
+        ToolMessage = None  # type: ignore[assignment, misc]
+
     for msg in messages:
-        if type(msg).__name__ == "ToolMessage":
+        if ToolMessage is not None and isinstance(msg, ToolMessage):
             if getattr(msg, "name", "") in WEB_TOOL_NAMES:
                 return True
     return False
@@ -641,8 +657,13 @@ def force_deep_think(
 
 def agent_performed_writes(messages: list) -> bool:
     """Return True if any write-oriented tool was called in *messages*."""
+    try:
+        from langchain_core.messages import ToolMessage
+    except ImportError:
+        ToolMessage = None  # type: ignore[assignment, misc]
+
     for msg in messages:
-        if type(msg).__name__ == "ToolMessage":
+        if ToolMessage is not None and isinstance(msg, ToolMessage):
             name = getattr(msg, "name", "")
             if name in ACTION_TOOL_NAMES:
                 content = getattr(msg, "content", "")
@@ -708,6 +729,9 @@ def run_execution_phase(
     exec_msgs: list = []
     try:
         if config is not None:
+            exec_config = copy(config)
+            if exec_config.available_tools is not None:
+                exec_config.available_tools = dict(exec_config.available_tools)
             result = run_agent(
                 exec_prompt,
                 context_messages,
@@ -716,7 +740,7 @@ def run_execution_phase(
                 context_prefix=context_prefix,
                 callbacks=callbacks,
                 result_messages=exec_msgs,
-                config=config,
+                config=exec_config,
             )
         else:
             result = run_agent(
@@ -782,23 +806,24 @@ def extract_partial_results(messages: list) -> str | None:
     if not messages:
         return None
 
+    try:
+        from langchain_core.messages import AIMessage, ToolMessage
+    except ImportError:
+        AIMessage = ToolMessage = None  # type: ignore[assignment, misc]
+
     tool_results = []
     last_ai_content = None
 
     for msg in messages:
-        msg_type = type(msg).__name__
-
-        # Collect tool results
-        if msg_type == "ToolMessage":
+        if ToolMessage is not None and isinstance(msg, ToolMessage):
             tool_name = getattr(msg, "name", "tool")
             content = getattr(msg, "content", "")
             if content and not content.startswith("Error"):
                 tool_results.append(f"**{tool_name}:** {content}")
 
-        # Track last AI message content
-        elif msg_type == "AIMessage":
+        elif AIMessage is not None and isinstance(msg, AIMessage):
             content = getattr(msg, "content", "")
-            if content and len(content) > 50:  # Meaningful content
+            if content and len(content) > 50:
                 last_ai_content = content
 
     if not tool_results and not last_ai_content:

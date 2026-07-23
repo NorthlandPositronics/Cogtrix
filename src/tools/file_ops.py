@@ -10,6 +10,18 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
+# Application install directory — allows read access to project docs/source
+# even when the working directory is set elsewhere (e.g., Docker with -w /tmp).
+_APP_DIR: Path = Path(__file__).resolve().parent.parent.parent
+
+_extra_write_dirs: list[Path] = []
+
+
+def set_allowed_write_dirs(dirs: list[str] | None) -> None:
+    """Configure additional directories where file write operations are allowed."""
+    global _extra_write_dirs
+    _extra_write_dirs = [Path(d).resolve() for d in (dirs or [])]
+
 
 class ReadFileInput(BaseModel):
     """Input schema for reading files."""
@@ -70,18 +82,64 @@ def _validate_path(path: str, is_write: bool = False) -> tuple[bool, str, Path |
         # Check for path traversal attempts
         if ".." in path:
             cwd = Path.cwd().resolve()
+            in_allowed = False
             try:
                 p.relative_to(cwd)
+                in_allowed = True
             except ValueError:
+                pass
+            if not in_allowed:
+                try:
+                    p.relative_to(_APP_DIR)
+                    in_allowed = True
+                except ValueError:
+                    pass
+            if not in_allowed:
+                for extra_dir in _extra_write_dirs:
+                    try:
+                        p.relative_to(extra_dir)
+                        in_allowed = True
+                    except ValueError:
+                        pass
+            if not in_allowed:
                 return False, "Path traversal not allowed", None
 
-        # ALL paths must resolve within cwd — blocks absolute paths outside
-        # the working directory and symlink-based traversal.
+        # Paths must resolve within an allowed root directory.
+        # Writes are restricted to cwd; reads also allow the app install directory
+        # (so Docker users with -w /tmp can still read project docs at /app).
         cwd = Path.cwd().resolve()
+        in_cwd = False
         try:
             p.relative_to(cwd)
+            in_cwd = True
         except ValueError:
-            return False, "Path must be within the working directory", None
+            pass
+
+        if not in_cwd:
+            if is_write:
+                for extra_dir in _extra_write_dirs:
+                    try:
+                        p.relative_to(extra_dir)
+                        return True, "", p
+                    except ValueError:
+                        pass
+                return False, "Write path must be within the working directory", None
+            # Reads: allow app dir and extra write dirs
+            in_allowed_read = False
+            try:
+                p.relative_to(_APP_DIR)
+                in_allowed_read = True
+            except ValueError:
+                pass
+            if not in_allowed_read:
+                for extra_dir in _extra_write_dirs:
+                    try:
+                        p.relative_to(extra_dir)
+                        in_allowed_read = True
+                    except ValueError:
+                        pass
+            if not in_allowed_read:
+                return False, "Path must be within the working directory", None
 
         return True, "", p
     except Exception as e:
@@ -430,6 +488,7 @@ __all__ = [
     "append_file",
     "list_directory",
     "file_info",
+    "set_allowed_write_dirs",
     "ReadFileInput",
     "WriteFileInput",
     "AppendFileInput",

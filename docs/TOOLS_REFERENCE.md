@@ -206,6 +206,8 @@ Last 5 execution(s):
 
 ## File Operations
 
+All file tools enforce path safety: paths must resolve within the current working directory. Read-only tools (`read_file`, `list_directory`, `file_info`) also allow access to the application install directory — this matters in Docker containers where the working directory may differ from the install path (e.g., `-w /tmp` while the app lives at `/app`). Write tools are restricted to the working directory by default, but additional write directories can be allowed via `--allow-write-path`, `COGTRIX_ALLOWED_WRITE_PATHS`, or the `allowed_write_paths` config option (see [Configuration](CONFIGURATION.md#allowed-write-paths)).
+
 ### read_file
 
 Read contents of a file.
@@ -235,7 +237,7 @@ Write content to a file (creates if not exists).
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `path` | string | Yes | File path to write |
+| `path` | string | Yes | File path to write (must be within working directory) |
 | `content` | string | Yes | Content to write |
 
 ---

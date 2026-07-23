@@ -6,6 +6,7 @@ reduce per-cycle token usage without losing important context.
 
 from __future__ import annotations
 
+import concurrent.futures
 from typing import Any
 
 from src.logging_config import get_logger
@@ -107,7 +108,7 @@ def apply_message_compression(
     context window, and is skipped entirely for providers with fewer than
     16 384 context tokens (where trimming is cheaper).
     """
-    from langchain_core.messages import ToolMessage
+    from langchain_core.messages import AIMessage, ToolMessage
 
     if max_context_tokens is None:
         return messages
@@ -135,7 +136,7 @@ def apply_message_compression(
     msg_age: dict[int, int] = {}
     for i in range(len(messages) - 1, -1, -1):
         msg = messages[i]
-        if hasattr(msg, "tool_calls") or type(msg).__name__ == "AIMessage":
+        if isinstance(msg, AIMessage):
             ai_count_from_end += 1
         if isinstance(msg, ToolMessage):
             msg_age[i] = ai_count_from_end
@@ -160,8 +161,8 @@ def apply_message_compression(
             tool_name = getattr(msg, "name", "unknown_tool")
             eligible[i] = (content, tool_name, tcid or "")
 
-    # Compress eligible messages serially. LangChain LLM instances are not
-    # thread-safe for concurrent invoke() calls.
+    # Compress eligible messages in parallel. LangChain LLM.invoke() makes
+    # stateless HTTP calls that are safe for concurrent use.
     compressed_results: dict[int, str] = {}
     if eligible:
 
@@ -172,12 +173,17 @@ def apply_message_compression(
             except Exception:
                 return idx, truncate_tool_output(content, len(content) * 3 // 4)
 
-        for i in list(eligible):
-            idx, compressed = _compress_one(i)
-            compressed_results[idx] = compressed
-            tcid = eligible[idx][2]
-            if tcid:
-                compression_cache[tcid] = compressed_results[idx]
+        workers = min(len(eligible), 4)
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=workers, thread_name_prefix="compress"
+        ) as pool:
+            futures = {pool.submit(_compress_one, i): i for i in eligible}
+            for future in concurrent.futures.as_completed(futures):
+                idx, compressed = future.result()
+                compressed_results[idx] = compressed
+                tcid = eligible[idx][2]
+                if tcid:
+                    compression_cache[tcid] = compressed
 
     # Assemble result list.
     result = []
