@@ -470,7 +470,11 @@ class TestHandlerEditFlow:
         """When edit_state.was_called=True and last_sent_message_id is set, channel.edit_message is called."""
 
         def _runner_that_edits(**kwargs: Any) -> str:
-            tools: list = kwargs.get("active_tools_list", [])
+            tools: list = (
+                kwargs["config"].active_tools_list
+                if kwargs.get("config") and kwargs["config"].active_tools_list
+                else []
+            )
             for t in tools:
                 if getattr(t, "name", None) == "edit_last_reply":
                     t.invoke({"new_text": "corrected text"})
@@ -493,7 +497,11 @@ class TestHandlerEditFlow:
         """When last_sent_message_id is None, edit_last_reply tool is not injected; falls through to send."""
 
         def _runner_noedit(**kwargs: Any) -> str:
-            tools: list = kwargs.get("active_tools_list", [])
+            tools: list = (
+                kwargs["config"].active_tools_list
+                if kwargs.get("config") and kwargs["config"].active_tools_list
+                else []
+            )
             # edit_last_reply should not be present since no prior message id
             for t in tools:
                 if getattr(t, "name", None) == "edit_last_reply":
@@ -519,7 +527,11 @@ class TestHandlerEditFlow:
         captured_tools: list = []
 
         def _capture(**kwargs: Any) -> str:
-            captured_tools.extend(kwargs.get("active_tools_list", []))
+            captured_tools.extend(
+                kwargs["config"].active_tools_list
+                if kwargs.get("config") and kwargs["config"].active_tools_list
+                else []
+            )
             return "ok"
 
         handler, _, _ = self._make_handler_with_session(
@@ -537,7 +549,11 @@ class TestHandlerEditFlow:
         captured_tools: list = []
 
         def _capture(**kwargs: Any) -> str:
-            captured_tools.extend(kwargs.get("active_tools_list", []))
+            captured_tools.extend(
+                kwargs["config"].active_tools_list
+                if kwargs.get("config") and kwargs["config"].active_tools_list
+                else []
+            )
             return "ok"
 
         handler, _, _ = self._make_handler_with_session(
@@ -570,7 +586,11 @@ class TestHandlerEditFlow:
         """Text passed to channel.edit_message is the sanitized version."""
 
         def _runner_edits(**kwargs: Any) -> str:
-            for t in kwargs.get("active_tools_list", []):
+            for t in (
+                kwargs["config"].active_tools_list
+                if kwargs.get("config") and kwargs["config"].active_tools_list
+                else []
+            ):
                 if getattr(t, "name", None) == "edit_last_reply":
                     t.invoke({"new_text": "updated content"})
                     break
@@ -1385,7 +1405,11 @@ class TestRouteResponseEditAndSchedule:
         """When both edit and schedule are called, both channel.edit_message and scheduler.schedule are invoked."""
 
         def _runner_both(**kwargs: Any) -> str:
-            tools: list = kwargs.get("active_tools_list", [])
+            tools: list = (
+                kwargs["config"].active_tools_list
+                if kwargs.get("config") and kwargs["config"].active_tools_list
+                else []
+            )
             for t in tools:
                 name = getattr(t, "name", None)
                 if name == "edit_last_reply":
@@ -1415,7 +1439,11 @@ class TestRouteResponseEditAndSchedule:
         """When both fire, the return value (for memory) is the scheduled text."""
 
         def _runner_both(**kwargs: Any) -> str:
-            tools: list = kwargs.get("active_tools_list", [])
+            tools: list = (
+                kwargs["config"].active_tools_list
+                if kwargs.get("config") and kwargs["config"].active_tools_list
+                else []
+            )
             for t in tools:
                 name = getattr(t, "name", None)
                 if name == "edit_last_reply":
@@ -1445,7 +1473,11 @@ class TestRouteResponseEditAndSchedule:
         """When only edit fires (no schedule), channel.send is NOT called."""
 
         def _runner_edit_only(**kwargs: Any) -> str:
-            for t in kwargs.get("active_tools_list", []):
+            for t in (
+                kwargs["config"].active_tools_list
+                if kwargs.get("config") and kwargs["config"].active_tools_list
+                else []
+            ):
                 if getattr(t, "name", None) == "edit_last_reply":
                     t.invoke({"new_text": "corrected"})
                     break

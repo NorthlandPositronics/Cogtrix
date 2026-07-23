@@ -67,6 +67,7 @@ def configure_exa(config: dict[str, Any]) -> None:
         api_key  - Exa API key (or read from EXA_API_KEY env var)
     """
     global _exa_config
+    # Atomic reference swap — safe for concurrent readers without a lock
     _exa_config = {**_exa_config, **config}
 
 

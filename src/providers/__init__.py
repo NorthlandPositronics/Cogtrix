@@ -15,8 +15,8 @@ Usage::
 
 from __future__ import annotations
 
-import functools
 import importlib
+import threading
 from typing import TYPE_CHECKING, Any
 
 from src.providers.defaults import (
@@ -55,19 +55,32 @@ _MODULES: dict[str, str] = {
     "google": "src.providers.google",
 }
 
+_provider_cache: dict[str, Any] = {}
+_provider_cache_lock = threading.Lock()
 
-@functools.cache
+
 def _load_provider(provider_type: str) -> Any:
     """Import and return a provider module by type name.
 
     Raises:
         ValueError: If *provider_type* is not a known provider type.
     """
-    module_path = _MODULES.get(provider_type)
-    if module_path is None:
-        supported = ", ".join(sorted(PROVIDER_TYPES))
-        raise ValueError(f"Unknown provider type: '{provider_type}'. Supported: {supported}")
-    return importlib.import_module(module_path)
+    with _provider_cache_lock:
+        if provider_type in _provider_cache:
+            return _provider_cache[provider_type]
+        module_path = _MODULES.get(provider_type)
+        if module_path is None:
+            supported = ", ".join(sorted(PROVIDER_TYPES))
+            raise ValueError(f"Unknown provider type: '{provider_type}'. Supported: {supported}")
+        module = importlib.import_module(module_path)
+        _provider_cache[provider_type] = module
+        return module
+
+
+def _clear_provider_cache() -> None:
+    """Clear the provider module cache — call on provider/model switch."""
+    with _provider_cache_lock:
+        _provider_cache.clear()
 
 
 # ── Public helpers ───────────────────────────────────────────────────

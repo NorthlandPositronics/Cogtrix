@@ -823,23 +823,23 @@ class TestConfigureRagVectordbDir:
 
     def test_configure_rag_vectordb_dir_updates_config(self):
         """configure_rag() with vectordb_dir updates _rag_config used by query functions."""
-        from src.tools.rag import _rag_config, configure_rag
+        import src.tools.rag as _rag_mod
 
-        original = _rag_config["vectordb_dir"]
+        original = _rag_mod._rag_config["vectordb_dir"]
         try:
-            configure_rag({"vectordb_dir": "/tmp/test_vectordb"})
-            assert _rag_config["vectordb_dir"] == "/tmp/test_vectordb"
+            _rag_mod.configure_rag({"vectordb_dir": "/tmp/test_vectordb"})
+            assert _rag_mod._rag_config["vectordb_dir"] == "/tmp/test_vectordb"
         finally:
-            configure_rag({"vectordb_dir": original})
+            _rag_mod.configure_rag({"vectordb_dir": original})
 
     def test_configure_rag_vectordb_dir_ignored_when_absent(self):
         """configure_rag() without vectordb_dir leaves the existing value intact."""
-        from src.tools.rag import _rag_config, configure_rag
+        import src.tools.rag as _rag_mod
 
-        configure_rag({"vectordb_dir": "/tmp/before"})
-        configure_rag({"embedding_provider": "ollama"})
-        assert _rag_config["vectordb_dir"] == "/tmp/before"
-        configure_rag({"vectordb_dir": str(configure_rag.__module__)})
+        _rag_mod.configure_rag({"vectordb_dir": "/tmp/before"})
+        _rag_mod.configure_rag({"embedding_provider": "ollama"})
+        assert _rag_mod._rag_config["vectordb_dir"] == "/tmp/before"
+        _rag_mod.configure_rag({"vectordb_dir": str(_rag_mod.configure_rag.__module__)})
 
     def test_query_knowledge_base_uses_configured_dir(self, tmp_path):
         """query_knowledge_base() checks the configured vectordb_dir, not the default."""

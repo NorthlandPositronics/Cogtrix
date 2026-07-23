@@ -61,6 +61,7 @@ def configure_tavily(config: dict[str, Any]) -> None:
         api_key  – Tavily API key (or read from TAVILY_API_KEY env var)
     """
     global _tavily_config
+    # Atomic reference swap — safe for concurrent readers without a lock
     _tavily_config = {**_tavily_config, **config}
 
 

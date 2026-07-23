@@ -89,6 +89,7 @@ def configure_deep_think(config: dict[str, Any]) -> None:
         default_model    – model name
     """
     global _config
+    # Atomic reference swap — safe for concurrent readers without a lock
     _config = {**_config, **config}
 
 

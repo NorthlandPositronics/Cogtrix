@@ -250,10 +250,12 @@ def get_model_status() -> dict[str, Any]:
     for key, breaker in snapshot:
         with _circuit_breaker_lock:
             available, reason = breaker.check_availability(cooldown)
+            consecutive_failures = breaker.consecutive_failures
+            last_error = breaker.last_error if not available else None
         status[key] = {
             "available": available,
-            "consecutive_failures": breaker.consecutive_failures,
-            "last_error": breaker.last_error if not available else None,
+            "consecutive_failures": consecutive_failures,
+            "last_error": last_error,
             "reason": reason,
         }
     return status
@@ -283,6 +285,7 @@ def configure_delegate(config: dict[str, Any]) -> None:
     Called by cogtrix.py at startup to pass configuration.
     """
     global _delegate_config
+    # Atomic reference swap — safe for concurrent readers without a lock
     _delegate_config = {**_delegate_config, **config}
 
 

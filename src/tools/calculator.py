@@ -35,8 +35,8 @@ OPERATORS = {
 
 
 def _safe_factorial(n: int) -> int:
-    if n > 10000:
-        raise ValueError("factorial argument too large (max 10000)")
+    if n > 1558:
+        raise ValueError("factorial argument too large to display (max 1558)")
     return math.factorial(n)
 
 
@@ -202,7 +202,7 @@ def calculate(expression: str) -> str:
             # Clean up floating point representation
             if result.is_integer() and abs(result) < 1e15:
                 return str(int(result))
-            elif abs(result) < 1e-10:
+            elif abs(result) < 1e-15:
                 return "0"
             else:
                 # Round to reasonable precision

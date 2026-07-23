@@ -138,6 +138,7 @@ def read_multiline(first_line: str = "") -> str:
 
 def run_inline_shell(command: str) -> None:
     """Execute a shell command inline and print the output."""
+    command = command.replace("\r", "")
     if not command.strip():
         if _console is not None:
             _console.print("[dim]Usage: !<command>  (e.g. !ls -la)[/dim]")

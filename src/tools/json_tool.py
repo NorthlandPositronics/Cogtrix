@@ -259,8 +259,9 @@ def extract_json(text: str) -> str:
             bracket_start if bracket_start != -1 else len(text),
         )
 
-        # Try progressively larger substrings
-        for end in range(start + 2, len(text) + 1):
+        # Only try substrings ending at closing-bracket positions (O(k) vs O(n))
+        closing = [i + 1 for i, ch in enumerate(text) if ch in ("}", "]") and i >= start]
+        for end in closing:
             try:
                 candidate = text[start:end]
                 data = json.loads(candidate)

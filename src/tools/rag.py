@@ -50,7 +50,18 @@ def configure_rag(config: dict) -> None:
             - api_key: Provider API key (for OpenAI/Google; None for Ollama)
             - vectordb_dir: Path to the FAISS index directory
     """
-    _rag_config.update(config)
+    if "vectordb_dir" in config and config["vectordb_dir"] is not None:
+        vdir = Path(str(config["vectordb_dir"]))
+        if not vdir.is_absolute():
+            resolved = (Path.cwd() / vdir).resolve()
+            cwd_resolved = Path.cwd().resolve()
+            if not resolved.is_relative_to(cwd_resolved):
+                raise ValueError(
+                    f"Path traversal detected in vectordb_dir: {config['vectordb_dir']!r}"
+                )
+    # Atomic reference swap — safe for concurrent readers without a lock
+    global _rag_config
+    _rag_config = {**_rag_config, **config}
 
 
 class KnowledgeQueryInput(BaseModel):

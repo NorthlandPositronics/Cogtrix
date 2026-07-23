@@ -10,8 +10,11 @@ import concurrent.futures
 import json as _json
 import re
 import threading
+import types
+import typing
 from collections import OrderedDict
 from dataclasses import dataclass
+from difflib import SequenceMatcher
 from typing import Any
 
 from src.agent.core import CogtrixState
@@ -194,11 +197,6 @@ def _correct_tool_args(tool: Any, args: dict) -> dict:
     Returns the (possibly corrected) args dict.  On any error, returns the
     original args unchanged.
     """
-    import json
-    import types
-    import typing
-    from difflib import SequenceMatcher
-
     schema = getattr(tool, "args_schema", None)
     if schema is None:
         return args
@@ -276,7 +274,7 @@ def _correct_tool_args(tool: Any, args: dict) -> dict:
             if isinstance(value, list) and all(isinstance(v, str) for v in value):
                 corrected[key] = " ".join(value)
             else:
-                corrected[key] = json.dumps(value)
+                corrected[key] = _json.dumps(value)
 
     return corrected
 
@@ -396,6 +394,7 @@ def build_agent_graph(
     _tool_lookup: dict[str, Any] = {getattr(t, "name", ""): t for t in active_tools_list}
     _tool_lookup.pop("", None)
     _active_names: set[str] = set(_tool_lookup.keys())
+    tool_catalog: dict[str, str] = build_tool_catalog(available_tools)
 
     def call_model(state: CogtrixState, config: RunnableConfig) -> dict:
         call_count[0] += 1
@@ -474,7 +473,7 @@ def build_agent_graph(
         if tool_name in _DUPLICATE_EXEMPT:
             return None
         try:
-            return tool_name + ":" + _json.dumps(call.get("args", {}), sort_keys=True)
+            return tool_name + ":" + _json.dumps(call.get("args", {}))
         except (TypeError, ValueError):
             return None
 
@@ -650,6 +649,7 @@ def build_agent_graph(
                         )
                         continue
                     tool_obj = available_tools.pop(match)
+                    tool_catalog.pop(match, None)
                     apply_output_cap(tool_obj, output_cap)
                     if registry.requires_confirmation(match):
                         if session_state.no_confirm:
@@ -860,6 +860,7 @@ def build_agent_graph(
                             rname = resolved
                     if rname in available_tools and rname not in tools_activated:
                         tool_obj = available_tools.pop(rname)
+                        tool_catalog.pop(rname, None)
                         apply_output_cap(tool_obj, output_cap)
                         if registry.requires_confirmation(rname):
                             if session_state.no_confirm:
@@ -908,6 +909,7 @@ def build_agent_graph(
                             active_names_ref.discard(rname)
                             original = session_state.all_tool_originals.get(rname, popped)
                             available_tools[rname] = original
+                            tool_catalog.update(build_tool_catalog({rname: original}))
                             tools_released.append(rname)
                             session_state.loaded_tools.discard(rname)
                             if rname in tool_lookup_ref:
@@ -945,7 +947,7 @@ def build_agent_graph(
             if available_tools or releasable:
                 rt = create_request_tools_tool(
                     available_tools,
-                    build_tool_catalog(available_tools),
+                    tool_catalog,
                     active_names=active_names_ref,
                     protected_names=protected,
                 )

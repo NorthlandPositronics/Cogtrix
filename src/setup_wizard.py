@@ -263,9 +263,12 @@ def run_setup_wizard(
     # Build system prompt
     safe_provider = bootstrap_info["provider"].replace("{", "{{").replace("}", "}}")
     safe_model = bootstrap_info["model"].replace("{", "{{").replace("}", "}}")
+    docs_escaped = docs.replace("{", "{{").replace("}", "}}")
+    existing_config_raw = existing_yaml or "No existing configuration."
+    config_escaped = existing_config_raw.replace("{", "{{").replace("}", "}}")
     system_prompt = _WIZARD_SYSTEM_PROMPT.format(
-        docs=docs,
-        existing_config=existing_yaml or "No existing configuration.",
+        docs=docs_escaped,
+        existing_config=config_escaped,
         bootstrap_provider=safe_provider,
         bootstrap_model=safe_model,
     )
@@ -610,6 +613,13 @@ def _load_docs(url: str | None = None) -> str:
     """
     if url:
         try:
+            from urllib.parse import urlparse as _urlparse
+
+            parsed = _urlparse(url)
+            if parsed.scheme not in ("http", "https"):
+                raise ValueError(
+                    f"Unsupported URL scheme: {parsed.scheme!r} (only http/https allowed)"
+                )
             req = urllib.request.Request(url)
             with urllib.request.urlopen(req, timeout=15) as resp:  # nosec B310
                 raw = resp.read(_MAX_DOC_SIZE + 1)

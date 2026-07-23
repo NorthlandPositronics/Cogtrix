@@ -230,6 +230,7 @@ def build_llm_for_decomposition(config: Any) -> Any:
     Reuses the primary model configuration since decomposition is a
     quick classification-style call.
     """
+    log = get_logger()
     try:
         from src.providers import create_chat_model
 
@@ -243,9 +244,9 @@ def build_llm_for_decomposition(config: Any) -> Any:
             num_ctx=provider_cfg.num_ctx if provider_cfg.type == "ollama" else None,
             max_tokens=provider_cfg.max_tokens,
         )
-    except Exception:
-        pass
-    return None
+    except Exception as exc:
+        log.debug("Failed to build decomposition LLM: %s", exc)
+        return None
 
 
 def extract_turn_messages(all_messages: list, boundary: object | None = None) -> list:

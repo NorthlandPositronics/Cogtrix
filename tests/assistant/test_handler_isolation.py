@@ -78,7 +78,7 @@ def _make_handler(
 
 
 class TestAvailableToolsIsolation:
-    """handle() passes a copy of _available_tools to the runner."""
+    """handle() passes a copy of _available_tools to the runner via config."""
 
     def test_runner_pop_does_not_mutate_available_tools(self):
         """When the runner pops a key from the passed dict, the original is unchanged."""
@@ -88,8 +88,9 @@ class TestAvailableToolsIsolation:
         tool_b.name = "tool_b"
 
         def _runner_that_pops(**kwargs: object) -> str:
-            passed_dict = kwargs.get("available_tools", {})
-            passed_dict.pop("tool_a", None)
+            cfg = kwargs.get("config")
+            if cfg is not None and cfg.available_tools:
+                cfg.available_tools.pop("tool_a", None)
             return "done"
 
         handler, _ = _make_handler(
@@ -110,7 +111,8 @@ class TestAvailableToolsIsolation:
         captured: list[dict] = []
 
         def _runner_capture(**kwargs: object) -> str:
-            captured.append(dict(kwargs.get("available_tools", {})))
+            cfg = kwargs.get("config")
+            captured.append(dict(cfg.available_tools) if cfg and cfg.available_tools else {})
             return "ok"
 
         handler, _ = _make_handler(
@@ -130,7 +132,9 @@ class TestAvailableToolsIsolation:
         captured_id: list[int] = []
 
         def _runner_capture(**kwargs: object) -> str:
-            captured_id.append(id(kwargs.get("available_tools")))
+            cfg = kwargs.get("config")
+            if cfg is not None:
+                captured_id.append(id(cfg.available_tools))
             return "ok"
 
         handler, _ = _make_handler(
@@ -144,7 +148,7 @@ class TestAvailableToolsIsolation:
 
 
 class TestActiveToolsIsolation:
-    """handle() passes a copy of _active_tools to the runner."""
+    """handle() passes a copy of _active_tools to the runner via config."""
 
     def test_runner_pop_does_not_mutate_active_tools(self):
         """When the runner removes an item from the passed list, the original is unchanged."""
@@ -154,9 +158,9 @@ class TestActiveToolsIsolation:
         tool_2.name = "tool_2"
 
         def _runner_that_pops(**kwargs: object) -> str:
-            passed_list = kwargs.get("active_tools_list", [])
-            if passed_list:
-                passed_list.pop()
+            cfg = kwargs.get("config")
+            if cfg is not None and cfg.active_tools_list:
+                cfg.active_tools_list.pop()
             return "done"
 
         handler, _ = _make_handler(
@@ -177,7 +181,8 @@ class TestActiveToolsIsolation:
         captured: list[list] = []
 
         def _runner_capture(**kwargs: object) -> str:
-            captured.append(list(kwargs.get("active_tools_list", [])))
+            cfg = kwargs.get("config")
+            captured.append(list(cfg.active_tools_list) if cfg and cfg.active_tools_list else [])
             return "ok"
 
         handler, _ = _make_handler(
@@ -197,7 +202,9 @@ class TestActiveToolsIsolation:
         captured_id: list[int] = []
 
         def _runner_capture(**kwargs: object) -> str:
-            captured_id.append(id(kwargs.get("active_tools_list")))
+            cfg = kwargs.get("config")
+            if cfg is not None:
+                captured_id.append(id(cfg.active_tools_list))
             return "ok"
 
         handler, _ = _make_handler(

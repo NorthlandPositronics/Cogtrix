@@ -215,11 +215,14 @@ def apply_message_compression(
             if tcid:
                 compression_cache[tcid] = compressed
 
-    # Assemble result list.
+    # Assemble result list, tracking saved chars incrementally.
     result = []
+    saved_chars = 0
     for i, msg in enumerate(messages):
         if i in compressed_results or i in cached:
             compressed_content = compressed_results[i] if i in compressed_results else cached[i]
+            original_len = _content_len(msg)
+            saved_chars += original_len - len(compressed_content)
             replacement = ToolMessage(
                 content=compressed_content,
                 tool_call_id=getattr(msg, "tool_call_id", "") or "",
@@ -231,7 +234,7 @@ def apply_message_compression(
 
     compressed_count = len(compressed_results)
     if compressed_count > 0:
-        new_total = sum(_content_len(m) for m in result)
+        new_total = total_chars - saved_chars
         log.info(
             "Compressed %d tool messages: %d chars -> %d chars (%.0f%% reduction)",
             compressed_count,

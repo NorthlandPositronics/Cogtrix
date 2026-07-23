@@ -6,6 +6,7 @@ Supports multiple LLM providers: OpenAI, Ollama.
 """
 
 import atexit
+import concurrent.futures as _cf
 import os
 import sys
 import time as _time_mod
@@ -2577,8 +2578,6 @@ def run_single_prompt(
         _spinner.start()
         try:
             if config and config.prompt_optimizer:
-                import concurrent.futures as _cf
-
                 with _cf.ThreadPoolExecutor(max_workers=2, thread_name_prefix="prep") as _pool:
                     _ctx_future = _pool.submit(memory_manager.prepare_context, prompt_text)
                     _opt_future = _pool.submit(
@@ -3028,6 +3027,22 @@ def main():
     configure_deep_think_tool(config)
 
     configure_file_ops_tool(config)
+
+    def _reconfigure_all_tools(cfg: Any, ctx_tokens: int, tool_list: list) -> None:
+        """Call every configure_* function and recompute the tool output cap."""
+        configure_delegate_tool(cfg, status_callback=_delegation_status)
+        configure_deep_think_tool(cfg)
+        configure_tavily_tool(cfg)
+        configure_exa_tool(cfg)
+        configure_brave_tool(cfg)
+        configure_serpapi_tool(cfg)
+        configure_google_search_tool(cfg)
+        configure_python_exec_tool(cfg)
+        configure_file_ops_tool(cfg)
+        configure_rag_tool(cfg)
+        cap = _compute_tool_output_cap(ctx_tokens)
+        for t in tool_list:
+            apply_output_cap(t, cap)
 
     try:
         from src.tools.deep_think import set_progress_callback
@@ -3641,10 +3656,8 @@ def main():
                             # Update hybrid memory LLM reference
                             memory_manager.set_llm(llm)
 
-                            # Reconfigure tools that depend on provider/model
-                            configure_python_exec_tool(config)
-                            configure_delegate_tool(config, status_callback=_delegation_status)
-                            configure_deep_think_tool(config)
+                            # Reconfigure all tools for new provider/model
+                            _reconfigure_all_tools(config, max_context_tokens, tools)
 
                             # Rebuild compression LLM for new provider/model
                             if config.context_compression:
@@ -3721,10 +3734,8 @@ def main():
                             # Update hybrid memory LLM reference
                             memory_manager.set_llm(llm)
 
-                            # Reconfigure tools that depend on provider/model
-                            configure_python_exec_tool(config)
-                            configure_delegate_tool(config, status_callback=_delegation_status)
-                            configure_deep_think_tool(config)
+                            # Reconfigure all tools for new provider
+                            _reconfigure_all_tools(config, max_context_tokens, tools)
 
                             # Rebuild compression LLM for new provider/model
                             if config.context_compression:
@@ -4112,13 +4123,7 @@ def main():
                             _cleanup_resources.append(llm)
 
                             memory_manager.set_llm(llm)
-                            configure_tavily_tool(config)
-                            configure_exa_tool(config)
-                            configure_brave_tool(config)
-                            configure_serpapi_tool(config)
-                            configure_python_exec_tool(config)
-                            configure_delegate_tool(config, status_callback=_delegation_status)
-                            configure_deep_think_tool(config)
+                            _reconfigure_all_tools(config, max_context_tokens, tools)
 
                             mode_adds = memory_manager.get_system_prompt_additions()
                             system_prompt = build_system_prompt(
@@ -4128,10 +4133,6 @@ def main():
                                 tool_instructions=provider_config.tool_instructions,
                             )
                             slash_cmds.system_prompt = system_prompt
-
-                            _tool_output_cap = _compute_tool_output_cap(max_context_tokens)
-                            for t in tools:
-                                apply_output_cap(t, _tool_output_cap)
 
                             if config.context_compression:
                                 try:
@@ -4225,8 +4226,6 @@ def main():
                 # The two operations are independent: the optimizer rewrites the prompt text
                 # while prepare_context reads conversation history — no data dependency.
                 if config.prompt_optimizer and not already_optimized:
-                    import concurrent.futures as _cf
-
                     with _cf.ThreadPoolExecutor(max_workers=2, thread_name_prefix="prep") as _pool:
                         _ctx_future = _pool.submit(memory_manager.prepare_context, user_input)
                         _opt_future = _pool.submit(

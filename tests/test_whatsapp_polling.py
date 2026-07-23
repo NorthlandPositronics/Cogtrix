@@ -399,9 +399,29 @@ class TestGetChatMessagesClient:
 
         params: dict = call_args.kwargs.get("params") or call_args[1].get("params", {})
         assert params["limit"] == 10
-        assert params["downloadMedia"] is False
-        assert params["filter.fromMe"] is False
-        assert params["filter.timestamp.gte"] == 1000
+        assert params["downloadMedia"] == "false"
+        assert "filter.fromMe" not in params
+        assert "filter.timestamp.gte" not in params
+
+    @patch("src.tools._whatsapp_client.requests")
+    def test_client_side_filtering(self, mock_requests: MagicMock) -> None:
+        """Filters are applied in Python, not as query params (WAHA WEBJS bug workaround)."""
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock()
+        mock_resp.json.return_value = [
+            {"id": "m1", "timestamp": 500, "from": "a@c.us", "body": "old", "fromMe": False},
+            {"id": "m2", "timestamp": 2000, "from": "b@c.us", "body": "new", "fromMe": False},
+            {"id": "m3", "timestamp": 2000, "from": "c@c.us", "body": "mine", "fromMe": True},
+        ]
+        mock_requests.get.return_value = mock_resp
+
+        client = WahaClient(base_url="http://localhost:3000", session="default")
+        messages = client.get_chat_messages(
+            "chat@c.us", filter_from_me=False, filter_timestamp_gte=1000
+        )
+
+        assert len(messages) == 1
+        assert messages[0].id == "m2"
 
 
 # ---------------------------------------------------------------------------

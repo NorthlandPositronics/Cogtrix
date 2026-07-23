@@ -267,6 +267,10 @@ class BaseMemoryManager(ABC):
                 Path(tmp_path).replace(meta_path)
             except Exception:
                 try:
+                    os.close(tmp_fd)
+                except OSError:
+                    pass
+                try:
                     os.unlink(tmp_path)
                 except OSError:
                     pass
@@ -311,6 +315,10 @@ class BaseMemoryManager(ABC):
                     json.dump(data, f)
                 Path(tmp_path).replace(meta_path)
             except Exception:
+                try:
+                    os.close(tmp_fd)
+                except OSError:
+                    pass
                 try:
                     os.unlink(tmp_path)
                 except OSError:

@@ -8,6 +8,7 @@ exposing per-chat history.
 
 from __future__ import annotations
 
+import atexit
 import concurrent.futures as _cf
 import hashlib
 import heapq
@@ -42,6 +43,7 @@ def _get_extraction_pool() -> _cf.ThreadPoolExecutor:
 
 _DEFAULT_FACTS_SUBDIR = "knowledge/facts.json"
 _DEFAULT_FAISS_SUBDIR = "vectordb/knowledge"
+_FAISS_SAVE_INTERVAL = 60.0
 
 _EXTRACT_FACTS_SYSTEM = """Extract durable factual knowledge from this conversation exchange.
 
@@ -116,6 +118,10 @@ class SharedKnowledgeStore:
         self._embedding_fn: Any = None
         self._embedding_tag: str | None = None
 
+        self._faiss_save_timer: threading.Timer | None = None
+        self._faiss_last_save: float = 0.0
+        self._faiss_timer_lock = threading.Lock()
+
         self._facts_path.parent.mkdir(parents=True, exist_ok=True)
         self._load()
 
@@ -126,6 +132,8 @@ class SharedKnowledgeStore:
             daemon=True,
         )
         self._embedding_thread.start()
+
+        atexit.register(self.flush)
 
     # ------------------------------------------------------------------
     # Public API
@@ -203,7 +211,7 @@ class SharedKnowledgeStore:
         return "\n".join(lines)
 
     def save(self) -> None:
-        """Persist the fact store to disk."""
+        """Persist facts JSON immediately; debounce the FAISS index write."""
         with self._lock:
             facts_snapshot = list(self._facts)
 
@@ -212,7 +220,7 @@ class SharedKnowledgeStore:
             tmp_fd, tmp_path = tempfile.mkstemp(dir=str(self._facts_path.parent), suffix=".tmp")
             try:
                 with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
-                    json.dump(data, f, ensure_ascii=False, indent=2)
+                    json.dump(data, f, ensure_ascii=False)
                 os.replace(tmp_path, self._facts_path)
             except Exception:
                 try:
@@ -233,14 +241,55 @@ class SharedKnowledgeStore:
             log.warning("Knowledge store: save failed: %s", exc)
 
         if self._vectorstore is not None and self._embeddings_ready.is_set():
-            try:
-                idx_dir = Path(self._faiss_index_dir)
-                idx_dir.mkdir(parents=True, exist_ok=True)
-                self._vectorstore.save_local(str(idx_dir))
-                meta = {"embedding_model": self._embedding_tag}
-                (idx_dir / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
-            except Exception as exc:
-                log.warning("Knowledge store: FAISS save failed: %s", exc)
+            self._schedule_faiss_save()
+
+    def _write_faiss_index(self) -> None:
+        """Write the FAISS index and metadata to disk."""
+        try:
+            idx_dir = Path(self._faiss_index_dir)
+            idx_dir.mkdir(parents=True, exist_ok=True)
+            self._vectorstore.save_local(str(idx_dir))
+            meta = {"embedding_model": self._embedding_tag}
+            (idx_dir / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+            self._faiss_last_save = time.monotonic()
+            log.debug("Knowledge store: FAISS index saved to %s", idx_dir)
+        except Exception as exc:
+            log.warning("Knowledge store: FAISS save failed: %s", exc)
+
+    def _schedule_faiss_save(self) -> None:
+        """Debounce the FAISS index write: at most once per _FAISS_SAVE_INTERVAL seconds."""
+        with self._faiss_timer_lock:
+            if self._faiss_save_timer is not None:
+                self._faiss_save_timer.cancel()
+                self._faiss_save_timer = None
+
+            elapsed = time.monotonic() - self._faiss_last_save
+            if elapsed >= _FAISS_SAVE_INTERVAL:
+                self._write_faiss_index()
+            else:
+                delay = _FAISS_SAVE_INTERVAL - elapsed
+                timer = threading.Timer(delay, self._on_faiss_timer_fire)
+                timer.daemon = True
+                timer.name = "knowledge-faiss-save"
+                self._faiss_save_timer = timer
+                timer.start()
+
+    def _on_faiss_timer_fire(self) -> None:
+        """Called by the debounce timer; clears the timer reference then writes."""
+        with self._faiss_timer_lock:
+            self._faiss_save_timer = None
+        if self._vectorstore is not None and self._embeddings_ready.is_set():
+            self._write_faiss_index()
+
+    def flush(self) -> None:
+        """Cancel any pending FAISS timer and write the index immediately."""
+        with self._faiss_timer_lock:
+            if self._faiss_save_timer is not None:
+                self._faiss_save_timer.cancel()
+                self._faiss_save_timer = None
+
+        if self._vectorstore is not None and self._embeddings_ready.is_set():
+            self._write_faiss_index()
 
     # ------------------------------------------------------------------
     # Extraction

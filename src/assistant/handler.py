@@ -133,6 +133,10 @@ class MessageHandler:
             self._datamarking_enabled: bool = guardrail_cfg.get("datamarking", True)
         else:
             self._datamarking_enabled = bool(datamarking_enabled)
+        log.info(
+            "Datamarking (Microsoft Spotlighting): %s",
+            "enabled" if self._datamarking_enabled else "disabled",
+        )
 
         excluded = _DEFAULT_EXCLUDED | set(config.get("excluded_tools", []))
         self._excluded_tools = excluded
@@ -141,6 +145,17 @@ class MessageHandler:
             name: tool for name, tool in available_tools.items() if name not in excluded
         }
         self._active_tools = [t for t in active_tools if getattr(t, "name", None) not in excluded]
+
+        if self._scheduler is not None:
+            self._list_scheduled_tool = create_list_scheduled_tool(
+                self._scheduler, self._services_config
+            )
+            self._edit_scheduled_tool = create_edit_scheduled_tool(self._scheduler)
+            self._cancel_scheduled_tool = create_cancel_scheduled_tool(self._scheduler)
+        else:
+            self._list_scheduled_tool = None
+            self._edit_scheduled_tool = None
+            self._cancel_scheduled_tool = None
 
     def _resolve_contact_prompt(self, msg: IncomingMessage) -> str | None:
         """Return per-contact instructions from config, or None if not configured."""
@@ -259,19 +274,15 @@ class MessageHandler:
         session: Any,
     ) -> tuple[str, set[str]]:
         """Invoke the agent runner and return (response, loaded_tools)."""
+        from src.orchestration.run_config import AgentRunConfig
+
         try:
-            runner = self._agent_runner
             call_session_state = SessionState(
                 no_confirm=self._session_state.no_confirm if self._session_state else True,
             )
-            response: str = runner(
-                user_input=user_input,
-                history_messages=history_messages,
-                context_prefix=context_prefix,
+            run_config = AgentRunConfig(
                 llm=self._llm,
                 system_prompt=effective_prompt,
-                registry=self._registry,
-                approvals=set(self._approvals),
                 available_tools=dict(self._available_tools),
                 active_tools_list=active_tools,
                 max_context_tokens=self._max_context_tokens,
@@ -279,6 +290,14 @@ class MessageHandler:
                 tool_call_guard=self._guardrails.check_tool_call,
                 session_state=call_session_state,
                 parallel_tool_execution=self._parallel_tool_execution,
+            )
+            response: str = self._agent_runner(
+                user_input=user_input,
+                history_messages=history_messages,
+                registry=self._registry,
+                approvals=set(self._approvals),
+                context_prefix=context_prefix,
+                config=run_config,
             )
         except Exception as exc:
             log.error("Agent error for session %s: %s", session.session_key, exc)
@@ -378,14 +397,21 @@ class MessageHandler:
             if "edit_last_reply" not in self._excluded_tools and session.last_sent_message_id:
                 active_tools.append(create_edit_reply_tool(edit_state))
             if self._scheduler:
-                if "list_scheduled_messages" not in self._excluded_tools:
-                    active_tools.append(
-                        create_list_scheduled_tool(self._scheduler, self._services_config)
-                    )
-                if "edit_scheduled_message" not in self._excluded_tools:
-                    active_tools.append(create_edit_scheduled_tool(self._scheduler))
-                if "cancel_scheduled_message" not in self._excluded_tools:
-                    active_tools.append(create_cancel_scheduled_tool(self._scheduler))
+                if (
+                    "list_scheduled_messages" not in self._excluded_tools
+                    and self._list_scheduled_tool is not None
+                ):
+                    active_tools.append(self._list_scheduled_tool)
+                if (
+                    "edit_scheduled_message" not in self._excluded_tools
+                    and self._edit_scheduled_tool is not None
+                ):
+                    active_tools.append(self._edit_scheduled_tool)
+                if (
+                    "cancel_scheduled_message" not in self._excluded_tools
+                    and self._cancel_scheduled_tool is not None
+                ):
+                    active_tools.append(self._cancel_scheduled_tool)
 
             effective_prompt, user_input, history = self._prepare_agent_call(
                 msg, context, combined_prefix

@@ -297,6 +297,8 @@ class TestHandlerDatamarking:
 
         call_kwargs = agent_runner.call_args
         assert call_kwargs is not None, "agent_runner was not called"
-        system_prompt: str = call_kwargs.kwargs["system_prompt"]
+        run_config = call_kwargs.kwargs["config"]
+        assert run_config is not None, "config kwarg was not passed to agent_runner"
+        system_prompt: str = run_config.system_prompt
         assert "Datamarking protocol" in system_prompt
         assert "RAW DATA" in system_prompt

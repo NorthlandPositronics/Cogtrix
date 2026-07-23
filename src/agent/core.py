@@ -696,7 +696,11 @@ def ensure_base_messages(history: list[Any]) -> list[Any]:
 
 @runtime_checkable
 class AgentRunner(Protocol):
-    """Protocol that decouples assistant handler from the concrete run_agent implementation."""
+    """Protocol that decouples assistant handler from the concrete run_agent implementation.
+
+    Callers pass session-constant parameters via ``config: AgentRunConfig``
+    and per-call parameters as positional/keyword arguments.
+    """
 
     def __call__(
         self,
@@ -710,19 +714,4 @@ class AgentRunner(Protocol):
         result_messages: list | None = None,
         *,
         config: AgentRunConfig | None = None,
-        llm: Any = None,
-        system_prompt: str | None = None,
-        available_tools: dict | None = None,
-        active_tools_list: list | None = None,
-        max_context_tokens: int | None = None,
-        preset_tools: set[str] | None = None,
-        context_compression: bool = True,
-        compression_min_age: int | None = None,
-        compression_min_chars: int | None = None,
-        compression_llm: Any = None,
-        tool_call_guard: Any | None = None,
-        session_state: Any = None,
-        confirmation_ui: Any | None = None,
-        on_tool_expansion: Any | None = None,
-        parallel_tool_execution: bool = True,
     ) -> str: ...

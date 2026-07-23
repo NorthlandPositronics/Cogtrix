@@ -59,6 +59,7 @@ def configure_brave(config: dict[str, Any]) -> None:
         api_key  - Brave Search API key (or read from BRAVE_API_KEY env var)
     """
     global _brave_config
+    # Atomic reference swap — safe for concurrent readers without a lock
     _brave_config = {**_brave_config, **config}
 
 

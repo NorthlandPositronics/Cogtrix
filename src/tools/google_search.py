@@ -58,6 +58,7 @@ def configure_google_search(config: dict[str, Any]) -> None:
         cse_id   - Programmable Search Engine ID (or GOOGLE_CSE_ID env var)
     """
     global _google_config
+    # Atomic reference swap — safe for concurrent readers without a lock
     _google_config = {**_google_config, **config}
 
 

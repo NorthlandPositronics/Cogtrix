@@ -6,16 +6,16 @@ from src.tools.calculator import _safe_factorial, calculate
 
 
 class TestSafeFactorial:
-    def test_factorial_cap_raises_for_10001(self) -> None:
+    def test_factorial_cap_raises_for_1559(self) -> None:
         with pytest.raises(ValueError, match="factorial argument too large"):
-            _safe_factorial(10001)
+            _safe_factorial(1559)
 
     def test_factorial_cap_raises_for_value_above_limit(self) -> None:
         with pytest.raises(ValueError):
             _safe_factorial(99999)
 
     def test_factorial_exactly_at_limit_succeeds(self) -> None:
-        result = _safe_factorial(10000)
+        result = _safe_factorial(1558)
         assert result > 0
 
     def test_factorial_small_value_returns_correct(self) -> None:
@@ -34,6 +34,6 @@ class TestCalculateFactorial:
         assert result == "120"
 
     def test_factorial_via_calculate_cap_returns_error(self) -> None:
-        result = calculate("factorial(10001)")
+        result = calculate("factorial(1559)")
         assert result.startswith("Error")
         assert "factorial" in result.lower() or "large" in result.lower()

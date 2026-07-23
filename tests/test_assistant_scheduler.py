@@ -557,7 +557,11 @@ class TestHandlerIntegration:
 
         def _runner_that_schedules(**kwargs):
             # Find the schedule_reply tool in active_tools_list and invoke it.
-            tools = kwargs.get("active_tools_list", [])
+            tools = (
+                kwargs["config"].active_tools_list
+                if kwargs.get("config") and kwargs["config"].active_tools_list
+                else []
+            )
             for t in tools:
                 if getattr(t, "name", None) == "schedule_reply":
                     t.invoke({"text": "Scheduled reply!", "delay_minutes": 60})
@@ -598,7 +602,11 @@ class TestHandlerIntegration:
         sched = _make_scheduler(tmp_path)
 
         def _runner_schedules(**kwargs):
-            tools = kwargs.get("active_tools_list", [])
+            tools = (
+                kwargs["config"].active_tools_list
+                if kwargs.get("config") and kwargs["config"].active_tools_list
+                else []
+            )
             for t in tools:
                 if getattr(t, "name", None) == "schedule_reply":
                     t.invoke({"text": "Delayed hello", "delay_minutes": 30})
@@ -619,7 +627,11 @@ class TestHandlerIntegration:
         captured_tools: list = []
 
         def _capture_runner(**kwargs):
-            captured_tools.extend(kwargs.get("active_tools_list", []))
+            captured_tools.extend(
+                kwargs["config"].active_tools_list
+                if kwargs.get("config") and kwargs["config"].active_tools_list
+                else []
+            )
             return "ok"
 
         channel = MagicMock()
@@ -634,7 +646,11 @@ class TestHandlerIntegration:
         captured_tools: list = []
 
         def _capture_runner(**kwargs):
-            captured_tools.extend(kwargs.get("active_tools_list", []))
+            captured_tools.extend(
+                kwargs["config"].active_tools_list
+                if kwargs.get("config") and kwargs["config"].active_tools_list
+                else []
+            )
             return "ok"
 
         channel = MagicMock()

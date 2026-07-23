@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.1.13](https://github.com/NorthlandPositronics/Cogtrix/compare/v0.1.12...v0.1.13) (2026-03-03)
+
+
+### Bug Fixes
+
+* apply Round 5 audit fixes (BUG-078/079/080/082, ARCH-039, PERF-901/902/907) ([2adf625](https://github.com/NorthlandPositronics/Cogtrix/commit/2adf625b65dbfe62a7dc2ccfd5b19bc7893af625))
+* merge channel-specific config into WhatsApp/Telegram channel constructors ([840791a](https://github.com/NorthlandPositronics/Cogtrix/commit/840791af00dcd0bcbba34a74c0b907b778e82684))
+* resolve 9 bugs and performance issues (BUG-074/075/076/077, PERF-802/804/806, ARCH-037-07/11) ([6291a65](https://github.com/NorthlandPositronics/Cogtrix/commit/6291a65d1aa44a245da3d36836ffcadca4dc7043))
+* WAHA client-side filtering, factorial cap, rag atomic swap, and CI workflow ([712007c](https://github.com/NorthlandPositronics/Cogtrix/commit/712007c7411b449244c617a9e50aae9ad9534582))
+
 ## [0.1.12](https://github.com/NorthlandPositronics/Cogtrix/compare/v0.1.11...v0.1.12) (2026-03-03)
 
 

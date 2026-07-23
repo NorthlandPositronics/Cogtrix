@@ -187,7 +187,7 @@ class JsonFileMemoryStore(BaseMemoryStore):
             tmp_fd, tmp_path = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
             try:
                 with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
-                    json.dump(serializable, f, ensure_ascii=False, indent=2)
+                    json.dump(serializable, f, ensure_ascii=False)
                 os.replace(tmp_path, path)
                 self._consecutive_save_failures = 0
             except Exception:

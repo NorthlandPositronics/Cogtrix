@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from src.agent.safety import ConfirmationUI
+    from src.orchestration.session_state import SessionState
 
 
 @dataclass
@@ -25,7 +29,7 @@ class AgentRunConfig:
     compression_min_chars: int | None = None
     compression_llm: Any = None
     tool_call_guard: Any | None = None
-    session_state: Any = None
-    confirmation_ui: Any | None = None
+    session_state: SessionState | None = None
+    confirmation_ui: ConfirmationUI | None = None
     on_tool_expansion: Any | None = None
     parallel_tool_execution: bool = True

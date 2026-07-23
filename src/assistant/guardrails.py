@@ -565,7 +565,7 @@ class ViolationTracker:
             tmp_fd, tmp_path = tempfile.mkstemp(dir=str(self._persist_path.parent), suffix=".tmp")
             try:
                 with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
-                    json.dump(data, f, ensure_ascii=False, indent=2)
+                    json.dump(data, f, ensure_ascii=False)
                 os.replace(tmp_path, self._persist_path)
             except Exception:
                 try:

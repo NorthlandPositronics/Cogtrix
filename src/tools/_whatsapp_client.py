@@ -374,21 +374,22 @@ class WahaClient:
         """Fetch messages from a specific chat via
         ``GET /api/{session}/chats/{chatId}/messages``.
 
+        Server-side ``filter.fromMe`` and ``filter.timestamp.gte`` are applied
+        client-side to work around a WAHA WEBJS engine bug where the evaluate
+        crashes with ``TypeError: Cannot read properties of undefined (reading 't')``
+        when these filters are passed as query parameters.
+
         Args:
             chat_id: The chat to fetch messages from.
             limit:   Maximum number of messages to return.
             download_media: Whether to include media download URLs.
-            filter_from_me: Server-side filter by sender (``True``/``False``/``None``).
+            filter_from_me: Client-side filter by sender (``True``/``False``/``None``).
             filter_timestamp_gte: Only return messages at or after this timestamp.
         """
         params: dict[str, Any] = {
             "limit": limit,
-            "downloadMedia": download_media,
+            "downloadMedia": str(download_media).lower(),
         }
-        if filter_from_me is not None:
-            params["filter.fromMe"] = filter_from_me
-        if filter_timestamp_gte is not None:
-            params["filter.timestamp.gte"] = filter_timestamp_gte
 
         resp = requests.get(
             self._url(f"/api/{self.session}/chats/{chat_id}/messages"),
@@ -401,14 +402,20 @@ class WahaClient:
 
         messages: list[Message] = []
         for raw in raw_messages:
+            from_me = raw.get("fromMe", False)
+            if filter_from_me is not None and from_me != filter_from_me:
+                continue
+            ts = raw.get("timestamp", 0)
+            if filter_timestamp_gte is not None and ts < filter_timestamp_gte:
+                continue
             messages.append(
                 Message(
                     id=raw.get("id", ""),
-                    timestamp=raw.get("timestamp", 0),
+                    timestamp=ts,
                     from_number=raw.get("from", ""),
                     to=raw.get("to"),
                     body=raw.get("body", ""),
-                    from_me=raw.get("fromMe", False),
+                    from_me=from_me,
                     has_media=raw.get("hasMedia", False),
                     media_url=(raw.get("media") or {}).get("url"),
                 )

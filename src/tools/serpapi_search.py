@@ -69,6 +69,7 @@ def configure_serpapi(config: dict[str, Any]) -> None:
         api_key  - SerpAPI key (or read from SERPAPI_API_KEY env var)
     """
     global _serpapi_config
+    # Atomic reference swap — safe for concurrent readers without a lock
     _serpapi_config = {**_serpapi_config, **config}
 
 

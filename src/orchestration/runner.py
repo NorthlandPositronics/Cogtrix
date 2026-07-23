@@ -30,23 +30,25 @@ _MAX_BOUND_CACHE_SIZE = 16
 _persistent_bound_cache: OrderedDict = OrderedDict()
 _persistent_compression_cache: OrderedDict = OrderedDict()
 _cached_llm_id: tuple[int, int] | None = None
-_cache_lock = threading.Lock()
+_bound_cache_lock = threading.Lock()
+_compression_cache_lock = threading.Lock()
 _llm_generation: int = 0
 
 
 def advance_llm_generation() -> None:
     """Increment the LLM generation counter when the LLM is switched."""
     global _llm_generation
-    with _cache_lock:
+    with _bound_cache_lock:
         _llm_generation += 1
 
 
 def invalidate_llm_caches() -> None:
     """Clear all LLM-related caches — call on provider/model switch."""
     global _llm_generation
-    with _cache_lock:
+    with _bound_cache_lock:
         _llm_generation += 1
         _persistent_bound_cache.clear()
+    with _compression_cache_lock:
         _persistent_compression_cache.clear()
 
 
@@ -59,16 +61,23 @@ class ToolCallLogger:
     """
 
     _STALE_TIMEOUT = 600  # 10 minutes
+    _EVICT_INTERVAL = 60.0  # minimum seconds between eviction passes
 
     def __init__(self) -> None:
         self._tool_start_times: dict[str, float] = {}
         self._lock = threading.Lock()
+        self._last_evict: float = 0.0
 
     def _evict_stale(self) -> None:
         """Remove entries older than ``_STALE_TIMEOUT`` to prevent leaks.
 
         Must be called with ``self._lock`` already held.
+        Rate-limited to at most once per ``_EVICT_INTERVAL`` seconds.
         """
+        now = time.monotonic()
+        if now - self._last_evict < self._EVICT_INTERVAL:
+            return
+        self._last_evict = now
         cutoff = time.time() - self._STALE_TIMEOUT
         stale_keys = [k for k, ts in self._tool_start_times.items() if ts < cutoff]
         for k in stale_keys:
@@ -579,12 +588,16 @@ def run_agent(
         global _persistent_bound_cache, _persistent_compression_cache, _cached_llm_id
 
         current_llm_id = (id(config.llm), _llm_generation)
-        with _cache_lock:
-            if _cached_llm_id is not None and _cached_llm_id != current_llm_id:
+        llm_changed: bool
+        with _bound_cache_lock:
+            llm_changed = _cached_llm_id is not None and _cached_llm_id != current_llm_id
+            if llm_changed:
                 _persistent_bound_cache.clear()
-                _persistent_compression_cache.clear()
             _cached_llm_id = current_llm_id
             local_bound_cache = OrderedDict(_persistent_bound_cache)
+        with _compression_cache_lock:
+            if llm_changed:
+                _persistent_compression_cache.clear()
             local_compression_cache = OrderedDict(_persistent_compression_cache)
 
         graph = build_agent_graph(
@@ -635,7 +648,7 @@ def run_agent(
 
             return recover_from_step_limit(graph, result, input_messages, invoke_config, log)
         finally:
-            with _cache_lock:
+            with _bound_cache_lock:
                 if _cached_llm_id == current_llm_id:
                     for key, value in local_bound_cache.items():
                         if key not in _persistent_bound_cache:
@@ -643,6 +656,8 @@ def run_agent(
                             _persistent_bound_cache.move_to_end(key)
                     while len(_persistent_bound_cache) > _MAX_BOUND_CACHE_SIZE:
                         _persistent_bound_cache.popitem(last=False)
+            with _compression_cache_lock:
+                if _cached_llm_id == current_llm_id:
                     for key, value in local_compression_cache.items():
                         if key not in _persistent_compression_cache:
                             _persistent_compression_cache[key] = value

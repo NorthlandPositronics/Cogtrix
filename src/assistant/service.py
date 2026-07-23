@@ -222,7 +222,7 @@ class AssistantService:
         futures: dict[str, Any] = {}
         with ThreadPoolExecutor(max_workers=2) as pool:
             if ch_cfgs.get("whatsapp", {}).get("enabled", True):
-                futures["whatsapp"] = pool.submit(self._init_whatsapp, config)
+                futures["whatsapp"] = pool.submit(self._init_whatsapp, config, ch_cfgs)
             if ch_cfgs.get("telegram", {}).get("enabled", True):
                 futures["telegram"] = pool.submit(self._init_telegram, config, ch_cfgs)
 
@@ -235,11 +235,12 @@ class AssistantService:
         return channels
 
     @staticmethod
-    def _init_whatsapp(config: Any) -> Channel | None:
+    def _init_whatsapp(config: Any, ch_cfgs: dict[str, Any]) -> Channel | None:
         try:
             from src.assistant.channels.whatsapp import WhatsAppChannel
 
-            wa = WhatsAppChannel(config.services.get("whatsapp", {}))
+            wa_cfg = {**config.services.get("whatsapp", {}), **ch_cfgs.get("whatsapp", {})}
+            wa = WhatsAppChannel(wa_cfg)
             if not wa.is_ready():
                 log.info("Waha session not ready — attempting to start it")
                 wa._client.start_session()
@@ -261,8 +262,9 @@ class AssistantService:
         try:
             from src.assistant.channels.telegram import TelegramChannel
 
-            tg_cfg = config.services.get("telegram", {})
-            long_poll = ch_cfgs.get("telegram", {}).get("long_poll_timeout", 30)
+            tg_ch = ch_cfgs.get("telegram", {})
+            tg_cfg = {**config.services.get("telegram", {}), **tg_ch}
+            long_poll = tg_ch.get("long_poll_timeout", 30)
             tg = TelegramChannel(tg_cfg, long_poll_timeout=long_poll)
             if tg.is_ready():
                 return tg
