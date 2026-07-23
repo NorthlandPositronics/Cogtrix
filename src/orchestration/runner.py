@@ -76,6 +76,20 @@ _SIMPLE_PRELOAD_TOOLS: tuple[str, ...] = (
     "get_current_datetime",
 )
 
+# File-mutation tool set (bug #1870). Pre-loaded when the prompt signals
+# destructive-file intent (see `_query_signals_file_write_intent`).
+# `read_file` is included because most realistic edits via `patch_file`
+# require reading the current content first to know the ``old_string``
+# to replace. There is intentionally no `delete_file` tool in Cogtrix —
+# pure-delete intents cannot be satisfied by this preload; they must be
+# caught by the #1869 fabricated-success detector instead.
+_FILE_WRITE_PRELOAD_TOOLS: tuple[str, ...] = (
+    "write_file",
+    "patch_file",
+    "append_file",
+    "read_file",
+)
+
 # Real-time / recency markers (bug #1839). The task-complexity classifier
 # scores *linguistic* complexity, so a short factual question like
 # "What's the current Apple stock price?" lands in SIMPLE and never gets
@@ -97,6 +111,65 @@ _REALTIME_QUERY_MARKERS = re.compile(
     re.IGNORECASE,
 )
 
+# File-mutation intent markers (bug #1870). The task-complexity classifier
+# only catches build/install/deploy + research patterns, so a destructive
+# prompt like "delete /workspace/foo.py" or "add a function to bar.py"
+# lands in SIMPLE/MODERATE with no pre-load. The agent then sees only
+# ``get_current_datetime`` + ``request_tools`` (the ``code`` memory-mode
+# preset) and — per Q9/Q10 of the #1869 holistic-test battery — tends to
+# silently fabricate success instead of nudging ``request_tools``.
+#
+# These markers add an orthogonal *destructive-intent* signal: when a
+# prompt asks the agent to mutate a file (write/patch/append/modify/
+# edit/overwrite/create/delete/remove/change/add) and the target is
+# clearly file-shaped (literal "file"/"directory"/"folder" token, an
+# apparent path with a recognised extension, or a multi-segment slash
+# path), the mutation tool set is force-loaded regardless of complexity.
+#
+# Verbs and targets must appear within 80 characters of each other,
+# mirroring the proximity guard used by COMPLEX_ACTION detection in
+# :func:`classify_task_complexity` — this suppresses false positives on
+# distant verb/path mentions like long prose with a closing reference
+# to a research note path.
+_FILE_WRITE_INTENT_VERBS = re.compile(
+    r"\b(?:"
+    r"writ(?:e|es|ing)|"
+    r"patch(?:es|ing)?|"
+    r"append(?:s|ing)?|"
+    r"modif(?:y|ies|ying)|"
+    r"edit(?:s|ing)?|"
+    r"overwrit(?:e|es|ing)|"
+    r"creat(?:e|es|ing)|"
+    r"delet(?:e|es|ing)|"
+    r"remov(?:e|es|ing)|"
+    r"chang(?:e|es|ing)|"
+    r"add(?:s|ing)?"
+    r")\b",
+    re.IGNORECASE,
+)
+
+_FILE_WRITE_INTENT_TARGETS = re.compile(
+    r"(?:"
+    # Explicit "file" / "files" / "directory" / "folder" / "dir" tokens
+    r"\b(?:file|files|folder|folders|directory|directories|dir)\b" r"|"
+    # Apparent file path with a recognised source/config extension.
+    # Extension list intentionally bounded — we don't want short English
+    # words to slip through. Each alternative requires the dot before it
+    # (``\.``) so plain words can't match.
+    r"\b[\w./_-]+\.(?:py|pyi|pyx|js|ts|tsx|jsx|java|c|h|cc|cpp|cxx|hpp|cs|"
+    r"go|rs|rb|swift|kt|kts|m|mm|php|pl|sh|bash|zsh|fish|"
+    r"json|jsonc|yaml|yml|toml|ini|cfg|conf|md|markdown|rst|txt|"
+    r"html|htm|css|scss|sass|less|xml|csv|tsv|tab|log|sql|"
+    r"gradle|cmake|make|mk|env|properties|service|lock|"
+    r"pb|proto|graphql|gql|tf|tfvars|hcl|nix|dockerfile|"
+    r"jinja|j2|tmpl|template)\b"
+    r"|"
+    # Multi-segment absolute or rooted path. At least two leading slash
+    # segments so we don't false-positive on token pairs like "to/from".
+    r"(?:/[\w.-]+){2,}/?" r")",
+    re.IGNORECASE,
+)
+
 
 def _query_needs_realtime_data(prompt: str) -> bool:
     """Heuristic: does the prompt ask for information past the model's
@@ -108,6 +181,35 @@ def _query_needs_realtime_data(prompt: str) -> bool:
     if not prompt:
         return False
     return _REALTIME_QUERY_MARKERS.search(prompt) is not None
+
+
+def _query_signals_file_write_intent(prompt: str) -> bool:
+    """Heuristic: does the prompt ask the agent to write, patch, modify,
+    delete, or otherwise mutate a file?
+
+    Orthogonal to task complexity — see bug #1870. Without this signal,
+    a short imperative like ``"delete /workspace/foo.py"`` lands in
+    SIMPLE / MODERATE and the agent's active tool set stays at the
+    ``code`` memory-mode preset (``{get_current_datetime, request_tools}``),
+    leaving the mutation tools idle in the catalog and creating a wide
+    fabrication surface (Q9/Q10 reproducers of #1869).
+
+    Tight precision: both a mutation verb and a file-shaped target (the
+    literal word ``file`` / ``directory`` / ``folder`` / ``dir``, an
+    apparent path with a recognised extension, or a multi-segment
+    slash path) must appear within 80 characters of each other —
+    mirroring the proximity guard used by ``COMPLEX_ACTION`` detection
+    in :func:`classify_task_complexity`.
+    """
+    if not prompt:
+        return False
+    verb_match = _FILE_WRITE_INTENT_VERBS.search(prompt)
+    if not verb_match:
+        return False
+    target_match = _FILE_WRITE_INTENT_TARGETS.search(prompt)
+    if not target_match:
+        return False
+    return abs(verb_match.start() - target_match.start()) < 80
 
 
 def _auto_load_web_search(config: AgentRunConfig) -> bool:
@@ -301,6 +403,73 @@ def _auto_load_simple_tools(config: AgentRunConfig) -> None:
 
     if loaded:
         get_logger().info("Auto-loaded common tools for simple task: %s", ", ".join(loaded))
+
+
+def _auto_load_file_write_tools(config: AgentRunConfig) -> bool:
+    """Move the file-mutation tool set from the catalog into the active set.
+
+    Mirrors :func:`_auto_load_web_search` for the destructive-file-intent
+    signal added for bug #1870. When the user's prompt signals an intent
+    to write, patch, append, modify, edit, overwrite, create, delete,
+    remove, change, or add to a file (with a file/dir target within 80
+    chars of the verb), pre-load the mutation tools so the agent does
+    not silently fabricate success when only ``get_current_datetime`` /
+    ``request_tools`` are active (the default ``code`` memory-mode preset
+    — see ``src/tools/configure.py``).
+
+    ``read_file`` is included alongside the mutators because most
+    realistic edits (``patch_file``) require reading the current content
+    first to know the ``old_string`` to replace.
+
+    Returns:
+        True only when at least one tool was actually moved from the
+        catalog into the active set; False otherwise (so callers can
+        log accurately).
+
+    Note:
+        Cogtrix has no ``delete_file`` tool — only ``write_file``,
+        ``patch_file``, ``append_file``. Pure-delete intents (e.g.
+        ``rm foo.py``) cannot be satisfied by this preload; they must
+        be caught by the #1869 fabricated-success detector and answered
+        with an honest "I do not have a delete tool" instead.
+    """
+    available_tools = config.available_tools
+    active_tools_list = config.active_tools_list
+    if not available_tools or active_tools_list is None:
+        return False
+
+    active_names = {getattr(tool, "name", "") for tool in active_tools_list}
+    loaded: list[str] = []
+    for tool_name in _FILE_WRITE_PRELOAD_TOOLS:
+        if tool_name in active_names or tool_name not in available_tools:
+            continue
+
+        tool = available_tools.pop(tool_name)
+        if hasattr(tool, "_resolve"):
+            try:
+                tool = tool._resolve()
+            except Exception as exc:
+                get_logger().warning(
+                    "Failed to resolve file-write preload tool %r: %s", tool_name, exc
+                )
+                available_tools[tool_name] = tool
+                continue
+
+        if tool is None:
+            available_tools[tool_name] = tool
+            continue
+
+        active_tools_list.append(tool)
+        active_names.add(tool_name)
+        loaded.append(tool_name)
+
+    if loaded:
+        get_logger().info(
+            "Auto-loaded file-write tools for destructive-intent prompt: %s",
+            ", ".join(loaded),
+        )
+        return True
+    return False
 
 
 class ToolCallLogger:
@@ -1012,6 +1181,17 @@ def run_agent(
             if _auto_load_web_search(config):
                 get_logger().info("Auto-loaded web_search for complex task")
 
+        # File-mutation intent — orthogonal to complexity (a short imperative
+        # like "delete /workspace/foo.py" is SIMPLE linguistically but still
+        # requires the mutation toolset to be live). Without this preload,
+        # the default `code` memory-mode preset leaves the agent with only
+        # `get_current_datetime` + `request_tools` and the model tends to
+        # silently fabricate success on destructive operations rather than
+        # invoke `request_tools` honestly (Q9/Q10 of #1869's holistic-test
+        # battery). See bug #1870.
+        if _query_signals_file_write_intent(user_input):
+            _auto_load_file_write_tools(config)
+
     # ── Task ownership classification ──────────────────────────────────────
     if getattr(config, "task_ownership_classifier_enabled", True):
         _toc_llm_fallback = getattr(config, "task_ownership_classifier_llm_fallback", False)
@@ -1121,12 +1301,13 @@ def run_agent(
 
         if use_per_session_caches:
             # API mode: snapshot local copies from per-session caches; merge back after.
-            if config.bound_cache is None or config.compression_cache is None:
-                raise RuntimeError(
-                    "run_agent: use_per_session_caches=True but bound_cache or "
-                    "compression_cache is None — AgentRunConfig was not properly "
-                    "initialised for API mode."
-                )
+            # ``use_per_session_caches`` is True exactly when both caches are
+            # non-None (computed three lines up), and nothing between mutates
+            # them — so the inner check that previously raised RuntimeError
+            # here was unreachable (#1090).  The ``assert`` keeps the type
+            # narrowing pyright needs for the indexing below without lying
+            # about being a runtime defence.
+            assert config.bound_cache is not None and config.compression_cache is not None
             local_bound_cache = OrderedDict(config.bound_cache)
             local_compression_cache = OrderedDict(config.compression_cache)
             compression_cache_target = config.compression_cache
@@ -1302,8 +1483,12 @@ def run_agent(
             _drain_background_compression_jobs(compression_cache_target)
             if use_per_session_caches:
                 # Merge local snapshots back into the per-session caches.
-                if config.bound_cache is None or config.compression_cache is None:
-                    raise RuntimeError("run_agent: per-session caches became None during execution")
+                # Same invariant as at the entry branch: ``use_per_session_caches``
+                # is True only when both caches were non-None, and ``config`` is
+                # treated as session-constant per the AgentRunConfig docstring.
+                # ``assert`` for pyright narrowing; the previous ``raise
+                # RuntimeError`` here was unreachable (#1090).
+                assert config.bound_cache is not None and config.compression_cache is not None
                 with config.cache_lock:
                     for key, value in local_bound_cache.items():
                         config.bound_cache[key] = value

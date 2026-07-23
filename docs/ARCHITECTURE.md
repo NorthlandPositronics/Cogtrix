@@ -96,6 +96,7 @@ Cogtrix is a modular LangChain-based AI agent built with a layered architecture:
 ```
 src/
 ├── _version.py            # Single source of truth: __version__, __copyright__
+├── concurrency.py         # invoke_with_timeout() + shared _INVOKE_POOL (8 workers); see docs/architecture/CONCURRENCY.md
 ├── config.py              # Configuration management
 ├── registry.py            # Tool discovery and registration
 ├── logging_config.py      # Logging infrastructure with secret scrubbing
@@ -117,6 +118,7 @@ src/
 │   ├── response_detectors.py  # Heuristics: hallucinated completion, tool-use response shape, phantom detection (A1.2)
 │   ├── tool_arg_correction.py # Tool-argument normalisation + schema-driven coercion at the dispatch boundary (A1.3)
 │   ├── topic_switch.py    # Cross-turn topic-switch detection used by call_model for memory-mode transitions (A1.4)
+│   ├── tool_message_kinds.py  # cogtrix.kind metadata for dispatcher-synthesised ToolMessages (#1921)
 │   ├── nodes/             # Graph node implementations
 │   │   ├── call_model.py  # LLM invocation node (binds tools, prepends system message)
 │   │   ├── process_tools.py  # Tool execution + on-demand tool expansion
@@ -257,9 +259,11 @@ src/
 │   ├── __init__.py        # RAG module
 │   └── ingest.py          # Document ingestion
 ├── tools/
+│   ├── _path_policy.py    # Canonical path-policy error strings + is_path_policy_error() (#1928)
 │   ├── configure.py       # Tool config factories: load_tools(), build_tool_catalog(),
 │   │                      #   apply_output_cap(), TOOL_PRESETS, configure_* functions
-│   ├── resolver.py        # resolve_tool_name(): canonical fuzzy tool-name resolver
+│   ├── resolver.py        # resolve_tool_name(): canonical fuzzy tool-name resolver;
+│   │                      #   top_k_candidates() for "Did you mean…" diagnostic surfacing (#1927)
 │   ├── agent_messaging.py # Agent inbox messaging (2 tools: send_to_agent, read_agent_inbox)
 │   ├── agent_tools.py     # Sub-agent lifecycle (5 tools: spawn_agent, get_task_status, …)
 │   ├── brave_search.py    # Brave Search API
@@ -659,11 +663,16 @@ Summarizes old, large `ToolMessage` objects before each LLM call to reduce token
 | `truncate_tool_output(text, max_chars)` | Middle-truncation with informative ellipsis |
 
 Compression is skipped entirely for providers with fewer than 16,384 context tokens (where simple
-truncation is cheaper). Eligible messages are compressed in parallel using
-`concurrent.futures.ThreadPoolExecutor` (up to 4 workers) rather than sequentially, so large batches
-of stale tool outputs are summarized in a single wall-clock pass. Once compressed, results are
-cached by `tool_call_id` and reused. The compression pass operates on a copy of the message list —
-graph state is never mutated.
+truncation is cheaper). Eligible messages are compressed in parallel using the module-level
+`_COMPRESSION_POOL` (4 workers — one of the four documented shared bounded pools; see
+[docs/architecture/CONCURRENCY.md](architecture/CONCURRENCY.md) for the full policy and pool
+inventory). Once compressed, results are cached by `tool_call_id` and reused. The compression pass
+operates on a copy of the message list — graph state is never mutated.
+
+> For timeout-bounded LLM calls outside the compression / agent-turn hot paths, use
+> `src.concurrency.invoke_with_timeout()` rather than spawning a per-call
+> `ThreadPoolExecutor(max_workers=1)`. The latter is the `with`-footgun pattern
+> the policy doc explicitly forbids; see CONCURRENCY.md for the migration history (#1903).
 
 #### 3g. Session State (`src/orchestration/session_state.py`)
 
@@ -818,13 +827,26 @@ def resolve_tool_name(
 ) -> tuple[str | None, str]:
 ```
 
-Resolution order:
+Resolution order (six steps as of #1924):
+
 1. Exact match in the on-demand pool → `("name", "available")`
 2. Exact match among active tools → `("name", "active")`
-3. Fuzzy match (Jaccard token overlap + substring/prefix bonuses) → `("name", "available"|"active")`
-4. No match → `(None, "none")`
+3. **Curated alias map** (`_KNOWN_ALIASES`) — model-training-distribution variants like `run_shell_command`, `bash`, `run_command`, `execute_command`, `shell`, `run_bash`, `shell_exec`, `exec` all map deterministically to `execute_shell_command`. Consulted before fuzzy so well-known hallucinations resolve correctly without raising the fuzzy threshold.
+4. **Short-request guard** — single-token requests of length ≤ `_SHORT_REQUEST_MAX_LEN` (=4) refuse to fuzzy-resolve. The Jaccard + bonus formula gives any 1-token candidate a free score boost (e.g. `run` would otherwise score 1.10 against `extend_run`); the guard forces such short single-token requests to either match exactly, route through the alias map, or return `(None, "none")`.
+5. Fuzzy match (Jaccard token overlap + substring/prefix bonuses) → `("name", "available"|"active")`.
+6. No match → `(None, "none")`.
 
-The fuzzy threshold is `FUZZY_MATCH_THRESHOLD = 0.65` (raised from 0.40 to prevent false positives such as `read_file`↔`write_file`). Token overlap uses underscore-split normalization. Substring containment and token-prefix hits add score bonuses (prefix bonus: +0.35) so abbreviated names (e.g., `search` → `web_search`, `shell_exec` → `shell_execute`) resolve correctly.
+The fuzzy threshold is `FUZZY_MATCH_THRESHOLD = 0.65` (raised from 0.40 to prevent false positives such as `read_file`↔`write_file`). Token overlap uses underscore-split normalization. Substring containment and token-prefix hits add score bonuses (prefix bonus: +0.35) so abbreviated multi-token names (e.g., `search` → `web_search`, `shell_exec` → `shell_execute`) resolve correctly.
+
+A companion `top_k_candidates()` function shares the same scoring pass
+(`_score_candidates`) and returns up to K highest-scoring candidates above a
+softer `min_score` floor (default 0.30). The `process_tools` dispatcher uses
+it to surface "Closest candidates: 'X' (score 0.50), 'Y' (score 0.42)" hints
+in the not-a-valid-tool error message, so the agent can recover without going
+through `request_tools(query=...)`.
+
+Duplicate sightings across pools are deduped (see #1932). The alias map and
+short-request guard are NOT applied here — top-K is a pure scoring surface.
 
 ### 7. Tool Registry (`src/registry.py`)
 

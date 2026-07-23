@@ -6,12 +6,12 @@ prompts via regex and LLM classification.
 
 from __future__ import annotations
 
-import concurrent.futures
 import re
 from dataclasses import dataclass
 from enum import Enum, auto
 from typing import Any
 
+from src.concurrency import invoke_with_timeout
 from src.logging_config import get_logger
 
 log = get_logger()
@@ -1146,22 +1146,23 @@ def classify_think_task(task: str, llm: Any) -> ThinkCategory:
             f"<task_text>{sanitized}</task_text>\n\n"
             "Reply with ONLY the single category name."
         )
-        # Wrap the LLM call in a temporary executor so we can enforce a timeout.
-        # Python threads cannot be cancelled; shutdown(wait=False) lets the
-        # hung thread die in the background without blocking the caller.
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            future = pool.submit(llm.invoke, classify_prompt)
-            try:
-                response = future.result(timeout=_CLASSIFY_TIMEOUT_SECONDS)
-            except concurrent.futures.TimeoutError:
-                future.cancel()
-                pool.shutdown(wait=False)
-                log.warning(
-                    "classify_think_task: LLM call timed out after %ds — "
-                    "falling back to default category",
-                    _CLASSIFY_TIMEOUT_SECONDS,
-                )
-                return THINK_DEFAULT_CATEGORY
+        # Bounded-timeout LLM invocation via the centralized helper —
+        # migrated under #1903.  Previously used the buggy
+        # ``with ThreadPoolExecutor(...) as pool:`` pattern, which calls
+        # ``shutdown(wait=True)`` on ``__exit__`` and would block on a
+        # hung LLM thread — the exact footgun the policy doc forbids.
+        # See docs/architecture/CONCURRENCY.md for the policy.
+        try:
+            response = invoke_with_timeout(
+                llm.invoke, classify_prompt, timeout=_CLASSIFY_TIMEOUT_SECONDS
+            )
+        except TimeoutError:
+            log.warning(
+                "classify_think_task: LLM call timed out after %ds — "
+                "falling back to default category",
+                _CLASSIFY_TIMEOUT_SECONDS,
+            )
+            return THINK_DEFAULT_CATEGORY
         raw_label = getattr(response, "content", str(response))
         if isinstance(raw_label, list):
             raw_label = " ".join(
@@ -1660,30 +1661,20 @@ def _classify_ownership_layer2(
     _m = re.match(r".{0,300}\b", _trunc, re.DOTALL)
     sanitized = _m.group(0).strip() if (_m and _m.group(0).strip()) else _trunc
     try:
-        import concurrent.futures as _cf
-
         from langchain_core.messages import HumanMessage
 
         _msg = HumanMessage(content=_OWNERSHIP_LLM_PROMPT.format(prompt=sanitized))
-        # Use shutdown(wait=False) on timeout so the hung LLM thread does not
-        # block the caller — the `with` context manager would call
-        # shutdown(wait=True) which blocks until the thread finishes.
-        _pool = _cf.ThreadPoolExecutor(max_workers=1)
+        # Bounded-timeout LLM invocation via the centralized helper —
+        # migrated under #1903; see docs/architecture/CONCURRENCY.md.
         try:
-            _fut = _pool.submit(llm.invoke, [_msg])
-            try:
-                result = _fut.result(timeout=timeout_seconds)
-            except _cf.TimeoutError:
-                _fut.cancel()
-                _pool.shutdown(wait=False)
-                log.warning(
-                    "Ownership classifier LLM call timed out after %ds — "
-                    "falling back to Layer 1 result",
-                    timeout_seconds,
-                )
-                return None
-        finally:
-            _pool.shutdown(wait=False)
+            result = invoke_with_timeout(llm.invoke, [_msg], timeout=timeout_seconds)
+        except TimeoutError:
+            log.warning(
+                "Ownership classifier LLM call timed out after %ds — "
+                "falling back to Layer 1 result",
+                timeout_seconds,
+            )
+            return None
         content = result.content
         if isinstance(content, list):
             content = " ".join(str(c.get("text", c) if isinstance(c, dict) else c) for c in content)

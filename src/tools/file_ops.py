@@ -11,6 +11,10 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
+from src.tools._path_policy import (
+    format_read_outside_error,
+    format_write_outside_error,
+)
 from src.tools.delegate import register_tool_categories
 from src.tools.error_sanitizer import sanitize_file_error as _sanitize_file_error
 
@@ -195,7 +199,7 @@ def _validate_path(path: str, is_write: bool = False) -> tuple[bool, str, Path |
                         return True, "", p
                     except ValueError:
                         pass
-                return False, "Write path must be within the working directory", None
+                return False, format_write_outside_error(path), None
             # Reads: allow app dir, extra write dirs, and extra read dirs
             in_allowed_read = False
             try:
@@ -218,7 +222,7 @@ def _validate_path(path: str, is_write: bool = False) -> tuple[bool, str, Path |
                     except ValueError:
                         pass
             if not in_allowed_read:
-                return False, "Path must be within the working directory", None
+                return False, format_read_outside_error(path), None
 
         return True, "", p
     except Exception as e:

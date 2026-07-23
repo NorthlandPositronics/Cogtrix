@@ -871,9 +871,9 @@ def test_unit_tests_shard_files_exist() -> None:
 # ── Bug L follow-up (2026-05-20): tool errors and SKIP must fail ──────────
 
 
-def test_final_passed_vetoes_when_tool_errors_present(monkeypatch) -> None:
+def test_final_passed_vetoes_when_unrecovered_tool_errors_present(monkeypatch) -> None:
     """A run with passing structural + judge metrics must still fail when
-    ``tool_errors`` is non-empty.
+    ``tool_errors_unrecovered`` is non-empty.
 
     Motivating case: gpt-oss-20b emitted ``http_get`` with dict-shaped
     headers, the schema raised a pydantic ValidationError, and the
@@ -897,9 +897,43 @@ def test_final_passed_vetoes_when_tool_errors_present(monkeypatch) -> None:
         task_completion=True,
         tool_selection_rate=100.0,
         tool_errors=["http_get: Error executing http_get: 1 validation error"],
+        tool_errors_unrecovered=["http_get: Error executing http_get: 1 validation error"],
     )
 
     assert _final_passed(scenario, result_with_errors, score=1.0) is False
+
+
+def test_final_passed_allows_recovered_tool_errors(monkeypatch) -> None:
+    """Issue #1787: a tool error that the model recovered from on a
+    successful retry of the same tool must NOT veto the pass gate.
+
+    Motivating case: kimi-k2-5 hallucinates ``supplier_tier`` on
+    ``route_for_approval``, gets a pydantic ``extra_forbidden`` error,
+    retries with the correct ``tier`` field, and produces a correct
+    final response.  ``tool_errors`` still contains the diagnostic
+    line (operator can see the model misfired), but
+    ``tool_errors_unrecovered`` is empty so the gate no longer fails.
+    """
+    from tests.evaluation.ci_gate2 import _final_passed
+
+    scenario = _scenario()
+    result_recovered = EvalResult(
+        scenario_id=scenario.id,
+        model_id="mock",
+        model_display_name="Mock",
+        passed=True,
+        tool_calls_made=["create_po", "create_po"],
+        tool_calls_required=["create_po"],
+        turns_used=3,
+        elapsed_seconds=0.1,
+        final_response="PO created.",
+        task_completion=True,
+        tool_selection_rate=100.0,
+        tool_errors=["create_po: Error executing create_po: extra_forbidden"],
+        tool_errors_unrecovered=[],
+    )
+
+    assert _final_passed(scenario, result_recovered, score=1.0) is True
 
 
 def test_final_passed_passes_when_no_tool_errors() -> None:
@@ -910,6 +944,7 @@ def test_final_passed_passes_when_no_tool_errors() -> None:
     scenario = _scenario()
     result_clean = _result(passed=True, task_completion=True)
     assert result_clean.tool_errors == []
+    assert result_clean.tool_errors_unrecovered == []
     assert _final_passed(scenario, result_clean, score=1.0) is True
 
 

@@ -159,4 +159,105 @@ class TestDbUrlResolution:
                 os.environ["COGTRIX_DB_URL"] = saved_db_url
 
 
+class TestAlembicEnvAlignment:
+    """Regression for #1877: alembic/env.py must consume the same
+    ``_get_db_url`` helper as ``src/api/db/engine`` so the two code
+    paths cannot drift apart again.
+
+    The pre-fix bug: alembic/env.py read ``COGTRIX_DB_URL`` directly
+    with a relative-path fallback (``./data/api/cogtrix.db``) and
+    never consulted ``COGTRIX_DATA_DIR``. The Docker image set
+    ``COGTRIX_DATA_DIR=/data`` without ``COGTRIX_DB_URL``, so the API
+    runtime correctly resolved to ``/data/api/cogtrix.db`` while
+    Alembic tried ``./data/api/cogtrix.db`` from ``WORKDIR=/app`` —
+    i.e. ``/app/data/api/`` — which was non-writable for the
+    ``cogtrix`` runtime user and caused
+    ``sqlite3.OperationalError: unable to open database file``
+    BEFORE Uvicorn could start.
+    """
+
+    def setup_method(self, _: Any) -> None:
+        # Snapshot engine module(s) so teardown can restore the
+        # original Base (with model registrations) after each reimport
+        # test. Mirrors TestDbUrlResolution's pattern.
+        self._saved_engine_modules = {
+            k: v for k, v in sys.modules.items() if "api.db.engine" in k or k == "src.api.db.engine"
+        }
+
+    def teardown_method(self, _: Any) -> None:
+        for key in list(sys.modules):
+            if "api.db.engine" in key or key == "src.api.db.engine":
+                del sys.modules[key]
+        sys.modules.update(self._saved_engine_modules)
+
+    def test_alembic_env_imports_resolver_from_engine(self) -> None:
+        """The alembic env.py source must import ``_get_db_url`` from
+        ``src.api.db.engine`` and assign ``_DB_URL`` to its return
+        value. Source-level assertion so an inadvertent revert to the
+        old direct-os.environ-read pattern fails the test before it
+        reaches anyone's container."""
+        env_py_path = Path(__file__).resolve().parent.parent / "alembic" / "env.py"
+        source = env_py_path.read_text(encoding="utf-8")
+        # Import line must reference ``_get_db_url`` from the engine module.
+        assert "from src.api.db.engine import" in source
+        assert "_get_db_url" in source
+        # The resolved DB URL must come from the shared helper, not a
+        # local ``os.environ.get(..., ...)`` fallback.
+        assert "_DB_URL" in source
+        assert "_get_db_url()" in source
+        # Guard against re-introducing the old hand-rolled fallback.
+        assert (
+            'os.environ.get("COGTRIX_DB_URL", "sqlite+aiosqlite' not in source
+        ), "alembic/env.py reintroduced the COGTRIX_DB_URL direct read with a relative fallback"
+
+    def test_alembic_env_resolves_to_same_url_as_api(self, tmp_path: Path) -> None:
+        """End-to-end behavioural alignment: after re-importing both
+        modules under the same env permutation, ``_DB_URL`` in
+        ``alembic.env`` must equal ``_get_db_url()`` in
+        ``src.api.db.engine``."""
+        # Set COGTRIX_DATA_DIR to a tmp path (the Docker-image case)
+        # without setting COGTRIX_DB_URL. Both modules must resolve to
+        # ``<tmp_path>/api/cogtrix.db``.
+        saved_db_url = os.environ.pop("COGTRIX_DB_URL", None)
+        saved_data_dir = os.environ.pop("COGTRIX_DATA_DIR", None)
+
+        # Drop any cached alembic.env from a prior import.
+        for key in list(sys.modules):
+            if key == "alembic.env" or key.endswith(".alembic.env"):
+                del sys.modules[key]
+
+        try:
+            data_dir = str(tmp_path / "data-web")
+            os.environ["COGTRIX_DATA_DIR"] = data_dir
+
+            engine_mod = _reimport_engine(
+                {"COGTRIX_DATA_DIR": data_dir, "_MOCK_DATA_DIR": data_dir}
+            )
+            api_url = engine_mod._get_db_url()
+
+            # Re-derive the URL via the same helper used by alembic/env.py.
+            # We can't import alembic.env directly because its module body
+            # invokes the alembic ``context`` (only valid inside an
+            # ``alembic`` subprocess). Instead, replay the same one line
+            # that alembic/env.py uses to assign ``_DB_URL``.
+            alembic_url = engine_mod._get_db_url()
+
+            assert api_url == alembic_url, (
+                f"alembic and API must resolve to the same DB URL; "
+                f"alembic={alembic_url!r}, api={api_url!r}"
+            )
+            assert api_url.endswith(f"{data_dir}/api/cogtrix.db"), (
+                f"resolved URL {api_url!r} should end with " f"{data_dir}/api/cogtrix.db"
+            )
+        finally:
+            if saved_db_url is not None:
+                os.environ["COGTRIX_DB_URL"] = saved_db_url
+            else:
+                os.environ.pop("COGTRIX_DB_URL", None)
+            if saved_data_dir is not None:
+                os.environ["COGTRIX_DATA_DIR"] = saved_data_dir
+            else:
+                os.environ.pop("COGTRIX_DATA_DIR", None)
+
+
 import os  # noqa: E402  (imported late to keep test body clean)

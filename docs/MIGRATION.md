@@ -1,14 +1,21 @@
-# Migration Guide: v0.x → v1.0
+# Migration Guide: v0.x → v1.0 (production-stability track)
+
+> **Current shipping version: v0.2.12.** The production-grade features described
+> below are landing incrementally across the v0.2.x series and are usable today —
+> they are not gated behind a future v1.0 release. The "v1.0" label denotes the
+> stability marker for when these features are considered GA, not a version
+> number you must wait for. Operators on v0.2.x can adopt each feature when it
+> ships; this document is the running guide to the cross-cutting work.
 
 This guide covers every breaking change, new requirement, and recommended
 action for operators upgrading a Cogtrix deployment from any v0.x release to
-v1.0.
+the production-stability track.
 
 ---
 
 ## 1. Overview
 
-Cogtrix v1.0 is the first production-stability release. It ships:
+The production-stability track ships:
 
 - PostgreSQL support as the production-grade database backend (M5.1)
 - Redis-backed session presence for horizontal scaling (M5.2)
@@ -246,7 +253,7 @@ COGTRIX_API_WORKERS=4
 
 ### OIDC/SSO integration
 
-v1.0 adds support for identity providers that issue RS256 or ES256 JWT tokens
+The production-stability track adds support for identity providers that issue RS256 or ES256 JWT tokens
 (Keycloak, Auth0, Okta, Azure AD, Google Workspace, etc.).
 
 When OIDC is enabled, the API accepts both:
@@ -286,7 +293,7 @@ for deployments that do not use SSO.
 
 ### Redis session presence
 
-v1.0 introduces an optional Redis store that tracks session last-activity
+The production-stability track introduces an optional Redis store that tracks session last-activity
 timestamps. This enables correct idle eviction across multiple API instances
 (horizontal scaling) without sharing in-memory state.
 
@@ -325,7 +332,7 @@ Redis connectivity errors during operation are caught and logged at DEBUG level
 
 ### Overview
 
-v1.0 writes a structured audit trail for tool calls, user actions,
+The production-stability track writes a structured audit trail for tool calls, user actions,
 configuration changes, and authentication events. The log is stored as
 **NDJSON** (newline-delimited JSON) — one event per line — so it can be
 tailed, grepped, and parsed by log aggregators (Splunk, Elastic, Loki, etc.).
@@ -381,7 +388,7 @@ audit trails are not required.
 
 ### Overview
 
-v1.0 adds per-user quota enforcement. Three independent limits are available:
+The production-stability track adds per-user quota enforcement. Three independent limits are available:
 
 | Quota | Config key | Default |
 |-------|-----------|---------|
@@ -432,7 +439,7 @@ quotas:
 
 ### New pluggable tool architecture
 
-v1.0 introduces a formal plugin contract. All external tool modules must
+The production-stability track introduces a formal plugin contract. All external tool modules must
 expose `TOOL_CONFIGS` and `TOOL_SETUP`.
 
 **Required interface:**
@@ -511,7 +518,7 @@ external/custom plugins.
 
 ### Multi-arch image
 
-v1.0 ships a multi-architecture image supporting **amd64** and **arm64**
+The production-stability track ships a multi-architecture image supporting **amd64** and **arm64**
 (Apple Silicon, Raspberry Pi, ARM cloud instances). The image is built with
 `docker buildx bake` and signed with SLSA attestations.
 

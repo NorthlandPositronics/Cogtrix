@@ -16,12 +16,17 @@
 >
 > Any in-flight feature branch will need to be rebased onto (or cherry-picked into) the new orphan root before it can be merged.
 
-## [0.2.12](https://github.com/NorthlandPositronics/Cogtrix/compare/v0.2.11...v0.2.12) (2026-05-27)
+## [0.2.13](https://github.com/NorthlandPositronics/Cogtrix/compare/v0.2.12...v0.2.13) (2026-05-31)
 
+### Features
+
+- v0.3.0 release — resolver/dispatcher hardening, ThreadPoolExecutor migration, agent fleet runner, rate-limit productionization ([#1936](https://github.com/NorthlandPositronics/Cogtrix/issues/1936)) ([98b4a81](https://github.com/NorthlandPositronics/Cogtrix/commit/98b4a814f7a958653dcd31c55715e4030e95ca4a))
+
+## [0.2.12](https://github.com/NorthlandPositronics/Cogtrix/compare/v0.2.11...v0.2.12) (2026-05-27)
 
 ### Bug Fixes
 
-* cut v0.2.12 release + production release-title guard ([#1852](https://github.com/NorthlandPositronics/Cogtrix/issues/1852)) ([#1858](https://github.com/NorthlandPositronics/Cogtrix/issues/1858)) ([12ab8a7](https://github.com/NorthlandPositronics/Cogtrix/commit/12ab8a72c85c826e077ab96b116d33e26dff300b))
+- cut v0.2.12 release + production release-title guard ([#1852](https://github.com/NorthlandPositronics/Cogtrix/issues/1852)) ([#1858](https://github.com/NorthlandPositronics/Cogtrix/issues/1858)) ([12ab8a7](https://github.com/NorthlandPositronics/Cogtrix/commit/12ab8a72c85c826e077ab96b116d33e26dff300b))
 
 ## [0.2.11](https://github.com/NorthlandPositronics/Cogtrix/compare/v0.2.10...v0.2.11) (2026-05-24)
 

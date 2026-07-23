@@ -15,6 +15,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from src.concurrency import invoke_with_timeout
 from src.logging_config import get_logger, log_delegation
 from src.tools.error_sanitizer import sanitize_error
 
@@ -981,26 +982,17 @@ def _execute_single_task(
             else:
                 log.debug("Invoking delegate LLM (agent fallback): %s", target_model)
             messages = _build_prompt(task, context, response_format, json_schema)
-            # Wrap bare llm.invoke() with ThreadPoolExecutor timeout — a hung
-            # model would otherwise block the caller indefinitely.
-            # NOTE: Do NOT use ``with ThreadPoolExecutor(...) as pool:`` because
-            # __exit__ calls shutdown(wait=True) which blocks on the hung thread.
-            # Manual management with finally: pool.shutdown(wait=False) is
-            # required.  Matches compression.py, phases.py, and graph.py.
+            # Wrap bare llm.invoke() with a hard timeout — a hung model would
+            # otherwise block the caller indefinitely. See docs/architecture/CONCURRENCY.md.
             _timeout = _delegate_config.get("default_timeout", 60)
-            executor = ThreadPoolExecutor(max_workers=1)
             try:
-                future = executor.submit(llm.invoke, messages)
-                try:
-                    result = future.result(timeout=_timeout)
-                except FuturesTimeoutError:
-                    log.warning(
-                        "delegate: llm.invoke() timed out after %ds — propagating to outer handler",
-                        _timeout,
-                    )
-                    raise
-            finally:
-                executor.shutdown(wait=False)
+                result = invoke_with_timeout(llm.invoke, messages, timeout=_timeout)
+            except TimeoutError:
+                log.warning(
+                    "delegate: llm.invoke() timed out after %ds — propagating to outer handler",
+                    _timeout,
+                )
+                raise
             response_text = _extract_content(result)
 
         # Validate JSON if requested
@@ -1154,11 +1146,11 @@ def delegate_task(
     mode_hint = " (with tools)" if use_tools and get_delegate_tools() else ""
     _emit_status(f"→ Delegating to {resolved_provider}/{resolved_model}{alias_hint}{mode_hint}")
 
-    # Execute with timeout — use explicit executor management so that
-    # a timeout does not block in executor.__exit__(wait=True).
-    executor = ThreadPoolExecutor(max_workers=1)
+    # Execute with timeout via the shared invoke pool — the helper enforces a
+    # hard timeout without blocking on shutdown of a hung worker. See
+    # docs/architecture/CONCURRENCY.md.
     try:
-        future = executor.submit(
+        result = invoke_with_timeout(
             _execute_single_task,
             task=task,
             context=context,
@@ -1169,16 +1161,11 @@ def delegate_task(
             temperature=temperature,
             num_ctx=num_ctx,
             use_tools=use_tools,
+            timeout=timeout,
         )
-
-        try:
-            result = future.result(timeout=timeout)
-        except FuturesTimeoutError:
-            future.cancel()
-            _emit_status(f"✗ Delegation timed out after {timeout}s")
-            return f"**Delegation timed out** after {timeout}s.\n\nTask: {task[:100]}..."
-    finally:
-        executor.shutdown(wait=False, cancel_futures=True)
+    except TimeoutError:
+        _emit_status(f"✗ Delegation timed out after {timeout}s")
+        return f"**Delegation timed out** after {timeout}s.\n\nTask: {task[:100]}..."
 
     # Format output
     if result.success:

@@ -14,9 +14,10 @@ keyword. See ``docs/optional/prompts/web-search-synthesis.md`` for the
 synthesis prompt design + the 11 hard constraints it enforces.
 """
 
-import concurrent.futures
 import logging
 from typing import Any
+
+from src.concurrency import invoke_with_timeout
 
 log = logging.getLogger("cogtrix")
 
@@ -304,23 +305,18 @@ def generate_summary(
     )
 
     try:
-        # Use an explicit pool (not `with`) so that shutdown(wait=False) in the
-        # timeout branch is not overridden by the context-manager __exit__, which
-        # always calls shutdown(wait=True) and would block on a hung LLM thread.
-        pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        # Bounded-timeout LLM invocation via the centralized helper —
+        # migrated under #1903; see docs/architecture/CONCURRENCY.md
+        # for the policy.
         try:
-            future = pool.submit(llm.invoke, prompt)
-            try:
-                response = future.result(timeout=effective_timeout)
-            except concurrent.futures.TimeoutError:
-                log.warning(
-                    "generate_summary(purpose=%s): LLM call timed out after %ds",
-                    purpose,
-                    effective_timeout,
-                )
-                return existing_summary
-        finally:
-            pool.shutdown(wait=False)
+            response = invoke_with_timeout(llm.invoke, prompt, timeout=effective_timeout)
+        except TimeoutError:
+            log.warning(
+                "generate_summary(purpose=%s): LLM call timed out after %ds",
+                purpose,
+                effective_timeout,
+            )
+            return existing_summary
         raw = getattr(response, "content", str(response)) or ""
         if isinstance(raw, list):
             raw = " ".join(str(c.get("text", c) if isinstance(c, dict) else c) for c in raw)

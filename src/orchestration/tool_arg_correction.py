@@ -67,6 +67,111 @@ _FUZZY_ARG_BLOCKLIST: frozenset[str] = frozenset(
     }
 )
 
+# #1862: common-suffix mapping for quantifier-style arg names. Weak models
+# routinely emit a wrong suffix on a shared prefix — ``max_points`` for
+# ``max_results``, ``num_items`` for ``num_results``, ``max_records`` for
+# ``max_results``. SequenceMatcher misses these because the suffix differs
+# in nearly every character. We map them only when (a) the prefix matches
+# exactly and ends at an underscore boundary, AND (b) BOTH the model's
+# suffix and the schema's expected suffix are in the equivalent-
+# quantifier set below. That keeps the rule from ever mapping
+# semantically distinct fields like ``min_results`` → ``max_results``
+# (different prefixes) or ``max_depth`` → ``max_results`` (suffix not in
+# the set).
+_EQUIVALENT_QUANTIFIER_SUFFIXES: frozenset[str] = frozenset(
+    {
+        "results",
+        "points",
+        "items",
+        "count",
+        "limit",
+        "entries",
+        "records",
+        "rows",
+        "matches",
+        "hits",
+        "values",
+        "elements",
+        "objects",
+    }
+)
+_MIN_QUANTIFIER_PREFIX_LEN = 3  # avoid mapping single-letter prefixes like ``n_``
+
+
+# #1862: antonym-prefix collision guard. Pairs like ``min_results`` /
+# ``max_results`` score 0.82 on SequenceMatcher (above the 0.75 remap
+# threshold) and would be silently flipped to their semantic opposite —
+# a real data hazard. When two names share every underscore-bounded
+# component except ONE position, and at that position the parts are both
+# in the antonym set, refuse to remap regardless of the character ratio.
+_ANTONYM_PREFIXES: frozenset[str] = frozenset(
+    {
+        "min",
+        "max",
+        "lower",
+        "upper",
+        "first",
+        "last",
+        "start",
+        "end",
+        "src",
+        "dst",
+        "source",
+        "dest",
+        "before",
+        "after",
+        "top",
+        "bottom",
+    }
+)
+
+
+def _is_antonym_collision(unk_lower: str, exp_lower: str) -> bool:
+    """Return True when ``unk_lower`` and ``exp_lower`` differ in EXACTLY one
+    underscore-bounded component and at that position the two parts are
+    both well-known antonyms (``min``↔``max``, ``start``↔``end``, …)."""
+    unk_parts = unk_lower.split("_")
+    exp_parts = exp_lower.split("_")
+    if len(unk_parts) != len(exp_parts):
+        return False
+    diff_positions = [
+        i for i, (u, e) in enumerate(zip(unk_parts, exp_parts, strict=True)) if u != e
+    ]
+    if len(diff_positions) != 1:
+        return False
+    i = diff_positions[0]
+    return unk_parts[i] in _ANTONYM_PREFIXES and exp_parts[i] in _ANTONYM_PREFIXES
+
+
+def _is_equivalent_quantifier_pair(unk_lower: str, exp_lower: str) -> bool:
+    """Return True when ``unk_lower`` and ``exp_lower`` differ only in a
+    quantifier-noun suffix on the same underscore-bounded prefix.
+
+    Examples that match (safe to remap):
+        ``max_points`` ↔ ``max_results``
+        ``num_items``  ↔ ``num_results``
+        ``max_records`` ↔ ``max_results``
+
+    Examples that DO NOT match (deliberately):
+        ``min_results`` ↔ ``max_results`` (different prefixes)
+        ``max_depth``   ↔ ``max_results`` (suffix not in the set)
+        ``n_points``    ↔ ``max_results`` (prefix below length floor)
+    """
+    if "_" not in unk_lower or "_" not in exp_lower:
+        return False
+    unk_prefix, _, unk_suffix = unk_lower.rpartition("_")
+    exp_prefix, _, exp_suffix = exp_lower.rpartition("_")
+    if not unk_prefix or unk_prefix != exp_prefix:
+        return False
+    if len(unk_prefix) < _MIN_QUANTIFIER_PREFIX_LEN:
+        return False
+    if unk_suffix == exp_suffix:
+        return False
+    return (
+        unk_suffix in _EQUIVALENT_QUANTIFIER_SUFFIXES
+        and exp_suffix in _EQUIVALENT_QUANTIFIER_SUFFIXES
+    )
+
 
 def _correct_tool_args(tool: Any, args: dict) -> dict:
     """Best-effort correction of misnamed tool arguments.
@@ -222,6 +327,11 @@ def _correct_tool_args(tool: Any, args: dict) -> dict:
             tied = False
             for exp in missing:
                 exp_lower = exp.lower()
+                # #1862: refuse antonym-prefix pairs (min↔max, start↔end,
+                # …) regardless of character ratio. They score high on
+                # SequenceMatcher but a silent remap would flip semantics.
+                if _is_antonym_collision(unk_lower, exp_lower):
+                    continue
                 # Substring containment — only trust when the shorter
                 # string is long enough to be meaningful.
                 shorter_len = min(len(unk_lower), len(exp_lower))
@@ -232,6 +342,10 @@ def _correct_tool_args(tool: Any, args: dict) -> dict:
                     and unk_lower not in _FUZZY_ARG_BLOCKLIST
                     and (unk_lower in exp_lower or exp_lower in unk_lower)
                 ):
+                    ratio = 1.0
+                elif _is_equivalent_quantifier_pair(unk_lower, exp_lower):
+                    # #1862: shared exact prefix at underscore boundary +
+                    # both suffixes are quantifier nouns → safe to remap.
                     ratio = 1.0
                 else:
                     ratio = SequenceMatcher(None, unk_lower, exp_lower).ratio()

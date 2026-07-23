@@ -111,7 +111,18 @@ def _extract_field_path(loc: list | tuple) -> list[str]:
 
 
 def _humanize_name(name: str) -> str:
-    """Convert a snake_case field name to a human-readable label."""
+    """Convert a snake_case field name to a human-readable label.
+
+    Special-cases the synthetic ``_root`` sentinel produced by
+    :func:`_extract_field_path` when Pydantic reports an error at the
+    request-body root (e.g. body missing entirely). Without the
+    special case, the naive ``str.replace + capitalize`` produced
+    ``" root"`` (with a leading space from the stripped underscore) and
+    the rendered message was ``" root is required."`` — confusing and
+    visually broken. See #1882.
+    """
+    if name == "_root":
+        return "Request body"
     return name.replace("_", " ").capitalize()
 
 

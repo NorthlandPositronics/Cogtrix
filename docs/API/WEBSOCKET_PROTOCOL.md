@@ -25,22 +25,63 @@ All other operations use the REST API.
 
 ## 2. Authentication
 
-The JWT bearer token must be provided on connection via the ``Authorization`` header:
+The JWT bearer token (or `cgx_live_` API key) may be provided via either of
+two paths. Both reach the same downstream validation pipeline; pick whichever
+matches your client environment.
+
+### 2.1 Authorization header — CLI / SDK clients
 
 ```
 Authorization: Bearer <jwt>
 ```
 
-If the token is missing, malformed, or invalid the server closes the connection with:
-- Close code `4001` — unauthorized
-- Close code `4003` — forbidden (valid token but wrong role/ownership)
+Case-insensitive on the scheme (``bearer``/``Bearer``/``BEARER`` all accepted).
+This is the canonical path for CLI tools, server-side SDKs, and any HTTP
+client that can set custom request headers on the WebSocket upgrade.
 
-.. note::
-   The browser ``WebSocket`` API does not support custom headers.  Clients
-   in browser environments must use a server-side proxy that injects the
-   ``Authorization`` header (e.g., from a cookie or query param) before
-   forwarding to the WebSocket endpoint, or a dedicated auth endpoint that
-   sets an HttpOnly session cookie accepted by the backend.
+### 2.2 Sec-WebSocket-Protocol — browser clients (#1887)
+
+```
+Sec-WebSocket-Protocol: bearer, <jwt>
+```
+
+The browser `WebSocket` constructor does not allow setting custom headers
+on the upgrade request; the only browser-portable way to attach auth to
+a WebSocket connection is the `protocols` argument:
+
+```js
+const ws = new WebSocket(url, ["bearer", token]);
+```
+
+The server extracts the second list element as the token when the first
+is `bearer` (case-insensitive). Per RFC 6455 the server echoes the
+selected subprotocol back on accept (`Sec-WebSocket-Protocol: bearer`) —
+without that echo Chromium / Firefox close the connection client-side
+with 1002 (Protocol error).
+
+When **both** paths are present, the `Authorization` header wins; no
+subprotocol is echoed in the response.
+
+#### Operator note — handshake-header logging
+
+The `Sec-WebSocket-Protocol` header is logged by some reverse proxies
+that do not redact it the way `Authorization` is conventionally
+redacted (nginx `$http_sec_websocket_protocol`, for example, is
+captured by default in many configurations). TLS protects the value
+in transit; this concern is **server-side logging only**.
+
+If your ingress logs handshake headers, add a redaction rule for
+`Sec-WebSocket-Protocol` containing `bearer,` — or strip the header
+from access logs entirely. Authorization-header path clients are
+unaffected.
+
+### 2.3 Close codes
+
+If the token is missing, malformed, or invalid the server closes with:
+
+- Close code `4001` — unauthorized (missing token, invalid token, revoked API key, inactive user)
+- Close code `4003` — forbidden (valid token but wrong role / ownership)
+- Close code `4004` — session not found (auth succeeded, no such session id)
 
 ---
 

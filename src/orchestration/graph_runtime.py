@@ -104,6 +104,26 @@ class PerRunState:
     # #1843: version-scope-collapse guard (parent/series status mis-scoped
     # onto a specific child/newer version ID).
     version_scope_count: list[int] = field(default_factory=lambda: [0])
+    # #1860: attributed-prose-claim guard (a source/authority is credited
+    # for content not in any tool result this turn).
+    unsupported_attribution_count: list[int] = field(default_factory=lambda: [0])
+    # #1713: sycophantic-prefix guard ("You're right" / "I apologize"
+    # validation prefix preceding a final answer). Bounded retries.
+    sycophancy_count: list[int] = field(default_factory=lambda: [0])
+    # #1869: fabricated-action-success-without-tool-call guard. Sibling
+    # to `fabrication_count` (which counts the tool-error-precursor case);
+    # this one counts the "no tool call at all" case. Bounded retries.
+    fabricated_action_count: list[int] = field(default_factory=lambda: [0])
+    # #1871: fabricated-tool-error-quote guard. Polarity sibling of the
+    # #1869 counter — counts cases where the model invents a verbatim
+    # quoted error string that does not appear in any ToolMessage this
+    # turn. Bounded retries.
+    fabricated_quote_count: list[int] = field(default_factory=lambda: [0])
+    # #1868: non-canonical GitHub-fork-recommendation guard. Catches
+    # responses that recommend a project + cite a non-canonical
+    # github.com/<owner>/<repo> URL with authoritative recommendation
+    # framing.
+    noncanonical_fork_count: list[int] = field(default_factory=lambda: [0])
     incompleteness_nudge_given: list[int] = field(default_factory=lambda: [0])
     expansion_count: list[int] = field(default_factory=lambda: [0])
     auto_expansion_count: list[int] = field(default_factory=lambda: [0])

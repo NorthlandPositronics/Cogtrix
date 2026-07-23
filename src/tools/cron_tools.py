@@ -31,6 +31,7 @@ from contextvars import ContextVar
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
+from src.concurrency import invoke_with_timeout
 from src.tools.delegate import register_tool_categories
 
 if TYPE_CHECKING:
@@ -407,16 +408,17 @@ class CronScheduler:
                         "falling back to direct LLM invocation.",
                         job.id,
                     )
-                # Mirror graph.py pattern — ThreadPoolExecutor with timeout so a
-                # hung provider does not block the scheduler thread (#488).
-                import concurrent.futures as _cf
-
-                _pool = _cf.ThreadPoolExecutor(max_workers=1)
-                _fut = _pool.submit(llm.invoke, [_HumanMessage(content=job.prompt)])
-                _pool.shutdown(wait=False)
+                # Bounded-timeout LLM invocation via the centralized helper —
+                # a hung provider must not block the scheduler thread (#488).
+                # Migrated to ``invoke_with_timeout`` under #1903; see
+                # ``docs/architecture/CONCURRENCY.md`` for the policy.
                 try:
-                    response = _fut.result(timeout=_cron_llm_timeout_seconds)
-                except _cf.TimeoutError:
+                    response = invoke_with_timeout(
+                        llm.invoke,
+                        [_HumanMessage(content=job.prompt)],
+                        timeout=_cron_llm_timeout_seconds,
+                    )
+                except TimeoutError:
                     log.warning(
                         "Cron job %s LLM call timed out after %.0f seconds; "
                         "job will retry on the next schedule.",

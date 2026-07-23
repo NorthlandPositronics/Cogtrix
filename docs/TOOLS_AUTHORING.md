@@ -288,3 +288,85 @@ rather than `search`).
 
 The `function` must be synchronous (no `async def`).  For async operations, run
 them with `asyncio.run()` or `loop.run_until_complete()` inside the function body.
+
+---
+
+## 7. Error string conventions
+
+### Path-policy errors (file-touching tools)
+
+Tools that touch the filesystem (`read_file`, `write_file`, `list_directory`, or
+any custom tool that resolves paths) should emit **canonical** error strings
+when a path falls outside the permitted area, so the agent recognises the same
+failure class consistently regardless of which tool produced it. The canonical
+strings live in `src/tools/_path_policy.py`:
+
+```python
+from src.tools._path_policy import (
+    format_write_outside_error,   # path outside writable area
+    format_read_outside_error,    # path outside readable area
+    format_traversal_error,       # ../ escape attempt
+    is_path_policy_error,         # downstream classifier
+)
+
+def my_tool_that_writes(path: str) -> str:
+    if not _is_safe_write_path(path):
+        return format_write_outside_error(path)
+    # ... proceed with write ...
+```
+
+The canonical strings start with `"Error: "` so the existing tool-error
+detection in `tests/evaluation/runner.py` continues to classify them. They
+each include `{path}` so the agent sees exactly what was rejected. `Permission
+denied: <path>` produced by an OS-level `PermissionError` is intentionally
+kept as a *separate* class — it signals a real environment issue rather than
+the agent picking a bad path.
+
+`is_path_policy_error(message)` is the recommended classifier for downstream
+consumers (dispatcher diagnostics, test harness) that want to distinguish
+agent-recoverable path choices from environmental failures.
+
+### Dispatcher-synthesised ToolMessage kinds
+
+The `process_tools` dispatcher uses `additional_kwargs["cogtrix.kind"]` to mark
+ToolMessages it synthesises when a tool call cannot actually execute (tool
+not loaded, name unresolvable, denied by user, ...). The four kinds are
+defined in `src/orchestration/tool_message_kinds.py`:
+
+| Kind | Trigger |
+|---|---|
+| `tool_not_loaded` | Match exists in catalog; agent should issue `request_tools(add=...)` |
+| `tool_disabled` | `session_state.is_denied(match)` |
+| `tool_name_invalid` | Fuzzy match points to an already-active tool ("Did you mean 'X'?" hint) |
+| `tool_resolution_failed` | No match found |
+
+Most tool authors don't need to interact with this set — the dispatcher
+attaches the kind automatically when it synthesises a failure response.
+**You only need to know about it if your tool produces ToolMessages itself**
+(for example, a meta-tool that dispatches to sub-tools and wraps their
+results, or a tool that intercepts and rewrites tool-call traffic). In that
+case, attach the appropriate kind so the fabricated-success detector in
+`response_detectors.py` recognises the synthetic failure:
+
+```python
+from langchain_core.messages import ToolMessage
+from src.orchestration.tool_message_kinds import (
+    COGTRIX_KIND_KEY,
+    KIND_TOOL_RESOLUTION_FAILED,
+)
+
+ToolMessage(
+    content=f"'{tool_name}' is not a valid tool and could not be resolved.",
+    tool_call_id=call["id"],
+    name=tool_name,
+    additional_kwargs={COGTRIX_KIND_KEY: KIND_TOOL_RESOLUTION_FAILED},
+)
+```
+
+Without the kind marker, a downstream detector falls back to substring
+matching on the content text — which drifts over time as messages are
+rephrased. The kind is the structural signal that won't drift.
+
+See `src/orchestration/tool_message_kinds.py` for the full set of kinds
+and `TOOL_RESOLUTION_FAILURE_KINDS` (the canonical set the detector chain
+treats as tool-error events).

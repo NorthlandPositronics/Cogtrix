@@ -247,13 +247,19 @@ def _final_passed(scenario: EvalScenario, result: EvalResult, score: float) -> b
        *quality* of the final response.  This catches subtle correctness
        issues that the binary tools-called check cannot see.
     4. The D2 cost ceiling has not been breached.
-    5. ``not result.tool_errors`` — no tool produced an error during the
-       run.  A scenario where the model produced a graceful "could not
-       find" answer alongside a pydantic ValidationError on http_get was
-       being reported as a pass before — the error was invisible to
-       success_criteria because the criteria only inspected the final
-       response text.  Tool errors are real failures the test must
-       surface.
+    5. ``not result.tool_errors_unrecovered`` — no tool error went
+       unrecovered.  A scenario where the model produced a graceful
+       "could not find" answer alongside a pydantic ValidationError on
+       http_get was being reported as a pass before — the error was
+       invisible to success_criteria because the criteria only inspected
+       the final response text.  Tool errors are real failures the test
+       must surface.
+
+       Issue #1787 refinement: an error that the model recovered from on
+       a successful retry of the same tool is no longer a hard veto.
+       The full ``result.tool_errors`` list still surfaces in the log
+       for diagnosis; only ``tool_errors_unrecovered`` gates the pass
+       decision.
 
     The judge is a quality check on top of the structural floor, never an
     override.  Any single condition failing flips this to False.
@@ -266,7 +272,7 @@ def _final_passed(scenario: EvalScenario, result: EvalResult, score: float) -> b
         return False
     if _cost_ceiling_breached(scenario, result):
         return False
-    if result.tool_errors:
+    if result.tool_errors_unrecovered:
         return False
     return True
 
@@ -529,9 +535,16 @@ def run_gate2_smoke(
                 # Surface tool errors prominently in CI logs.  Each entry is
                 # already a short "<tool>: <truncated>" line; cap the list
                 # at 5 to keep noisy runs scannable without losing signal.
+                #
+                # Issue #1787: ``unrecovered`` is the count that actually
+                # gates pass/fail; ``count`` is the diagnostic total
+                # (includes errors the model self-corrected from on a
+                # later retry of the same tool).  Showing both makes
+                # "the model misfired but recovered" runs obvious in CI.
+                _unrec = len(result.tool_errors_unrecovered)
                 emit(
                     f"[gate2]   TOOL_ERRORS count={len(result.tool_errors)} "
-                    f"errors={result.tool_errors[:5]}"
+                    f"unrecovered={_unrec} errors={result.tool_errors[:5]}"
                 )
             if not final_passed:
                 any_failures = True

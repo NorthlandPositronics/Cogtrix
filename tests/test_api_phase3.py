@@ -760,3 +760,144 @@ class TestWebSocketLifecycle:
                     pytest.skip("WebSocket not fully connected in test environment")
         finally:
             _oidc_mod._validator = old_validator
+
+
+class TestWebSocketSubprotocolAuth:
+    """#1887 — Tests for the `Sec-WebSocket-Protocol: bearer, <token>`
+    auth path used by browser clients.
+
+    Browsers cannot set custom headers on WebSocket upgrade requests; the
+    only browser-portable way to attach auth is the
+    ``WebSocket(url, protocols)`` constructor, which sends a
+    ``Sec-WebSocket-Protocol`` request header. The server extracts the
+    token from the second list element when the first is ``"bearer"``
+    (case-insensitive) and echoes ``"bearer"`` back as the selected
+    subprotocol per RFC 6455.
+
+    These tests pin the new path's behaviour AND guard against regressions
+    in the existing Authorization-header path's precedence.
+    """
+
+    def test_ws_accepts_subprotocol_bearer(self, client: TestClient) -> None:
+        """A valid token passed via ``subprotocols=["bearer", token]``
+        completes the handshake; the server echoes ``"bearer"`` per
+        RFC 6455 so the browser doesn't close the connection 1002.
+
+        Authentication completes successfully, so the disconnect we
+        observe is the downstream session-not-found 4004 (the test uses
+        a fresh UUID without provisioning a real session). The 4004
+        proves auth succeeded — the request reached the
+        session-ownership check, which is the path that comes after
+        token extraction.
+        """
+        from starlette.websockets import WebSocketDisconnect
+
+        user_id = str(uuid.uuid4())
+        token = create_access_token(user_id=user_id, role="admin")
+        with pytest.raises(WebSocketDisconnect) as exc_info:
+            with client.websocket_connect(
+                f"/ws/v1/sessions/{uuid.uuid4()}",
+                subprotocols=["bearer", token],
+            ) as ws:
+                # The server must have echoed "bearer" — without that
+                # echo a real browser would close the connection
+                # itself with 1002 (Protocol error) before reading.
+                assert ws.accepted_subprotocol == "bearer"
+                ws.receive_text()
+        # 4004 (session not found) means the token was accepted and
+        # the request reached the downstream session-ownership check.
+        # 4001 here would mean auth itself failed.
+        assert exc_info.value.code == 4004, (
+            f"Auth via subprotocol must succeed (4004 = session-not-found "
+            f"after auth); got {exc_info.value.code}"
+        )
+
+    def test_ws_subprotocol_case_insensitive_bearer(self, client: TestClient) -> None:
+        """``subprotocols=["Bearer", token]`` is accepted just like the
+        Authorization header's case-insensitive ``Bearer``. A
+        third-party client that capitalises the scheme to mirror the
+        HTTP convention must not silently fail."""
+        from starlette.websockets import WebSocketDisconnect
+
+        user_id = str(uuid.uuid4())
+        token = create_access_token(user_id=user_id, role="admin")
+        with pytest.raises(WebSocketDisconnect) as exc_info:
+            with client.websocket_connect(
+                f"/ws/v1/sessions/{uuid.uuid4()}",
+                subprotocols=["Bearer", token],
+            ) as ws:
+                assert ws.accepted_subprotocol == "bearer"
+                ws.receive_text()
+        assert exc_info.value.code == 4004
+
+    def test_ws_authorization_header_wins_when_both_present(self, client: TestClient) -> None:
+        """When BOTH ``Authorization`` and ``Sec-WebSocket-Protocol``
+        are present, the header path takes precedence and the server
+        does NOT echo a subprotocol back. The subprotocol-side token
+        (even a garbage one here) is ignored."""
+        from starlette.websockets import WebSocketDisconnect
+
+        user_id = str(uuid.uuid4())
+        good_token = create_access_token(user_id=user_id, role="admin")
+        garbage_subprotocol_token = "not.a.valid.token"
+
+        with pytest.raises(WebSocketDisconnect) as exc_info:
+            with client.websocket_connect(
+                f"/ws/v1/sessions/{uuid.uuid4()}",
+                headers={"Authorization": f"Bearer {good_token}"},
+                subprotocols=["bearer", garbage_subprotocol_token],
+            ) as ws:
+                # Header path was used → no subprotocol echoed.
+                assert ws.accepted_subprotocol is None
+                ws.receive_text()
+        # 4004 = the GOOD header token was used (auth succeeded; the
+        # downstream session check failed). If the subprotocol garbage
+        # had won precedence we'd see 4001 instead.
+        assert exc_info.value.code == 4004, (
+            f"Authorization header must take precedence over "
+            f"Sec-WebSocket-Protocol; got {exc_info.value.code}"
+        )
+
+    def test_ws_rejects_lone_bearer_in_subprotocol(self, client: TestClient) -> None:
+        """``subprotocols=["bearer"]`` with no second element must be
+        rejected — there is no token to extract. Closes with 4001."""
+        from starlette.websockets import WebSocketDisconnect
+
+        with pytest.raises(WebSocketDisconnect) as exc_info:
+            with client.websocket_connect(
+                f"/ws/v1/sessions/{uuid.uuid4()}",
+                subprotocols=["bearer"],
+            ) as ws:
+                ws.receive_text()
+        assert exc_info.value.code == 4001
+
+    def test_ws_rejects_unknown_first_subprotocol_element(self, client: TestClient) -> None:
+        """``subprotocols=["custom", token]`` does not match the
+        ``"bearer"`` scheme — token is not extracted, 4001 ensues.
+        Future schemes (basic, etc.) intentionally require explicit
+        server support."""
+        from starlette.websockets import WebSocketDisconnect
+
+        user_id = str(uuid.uuid4())
+        token = create_access_token(user_id=user_id, role="admin")
+        with pytest.raises(WebSocketDisconnect) as exc_info:
+            with client.websocket_connect(
+                f"/ws/v1/sessions/{uuid.uuid4()}",
+                subprotocols=["custom-scheme", token],
+            ) as ws:
+                ws.receive_text()
+        assert exc_info.value.code == 4001
+
+    def test_ws_rejects_invalid_token_via_subprotocol(self, client: TestClient) -> None:
+        """A malformed JWT delivered via the subprotocol path must
+        reach the same rejection path as the Authorization-header
+        equivalent (``test_ws_rejects_invalid_token`` above) — 4001."""
+        from starlette.websockets import WebSocketDisconnect
+
+        with pytest.raises(WebSocketDisconnect) as exc_info:
+            with client.websocket_connect(
+                f"/ws/v1/sessions/{uuid.uuid4()}",
+                subprotocols=["bearer", "not.a.valid.token"],
+            ) as ws:
+                ws.receive_text()
+        assert exc_info.value.code == 4001

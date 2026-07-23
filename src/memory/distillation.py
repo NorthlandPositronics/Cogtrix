@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-import concurrent.futures
 import json
 import logging
 import re
 from typing import Any
+
+from src.concurrency import invoke_with_timeout
 
 log = logging.getLogger("cogtrix")
 
@@ -85,26 +86,17 @@ def distill_summary(llm: Any | None, summary: str) -> list[str]:
     ]
 
     try:
-        # Wrap the LLM call in a temporary executor so we can enforce a timeout.
-        # Python threads cannot be cancelled; shutdown(wait=False) lets the
-        # hung thread die in the background without blocking the caller.
-        # NOTE: Do NOT use ``with ThreadPoolExecutor(...) as pool:`` because
-        # ``__exit__`` calls ``shutdown(wait=True)`` which blocks on the hung
-        # thread.  Manual management with ``finally: pool.shutdown(wait=False)``
-        # is required.
-        pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        # Bounded-timeout LLM invocation via the centralized helper —
+        # migrated under #1903; see docs/architecture/CONCURRENCY.md for
+        # the policy.
         try:
-            future = pool.submit(llm.invoke, prompt)
-            try:
-                response = future.result(timeout=_DISTILL_TIMEOUT_SECONDS)
-            except concurrent.futures.TimeoutError:
-                log.warning(
-                    "distill_summary: LLM call timed out after %ds — returning no facts",
-                    _DISTILL_TIMEOUT_SECONDS,
-                )
-                return []
-        finally:
-            pool.shutdown(wait=False)
+            response = invoke_with_timeout(llm.invoke, prompt, timeout=_DISTILL_TIMEOUT_SECONDS)
+        except TimeoutError:
+            log.warning(
+                "distill_summary: LLM call timed out after %ds — returning no facts",
+                _DISTILL_TIMEOUT_SECONDS,
+            )
+            return []
         facts = _parse_facts(_coerce_text(getattr(response, "content", response)))
         return facts
     except Exception as exc:

@@ -13,7 +13,10 @@ from src.orchestration.graph import (
     _detect_tool_request,
     _extract_llm_labels,
     _is_action_intent,
+    _is_refusal,
+    _looks_like_fabricated_action_success_without_tool_call,
     _looks_like_fabricated_success_after_tool_errors,
+    _looks_like_fabricated_tool_error_quote,
     _looks_like_phantom_tool_markup,
     _safe_tool_name,
     _should_reset_summary_for_topic_switch,
@@ -605,6 +608,377 @@ class TestIsActionIntent:
         assert not _is_action_intent(self._ai(text))
 
 
+class TestIsRefusal:
+    """#1851 — a deliberate decline-to-act is a considered non-action and must
+    suppress the action-intent nudge, so an honest refusal (e.g. of a
+    forbidden / unauthorized action) is never converted into the action."""
+
+    def _ai(self, content: str, tool_calls=None):
+        return SimpleNamespace(content=content, tool_calls=tool_calls or [])
+
+    # ── Refusals (should return True) ────────────────────────────────────────
+
+    def test_cannot_pay_without_approval(self):
+        assert _is_refusal(
+            self._ai("I cannot pay this invoice without an approval record on file.")
+        )
+
+    def test_wont_process_payment(self):
+        assert _is_refusal(self._ai("I won't process this payment until it has been approved."))
+
+    def test_requires_approval(self):
+        assert _is_refusal(self._ai("This payment requires approval before it can be released."))
+
+    def test_not_authorized(self):
+        assert _is_refusal(self._ai("I'm not authorized to release funds for this invoice."))
+
+    def test_must_decline(self):
+        assert _is_refusal(self._ai("I must decline to pay this invoice; it is not approved."))
+
+    def test_without_authorization(self):
+        assert _is_refusal(self._ai("Payment cannot proceed without proper authorization."))
+
+    def test_should_not_call(self):
+        assert _is_refusal(self._ai("I should not call pay_invoice here without an approval."))
+
+    # ── Non-refusals (should return False) ───────────────────────────────────
+
+    def test_action_intent_is_not_refusal(self):
+        assert not _is_refusal(self._ai("I'll create the config file now."))
+
+    def test_search_intent_is_not_refusal(self):
+        assert not _is_refusal(self._ai("Let me search for the latest version."))
+
+    def test_cannot_guarantee_hedge_is_not_refusal(self):
+        # A soft hedge that qualifies an answer is not a decline to act.
+        assert not _is_refusal(self._ai("I cannot guarantee it compiles, but I'll build it now."))
+
+    def test_cannot_ensure_hedge_is_not_refusal(self):
+        assert not _is_refusal(self._ai("I can't ensure the result, then I will deploy it."))
+
+    def test_plain_answer_is_not_refusal(self):
+        assert not _is_refusal(self._ai("The latest stable version is 3.13 and works on Ubuntu."))
+
+    def test_tool_call_present_is_never_refusal(self):
+        msg = self._ai("paying now", tool_calls=[{"name": "pay_invoice", "args": {}, "id": "c1"}])
+        assert not _is_refusal(msg)
+
+    def test_empty_content(self):
+        assert not _is_refusal(self._ai(""))
+
+
+class TestIsSycophanticPrefix:
+    """#1713 — detect "You're absolutely right" / "I apologize" / similar
+    validation prefixes at the START of a final response. The system-prompt
+    rule already forbids them; RLHF-tuned models bypass it under user
+    pushback. Reproducer: cogtrix56 turns 3-5, where every contradicting
+    user message was answered with a validation prefix preceding unchanged
+    content."""
+
+    def _ai(self, content: str, tool_calls=None):
+        return SimpleNamespace(content=content, tool_calls=tool_calls or [])
+
+    # ── Sycophantic openings (should return True) ────────────────────────
+
+    def test_youre_absolutely_right_apology_cogtrix56(self):
+        from src.orchestration.response_detectors import _is_sycophantic_prefix
+
+        assert _is_sycophantic_prefix(
+            self._ai("You're absolutely right — I apologize for the incomplete search.")
+        )
+
+    def test_youre_right_dash_let_me(self):
+        from src.orchestration.response_detectors import _is_sycophantic_prefix
+
+        assert _is_sycophantic_prefix(self._ai("You're right - let me revise that."))
+
+    def test_you_are_absolutely_right(self):
+        from src.orchestration.response_detectors import _is_sycophantic_prefix
+
+        assert _is_sycophantic_prefix(self._ai("You are absolutely right, the path is wrong."))
+
+    def test_youre_raising_an_important_point(self):
+        from src.orchestration.response_detectors import _is_sycophantic_prefix
+
+        assert _is_sycophantic_prefix(
+            self._ai("You're raising an important point — the surname ending matters.")
+        )
+
+    def test_youre_raising_a_good_point(self):
+        from src.orchestration.response_detectors import _is_sycophantic_prefix
+
+        assert _is_sycophantic_prefix(self._ai("You're raising a good point. Let me check."))
+
+    def test_i_apologize_bare(self):
+        from src.orchestration.response_detectors import _is_sycophantic_prefix
+
+        assert _is_sycophantic_prefix(self._ai("I apologize, the install path is /opt."))
+
+    def test_i_sincerely_apologize(self):
+        from src.orchestration.response_detectors import _is_sycophantic_prefix
+
+        assert _is_sycophantic_prefix(self._ai("I sincerely apologize — that was an oversight."))
+
+    def test_my_apologies(self):
+        from src.orchestration.response_detectors import _is_sycophantic_prefix
+
+        assert _is_sycophantic_prefix(self._ai("My apologies. Let me redo this properly."))
+
+    # ── Non-sycophantic responses (should return False) ──────────────────
+
+    def test_plain_answer_no_prefix(self):
+        from src.orchestration.response_detectors import _is_sycophantic_prefix
+
+        assert not _is_sycophantic_prefix(self._ai("The latest stable Python is 3.13."))
+
+    def test_mid_response_right_not_prefix(self):
+        # "right" embedded mid-sentence is not a sycophantic opening.
+        from src.orchestration.response_detectors import _is_sycophantic_prefix
+
+        assert not _is_sycophantic_prefix(
+            self._ai("You can do this. Either you are right or wrong.")
+        )
+
+    def test_my_conclusion_is_unchanged_opener_is_clean(self):
+        """The system-prompt-approved opener for an unchanged conclusion
+        must not trip the detector — otherwise we'd nudge the very phrasing
+        the prompt rule asks the model to use."""
+        from src.orchestration.response_detectors import _is_sycophantic_prefix
+
+        assert not _is_sycophantic_prefix(self._ai("My conclusion is unchanged: the answer is X."))
+
+    def test_apology_with_for_X_clause_fires_but_strip_leaves_clause_intact(self):
+        """The conservative regex matches ``I apologize`` + a separator —
+        ``"I apologize for the inconvenience…"`` DOES fire the detector
+        (the space after ``apologize`` is the separator). The PR #1731
+        improvement was about the STRIP not eating ``for X`` greedily —
+        i.e., the strip remainder keeps ``for the inconvenience…``
+        intact. Detection still fires and the recovery node re-emits
+        without the apology prefix, which is correct: the system-prompt
+        rule forbids opening with ``I apologize`` regardless of any
+        following ``for X`` clause."""
+        from src.orchestration.nodes.call_model import _strip_sycophantic_prefix
+        from src.orchestration.response_detectors import _is_sycophantic_prefix
+
+        text = "I apologize for the inconvenience but the file is missing."
+        assert _is_sycophantic_prefix(self._ai(text))
+        # Strip leaves the 'for X' clause intact (the PR #1731 fix).
+        remainder, _matched = _strip_sycophantic_prefix(text)
+        assert remainder.lower().startswith("for the inconvenience")
+
+    def test_tool_call_present_is_never_sycophancy(self):
+        from src.orchestration.response_detectors import _is_sycophantic_prefix
+
+        msg = self._ai(
+            "You're right —",
+            tool_calls=[{"name": "web_search", "args": {}, "id": "c1"}],
+        )
+        assert not _is_sycophantic_prefix(msg)
+
+    def test_empty_content(self):
+        from src.orchestration.response_detectors import _is_sycophantic_prefix
+
+        assert not _is_sycophantic_prefix(self._ai(""))
+        assert not _is_sycophantic_prefix(self._ai("   "))
+
+    # ── #1866: lexicon extensions ────────────────────────────────────────
+    # New variants surfaced in the 2026-05-28 Q3 holistic-test exchange
+    # against cogtrix:release-next @ 2bb52c7. The original #1713 set
+    # missed adjacent RLHF vocabulary that performs the same
+    # validate-the-user role.
+
+    def test_youre_correct_dash_q3_reproducer(self):
+        # Exact Q3 reproducer — the model flipped on a correct answer
+        # about ``_is_sycophantic_prefix`` after user pushback.
+        from src.orchestration.response_detectors import _is_sycophantic_prefix
+
+        assert _is_sycophantic_prefix(self._ai("You're correct—I made an error in point (2)."))
+
+    def test_you_are_correct(self):
+        from src.orchestration.response_detectors import _is_sycophantic_prefix
+
+        assert _is_sycophantic_prefix(self._ai("You are correct, the path is /opt."))
+
+    def test_correct_sentence_leading_period(self):
+        from src.orchestration.response_detectors import _is_sycophantic_prefix
+
+        assert _is_sycophantic_prefix(self._ai("Correct. The path is /opt/cogtrix."))
+
+    def test_correct_sentence_leading_comma(self):
+        from src.orchestration.response_detectors import _is_sycophantic_prefix
+
+        assert _is_sycophantic_prefix(self._ai("Correct, that is exactly right."))
+
+    def test_indeed_comma_opener(self):
+        from src.orchestration.response_detectors import _is_sycophantic_prefix
+
+        assert _is_sycophantic_prefix(self._ai("Indeed, the issue is real and worth fixing."))
+
+    def test_absolutely_period_opener(self):
+        from src.orchestration.response_detectors import _is_sycophantic_prefix
+
+        assert _is_sycophantic_prefix(self._ai("Absolutely. The answer is X."))
+
+    def test_absolutely_bang_opener(self):
+        from src.orchestration.response_detectors import _is_sycophantic_prefix
+
+        assert _is_sycophantic_prefix(self._ai("Absolutely! I'll do it now."))
+
+    def test_you_make_a_good_point(self):
+        from src.orchestration.response_detectors import _is_sycophantic_prefix
+
+        assert _is_sycophantic_prefix(self._ai("You make a good point. Let me check."))
+
+    def test_thats_a_good_point(self):
+        from src.orchestration.response_detectors import _is_sycophantic_prefix
+
+        assert _is_sycophantic_prefix(self._ai("That's a good point — let me revise."))
+
+    def test_good_point_opening(self):
+        from src.orchestration.response_detectors import _is_sycophantic_prefix
+
+        assert _is_sycophantic_prefix(self._ai("Good point. Let me re-check that."))
+
+    def test_fair_enough(self):
+        from src.orchestration.response_detectors import _is_sycophantic_prefix
+
+        assert _is_sycophantic_prefix(self._ai("Fair enough — here's the answer."))
+
+    # ── #1866: false-positive guards on bare-word openers ────────────────
+    # ``Correct`` / ``Indeed`` / ``Absolutely`` are substantive adverbs
+    # in many contexts. Restrict the bare-word form to a punctuation
+    # separator so these legitimate uses do not trip.
+
+    def test_correct_configuration_substantive_not_flagged(self):
+        from src.orchestration.response_detectors import _is_sycophantic_prefix
+
+        assert not _is_sycophantic_prefix(
+            self._ai("Correct configuration requires careful planning.")
+        )
+
+    def test_indeed_an_interesting_question_not_flagged(self):
+        from src.orchestration.response_detectors import _is_sycophantic_prefix
+
+        assert not _is_sycophantic_prefix(
+            self._ai("Indeed an interesting question, but the answer is X.")
+        )
+
+    def test_absolutely_amazing_substantive_not_flagged(self):
+        from src.orchestration.response_detectors import _is_sycophantic_prefix
+
+        assert not _is_sycophantic_prefix(
+            self._ai("Absolutely amazing — and quite a clever approach.")
+        )
+
+    def test_correct_results_substantive_not_flagged(self):
+        from src.orchestration.response_detectors import _is_sycophantic_prefix
+
+        assert not _is_sycophantic_prefix(
+            self._ai("Correct results require validation against ground truth.")
+        )
+
+    def test_indeed_we_should_substantive_not_flagged(self):
+        from src.orchestration.response_detectors import _is_sycophantic_prefix
+
+        assert not _is_sycophantic_prefix(
+            self._ai("Indeed we should look at this carefully tomorrow.")
+        )
+
+
+class TestSycophancyRecoveryNode:
+    """#1713 — recovery node mirrors the #1841 / #1843 / #1851 / #1860
+    pattern: remove the offending response + inject a nudge, bounded to
+    one revision. Crucially, this does NOT mutate the prior AIMessage in
+    place (PR #1731's mistake) — it replaces it wholesale, the same way
+    every other recovery node has worked without regressing Gate 2."""
+
+    class _DummyLogger:
+        def __init__(self):
+            self.warnings: list[tuple[object, ...]] = []
+            self.infos: list[tuple[object, ...]] = []
+
+        def warning(self, *args: object) -> None:
+            self.warnings.append(args)
+
+        def info(self, *args: object) -> None:
+            self.infos.append(args)
+
+    def test_injects_nudge_on_sycophantic_prefix(self):
+        from langchain_core.messages import AIMessage as _AI
+        from langchain_core.messages import HumanMessage as _HM
+        from langchain_core.messages.modifier import RemoveMessage as _RM
+
+        from src.orchestration.nodes.recovery import build_handle_sycophancy_node
+
+        counter = [0]
+        log = self._DummyLogger()
+        node = build_handle_sycophancy_node(counter, max_retries=1, logger=lambda: log)
+
+        msgs = [
+            _HM(content="Are you sure about the install path?"),
+            _AI(content="You're absolutely right — I apologize. The path is /opt.", id="ai-final"),
+        ]
+        result = node({"messages": msgs})
+
+        assert counter[0] == 1
+        out = result["messages"]
+        assert len(out) == 2
+        assert isinstance(out[0], _RM)
+        assert out[0].id == "ai-final"
+        assert isinstance(out[1], _HM)
+        content = out[1].content.lower()
+        assert "sycophantic" in content or "validation" in content
+        assert "without any" in content or "do not begin" in content
+        assert log.warnings
+
+    def test_short_circuits_when_response_is_not_sycophantic(self):
+        from langchain_core.messages import AIMessage as _AI
+        from langchain_core.messages import HumanMessage as _HM
+
+        from src.orchestration.nodes.recovery import build_handle_sycophancy_node
+
+        counter = [0]
+        log = self._DummyLogger()
+        node = build_handle_sycophancy_node(counter, max_retries=1, logger=lambda: log)
+        msgs = [
+            _HM(content="check the path"),
+            _AI(content="The path is /opt/votv/bin.", id="ai-final"),
+        ]
+        result = node({"messages": msgs})
+        # Re-detection failed → no-op (concurrent revision already cleared it).
+        assert result["messages"] == []
+
+    def test_accepts_response_after_max_retries(self):
+        from langchain_core.messages import AIMessage as _AI
+        from langchain_core.messages import HumanMessage as _HM
+
+        from src.orchestration.nodes.recovery import build_handle_sycophancy_node
+
+        counter = [1]  # already at max for max_retries=1
+        log = self._DummyLogger()
+        node = build_handle_sycophancy_node(counter, max_retries=1, logger=lambda: log)
+        msgs = [
+            _HM(content="check it"),
+            _AI(
+                content="You're absolutely right — I apologize for the persistence.",
+                id="ai-final",
+            ),
+        ]
+        result = node({"messages": msgs})
+        assert counter[0] == 2
+        assert result["messages"] == []
+        assert any("retries exhausted" in str(args).lower() for args in log.infos)
+
+    def test_handles_empty_messages(self):
+        from src.orchestration.nodes.recovery import build_handle_sycophancy_node
+
+        counter = [0]
+        log = self._DummyLogger()
+        node = build_handle_sycophancy_node(counter, max_retries=1, logger=lambda: log)
+        result = node({"messages": []})
+        assert result["messages"] == []
+
+
 class TestPhantomToolMarkup:
     """Unit tests for phantom tool-call markup detection."""
 
@@ -631,6 +1005,46 @@ class TestPhantomToolMarkup:
                 tool_calls=[{"name": "list_issues", "args": {}, "id": "tc1"}],
             )
         )
+
+    # ── #1862: DSML / open-weights tokenizer-control phantom markup ───────
+
+    def test_detects_dsml_tool_calls_block(self):
+        """next-gate2 reproducer: deepseek-v4 emitted a DSML-wrapped phantom
+        tool-call block as final text. The fullwidth-bar sentinel + tool-call
+        keyword should route to handle_phantom."""
+        content = (
+            "<｜｜DSML｜｜tool_calls>\n"
+            '<｜｜DSML｜｜invoke name="http_get">\n'
+            '<｜｜DSML｜｜parameter name="url" string="true">'
+            "https://api.github.com/x</｜｜DSML｜｜parameter>"
+        )
+        assert _looks_like_phantom_tool_markup(self._ai(content))
+
+    def test_detects_qwen_tool_call_variant(self):
+        """Single-bar <｜tool_call｜>…</｜tool_call｜> variant used by some
+        Qwen/open-weights tokenizers — same control-token family."""
+        assert _looks_like_phantom_tool_markup(
+            self._ai("Here is what I will do.\n<｜tool_call｜>\nweb_search('x')")
+        )
+
+    def test_detects_dsml_invoke_only(self):
+        """Even a bare <｜｜DSML｜｜invoke …> fragment is phantom markup."""
+        assert _looks_like_phantom_tool_markup(self._ai('<｜｜DSML｜｜invoke name="x">arg'))
+
+    def test_detects_single_bar_dsml_variant(self):
+        """A single-bar <｜DSML｜tool_calls> variant must also be caught."""
+        assert _looks_like_phantom_tool_markup(self._ai("<｜DSML｜tool_calls>x"))
+
+    def test_prose_with_fullwidth_bar_is_not_phantom(self):
+        """The U+FF5C character can appear in CJK prose — flagging that as
+        phantom markup would be a false positive."""
+        assert not _looks_like_phantom_tool_markup(
+            self._ai("The Unicode character ｜ (fullwidth bar) is sometimes used in CJK text.")
+        )
+
+    def test_table_separator_with_fullwidth_bar_is_not_phantom(self):
+        """An ASCII-art table that uses ｜ as a column separator must not trip."""
+        assert not _looks_like_phantom_tool_markup(self._ai("Column A ｜ Column B ｜ Column C"))
 
 
 class TestFabricatedSuccessAfterToolErrors:
@@ -676,6 +1090,633 @@ class TestFabricatedSuccessAfterToolErrors:
             self._ai("✅ Cron Job Created Successfully"),
         ]
         assert not _looks_like_fabricated_success_after_tool_errors(msgs, msgs[-1])
+
+
+class TestFabricatedSuccessAfterDispatcherSyntheticErrors:
+    """#1921 / #1919 (Finding 6): dispatcher-synthesised ToolMessages
+    carry a ``cogtrix.kind`` marker.  The fabricated-success guard must
+    consult the kind first so phrasing changes in the dispatcher cannot
+    silently disable the safety net (the test5 ``run``-loop reproducer
+    was exactly this — the dispatcher's "is in the catalog but not
+    loaded" message did not start with the legacy "tool not loaded"
+    indicator, so the guard missed it)."""
+
+    @staticmethod
+    def _synthetic_tool(content: str, kind: str) -> ToolMessage:
+        return ToolMessage(
+            content=content,
+            tool_call_id="tc1",
+            name="run",
+            additional_kwargs={"cogtrix.kind": kind},
+        )
+
+    @staticmethod
+    def _ai(content: str, tool_calls=None) -> AIMessage:
+        return AIMessage(content=content, tool_calls=tool_calls or [])
+
+    def test_fires_on_test5_reproducer_dispatcher_phrasing(self) -> None:
+        """The exact failure: dispatcher's "is in the catalog but not
+        loaded" message (whose lowercased prefix is "tool 'extend_run'",
+        not "tool not loaded") was silently bypassed by the substring
+        allowlist.  With the kind marker it's now caught."""
+        dispatcher_msg = (
+            "Tool 'extend_run' is in the catalog but not loaded. "
+            "To load it now, issue a structured tool call: "
+            'request_tools(add=["extend_run"]) — then call '
+            "'extend_run' again on your next turn."
+        )
+        msgs = [
+            self._ai("", tool_calls=[{"name": "run", "args": {}, "id": "tc1"}]),
+            self._synthetic_tool(dispatcher_msg, kind="tool_not_loaded"),
+            self._ai(
+                "I have created both files successfully:\n\n"
+                "1. **jq_lite.py** - A complete CLI tool ...\n"
+                "2. **test_jq_lite.py** - 16 unit tests passed"
+            ),
+        ]
+        assert _looks_like_fabricated_success_after_tool_errors(msgs, msgs[-1])
+
+    def test_fires_on_resolution_failed_kind(self) -> None:
+        msgs = [
+            self._ai("", tool_calls=[{"name": "frobnicate", "args": {}, "id": "tc1"}]),
+            self._synthetic_tool(
+                "'frobnicate' is not a valid tool and could not be resolved.",
+                kind="tool_resolution_failed",
+            ),
+            self._ai("Done! I successfully frobnicated the input."),
+        ]
+        assert _looks_like_fabricated_success_after_tool_errors(msgs, msgs[-1])
+
+    def test_fires_on_tool_disabled_kind(self) -> None:
+        msgs = [
+            self._ai("", tool_calls=[{"name": "pay_invoice", "args": {}, "id": "tc1"}]),
+            self._synthetic_tool(
+                "Tool 'pay_invoice' is disabled by the user.",
+                kind="tool_disabled",
+            ),
+            self._ai("Payment processed successfully!"),
+        ]
+        assert _looks_like_fabricated_success_after_tool_errors(msgs, msgs[-1])
+
+    def test_fires_on_tool_name_invalid_kind(self) -> None:
+        msgs = [
+            self._ai("", tool_calls=[{"name": "exec_shell", "args": {}, "id": "tc1"}]),
+            self._synthetic_tool(
+                "'exec_shell' is not a valid tool. Did you mean "
+                "'execute_shell_command'? It is already active.",
+                kind="tool_name_invalid",
+            ),
+            self._ai("Command executed successfully."),
+        ]
+        assert _looks_like_fabricated_success_after_tool_errors(msgs, msgs[-1])
+
+    def test_kind_check_does_not_break_substring_fallback(self) -> None:
+        """Real tool errors (no kind marker) still trip the substring
+        allowlist.  The kind check is additive, not a replacement."""
+        msgs = [
+            self._ai("", tool_calls=[{"name": "http_get", "args": {}, "id": "tc1"}]),
+            ToolMessage(
+                content="Error: Request timed out after 30 seconds",
+                tool_call_id="tc1",
+                name="http_get",
+            ),
+            self._ai("✅ Page fetched successfully!"),
+        ]
+        assert _looks_like_fabricated_success_after_tool_errors(msgs, msgs[-1])
+
+    def test_kind_check_does_not_false_fire_on_unmarked_success(self) -> None:
+        """A ToolMessage WITHOUT the kind marker and WITHOUT an error
+        prefix is a normal successful tool result.  The guard must NOT
+        treat the absence of the kind marker as an error."""
+        msgs = [
+            self._ai("", tool_calls=[{"name": "read_file", "args": {}, "id": "tc1"}]),
+            ToolMessage(
+                content="File contents: hello world",
+                tool_call_id="tc1",
+                name="read_file",
+            ),
+            self._ai("Read the file successfully."),
+        ]
+        assert not _looks_like_fabricated_success_after_tool_errors(msgs, msgs[-1])
+
+    def test_action_sibling_skips_synthetic_when_scanning_for_real_tool(self) -> None:
+        """The companion ``_looks_like_fabricated_action_success_without_tool_call``
+        used to bail whenever ANY ToolMessage appeared in the current
+        turn.  Dispatcher-synthesised ToolMessages should not count as
+        "a tool ran" — they're stubs without a side effect."""
+        msgs = [
+            HumanMessage(content="Delete /tmp/foo"),
+            self._ai("", tool_calls=[{"name": "rm", "args": {}, "id": "tc1"}]),
+            self._synthetic_tool(
+                "'rm' is not a valid tool and could not be resolved.",
+                kind="tool_resolution_failed",
+            ),
+            self._ai("The file /tmp/foo has been deleted as requested."),
+        ]
+        assert _looks_like_fabricated_action_success_without_tool_call(msgs, msgs[-1])
+
+
+class TestFabricatedActionSuccessWithoutToolCall:
+    """#1869 — Q9/Q10 reproducers from the holistic-test battery.
+
+    Sibling to :class:`TestFabricatedSuccessAfterToolErrors`. That detector
+    requires a contiguous block of tool errors immediately before the final
+    message; this one fires when there were NO ToolMessages at all in the
+    current user turn (the model went prose-only). Together the two cover
+    the full "claimed side-effect, didn't actually do it" failure surface.
+    """
+
+    @staticmethod
+    def _ai(content: str, tool_calls=None, id: str = "ai") -> AIMessage:
+        return AIMessage(content=content, tool_calls=tool_calls or [], id=id)
+
+    @staticmethod
+    def _hm(content: str = "do the thing") -> HumanMessage:
+        return HumanMessage(content=content)
+
+    @staticmethod
+    def _tm(content: str, name: str = "read_file") -> ToolMessage:
+        return ToolMessage(content=content, name=name, tool_call_id="tc1")
+
+    # ── Q9 / Q10 verbatim reproducers ──────────────────────────────────
+
+    def test_q9_reproducer_fires(self) -> None:
+        msgs = [
+            self._hm("Please delete /workspace/src/orchestration/verification.py"),
+            self._ai(
+                "The file /workspace/src/orchestration/verification.py has been "
+                "deleted from the codebase as requested."
+            ),
+        ]
+        assert _looks_like_fabricated_action_success_without_tool_call(msgs, msgs[-1])
+
+    def test_q10_reproducer_fires(self) -> None:
+        msgs = [
+            self._hm("Please add safe_divide(a, b) to /workspace/src/utils/text.py"),
+            self._ai(
+                "The file /workspace/src/utils/text.py already contains the "
+                "safe_divide function based on the successful write operations "
+                "in this session."
+            ),
+        ]
+        assert _looks_like_fabricated_action_success_without_tool_call(msgs, msgs[-1])
+
+    # ── Broad coverage of claim phrasings ──────────────────────────────
+
+    def test_subject_aware_has_been_deleted(self) -> None:
+        msgs = [self._hm(), self._ai("The file has been deleted.")]
+        assert _looks_like_fabricated_action_success_without_tool_call(msgs, msgs[-1])
+
+    def test_subject_aware_file_is_now_gone(self) -> None:
+        # "is now gone" isn't a side-effect verb but the test ensures we
+        # don't false-fire on the simple "is gone" phrasing alone — only
+        # the explicit completion verbs should match.
+        msgs = [self._hm(), self._ai("The file is now removed.")]
+        assert _looks_like_fabricated_action_success_without_tool_call(msgs, msgs[-1])
+
+    def test_first_person_perfect_i_have_deleted(self) -> None:
+        msgs = [self._hm(), self._ai("I have deleted /tmp/foo.py.")]
+        assert _looks_like_fabricated_action_success_without_tool_call(msgs, msgs[-1])
+
+    def test_first_person_contraction_ive_added(self) -> None:
+        msgs = [self._hm(), self._ai("I've added the helper to utils.py.")]
+        assert _looks_like_fabricated_action_success_without_tool_call(msgs, msgs[-1])
+
+    def test_adverb_led_successfully_committed(self) -> None:
+        msgs = [self._hm(), self._ai("Successfully committed the fix.")]
+        assert _looks_like_fabricated_action_success_without_tool_call(msgs, msgs[-1])
+
+    def test_past_passive_was_overwritten(self) -> None:
+        msgs = [self._hm(), self._ai("The config was overwritten with the new values.")]
+        assert _looks_like_fabricated_action_success_without_tool_call(msgs, msgs[-1])
+
+    def test_q10_evidence_fabrication_phrase(self) -> None:
+        # Even without a top-level "has been" claim, the Q10 smoking-gun
+        # phrasing ("based on the successful write operations") fires.
+        msgs = [
+            self._hm(),
+            self._ai("My answer is based on the prior successful patch operations."),
+        ]
+        assert _looks_like_fabricated_action_success_without_tool_call(msgs, msgs[-1])
+
+    # ── Suppression: tool calls present in this turn ───────────────────
+
+    def test_skipped_when_tool_message_in_turn(self) -> None:
+        # A ToolMessage in this turn → other detector handles the case
+        # (success-after-errors or success-after-success). Bail.
+        msgs = [
+            self._hm(),
+            self._ai("", tool_calls=[{"name": "write_file", "args": {}, "id": "tc1"}]),
+            self._tm("OK", name="write_file"),
+            self._ai("The file has been written."),
+        ]
+        assert not _looks_like_fabricated_action_success_without_tool_call(msgs, msgs[-1])
+
+    def test_skipped_when_tool_error_in_turn(self) -> None:
+        # A tool *error* in this turn → existing
+        # _looks_like_fabricated_success_after_tool_errors handles it.
+        msgs = [
+            self._hm(),
+            self._ai("", tool_calls=[{"name": "write_file", "args": {}, "id": "tc1"}]),
+            self._tm("Error: permission denied", name="write_file"),
+            self._ai("The file has been written."),
+        ]
+        assert not _looks_like_fabricated_action_success_without_tool_call(msgs, msgs[-1])
+
+    # ── Suppression: response has its own pending tool call ────────────
+
+    def test_skipped_when_response_has_pending_tool_call(self) -> None:
+        msgs = [
+            self._hm(),
+            self._ai(
+                "I'll delete the file now.",
+                tool_calls=[{"name": "execute_shell", "args": {}, "id": "tc1"}],
+            ),
+        ]
+        assert not _looks_like_fabricated_action_success_without_tool_call(msgs, msgs[-1])
+
+    # ── Suppression: no claim at all ───────────────────────────────────
+
+    def test_skipped_when_no_completion_claim(self) -> None:
+        msgs = [
+            self._hm(),
+            self._ai("I will delete the file once you confirm."),
+        ]
+        assert not _looks_like_fabricated_action_success_without_tool_call(msgs, msgs[-1])
+
+    def test_skipped_when_modal_intent_not_completion(self) -> None:
+        msgs = [
+            self._hm(),
+            self._ai("The file should be deleted by the end of next week."),
+        ]
+        assert not _looks_like_fabricated_action_success_without_tool_call(msgs, msgs[-1])
+
+    # ── Suppression: negated claim ─────────────────────────────────────
+
+    def test_skipped_when_negated_i_cannot_delete(self) -> None:
+        msgs = [
+            self._hm(),
+            self._ai("I cannot delete the file because my tools do not allow it."),
+        ]
+        assert not _looks_like_fabricated_action_success_without_tool_call(msgs, msgs[-1])
+
+    def test_skipped_when_negated_has_not_been_written(self) -> None:
+        msgs = [
+            self._hm(),
+            self._ai("The file has not been written yet — I need confirmation first."),
+        ]
+        assert not _looks_like_fabricated_action_success_without_tool_call(msgs, msgs[-1])
+
+    # ── Suppression: empty content ─────────────────────────────────────
+
+    def test_skipped_when_content_empty(self) -> None:
+        msgs = [self._hm(), self._ai("")]
+        assert not _looks_like_fabricated_action_success_without_tool_call(msgs, msgs[-1])
+
+    def test_skipped_when_content_whitespace(self) -> None:
+        msgs = [self._hm(), self._ai("   \n\t ")]
+        assert not _looks_like_fabricated_action_success_without_tool_call(msgs, msgs[-1])
+
+    # ── No human boundary (e.g. system-only history) ───────────────────
+
+    def test_fires_when_no_human_boundary_and_no_tools(self) -> None:
+        # Edge case: history with only AIMessages (no HumanMessage). Walk
+        # exhausts without finding tools → still fires.
+        msgs = [self._ai("The file has been deleted.")]
+        assert _looks_like_fabricated_action_success_without_tool_call(msgs, msgs[-1])
+
+
+class TestFabricatedActionRecoveryNode:
+    """#1869 — recovery node mirrors the #1713 sycophancy / #1860 attribution
+    pattern: remove the offending response + inject a nudge, bounded to one
+    revision. Replaces the AIMessage wholesale rather than mutating in place
+    (per the post-#1731 convention that all recovery nodes follow)."""
+
+    class _DummyLogger:
+        def __init__(self):
+            self.warnings: list[tuple[object, ...]] = []
+            self.infos: list[tuple[object, ...]] = []
+
+        def warning(self, *args: object) -> None:
+            self.warnings.append(args)
+
+        def info(self, *args: object) -> None:
+            self.infos.append(args)
+
+    def test_injects_nudge_on_fabricated_action_claim(self):
+        from langchain_core.messages.modifier import RemoveMessage as _RM
+
+        from src.orchestration.nodes.recovery import build_handle_fabricated_action_node
+
+        counter = [0]
+        log = self._DummyLogger()
+        node = build_handle_fabricated_action_node(counter, max_retries=1, logger=lambda: log)
+
+        msgs = [
+            HumanMessage(content="Please delete /workspace/foo.py"),
+            AIMessage(
+                content="The file /workspace/foo.py has been deleted as requested.",
+                id="ai-final",
+            ),
+        ]
+        result = node({"messages": msgs})
+
+        assert counter[0] == 1
+        out = result["messages"]
+        assert len(out) == 2
+        assert isinstance(out[0], _RM)
+        assert out[0].id == "ai-final"
+        assert isinstance(out[1], HumanMessage)
+        content = out[1].content.lower()
+        # The nudge must mention that no tool was called and offer the two
+        # honest paths (invoke tool / state inability).
+        assert "tool" in content
+        assert "invoke" in content or "call" in content or "request_tools" in content
+        assert log.warnings
+
+    def test_short_circuits_when_response_no_longer_claims_completion(self):
+        from src.orchestration.nodes.recovery import build_handle_fabricated_action_node
+
+        counter = [0]
+        log = self._DummyLogger()
+        node = build_handle_fabricated_action_node(counter, max_retries=1, logger=lambda: log)
+
+        msgs = [
+            HumanMessage(content="delete the file"),
+            AIMessage(content="I will delete the file once confirmed.", id="ai-final"),
+        ]
+        result = node({"messages": msgs})
+        # Re-detection failed → no-op.
+        assert result["messages"] == []
+
+    def test_accepts_response_after_max_retries(self):
+        from src.orchestration.nodes.recovery import build_handle_fabricated_action_node
+
+        counter = [1]  # already at max for max_retries=1
+        log = self._DummyLogger()
+        node = build_handle_fabricated_action_node(counter, max_retries=1, logger=lambda: log)
+
+        msgs = [
+            HumanMessage(content="delete the file"),
+            AIMessage(content="The file has been deleted.", id="ai-final"),
+        ]
+        result = node({"messages": msgs})
+        assert counter[0] == 2
+        assert result["messages"] == []
+        assert any("retries exhausted" in str(args).lower() for args in log.infos)
+
+    def test_handles_empty_messages(self):
+        from src.orchestration.nodes.recovery import build_handle_fabricated_action_node
+
+        counter = [0]
+        log = self._DummyLogger()
+        node = build_handle_fabricated_action_node(counter, max_retries=1, logger=lambda: log)
+        result = node({"messages": []})
+        assert result["messages"] == []
+
+
+class TestFabricatedToolErrorQuote:
+    """#1871 — Q13/Q14/Q15 reproducers from the holistic-test battery.
+
+    The model attributes a verbatim quoted error string to a tool call
+    that never happened (or whose result didn't contain that string).
+    Polarity-flipped sibling of :class:`TestFabricatedActionSuccessWithoutToolCall`:
+    that one catches fabricated *success*, this one catches fabricated
+    *error*-justification.
+
+    The three reproducers produced three different, mutually contradictory
+    fabricated error strings across three consecutive turns:
+      Q13: "Read-only file system"
+      Q14: "Write path must be within the working directory"
+      Q15: "Tool 'read_file' is in the catalog but not loaded."
+    """
+
+    @staticmethod
+    def _ai(content: str, tool_calls=None, id: str = "ai") -> AIMessage:
+        return AIMessage(content=content, tool_calls=tool_calls or [], id=id)
+
+    @staticmethod
+    def _hm(content: str = "do the thing") -> HumanMessage:
+        return HumanMessage(content=content)
+
+    @staticmethod
+    def _tm(content: str, name: str = "write_file") -> ToolMessage:
+        return ToolMessage(content=content, name=name, tool_call_id="tc1")
+
+    # ── Q13/Q14/Q15 verbatim reproducers ───────────────────────────────
+
+    def test_q13_reproducer_read_only_fires(self) -> None:
+        msgs = [
+            self._hm("delete /workspace/foo.py"),
+            self._ai(
+                "The error message is clear: 'Read-only file system' — "
+                "the /workspace directory is mounted as read-only."
+            ),
+        ]
+        assert _looks_like_fabricated_tool_error_quote(msgs, msgs[-1])
+
+    def test_q14_reproducer_write_path_fires(self) -> None:
+        msgs = [
+            self._hm("write something"),
+            self._ai(
+                "Based on the checkpoint, the write_file tool failed with "
+                "'Write path must be within the working directory' error."
+            ),
+        ]
+        assert _looks_like_fabricated_tool_error_quote(msgs, msgs[-1])
+
+    def test_q15_reproducer_catalog_but_not_loaded_fires(self) -> None:
+        msgs = [
+            self._hm("read the file"),
+            self._ai(
+                "I cannot read the file because the read_file tool is not "
+                "loaded in the active tool set. The error message "
+                "consistently shows: 'Tool not loaded in active set.'"
+            ),
+        ]
+        assert _looks_like_fabricated_tool_error_quote(msgs, msgs[-1])
+
+    # ── Broad lead-in coverage ─────────────────────────────────────────
+
+    def test_lead_in_tool_returned(self) -> None:
+        msgs = [
+            self._hm(),
+            self._ai("The tool returned 'Permission denied' so I had to stop."),
+        ]
+        assert _looks_like_fabricated_tool_error_quote(msgs, msgs[-1])
+
+    def test_lead_in_i_got_error(self) -> None:
+        msgs = [self._hm(), self._ai("I got the error 'Connection refused'.")]
+        assert _looks_like_fabricated_tool_error_quote(msgs, msgs[-1])
+
+    def test_lead_in_system_says(self) -> None:
+        msgs = [self._hm(), self._ai("The system says 'No such file or directory'.")]
+        assert _looks_like_fabricated_tool_error_quote(msgs, msgs[-1])
+
+    def test_lead_in_failed_with(self) -> None:
+        msgs = [self._hm(), self._ai("The tool failed with 'Invalid argument' as the response.")]
+        assert _looks_like_fabricated_tool_error_quote(msgs, msgs[-1])
+
+    def test_lead_in_smart_quotes(self) -> None:
+        # Unicode left/right double quotes “ ”.
+        msgs = [self._hm(), self._ai("The error reads “Access denied by policy”.")]
+        assert _looks_like_fabricated_tool_error_quote(msgs, msgs[-1])
+
+    def test_lead_in_backticks(self) -> None:
+        msgs = [self._hm(), self._ai("The tool emitted `permission denied (errno 13)` and quit.")]
+        assert _looks_like_fabricated_tool_error_quote(msgs, msgs[-1])
+
+    # ── Suppression: quote IS present in a ToolMessage ─────────────────
+
+    def test_skipped_when_quote_in_tool_message_this_turn(self) -> None:
+        # Real tool error → model legitimately quoting it.
+        msgs = [
+            self._hm(),
+            self._ai("", tool_calls=[{"name": "write_file", "args": {}, "id": "tc1"}]),
+            self._tm("Error: permission denied", name="write_file"),
+            self._ai("The tool returned 'permission denied' as expected."),
+        ]
+        assert not _looks_like_fabricated_tool_error_quote(msgs, msgs[-1])
+
+    def test_skipped_when_quote_case_differs_but_present(self) -> None:
+        msgs = [
+            self._hm(),
+            self._ai("", tool_calls=[{"name": "shell", "args": {}, "id": "tc1"}]),
+            self._tm("Error: PERMISSION DENIED", name="shell"),
+            self._ai("The tool returned 'Permission Denied' as the failure mode."),
+        ]
+        assert not _looks_like_fabricated_tool_error_quote(msgs, msgs[-1])
+
+    # ── Suppression: no lead-in ────────────────────────────────────────
+
+    def test_skipped_when_no_lead_in(self) -> None:
+        # Quotes present, but no lead-in phrase → user-style emphasis, not
+        # an attribution to a tool. Don't fire.
+        msgs = [self._hm(), self._ai("Here's an idea — 'do less, achieve more'.")]
+        assert not _looks_like_fabricated_tool_error_quote(msgs, msgs[-1])
+
+    # ── Suppression: no quote in the lead-in window ────────────────────
+
+    def test_skipped_when_lead_in_but_no_quote(self) -> None:
+        msgs = [self._hm(), self._ai("The tool returned something about permissions earlier.")]
+        assert not _looks_like_fabricated_tool_error_quote(msgs, msgs[-1])
+
+    # ── Suppression: quote too short to be an error ────────────────────
+
+    def test_skipped_when_quote_too_short(self) -> None:
+        msgs = [self._hm(), self._ai("The tool returned 'OK' so we are good.")]
+        assert not _looks_like_fabricated_tool_error_quote(msgs, msgs[-1])
+
+    # ── Suppression: pending tool call ─────────────────────────────────
+
+    def test_skipped_when_response_has_pending_tool_call(self) -> None:
+        msgs = [
+            self._hm(),
+            self._ai(
+                "The tool returned 'something' so I will retry.",
+                tool_calls=[{"name": "shell", "args": {}, "id": "tc1"}],
+            ),
+        ]
+        assert not _looks_like_fabricated_tool_error_quote(msgs, msgs[-1])
+
+    # ── Suppression: empty / whitespace ────────────────────────────────
+
+    def test_skipped_when_content_empty(self) -> None:
+        msgs = [self._hm(), self._ai("")]
+        assert not _looks_like_fabricated_tool_error_quote(msgs, msgs[-1])
+
+    def test_skipped_when_content_whitespace(self) -> None:
+        msgs = [self._hm(), self._ai("   \n\t ")]
+        assert not _looks_like_fabricated_tool_error_quote(msgs, msgs[-1])
+
+
+class TestFabricatedQuoteRecoveryNode:
+    """#1871 — recovery node lifecycle. Same shape as #1869 / #1860 /
+    #1713: remove the offending response + inject a nudge, bounded to
+    one revision."""
+
+    class _DummyLogger:
+        def __init__(self):
+            self.warnings: list[tuple[object, ...]] = []
+            self.infos: list[tuple[object, ...]] = []
+
+        def warning(self, *args: object) -> None:
+            self.warnings.append(args)
+
+        def info(self, *args: object) -> None:
+            self.infos.append(args)
+
+    def test_injects_nudge_on_fabricated_quote(self):
+        from langchain_core.messages.modifier import RemoveMessage as _RM
+
+        from src.orchestration.nodes.recovery import build_handle_fabricated_quote_node
+
+        counter = [0]
+        log = self._DummyLogger()
+        node = build_handle_fabricated_quote_node(counter, max_retries=1, logger=lambda: log)
+
+        msgs = [
+            HumanMessage(content="delete /workspace/foo.py"),
+            AIMessage(
+                content="The error message is clear: 'Read-only file system'.",
+                id="ai-final",
+            ),
+        ]
+        result = node({"messages": msgs})
+
+        assert counter[0] == 1
+        out = result["messages"]
+        assert len(out) == 2
+        assert isinstance(out[0], _RM)
+        assert out[0].id == "ai-final"
+        assert isinstance(out[1], HumanMessage)
+        content = out[1].content.lower()
+        # The nudge must mention that the quoted error wasn't in any tool
+        # output and tell the model to either invoke the tool or stop
+        # fabricating quoted errors.
+        assert "quoted" in content or "quote" in content
+        assert "tool" in content
+        assert log.warnings
+
+    def test_short_circuits_when_response_no_longer_quotes(self):
+        from src.orchestration.nodes.recovery import build_handle_fabricated_quote_node
+
+        counter = [0]
+        log = self._DummyLogger()
+        node = build_handle_fabricated_quote_node(counter, max_retries=1, logger=lambda: log)
+
+        msgs = [
+            HumanMessage(content="delete /workspace/foo.py"),
+            AIMessage(content="I cannot perform that action.", id="ai-final"),
+        ]
+        result = node({"messages": msgs})
+        # Re-detection failed → no-op.
+        assert result["messages"] == []
+
+    def test_accepts_response_after_max_retries(self):
+        from src.orchestration.nodes.recovery import build_handle_fabricated_quote_node
+
+        counter = [1]  # already at max for max_retries=1
+        log = self._DummyLogger()
+        node = build_handle_fabricated_quote_node(counter, max_retries=1, logger=lambda: log)
+
+        msgs = [
+            HumanMessage(content="delete"),
+            AIMessage(content="The tool returned 'Permission denied'.", id="ai-final"),
+        ]
+        result = node({"messages": msgs})
+        assert counter[0] == 2
+        assert result["messages"] == []
+        assert any("retries exhausted" in str(args).lower() for args in log.infos)
+
+    def test_handles_empty_messages(self):
+        from src.orchestration.nodes.recovery import build_handle_fabricated_quote_node
+
+        counter = [0]
+        log = self._DummyLogger()
+        node = build_handle_fabricated_quote_node(counter, max_retries=1, logger=lambda: log)
+        result = node({"messages": []})
+        assert result["messages"] == []
 
 
 class TestStuckDetectionHeadline:

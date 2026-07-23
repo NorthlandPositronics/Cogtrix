@@ -12,7 +12,6 @@ Usage:
 
 from __future__ import annotations
 
-import concurrent.futures
 import contextlib
 import getpass
 import ipaddress
@@ -33,6 +32,7 @@ from typing import Any
 import yaml
 
 from src.cli.args import color_enabled
+from src.concurrency import invoke_with_timeout
 
 # Timeout for LLM calls in the setup wizard — prevents a hung model from
 # blocking the caller indefinitely. Fail-open: connection tests return None,
@@ -150,22 +150,23 @@ def _spinner(label: str = "Thinking"):
 
 
 def _invoke_llm_with_timeout(llm: Any, messages: Any) -> Any:
-    """Invoke *llm* with a ThreadPoolExecutor timeout.
+    """Invoke *llm* with a hard timeout via the shared concurrency pool.
+
+    Migrated to :func:`src.concurrency.invoke_with_timeout` under #1677 —
+    one of fifteen pre-existing per-call ``ThreadPoolExecutor`` sites
+    that previously each spawned their own single-worker pool plus
+    the same "do NOT use ``with``" warning comment.  See
+    :doc:`docs/architecture/CONCURRENCY.md` for the policy.
 
     Prevents a hung provider from blocking the setup wizard indefinitely.
     On timeout, raises :exc:`RuntimeError` with a clear message.
     """
-    pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-    future = pool.submit(llm.invoke, messages)
-    pool.shutdown(wait=False)
     try:
-        return future.result(timeout=_SETUP_WIZARD_LLM_TIMEOUT_SECONDS)
-    except concurrent.futures.TimeoutError:
-        future.cancel()
-        pool.shutdown(wait=False)
+        return invoke_with_timeout(llm.invoke, messages, timeout=_SETUP_WIZARD_LLM_TIMEOUT_SECONDS)
+    except TimeoutError as exc:
         raise RuntimeError(
             f"LLM call timed out after {_SETUP_WIZARD_LLM_TIMEOUT_SECONDS}s"
-        ) from None
+        ) from exc
 
 
 # ── Box drawing ──────────────────────────────────────────────────────

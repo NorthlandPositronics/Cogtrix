@@ -534,6 +534,38 @@ class TestMyTool:
             MyToolInput(query="", max_results=-1)
 ```
 
+### Agent Complexity Test Fleet
+
+The `tests/agent_complexity/` package (added in #1931) is a first-class
+runner for multi-container Docker-based stress tests. It launches N
+parallel cogtrix containers, each driving a distinct task that
+exercises a different combination of tool tiers, task length, and
+recovery surface. Surfaces orchestration-level defects (resolver
+loops, dispatcher guidance drift, retry storms) that unit tests
+cannot catch under load.
+
+```bash
+# Build a fresh image and run the default 5 scenarios:
+python -m tests.agent_complexity.runner --build
+
+# Use an existing image:
+python -m tests.agent_complexity.runner --image-tag cogtrix:latest
+
+# Run a subset:
+python -m tests.agent_complexity.runner --scenarios gas,sec
+```
+
+Exits **0** when every scenario completed within budget and without
+tool failures; **1** otherwise. Per-task log files land in
+`--output-dir` (default `.agent-fleet-logs/`). The runner ships with
+24 unit tests that exercise the Docker-free pieces
+(`resolve_config_path`, `_parse_log`, `_select_scenarios`,
+`_format_summary`).
+
+Costs real LLM tokens — runs manually, not in CI. See
+[`tests/agent_complexity/README.md`](../tests/agent_complexity/README.md)
+for the full design and how to add scenarios.
+
 ---
 
 ## Code Style
@@ -756,11 +788,14 @@ cogtrix/
 ### Pull Request Process
 
 1. Fork the repository.
-2. Create a feature branch from `next` (not `main`):
+2. Create a feature branch from `release/next` (not `production`):
    ```bash
-   git checkout next
-   git checkout -b feat/my-feature
+   git checkout release/next
+   git checkout -b feature/<issue-id>-short-description
    ```
+   Branch naming follows the convention documented in
+   [CONTRIBUTING.md](../CONTRIBUTING.md):
+   `[feature|bugfix|hotfix]/<github-issue-id>-short-description`.
 3. Make changes with tests.
 4. Run all checks:
    ```bash
@@ -768,7 +803,7 @@ cogtrix/
    uv run ruff check .
    uv run pytest tests/ -v
    ```
-5. Submit a pull request targeting `next`.
+5. Submit a pull request targeting `release/next`.
 
 ### Commit Messages
 

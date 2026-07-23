@@ -511,6 +511,89 @@ class TestBuildSystemPrompt:
         assert "<YYYYMMDD>" not in result
         assert "<url>" not in result
 
+    def test_default_prompt_directs_semantic_scholar_for_citation_queries(self):
+        # Bug #1889 regression — when the user asks about citation counts /
+        # "most-cited" / "top-cited" academic papers, the agent must reach
+        # for the Semantic Scholar API (which exposes citationCount per
+        # paper), not arXiv.org (which doesn't publish citation counts)
+        # and not raw web_search for "most cited X papers" (which returns
+        # subjective blog rankings, not citation-sorted results).
+        #
+        # README-flagship reproducer: "Find the five most-cited deep-
+        # learning papers from arXiv in 2025…" — without this rule, the
+        # agent has three failure modes: (a) fabricate arXiv IDs from
+        # web_search snippets, (b) substitute "recent" for "most-cited"
+        # without admitting it, (c) refuse honestly. None of those make
+        # the README's flagship promise true.
+        result = build_system_prompt()
+        lower = result.lower()
+
+        # The rule must name the citation-query trigger phrases so the
+        # model recognises the scenario. Both "citation count" and
+        # "most-cited" are common surface forms.
+        assert "citation count" in lower, (
+            "Citation-query rule missing from default system prompt — "
+            "README's flagship 'most-cited arXiv papers' prompt cannot be "
+            "answered honestly without Semantic Scholar (#1889)"
+        )
+        assert "most-cited" in lower or "most cited" in lower
+
+        # Semantic Scholar must be named as the canonical service — the
+        # whole point of the rule is to give the model a concrete service
+        # to reach for, mirroring the Wayback Machine anchor in the named-
+        # services rule above.
+        assert "semantic scholar" in lower, (
+            "Semantic Scholar must be named as the citation-data source — "
+            "without a named service the model defaults back to "
+            "web_search for 'most cited X' and gets blog rankings"
+        )
+
+        # The contrast that anchors the rule: arXiv does NOT publish
+        # citation counts. Without this, the README's depiction
+        # (http_get against arxiv.org/abs/...) misleads the model into
+        # thinking arxiv is the right surface for citation data.
+        assert "arxiv" in lower and (
+            "does not publish citation" in lower
+            or "doesn't publish citation" in lower
+            or "not publish citation counts" in lower
+        ), (
+            "Rule must explicitly state arXiv doesn't publish citation "
+            "counts — otherwise the model treats arxiv.org as the "
+            "citation-data surface and fabricates rankings"
+        )
+
+        # http_get must be named as the access method. web_search must
+        # also appear in the same clause so a future copy-edit can't
+        # silently weaken the contrast.
+        assert "http_get" in result
+        assert "web_search" in lower
+
+        # The response field the model needs to sort by must be named —
+        # without that the model can't even attempt the ranking step.
+        assert "citationcount" in lower or "citation_count" in lower, (
+            "Rule must name the citationCount field so the model knows "
+            "what to sort the Semantic Scholar response by"
+        )
+
+        # Hard guard, same as the named-services rule: no literal API
+        # URL template in the prompt. Small models echo URL templates
+        # verbatim into refusal responses, tripping downstream
+        # response_not_contains checks (#1727 Gate 2 shard D pattern).
+        assert "api.semanticscholar.org/graph/v1" not in result, (
+            "Literal api.semanticscholar.org/graph/v1 URL template "
+            "must not appear in the prompt — small models leak it "
+            "verbatim into refusal responses (#1727 pattern)"
+        )
+
+        # Forbid the "ask first when ambiguous" escape hatch from
+        # silently disappearing — without it, the rule punishes
+        # legitimate "top recent papers" queries by routing them to
+        # the citation API when "most recent" would have been correct.
+        assert "most cited" in lower and "most recent" in lower, (
+            "Rule must offer the 'ask once: most cited vs most recent' "
+            "branch so non-citation 'top papers' queries route correctly"
+        )
+
 
 # ---------------------------------------------------------------------------
 # _estimate_msg_tokens

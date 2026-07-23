@@ -421,8 +421,24 @@ class TestForceDelegationUserCancelledRun:
 
 class TestForceDelegationTimeout:
     def test_llm_invoke_timeout_returns_original_response(self):
-        """If llm.invoke hangs, force_delegation must timeout and return agent_response."""
-        import concurrent.futures
+        """If the decomposition LLM call times out, ``force_delegation`` must
+        return ``agent_response`` and log a warning.
+
+        Pre-#1903 this test patched ``concurrent.futures.ThreadPoolExecutor``
+        to inject the timeout.  After the migration to
+        :func:`src.concurrency.invoke_with_timeout`, the pool plumbing has
+        moved into the centralized helper, so we mock
+        ``src.orchestration.phases.invoke_with_timeout`` (the imported
+        helper at the call site) with ``side_effect=TimeoutError`` instead.
+        The behavioural contract — timeout → original response + WARNING
+        — is verified identically; only the mock target moves.
+
+        The pre-#1903 ``cancelled == [True]`` assertion is dropped because
+        future cancellation is an internal detail of the helper, not part
+        of ``force_delegation``'s contract.  The shared pool's
+        cancellation contract is covered by
+        ``tests/test_concurrency.py``.
+        """
         from unittest.mock import patch
 
         log_mock = MagicMock()
@@ -430,29 +446,14 @@ class TestForceDelegationTimeout:
         config_mock.resolve_llm_config.return_value = (MagicMock(), MagicMock())
 
         fake_llm = MagicMock()
-        cancelled: list[bool] = []
-
-        class FakeFuture:
-            def result(self, timeout=None):
-                raise concurrent.futures.TimeoutError("timed out")
-
-            def cancel(self):
-                cancelled.append(True)
-
-        class FakeExecutor:
-            def __init__(self, *args, **kwargs):
-                pass
-
-            def submit(self, fn, *args, **kwargs):
-                return FakeFuture()
-
-            def shutdown(self, wait=False):
-                pass
 
         with patch("src.orchestration.phases.build_llm_for_decomposition", return_value=fake_llm):
             with patch("src.tools.delegate._delegate_config") as mock_cfg:
                 mock_cfg.get.return_value = {"default": {"model": "gpt-4o", "provider": "openai"}}
-                with patch("concurrent.futures.ThreadPoolExecutor", FakeExecutor):
+                with patch(
+                    "src.orchestration.phases.invoke_with_timeout",
+                    side_effect=TimeoutError("timed out"),
+                ):
                     from src.orchestration.phases import force_delegation
 
                     result = force_delegation(
@@ -464,7 +465,6 @@ class TestForceDelegationTimeout:
                     )
 
         assert result == "original response"
-        assert cancelled == [True]
         log_mock.warning.assert_called_once()
         assert "timed out" in log_mock.warning.call_args[0][0].lower()
 

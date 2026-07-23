@@ -56,6 +56,7 @@ YAML example::
 import json
 import logging
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -218,6 +219,83 @@ class RAGConfig:
             )
 
 
+# SlowAPI-style rate-limit spec: ``<N>/<window>`` where window is one of
+# ``second`` / ``minute`` / ``hour`` / ``day`` (or the single-letter alias).
+# Accepts an optional trailing ``s`` (``5/minutes``) and surrounding
+# whitespace. Used by :class:`APIConfig` and by the API rate-limit
+# resolver in ``src/api/rate_limit.py``.
+_RATE_LIMIT_SPEC_RE = re.compile(
+    r"^\s*(\d+)\s*/\s*(second|minute|hour|day|s|m|h|d)s?\s*$",
+    re.IGNORECASE,
+)
+
+
+@dataclass
+class APIConfig:
+    """Configuration for the Cogtrix HTTP API server (#1879).
+
+    Currently exposes per-route rate-limit overrides and the trusted-
+    reverse-proxy CIDR allowlist that ``_client_key`` consults to
+    recover the real client IP behind a load balancer.
+
+    Defaults preserve the previously-hardcoded values so existing
+    deployments behave identically when no ``api:`` block is present
+    in ``.cogtrix.yaml``.
+    """
+
+    # Per-route rate limits, expressed as SlowAPI-style ``"<N>/<window>"``
+    # strings. The ``default`` key is the catch-all applied when a route
+    # name is not explicitly listed. Adding a new key requires no code
+    # change beyond a matching ``per_route_rate_limit_for("<name>")``
+    # call at the route definition.
+    rate_limits: dict[str, str] = field(
+        default_factory=lambda: {
+            "default": "120/minute",
+            "auth_register": "3/hour",
+            "auth_login": "5/minute",
+            "auth_refresh": "5/minute",
+            "saml_acs": "5/minute",
+        }
+    )
+
+    # IPv4 / IPv6 CIDR networks for trusted reverse proxies. When
+    # non-empty, ``_client_key`` walks ``X-Forwarded-For`` right-to-left
+    # honouring this allowlist so the rate limiter buckets by the real
+    # client IP rather than the load-balancer's pod address.
+    trusted_proxy_cidrs: list[str] = field(default_factory=list)
+
+    # Optional Redis URL for a shared rate-limit counter (#1879 Slice B).
+    # When unset, the rate limiter falls back to a per-process in-memory
+    # sliding window — correct for single-node deployments but jitters
+    # under horizontal scaling. Set to a ``redis://...`` (or
+    # ``rediss://...`` / ``redis+sentinel://...``) URL to share the
+    # counter across replicas. Requires the ``cogtrix[redis]`` install
+    # extra. ``COGTRIX_REDIS_URL`` env var takes precedence over this
+    # value at runtime.
+    redis_url: str | None = None
+
+    def __post_init__(self) -> None:
+        for name, spec in self.rate_limits.items():
+            if not _RATE_LIMIT_SPEC_RE.match(spec):
+                raise ConfigError(
+                    f"api.rate_limits.{name!r} must be '<N>/<window>' where "
+                    f"window is one of second/minute/hour/day (or s/m/h/d); "
+                    f"got {spec!r}"
+                )
+        if "default" not in self.rate_limits:
+            raise ConfigError(
+                "api.rate_limits must define a 'default' key (used as the "
+                "catch-all when a route is not explicitly listed)"
+            )
+        import ipaddress
+
+        for cidr in self.trusted_proxy_cidrs:
+            try:
+                ipaddress.ip_network(cidr, strict=False)
+            except ValueError as exc:
+                raise ConfigError(f"api.trusted_proxy_cidrs: invalid CIDR {cidr!r}: {exc}") from exc
+
+
 @dataclass
 class Config:
     """Application configuration with defaults."""
@@ -350,6 +428,9 @@ class Config:
 
     # RAG settings
     rag: RAGConfig = field(default_factory=RAGConfig)
+
+    # API server settings (#1879 — per-route rate limits, trusted-proxy CIDRs).
+    api: APIConfig = field(default_factory=APIConfig)
 
     # Logging and debug settings
     debug: bool = False
@@ -1472,6 +1553,65 @@ def _apply_config_file(config: Config, path: Path) -> None:
                 config.rag.chunk_size,
             )
             config.rag.chunk_overlap = RAGConfig().chunk_overlap
+
+    # ── API server settings (#1879) ──────────────────────────────
+    if "api" in data and isinstance(data["api"], dict):
+        api_cfg = data["api"]
+        # Rate-limit map merges into defaults so unspecified keys keep
+        # the built-in value. Each value must parse as a SlowAPI-style
+        # ``"<N>/<window>"`` spec — invalid values fall through to
+        # ``APIConfig.__post_init__`` which raises ``ConfigError`` at
+        # the merge point below.
+        if "rate_limits" in api_cfg and isinstance(api_cfg["rate_limits"], dict):
+            merged_limits = dict(config.api.rate_limits)
+            for k, v in api_cfg["rate_limits"].items():
+                if isinstance(v, str):
+                    merged_limits[str(k)] = v
+                else:
+                    # NOTE: we intentionally log the type only, never the
+                    # raw value. The ``data`` dict that ``api_cfg`` is sliced
+                    # from also carries provider API keys further up the
+                    # tree, and CodeQL's ``py/clear-text-logging-sensitive-data``
+                    # query taints anything reachable from that root. Type
+                    # alone is enough for an operator to diagnose the YAML.
+                    _log.warning(
+                        "api.rate_limits.%s must be a string '<N>/<window>' " "(got %s); ignoring",
+                        k,
+                        type(v).__name__,
+                    )
+            config.api.rate_limits = merged_limits
+        # CIDR list accepts either a YAML list or a comma-separated string.
+        if "trusted_proxy_cidrs" in api_cfg:
+            raw = api_cfg["trusted_proxy_cidrs"]
+            if isinstance(raw, list):
+                config.api.trusted_proxy_cidrs = [str(c).strip() for c in raw if str(c).strip()]
+            elif isinstance(raw, str):
+                config.api.trusted_proxy_cidrs = [c.strip() for c in raw.split(",") if c.strip()]
+            else:
+                # Type-only log; see the rate_limits sibling block for the
+                # CodeQL rationale.
+                _log.warning(
+                    "api.trusted_proxy_cidrs must be a list or comma-separated "
+                    "string (got %s); ignoring",
+                    type(raw).__name__,
+                )
+        # Optional Redis URL for the shared rate-limit counter
+        # (#1879 Slice B). Empty string is treated as unset.
+        if "redis_url" in api_cfg:
+            raw_url = api_cfg["redis_url"]
+            if raw_url is None or (isinstance(raw_url, str) and not raw_url.strip()):
+                config.api.redis_url = None
+            elif isinstance(raw_url, str):
+                config.api.redis_url = raw_url.strip()
+            else:
+                _log.warning(
+                    "api.redis_url must be a string (got %s); ignoring",
+                    type(raw_url).__name__,
+                )
+        # Re-validate the merged APIConfig so invalid specs / CIDRs raise
+        # ``ConfigError`` with the same diagnostic as a freshly-constructed
+        # instance.
+        APIConfig.__post_init__(config.api)
 
     # ── Research delegate ─────────────────────────────────────────
     if "research_delegate" in data and isinstance(data["research_delegate"], dict):

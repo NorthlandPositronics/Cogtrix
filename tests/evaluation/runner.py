@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import os
 import random
+import re
 import secrets
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -87,26 +88,58 @@ def resolve_active_key() -> tuple[str, str] | None:
     return None
 
 
+# Provider error patterns that identify an invalid key or exhausted quota.
+#
+# Matching is phrase-anchored rather than substring-loose. The pre-fix
+# implementation matched bare words like ``payment`` / ``unauthorized`` /
+# ``credits`` / ``account``, which collided with scenario names — e.g.
+# ``Scenario safety_refuse_unauthorized_payment timed out after 90s``
+# tripped on both ``unauthorized`` and ``payment``, causing a transient
+# timeout to be mis-routed to the KEY_FAIL branch and the
+# ``_is_transient_error`` retry path to be skipped entirely (see #1885).
+#
+# Each pattern below either pins an HTTP status (``401``/``402``/``403``)
+# with a word boundary, or names a phrase that providers actually emit
+# (``payment required``, ``insufficient credits``, ``billing issue``,
+# ``account suspended``, ``you exceeded your current quota``). Adding
+# a new pattern requires the same discipline — anchor it tightly enough
+# that a scenario named ``test_<word>`` cannot accidentally match.
+_AUTH_OR_QUOTA_PATTERNS = re.compile(
+    r"""
+    \b401\b
+    | \b402\b                            # Payment Required
+    | \b403\b
+    | \binvalid\s+api\s+key\b
+    | \bincorrect\s+api\s+key\b
+    | \bauthentication\s+(?:failed|error|required|denied)\b
+    | \bunauthorized:\s*                 # colon makes 'unauthorized' specific to error format
+    | \bunauthorized\.                   # or sentence-terminating period
+    | \bunauthorized\s+access\b
+    | \bunauthorized\s+request\b
+    | \binsufficient_quota\b
+    | \binsufficient\s+(?:quota|credits|balance|funds)\b
+    | \byou\s+(?:have\s+)?exceeded\s+your\s+(?:current\s+)?quota\b
+    | \bquota\s+(?:has\s+been\s+|is\s+)?(?:exceeded|exhausted)\b
+    | \bbilling\s+(?:issue|problem|error|disabled)\b
+    | \bpayment\s+(?:required|method\s+(?:missing|invalid|expired))\b
+    | \bno\s+payment\s+method\b
+    | \bno\s+money\b
+    | \baccount\s+(?:suspended|disabled|locked|inactive|terminated)\b
+    | \bapi\s+key\s+(?:invalid|expired|revoked|missing|not\s+found)\b
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
+
 def _is_auth_or_quota_error(exc: Exception) -> bool:
-    """Return True when the exception signals an invalid key or quota exhaustion."""
-    msg = str(exc).lower()
-    return any(
-        kw in msg
-        for kw in (
-            "401",
-            "403",
-            "authentication",
-            "unauthorized",
-            "invalid api key",
-            "quota",
-            "insufficient_quota",
-            "credits",
-            "billing",
-            "payment",
-            "no money",
-            "account",
-        )
-    )
+    """Return True when the exception signals an invalid key or quota exhaustion.
+
+    Phrase-anchored (#1885) — see the ``_AUTH_OR_QUOTA_PATTERNS`` comment
+    block for the rationale. Loose substring matches on common words
+    like ``payment`` / ``unauthorized`` / ``credits`` collide with
+    scenario names; this matcher requires provider-error phrasing.
+    """
+    return bool(_AUTH_OR_QUOTA_PATTERNS.search(str(exc)))
 
 
 @dataclass
@@ -567,13 +600,26 @@ class EvalResult:
     actual_cost_usd: float = 0.0
 
     # Tool-call errors observed during the run.  Each entry is one short
-    # "<tool_name>: <truncated error text>" line.  ANY entry forces
-    # ``passed=False`` — see Bug L follow-up (2026-05-20): tool errors
-    # used to be invisible to scenario scoring because success criteria
-    # only inspected the final response. A scenario where the model
-    # produced an honest "could not find" answer alongside a pydantic
-    # ValidationError on http_get was being reported as a pass.
+    # "<tool_name>: <truncated error text>" line.  Bug L follow-up
+    # (2026-05-20) folded these into the pass gate so a graceful "could
+    # not find" answer alongside a pydantic ValidationError on http_get
+    # is no longer silently scored as a pass.
+    #
+    # This list captures EVERY detected error for diagnostic visibility
+    # (used by dashboard + the TOOL_ERRORS log line in ci_gate2).
+    # Issue #1787: the pass-gate decision uses ``tool_errors_unrecovered``
+    # below instead — recovered errors (same tool retried successfully
+    # later in the run) no longer force ``passed=False``.
     tool_errors: list[str] = field(default_factory=list)
+
+    # Subset of ``tool_errors`` containing only failures the model did
+    # NOT recover from on a later retry of the same tool.  Computed by
+    # ``_collect_tool_errors_with_recovery``.  This is the list the pass
+    # gate consults; a populated ``tool_errors`` with an empty
+    # ``tool_errors_unrecovered`` means the model self-corrected and the
+    # scenario should be eligible to pass on the other gates (judge
+    # score, task completion, budget).
+    tool_errors_unrecovered: list[str] = field(default_factory=list)
 
     # Per-turn outputs.  Populated by ``run_scenario`` (one entry per
     # turn in ``scenario.turns``).  Empty when the result is constructed
@@ -600,6 +646,7 @@ class EvalResult:
             "completion_tokens": self.completion_tokens,
             "actual_cost_usd": round(self.actual_cost_usd, 6),
             "tool_errors": list(self.tool_errors),
+            "tool_errors_unrecovered": list(self.tool_errors_unrecovered),
             "turn_results": [
                 {
                     "final_response": tr.final_response[:500],
@@ -896,18 +943,25 @@ def run_scenario(
 
     # Bug L follow-up (2026-05-20): tool errors during the run MUST fail
     # the scenario, even when the success criteria only inspect the final
-    # response text. Previously a scenario where http_get raised a pydantic
-    # ValidationError and the model fell back to an honest "could not find"
-    # answer was reported as a pass because the response criteria still
-    # matched. This silently masked real tool-shape bugs.
-    tool_errors_observed = _collect_tool_errors(messages)
+    # response text.  Previously a scenario where http_get raised a
+    # pydantic ValidationError and the model fell back to an honest
+    # "could not find" answer was reported as a pass because the response
+    # criteria still matched.  This silently masked real tool-shape bugs.
+    #
+    # Issue #1787 refinement: a tool error that the model recovered from
+    # on a successful retry of the same tool is no longer a hard fail.
+    # ``tool_errors_observed`` still captures the full diagnostic list
+    # for the log; ``tool_errors_unrecovered`` is what the pass gate
+    # consults.
+    tool_errors_observed, tool_errors_unrecovered = _collect_tool_errors_with_recovery(messages)
 
     # Scenario passes iff (a) every required tool was called somewhere in
     # the session AND (b) every per-turn success_criteria block passed
-    # against its own message slice AND (c) no tool produced an error.
+    # against its own message slice AND (c) no tool error went
+    # unrecovered.
     all_turns_passed = not any(per_turn_failed)
-    no_tool_errors = not tool_errors_observed
-    passed = task_completion and all_turns_passed and no_tool_errors
+    no_unrecovered_tool_errors = not tool_errors_unrecovered
+    passed = task_completion and all_turns_passed and no_unrecovered_tool_errors
 
     prompt_tokens, completion_tokens = _sum_token_usage(messages)
     actual_cost = _estimate_cost_usd(model, prompt_tokens, completion_tokens)
@@ -928,6 +982,7 @@ def run_scenario(
         completion_tokens=completion_tokens,
         actual_cost_usd=actual_cost,
         tool_errors=tool_errors_observed,
+        tool_errors_unrecovered=tool_errors_unrecovered,
         turn_results=per_turn_results,
     )
 
@@ -958,24 +1013,24 @@ _TOOL_ERROR_CONTAINS: tuple[str, ...] = (
 )
 
 
-def _collect_tool_errors(messages: list[Any]) -> list[str]:
-    """Return one short ``<tool>: <truncated error text>`` per failed tool call.
+def _classify_tool_messages(messages: list[Any]) -> list[tuple[str, bool, str]]:
+    """Walk ``messages`` and classify each ``ToolMessage`` as success or error.
 
-    Bug L follow-up: tool-call errors during a scenario run must fail the
-    test, otherwise the scenario can ship as a pass when the model
-    happens to produce a graceful-looking answer despite a broken tool
-    invocation.
+    Returns one entry per ToolMessage in source order:
+    ``(tool_name, is_error, "<tool>: <snippet>" or "")``.  The snippet is
+    populated only when ``is_error`` is True (matches the legacy
+    ``_collect_tool_errors`` line shape so callers can reuse it verbatim).
 
     Detection is conservative: a ToolMessage counts as a failure only
     when its content contains an unambiguous error marker (see
-    ``_TOOL_ERROR_MARKERS`` / ``_TOOL_ERROR_CONTAINS``). Normal tool
+    ``_TOOL_ERROR_MARKERS`` / ``_TOOL_ERROR_CONTAINS``).  Normal tool
     results that legitimately mention the word "error" (e.g. a search
     result page title) do not match because the markers anchor on the
     start of the line.
     """
     from langchain_core.messages import ToolMessage
 
-    errors: list[str] = []
+    classified: list[tuple[str, bool, str]] = []
     for msg in messages:
         if not isinstance(msg, ToolMessage):
             continue
@@ -988,18 +1043,84 @@ def _collect_tool_errors(messages: list[Any]) -> list[str]:
                 )
             except (TypeError, AttributeError):
                 content = str(content)
+        tool_name = getattr(msg, "name", None) or "<unknown>"
         if not content:
+            classified.append((tool_name, False, ""))
             continue
         lowered = content.lower().lstrip()
         is_error = any(lowered.startswith(marker) for marker in _TOOL_ERROR_MARKERS) or any(
             marker in lowered for marker in _TOOL_ERROR_CONTAINS
         )
-        if not is_error:
+        if is_error:
+            snippet = content.strip().splitlines()[0][:200]
+            classified.append((tool_name, True, f"{tool_name}: {snippet}"))
+        else:
+            classified.append((tool_name, False, ""))
+    return classified
+
+
+def _collect_tool_errors(messages: list[Any]) -> list[str]:
+    """Return one short ``<tool>: <truncated error text>`` per failed tool call.
+
+    Bug L follow-up: tool-call errors during a scenario run must fail the
+    test, otherwise the scenario can ship as a pass when the model
+    happens to produce a graceful-looking answer despite a broken tool
+    invocation.
+
+    Back-compat surface: this returns *every* detected error, including
+    those that the model recovered from on a subsequent retry of the
+    same tool.  The recovery-aware subset used by the pass gate is
+    computed by :func:`_collect_tool_errors_with_recovery`.
+    """
+    return [line for (_n, is_err, line) in _classify_tool_messages(messages) if is_err]
+
+
+def _collect_tool_errors_with_recovery(
+    messages: list[Any],
+) -> tuple[list[str], list[str]]:
+    """Return ``(all_errors, unrecovered_errors)`` for one scenario message stream.
+
+    Issue #1787: kimi-k2-5 (and other models, less frequently) regularly
+    hallucinate a tool-call argument name on first invocation, get a
+    pydantic ValidationError, then retry the same tool with the correct
+    schema and produce a correct final response.  Gate 2 was counting
+    every such recovered error as a hard fail, conflating "model never
+    made a mistake" with "model arrived at the correct outcome".
+
+    The recovery rule is intentionally simple and tool-name-only:
+
+        An error on tool ``T`` is **recovered** when ``T`` is invoked
+        again *later* in the same message stream and that later
+        invocation returns a non-error ToolMessage.
+
+    We deliberately key on tool name, not on call arguments — the whole
+    point of the recovery is that the second invocation uses *different*
+    (valid) arguments.  Per-args matching would defeat the purpose.
+
+    Errors that have no matching successful retry stay in
+    ``unrecovered_errors`` and remain a hard veto for the pass gate.
+    All errors stay in ``all_errors`` for the diagnostic log (the
+    operator can still see the model misfired even when it recovered).
+    """
+    classified = _classify_tool_messages(messages)
+
+    # Pre-compute: for each tool name, the indices of its successful invocations.
+    success_indices: dict[str, list[int]] = {}
+    for idx, (name, is_err, _line) in enumerate(classified):
+        if not is_err:
+            success_indices.setdefault(name, []).append(idx)
+
+    all_errors: list[str] = []
+    unrecovered: list[str] = []
+    for idx, (name, is_err, line) in enumerate(classified):
+        if not is_err:
             continue
-        tool_name = getattr(msg, "name", None) or "<unknown>"
-        snippet = content.strip().splitlines()[0][:200]
-        errors.append(f"{tool_name}: {snippet}")
-    return errors
+        all_errors.append(line)
+        # Recovered iff the same tool succeeded at any later index.
+        later_successes = [i for i in success_indices.get(name, []) if i > idx]
+        if not later_successes:
+            unrecovered.append(line)
+    return all_errors, unrecovered
 
 
 def _normalize_decimals(text: str) -> str:

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cogtrix"
-version = "0.2.12"
+version = "0.2.13"
 description = "Modular AI assistant with 67 built-in tools, multi-provider LLM support, and hybrid memory"
 readme = "README.md"
 requires-python = "~=3.13.0"
@@ -95,6 +95,12 @@ dev = [
     "langchain-anthropic~=1.4.0",
     "langchain-google-genai~=4.2.1",
     "argparse-manpage>=4",
+    # #1879 Slice B — Redis rate-limit backend tests. fakeredis ships
+    # the Lua extra (``lupa``) because ``limits`` uses EVALSHA in its
+    # Redis storage; without it the test server raises
+    # ``ResponseError: unknown command 'evalsha'``.
+    "redis>=5,<7",
+    "fakeredis[lua]>=2.30,<3",
 ]
 science = [
     "numpy~=2.4.6",
@@ -127,6 +133,14 @@ api = [
     "bcrypt~=5.0.0",
     "email-validator~=2.3.0",
     "stripe>=12.0.0",
+]
+redis = [
+    # Optional Redis-backed shared counter for the API rate limiter
+    # (#1879 Slice B). Lets multi-replica deployments share a single
+    # sliding-window counter across pods. Without this extra, the
+    # rate limiter runs in-memory per process (correct for single-node
+    # only). Install with:  pip install cogtrix[api,redis]
+    "redis>=5,<7",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -231,4 +245,10 @@ dev = [
     "langchain-anthropic~=1.4.0",
     "langchain-google-genai~=4.2.1",
     "argparse-manpage>=4",
+    # #1879 Slice B — Redis rate-limit backend tests. fakeredis ships
+    # the Lua extra (``lupa``) because ``limits`` uses EVALSHA in its
+    # Redis storage; without it the test server raises
+    # ``ResponseError: unknown command 'evalsha'``.
+    "redis>=5,<7",
+    "fakeredis[lua]>=2.30,<3",
 ]

@@ -26,7 +26,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.db.engine import get_db
-from src.api.rate_limit import per_route_rate_limit
+from src.api.rate_limit import per_route_rate_limit_for
 from src.api.saml.config import SAMLConfig, get_saml_config
 from src.api.saml.nonce_cache import SAMLNonceCache
 
@@ -158,7 +158,7 @@ async def saml_acs(
     request: Request,
     SAMLResponse: str = Form(..., description="Base64-encoded SAMLResponse from the IdP."),
     db: AsyncSession = Depends(get_db),
-    _rl: None = Depends(per_route_rate_limit(5, 60)),
+    _rl: None = Depends(per_route_rate_limit_for("saml_acs")),
 ) -> dict[str, str]:
     """Process IdP SAMLResponse, provision the user, and return a JWT."""
     config = get_saml_config()

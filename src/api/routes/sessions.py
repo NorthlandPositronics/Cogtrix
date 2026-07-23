@@ -21,7 +21,7 @@ import logging
 from datetime import UTC, datetime
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.auth import TokenData, get_current_user
@@ -219,7 +219,7 @@ async def _check_session_access(
 )
 async def create_session(
     request: Request,
-    body: SessionCreateRequest,
+    body: SessionCreateRequest | None = Body(default=None),
     current_user: TokenData = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
     _plan: None = Depends(maybe_require_api_call_capacity),
@@ -228,7 +228,19 @@ async def create_session(
 
     Auth: bearer token required.
     Error codes: UNAUTHORIZED, TOKEN_EXPIRED, VALIDATION_ERROR.
+
+    The request body is optional — POSTing with no body (or ``{}``) is
+    equivalent to POSTing ``SessionCreateRequest()`` with all defaults
+    populated (auto-generated name, default ``SessionConfig``, empty
+    tool lists, no workspace). Frontends that just want "give me a new
+    session" can call ``POST /sessions`` without serialising a body.
+    See #1882.
     """
+    # #1882: every field on SessionCreateRequest has a default — accept
+    # missing body as "all defaults". Empty JSON ``{}`` already produced
+    # this state; the prior signature was the only thing rejecting it.
+    if body is None:
+        body = SessionCreateRequest()
     repo = SessionRepository(db)
 
     # Enforce concurrent session quota

@@ -1,13 +1,11 @@
 """Tests for src/orchestration/reflection_delegate.py."""
 
-import concurrent.futures
 import logging
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from src.orchestration.reflection_delegate import (
-    _REFLECTION_LLM_TIMEOUT_SECONDS,
     CounterPlanEvaluator,
     PlanGenerator,
     _call_llm,
@@ -15,7 +13,23 @@ from src.orchestration.reflection_delegate import (
 
 
 class TestCallLlmTimeout:
-    """Regression tests for #1558: _call_llm must timeout instead of hanging."""
+    """Regression tests for #1558: _call_llm must timeout instead of hanging.
+
+    Tests pre-#1903 mocked ``concurrent.futures.ThreadPoolExecutor`` to
+    inject the timeout/exception.  After the migration to
+    :func:`src.concurrency.invoke_with_timeout` (#1903), the pool
+    construction moved out of this module into the centralized helper;
+    these tests now mock ``invoke_with_timeout`` at its import site
+    (``src.orchestration.reflection_delegate.invoke_with_timeout``) so
+    the behavioural contract — timeout / exception → empty string with
+    WARNING log — is verified independently of the pool plumbing.
+
+    The two pre-#1903 ``test_pool_shutdown_called*`` tests were deleted:
+    they pinned the *implementation* detail that ``_call_llm`` shut down
+    its own pool, which is no longer this function's responsibility.
+    The shared pool's shutdown contract is covered by
+    ``tests/test_concurrency.py::TestSharedPoolContract``.
+    """
 
     def _make_llm(self, content="ok"):
         """Create a fake LLM that returns *content*."""
@@ -32,94 +46,36 @@ class TestCallLlmTimeout:
         llm.invoke.assert_called_once()
 
     def test_returns_empty_on_timeout(self, caplog: pytest.LogCaptureFixture):
-        """When future.result(timeout=60) raises TimeoutError, return empty string."""
-        fake_future = MagicMock(spec=concurrent.futures.Future)
-        fake_future.result.side_effect = concurrent.futures.TimeoutError("timed out")
-
-        fake_pool = MagicMock()
-        fake_pool.submit.return_value = fake_future
-
+        """When ``invoke_with_timeout`` raises ``TimeoutError``, return empty string."""
         llm = MagicMock()
 
         with caplog.at_level(logging.WARNING, logger="cogtrix"):
-            with patch("concurrent.futures.ThreadPoolExecutor", return_value=fake_pool) as mock_tpe:
+            with patch(
+                "src.orchestration.reflection_delegate.invoke_with_timeout",
+                side_effect=TimeoutError("timed out"),
+            ):
                 result = _call_llm(llm, "generate a plan")
 
         assert result == ""
-        mock_tpe.assert_called_once_with(max_workers=1)
-        fake_future.result.assert_called_once_with(timeout=_REFLECTION_LLM_TIMEOUT_SECONDS)
         warning_records = [r for r in caplog.records if r.levelno >= logging.WARNING]
         assert warning_records, "Expected WARNING log on timeout"
         assert any("timed out" in r.getMessage().lower() for r in warning_records)
 
-    def test_returns_empty_on_plain_timeout_error(self, caplog: pytest.LogCaptureFixture):
-        """Built-in TimeoutError must also be caught and return empty string."""
-        fake_future = MagicMock(spec=concurrent.futures.Future)
-        fake_future.result.side_effect = TimeoutError("plain timeout")
-
-        fake_pool = MagicMock()
-        fake_pool.submit.return_value = fake_future
-
-        llm = MagicMock()
-
-        with caplog.at_level(logging.WARNING, logger="cogtrix"):
-            with patch("concurrent.futures.ThreadPoolExecutor", return_value=fake_pool):
-                result = _call_llm(llm, "generate a plan")
-
-        assert result == ""
-        warning_records = [r for r in caplog.records if r.levelno >= logging.WARNING]
-        assert warning_records, "Expected WARNING log on plain TimeoutError"
-
     def test_returns_empty_on_llm_exception(self, caplog: pytest.LogCaptureFixture):
         """Non-timeout exceptions still return empty string with a warning."""
-        fake_future = MagicMock(spec=concurrent.futures.Future)
-        fake_future.result.side_effect = RuntimeError("model exploded")
-
-        fake_pool = MagicMock()
-        fake_pool.submit.return_value = fake_future
-
         llm = MagicMock()
 
         with caplog.at_level(logging.WARNING, logger="cogtrix"):
-            with patch("concurrent.futures.ThreadPoolExecutor", return_value=fake_pool):
+            with patch(
+                "src.orchestration.reflection_delegate.invoke_with_timeout",
+                side_effect=RuntimeError("model exploded"),
+            ):
                 result = _call_llm(llm, "generate a plan")
 
         assert result == ""
         warning_records = [r for r in caplog.records if r.levelno >= logging.WARNING]
         assert warning_records, "Expected WARNING log on exception"
         assert any("failed" in r.getMessage().lower() for r in warning_records)
-
-    def test_pool_shutdown_called(self):
-        """Pool.shutdown(wait=False) must be called even on success."""
-        fake_future = MagicMock(spec=concurrent.futures.Future)
-        result = MagicMock()
-        result.content = "ok"
-        fake_future.result.return_value = result
-
-        fake_pool = MagicMock()
-        fake_pool.submit.return_value = fake_future
-
-        llm = MagicMock()
-
-        with patch("concurrent.futures.ThreadPoolExecutor", return_value=fake_pool):
-            _call_llm(llm, "generate a plan")
-
-        fake_pool.shutdown.assert_called_once_with(wait=False)
-
-    def test_pool_shutdown_called_on_timeout(self):
-        """Pool.shutdown(wait=False) must be called even on timeout."""
-        fake_future = MagicMock(spec=concurrent.futures.Future)
-        fake_future.result.side_effect = concurrent.futures.TimeoutError("timed out")
-
-        fake_pool = MagicMock()
-        fake_pool.submit.return_value = fake_future
-
-        llm = MagicMock()
-
-        with patch("concurrent.futures.ThreadPoolExecutor", return_value=fake_pool):
-            _call_llm(llm, "generate a plan")
-
-        fake_pool.shutdown.assert_called_once_with(wait=False)
 
 
 class TestPlanGeneratorTimeout:

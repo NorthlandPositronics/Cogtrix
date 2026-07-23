@@ -539,6 +539,489 @@ def build_handle_version_scope_node(
     return handle_version_scope
 
 
+def build_handle_unsupported_attribution_node(
+    unsupported_attribution_count: list[int],
+    max_retries: int,
+    logger: Callable[[], Any] = get_logger,
+) -> Callable[[CogtrixState], dict]:
+    """Build the unsupported-attribution recovery node bound to a run-local
+    counter.
+
+    #1860 (attributed-prose-claim guard): when the model's response credits
+    a source/authority ("as confirmed by", "according to", "officially …")
+    for a paragraph whose distinctive content is not in any tool result
+    this turn, the model is fabricating the source itself rather than
+    paraphrasing. This node deletes the offending response and injects a
+    nudge listing the unsupported attribution snippets, with three revision
+    options (re-check + paraphrase faithfully, drop the attribution, or
+    state plainly that the tools didn't establish it).
+
+    Args:
+        unsupported_attribution_count: Mutable counter of how many times
+            the node fired this run.
+        max_retries: Maximum revision attempts before accepting the
+            response. Default 1 — one revision attempt; a model still
+            fabricating attributed claims after the nudge is actively
+            ignoring the guard, not unlucky.
+        logger: Logger factory.
+    """
+    from src.orchestration.verification import (
+        collect_tool_message_contents,
+        detect_unsupported_attribution,
+        format_unsupported_attribution_nudge,
+    )
+
+    def handle_unsupported_attribution(state: CogtrixState) -> dict:
+        from langchain_core.messages import HumanMessage as _HM
+
+        unsupported_attribution_count[0] += 1
+        log = logger()
+        msgs = state.get("messages") or []
+        last = msgs[-1] if msgs else None
+        last_content = getattr(last, "content", "") if last is not None else ""
+
+        if not isinstance(last_content, str):
+            return {"messages": []}
+
+        turn_start = _find_current_turn_start(msgs)
+        user_prompt = ""
+        if turn_start < len(msgs) and isinstance(msgs[turn_start], _HM):
+            up = msgs[turn_start].content
+            if isinstance(up, str):
+                user_prompt = up
+        tool_contents = collect_tool_message_contents(msgs, turn_start)
+
+        snippets = detect_unsupported_attribution(last_content, tool_contents, user_prompt)
+
+        if not snippets:
+            # Re-detection failed — possibly revised by a concurrent path.
+            return {"messages": []}
+
+        log.warning(
+            "Unsupported-attribution detected (snippets=%s, attempt %d/%d). Injecting nudge.",
+            snippets,
+            unsupported_attribution_count[0],
+            max_retries,
+        )
+
+        if unsupported_attribution_count[0] > max_retries:
+            log.info(
+                "Unsupported-attribution retries exhausted (snippets=%s) — accepting "
+                "the agent's response as-is rather than spinning further.",
+                snippets,
+            )
+            return {"messages": []}
+
+        removal: list[Any] = []
+        if last is not None and getattr(last, "id", None):
+            removal.append(RemoveMessage(id=last.id))
+        return {
+            "messages": [
+                *removal,
+                HumanMessage(content=format_unsupported_attribution_nudge(snippets)),
+            ]
+        }
+
+    return handle_unsupported_attribution
+
+
+def build_handle_sycophancy_node(
+    sycophancy_count: list[int],
+    max_retries: int,
+    logger: Callable[[], Any] = get_logger,
+) -> Callable[[CogtrixState], dict]:
+    """Build the sycophancy recovery node bound to a run-local counter.
+
+    Bug G (#1713): RLHF-tuned models bypass the system-prompt rule and
+    open a final answer with *"You're absolutely right"* / *"I apologize"*
+    even when their conclusion is unchanged — the social failure that
+    magnifies the operational failure of repeated content. The earlier
+    in-place-strip attempt (PR #1731) broke Gate 2 because it mutated
+    the existing AIMessage body, leaving a half-formed remainder that
+    downstream rounds referenced. This node uses the standard recovery
+    pattern instead — fully remove the offending response and inject a
+    nudge so the model regenerates from scratch on the next call_model
+    round. None of the sibling recovery nodes have regressed Gate 2,
+    because they replace the response rather than edit it in place.
+
+    Args:
+        sycophancy_count: Mutable counter of how many times the node
+            fired this run.
+        max_retries: Maximum revision attempts before accepting the
+            response. Default 1 — one revision attempt; if the model
+            still opens with the validation prefix after the nudge, the
+            response ships as-is (the existing logging-only path in
+            ``call_model.py`` retains visibility).
+        logger: Logger factory.
+    """
+    from src.orchestration.response_detectors import _is_sycophantic_prefix
+
+    def handle_sycophancy(state: CogtrixState) -> dict:
+        sycophancy_count[0] += 1
+        log = logger()
+        msgs = state.get("messages") or []
+        last = msgs[-1] if msgs else None
+
+        if last is None or not _is_sycophantic_prefix(last):
+            # Re-detection failed — possibly revised by a concurrent path.
+            return {"messages": []}
+
+        log.warning(
+            "Sycophantic-prefix detected (attempt %d/%d). Injecting nudge.",
+            sycophancy_count[0],
+            max_retries,
+        )
+
+        if sycophancy_count[0] > max_retries:
+            log.info(
+                "Sycophancy retries exhausted — accepting the agent's response "
+                "as-is rather than spinning further. The logging-only path in "
+                "call_model retains visibility."
+            )
+            return {"messages": []}
+
+        removal: list[Any] = []
+        if getattr(last, "id", None):
+            removal.append(RemoveMessage(id=last.id))
+        return {
+            "messages": [
+                *removal,
+                HumanMessage(
+                    content=(
+                        "Your response started with a sycophantic validation "
+                        'prefix ("You\'re right" / "You\'re absolutely right" / '
+                        '"I apologize" / similar). The system prompt forbids '
+                        "this — validating the user and then giving the same "
+                        "answer is dishonest, and validating before substantive "
+                        "revision is unnecessary noise.\n\n"
+                        "Re-emit your answer WITHOUT any validation or apology "
+                        "prefix. Choose one:\n"
+                        "  (a) If your conclusion is unchanged after considering "
+                        'my input, say so plainly: "My conclusion is unchanged: '
+                        '<conclusion>" — and state what evidence would change '
+                        "it.\n"
+                        "  (b) If you have new analysis, state it directly with "
+                        "no preamble — open with the substantive content, not "
+                        "with a validation phrase.\n\n"
+                        'Do NOT begin with "You\'re right", "You\'re absolutely '
+                        'right", "You\'re raising an important point", "I '
+                        'apologize", "My apologies", or any equivalent '
+                        "validation/apology opener."
+                    )
+                ),
+            ]
+        }
+
+    return handle_sycophancy
+
+
+def build_handle_fabricated_action_node(
+    fabricated_action_count: list[int],
+    max_retries: int,
+    logger: Callable[[], Any] = get_logger,
+) -> Callable[[CogtrixState], dict]:
+    """Build the fabricated-action-success recovery node.
+
+    Bug #1869: when the user asks the agent to perform a destructive
+    file operation and the corresponding tool is not in the active
+    set (per #1870's upstream loadout fix, this should be rare —
+    but the gap still exists for pure-delete intents, which have no
+    matching Cogtrix tool), the model has been observed to silently
+    fabricate a successful outcome — Q9 / Q10 of the holistic-test
+    battery against ``cogtrix:release-next`` @ ``2bb52c7``:
+
+        Q9:  "The file ...verification.py has been deleted from the
+              codebase as requested." (no tool call, file intact)
+        Q10: "The file ...text.py already contains the safe_divide
+              function based on the successful write operations in
+              this session." (no tool call, no prior writes)
+
+    Sibling to the existing ``handle_fabrication`` node (which catches
+    the success-after-tool-errors variant). This node fires when there
+    were **zero** ToolMessages in the current user turn — the model
+    went prose-only and confabulated the outcome.
+
+    The nudge explicitly names both honest paths so the model can
+    recognise its situation: either invoke the appropriate tool now,
+    or report plainly that it cannot perform the action with its
+    current tool inventory. The latter case is the right answer for
+    pure-delete intents (Cogtrix has no ``delete_file`` tool).
+
+    Mirrors the post-#1731 recovery pattern: remove the offending
+    response wholesale (``RemoveMessage``) and inject the nudge —
+    never mutate the existing AIMessage in place.
+
+    Args:
+        fabricated_action_count: Mutable per-run counter (lives on
+            :class:`PerRunState`) of how many times this node has fired
+            in the current run.
+        max_retries: Maximum revision attempts before accepting the
+            response. Default 1 — one revision; if the model still
+            fabricates after the nudge, the response ships as-is
+            with a logged warning.
+        logger: Logger factory (overridable for testing).
+    """
+    from src.orchestration.response_detectors import (
+        _looks_like_fabricated_action_success_without_tool_call,
+    )
+
+    def handle_fabricated_action(state: CogtrixState) -> dict:
+        fabricated_action_count[0] += 1
+        log = logger()
+        msgs = state.get("messages") or []
+        last = msgs[-1] if msgs else None
+
+        if last is None or not _looks_like_fabricated_action_success_without_tool_call(msgs, last):
+            # Re-detection failed — possibly revised by a concurrent path.
+            return {"messages": []}
+
+        log.warning(
+            "Fabricated action-success without tool call (attempt %d/%d). " "Injecting correction.",
+            fabricated_action_count[0],
+            max_retries,
+        )
+
+        if fabricated_action_count[0] > max_retries:
+            log.info(
+                "Fabricated-action retries exhausted — accepting the agent's "
+                "response as-is rather than spinning further."
+            )
+            return {"messages": []}
+
+        removal: list[Any] = []
+        if getattr(last, "id", None):
+            removal.append(RemoveMessage(id=last.id))
+        return {
+            "messages": [
+                *removal,
+                HumanMessage(
+                    content=(
+                        "Your response claims a file or system change was "
+                        "completed (e.g. file deleted / written / created / "
+                        "modified), but you did not invoke any tool in this "
+                        "turn — no tool call was issued and no ToolMessage "
+                        "appears in the conversation. You cannot have performed "
+                        "the action.\n\n"
+                        "Choose exactly one path and answer accordingly — do "
+                        "NOT repeat the false-completion claim:\n"
+                        "  (a) If a tool exists that can perform the requested "
+                        "action, invoke it now via a structured tool call "
+                        '(call `request_tools(add=["<tool_name>"])` first '
+                        "if the tool is in the catalog but not yet loaded — "
+                        "the catalog includes `write_file`, `patch_file`, "
+                        "`append_file`, `read_file`, `execute_shell_command`, "
+                        "and others).\n"
+                        "  (b) If no available tool can perform the action "
+                        "(for example, the user asked you to delete a file "
+                        "and no delete tool is loaded), tell the user plainly "
+                        "that you have NOT performed the action and explain "
+                        "what tool would be needed.\n\n"
+                        "Do NOT fabricate quoted error messages to explain "
+                        "the discrepancy. Do NOT claim the action succeeded "
+                        "based on prior session state. Report honestly."
+                    )
+                ),
+            ]
+        }
+
+    return handle_fabricated_action
+
+
+def build_handle_fabricated_quote_node(
+    fabricated_quote_count: list[int],
+    max_retries: int,
+    logger: Callable[[], Any] = get_logger,
+) -> Callable[[CogtrixState], dict]:
+    """Build the fabricated-tool-error-quote recovery node.
+
+    Bug #1871: polarity-flipped sibling of the #1869 fabricated-success
+    recovery. The model emits prose like *"The error message is clear:
+    'Read-only file system'"* — a confident verbatim quote framed as
+    observed tool output — but no tool ran this turn (or the quoted
+    span never appeared in any ToolMessage). Q13 / Q14 / Q15 of the
+    holistic-test battery against ``cogtrix:release-next`` @ ``2bb52c7``
+    produced three different mutually-contradictory fabricated error
+    strings across three consecutive turns, each presented with the
+    same confident framing.
+
+    A verbatim quoted error string carries unusual epistemic weight
+    in the conversation — readers reasonably assume the agent saw that
+    text from a real tool. Letting the agent freely fabricate quoted
+    error output is materially worse than fabricating prose claims.
+
+    Mirrors the recovery-node pattern from #1869 / #1713: remove the
+    offending response wholesale and inject a nudge naming both honest
+    paths (call the tool and observe a real error, or stop attributing
+    quoted text to tools that did not run).
+
+    Args:
+        fabricated_quote_count: Mutable per-run counter (lives on
+            :class:`PerRunState`) of how many times this node has fired
+            in the current run.
+        max_retries: Maximum revision attempts before accepting the
+            response. Default 1.
+        logger: Logger factory (overridable for testing).
+    """
+    from src.orchestration.response_detectors import (
+        _looks_like_fabricated_tool_error_quote,
+    )
+
+    def handle_fabricated_quote(state: CogtrixState) -> dict:
+        fabricated_quote_count[0] += 1
+        log = logger()
+        msgs = state.get("messages") or []
+        last = msgs[-1] if msgs else None
+
+        if last is None or not _looks_like_fabricated_tool_error_quote(msgs, last):
+            # Re-detection failed — possibly revised by a concurrent path.
+            return {"messages": []}
+
+        log.warning(
+            "Fabricated tool-error quote without backing ToolMessage "
+            "(attempt %d/%d). Injecting correction.",
+            fabricated_quote_count[0],
+            max_retries,
+        )
+
+        if fabricated_quote_count[0] > max_retries:
+            log.info(
+                "Fabricated-quote retries exhausted — accepting the agent's "
+                "response as-is rather than spinning further."
+            )
+            return {"messages": []}
+
+        removal: list[Any] = []
+        if getattr(last, "id", None):
+            removal.append(RemoveMessage(id=last.id))
+        return {
+            "messages": [
+                *removal,
+                HumanMessage(
+                    content=(
+                        "Your response quotes a verbatim error message "
+                        "(text inside quotation marks, presented as a tool "
+                        "or system output), but no tool was invoked in this "
+                        "turn — or the quoted text does not appear in any "
+                        "ToolMessage in the conversation. You cannot have "
+                        "observed that error string.\n\n"
+                        "Choose exactly one path and answer accordingly — do "
+                        "NOT repeat the fabricated quote and do NOT invent "
+                        "a different quoted error:\n"
+                        "  (a) If a tool can produce the relevant output, "
+                        "invoke it now via a structured tool call (use "
+                        '`request_tools(add=["<name>"])` first if the tool '
+                        "is in the catalog but not yet loaded). Quote ONLY "
+                        "what the tool actually returns.\n"
+                        "  (b) If you have no tool that can produce the "
+                        "output, tell the user plainly that you have NOT "
+                        "observed any such error and answer based on what "
+                        "you actually know, without quoting fabricated text.\n\n"
+                        "Quoting an error string you have not observed is "
+                        "the worst-possible answer because the quote format "
+                        "implies you saw it. Stop attributing quoted text "
+                        "to tools that did not run."
+                    )
+                ),
+            ]
+        }
+
+    return handle_fabricated_quote
+
+
+def build_handle_noncanonical_fork_node(
+    noncanonical_fork_count: list[int],
+    max_retries: int,
+    logger: Callable[[], Any] = get_logger,
+) -> Callable[[CogtrixState], dict]:
+    """Build the non-canonical-fork-recommendation recovery node.
+
+    Bug #1868: the model surfaces a non-canonical GitHub fork (low
+    stars, no releases, personal owner) and presents it with the
+    canonical project's description + recommendation framing. The user
+    clicking the link lands on the fork rather than the canonical home.
+
+    Reproducer (Q5 of the 2026-05-28 holistic-test battery against
+    ``cogtrix:release-next`` @ ``2bb52c7``): asked for *"three currently-
+    active open-source projects on GitHub that implement WebAssembly
+    tools for security analysis"*, the agent returned one canonical
+    entry plus two personal/inactive forks
+    (``DharitriOne/wasmer``, ``wasm-wasi-rs/runtimes__wasmtime``) with
+    the canonical projects' blurbs.
+
+    Mirrors the post-#1731 recovery-node pattern: remove the offending
+    response wholesale and inject a nudge naming both honest paths —
+    either replace the URL with the canonical home (verifying via a
+    fresh ``web_search`` or the owner-is-the-official-org check) or
+    state plainly that no canonical match was found.
+
+    Args:
+        noncanonical_fork_count: Mutable per-run counter (lives on
+            :class:`PerRunState`) of how many times this node has fired
+            in the current run.
+        max_retries: Maximum revision attempts before accepting the
+            response. Default 1.
+        logger: Logger factory (overridable for testing).
+    """
+    from src.orchestration.verification import (
+        detect_noncanonical_fork_recommendation,
+        format_noncanonical_fork_nudge,
+    )
+
+    def handle_noncanonical_fork(state: CogtrixState) -> dict:
+        noncanonical_fork_count[0] += 1
+        log = logger()
+        msgs = state.get("messages") or []
+        last = msgs[-1] if msgs else None
+
+        if last is None:
+            return {"messages": []}
+        content = getattr(last, "content", "")
+        if not isinstance(content, str) or not content.strip():
+            return {"messages": []}
+
+        # User prompt is the most recent HumanMessage; needed for the
+        # "user asked for forks" suppression.
+        user_prompt = ""
+        for m in reversed(msgs):
+            if m.__class__.__name__ == "HumanMessage":
+                hp = getattr(m, "content", "")
+                if isinstance(hp, str):
+                    user_prompt = hp
+                break
+
+        flagged = detect_noncanonical_fork_recommendation(content, user_prompt=user_prompt)
+        if not flagged:
+            # Re-detection failed — possibly revised by a concurrent path.
+            return {"messages": []}
+
+        log.warning(
+            "Non-canonical fork URL%s recommended (attempt %d/%d): %s",
+            "s" if len(flagged) != 1 else "",
+            noncanonical_fork_count[0],
+            max_retries,
+            ", ".join(flagged),
+        )
+
+        if noncanonical_fork_count[0] > max_retries:
+            log.info(
+                "Non-canonical-fork retries exhausted — accepting the "
+                "agent's response as-is rather than spinning further."
+            )
+            return {"messages": []}
+
+        removal: list[Any] = []
+        if getattr(last, "id", None):
+            removal.append(RemoveMessage(id=last.id))
+        return {
+            "messages": [
+                *removal,
+                HumanMessage(content=format_noncanonical_fork_nudge(flagged)),
+            ]
+        }
+
+    return handle_noncanonical_fork
+
+
 def _find_current_turn_start(messages: list[Any]) -> int:
     """Return the index of the most recent HumanMessage in *messages*.
 

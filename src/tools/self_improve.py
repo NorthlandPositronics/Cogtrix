@@ -13,7 +13,6 @@ Configuration:
 from __future__ import annotations
 
 import ast
-import concurrent.futures
 import dataclasses
 import json
 import logging
@@ -36,6 +35,7 @@ else:
         BaseModel = object  # type: ignore[assignment,misc]
         Field = lambda *a, **kw: None  # type: ignore[assignment]  # noqa: E731
 
+from src.concurrency import invoke_with_timeout
 from src.logging_config import _scrub_secrets
 from src.providers import create_chat_model_from_configs
 from src.tools.delegate import register_tool_categories
@@ -386,20 +386,19 @@ def self_improve(
 
         # Build LLM prompt and call
         prompt = _build_patch_prompt(finding, scrubbed_content)
-        pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
         try:
-            future = pool.submit(llm.invoke, [_HumanMessage(content=prompt)])
-            response = future.result(timeout=_SELF_IMPROVE_LLM_TIMEOUT_SECONDS)
+            response = invoke_with_timeout(
+                llm.invoke,
+                [_HumanMessage(content=prompt)],
+                timeout=_SELF_IMPROVE_LLM_TIMEOUT_SECONDS,
+            )
             raw = getattr(response, "content", str(response))
-        except concurrent.futures.TimeoutError:
-            pool.shutdown(wait=False)
+        except TimeoutError:
             skipped.append((finding, "LLM call timed out"))
             continue
         except Exception as exc:
             skipped.append((finding, f"LLM call failed: {exc}"))
             continue
-        finally:
-            pool.shutdown(wait=False)
 
         patched_code = _extract_code(str(raw))
 

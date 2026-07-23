@@ -43,6 +43,7 @@ from src.orchestration.reflection_delegate import (
     UNCERTAINTY_NOTE_PREFIX,
     extract_decision_justification,
 )
+from src.orchestration.response_detectors import _SYCOPHANTIC_PREFIX_RE
 from src.orchestration.search_quality import (
     SearchQualityThresholds,
     has_substantive_search_results,
@@ -62,49 +63,17 @@ from src.orchestration.search_quality import (
 # is quoting verbatim) and silent stripping would corrupt those.
 _CJK_RE = re.compile(r"[一-鿿぀-ゟ゠-ヿ㐀-䶿]")
 
-# Bug G #1713 follow-up — orchestrator-side strip filter for sycophantic
+# Bug G #1713 follow-up — orchestrator-side detection of sycophantic
 # validation prefixes. The system-prompt rule in
 # ``src/agent/core.py:build_system_prompt`` is the primary defense, but
 # RLHF-tuned chat models (qwen3-coder observed in 2026-05-21 corpus
-# replay on E03) still emit "You're right - let me ..." prefixes even
-# when the rule explicitly forbids them. This filter strips the matched
-# prefix and capitalises the first remaining character so the response
-# reads naturally without the validation phrase. Logs a WARNING with
-# the matched prefix for ops visibility.
-#
-# The regex anchors on ``^\s*`` because the prefix MUST be at the very
-# start of the response — embedded "you're right" further in the text
-# (e.g. quoting the user, discussing rights, etc.) is legitimate. The
-# trailing class ``[\s\-—–,.!:;]+`` consumes the punctuation/separator
-# the model uses to glue the prefix to the actual content
-# ("You're right - let me", "You're right, let me", "You're right.
-# Let me", "I apologize — I'll").
-#
-# We deliberately do NOT consume an "I apologize for X" extension here.
-# Earlier prototype matched ``i apologize(?:\s+for[^.!?]{0,80})?`` which
-# greedily ate the next clause when the model wrote "I apologize for
-# the inconvenience but ..." — the strip would remove the entire
-# 80-char span and leave a malformed remainder that broke downstream
-# scoring on shard D × kimi-k2-5 (PR #1731 first iteration). The
-# conservative form below requires the verb-phrase prefix to be
-# immediately followed by a separator (whitespace + dash, comma,
-# period, etc.). Apology clauses with an inline "for X" clause stay
-# intact; only the bare-verb-then-separator pattern gets stripped.
-_SYCOPHANTIC_PREFIX_RE = re.compile(
-    r"^\s*(?:"
-    r"you're absolutely right"
-    r"|you are absolutely right"
-    r"|you're right"
-    r"|you are right"
-    r"|you're raising an important point"
-    r"|you're raising a (?:good|valid|fair) point"
-    r"|i sincerely apologize"
-    r"|i apologize"
-    r"|my apologies"
-    r")"
-    r"[\s\-—–,.!:;]+",
-    re.IGNORECASE,
-)
+# replay on E03; deepseek-v4-flash in next69) still emit "You're right —
+# let me ..." prefixes even when the rule explicitly forbids them. The
+# regex itself lives in ``response_detectors`` alongside the other
+# router-level predicates (imported at module top); this module retains
+# the strip helper below for the LOGGING-ONLY observation path. The
+# router-level recovery node (``handle_sycophancy`` in graph.py) does
+# the actual remove-and-regenerate using the same regex.
 
 
 def _strip_sycophantic_prefix(text: str) -> tuple[str, str | None]:

@@ -520,7 +520,9 @@ async def session_websocket(
     """WebSocket endpoint for streaming agent output.
 
     Connection lifecycle:
-        1. Client connects with Authorization: Bearer <token> header.
+        1. Client connects with either an Authorization: Bearer <token> header
+           (CLI/SDK clients) or a Sec-WebSocket-Protocol of ["bearer", "<token>"]
+           (browsers — the only browser-compatible way to pass auth on a WebSocket).
         2. Server validates the JWT and session ownership.
            On failure, server sends close code 4001 (unauthorized) or 4003 (forbidden).
         3. Server registers the connection and sends the first agent_state message.
@@ -533,14 +535,40 @@ async def session_websocket(
         the last received seq value. The server will resend any buffered messages
         with seq > client_last_seq (buffer is kept for 30 s post-disconnect).
     """
-    # 1. Accept the WebSocket connection so we can send close codes.
-    await websocket.accept()
-
-    # 2. Extract raw token from Authorization header.
+    # 1. Extract raw token. Browsers cannot set custom headers on WebSocket
+    #    connections, so we accept either ``Authorization`` (for CLI/SDK
+    #    clients) or ``Sec-WebSocket-Protocol`` of the form
+    #    ``["bearer", "<token>"]`` (for browsers — the only browser-portable
+    #    way to attach auth to a WebSocket upgrade). When the subprotocol
+    #    path is used, RFC 6455 requires us to echo the selected subprotocol
+    #    back on ``accept`` — without that echo Chromium/Firefox close the
+    #    connection client-side with 1002 (Protocol error). See #1887.
     raw_token: str | None = None
+    accept_subprotocol: str | None = None
+
     auth_header = websocket.headers.get("authorization", "")
     if auth_header.lower().startswith("bearer "):
         raw_token = auth_header[7:]
+    else:
+        # ``Sec-WebSocket-Protocol`` may arrive as a single comma-joined
+        # header line OR as multiple header instances (RFC 7230 §3.2.2 —
+        # browsers send one line, but proxies and custom clients may
+        # split). ``Headers.getlist`` returns every instance; joining with
+        # commas + splitting normalises both shapes.
+        raw_proto = ",".join(websocket.headers.getlist("sec-websocket-protocol"))
+        protocols = [p.strip() for p in raw_proto.split(",") if p.strip()]
+        # First element identifies the scheme (case-insensitive — matches
+        # the ``Authorization`` header check above). Second element is the
+        # token. Anything beyond is ignored.
+        if len(protocols) >= 2 and protocols[0].lower() == "bearer":
+            raw_token = protocols[1]
+            accept_subprotocol = "bearer"
+
+    # 2. Accept the WebSocket connection so we can send close codes. The
+    #    ``subprotocol=`` kwarg is None for the Authorization-header path
+    #    (no echo header in response) and ``"bearer"`` when the subprotocol
+    #    path was used.
+    await websocket.accept(subprotocol=accept_subprotocol)
 
     if raw_token is None:
         await websocket.close(code=4001, reason="Missing bearer token")

@@ -21,7 +21,11 @@ pytest.importorskip("fastapi")
 os.environ.setdefault("COGTRIX_JWT_SECRET", "testsecret_mustbe32chars_minimum00")
 os.environ.setdefault("COGTRIX_DB_URL", "sqlite+aiosqlite:///:memory:")
 
-from datetime import UTC, datetime, timedelta  # noqa: E402
+# NOTE: datetime/UTC/timedelta were used by the pre-#1879-Slice-B
+# test_window_expires_and_requests_succeed_again which patched
+# ``src.api.rate_limit.datetime``. The new test patches
+# ``limits.storage.memory.time.time`` instead — see that test for the
+# rationale. Removed unused imports.
 
 from fastapi import Depends, FastAPI, Request  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
@@ -113,15 +117,28 @@ class TestPerRouteRateLimit:
             assert data["code"] == "RATE_LIMIT_EXCEEDED"
 
     def test_window_expires_and_requests_succeed_again(self) -> None:
+        """Slice B note: enforcement now delegates to
+        ``limits.MovingWindowRateLimiter`` over ``MemoryStorage``,
+        which reads ``time.time()`` directly inside
+        ``limits.storage.memory``. The previous test patched
+        ``src.api.rate_limit.datetime`` — that code path no longer
+        consults the clock at all (the legacy ``_hit_counters`` /
+        ``datetime.now(UTC)`` machinery is gone). Patch the time
+        source the new backend actually reads so the moving window
+        effectively expires without sleeping 60+ real seconds.
+        """
+        import time as _time
+
+        import limits.storage.memory as _limits_memory
+
         app = _make_per_route_app(max_calls=2, window_seconds=60)
         with TestClient(app, raise_server_exceptions=False) as client:
             assert client.get("/test").status_code == 200
             assert client.get("/test").status_code == 200
             assert client.get("/test").status_code == 429
 
-            future = datetime.now(UTC) + timedelta(seconds=61)
-            with patch("src.api.rate_limit.datetime") as mock_dt:
-                mock_dt.now.return_value = future
+            future_unix = _time.time() + 70
+            with patch.object(_limits_memory.time, "time", return_value=future_unix):
                 r = client.get("/test")
                 assert r.status_code == 200
 

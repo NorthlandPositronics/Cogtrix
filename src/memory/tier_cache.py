@@ -7,11 +7,12 @@ Phase 3 — background roll-forward via ``roll_forward()`` and ``compress_to_tie
 
 from __future__ import annotations
 
-import concurrent.futures
 import logging
 import math
 from dataclasses import dataclass, field
 from typing import Any
+
+from src.concurrency import invoke_with_timeout
 
 log = logging.getLogger("cogtrix")
 
@@ -214,26 +215,19 @@ def compress_to_tier(
             f"{content}\n"
             f"<<<END_{nonce}>>>"
         )
-        # Wrap the LLM call in a temporary executor so we can enforce a timeout.
-        # Python threads cannot be cancelled; shutdown(wait=False) lets the
-        # hung thread die in the background without blocking the caller.
-        # NOTE: we use manual pool creation (not ``with``) because
-        # ThreadPoolExecutor.__exit__ calls shutdown(wait=True), which would
-        # block forever on a hung thread.
-        pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-        future = pool.submit(llm.invoke, prompt)
+        # Bounded-timeout LLM invocation via the centralized helper —
+        # migrated under #1903; see docs/architecture/CONCURRENCY.md.
+        # Timeout is re-raised so the outer ``except Exception`` does
+        # the truncation fallback.
         try:
-            response = future.result(timeout=_COMPRESSION_TIMEOUT_SECONDS)
-        except concurrent.futures.TimeoutError:
-            future.cancel()
+            response = invoke_with_timeout(llm.invoke, prompt, timeout=_COMPRESSION_TIMEOUT_SECONDS)
+        except TimeoutError:
             log.warning(
                 "compress_to_tier(%d): LLM call timed out after %ds — falling back to truncation",
                 tier,
                 _COMPRESSION_TIMEOUT_SECONDS,
             )
             raise
-        finally:
-            pool.shutdown(wait=False)
         raw = getattr(response, "content", str(response))
         if isinstance(raw, list):
             raw = " ".join(str(c.get("text", c) if isinstance(c, dict) else c) for c in raw)

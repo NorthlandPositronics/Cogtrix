@@ -1768,6 +1768,124 @@ class TestCorrectToolArgs:
 
 
 # ---------------------------------------------------------------------------
+# #1862: equivalent-quantifier-suffix mapping
+# ---------------------------------------------------------------------------
+
+
+class _QuantifierSchema(BaseModel):
+    """Stand-in for SearchWebInput / similar schemas: ``max_results`` is
+    the canonical quantifier field name."""
+
+    query: str = Field(description="Search query")
+    max_results: int = Field(default=5, description="Max results")
+    notes: str | None = Field(default=None, description="Notes")
+
+
+class TestQuantifierSuffixMapping:
+    """#1862 — weak models routinely emit ``max_points`` for ``max_results``
+    (and analogous shared-prefix quantifier-suffix typos). The arg-corrector
+    must map them WITHOUT ever mapping semantically distinct fields like
+    ``min_results`` → ``max_results``."""
+
+    def test_max_points_maps_to_max_results(self):
+        """The exact next-gate2 reproducer: search_web(max_points=...) must
+        map to max_results before pydantic 'extra_forbidden' fires."""
+        from src.orchestration.tool_arg_correction import _correct_tool_args
+
+        tool = MagicMock()
+        tool.args_schema = _QuantifierSchema
+        result = _correct_tool_args(tool, {"query": "x", "max_points": 5})
+        assert result == {"query": "x", "max_results": 5}
+
+    def test_num_items_maps_to_max_results(self):
+        from src.orchestration.tool_arg_correction import _correct_tool_args
+
+        class _NumSchema(BaseModel):
+            query: str = Field(description="q")
+            num_results: int = Field(default=5, description="n")
+
+        tool = MagicMock()
+        tool.args_schema = _NumSchema
+        result = _correct_tool_args(tool, {"query": "x", "num_items": 3})
+        assert result == {"query": "x", "num_results": 3}
+
+    def test_min_results_NOT_mapped_to_max_results(self):
+        """Different prefix (min vs max) — must NOT be remapped despite
+        identical suffix. This is the key low-FP guarantee."""
+        from src.orchestration.tool_arg_correction import _correct_tool_args
+
+        tool = MagicMock()
+        tool.args_schema = _QuantifierSchema
+        result = _correct_tool_args(tool, {"query": "x", "min_results": 5})
+        # min_results stays as the unknown arg (not remapped onto max_results).
+        assert "min_results" in result
+        assert "max_results" not in result
+
+    def test_unrelated_suffix_NOT_mapped(self):
+        """Suffix not in the equivalence set (e.g. depth) must not be
+        remapped onto results."""
+        from src.orchestration.tool_arg_correction import _correct_tool_args
+
+        tool = MagicMock()
+        tool.args_schema = _QuantifierSchema
+        result = _correct_tool_args(tool, {"query": "x", "max_depth": 3})
+        # max_depth stays; no remap onto max_results.
+        assert "max_depth" in result
+        assert "max_results" not in result
+
+    def test_short_prefix_NOT_mapped(self):
+        """A single-letter prefix below the length floor must not trigger
+        the equivalent-quantifier rule."""
+        from src.orchestration.tool_arg_correction import (
+            _correct_tool_args,
+            _is_equivalent_quantifier_pair,
+        )
+
+        # Direct pair-rule check.
+        assert not _is_equivalent_quantifier_pair("n_points", "max_results")
+        # End-to-end: n_points must not collapse onto max_results.
+        tool = MagicMock()
+        tool.args_schema = _QuantifierSchema
+        result = _correct_tool_args(tool, {"query": "x", "n_points": 2})
+        assert "max_results" not in result
+
+    def test_legit_args_pass_through_unchanged(self):
+        """Regression: when the model uses the correct names, args are
+        untouched (the new rule must not silently rewrite anything)."""
+        from src.orchestration.tool_arg_correction import _correct_tool_args
+
+        tool = MagicMock()
+        tool.args_schema = _QuantifierSchema
+        result = _correct_tool_args(tool, {"query": "x", "max_results": 10, "notes": "go"})
+        assert result == {"query": "x", "max_results": 10, "notes": "go"}
+
+    def test_pair_rule_unit_cases(self):
+        """Direct unit coverage of the pair predicate — locks down both
+        the should-map and must-not-map shapes."""
+        from src.orchestration.tool_arg_correction import _is_equivalent_quantifier_pair
+
+        # Should map.
+        for unk, exp in [
+            ("max_points", "max_results"),
+            ("num_items", "num_results"),
+            ("max_records", "max_results"),
+            ("total_count", "total_results"),
+        ]:
+            assert _is_equivalent_quantifier_pair(unk, exp), f"expected map: {unk}↔{exp}"
+
+        # Must not map.
+        for unk, exp in [
+            ("min_results", "max_results"),  # different prefix
+            ("max_depth", "max_results"),  # suffix not in set
+            ("n_points", "max_results"),  # prefix below floor
+            ("max_results", "max_results"),  # identical → not a remap pair
+            ("points", "results"),  # no underscore
+            ("user_results", "max_results"),  # different prefixes
+        ]:
+            assert not _is_equivalent_quantifier_pair(unk, exp), f"unexpected map: {unk}↔{exp}"
+
+
+# ---------------------------------------------------------------------------
 # Duplicate tool call detection
 # ---------------------------------------------------------------------------
 

@@ -142,7 +142,12 @@ Users running v0.x should:
 - Consult `docs/MIGRATION.md` before upgrading across minor versions.
 - Expect breaking changes to be documented in `CHANGELOG.md` under a `BREAKING` header.
 
-The v0.x → v0.2.0 migration is fully documented in [docs/MIGRATION.md](MIGRATION.md).
+The v0.x → v1.0 production-stability migration (the cross-cutting feature track
+that pre-dates v1.0 GA — PostgreSQL, Redis, OIDC, audit log, quotas, multi-arch
+Docker) is documented in [docs/MIGRATION.md](MIGRATION.md). Those features are
+landing incrementally across the v0.2.x series; the "v1.0" label denotes the
+stability marker for when they are considered GA, not a future release that
+gates their availability.
 
 ---
 

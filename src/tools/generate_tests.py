@@ -10,7 +10,6 @@ Configuration:
 
 from __future__ import annotations
 
-import concurrent.futures
 import re
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -30,6 +29,7 @@ else:
         Field = lambda *a, **kw: None  # type: ignore[assignment]  # noqa: E731
 
 from src.agent.safety import UserCancelledRun
+from src.concurrency import invoke_with_timeout
 from src.logging_config import _scrub_secrets
 from src.providers import create_chat_model_from_configs
 from src.tools.delegate import register_tool_categories
@@ -64,8 +64,15 @@ def is_configured() -> bool:
 
 # ── Path helpers ──────────────────────────────────────────────────────────────
 
-_CWD_ERROR = "Path must be within the working directory"
-_TRAVERSAL_ERROR = "Path traversal not allowed"
+# #1928: route all path-policy error strings through the canonical
+# ``src/tools/_path_policy.py`` helpers so every file tool emits the
+# same shape for the same logical class of failure.  Import here
+# (after the conditional pydantic block above) — the ``noqa: E402``
+# marker on each line is required because ruff sees these as
+# module-level imports after non-import statements.
+from src.tools._path_policy import format_read_outside_error as _format_outside  # noqa: E402
+from src.tools._path_policy import format_traversal_error as _format_traversal  # noqa: E402
+from src.tools._path_policy import format_write_outside_error as _format_write_outside  # noqa: E402
 
 
 def _resolve_source_path(path: str) -> tuple[bool, str, Path | None]:
@@ -80,7 +87,7 @@ def _resolve_source_path(path: str) -> tuple[bool, str, Path | None]:
                 try:
                     p.relative_to(_APP_DIR)
                 except ValueError:
-                    return False, _TRAVERSAL_ERROR, None
+                    return False, _format_traversal(path), None
         try:
             p.relative_to(cwd)
             return True, "", p
@@ -91,7 +98,7 @@ def _resolve_source_path(path: str) -> tuple[bool, str, Path | None]:
             return True, "", p
         except ValueError:
             pass
-        return False, _CWD_ERROR, None
+        return False, _format_outside(path), None
     except Exception as exc:
         return False, str(exc), None
 
@@ -105,12 +112,12 @@ def _resolve_output_path(path: str) -> tuple[bool, str, Path | None]:
             try:
                 p.relative_to(cwd)
             except ValueError:
-                return False, _TRAVERSAL_ERROR, None
+                return False, _format_traversal(path), None
         try:
             p.relative_to(cwd)
             return True, "", p
         except ValueError:
-            return False, "Write path must be within the working directory", None
+            return False, _format_write_outside(path), None
     except Exception as exc:
         return False, str(exc), None
 
@@ -260,16 +267,15 @@ def generate_tests(
         assert _HumanMessage is not None
         llm = create_chat_model_from_configs(*_config.resolve_llm_config())
         prompt = _build_prompt(source_file, source_content, focus)
-        pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
         try:
-            future = pool.submit(llm.invoke, [_HumanMessage(content=prompt)])
-            response = future.result(timeout=_GENERATE_TESTS_LLM_TIMEOUT_SECONDS)
+            response = invoke_with_timeout(
+                llm.invoke,
+                [_HumanMessage(content=prompt)],
+                timeout=_GENERATE_TESTS_LLM_TIMEOUT_SECONDS,
+            )
             raw = getattr(response, "content", str(response))
-        except concurrent.futures.TimeoutError:
-            pool.shutdown(wait=False)
+        except TimeoutError:
             return "Error: LLM call timed out"
-        finally:
-            pool.shutdown(wait=False)
     except UserCancelledRun:
         raise
     except Exception as exc:

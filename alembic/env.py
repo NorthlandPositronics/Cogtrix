@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
 from logging.config import fileConfig
 
 from sqlalchemy import pool
@@ -20,12 +19,25 @@ if config.config_file_name is not None:
 
 # Import all models so their tables appear in target_metadata
 import src.api.db.models  # noqa: E402, F401 — registers model classes on Base.metadata
-from src.api.db.engine import Base  # noqa: E402
+from src.api.db.engine import Base, _get_db_url  # noqa: E402
 
 target_metadata = Base.metadata
 
-# Database URL: prefer env var over alembic.ini
-_DB_URL: str = os.environ.get("COGTRIX_DB_URL", "sqlite+aiosqlite:///./data/api/cogtrix.db")
+# Database URL: single source of truth with the API runtime. ``_get_db_url``
+# resolves the priority chain (#1877):
+#   1. ``COGTRIX_DB_URL`` env var
+#   2. ``COGTRIX_DATA_DIR`` env var → ``<DATA_DIR>/api/cogtrix.db``
+#   3. ``data_dir`` from the Cogtrix config file
+#   4. Built-in default ``./data/api/cogtrix.db``
+# The previous direct ``os.environ.get(..., "./data/api/cogtrix.db")``
+# fallback only honoured (1) and (4), so when the Docker image set
+# ``COGTRIX_DATA_DIR=/data`` (the canonical mount point) without
+# ``COGTRIX_DB_URL`` the API runtime resolved to ``/data/api/cogtrix.db``
+# while Alembic resolved to ``./data/api/cogtrix.db`` relative to
+# ``WORKDIR=/app`` — i.e. a non-writable ``/app/data/api/`` — and the
+# migration failed with ``sqlite3.OperationalError: unable to open
+# database file`` before Uvicorn could start.
+_DB_URL: str = _get_db_url()
 
 
 def run_migrations_offline() -> None:

@@ -1,6 +1,31 @@
 """Tests for source diversity tracking and contradiction detection."""
 
-from src.orchestration.research_delegate import ContradictionDetector, SourceTracker
+from src.orchestration.research_delegate import (
+    ContradictionDetector,
+    SourceSnapshot,
+    SourceTracker,
+)
+
+
+def _snap(origin: str, content: str) -> SourceSnapshot:
+    """Build a fully-typed ``SourceSnapshot`` from the two fields the
+    contradiction-detection tests actually exercise (#1900).
+
+    ``ContradictionDetector._find_supporting_origins`` only indexes
+    ``source["content"]`` and ``source["origin"]``, but the public
+    parameter is typed ``list[SourceSnapshot]`` (a 6-field TypedDict).
+    Passing bare ``{"origin": ..., "content": ...}`` dict literals
+    works at runtime but trips pyright's ``reportArgumentType``.  This
+    helper keeps the test bodies concise while satisfying the contract.
+    """
+    return {
+        "source_id": f"sid-{id(content)}",
+        "url": "https://example.com/",
+        "domain": "example.com",
+        "origin": origin,
+        "content": content,
+        "timestamp": "2026-01-01T00:00:00Z",
+    }
 
 
 class TestSourceTracker:
@@ -75,6 +100,81 @@ class TestSourceTracker:
 
         assert "example" in tracker.get_unique_origins()
 
+    # ── Bug #1896 regression — duplicate-source-ID guard ──
+
+    def test_duplicate_source_id_is_ignored(self):
+        """Adding the same source_id twice must not inflate any tracker
+        state.  Without the guard, ``total_sources`` would double and
+        ``diversity_score`` would drop from 1.0 to 0.5 from a single
+        duplicate add — turning a "perfect diversity" tracker into
+        spurious "low diversity" with no signal to the caller (#1896)."""
+        tracker = SourceTracker()
+        tracker.add_source("s1", "https://example.com/a", "content")
+        tracker.add_source("s1", "https://example.com/a", "content")
+
+        stats = tracker.get_statistics()
+        assert stats["total_sources"] == 1, (
+            f"Duplicate source_id must be ignored — total_sources is "
+            f"{stats['total_sources']}, expected 1 (#1896)"
+        )
+        assert stats["unique_domains"] == 1
+        assert stats["unique_origins"] == 1
+        # Diversity score on a single source is 1.0 (perfect diversity).
+        # Without the guard the second add would push it to 0.5.
+        assert tracker.diversity_score() == 1.0
+
+    def test_duplicate_source_id_logs_warning(self, caplog):
+        """The duplicate add must emit a WARNING so a latent caller-side
+        bug surfaces in ops logs rather than silently degrading
+        statistics.  The warning must name the duplicate source_id and
+        the already-tracked URL so the operator can trace the source of
+        the regression."""
+        import logging
+
+        tracker = SourceTracker()
+        tracker.add_source("s1", "https://original.com/a", "content")
+
+        with caplog.at_level(logging.WARNING, logger="cogtrix"):
+            tracker.add_source("s1", "https://duplicate-attempt.com/b", "content")
+
+        assert any("duplicate source_id" in r.message for r in caplog.records), (
+            f"Expected a 'duplicate source_id' WARNING; got "
+            f"{[r.message for r in caplog.records]!r}"
+        )
+        # The warning must name the offending source_id.
+        msg = next(r.message for r in caplog.records if "duplicate source_id" in r.message)
+        assert "'s1'" in msg
+        # And the already-tracked URL so the operator can trace it.
+        # Check the full URL (scheme + host + path), not just the host
+        # substring — both because it's a stronger test and because a
+        # host-only substring trips CodeQL's incomplete-URL-substring
+        # sanitisation pattern (py/incomplete-url-substring-sanitization),
+        # even though this is a log-content assertion not a security check.
+        assert "https://original.com/a" in msg
+
+    def test_distinct_source_ids_still_accumulate(self):
+        """Negative control: distinct source IDs at the same URL must
+        still both register, even though they're at the same URL —
+        the guard keys on source_id, not on URL."""
+        tracker = SourceTracker()
+        tracker.add_source("s1", "https://example.com/a", "content")
+        tracker.add_source("s2", "https://example.com/a", "content")
+
+        assert tracker.get_statistics()["total_sources"] == 2
+
+    def test_mixed_unique_and_duplicate_source_ids(self):
+        """Realistic shape: 5 unique IDs interleaved with 3 duplicates
+        → only the 5 unique sources register."""
+        tracker = SourceTracker()
+        for i in range(5):
+            tracker.add_source(f"s{i}", f"https://example.com/page{i}", "content")
+        # 3 duplicate re-adds of existing IDs.
+        tracker.add_source("s0", "https://example.com/page0", "content")
+        tracker.add_source("s2", "https://example.com/page2", "content")
+        tracker.add_source("s4", "https://example.com/page4", "content")
+
+        assert tracker.get_statistics()["total_sources"] == 5
+
 
 class TestContradictionDetection:
     """Tests for ContradictionDetector class."""
@@ -83,9 +183,9 @@ class TestContradictionDetection:
         """Test that claims from single origin are flagged."""
         detector = ContradictionDetector()
         sources = [
-            {"origin": "origin1", "content": "Claim A is true"},
-            {"origin": "origin1", "content": "Claim A is confirmed"},
-            {"origin": "origin1", "content": "Claim A is verified"},
+            _snap("origin1", "Claim A is true"),
+            _snap("origin1", "Claim A is confirmed"),
+            _snap("origin1", "Claim A is verified"),
         ]
 
         disagreements = detector.check_for_disagreement(["Claim A is true"], sources)
@@ -100,9 +200,9 @@ class TestContradictionDetection:
         detector = ContradictionDetector()
         # All sources contain the exact claim text
         sources = [
-            {"origin": "origin1", "content": "Claim A is true"},
-            {"origin": "origin2", "content": "Claim A is true"},
-            {"origin": "origin3", "content": "Claim A is true"},
+            _snap("origin1", "Claim A is true"),
+            _snap("origin2", "Claim A is true"),
+            _snap("origin3", "Claim A is true"),
         ]
 
         disagreements = detector.check_for_disagreement(["Claim A is true"], sources)
@@ -113,8 +213,8 @@ class TestContradictionDetection:
         """Test detection of conflicting evidence."""
         ContradictionDetector()
         sources = [
-            {"origin": "origin1", "content": "Claim A is true"},
-            {"origin": "origin2", "content": "Claim A is false"},
+            _snap("origin1", "Claim A is true"),
+            _snap("origin2", "Claim A is false"),
         ]
 
         assert len(sources) == 2
@@ -183,6 +283,64 @@ class TestContradictionDetection:
         detector.add_claim("Claim", origins)
 
         assert detector.get_confidence_score() > 0.9
+
+    # ── Bug #1175 regression — origin_count must measure UNIQUE origins ──
+
+    def test_duplicate_origins_collapse_to_unique_count(self):
+        """The #1175 reproducer: a claim backed by five source IDs all
+        from wikipedia.org represents ONE origin, not five — passing
+        the same origin name five times must collapse to a single
+        unique origin via the ``set()`` dedup. Without dedup the field
+        was a misnamed source-count and inflated confidence.
+
+        Concrete consequence the ticket called out: five identical
+        ``"wikipedia"`` entries used to produce ``origin_count == 5``
+        and confidence 1.0 despite zero origin diversity. The
+        ``set(supporting_origins)`` step is what prevents that —
+        pinning it here so a future "preserve duplicates" change
+        re-introduces the bug visibly.
+        """
+        detector = ContradictionDetector()
+        detector.add_claim("Wiki-only claim", ["wikipedia"] * 5)
+        c = detector.claims[0]
+        assert c["origin_count"] == 1, (
+            f"Five identical origins must yield origin_count=1, got "
+            f"{c['origin_count']} — set() dedup regressed (#1175)"
+        )
+        # Confidence must NOT classify single-origin claims as well-supported.
+        # ``well_supported`` requires ``origin_count > 1``; single-origin
+        # claims fall into ``poorly_supported``.
+        stats = detector.get_statistics()
+        assert stats["well_supported_claims"] == 0
+        assert stats["poorly_supported_claims"] == 1
+
+    def test_supporting_origins_keyword_is_the_public_contract(self):
+        """The public parameter name is ``supporting_origins`` (not
+        ``supporting_sources``). The rename closes the gap between the
+        docstring's stated semantics and the field name; passing via
+        keyword pins that the public contract didn't silently revert
+        to the old misleading name."""
+        detector = ContradictionDetector()
+        detector.add_claim(
+            claim="kw-style call",
+            supporting_origins=["wikipedia", "github", "news_agency"],
+        )
+        assert detector.claims[0]["origin_count"] == 3
+        # And the stored dict uses the new key name, not the old one.
+        assert "supporting_origins" in detector.claims[0]
+        assert "supporting_sources" not in detector.claims[0]
+
+    def test_mixed_duplicate_and_unique_origins(self):
+        """Real-world shape: two wiki source IDs (collapse to one
+        origin) plus one github plus one news_agency → origin_count=3,
+        not 4. Pins the ``set()`` semantics on a non-degenerate
+        input."""
+        detector = ContradictionDetector()
+        detector.add_claim(
+            "Mixed-origin claim",
+            ["wikipedia", "wikipedia", "github", "news_agency"],
+        )
+        assert detector.claims[0]["origin_count"] == 3
 
 
 class TestIntegration:

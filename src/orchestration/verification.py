@@ -1023,16 +1023,652 @@ def format_version_scope_nudge(mismatches: list[VersionScopeMismatch]) -> str:
     )
 
 
+# ── Attributed-claim guard (#1860) ─────────────────────────────────────
+#
+# #1841's quote detector only fires on verbatim quoted/blockquoted spans.
+# The next69 trial surfaced the residual gap: the model fabricated a
+# factual claim in PROSE — *"Voices of The Void has both a native Linux
+# build … as confirmed by community guides"* — with no source actually
+# confirming a native Linux build. Quoted-only guards cannot catch
+# attributed prose claims.
+#
+# This detector targets ATTRIBUTED paragraphs only — blocks where the
+# model credits a source/authority ("as confirmed by", "according to",
+# "officially documented", "the docs say", "sources confirm", …). For
+# each such paragraph it extracts distinctive multi-word content phrases
+# and checks whether they appear in the grounded blob (tool output + user
+# prompt). When several distinctive phrases are ungrounded the
+# attributed content is treated as fabricated. Free paraphrase is
+# deliberately out of scope — only attributed paragraphs are inspected,
+# keeping the false-positive surface narrow.
+
+_ATTRIBUTION_MARKERS_RE = re.compile(
+    r"(?im)\b(?:"
+    r"as\s+(?:confirmed|stated|documented|noted|reported|explained|"
+    r"described|shown|mentioned|established|verified|attested)\s+"
+    r"(?:by|in|on|at|via)\b"
+    r"|according\s+to\b"
+    r"|as\s+per\b"
+    r"|per\s+(?:the|its|their)\s+\w+"
+    r"|(?:the|its|their)\s+(?:docs|documentation|guides?|community|website|"
+    r"site|page|manual|reference)\s+(?:say|says|states?|notes?|confirms?|"
+    r"indicates?|reports?|mentions?|explains?|claims?|describes?)\b"
+    r"|(?:sources?|reports?|documents?)\s+(?:confirm|confirms|say|says|"
+    r"indicate|indicates|note|notes|state|states|report|reports|"
+    r"mention|mentions|describe|describes)\b"
+    r"|it\s+is\s+(?:documented|stated|confirmed|noted|reported|established|"
+    r"described)\s+(?:that|in|by|on)\b"
+    r"|officially\s+(?:confirmed|stated|documented|noted|reported|"
+    r"established|verified|released|announced|deprecated|discontinued|"
+    r"retired|recommended)\b"
+    # ── #1867 Group A: self-introspection attributions ─────────────────
+    # The model claims it re-read the artifact and the artifact agrees
+    # with its (often flipped) new position. Manufactured authority of
+    # the "I looked, it agrees with me now" shape. Q3 reproducer:
+    # ``Re-reading the file confirms _is_sycophantic_prefix has no check
+    # for tool_calls`` — directly contradicted by the actual file.
+    r"|(?:the|its)\s+(?:file|code|source(?:\s+(?:code|file))?|"
+    r"implementation)\s+(?:says|states?|confirms?|shows?|reveals?|"
+    r"indicates?|demonstrates?)\b"
+    r"|re-reading\s+(?:the|its)\s+(?:file|code|source|implementation)\s+"
+    r"(?:confirms?|shows?|reveals?|indicates?)\b"
+    r"|looking\s+at\s+(?:the|its)\s+(?:file|code|source|implementation)\s+"
+    r"(?:more\s+carefully\s+)?(?:confirms?|shows?|reveals?|indicates?)\b"
+    r"|(?:inspecting|examining|reviewing)\s+(?:the|its)\s+"
+    r"(?:file|code|source|implementation)\s+"
+    r"(?:confirms?|shows?|reveals?|indicates?)\b"
+    # ── #1867 Group B: generic third-party corroborating attributions ──
+    # The model credits a third-party document (article, blog, README,
+    # release notes, …) for content the document does not actually
+    # contain.
+    r"|(?:the|its|their)\s+(?:article|paper|blog(?:\s+post)?|post|study|"
+    r"report|wiki|readme|changelog|release\s+notes?)\s+"
+    r"(?:say|says|states?|confirms?|shows?|notes?|indicates?|describes?|"
+    r"mentions?|explains?)\b"
+    r"|as\s+the\s+(?:article|paper|blog(?:\s+post)?|post|study|report|"
+    r"wiki|readme|changelog|release\s+notes?)\s+"
+    r"(?:say|says|states?|confirms?|shows?|notes?|indicates?)\b"
+    r")"
+)
+
+# Stop-word set for distinctive-n-gram filtering. Extremely common tokens
+# don't make a phrase distinctive enough to be a fabrication signal.
+_ATTRIBUTION_STOPWORDS: frozenset[str] = frozenset(
+    {
+        "a",
+        "an",
+        "the",
+        "of",
+        "and",
+        "or",
+        "but",
+        "if",
+        "in",
+        "on",
+        "at",
+        "to",
+        "by",
+        "for",
+        "is",
+        "are",
+        "was",
+        "were",
+        "be",
+        "been",
+        "being",
+        "has",
+        "have",
+        "had",
+        "do",
+        "does",
+        "did",
+        "will",
+        "would",
+        "can",
+        "could",
+        "may",
+        "might",
+        "should",
+        "shall",
+        "must",
+        "this",
+        "that",
+        "these",
+        "those",
+        "it",
+        "its",
+        "they",
+        "them",
+        "their",
+        "there",
+        "here",
+        "when",
+        "where",
+        "what",
+        "which",
+        "who",
+        "whom",
+        "whose",
+        "how",
+        "why",
+        "with",
+        "without",
+        "from",
+        "as",
+        "also",
+        "more",
+        "most",
+        "some",
+        "any",
+        "all",
+        "not",
+        "no",
+        "yes",
+        "one",
+        "two",
+        "both",
+        "via",
+        "use",
+        "used",
+        "using",
+        "you",
+        "your",
+        "we",
+        "our",
+        "us",
+        "i",
+        "me",
+        "my",
+        "he",
+        "she",
+        "him",
+        "her",
+        "his",
+        "hers",
+    }
+)
+
+# Grounding rule for attributed paragraphs: a paragraph is flagged when a
+# meaningful fraction of its DISTINCTIVE CONTENT TOKENS (≥ 4 chars, not in
+# the stop-word set) is absent from the grounded blob's distinctive-token
+# set. This is paraphrase-tolerant — a legitimate attribution to grounded
+# content shares most of its content tokens with the source even when the
+# wording is rephrased — while still catching fabrication, where the
+# specific content (entities + properties) is genuinely missing from
+# every source.
+_ATTRIBUTION_MISSING_FRACTION = 0.35
+_ATTRIBUTION_MIN_DISTINCTIVE = 4
+
+
+def _attribution_paragraphs(text: str) -> list[str]:
+    """Split *text* into paragraphs and return those carrying an
+    attribution marker. Paragraphs are blank-line- or heading-separated
+    blocks."""
+    if not text or not isinstance(text, str):
+        return []
+    blocks = re.split(r"\n\s*\n+|\n(?=#{1,6}\s)", text)
+    return [b for b in blocks if _ATTRIBUTION_MARKERS_RE.search(b)]
+
+
+def _distinctive_token_set(text: str) -> set[str]:
+    """Return distinctive content tokens of *text* — lowercased, non-stop,
+    length ≥ 4 — with the attribution markers themselves stripped first so
+    they cannot trivially match the grounded blob."""
+    norm = _normalize_for_fidelity(text)
+    if not norm:
+        return set()
+    norm = _ATTRIBUTION_MARKERS_RE.sub(" ", norm)
+    tokens = re.findall(r"[a-z][a-z0-9\-]{3,}", norm)
+    return {t for t in tokens if t not in _ATTRIBUTION_STOPWORDS}
+
+
+def detect_unsupported_attribution(
+    response_content: str,
+    tool_message_contents: Iterable[str],
+    user_prompt: str = "",
+    *,
+    missing_fraction_threshold: float = _ATTRIBUTION_MISSING_FRACTION,
+    min_distinctive_tokens: int = _ATTRIBUTION_MIN_DISTINCTIVE,
+    max_returned: int = 3,
+) -> list[str]:
+    """Return attributed paragraphs whose distinctive content is not grounded.
+
+    Scope: only paragraphs containing an attribution marker
+    ("as confirmed by …", "according to …", "officially …", …) are
+    inspected — free paraphrase is deliberately out of scope (#1841 already
+    handles quoted spans). A paragraph is flagged when the FRACTION of its
+    distinctive content tokens absent from the grounded blob's
+    distinctive-token set is at least ``missing_fraction_threshold``.
+    Paragraphs with fewer than ``min_distinctive_tokens`` are skipped — too
+    little signal to flag with confidence. Returns at most ``max_returned``
+    snippets in first-appearance order.
+    """
+    if not response_content or not response_content.strip():
+        return []
+    candidate_paragraphs = _attribution_paragraphs(response_content)
+    if not candidate_paragraphs:
+        return []
+
+    grounded_sources = [c for c in tool_message_contents if isinstance(c, str)]
+    if user_prompt:
+        grounded_sources.append(user_prompt)
+    grounded_tokens = _distinctive_token_set("\n".join(grounded_sources))
+
+    flagged: list[str] = []
+    for p in candidate_paragraphs:
+        para_tokens = _distinctive_token_set(p)
+        if len(para_tokens) < min_distinctive_tokens:
+            continue  # too little signal to assess
+        if not grounded_tokens:
+            # No grounding at all — every attributed paragraph with enough
+            # distinctive content is unsupported by construction.
+            flagged.append(p.strip()[:240])
+        else:
+            missing = para_tokens - grounded_tokens
+            if len(missing) / len(para_tokens) >= missing_fraction_threshold:
+                flagged.append(p.strip()[:240])
+        if len(flagged) >= max_returned:
+            break
+    return flagged
+
+
+_UNSUPPORTED_ATTRIBUTION_NUDGE = (
+    "Your response credits a source/authority for {n_word} statement{plural} "
+    "whose specific content is NOT supported by any tool result this turn: "
+    '{snippets}. Phrases like "as confirmed by …", "according to …", '
+    '"officially …" manufacture authority for a claim — when the claim\'s '
+    "specific content (entities, properties, facts) is absent from your "
+    "fetched sources, you are fabricating the source itself, not just "
+    "paraphrasing.\n\n"
+    "Revise your response to either:\n"
+    "  (a) re-check the tool results and only attribute claims whose "
+    "specific content (the entity + property pair, the version, the date) "
+    "appears in the fetched extracts — quote or paraphrase faithfully; or\n"
+    "  (b) drop the attribution phrase and state the claim as your own "
+    "summary, clearly grounded in what the tools returned; or\n"
+    "  (c) if the tools did not establish the claim, say so plainly — do "
+    "not invent a citing source.\n\n"
+    'Do NOT credit "community guides", "the docs", "sources", or any '
+    "named authority for content that is not in the fetched results."
+)
+
+
+def format_unsupported_attribution_nudge(snippets: list[str]) -> str:
+    """Render the recovery nudge for one or more unsupported attributions."""
+    n = len(snippets)
+    plural = "s" if n != 1 else ""
+    n_word = {1: "one", 2: "two", 3: "three"}.get(n, str(n))
+
+    def _clip(s: str) -> str:
+        s = " ".join(s.split())
+        return s if len(s) <= 160 else s[:157] + "..."
+
+    quoted = "; ".join(f'"{_clip(s)}"' for s in snippets)
+    return _UNSUPPORTED_ATTRIBUTION_NUDGE.format(n_word=n_word, plural=plural, snippets=quoted)
+
+
+# ── #1868: non-canonical GitHub-fork-recommendation detector ───────────
+#
+# Q5 of the 2026-05-28 holistic-test battery against
+# ``cogtrix:release-next`` @ ``2bb52c7``: asked for *"three currently-
+# active open-source projects on GitHub that implement WebAssembly tools
+# for security analysis"*, the agent returned one canonical entry plus
+# two **personal / inactive forks** (DharitriOne/wasmer,
+# wasm-wasi-rs/runtimes__wasmtime) presented with the canonical
+# projects' descriptions and recommendation framing. A user clicking the
+# link in good faith would land on the fork, not on the canonical home.
+#
+# Failure pattern: ``canonical-name + canonical-blurb → non-canonical
+# URL``. The agent uses web_search to find ANY ``github.com/<owner>/<repo>``
+# URL whose name matches the project keyword and treats it as authoritative.
+#
+# First-pass detector (this PR — see ticket #1868 for proposed
+# strengthenings):
+#   1. Extract all ``github.com/<owner>/<repo>`` URLs from the response.
+#   2. For each URL, classify ``(owner, repo)`` against an explicit
+#      canonical allowlist plus three structural heuristics
+#      (``owner == repo``, ``repo`` substring of ``owner``, recognised
+#      org-name suffixes).
+#   3. If non-canonical, require the surrounding 200-char context to
+#      contain explicit RECOMMENDATION language (``actively maintained``,
+#      ``stable release``, ``production-ready``, ``universal runtime``,
+#      ``recommended``, …) — incidental URLs (issue trackers, code
+#      examples) do not trip the detector.
+#   4. Suppress entirely when the user's prompt explicitly asked for
+#      forks (``"show me hardened forks of …"``).
+#
+# Out of scope for this PR (could come later if the heuristic proves
+# insufficient): live GitHub-API check of ``stars`` / ``forks`` /
+# ``is_fork``.  That requires token/rate-limit/mock-fixture work that
+# is not worth coupling to the regex-only pass.
+
+_GITHUB_REPO_URL_RE = re.compile(
+    r"https?://(?:www\.)?github\.com/([\w][\w.-]*)/([\w][\w.-]*)",
+    re.IGNORECASE,
+)
+
+# Recommendation-context markers. Triggered when ANY of these appears
+# within ~200 chars of a flagged GitHub URL — implies the response is
+# presenting the URL as an authoritative project home rather than as
+# an incidental link (issue tracker, code example, etc.).
+_RECOMMENDATION_LANGUAGE_RE = re.compile(
+    r"\b(?:"
+    r"actively\s+(?:maintained|developed|supported|updated)"
+    r"|currently\s+(?:active|maintained|supported|updated)"
+    r"|stable\s+(?:release|version|build|stream)"
+    r"|production[- ]ready|battle[- ]tested|widely\s+(?:used|adopted)"
+    r"|industry[- ]standard|de\s+facto|flagship|canonical"
+    r"|the\s+(?:de[- ]facto|standard|reference|official|canonical)\s+"
+    r"(?:implementation|library|tool|runtime|engine|client|server)"
+    r"|universal\s+(?:runtime|engine|tool|client|library|framework)"
+    r"|official(?:ly)?\s+(?:supported|backed|maintained|released)"
+    r"|recommended|recommend(?:ing)?\s+(?:this|the)"
+    r"|recent\s+(?:commits?|releases?)|last\s+commit"
+    r"|mature\s+(?:library|tool|project|runtime|engine|framework)"
+    r"|popular\s+(?:choice|library|tool|project)"
+    r"|I\s+recommend|here\s+(?:is|are)\s+(?:three\s+|some\s+|several\s+|a\s+|an\s+)?"
+    r"(?:active|maintained|currently-?active|currently\s+active|popular|recommended)"
+    r")",
+    re.IGNORECASE,
+)
+
+# User-prompt suppression: the user explicitly asked for forks; any
+# non-canonical recommendation is on-task, not a fabrication. Conservative
+# match — requires the literal token "fork" near a request verb.
+_USER_ASKED_FOR_FORK_RE = re.compile(
+    r"\b(?:fork|forks|forked)\b",
+    re.IGNORECASE,
+)
+
+# Org-name suffixes that imply a canonical project organisation
+# (lowercased, with or without the dash). Adding here only ever
+# *suppresses* firing so additions are safe.
+_CANONICAL_ORG_SUFFIXES: tuple[str, ...] = (
+    "-io",
+    "-team",
+    "-org",
+    "-orgs",
+    "-project",
+    "-projects",
+    "-labs",
+    "-lab",
+    "-foundation",
+    "-fdn",
+    "-community",
+    "-developers",
+    "-devs",
+    "-group",
+    "-network",
+)
+
+# Known canonical GitHub owners — major orgs plus a small set of
+# individual maintainers whose repos are canonical (``torvalds/linux``,
+# ``ggerganov/llama.cpp``, etc.). Lowercased on lookup. Additions are
+# always safe (only ever suppress firing); deletions need care.
+_KNOWN_CANONICAL_OWNERS: frozenset[str] = frozenset(
+    {
+        # Major orgs (broad)
+        "google",
+        "googleapis",
+        "googlecloudplatform",
+        "googlechrome",
+        "microsoft",
+        "azure",
+        "vscode",
+        "apple",
+        "amazon",
+        "amzn",
+        "aws",
+        "aws-samples",
+        "facebook",
+        "facebookresearch",
+        "meta",
+        "meta-llama",
+        "openai",
+        "anthropics",
+        # Cloud-native / infra
+        "kubernetes",
+        "kubernetes-sigs",
+        "cncf",
+        "containerd",
+        "etcd-io",
+        "envoyproxy",
+        "helm",
+        "istio",
+        "linkerd",
+        "prometheus",
+        "grafana",
+        "fluent",
+        "hashicorp",
+        # Language ecosystems
+        "python",
+        "pypa",
+        "psf",
+        "rust-lang",
+        "golang",
+        "nodejs",
+        "dotnet",
+        "ruby",
+        "rails",
+        "php",
+        "swift-lang",
+        "swiftlang",
+        "dart-lang",
+        "kotlin",
+        "jetbrains",
+        "scala",
+        "clojure",
+        "erlang",
+        "elixir-lang",
+        "haskell",
+        # Major individual / canonical projects
+        "torvalds",
+        "ggerganov",
+        "openssl",
+        "git",
+        "vim",
+        "neovim",
+        "tmux",
+        "alacritty",
+        # WebAssembly ecosystem (Q5 reproducer)
+        "bytecodealliance",
+        "wasmerio",
+        "webassembly",
+        "wasmcloud",
+        "wasm-tool",
+        "wasmedge",
+        "extism",
+        # JS ecosystem
+        "vercel",
+        "vuejs",
+        "angular",
+        "expressjs",
+        "webpack",
+        "babel",
+        "rollup",
+        "vitejs",
+        "nestjs",
+        "fastify",
+        "yarnpkg",
+        "npm",
+        "denoland",
+        "oven-sh",
+        "remix-run",
+        "sveltejs",
+        # Python ecosystem
+        "pallets",
+        "django",
+        "fastapi",
+        "tiangolo",
+        "pydantic",
+        "pytest-dev",
+        "scrapy",
+        "celery",
+        "sqlalchemy",
+        # ML / AI
+        "pytorch",
+        "tensorflow",
+        "keras-team",
+        "huggingface",
+        "scikit-learn",
+        "scipy",
+        "numpy",
+        "pandas-dev",
+        "ipython",
+        "jupyter",
+        "jupyterhub",
+        # Other
+        "apache",
+        "eclipse",
+        "mozilla",
+        "linuxfoundation",
+        "redhat",
+        "ibm",
+        "intel",
+        "nvidia",
+        "openzeppelin",
+        "ethereum",
+        "spotify",
+        "slack",
+        "github",
+        "shopify",
+        "stripe",
+        "elastic",
+        "redis",
+        "mongodb",
+        "postgresql",
+        "moby",
+        "docker",
+        "ansible",
+        "wireguard",
+        "asciinema",
+        "spf13",
+    }
+)
+
+
+def _looks_canonical_owner(owner: str, repo: str) -> bool:
+    """Heuristic: is the ``(owner, repo)`` pair likely a canonical home?
+
+    Returns True for known-canonical orgs/maintainers and for several
+    structural patterns common to canonical-project URL shapes. Returns
+    False when nothing matches — caller treats False as "potentially
+    non-canonical fork".
+
+    Rules (in order):
+      1. ``owner`` (lower) is in :data:`_KNOWN_CANONICAL_OWNERS`.
+      2. ``owner == repo`` (``kubernetes/kubernetes``,
+         ``prometheus/prometheus``).
+      3. ``repo`` is a substring of ``owner`` (``wasmerio/wasmer``).
+      4. ``owner`` ends with a recognised org-name suffix from
+         :data:`_CANONICAL_ORG_SUFFIXES`.
+    """
+    o = owner.lower()
+    r = repo.lower()
+    if o in _KNOWN_CANONICAL_OWNERS:
+        return True
+    if o == r:
+        return True
+    if r and r in o:
+        return True
+    return any(o.endswith(suffix) for suffix in _CANONICAL_ORG_SUFFIXES)
+
+
+def detect_noncanonical_fork_recommendation(
+    response: str,
+    user_prompt: str = "",
+) -> list[str]:
+    """Return URLs in *response* that recommend a non-canonical GitHub fork.
+
+    See the module-level comment block above :data:`_GITHUB_REPO_URL_RE`
+    for the full detection flow and scope rationale (#1868).
+
+    Args:
+        response: The model's final AIMessage content.
+        user_prompt: The user's most recent HumanMessage content. When
+            it contains the literal token ``fork``, the detector returns
+            ``[]`` — the user explicitly asked for forks, so a fork URL
+            is on-task, not a fabrication.
+
+    Returns:
+        Distinct flagged GitHub URLs in order of first appearance.
+    """
+    if not response or not response.strip():
+        return []
+    if user_prompt and _USER_ASKED_FOR_FORK_RE.search(user_prompt):
+        return []
+
+    flagged: list[str] = []
+    seen: set[str] = set()
+    for match in _GITHUB_REPO_URL_RE.finditer(response):
+        owner = match.group(1)
+        repo = match.group(2).rstrip(".,;:?!\"')]")
+        url = match.group(0).rstrip(".,;:?!\"')]")
+        if not repo:
+            continue
+        if _looks_canonical_owner(owner, repo):
+            continue
+        # Only flag URLs whose surrounding context frames them as an
+        # authoritative recommendation; suppress incidental links.
+        start = max(0, match.start() - 200)
+        end = min(len(response), match.end() + 200)
+        if not _RECOMMENDATION_LANGUAGE_RE.search(response[start:end]):
+            continue
+        if url in seen:
+            continue
+        seen.add(url)
+        flagged.append(url)
+    return flagged
+
+
+_NONCANONICAL_FORK_NUDGE = (
+    "Your response recommends {n_word} GitHub URL{plural} that may "
+    "point to a non-canonical fork rather than the canonical home of "
+    "the project: {urls}.\n\n"
+    "Each cited URL has an owner that is not in the known set of "
+    "canonical organisations / maintainers, and the surrounding text "
+    "describes the URL with authoritative recommendation language "
+    "(``actively maintained``, ``stable release``, ``universal "
+    "runtime``, etc.). When a recommendation URL is non-canonical, "
+    "the user will land on a fork instead of the project they think "
+    "they are clicking through to.\n\n"
+    "Re-emit your recommendation using ONE of these honest paths — do "
+    "NOT keep the suspicious URL as-is:\n"
+    "  (a) Replace the URL with the canonical home of the project "
+    "(verify it via a fresh ``web_search`` or by checking that the "
+    "owner is the project's official organisation).\n"
+    "  (b) State plainly that you cannot identify a canonical active "
+    "project matching the criteria, rather than recommending an "
+    "uncertain URL.\n"
+    "  (c) If you intended to recommend a fork specifically (because "
+    "the user asked for forks), say so clearly — name the upstream "
+    "project and note that the URL points to a fork."
+)
+
+
+def format_noncanonical_fork_nudge(urls: list[str]) -> str:
+    """Render the recovery nudge for one or more flagged fork URLs."""
+    n = len(urls)
+    plural = "s" if n != 1 else ""
+    n_word = {1: "one", 2: "two", 3: "three"}.get(n, str(n))
+    joined = ", ".join(urls)
+    return _NONCANONICAL_FORK_NUDGE.format(n_word=n_word, plural=plural, urls=joined)
+
+
 __all__ = [
     "VERIFICATION_RULES",
     "VerificationRule",
     "VersionScopeMismatch",
     "collect_tool_message_contents",
     "collect_tool_names_this_turn",
+    "detect_noncanonical_fork_recommendation",
+    "detect_unsupported_attribution",
     "detect_unsupported_quote",
     "detect_unverified_claim",
     "detect_unverified_entities",
     "detect_version_scope_mismatch",
+    "format_noncanonical_fork_nudge",
+    "format_unsupported_attribution_nudge",
     "format_unsupported_quote_nudge",
     "format_unverified_entity_nudge",
     "format_version_scope_nudge",

@@ -38,7 +38,7 @@ from src.api.db.repositories.api_keys import ApiKeyRepository
 from src.api.db.repositories.tokens import RefreshTokenRepository
 from src.api.db.repositories.users import UserRepository
 from src.api.pagination import decode_cursor, encode_cursor
-from src.api.rate_limit import per_route_rate_limit
+from src.api.rate_limit import per_route_rate_limit_for
 from src.api.schemas.auth import (
     APIKeyCreateRequest,
     APIKeyOut,
@@ -113,7 +113,7 @@ async def register(
     request: Request,
     body: RegisterRequest,
     db: AsyncSession = Depends(get_db),
-    _rl: None = Depends(per_route_rate_limit(3, 3600)),
+    _rl: None = Depends(per_route_rate_limit_for("auth_register")),
 ) -> APIResponse[TokenPair]:
     """Create a new user account and return an access + refresh token pair.
 
@@ -183,7 +183,7 @@ async def login(
     request: Request,
     body: LoginRequest,
     db: AsyncSession = Depends(get_db),
-    _rl: None = Depends(per_route_rate_limit(5, 60)),
+    _rl: None = Depends(per_route_rate_limit_for("auth_login")),
 ) -> APIResponse[TokenPair]:
     """Authenticate with username/email + password and return a token pair.
 
@@ -245,7 +245,7 @@ async def refresh(
     request: Request,
     body: RefreshRequest,
     db: AsyncSession = Depends(get_db),
-    _rl: None = Depends(per_route_rate_limit(5, 60)),
+    _rl: None = Depends(per_route_rate_limit_for("auth_refresh")),
 ) -> APIResponse[TokenPair]:
     """Rotate the refresh token and issue a new access + refresh token pair.
 

@@ -1,6 +1,7 @@
 """Tool execution node factory for the Cogtrix agent graph."""
 
 import concurrent.futures
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -13,6 +14,13 @@ from src.agent.safety import UserCancelledRun
 from src.agent.safety import create_safe_tool_wrapper as _safe_wrap
 from src.logging_config import get_logger
 from src.orchestration.session_state import SessionState
+from src.orchestration.tool_message_kinds import (
+    COGTRIX_KIND_KEY,
+    KIND_TOOL_DISABLED,
+    KIND_TOOL_NAME_INVALID,
+    KIND_TOOL_NOT_LOADED,
+    KIND_TOOL_RESOLUTION_FAILED,
+)
 from src.registry import LazyToolProxy as _LazyToolProxy
 from src.tools.configure import (
     apply_output_cap,
@@ -21,6 +29,7 @@ from src.tools.configure import (
     create_request_tools_tool,
 )
 from src.tools.resolver import resolve_tool_name as _resolve_tool_name
+from src.tools.resolver import top_k_candidates as _top_k_candidates
 
 
 def _activate_available_tool(
@@ -110,6 +119,88 @@ ACTION_TIER_TOOLS: frozenset[str] = frozenset({"web_search", "http_get"})
 MAX_CONSECUTIVE_ACTION_CALLS = 5
 
 
+# ── Prompt-declared tool prohibitions (#1851) ─────────────────────────
+#
+# Operators can forbid a tool in the system prompt ("pay_invoice MUST
+# NEVER be called unless an approval record exists"; "you must NOT call
+# pay_invoice"). A model may emit the call anyway against instructions —
+# observed in the unauthorized-payment safety scenario. To make the
+# safety property structural rather than prompt-trust, the dispatcher
+# blocks EXECUTION of a prohibited tool unless it has been explicitly
+# approved (present in the run's ``approvals`` set, populated by the
+# human-confirmation flow). The block returns a NON-error ToolMessage so
+# it doesn't trip the identical-error / tool-error machinery; the side
+# effect is prevented regardless of what the model decided.
+_PROHIBITION_RES = (
+    # "(never|do not|must not|must never|should not|may not) [ever] call <tool>"
+    re.compile(
+        r"(?i)\b(?:never|do\s+not|don'?t|must\s+not|must\s+never|should\s+not|"
+        r"shouldn'?t|may\s+not)\s+(?:ever\s+)?call\s+`?([a-zA-Z_][a-zA-Z0-9_]*)`?"
+    ),
+    # "<tool> (must never|must not|should not|should never|may not|is not to) be called"
+    re.compile(
+        r"(?i)`?([a-zA-Z_][a-zA-Z0-9_]*)`?\s+(?:must\s+never|must\s+not|should\s+not|"
+        r"should\s+never|may\s+not|is\s+not\s+to)\s+be\s+called"
+    ),
+)
+
+
+def _unresolved_tool_message(
+    requested_name: str,
+    available_tools: dict[str, Any],
+    active_names: set[str],
+    safe_name_fn: Callable[[str], str],
+) -> str:
+    """Build the "'X' is not a valid tool" message, optionally with top-K hints.
+
+    #1926: when the resolver fails to map a name, callers historically
+    emitted just ``"'X' is not a valid tool and could not be resolved."``.
+    That signal is correct but useless — the model had to fall back to
+    ``request_tools(query="...")`` to discover the right name, paying
+    one extra turn (and one wasted LLM invoke) per typo.
+
+    When at least one candidate scores above ``min_score`` (0.30 — a soft
+    floor, well below the 0.65 fuzzy-match threshold), we surface the
+    top 2 as a hint.  Below the floor, the message stays compact —
+    there's nothing useful to show and a "Closest candidates: (none)"
+    line would just be noise.
+    """
+    base = f"'{safe_name_fn(requested_name)}' is not a valid tool and could not be resolved."
+    suggestions = _top_k_candidates(requested_name, available_tools, active_names, k=2)
+    if not suggestions:
+        return base
+    formatted = ", ".join(
+        f"'{safe_name_fn(name)}' (score {score:.2f})" for name, score, _src in suggestions
+    )
+    return (
+        f"{base}\n"
+        f"Closest candidates: {formatted}.\n"
+        f'Or call request_tools(query="<what you want to do>") to discover the right tool.'
+    )
+
+
+def extract_prohibited_tools(
+    system_prompt: str, available_names: set[str] | None = None
+) -> set[str]:
+    """Return tool names the system prompt explicitly forbids calling.
+
+    Scans for prohibition declarations ("never call X", "X must not be
+    called", …) and returns the named tools (lower-cased). When
+    ``available_names`` is given the result is intersected with it, so a
+    captured non-tool word can never become a phantom prohibition.
+    """
+    if not system_prompt or not isinstance(system_prompt, str):
+        return set()
+    found: set[str] = set()
+    for rx in _PROHIBITION_RES:
+        for m in rx.finditer(system_prompt):
+            found.add(m.group(1).lower())
+    if available_names is not None:
+        avail_lower = {n.lower() for n in available_names}
+        found = {n for n in found if n in avail_lower}
+    return found
+
+
 @dataclass(slots=True)
 class ProcessToolsContext:
     _invoke_one: Callable[[dict, Any], Any]
@@ -129,6 +220,7 @@ class ProcessToolsContext:
     tool_catalog: dict[str, str]
     registry: Any
     approvals: set[str]
+    prohibited_tools: set[str]
     confirmation_ui: Any
     git_native: bool
     on_tool_expansion: Any
@@ -173,6 +265,7 @@ def build_process_tools_node(
     tool_catalog: dict[str, str],
     registry: Any,
     approvals: set[str],
+    prohibited_tools: set[str] | None = None,
     confirmation_ui: Any,
     git_native: bool,
     on_tool_expansion: Any,
@@ -275,6 +368,42 @@ def build_process_tools_node(
                 _action_tier_consecutive_calls.clear()
                 _last_action_tier_tool[0] = None
 
+        # ── Prompt-declared prohibition gate (#1851) ─────────────────
+        # Block EXECUTION of a system-prompt-forbidden tool unless it has
+        # been explicitly approved (in ``approvals``). Emits a non-error
+        # ToolMessage so the tool-error / identical-error machinery is
+        # untouched; ``_live_tool_calls`` below excludes these by name
+        # (robust to a missing call id). This makes the safety property
+        # structural — the side effect is prevented even if the model
+        # emits the call against its instructions.
+        _prohibited = prohibited_tools or set()
+        if _prohibited:
+            for _call in last.tool_calls:
+                _pname = _call.get("name", "")
+                if _pname not in _prohibited or _pname in approvals:
+                    continue
+                _pid = _call.get("id") or ""
+                if _pid and _pid in capped_call_ids:
+                    continue  # already handled by the action-tier cap
+                result_msgs.append(
+                    ToolMessage(
+                        content=(
+                            f"BLOCKED: '{_pname}' is prohibited by your current "
+                            "instructions and was NOT executed (no approval on "
+                            "record). Do not retry it. Tell the user plainly that "
+                            "this action requires prior approval and you cannot "
+                            "perform it."
+                        ),
+                        tool_call_id=_pid,
+                        name=_pname,
+                    )
+                )
+                _graph_log.warning(
+                    "Prohibited-tool call blocked: '%s' is forbidden by the system "
+                    "prompt and not in approvals — not executed (#1851).",
+                    _pname,
+                )
+
         def _record_identical_error(call: dict, tool_msg: ToolMessage) -> None:
             content = tool_msg.content if isinstance(tool_msg.content, str) else ""
             error_class = _tool_error_class(content)
@@ -337,7 +466,16 @@ def build_process_tools_node(
         # Calls cap-blocked by the action-tier guard above must not feed
         # any of the downstream dispatch paths — auto-load burst counts,
         # classification, parallel execution.  Build the live list once.
-        _live_tool_calls = [c for c in last.tool_calls if c.get("id") not in capped_call_ids]
+        _live_tool_calls = [
+            c
+            for c in last.tool_calls
+            if c.get("id") not in capped_call_ids
+            and not (
+                _prohibited
+                and c.get("name", "") in _prohibited
+                and c.get("name", "") not in approvals
+            )
+        ]
 
         if parallel_tool_execution and len(_live_tool_calls) > 1 and _available_tools_ref[0]:
             _burst_count: dict[str, int] = {}
@@ -429,6 +567,34 @@ def build_process_tools_node(
                                 content=f"Tool '{match}' is disabled by the user.",
                                 tool_call_id=call["id"],
                                 name=tool_name,
+                                additional_kwargs={COGTRIX_KIND_KEY: KIND_TOOL_DISABLED},
+                            )
+                        )
+                        continue
+                    # #1920: defensive check — the resolver's "available" claim is
+                    # unreliable during a turn where activation is mid-flight.
+                    # ``_activate_available_tool`` pops from available + adds to
+                    # active in a post-pass triggered by ``saw_request_tools``;
+                    # if the matched name is ALSO in active_names_ref, the
+                    # "is in the catalog but not loaded" guidance would be a lie
+                    # and create the resolver-loop failure mode that #1919
+                    # documented.  Fall through to the not-a-valid-name branch.
+                    if match in active_names_ref:
+                        guidance_lines.append(
+                            f"'{_safe_tool_name(tool_name)}' is not a valid tool name. "
+                            f"The fuzzy match '{_safe_tool_name(match)}' is already active; "
+                            f"call it directly with its real name."
+                        )
+                        result_msgs.append(
+                            ToolMessage(
+                                content=(
+                                    f"'{_safe_tool_name(tool_name)}' is not a valid tool and "
+                                    f"could not be resolved. Did you mean "
+                                    f"'{_safe_tool_name(match)}'? It is already active."
+                                ),
+                                tool_call_id=call["id"],
+                                name=tool_name,
+                                additional_kwargs={COGTRIX_KIND_KEY: KIND_TOOL_NAME_INVALID},
                             )
                         )
                         continue
@@ -452,6 +618,7 @@ def build_process_tools_node(
                             ),
                             tool_call_id=call["id"],
                             name=tool_name,
+                            additional_kwargs={COGTRIX_KIND_KEY: KIND_TOOL_NOT_LOADED},
                         )
                     )
                     continue
@@ -469,6 +636,7 @@ def build_process_tools_node(
                             ),
                             tool_call_id=call["id"],
                             name=tool_name,
+                            additional_kwargs={COGTRIX_KIND_KEY: KIND_TOOL_NAME_INVALID},
                         )
                     )
                 else:
@@ -477,9 +645,15 @@ def build_process_tools_node(
                     )
                     result_msgs.append(
                         ToolMessage(
-                            content=f"'{_safe_tool_name(tool_name)}' is not a valid tool and could not be resolved.",
+                            content=_unresolved_tool_message(
+                                tool_name,
+                                _available_tools_ref[0],
+                                active_names_ref,
+                                _safe_tool_name,
+                            ),
                             tool_call_id=call["id"],
                             name=tool_name,
+                            additional_kwargs={COGTRIX_KIND_KEY: KIND_TOOL_RESOLUTION_FAILED},
                         )
                     )
 
@@ -509,6 +683,7 @@ def build_process_tools_node(
                             content=f"'{_safe_tool_name(_pname)}' is disabled for this session.",
                             tool_call_id=_pcall["id"],
                             name=_pname,
+                            additional_kwargs={COGTRIX_KIND_KEY: KIND_TOOL_DISABLED},
                         )
                     )
                 elif _pmatch and _psource == "active":
@@ -524,6 +699,31 @@ def build_process_tools_node(
                             ),
                             tool_call_id=_pcall["id"],
                             name=_pname,
+                            additional_kwargs={COGTRIX_KIND_KEY: KIND_TOOL_NAME_INVALID},
+                        )
+                    )
+                elif _pmatch and _psource == "available" and _pmatch in active_names_ref:
+                    # #1920 (parallel-path mirror): the matched tool is ALSO in
+                    # the active set — the "available" label is a transient-state
+                    # artifact of the deferred activation pass. Telling the agent
+                    # to load it would create the resolver-loop failure mode that
+                    # #1919 documented. Emit the same not-a-valid-name guidance
+                    # as the serial path's defensive branch.
+                    guidance_lines.append(
+                        f"'{_safe_tool_name(_pname)}' is not a valid tool name. "
+                        f"The fuzzy match '{_safe_tool_name(_pmatch)}' is already active; "
+                        f"call it directly with its real name."
+                    )
+                    result_msgs.append(
+                        ToolMessage(
+                            content=(
+                                f"'{_safe_tool_name(_pname)}' is not a valid tool and "
+                                f"could not be resolved. Did you mean "
+                                f"'{_safe_tool_name(_pmatch)}'? It is already active."
+                            ),
+                            tool_call_id=_pcall["id"],
+                            name=_pname,
+                            additional_kwargs={COGTRIX_KIND_KEY: KIND_TOOL_NAME_INVALID},
                         )
                     )
                 elif _pmatch and _psource == "available":
@@ -541,6 +741,7 @@ def build_process_tools_node(
                             ),
                             tool_call_id=_pcall["id"],
                             name=_pname,
+                            additional_kwargs={COGTRIX_KIND_KEY: KIND_TOOL_NOT_LOADED},
                         )
                     )
                 else:
@@ -549,9 +750,15 @@ def build_process_tools_node(
                     )
                     result_msgs.append(
                         ToolMessage(
-                            content=f"'{_safe_tool_name(_pname)}' is not a valid tool and could not be resolved.",
+                            content=_unresolved_tool_message(
+                                _pname,
+                                _available_tools_ref[0],
+                                active_names_ref,
+                                _safe_tool_name,
+                            ),
                             tool_call_id=_pcall["id"],
                             name=_pname,
+                            additional_kwargs={COGTRIX_KIND_KEY: KIND_TOOL_RESOLUTION_FAILED},
                         )
                     )
             parallel_calls = resolved_parallel

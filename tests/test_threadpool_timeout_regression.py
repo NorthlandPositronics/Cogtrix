@@ -20,17 +20,41 @@ class TestCogtrixPromptPrepTimeout:
     """The two prompt-prep paths in cogtrix.py must not block on hung threads."""
 
     def test_explicit_pool_not_context_manager(self):
-        """Verify cogtrix.py uses explicit pool = ThreadPoolExecutor (not `with`)."""
+        """Verify cogtrix.py uses a safe timeout pattern, not the
+        ``with _cf.ThreadPoolExecutor(...) as pool:`` footgun.
+
+        Two safe shapes are accepted:
+
+        1. **Legacy explicit-pool pattern** — ``_pool = _cf.ThreadPoolExecutor``
+           + ``_pool.shutdown(wait=False)`` + both ``_ctx_future`` /
+           ``_opt_future`` named-future timeouts on the prompt-prep paths.
+           This is the original fix for #1158.
+        2. **Migrated to centralized helper** — ``from src.concurrency
+           import invoke_with_timeout`` (#1677 / PR #1904). The helper
+           encapsulates the safe shutdown pattern in one place.
+
+        The buggy ``with _cf.ThreadPoolExecutor(...) as pool:`` shape MUST
+        never appear regardless of which pattern is in use.
+        """
         import cogtrix
 
         source = Path(cogtrix.__file__).read_text()
-        # The old buggy pattern:
+        # The actual footgun pattern must NEVER appear in this file.
         assert "with _cf.ThreadPoolExecutor" not in source
-        # The new fixed pattern:
-        assert "_pool = _cf.ThreadPoolExecutor" in source
-        assert "_pool.shutdown(wait=False)" in source
-        assert "_ctx_future.result(timeout=60)" in source
-        assert "_opt_future.result(timeout=60)" in source
+        # One of the two safe shapes must be present.
+        uses_legacy_explicit_pool = (
+            "_pool = _cf.ThreadPoolExecutor" in source
+            and "_pool.shutdown(wait=False)" in source
+            and "_ctx_future.result(timeout=60)" in source
+            and "_opt_future.result(timeout=60)" in source
+        )
+        uses_centralized_helper = "from src.concurrency import invoke_with_timeout" in source
+        assert uses_legacy_explicit_pool or uses_centralized_helper, (
+            "cogtrix.py must use either the legacy explicit-pool + "
+            "shutdown(wait=False) pattern with named-future timeouts on "
+            "both prompt-prep paths OR the centralized "
+            "src.concurrency.invoke_with_timeout helper (#1677)"
+        )
 
 
 # ── service.py _init_channels ────────────────────────────────────────────────
@@ -315,12 +339,40 @@ class TestSetupWizardTimeout:
     """setup_wizard must not block on hung LLM calls — fail-open with clear exit."""
 
     def test_explicit_pool_not_context_manager(self):
-        """Verify setup_wizard.py uses explicit pool = ThreadPoolExecutor (not `with`)."""
+        """Verify setup_wizard.py uses a safe timeout pattern, not the
+        ``with ThreadPoolExecutor as pool:`` footgun.
+
+        Two safe shapes are accepted:
+
+        1. **Legacy explicit-pool pattern** — ``pool =
+           concurrent.futures.ThreadPoolExecutor(...)`` followed by
+           ``pool.shutdown(wait=False)``.  This was the original fix for
+           #1158.
+        2. **Migrated to centralized helper** — ``from src.concurrency
+           import invoke_with_timeout`` (#1677 / PR #1904).  The helper
+           encapsulates the safe shutdown pattern in one place.
+
+        The buggy ``with concurrent.futures.ThreadPoolExecutor(...) as
+        pool:`` shape MUST never appear regardless of which pattern is
+        in use.
+        """
         import src.setup_wizard as sw
 
         source = Path(sw.__file__).read_text()
-        assert "pool = concurrent.futures.ThreadPoolExecutor" in source
-        assert "pool.shutdown(wait=False)" in source
+        # The actual footgun: ``with ThreadPoolExecutor(...) as pool:``
+        # calls ``shutdown(wait=True)`` on exit and blocks on hung threads.
+        assert "with concurrent.futures.ThreadPoolExecutor" not in source
+        # One of the two safe shapes must be present.
+        uses_legacy_explicit_pool = (
+            "pool = concurrent.futures.ThreadPoolExecutor" in source
+            and "pool.shutdown(wait=False)" in source
+        )
+        uses_centralized_helper = "from src.concurrency import invoke_with_timeout" in source
+        assert uses_legacy_explicit_pool or uses_centralized_helper, (
+            "setup_wizard.py must use either the legacy explicit-pool + "
+            "shutdown(wait=False) pattern OR the centralized "
+            "src.concurrency.invoke_with_timeout helper (#1677)"
+        )
 
     @pytest.mark.timeout(10)
     def test_test_connection_timeout_returns_none(self):
@@ -370,37 +422,66 @@ class TestDelegateFallbackTimeout:
     """The fallback llm.invoke() in _execute_single_task must not block on hung threads."""
 
     def test_explicit_pool_not_context_manager(self):
-        """Verify delegate.py uses explicit pool = ThreadPoolExecutor (not `with`)."""
+        """Verify delegate.py's _execute_single_task fallback block uses a
+        safe timeout pattern, not the ``with ThreadPoolExecutor(...) as
+        pool:`` footgun.
+
+        Two safe shapes are accepted inside the fallback block:
+
+        1. **Legacy explicit-pool pattern** — ``executor =
+           ThreadPoolExecutor(max_workers=1)`` + ``future =
+           executor.submit(llm.invoke, ...)``. This is the original fix
+           for #1158.
+        2. **Migrated to centralized helper** — ``invoke_with_timeout(...)``
+           call in the block, with ``from src.concurrency import
+           invoke_with_timeout`` imported at module top (#1677 / PR #1904).
+
+        The buggy ``with ThreadPoolExecutor(...) as <var>:`` shape MUST
+        never appear in the fallback block regardless of which pattern
+        is in use — that's the actual footgun this test guards.
+        """
+        import re
+
         import src.tools.delegate as delegate_mod
 
         source = Path(delegate_mod.__file__).read_text()
-        # The new fixed pattern must be present globally:
-        assert "executor = ThreadPoolExecutor(max_workers=1)" in source
-        assert "executor.shutdown(wait=False)" in source
-        assert "FuturesTimeoutError" in source
-        # The fallback block must use the executor pattern for llm.invoke():
-        # Locate the specific fallback block (in _execute_single_task, not the public wrapper)
+        # Locate the specific fallback block (in _execute_single_task,
+        # not the public wrapper).  The marker persists across migrations.
         fallback_marker = "# ── Fallback: plain LLM call"
         assert fallback_marker in source
-        # Check that within ~80 lines after the fallback marker, the executor pattern is used
-        # and NOT the buggy `with ThreadPoolExecutor(...) as pool:` actual usage.
-        # The phrase appears in explanatory comments (backtick-quoted), so we must
-        # skip comment lines before checking for actual code usage.
         marker_pos = source.find(fallback_marker)
         fallback_block = source[marker_pos : marker_pos + 5000]
-        assert "future = executor.submit(llm.invoke" in fallback_block
-        # Check all non-comment lines for the actual buggy context-manager pattern
-        import re
 
+        # The actual footgun pattern MUST NEVER appear in the fallback
+        # block.  The phrase may appear in explanatory comments (backtick-
+        # quoted), so skip comment lines before checking for actual code
+        # usage.
         buggy_pattern = re.compile(r"with\s+ThreadPoolExecutor\([^)]+\)\s+as\s+\w+:")
         for line in fallback_block.splitlines():
             stripped = line.lstrip()
             if stripped.startswith("#"):
-                continue  # skip comment lines (they may quote the anti-pattern)
+                continue
             if buggy_pattern.search(line):
                 pytest.fail(
-                    f"Buggy `with ThreadPoolExecutor(...) as pool:` found in fallback block: {line!r}"
+                    "Buggy `with ThreadPoolExecutor(...) as pool:` found in "
+                    f"fallback block: {line!r}"
                 )
+
+        # The fallback block must use one of the two safe shapes.
+        uses_legacy_fallback = (
+            "executor = ThreadPoolExecutor(max_workers=1)" in fallback_block
+            and "future = executor.submit(llm.invoke" in fallback_block
+            and "executor.shutdown(wait=False)" in source
+        )
+        uses_centralized_fallback = (
+            "invoke_with_timeout(" in fallback_block
+            and "from src.concurrency import invoke_with_timeout" in source
+        )
+        assert uses_legacy_fallback or uses_centralized_fallback, (
+            "delegate.py fallback block must use either the legacy "
+            "explicit-pool + shutdown(wait=False) pattern OR the centralized "
+            "src.concurrency.invoke_with_timeout helper (#1677)"
+        )
 
     @pytest.mark.timeout(10)
     def test_hung_llm_fallback_returns_failure_not_hang(self):
@@ -450,7 +531,19 @@ class TestDelegateFallbackTimeout:
                     assert result.success is False
                     assert result.response == ""
                     assert result.error is not None
-                    assert "timed out" in result.error.lower() or "hung" in result.error.lower()
+                    # Three error shapes are accepted:
+                    #   1. "hung" — worker raised FuturesTimeoutError("hung") before the
+                    #      wall-clock timer fired (legacy explicit-pool path).
+                    #   2. "timed out" — generic timeout phrasing if the executor's own
+                    #      TimeoutError surfaces with no message (legacy edge case).
+                    #   3. "did not return within Ns" — normalized message produced by
+                    #      src.concurrency.invoke_with_timeout after #1903 migration.
+                    err_lower = result.error.lower()
+                    assert (
+                        "hung" in err_lower
+                        or "timed out" in err_lower
+                        or "did not return" in err_lower
+                    ), f"Unexpected delegate timeout error: {result.error!r}"
 
     @pytest.mark.timeout(10)
     def test_successful_llm_fallback_returns_response(self):

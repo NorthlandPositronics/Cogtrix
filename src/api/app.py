@@ -42,7 +42,14 @@ from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 
-from src.api.rate_limit import configure_trusted_proxy_cidrs, limiter, reset_rate_limits
+from src.api.rate_limit import (
+    configure_rate_limit_backend,
+    configure_rate_limits,
+    configure_trusted_proxy_cidrs,
+    current_backend_label,
+    limiter,
+    reset_rate_limits,
+)
 from src.api.routes import (
     admin,
     agents,
@@ -238,8 +245,93 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     # signal (forge audit B5, second-order to H3).
     configure_dummy_password_hash()
 
+    # ── Rate-limit + trusted-proxy config (#1879 Slice A) ──────────────
+    # Precedence: env var > .cogtrix.yaml > built-in default. We tolerate
+    # a missing/unreadable config file (matches the pre-#1879 behaviour
+    # where the limit was hardcoded and the only knob was the env var) —
+    # but a malformed ``api:`` block surfaces cleanly as a startup error
+    # via ``ConfigError`` / ``ValueError`` rather than a 500 on the
+    # first request.
     try:
-        configure_trusted_proxy_cidrs(os.environ.get("COGTRIX_TRUSTED_PROXY_CIDRS"))
+        from src.config import APIConfig as _APIConfig
+        from src.config import load_config as _load_config
+
+        try:
+            _app_cfg_api = _load_config().api
+        except Exception as _cfg_exc:  # noqa: BLE001
+            log.info(
+                "API rate-limit / trusted-proxy config falling back to "
+                "built-in defaults (could not load .cogtrix.yaml: %s)",
+                _cfg_exc,
+            )
+            _app_cfg_api = _APIConfig()
+
+        _rate_limits_cfg = dict(_app_cfg_api.rate_limits)
+        for _name in list(_rate_limits_cfg):
+            _env_val = os.environ.get(f"COGTRIX_RATE_LIMIT_{_name.upper()}")
+            if _env_val:
+                _rate_limits_cfg[_name] = _env_val
+        _default_spec = _rate_limits_cfg.pop(
+            "default",
+            os.environ.get("COGTRIX_RATE_LIMIT_DEFAULT", "120/minute"),
+        )
+        configure_rate_limits(default=_default_spec, per_route=_rate_limits_cfg)
+
+        # Trusted-proxy CIDRs: env-var wins; YAML next; empty otherwise.
+        _trusted_env = os.environ.get("COGTRIX_TRUSTED_PROXY_CIDRS")
+        if _trusted_env is not None:
+            configure_trusted_proxy_cidrs(_trusted_env)
+        elif _app_cfg_api.trusted_proxy_cidrs:
+            configure_trusted_proxy_cidrs(_app_cfg_api.trusted_proxy_cidrs)
+        else:
+            configure_trusted_proxy_cidrs(None)
+
+        # ── Rate-limit storage backend (#1879 Slice B) ─────────────
+        # COGTRIX_REDIS_URL > api.redis_url (YAML) > None (in-memory).
+        # When unset, the per-process MemoryStorage default is used —
+        # correct for single-node deployments but jitters under
+        # horizontal scaling; we log the chosen backend so operators
+        # can see what they got at startup.
+        _redis_env = os.environ.get("COGTRIX_REDIS_URL")
+        if _redis_env is not None and _redis_env.strip():
+            _redis_url = _redis_env.strip()
+        else:
+            _redis_url = (_app_cfg_api.redis_url or "").strip() or None
+        try:
+            configure_rate_limit_backend(redis_url=_redis_url)
+        except ImportError as exc:
+            # ``limits.storage_from_string('redis://...')`` lazy-imports
+            # the ``redis`` package. Operators who set a Redis URL
+            # without installing ``cogtrix[redis]`` get a clear error
+            # at startup rather than a 500 on the first request.
+            raise RuntimeError(
+                f"COGTRIX_REDIS_URL / api.redis_url is set but the 'redis' "
+                f"package is not installed. Install with: "
+                f"pip install cogtrix[api,redis]  (original error: {exc})"
+            ) from exc
+        if _redis_url is None:
+            log.info(
+                "Rate-limit backend: in-memory (per-process). "
+                "Set COGTRIX_REDIS_URL or api.redis_url for multi-replica "
+                "deployments."
+            )
+        else:
+            log.info(
+                "Rate-limit backend: shared counter at %s",
+                current_backend_label(),
+            )
+
+        # #1879 follow-up: ``configure_rate_limit_backend`` also rebuilt
+        # the module-level SlowAPI ``limiter`` with the same backend so
+        # the global 120/min blunt guard shares state across replicas.
+        # ``SlowAPIMiddleware.dispatch`` reads ``app.state.limiter`` on
+        # every request, so reassigning here lets the rebuilt limiter
+        # take effect on the next inbound request — no middleware
+        # recreation required. Access via module attribute so we pick
+        # up the rebuilt instance, not the one imported at module load.
+        from src.api import rate_limit as _rl_module
+
+        app.state.limiter = _rl_module.limiter
     except ValueError as exc:
         raise RuntimeError(str(exc)) from exc
 

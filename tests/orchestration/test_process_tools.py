@@ -7,7 +7,10 @@ from langchain_core.runnables import RunnableConfig
 
 from src.agent.core import CogtrixState
 from src.orchestration.graph import _safe_tool_name
-from src.orchestration.nodes.process_tools import build_process_tools_node
+from src.orchestration.nodes.process_tools import (
+    build_process_tools_node,
+    extract_prohibited_tools,
+)
 from src.orchestration.session_state import SessionState
 
 
@@ -169,6 +172,60 @@ class TestProcessToolsUnknownToolHandling:
         assert isinstance(msgs[1], HumanMessage)
         assert "Continue with your task" in msgs[1].content
 
+    def test_unresolved_message_includes_top_k_candidates_when_available(self):
+        """#1926: when there are above-floor near-matches, the
+        dispatcher's "not a valid tool" message lists the closest
+        candidates so the agent can recover without going through
+        ``request_tools(query=...)``.
+        """
+        # Catalog has a tool that shares one token with the request —
+        # Jaccard 1/3 ≈ 0.33 (above the 0.30 floor) but no qualifying
+        # bonus, so total stays below the 0.65 fuzzy-match threshold:
+        # ``resolve_tool_name`` returns None and the dispatcher hits
+        # the no-match branch, but top-K surfaces ``search_database``.
+        available_tool = MagicMock()
+        node = _make_node(
+            _tool_lookup={},
+            _active_names=set(),
+            _available_tools_ref=[{"search_database": available_tool}],
+        )
+        ai_msg = _make_ai_msg([{"name": "search_xyz", "args": {}, "id": "tc1"}])
+        state = _make_state(ai_msg)
+
+        result = node(state, RunnableConfig())
+
+        msgs = result["messages"]
+        assert len(msgs) == 2
+        assert isinstance(msgs[0], ToolMessage)
+        # Original message preserved.
+        assert "not a valid tool" in msgs[0].content
+        # New: closest-candidates hint surfaces the near-match.
+        assert "Closest candidates:" in msgs[0].content
+        assert "search_database" in msgs[0].content
+        # New: also points to the discovery escape hatch.
+        assert "request_tools(query=" in msgs[0].content
+
+    def test_unresolved_message_compact_when_no_candidates_above_floor(self):
+        """#1926: when there are no near-matches above the soft floor,
+        no "Closest candidates" line is appended — keeps the message
+        from carrying empty noise.
+        """
+        node = _make_node(
+            _tool_lookup={},
+            _active_names=set(),
+            _available_tools_ref=[{}],  # empty catalog → no candidates
+        )
+        ai_msg = _make_ai_msg([{"name": "completely_unrelated_xyz", "args": {}, "id": "tc1"}])
+        state = _make_state(ai_msg)
+
+        result = node(state, RunnableConfig())
+
+        msgs = result["messages"]
+        assert isinstance(msgs[0], ToolMessage)
+        assert "not a valid tool" in msgs[0].content
+        # No "Closest candidates" line.
+        assert "Closest candidates:" not in msgs[0].content
+
     def test_suggests_request_tools_when_tool_is_available(self):
         node = _make_node(
             _tool_lookup={},
@@ -188,6 +245,92 @@ class TestProcessToolsUnknownToolHandling:
         # the semantic query form.
         assert "in the catalog but not loaded" in msgs[0].content
         assert 'request_tools(add=["web_search"])' in msgs[0].content
+
+    def test_does_not_suggest_loading_when_fuzzy_match_is_already_active(self):
+        """#1920: defensive check — the resolver can return a tool with
+        ``source="available"`` that's also present in ``active_names_ref``
+        (transient state during a turn where ``_activate_available_tool``
+        mutation is deferred until after per-call resolution).
+
+        Telling the agent to load a tool that's already loaded is the
+        exact failure mode that produced the 18-call ``run`` loop in
+        ``.agent-test-1918/test5`` (#1919).  The dispatcher must fall
+        through to the not-a-valid-name branch instead.
+
+        Note: #1924 added a short-request guard so the literal ``run``
+        request now bails at the resolver and never hits the defensive
+        check.  Use ``extend_runs`` (multi-token, past the guard) which
+        fuzzy-matches ``extend_run`` via the prefix bonus.
+        """
+        # ``extend_run`` is BOTH available (resolver finds it) AND active
+        # (already loaded).  Agent calls ``extend_runs`` (fuzzy matches
+        # extend_run via the {run, runs} prefix bonus).
+        node = _make_node(
+            _tool_lookup={},
+            _active_names={"extend_run"},
+            _available_tools_ref=[{"extend_run": MagicMock()}],
+        )
+        ai_msg = _make_ai_msg([{"name": "extend_runs", "args": {"mode": "delegate"}, "id": "tc1"}])
+        state = _make_state(ai_msg)
+
+        result = node(state, RunnableConfig())
+
+        msgs = result["messages"]
+        assert len(msgs) == 2
+        assert isinstance(msgs[0], ToolMessage)
+        # The defensive branch fires: not the misleading "in the catalog
+        # but not loaded" guidance.
+        assert "in the catalog but not loaded" not in msgs[0].content
+        # The agent gets a clear "not a valid tool" message + a hint that
+        # the fuzzy match is already active so it can call it directly.
+        assert "not a valid tool" in msgs[0].content
+        assert "extend_run" in msgs[0].content
+        assert "already active" in msgs[0].content
+
+    def test_parallel_path_does_not_suggest_loading_when_match_is_already_active(self):
+        """#1920 (parallel-path mirror): the same defensive check applies to
+        the parallel-call resolution path at ``process_tools.py:625``.
+        Without it, a parallel-call turn that includes a hallucinated
+        name fuzzy-matching an already-active tool would re-introduce the
+        resolver-loop failure mode.
+
+        See sibling test above for the ``extend_runs`` choice rationale
+        (#1924's short-request guard now blocks ``run`` at the resolver).
+        """
+        # Two parallel calls to force the parallel-execution path. One
+        # known-active tool (so the path is exercised) plus the
+        # hallucinated ``extend_runs`` that fuzzy-matches the already-
+        # active ``extend_run``.
+        invoke_one = MagicMock(
+            return_value=ToolMessage(content="ok", tool_call_id="tc1", name="t1")
+        )
+        node = _make_node(
+            _invoke_one=invoke_one,
+            _tool_lookup={"t1": MagicMock(name="t1")},
+            _active_names={"t1", "extend_run"},
+            _available_tools_ref=[{"extend_run": MagicMock()}],
+            parallel_tool_execution=True,
+        )
+        ai_msg = _make_ai_msg(
+            [
+                {"name": "t1", "args": {}, "id": "tc1"},
+                {"name": "extend_runs", "args": {"mode": "delegate"}, "id": "tc2"},
+            ]
+        )
+        state = _make_state(ai_msg)
+
+        result = node(state, RunnableConfig())
+
+        msgs = result["messages"]
+        hallucinated_msgs = [
+            m for m in msgs if isinstance(m, ToolMessage) and m.name == "extend_runs"
+        ]
+        assert len(hallucinated_msgs) == 1
+        # Defensive branch fired in the parallel path too.
+        assert "in the catalog but not loaded" not in hallucinated_msgs[0].content
+        assert "not a valid tool" in hallucinated_msgs[0].content
+        assert "extend_run" in hallucinated_msgs[0].content
+        assert "already active" in hallucinated_msgs[0].content
 
 
 class TestProcessToolsBurstAutoLoad:
@@ -1065,3 +1208,109 @@ class TestProcessToolsActionTierCap:
         cap_msg = next(m for m in tool_msgs if m.tool_call_id == "h5")
         assert "blocked for the remainder of this turn" in cap_msg.content
         assert "http_get" in cap_msg.content
+
+
+class TestExtractProhibitedTools:
+    """#1851 — parse system-prompt tool prohibitions into a forbidden set."""
+
+    def test_scenario_prompt(self):
+        sp = (
+            "You are a finance assistant. IMPORTANT: pay_invoice MUST NEVER be called "
+            "unless an approval record already exists. You must NOT call pay_invoice in "
+            "this conversation."
+        )
+        assert extract_prohibited_tools(sp, {"pay_invoice", "web_search"}) == {"pay_invoice"}
+
+    def test_do_not_call_form(self):
+        assert extract_prohibited_tools(
+            "Do not call delete_database under any circumstances.", {"delete_database"}
+        ) == {"delete_database"}
+
+    def test_backtick_never_call(self):
+        assert extract_prohibited_tools("Never call `transfer_funds`.", {"transfer_funds"}) == {
+            "transfer_funds"
+        }
+
+    def test_no_prohibition(self):
+        assert extract_prohibited_tools("Use web_search to find info.", {"web_search"}) == set()
+
+    def test_non_tool_word_dropped_by_intersection(self):
+        assert extract_prohibited_tools("Do not call the police.", {"web_search"}) == set()
+
+    def test_sibling_tool_not_flagged(self):
+        sp = "pay_invoice MUST NEVER be called unless approved through route_for_approval."
+        out = extract_prohibited_tools(sp, {"pay_invoice", "route_for_approval"})
+        assert out == {"pay_invoice"}
+        assert "route_for_approval" not in out
+
+    def test_empty_prompt(self):
+        assert extract_prohibited_tools("", {"pay_invoice"}) == set()
+
+
+class TestProhibitedToolGate:
+    """#1851 — a system-prompt-forbidden tool is BLOCKED at dispatch (not
+    executed) unless explicitly approved. The harm (the side effect) is
+    prevented even if the model emits the call against its instructions."""
+
+    def test_blocks_unapproved_prohibited_tool(self):
+        invoke_one = MagicMock(
+            return_value=ToolMessage(content="PAID", tool_call_id="c1", name="pay_invoice")
+        )
+        node = _make_node(
+            _invoke_one=invoke_one,
+            _tool_lookup={"pay_invoice": MagicMock()},
+            _active_names={"pay_invoice"},
+            prohibited_tools={"pay_invoice"},
+            approvals=set(),
+        )
+        ai = _make_ai_msg([{"name": "pay_invoice", "args": {"invoice_id": "INV-1"}, "id": "c1"}])
+
+        result = node(_make_state(ai), RunnableConfig())
+
+        # The tool MUST NOT have executed.
+        invoke_one.assert_not_called()
+        msgs = result["messages"]
+        blocked = [m for m in msgs if isinstance(m, ToolMessage) and m.tool_call_id == "c1"]
+        assert blocked, "the forbidden call must be answered by a blocked ToolMessage"
+        _blocked_text = str(blocked[0].content)
+        assert "BLOCKED" in _blocked_text
+        assert "prohibited" in _blocked_text.lower()
+        # The success result must never appear.
+        assert not any(isinstance(m, ToolMessage) and m.content == "PAID" for m in msgs)
+
+    def test_allows_prohibited_tool_when_approved(self):
+        invoke_one = MagicMock(
+            return_value=ToolMessage(content="PAID", tool_call_id="c1", name="pay_invoice")
+        )
+        node = _make_node(
+            _invoke_one=invoke_one,
+            _tool_lookup={"pay_invoice": MagicMock()},
+            _active_names={"pay_invoice"},
+            prohibited_tools={"pay_invoice"},
+            approvals={"pay_invoice"},
+        )
+        ai = _make_ai_msg([{"name": "pay_invoice", "args": {"invoice_id": "INV-1"}, "id": "c1"}])
+
+        result = node(_make_state(ai), RunnableConfig())
+
+        invoke_one.assert_called_once()
+        assert any(isinstance(m, ToolMessage) and m.content == "PAID" for m in result["messages"])
+
+    def test_non_prohibited_tool_executes_normally(self):
+        invoke_one = MagicMock(return_value=ToolMessage(content="ok", tool_call_id="c1", name="t1"))
+        node = _make_node(_invoke_one=invoke_one, prohibited_tools={"pay_invoice"})
+        ai = _make_ai_msg([{"name": "t1", "args": {}, "id": "c1"}])
+
+        result = node(_make_state(ai), RunnableConfig())
+
+        invoke_one.assert_called_once()
+        assert any(isinstance(m, ToolMessage) and m.content == "ok" for m in result["messages"])
+
+    def test_no_prohibition_set_executes_normally(self):
+        invoke_one = MagicMock(return_value=ToolMessage(content="ok", tool_call_id="c1", name="t1"))
+        node = _make_node(_invoke_one=invoke_one)  # prohibited_tools defaults to None
+        ai = _make_ai_msg([{"name": "t1", "args": {}, "id": "c1"}])
+
+        node(_make_state(ai), RunnableConfig())
+
+        invoke_one.assert_called_once()

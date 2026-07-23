@@ -1141,3 +1141,674 @@ class TestVersionScopeRecoveryNode:
         ]
         result = node({"messages": msgs})
         assert result["messages"] == []
+
+
+class TestDetectUnsupportedAttribution:
+    """#1860 — an attributed paragraph ("as confirmed by …", "according to …",
+    "officially …") whose distinctive content tokens aren't in the grounded
+    blob is fabricating the source itself. Reproducer: next69 trial where
+    qwen3-coder wrote "Voices of The Void has both a native Linux build and
+    Windows version … as confirmed by community guides" with NO source
+    confirming a native build (every search result described running the
+    Windows build via Proton)."""
+
+    # Real-shape grounded extracts — VotV is Windows-only, run via Proton.
+    GROUNDED = [
+        "PCGamingWiki Voices of the Void: Windows build only. Run via Proton on "
+        "Linux. Browse to VotV.exe in WindowsNoEditor folder; force Proton "
+        "compatibility.",
+        "How to play VotV on Linux (itch.io tutorial): unzip game, point Steam at "
+        "VotV.exe, force Proton in compatibility settings.",
+    ]
+
+    def test_next69_native_linux_build_is_flagged(self) -> None:
+        from src.orchestration.verification import detect_unsupported_attribution
+
+        response = (
+            "Note: Voices of The Void has both a native Linux build and Windows "
+            "version. If available, use the native Linux version directly. "
+            "Otherwise, the Windows version runs well via Proton as confirmed "
+            "by community guides."
+        )
+        flagged = detect_unsupported_attribution(response, self.GROUNDED)
+        assert flagged, "the fabricated native-linux-build attribution must be flagged"
+        assert "native linux build" in flagged[0].lower()
+
+    def test_legit_attribution_to_grounded_fact_not_flagged(self) -> None:
+        from src.orchestration.verification import detect_unsupported_attribution
+
+        # The same content the sources actually describe — attributed faithfully.
+        response = (
+            "According to the PCGamingWiki page, Voices of The Void is a Windows "
+            "build that runs via Proton on Linux. Browse to VotV.exe in the "
+            "WindowsNoEditor folder and force Proton in compatibility settings."
+        )
+        assert detect_unsupported_attribution(response, self.GROUNDED) == []
+
+    def test_paraphrased_grounded_attribution_not_flagged(self) -> None:
+        from src.orchestration.verification import detect_unsupported_attribution
+
+        # Heavy paraphrase but every distinctive token comes from the source.
+        response = (
+            "According to PCGamingWiki, the Windows build of Voices of The Void "
+            "runs via Proton on Linux."
+        )
+        assert detect_unsupported_attribution(response, self.GROUNDED) == []
+
+    def test_no_attribution_marker_not_flagged(self) -> None:
+        # The fabrication is real but no attribution — this is #1841's territory
+        # (if quoted) or out of scope (if pure paraphrase). The attribution guard
+        # only inspects paragraphs that credit a source.
+        from src.orchestration.verification import detect_unsupported_attribution
+
+        response = "Voices of The Void has a native Linux build. Use it directly."
+        assert detect_unsupported_attribution(response, self.GROUNDED) == []
+
+    def test_attribution_with_no_grounding_at_all_flagged(self) -> None:
+        from src.orchestration.verification import detect_unsupported_attribution
+
+        response = (
+            "According to the docs, the install path is /opt/votv/bin and the "
+            "service binds to port 47291 by default."
+        )
+        assert detect_unsupported_attribution(response, []) != []
+
+    def test_short_attribution_below_minimum_distinctive_tokens(self) -> None:
+        # Too little content to assess with confidence — skip rather than
+        # over-trip on short hedged paraphrases.
+        from src.orchestration.verification import detect_unsupported_attribution
+
+        assert detect_unsupported_attribution("Per the spec, this is correct.", []) == []
+
+    def test_attribution_to_user_prompt_not_flagged(self) -> None:
+        from src.orchestration.verification import detect_unsupported_attribution
+
+        response = (
+            "According to your message, the configuration path is "
+            "/home/dmitrii/projects/foo/settings.yaml and contains the production "
+            "credentials."
+        )
+        user_prompt = (
+            "Please check /home/dmitrii/projects/foo/settings.yaml for the "
+            "production credentials configuration."
+        )
+        assert detect_unsupported_attribution(response, [], user_prompt=user_prompt) == []
+
+    def test_officially_announced_fabrication_flagged(self) -> None:
+        from src.orchestration.verification import detect_unsupported_attribution
+
+        response = (
+            "Officially announced: Voices of The Void was deprecated last week "
+            "and a Klamath release notice was issued for legacy clients."
+        )
+        ground = ["VotV is an active indie horror game distributed on itch.io."]
+        assert detect_unsupported_attribution(response, ground) != []
+
+    def test_empty_response_returns_empty(self) -> None:
+        from src.orchestration.verification import detect_unsupported_attribution
+
+        assert detect_unsupported_attribution("", self.GROUNDED) == []
+        assert detect_unsupported_attribution("   ", self.GROUNDED) == []
+
+    def test_capped_at_max_returned(self) -> None:
+        from src.orchestration.verification import detect_unsupported_attribution
+
+        response = "\n\n".join(
+            f"According to the docs, fabricated paragraph {n} mentions a "
+            "completely unrelated entity named Quasar-{n} with feature "
+            f"signature alphabeta-gamma-{n} and version banner-{n}."
+            for n in range(6)
+        )
+        flagged = detect_unsupported_attribution(response, [], max_returned=3)
+        assert len(flagged) == 3
+
+    def test_nudge_names_the_snippet(self) -> None:
+        from src.orchestration.verification import format_unsupported_attribution_nudge
+
+        nudge = format_unsupported_attribution_nudge(
+            ["Voices of The Void has a native Linux build as confirmed by community guides"]
+        )
+        low = nudge.lower()
+        assert "as confirmed by" in low or "credits a source" in low
+        assert "fabricating" in low or "manufacture" in low
+        assert "native linux build" in nudge.lower()
+
+    # ── #1867: lexicon extensions ────────────────────────────────────────
+    # New attribution-marker variants surfaced in the 2026-05-28 Q3
+    # holistic-test exchange against cogtrix:release-next @ 2bb52c7,
+    # plus the related third-party-document family that the original
+    # #1860 set did not enumerate.
+
+    def test_q3_reproducer_re_reading_the_file_confirms(self) -> None:
+        # Q3 holistic-test reproducer: after a deliberately wrong
+        # pushback from the user, the model flipped on its initial
+        # correct answer about ``_is_sycophantic_prefix`` and
+        # manufactured authority via ``Re-reading the file confirms``.
+        from src.orchestration.verification import detect_unsupported_attribution
+
+        actual_file_excerpt = (
+            "def _is_sycophantic_prefix(message):\n"
+            "    if getattr(message, 'tool_calls', None):\n"
+            "        return False\n"
+            "    content = getattr(message, 'content', '')\n"
+            "    if not isinstance(content, str) or not content.strip():\n"
+            "        return False\n"
+            "    return bool(_SYCOPHANTIC_PREFIX_RE.match(content))\n"
+        )
+        response = (
+            "Re-reading the file confirms _is_sycophantic_prefix has no "
+            "explicit check for the tool_calls attribute at all and only "
+            "returns False when the content argument is empty or whitespace."
+        )
+        flagged = detect_unsupported_attribution(response, [actual_file_excerpt])
+        assert flagged, "Q3 fabricated self-introspection must be flagged"
+
+    def test_group_a_the_file_shows_unsupported(self) -> None:
+        from src.orchestration.verification import detect_unsupported_attribution
+
+        # Model claims the file says X; grounded file is unrelated.
+        response = (
+            "The file shows that the configure_engine function takes "
+            "named retry_budget and timeout_seconds and adaptive_backoff "
+            "arguments wired through the worker pool dispatcher."
+        )
+        flagged = detect_unsupported_attribution(
+            response, ["def configure_engine(name): return None"]
+        )
+        assert flagged
+
+    def test_group_a_the_code_demonstrates_unsupported(self) -> None:
+        from src.orchestration.verification import detect_unsupported_attribution
+
+        response = (
+            "The code demonstrates that pull_request_handler uses a "
+            "ContextManager pattern with __aenter__ and __aexit__ for "
+            "async shutdown sequencing and rollback orchestration."
+        )
+        flagged = detect_unsupported_attribution(response, ["def pull_request_handler(): pass"])
+        assert flagged
+
+    def test_group_a_looking_at_the_source_unsupported(self) -> None:
+        from src.orchestration.verification import detect_unsupported_attribution
+
+        response = (
+            "Looking at the source confirms validator_pipeline runs "
+            "preflight checks against the configured allowlist namespaces "
+            "before delegating to the downstream sanitizer module."
+        )
+        flagged = detect_unsupported_attribution(
+            response, ["def validator_pipeline(input): return input"]
+        )
+        assert flagged
+
+    def test_group_b_the_readme_confirms_unsupported(self) -> None:
+        from src.orchestration.verification import detect_unsupported_attribution
+
+        response = (
+            "The README confirms that the Frobnicator module supports both "
+            "TLSv1.3 and Kyber-768 post-quantum key exchange out of the "
+            "box with zero configuration."
+        )
+        flagged = detect_unsupported_attribution(
+            response, ["Frobnicator is a small library for parsing config files."]
+        )
+        assert flagged
+
+    def test_group_b_the_article_states_unsupported(self) -> None:
+        from src.orchestration.verification import detect_unsupported_attribution
+
+        response = (
+            "The article states that the Banana protocol was deprecated in "
+            "version 4.7.3 with mandatory migration to Plantain by the "
+            "end of fiscal quarter four."
+        )
+        flagged = detect_unsupported_attribution(
+            response, ["Banana is a yellow fruit grown in tropical climates."]
+        )
+        assert flagged
+
+    def test_group_b_the_changelog_notes_unsupported(self) -> None:
+        from src.orchestration.verification import detect_unsupported_attribution
+
+        response = (
+            "The changelog notes that the WebSocket disconnect-rebalance "
+            "logic was rewritten in 9.4 with the cooperative-shutdown "
+            "handshake replacing the legacy SIGTERM-only path."
+        )
+        flagged = detect_unsupported_attribution(
+            response, ["Project does inventory tracking for warehouses."]
+        )
+        assert flagged
+
+    # ── #1867: false-positive guards ────────────────────────────────────
+
+    def test_fp_the_readme_needs_updating_not_flagged(self) -> None:
+        # "The README" is the grammatical subject of an action verb
+        # ("needs"), not a corroborating source. Must NOT fire.
+        from src.orchestration.verification import detect_unsupported_attribution
+
+        response = (
+            "The README needs updating to say that the install path now "
+            "lives in /opt/cogtrix/etc instead of the legacy /etc/cogtrix."
+        )
+        assert detect_unsupported_attribution(response, []) == []
+
+    def test_fp_the_file_is_missing_not_flagged(self) -> None:
+        from src.orchestration.verification import detect_unsupported_attribution
+
+        response = "The file is missing — please supply it before I continue the analysis."
+        assert detect_unsupported_attribution(response, []) == []
+
+    def test_fp_the_code_i_wrote_not_flagged(self) -> None:
+        # First-person ownership; not a corroborating attribution.
+        from src.orchestration.verification import detect_unsupported_attribution
+
+        response = (
+            "The code I wrote does not handle the edge case where the "
+            "input list is empty, but the spec says that should be a no-op."
+        )
+        # NOTE: "the spec says" doesn't match any of our markers either
+        # ("the spec" isn't in the docs-keyword set), so the whole
+        # response should have no attribution markers at all.
+        assert detect_unsupported_attribution(response, []) == []
+
+
+class TestDetectNoncanonicalForkRecommendation:
+    """#1868 — the model surfaces a non-canonical GitHub fork and attaches a
+    canonical-project description / recommendation to it.
+
+    Q5 holistic-test reproducer (cogtrix:release-next @ 2bb52c7): asked for
+    "three currently-active open-source projects on GitHub that implement
+    WebAssembly tools for security analysis", the agent returned one
+    canonical entry plus two personal/inactive forks (DharitriOne/wasmer,
+    wasm-wasi-rs/runtimes__wasmtime) presented with the canonical
+    projects' descriptions and recommendation framing.
+    """
+
+    Q5_REPRODUCER = (
+        "Here are three currently-active open-source WebAssembly projects "
+        "for security analysis:\n\n"
+        "1. **Wasmtime** — universal WebAssembly runtime maintained by "
+        "the Bytecode Alliance, with stable releases and active commits.\n"
+        "   https://github.com/bytecodealliance/wasmtime — last commit "
+        "in May 2026.\n"
+        "2. **Wasmer** — universal WebAssembly runtime supporting WASI "
+        "and a wide range of target platforms.\n"
+        "   https://github.com/DharitriOne/wasmer — actively developed "
+        "with recent commits.\n"
+        "3. **wasm-wasi-rs/runtimes__wasmtime** — a stable WASM/WASI "
+        "runtime focused on runtime security and sandboxing.\n"
+        "   https://github.com/wasm-wasi-rs/runtimes__wasmtime — "
+        "currently active and recommended.\n"
+    )
+
+    # ── Q5 verbatim reproducer ─────────────────────────────────────────
+
+    def test_q5_reproducer_two_forks_flagged_canonical_kept(self) -> None:
+        from src.orchestration.verification import (
+            detect_noncanonical_fork_recommendation,
+        )
+
+        flagged = detect_noncanonical_fork_recommendation(self.Q5_REPRODUCER)
+        # bytecodealliance/wasmtime is canonical → must NOT be flagged.
+        # DharitriOne/wasmer and wasm-wasi-rs/runtimes__wasmtime are
+        # non-canonical forks presented with recommendation language.
+        joined = " ".join(flagged)
+        assert "DharitriOne/wasmer" in joined
+        assert "wasm-wasi-rs/runtimes__wasmtime" in joined
+        assert "bytecodealliance/wasmtime" not in joined
+
+    # ── Positive cases ─────────────────────────────────────────────────
+
+    def test_personal_fork_with_recommendation_language(self) -> None:
+        from src.orchestration.verification import (
+            detect_noncanonical_fork_recommendation,
+        )
+
+        response = (
+            "I recommend Wasmer — it is a universal WebAssembly runtime "
+            "that is actively maintained: https://github.com/RandomUser/wasmer"
+        )
+        flagged = detect_noncanonical_fork_recommendation(response)
+        assert flagged
+        assert "RandomUser/wasmer" in flagged[0]
+
+    def test_inactive_fork_with_recommendation_language(self) -> None:
+        from src.orchestration.verification import (
+            detect_noncanonical_fork_recommendation,
+        )
+
+        response = (
+            "For a stable production-ready runtime see "
+            "https://github.com/JaneDoe/redis — it has had recent releases."
+        )
+        flagged = detect_noncanonical_fork_recommendation(response)
+        assert flagged
+        assert "JaneDoe/redis" in flagged[0]
+
+    # ── Negative: canonical allowlist (org owners) ─────────────────────
+
+    def test_canonical_bytecodealliance_not_flagged(self) -> None:
+        from src.orchestration.verification import (
+            detect_noncanonical_fork_recommendation,
+        )
+
+        response = (
+            "I recommend Wasmtime — a stable production-ready WebAssembly "
+            "runtime: https://github.com/bytecodealliance/wasmtime"
+        )
+        assert detect_noncanonical_fork_recommendation(response) == []
+
+    def test_canonical_kubernetes_not_flagged(self) -> None:
+        from src.orchestration.verification import (
+            detect_noncanonical_fork_recommendation,
+        )
+
+        # Same-name owner/repo pattern (kubernetes/kubernetes).
+        response = (
+            "For a mature container orchestrator see "
+            "https://github.com/kubernetes/kubernetes — actively maintained."
+        )
+        assert detect_noncanonical_fork_recommendation(response) == []
+
+    def test_canonical_torvalds_individual_owner_not_flagged(self) -> None:
+        from src.orchestration.verification import (
+            detect_noncanonical_fork_recommendation,
+        )
+
+        # Individual canonical maintainer (torvalds/linux) — must be in
+        # the allowlist or the heuristic must be conservative enough.
+        response = "For an actively maintained kernel see " "https://github.com/torvalds/linux"
+        assert detect_noncanonical_fork_recommendation(response) == []
+
+    def test_canonical_owner_contains_repo_not_flagged(self) -> None:
+        # wasmerio/wasmer — the org name is a superset of the project name,
+        # a common canonical pattern.
+        from src.orchestration.verification import (
+            detect_noncanonical_fork_recommendation,
+        )
+
+        response = (
+            "For a universal Wasm runtime see "
+            "https://github.com/wasmerio/wasmer — actively maintained."
+        )
+        assert detect_noncanonical_fork_recommendation(response) == []
+
+    # ── Negative: no recommendation language ───────────────────────────
+
+    def test_url_without_recommendation_language_not_flagged(self) -> None:
+        from src.orchestration.verification import (
+            detect_noncanonical_fork_recommendation,
+        )
+
+        # The URL is mentioned but no recommendation framing — could be
+        # an issue tracker, a code example, etc. The detector must not
+        # fire on incidental URLs.
+        response = (
+            "The bug is documented at "
+            "https://github.com/RandomUser/wasmer/issues/42 — please file a "
+            "ticket if you reproduce it."
+        )
+        assert detect_noncanonical_fork_recommendation(response) == []
+
+    # ── Negative: user explicitly asked for forks ──────────────────────
+
+    def test_user_explicitly_asked_for_forks_suppresses(self) -> None:
+        from src.orchestration.verification import (
+            detect_noncanonical_fork_recommendation,
+        )
+
+        response = (
+            "Here is a hardened fork of Wasmer with extra sandboxing: "
+            "https://github.com/HardenedFork/wasmer — actively maintained."
+        )
+        user_prompt = "Show me hardened forks of Wasmer that are still maintained."
+        assert detect_noncanonical_fork_recommendation(response, user_prompt=user_prompt) == []
+
+    # ── Negative: empty / no URLs ──────────────────────────────────────
+
+    def test_empty_response_returns_empty(self) -> None:
+        from src.orchestration.verification import (
+            detect_noncanonical_fork_recommendation,
+        )
+
+        assert detect_noncanonical_fork_recommendation("") == []
+        assert detect_noncanonical_fork_recommendation("   ") == []
+
+    def test_response_without_github_urls_not_flagged(self) -> None:
+        from src.orchestration.verification import (
+            detect_noncanonical_fork_recommendation,
+        )
+
+        response = (
+            "Wasmer is a universal WebAssembly runtime that is actively "
+            "maintained. It supports WASI."
+        )
+        assert detect_noncanonical_fork_recommendation(response) == []
+
+    # ── Nudge format ───────────────────────────────────────────────────
+
+    def test_nudge_names_the_flagged_url(self) -> None:
+        from src.orchestration.verification import (
+            format_noncanonical_fork_nudge,
+        )
+
+        nudge = format_noncanonical_fork_nudge(["https://github.com/DharitriOne/wasmer"])
+        low = nudge.lower()
+        assert "dharitrione/wasmer" in low or "dharitri" in low
+        # Nudge must name the failure mode and one of the honest paths.
+        assert "fork" in low or "canonical" in low or "non-canonical" in low
+        assert "verify" in low or "re-check" in low or "restate" in low
+
+
+class TestNoncanonicalForkRecoveryNode:
+    """#1868 — recovery node lifecycle. Same shape as #1869 / #1871 /
+    #1860: remove the offending response + inject a nudge, bounded to
+    one revision."""
+
+    class _DummyLogger:
+        def __init__(self) -> None:
+            self.warnings: list[tuple[object, ...]] = []
+            self.infos: list[tuple[object, ...]] = []
+
+        def warning(self, *args: object) -> None:
+            self.warnings.append(args)
+
+        def info(self, *args: object) -> None:
+            self.infos.append(args)
+
+    def _q5_msgs(self) -> list:
+        from src.orchestration.verification import (
+            detect_noncanonical_fork_recommendation,
+        )
+
+        # Sanity: response triggers the detector.
+        rep = TestDetectNoncanonicalForkRecommendation.Q5_REPRODUCER
+        assert detect_noncanonical_fork_recommendation(rep)
+        return [
+            HumanMessage(content="Give me three currently-active WebAssembly projects on GitHub."),
+            AIMessage(content=rep, id="ai-final"),
+        ]
+
+    def test_injects_nudge_on_flagged_url(self) -> None:
+        from src.orchestration.nodes.recovery import (
+            build_handle_noncanonical_fork_node,
+        )
+
+        counter = [0]
+        log = self._DummyLogger()
+        node = build_handle_noncanonical_fork_node(counter, max_retries=1, logger=lambda: log)
+
+        msgs = self._q5_msgs()
+        result = node({"messages": msgs})
+
+        assert counter[0] == 1
+        out = result["messages"]
+        assert len(out) == 2
+        assert isinstance(out[0], RemoveMessage)
+        assert out[0].id == "ai-final"
+        assert isinstance(out[1], HumanMessage)
+        low = out[1].content.lower()
+        # The nudge must mention "fork" / "canonical" and at least one of
+        # the flagged URLs.
+        assert "fork" in low or "canonical" in low or "non-canonical" in low
+        assert "github.com" in low
+        assert log.warnings
+
+    def test_short_circuits_when_response_no_longer_flags(self) -> None:
+        from src.orchestration.nodes.recovery import (
+            build_handle_noncanonical_fork_node,
+        )
+
+        counter = [0]
+        log = self._DummyLogger()
+        node = build_handle_noncanonical_fork_node(counter, max_retries=1, logger=lambda: log)
+
+        msgs = [
+            HumanMessage(content="recommend wasmtime"),
+            AIMessage(
+                content=(
+                    "Wasmtime: https://github.com/bytecodealliance/wasmtime "
+                    "— actively maintained."
+                ),
+                id="ai-final",
+            ),
+        ]
+        result = node({"messages": msgs})
+        # Re-detection failed → no-op.
+        assert result["messages"] == []
+
+    def test_accepts_response_after_max_retries(self) -> None:
+        from src.orchestration.nodes.recovery import (
+            build_handle_noncanonical_fork_node,
+        )
+
+        counter = [1]  # already at max for max_retries=1
+        log = self._DummyLogger()
+        node = build_handle_noncanonical_fork_node(counter, max_retries=1, logger=lambda: log)
+        msgs = self._q5_msgs()
+        result = node({"messages": msgs})
+        assert counter[0] == 2
+        assert result["messages"] == []
+        assert any("retries exhausted" in str(args).lower() for args in log.infos)
+
+    def test_handles_empty_messages(self) -> None:
+        from src.orchestration.nodes.recovery import (
+            build_handle_noncanonical_fork_node,
+        )
+
+        counter = [0]
+        log = self._DummyLogger()
+        node = build_handle_noncanonical_fork_node(counter, max_retries=1, logger=lambda: log)
+        result = node({"messages": []})
+        assert result["messages"] == []
+
+
+class TestUnsupportedAttributionRecoveryNode:
+    """#1860 — recovery node mirrors the #1841 quote node: remove the offending
+    response + inject a nudge, bounded to one revision."""
+
+    def _msgs(self, user_prompt: str, tool_result: str, response_text: str):
+        return [
+            HumanMessage(content=user_prompt),
+            AIMessage(
+                content="",
+                tool_calls=[{"name": "web_search", "args": {"q": "x"}, "id": "c1"}],
+            ),
+            ToolMessage(content=tool_result, tool_call_id="c1", name="web_search"),
+            AIMessage(content=response_text, id="ai-final"),
+        ]
+
+    def test_injects_nudge_on_fabricated_attribution(self) -> None:
+        from src.orchestration.nodes.recovery import (
+            build_handle_unsupported_attribution_node,
+        )
+
+        counter = [0]
+        log = _DummyLogger()
+        node = build_handle_unsupported_attribution_node(counter, max_retries=1, logger=lambda: log)
+        msgs = self._msgs(
+            user_prompt="how do I play Voices of The Void on Linux?",
+            tool_result=(
+                "PCGamingWiki Voices of the Void: Windows build only. Run via Proton "
+                "on Linux. Browse to VotV.exe in WindowsNoEditor folder; force Proton "
+                "compatibility."
+            ),
+            response_text=(
+                "Note: Voices of The Void has both a native Linux build and Windows "
+                "version. The Windows version runs well via Proton as confirmed by "
+                "community guides."
+            ),
+        )
+
+        result = node({"messages": msgs})
+
+        assert counter[0] == 1
+        out = result["messages"]
+        assert len(out) == 2
+        assert isinstance(out[0], RemoveMessage)
+        assert out[0].id == "ai-final"
+        assert isinstance(out[1], HumanMessage)
+        assert (
+            "credits a source" in out[1].content.lower() or "fabricating" in out[1].content.lower()
+        )
+        assert log.warnings
+
+    def test_short_circuits_when_attribution_is_grounded(self) -> None:
+        from src.orchestration.nodes.recovery import (
+            build_handle_unsupported_attribution_node,
+        )
+
+        counter = [0]
+        log = _DummyLogger()
+        node = build_handle_unsupported_attribution_node(counter, max_retries=1, logger=lambda: log)
+        msgs = self._msgs(
+            user_prompt="how do I play Voices of The Void on Linux?",
+            tool_result=(
+                "PCGamingWiki Voices of the Void: Windows build only. Run via Proton "
+                "on Linux. Browse to VotV.exe in WindowsNoEditor folder; force Proton "
+                "compatibility."
+            ),
+            response_text=(
+                "According to PCGamingWiki, the Windows build of Voices of The Void "
+                "runs via Proton on Linux."
+            ),
+        )
+        result = node({"messages": msgs})
+        assert result["messages"] == []
+
+    def test_accepts_response_after_max_retries(self) -> None:
+        from src.orchestration.nodes.recovery import (
+            build_handle_unsupported_attribution_node,
+        )
+
+        counter = [1]  # already at max for max_retries=1
+        log = _DummyLogger()
+        node = build_handle_unsupported_attribution_node(counter, max_retries=1, logger=lambda: log)
+        msgs = self._msgs(
+            user_prompt="tell me about it",
+            tool_result="unrelated content with no overlap whatsoever",
+            response_text=(
+                "According to the docs, the install path is /opt/votv/bin and the "
+                "service binds to port 47291 by default."
+            ),
+        )
+        result = node({"messages": msgs})
+        assert counter[0] == 2
+        assert result["messages"] == []
+        assert any("retries exhausted" in str(args).lower() for args in log.infos)
+
+    def test_handles_non_string_content(self) -> None:
+        from src.orchestration.nodes.recovery import (
+            build_handle_unsupported_attribution_node,
+        )
+
+        counter = [0]
+        log = _DummyLogger()
+        node = build_handle_unsupported_attribution_node(counter, max_retries=1, logger=lambda: log)
+        msgs = [
+            HumanMessage(content="hi"),
+            AIMessage(content=[{"type": "text", "text": "..."}], id="ai-x"),
+        ]
+        result = node({"messages": msgs})
+        assert result["messages"] == []

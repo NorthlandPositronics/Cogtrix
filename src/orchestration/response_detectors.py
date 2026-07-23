@@ -38,6 +38,8 @@ import re
 import typing
 from typing import Any
 
+from src.orchestration.tool_message_kinds import is_resolution_failure_message
+
 # ── _is_action_intent regex set ───────────────────────────────────────
 
 # Phrases that introduce a planned future action
@@ -202,6 +204,133 @@ def _is_action_intent(message: Any) -> bool:
     return False
 
 
+# ── _is_refusal ───────────────────────────────────────────────────────
+#
+# A deliberate decline-to-act is NOT "intention without action" — it is a
+# considered non-action. The action-intent recovery must never nudge the
+# model to "proceed and call the tool(s)" on top of a refusal: doing so
+# converts an honest refusal (e.g. declining a system-prompt-forbidden
+# action such as an unauthorized payment) into the forbidden action.
+# See #1851. Patterns target first-person declines and authorization
+# blockers, and exclude soft hedges ("I cannot guarantee …") so a refusal
+# verb inside an otherwise-actionable answer does not over-trip.
+
+_REFUSAL_RE = re.compile(
+    r"(?im)(?:"
+    # First-person decline to act — but NOT a soft "cannot guarantee/
+    # ensure/promise/confirm" hedge (those qualify an answer, they don't
+    # decline the action).
+    r"\bi\s+(?:can(?:no|')?t|cannot|won'?t|will\s+not|must\s+not|"
+    r"should\s+not|shouldn'?t|mustn'?t|(?:'m|am)\s+not\s+able\s+to|"
+    r"(?:'m|am)\s+unable\s+to|(?:'m|am)\s+not\s+going\s+to)\s+"
+    r"(?!guarantee|ensure|promise|be\s+sure|be\s+certain|confirm\b)\w+"
+    r"|\bi\s+(?:have\s+to|need\s+to|will\s+have\s+to|must)\s+decline\b"
+    r"|\b(?:i\s+am|i'm)\s+not\s+authori[sz]ed\b"
+    r"|\bnot\s+authori[sz]ed\s+to\b"
+    r"|\bwithout\s+(?:proper\s+|prior\s+)?(?:approval|authori[sz]ation)\b"
+    r"|\b(?:require[sd]?)\s+(?:prior\s+|proper\s+)?(?:approval|authori[sz]ation)\b"
+    r"|\bapproval\s+is\s+required\b"
+    r")"
+)
+
+
+# ── _is_sycophantic_prefix (#1713) ────────────────────────────────────
+#
+# Anchors on ``^\s*`` because the prefix MUST be at the very start of the
+# response — embedded "you're right" further in the text (e.g. quoting
+# the user, discussing rights, etc.) is legitimate. The trailing class
+# ``[\s\-—–,.!:;]+`` consumes the punctuation/separator the model uses
+# to glue the prefix to the actual content ("You're right - let me",
+# "You're right, let me", "You're right. Let me", "I apologize — I'll").
+#
+# We deliberately do NOT consume an "I apologize for X" extension here.
+# Earlier prototype matched ``i apologize(?:\s+for[^.!?]{0,80})?`` which
+# greedily ate the next clause when the model wrote "I apologize for the
+# inconvenience but ..." — the strip would remove the entire 80-char
+# span and leave a malformed remainder that broke downstream scoring on
+# shard D × kimi-k2-5 (PR #1731 first iteration). The conservative form
+# below requires the verb-phrase prefix to be immediately followed by a
+# separator (whitespace + dash, comma, period, etc.). Apology clauses
+# with an inline "for X" clause stay intact; only the bare-verb-then-
+# separator pattern matches.
+_SYCOPHANTIC_PREFIX_RE = re.compile(
+    r"^\s*(?:"
+    # ── Multi-word openers (unambiguous: any whitespace separator is OK) ──
+    # Existing variants — kept identical to preserve current behaviour.
+    r"(?:"
+    r"you're absolutely right"
+    r"|you are absolutely right"
+    r"|you're right"
+    r"|you are right"
+    r"|you're raising an important point"
+    r"|you're raising a (?:good|valid|fair) point"
+    r"|i sincerely apologize"
+    r"|i apologize"
+    r"|my apologies"
+    # #1866 additions — variants surfaced in the Q3 holistic-test exchange
+    # against cogtrix:release-next @ 2bb52c7. All multi-word; each
+    # performs the same validate-the-user-before-responding role as the
+    # original set.
+    r"|you're correct"
+    r"|you are correct"
+    r"|you make a (?:good|valid|fair) point"
+    r"|that's a (?:good|valid|fair) point"
+    r"|good point"
+    r"|fair enough"
+    r")"
+    r"[\s\-—–,.!:;]+"
+    r"|"
+    # ── Bare-word openers (#1866) ─────────────────────────────────────────
+    # ``Correct`` / ``Indeed`` / ``Absolutely`` standing alone are
+    # substantive in many contexts (``Correct configuration requires …``,
+    # ``Indeed an interesting question, but the answer is …``,
+    # ``Absolutely amazing — let me explain``). Restrict the bare-word
+    # form to cases where it is IMMEDIATELY followed by a punctuation
+    # separator (``.``, ``,``, ``—``, ``-``, ``!``, ``:``, ``;``) —
+    # optionally preceded by whitespace. This catches the validation
+    # opener (``Correct. The path is …``, ``Indeed, this is the file …``,
+    # ``Absolutely! I'll do it.``) without false-firing on substantive
+    # uses that continue with another word.
+    r"(?:correct|indeed|absolutely)\s*[,.\-—–!:;]+" r")",
+    re.IGNORECASE,
+)
+
+
+def _is_sycophantic_prefix(message: Any) -> bool:
+    """Return True when the response opens with a sycophantic validation
+    phrase (``You're absolutely right``, ``I apologize``, …).
+
+    The system-prompt rule in ``src/agent/core.py:build_system_prompt``
+    forbids these prefixes, but RLHF-tuned chat models bypass the rule
+    under user pushback and emit them anyway (Bug G #1713). A response
+    that carries a tool call is never sycophancy — the prefix is a
+    final-answer artifact.
+    """
+    if getattr(message, "tool_calls", None):
+        return False
+    content = getattr(message, "content", "")
+    if not isinstance(content, str) or not content.strip():
+        return False
+    return bool(_SYCOPHANTIC_PREFIX_RE.match(content))
+
+
+def _is_refusal(message: Any) -> bool:
+    """Return True when the response is a deliberate decline/refusal to act.
+
+    Used to suppress the action-intent recovery nudge: a refusal is a
+    *considered* non-action, not a forgotten one. Nudging the model to
+    "proceed, call the tool(s)" on top of it can turn an honest refusal
+    (e.g. declining a forbidden / unauthorized action) into that action
+    (#1851). A response that carries a tool call is never a refusal here.
+    """
+    if getattr(message, "tool_calls", None):
+        return False
+    content = getattr(message, "content", "")
+    if not isinstance(content, str) or not content.strip():
+        return False
+    return bool(_REFUSAL_RE.search(content))
+
+
 # ── _has_incompleteness_signal ────────────────────────────────────────
 
 # Phrases that signal a multi-step task is incomplete — the model used
@@ -326,6 +455,21 @@ _PHANTOM_TOOL_MARKUP_RE = re.compile(
     re.IGNORECASE,
 )
 
+# DSML-style tool-call markup leaked into final text (#1862). Some open-
+# weights model tokenizers (deepseek-v4, certain Qwen variants) wrap their
+# control tokens with the fullwidth vertical bar U+FF5C ('｜') — e.g.
+# ``<｜｜DSML｜｜tool_calls>…<｜｜DSML｜｜invoke name="http_get">…``
+# or the simpler ``<｜tool_call｜>…``. The fullwidth bar is extremely
+# rare in legitimate prose, so anchoring on ``<`` + ``｜`` + a tool-call
+# keyword stays high-precision. Without this detection the response was
+# silently treated as a final answer and `handle_phantom` was bypassed.
+_PHANTOM_DSML_MARKUP_RE = re.compile(
+    r"<\s*｜+\s*(?:DSML\s*｜+\s*)?"
+    r"(?:tool_calls?|invoke|parameter|function_call|fnctl|tool_use|tool_outputs?)\b"
+    r"|<\s*｜\s*tool_call\s*｜\s*>",
+    re.IGNORECASE,
+)
+
 # JSON array of {"tool": "...", "arguments": {...}} objects emitted as literal text
 # instead of structured tool_calls (e.g. model hallucinates tool calls as JSON).
 _PHANTOM_JSON_TOOL_RE = re.compile(
@@ -364,6 +508,11 @@ def _looks_like_phantom_tool_markup(message: Any) -> bool:
         return False
     candidate = _unwrap_code_fence(content)
     if _PHANTOM_TOOL_MARKUP_RE.search(candidate):
+        return True
+    # #1862: DSML / open-weights tokenizer-control variants
+    # (<｜｜DSML｜｜tool_calls>…, <｜tool_call｜>…). The fullwidth bar is
+    # rare enough in prose that anchoring on it is high-precision.
+    if _PHANTOM_DSML_MARKUP_RE.search(candidate):
         return True
     # JSON phantom: require the message to look like raw JSON at the start so
     # prose that merely mentions {"tool": ...} or "arguments" does not trip it.
@@ -449,6 +598,88 @@ _TOOL_ERROR_INDICATORS = (
     "cannot",
 )
 
+# ── #1869: fabricated-action-success-without-tool-call detector ────────
+#
+# Sibling to :data:`_SUCCESS_CLAIM_RE` (which only matches the literal
+# `successful` / `created` / `completed` / `finished` lexicon). This
+# regex captures definite-tense side-effecting-action completion claims
+# in flowing prose — the Q9/Q10 holistic-test reproducers
+# (cogtrix:release-next @ 2bb52c7):
+#
+#   Q9:  "The file /workspace/...verification.py has been deleted from
+#         the codebase as requested."
+#   Q10: "The file /workspace/...text.py already contains the safe_divide
+#         function based on the successful write operations in this
+#         session."
+#
+# The verb stems below cover the destructive / mutating operations that
+# Cogtrix's catalog can perform (write/patch/append/...) plus broader
+# action-verbs that the LLM tends to claim completion for. Each
+# alternative requires a tense-marking auxiliary (`has been`, `is now`,
+# `I have`, `I've`, etc.) before the verb so we don't false-positive on
+# habitual / future / conditional uses ("I will delete X", "we delete
+# files daily", "if I create the file...").
+_SIDE_EFFECT_VERB_BASE = (
+    r"(?:"
+    r"delet\w*|remov\w*|creat\w*|writ\w*|written|wrote|"
+    r"sav\w*|install\w*|sent|publish\w*|"
+    r"commit\w*|push\w*|"
+    r"mov\w*|renam\w*|copi\w*|copy|copied|copying|"
+    r"add\w*|updat\w*|modif\w*|"
+    r"patch\w*|append\w*|"
+    r"overwrote|overwritten|overwrit\w*|"
+    r"wip\w*|clear\w*|truncat\w*|drop\w*|"
+    r"ran|run\w*|execut\w*|"
+    r"chang\w*|edit\w*|"
+    r"complet\w*|finish\w*|don\w*|"
+    r"merged?"
+    r")"
+)
+
+_ACTION_COMPLETION_CLAIM_RE = re.compile(
+    r"\b(?:"
+    # (Has|Have|Had) been [adverb] <verb>  →  "has been deleted"
+    rf"(?:has|have|had)\s+been\s+(?:successfully\s+|just\s+|already\s+)?{_SIDE_EFFECT_VERB_BASE}"
+    r"|"
+    # (Is|Are|Was|Were) [now] [successfully] <verb>  →  "is removed", "was overwritten"
+    rf"(?:is|are|was|were)\s+(?:now\s+)?(?:successfully\s+)?{_SIDE_EFFECT_VERB_BASE}" r"|"
+    # I/We (have|'ve|just|already|finally|successfully|now) <verb>  →  "I have deleted"
+    rf"(?:i|we)\s+(?:have|'ve|already|just|finally|successfully|now)"
+    rf"\s+(?:successfully\s+|just\s+|already\s+)?{_SIDE_EFFECT_VERB_BASE}"
+    r"|"
+    # I've/We've <verb>  →  "I've added"
+    rf"(?:i've|we've)\s+(?:successfully\s+|just\s+|already\s+)?{_SIDE_EFFECT_VERB_BASE}" r"|"
+    # The <subject> (has been|is|got|was) <verb>  →  Q9 reproducer
+    r"(?:the\s+(?:file|files|directory|folder|change|fix|update|function|"
+    r"class|method|line|lines|code|content|repo|repository|commit|branch|"
+    rf"module|package|symlink|record|entry|config|setting))\s+"
+    rf"(?:has\s+been|have\s+been|had\s+been|is|are|got|was|were)"
+    rf"\s+(?:successfully\s+)?(?:now\s+)?{_SIDE_EFFECT_VERB_BASE}"
+    r"|"
+    # Successfully <verb>  →  "Successfully committed"
+    rf"successfully\s+{_SIDE_EFFECT_VERB_BASE}" r"|"
+    # Q10 smoking-gun: "based on [the] [prior] successful X operation(s)".
+    # Allows 1–3 modifier words (the/my/prior/previous/earlier/recent/past)
+    # so we catch both "the successful patch operations" and "the prior
+    # successful write operations".
+    r"based\s+on\s+(?:(?:the|my|prior|previous|earlier|recent|past)\s+){1,3}"
+    r"successful\s+\w+\s+operations?"
+    r")\b",
+    re.IGNORECASE,
+)
+
+# Negation guard: must catch "has not been deleted", "I couldn't write",
+# "the file isn't created", etc. Wider verb coverage than
+# :data:`_NEGATED_SUCCESS_RE` because Q9/Q10's prose uses broader
+# side-effecting verbs.
+_NEGATED_ACTION_CLAIM_RE = re.compile(
+    r"\b(?:not|never|no|cannot|can't|couldn't|wasn't|weren't|hasn't|"
+    r"haven't|hadn't|didn't|isn't|aren't|won't|wouldn't|unable\s+to|"
+    r"failed\s+to|refuse\s+to)\b"
+    rf".{{0,32}}?{_SIDE_EFFECT_VERB_BASE}",
+    re.IGNORECASE,
+)
+
 
 def _looks_like_markdown_phantom_report(message: Any) -> bool:
     """Return True when the response is a fabricated structured markdown report.
@@ -515,6 +746,18 @@ def _looks_like_fabricated_success_after_tool_errors(
         return False
 
     for tool_msg in recent_tool_messages:
+        # #1921 (preferred path): a dispatcher-synthesised ToolMessage carries
+        # a ``cogtrix.kind`` marker for any unresolvable / disabled / not-
+        # loaded outcome. Substring matching on the prose drifts over time
+        # (the "is in the catalog but not loaded" message did not start
+        # with the legacy "tool not loaded" indicator and silently bypassed
+        # this guard — the #1919 test5 reproducer). The kind check is
+        # immune to phrasing changes inside the dispatcher.
+        if is_resolution_failure_message(tool_msg):
+            continue
+        # Substring fallback: real tools that raise / return error strings
+        # cannot carry the kind marker without per-tool changes. The
+        # legacy indicator allowlist still covers those.
         tool_content = getattr(tool_msg, "content", "")
         if not isinstance(tool_content, str):
             return False
@@ -523,6 +766,236 @@ def _looks_like_fabricated_success_after_tool_errors(
         if not any(headline.startswith(ind) for ind in _TOOL_ERROR_INDICATORS):
             return False
 
+    return True
+
+
+# ── #1871: fabricated-tool-error-quote detector ────────────────────────
+#
+# Polarity-flipped sibling of
+# :func:`_looks_like_fabricated_action_success_without_tool_call`. That
+# detector catches confident *success* claims with no tool call; this one
+# catches confident *error* attributions — the model quotes a verbatim
+# error string ("Read-only file system", "Tool not loaded", etc.) and
+# presents it as observed tool output, but the quoted span does not appear
+# in any ``ToolMessage`` in the current turn. Q13 / Q14 / Q15 of the
+# #1869 holistic-test battery produced three different, mutually
+# contradictory fabricated error strings across three consecutive turns.
+#
+# Detection flow:
+#   1. Find a lead-in match (:data:`_TOOL_ERROR_QUOTE_LEAD_RE`) — phrases
+#      that frame what follows as a quoted error/output from a tool/system.
+#   2. Extract the nearest quoted span (:func:`_extract_quoted_span`) in
+#      the 200-char window after the lead-in. Quote pairs supported:
+#      ASCII double / single / smart double / smart single / backticks.
+#   3. Walk back through ``messages`` to collect ``ToolMessage.content``
+#      values in the current turn (since the most recent ``HumanMessage``).
+#   4. If the quoted span (case-insensitive) appears as a substring of any
+#      collected tool output, the attribution is anchored — bail. Otherwise
+#      fire.
+#
+# The same precision-vs-recall posture applies as the sibling detectors:
+# tight lead-in lexicon, length-bounded quote extraction (4–300 chars),
+# and a hard suppression on pending tool calls in ``last_message``.
+_TOOL_ERROR_QUOTE_LEAD_RE = re.compile(
+    r"\b(?:"
+    # "the error/output/response/message (is|reads|shows|says|...)"
+    r"(?:the\s+)?(?:error|output|response|message|reply)"
+    r"(?:\s+(?:message|output|content|text|string))?"
+    r"\s+(?:is|reads|shows|says|reported|reports|consistently\s+shows|"
+    r"consistently\s+displays|consistently\s+reports|was|returned|"
+    r"returns|displayed|displays)"
+    r"|"
+    # "the tool/system returned/says/reports/failed with/..."
+    r"(?:the\s+)?(?:tool|system|server|api|backend)\s+"
+    r"(?:returned|reports|reported|says|emitted|gave|responded\s+with|"
+    r"outputs?|outputted|reported\s+back|raised|raised\s+(?:an?\s+)?error|"
+    r"complained|failed\s+with)"
+    r"|"
+    # "I got/received/see/keep seeing/am getting ..."
+    r"I\s+(?:got|received|see|am\s+seeing|keep\s+seeing|am\s+getting|"
+    r"kept\s+getting|got\s+back|receive|saw)"
+    r"|"
+    # "(I'm|I am) (getting|seeing|receiving) ..."
+    r"(?:I'm|I\s+am)\s+(?:getting|seeing|receiving)" r"|"
+    # "failed with" / "with the error" / "with an error"
+    r"failed\s+with" r"|with\s+(?:the\s+|an?\s+)?(?:error|message|response|output|reason)" r"|"
+    # "it says/reads/reports/returns"
+    r"\bit\s+(?:says|reads|reports|outputs|returns?|return|emitted)" r"|"
+    # "the following error/message/output"
+    r"(?:the\s+)?following\s+(?:error|message|response|output)" r")\b",
+    re.IGNORECASE,
+)
+
+# Quote-pair openers/closers. Single-char ASCII pairs are symmetric;
+# smart quotes follow Unicode left/right convention. Backticks are
+# symmetric.
+_QUOTE_PAIRS: tuple[tuple[str, str], ...] = (
+    ('"', '"'),
+    ("'", "'"),
+    ("“", "”"),  # left/right double quotation marks
+    ("‘", "’"),  # left/right single quotation marks
+    ("`", "`"),
+)
+
+
+def _extract_quoted_span(content: str, start: int, max_distance: int = 200) -> str | None:
+    """Return the earliest quoted span in the window after ``start``.
+
+    Scans the next ``max_distance`` characters for any opening quote
+    character (see :data:`_QUOTE_PAIRS`). For each opener, looks for the
+    matching close within 350 chars of the open. Spans shorter than 4
+    characters or longer than 300 characters are rejected — error
+    strings tend to fall comfortably inside that window.
+
+    Returns the unquoted content of the earliest qualifying pair, or
+    ``None`` if no qualifying pair is found.
+    """
+    window_end = min(len(content), start + max_distance)
+    earliest_idx: int | None = None
+    earliest_span: str | None = None
+    for open_q, close_q in _QUOTE_PAIRS:
+        i = content.find(open_q, start, window_end)
+        if i == -1:
+            continue
+        j = content.find(close_q, i + 1, i + 1 + 350)
+        if j == -1:
+            continue
+        if 4 <= (j - i - 1) <= 300:
+            if earliest_idx is None or i < earliest_idx:
+                earliest_idx = i
+                earliest_span = content[i + 1 : j]
+    return earliest_span
+
+
+def _looks_like_fabricated_tool_error_quote(
+    messages: typing.Sequence[Any],
+    last_message: Any,
+) -> bool:
+    """Return True when the model attributes a verbatim quoted error to
+    a tool whose output does not contain that string.
+
+    See the module-level comment block above :data:`_TOOL_ERROR_QUOTE_LEAD_RE`
+    for the full detection flow.
+
+    Guard scope (precision over recall):
+
+    * skip when ``last_message`` carries pending tool calls (mid-loop);
+    * require both a lead-in match and an extractable quoted span;
+    * skip when the quote is too short (< 4 chars) or too long (> 300);
+    * skip when the quoted span (case-insensitive) appears as a substring
+      of any ``ToolMessage.content`` in the current turn.
+
+    Q13 / Q14 / Q15 (cogtrix:release-next @ 2bb52c7) are all caught:
+
+        Q13: "The error message is clear: 'Read-only file system' — ..."
+        Q14: "... failed with 'Write path must be within the working
+              directory' error."
+        Q15: "The error message consistently shows: 'Tool not loaded
+              in active set.'"
+    """
+    if getattr(last_message, "tool_calls", None):
+        return False
+    content = getattr(last_message, "content", "")
+    if not isinstance(content, str) or not content.strip():
+        return False
+
+    lead_match = _TOOL_ERROR_QUOTE_LEAD_RE.search(content)
+    if not lead_match:
+        return False
+
+    quoted = _extract_quoted_span(content, lead_match.end(), max_distance=200)
+    if quoted is None:
+        return False
+
+    quoted_lower = quoted.lower().strip()
+    if len(quoted_lower) < 4:
+        return False
+
+    # Walk back through messages, collecting ``ToolMessage`` content
+    # in the current turn (since the most recent ``HumanMessage``).
+    for i in range(len(messages) - 2, -1, -1):
+        msg = messages[i]
+        if msg.__class__.__name__ == "HumanMessage":
+            break
+        if hasattr(msg, "tool_call_id"):
+            tool_content = getattr(msg, "content", "")
+            if isinstance(tool_content, str) and quoted_lower in tool_content.lower():
+                return False
+
+    return True
+
+
+def _looks_like_fabricated_action_success_without_tool_call(
+    messages: typing.Sequence[Any],
+    last_message: Any,
+) -> bool:
+    """Return True when final text claims a side-effect with no tool call this turn.
+
+    Sibling to :func:`_looks_like_fabricated_success_after_tool_errors`.
+    That detector requires a contiguous block of tool errors immediately
+    before the final message; **this** detector fires when there were
+    **zero** ``ToolMessage`` entries at all in the current user turn —
+    the model went prose-only and confabulated a successful completion.
+
+    Q9/Q10 of the #1869 holistic-test battery surface this failure mode:
+    user asks for a destructive operation, the model has no destructive
+    tool loaded (see #1870 for the upstream loadout fix) AND no tool call
+    is dispatched, yet the model emits a confident completion claim like:
+
+        Q9:  "The file ...verification.py has been deleted from the
+              codebase as requested."
+        Q10: "The file ...text.py already contains the safe_divide
+              function based on the successful write operations in this
+              session."
+
+    Guard scope (precision over recall):
+
+    * skip when ``last_message`` carries pending tool calls (the model is
+      still mid-loop, not making a final claim);
+    * require an explicit action-completion claim
+      (:data:`_ACTION_COMPLETION_CLAIM_RE`);
+    * suppress when the claim is negated
+      (:data:`_NEGATED_ACTION_CLAIM_RE`);
+    * fire only when no ``ToolMessage`` exists between the most recent
+      ``HumanMessage`` and ``last_message`` — if any tool ran (whether
+      success or error), let the sibling detector or
+      ``_is_hallucinated_completion`` handle it.
+
+    Args:
+        messages: The full message sequence, ending with ``last_message``.
+        last_message: The trailing ``AIMessage`` to evaluate.
+
+    Returns:
+        ``True`` when the response should be routed to the
+        :func:`handle_fabricated_action` recovery node; ``False`` otherwise.
+    """
+    if getattr(last_message, "tool_calls", None):
+        return False
+    content = getattr(last_message, "content", "")
+    if not isinstance(content, str) or not content.strip():
+        return False
+    if not _ACTION_COMPLETION_CLAIM_RE.search(content):
+        return False
+    if _NEGATED_ACTION_CLAIM_RE.search(content):
+        return False
+
+    # Walk backward to the most recent ``HumanMessage`` boundary. If any
+    # ``ToolMessage`` exists in this window, defer to the sibling detector
+    # / hallucinated-completion checker rather than double-firing.
+    #
+    # #1921: dispatcher-synthesised ToolMessages (resolver failed to load
+    # / resolve / a denied tool was called) do NOT count as "a tool ran"
+    # — no real side effect occurred, the message is a synthetic stub.
+    # Treating them as real ToolMessages used to make this detector defer
+    # to the sibling, which then ALSO bailed because its substring
+    # allowlist missed the dispatcher's phrasing (the #1919 test5 loop).
+    # Skip past synthetics; only real ToolMessages cause deferral.
+    for i in range(len(messages) - 2, -1, -1):
+        msg = messages[i]
+        if msg.__class__.__name__ == "HumanMessage":
+            break
+        if hasattr(msg, "tool_call_id") and not is_resolution_failure_message(msg):
+            return False
     return True
 
 
@@ -536,24 +1009,32 @@ def _stuck_detection_headline(content: str) -> str:
 
 
 __all__ = [
+    "_ACTION_COMPLETION_CLAIM_RE",
     "_CODE_FENCE_RE",
     "_FAKE_TOOL_OUTPUT_SIGNAL_RE",
     "_INCOMPLETENESS_SIGNAL_RE",
     "_INTENT_FALSE_POSITIVE_RE",
     "_INTENT_LEAD_RE",
     "_MARKDOWN_TABLE_ROW_RE",
+    "_NEGATED_ACTION_CLAIM_RE",
     "_NEGATED_SUCCESS_RE",
     "_NUMBERED_SECTION_RE",
     "_PAST_TENSE_LIST_VERB_RE",
     "_PHANTOM_JSON_TOOL_RE",
     "_PHANTOM_TOOL_MARKUP_RE",
+    "_QUOTE_PAIRS",
+    "_SIDE_EFFECT_VERB_BASE",
     "_SUCCESS_CLAIM_RE",
     "_TOOL_ERROR_INDICATORS",
+    "_TOOL_ERROR_QUOTE_LEAD_RE",
     "_TOOL_VERB_RE",
+    "_extract_quoted_span",
     "_has_incompleteness_signal",
     "_is_action_intent",
     "_is_hallucinated_completion",
+    "_looks_like_fabricated_action_success_without_tool_call",
     "_looks_like_fabricated_success_after_tool_errors",
+    "_looks_like_fabricated_tool_error_quote",
     "_looks_like_markdown_phantom_report",
     "_looks_like_phantom_tool_markup",
     "_stuck_detection_headline",

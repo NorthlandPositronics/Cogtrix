@@ -24,10 +24,18 @@ from src.orchestration.compression import (
     _content_len,
     apply_message_compression,
 )
-from src.orchestration.nodes.process_tools import build_process_tools_node
+from src.orchestration.nodes.process_tools import (
+    build_process_tools_node,
+    extract_prohibited_tools,
+)
 from src.orchestration.nodes.recovery import (
     build_handle_action_intent_node,
+    build_handle_fabricated_action_node,
+    build_handle_fabricated_quote_node,
+    build_handle_noncanonical_fork_node,
     build_handle_phantom_node,
+    build_handle_sycophancy_node,
+    build_handle_unsupported_attribution_node,
     build_handle_unsupported_quote_node,
     build_handle_unverified_claim_node,
     build_handle_unverified_entity_node,
@@ -371,7 +379,11 @@ from src.orchestration.response_detectors import (  # noqa: E402, F401
     _has_incompleteness_signal,
     _is_action_intent,
     _is_hallucinated_completion,
+    _is_refusal,
+    _is_sycophantic_prefix,
+    _looks_like_fabricated_action_success_without_tool_call,
     _looks_like_fabricated_success_after_tool_errors,
+    _looks_like_fabricated_tool_error_quote,
     _looks_like_markdown_phantom_report,
     _looks_like_phantom_tool_markup,
     _stuck_detection_headline,
@@ -658,6 +670,26 @@ def build_agent_graph(
     # #1843: version-scope-collapse guard. One revision attempt — same
     # rationale as the fidelity guard it composes with.
     _MAX_VERSION_SCOPE_RETRIES = 1
+    # #1860: attributed-prose-claim guard. One revision attempt — same
+    # rationale as the sibling fidelity guards.
+    _MAX_UNSUPPORTED_ATTRIBUTION_RETRIES = 1
+    # #1713: sycophantic-prefix guard. One revision attempt; the
+    # existing logging-only path retains visibility after the budget.
+    _MAX_SYCOPHANCY_RETRIES = 1
+    # #1869: fabricated-action-success-without-tool-call guard. One
+    # revision attempt — sibling to the existing fabrication guard,
+    # which covers the tool-error precursor case. This one covers
+    # the "no tool call at all" case.
+    _MAX_FABRICATED_ACTION_RETRIES = 1
+    # #1871: fabricated-tool-error-quote guard. One revision attempt;
+    # polarity sibling of the #1869 guard. Catches verbatim quoted
+    # error strings that never appeared in any ToolMessage this turn.
+    _MAX_FABRICATED_QUOTE_RETRIES = 1
+    # #1868: non-canonical GitHub-fork-recommendation guard. One revision
+    # attempt — sibling to the fidelity guards. Fires when the model
+    # recommends a project + cites a github.com URL whose owner is not
+    # canonical AND the surrounding context frames it as authoritative.
+    _MAX_NONCANONICAL_FORK_RETRIES = 1
     # After the 3 standard action-intent nudges are exhausted, the model
     # gets exactly one more chance if the response contains incompleteness
     # language ("first", "to start", "step 1") — a stronger nudge that
@@ -1120,6 +1152,26 @@ def build_agent_graph(
         version_scope_count=_per_run_state[0].version_scope_count,
         max_retries=_MAX_VERSION_SCOPE_RETRIES,
     )
+    handle_unsupported_attribution = build_handle_unsupported_attribution_node(
+        unsupported_attribution_count=_per_run_state[0].unsupported_attribution_count,
+        max_retries=_MAX_UNSUPPORTED_ATTRIBUTION_RETRIES,
+    )
+    handle_sycophancy = build_handle_sycophancy_node(
+        sycophancy_count=_per_run_state[0].sycophancy_count,
+        max_retries=_MAX_SYCOPHANCY_RETRIES,
+    )
+    handle_fabricated_action = build_handle_fabricated_action_node(
+        fabricated_action_count=_per_run_state[0].fabricated_action_count,
+        max_retries=_MAX_FABRICATED_ACTION_RETRIES,
+    )
+    handle_fabricated_quote = build_handle_fabricated_quote_node(
+        fabricated_quote_count=_per_run_state[0].fabricated_quote_count,
+        max_retries=_MAX_FABRICATED_QUOTE_RETRIES,
+    )
+    handle_noncanonical_fork = build_handle_noncanonical_fork_node(
+        noncanonical_fork_count=_per_run_state[0].noncanonical_fork_count,
+        max_retries=_MAX_NONCANONICAL_FORK_RETRIES,
+    )
 
     def handle_fabrication(state: CogtrixState) -> dict:
         _per_run_state[0].fabrication_count[0] += 1
@@ -1358,6 +1410,12 @@ def build_agent_graph(
     )
     _invoke_one = _invoker.invoke_one
 
+    # #1851: tools the system prompt explicitly forbids. Blocked at
+    # dispatch unless explicitly approved — structural safety, not
+    # prompt-trust. Computed once from the static system prompt; no
+    # intersection with the catalog so a dynamically-loaded forbidden
+    # tool is still gated (only real calls are ever blocked).
+    _prohibited_tools = extract_prohibited_tools(system_prompt)
     process_tools = build_process_tools_node(
         _invoke_one=_invoke_one,
         _tool_lookup=_per_run_state[0].tool_lookup,
@@ -1376,6 +1434,7 @@ def build_agent_graph(
         tool_catalog=_per_run_state[0].tool_catalog,
         registry=registry,
         approvals=approvals,
+        prohibited_tools=_prohibited_tools,
         confirmation_ui=confirmation_ui,
         git_native=git_native,
         on_tool_expansion=on_tool_expansion,
@@ -1435,6 +1494,40 @@ def build_agent_graph(
             if _looks_like_fabricated_success_after_tool_errors(msgs, last):
                 return "handle_fabrication"
 
+            # #1869: sibling fabrication detector — fires when the model
+            # claimed a side-effect but invoked NO tool at all this turn.
+            # Bounded by a per-run retry budget; once exhausted, the
+            # response ships and the warning log retains visibility.
+            if _per_run_state[0].fabricated_action_count[
+                0
+            ] <= _MAX_FABRICATED_ACTION_RETRIES and _looks_like_fabricated_action_success_without_tool_call(
+                msgs, last
+            ):
+                return "handle_fabricated_action"
+
+            # #1871: polarity sibling of #1869 — the model attributed a
+            # verbatim quoted error string to a tool whose output does
+            # not contain it. Routed right after #1869 so the two
+            # mutually-exclusive fabrication modes (success vs error)
+            # are dispatched together.
+            if _per_run_state[0].fabricated_quote_count[
+                0
+            ] <= _MAX_FABRICATED_QUOTE_RETRIES and _looks_like_fabricated_tool_error_quote(
+                msgs, last
+            ):
+                return "handle_fabricated_quote"
+
+            # #1713: sycophantic-prefix recovery. Routed early so we don't
+            # waste fidelity-check work on a response we're about to
+            # regenerate. The earlier in-place-strip attempt (PR #1731)
+            # broke Gate 2 by mutating the AIMessage body; this recovery
+            # node replaces the response wholesale instead — same pattern
+            # as every other recovery node, none of which has regressed
+            # Gate 2.
+            if _is_sycophantic_prefix(last):
+                if _per_run_state[0].sycophancy_count[0] <= _MAX_SYCOPHANCY_RETRIES:
+                    return "handle_sycophancy"
+
             # Has content but no tool calls — check for intention-without-action.
             # Suppress the nudge when the agent is responding to an access-denied
             # tool failure: the model is offering alternatives, not planning to act.
@@ -1449,6 +1542,13 @@ def build_agent_graph(
                     for err in recent_tool_errors
                 ):
                     pass  # skip nudge — agent handled the error gracefully
+                elif _is_refusal(last):
+                    # #1851: a deliberate refusal is a considered non-action,
+                    # not a forgotten one. Never nudge "proceed, call the
+                    # tool(s)" on top of a refusal — that can convert an honest
+                    # decline (e.g. of a forbidden / unauthorized action) into
+                    # the action itself. Let the refusal stand.
+                    pass
                 else:
                     return "handle_action_intent"
 
@@ -1469,6 +1569,8 @@ def build_agent_graph(
                 from src.orchestration.verification import (
                     collect_tool_message_contents,
                     collect_tool_names_this_turn,
+                    detect_noncanonical_fork_recommendation,
+                    detect_unsupported_attribution,
                     detect_unsupported_quote,
                     detect_unverified_claim,
                     detect_unverified_entities,
@@ -1525,6 +1627,33 @@ def build_agent_graph(
                 if detect_version_scope_mismatch(content, _all_tool_contents):
                     if _per_run_state[0].version_scope_count[0] <= _MAX_VERSION_SCOPE_RETRIES:
                         return "handle_version_scope"
+
+                # #1860: attributed-prose-claim guard. A paragraph that
+                # credits a source/authority ("as confirmed by …",
+                # "according to …", "officially …") for content whose
+                # distinctive tokens are absent from the grounded blob is
+                # fabricating the citation itself.
+                if detect_unsupported_attribution(content, _tool_contents, _user_prompt):
+                    if (
+                        _per_run_state[0].unsupported_attribution_count[0]
+                        <= _MAX_UNSUPPORTED_ATTRIBUTION_RETRIES
+                    ):
+                        return "handle_unsupported_attribution"
+
+                # #1868: non-canonical GitHub-fork-recommendation guard.
+                # The agent surfaces a non-canonical fork URL and presents
+                # it with the canonical project's description + recommen-
+                # dation framing (Q5 reproducer: DharitriOne/wasmer,
+                # wasm-wasi-rs/runtimes__wasmtime). Independent of the
+                # tool-result grounding — the failure can fire even when
+                # the agent did do a web_search, because search results
+                # surface forks alongside canonical homes.
+                if _per_run_state[0].noncanonical_fork_count[
+                    0
+                ] <= _MAX_NONCANONICAL_FORK_RETRIES and detect_noncanonical_fork_recommendation(
+                    content, user_prompt=_user_prompt
+                ):
+                    return "handle_noncanonical_fork"
 
         return END
 
@@ -1585,6 +1714,48 @@ def build_agent_graph(
         # attempt, then accept-and-ship rather than loop on a model
         # that keeps collapsing the version scope.
         if _per_run_state[0].version_scope_count[0] > _MAX_VERSION_SCOPE_RETRIES:
+            return END
+        return "call_model"
+
+    def route_after_unsupported_attribution(state: CogtrixState) -> str:  # noqa: ARG001
+        # Same shape as the other verification guards: one revision
+        # attempt, then accept-and-ship rather than loop on a model
+        # that keeps fabricating attributions.
+        if (
+            _per_run_state[0].unsupported_attribution_count[0]
+            > _MAX_UNSUPPORTED_ATTRIBUTION_RETRIES
+        ):
+            return END
+        return "call_model"
+
+    def route_after_sycophancy(state: CogtrixState) -> str:  # noqa: ARG001
+        # Same shape as the other recovery guards: one revision attempt,
+        # then accept-and-ship rather than loop on a model that keeps
+        # opening with a validation prefix.
+        if _per_run_state[0].sycophancy_count[0] > _MAX_SYCOPHANCY_RETRIES:
+            return END
+        return "call_model"
+
+    def route_after_fabricated_action(state: CogtrixState) -> str:  # noqa: ARG001
+        # #1869: sibling to route_after_fabrication. One revision attempt;
+        # if the model keeps fabricating after the nudge, accept-and-ship
+        # rather than spin — the warning log retains visibility.
+        if _per_run_state[0].fabricated_action_count[0] > _MAX_FABRICATED_ACTION_RETRIES:
+            return END
+        return "call_model"
+
+    def route_after_fabricated_quote(state: CogtrixState) -> str:  # noqa: ARG001
+        # #1871: polarity sibling of route_after_fabricated_action.
+        # One revision attempt; accept-and-ship after exhaustion.
+        if _per_run_state[0].fabricated_quote_count[0] > _MAX_FABRICATED_QUOTE_RETRIES:
+            return END
+        return "call_model"
+
+    def route_after_noncanonical_fork(state: CogtrixState) -> str:  # noqa: ARG001
+        # #1868: same shape as the other fidelity guards. One revision
+        # attempt; accept-and-ship after exhaustion (the warning log
+        # retains visibility).
+        if _per_run_state[0].noncanonical_fork_count[0] > _MAX_NONCANONICAL_FORK_RETRIES:
             return END
         return "call_model"
 
@@ -1652,6 +1823,11 @@ def build_agent_graph(
     graph.add_node("handle_unverified_entity", handle_unverified_entity)
     graph.add_node("handle_unsupported_quote", handle_unsupported_quote)
     graph.add_node("handle_version_scope", handle_version_scope)
+    graph.add_node("handle_unsupported_attribution", handle_unsupported_attribution)
+    graph.add_node("handle_sycophancy", handle_sycophancy)
+    graph.add_node("handle_fabricated_action", handle_fabricated_action)
+    graph.add_node("handle_fabricated_quote", handle_fabricated_quote)
+    graph.add_node("handle_noncanonical_fork", handle_noncanonical_fork)
     graph.add_node("process_tools", process_tools)
     graph.set_entry_point("call_model")
     graph.add_conditional_edges(
@@ -1667,6 +1843,11 @@ def build_agent_graph(
             "handle_unverified_entity": "handle_unverified_entity",
             "handle_unsupported_quote": "handle_unsupported_quote",
             "handle_version_scope": "handle_version_scope",
+            "handle_unsupported_attribution": "handle_unsupported_attribution",
+            "handle_sycophancy": "handle_sycophancy",
+            "handle_fabricated_action": "handle_fabricated_action",
+            "handle_fabricated_quote": "handle_fabricated_quote",
+            "handle_noncanonical_fork": "handle_noncanonical_fork",
             END: END,
         },
     )
@@ -1707,6 +1888,31 @@ def build_agent_graph(
     graph.add_conditional_edges(
         "handle_version_scope",
         route_after_version_scope,
+        {"call_model": "call_model", END: END},
+    )
+    graph.add_conditional_edges(
+        "handle_unsupported_attribution",
+        route_after_unsupported_attribution,
+        {"call_model": "call_model", END: END},
+    )
+    graph.add_conditional_edges(
+        "handle_sycophancy",
+        route_after_sycophancy,
+        {"call_model": "call_model", END: END},
+    )
+    graph.add_conditional_edges(
+        "handle_fabricated_action",
+        route_after_fabricated_action,
+        {"call_model": "call_model", END: END},
+    )
+    graph.add_conditional_edges(
+        "handle_fabricated_quote",
+        route_after_fabricated_quote,
+        {"call_model": "call_model", END: END},
+    )
+    graph.add_conditional_edges(
+        "handle_noncanonical_fork",
+        route_after_noncanonical_fork,
         {"call_model": "call_model", END: END},
     )
     compiled = graph.compile()

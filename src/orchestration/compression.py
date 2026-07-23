@@ -15,6 +15,7 @@ import time
 from collections.abc import Callable
 from typing import Any
 
+from src.concurrency import invoke_with_timeout
 from src.logging_config import get_logger
 from src.utils.text import _FALLBACK_MAX_CHARS, truncate_tool_output
 
@@ -116,27 +117,22 @@ def compress_tool_message(content: str, tool_name: str, llm: Any) -> str:
             f"{content}\n"
             f"<<<END_{nonce}>>>"
         )
-        # Wrap the LLM call in a temporary executor so we can enforce a timeout.
-        # Python threads cannot be cancelled; shutdown(wait=False) lets the
-        # hung thread die in the background without blocking the caller.
-        # NOTE: Do NOT use ``with ThreadPoolExecutor(...) as pool:`` because
-        # ``__exit__`` calls ``shutdown(wait=True)`` which blocks on the hung
-        # thread.  Manual management with ``finally: pool.shutdown(wait=False)``
-        # is required.
-        pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        # Bounded-timeout LLM invocation via the centralized helper —
+        # migrated under #1903; see docs/architecture/CONCURRENCY.md.
+        # The module-level _COMPRESSION_POOL above is a separate shared
+        # pool (for background warm-up jobs); per-call timeout-bounded
+        # invocations go through invoke_with_timeout's shared pool.
         try:
-            future = pool.submit(llm.invoke, compress_prompt)
-            try:
-                response = future.result(timeout=_COMPRESS_INVOKE_TIMEOUT_SECONDS)
-            except concurrent.futures.TimeoutError:
-                log.warning(
-                    "compress_tool_message: LLM call timed out after %ds — falling back to truncation",
-                    _COMPRESS_INVOKE_TIMEOUT_SECONDS,
-                )
-                fallback_len = max(len(content) * 3 // 4, min(len(content), 200))
-                return truncate_tool_output(content, min(fallback_len, _FALLBACK_MAX_CHARS))
-        finally:
-            pool.shutdown(wait=False)
+            response = invoke_with_timeout(
+                llm.invoke, compress_prompt, timeout=_COMPRESS_INVOKE_TIMEOUT_SECONDS
+            )
+        except TimeoutError:
+            log.warning(
+                "compress_tool_message: LLM call timed out after %ds — falling back to truncation",
+                _COMPRESS_INVOKE_TIMEOUT_SECONDS,
+            )
+            fallback_len = max(len(content) * 3 // 4, min(len(content), 200))
+            return truncate_tool_output(content, min(fallback_len, _FALLBACK_MAX_CHARS))
         raw = getattr(response, "content", str(response))
         if isinstance(raw, list):
             raw = " ".join(str(c.get("text", c) if isinstance(c, dict) else c) for c in raw)
@@ -461,16 +457,10 @@ def apply_message_compression(
     def _compress_ai_one(idx: int, content: str) -> tuple[int, str | None]:
         """Compress one AIMessage via LLM; returns (idx, summary) or (idx, None)."""
         try:
-            # Wrap the LLM call in a temporary executor so we can enforce a timeout.
-            # Python threads cannot be cancelled; shutdown(wait=False) lets the
-            # hung thread die in the background without blocking the caller.
-            # NOTE: Do NOT use ``with ThreadPoolExecutor(...) as pool:`` because
-            # ``__exit__`` calls ``shutdown(wait=True)`` which blocks on the hung
-            # thread.  Manual management with ``finally: pool.shutdown(wait=False)``
-            # is required.
-            pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+            # Bounded-timeout LLM invocation via the centralized helper —
+            # migrated under #1903; see docs/architecture/CONCURRENCY.md.
             try:
-                future = pool.submit(
+                resp = invoke_with_timeout(
                     llm.invoke,
                     [
                         HumanMessage(
@@ -480,18 +470,15 @@ def apply_message_compression(
                             )
                         )
                     ],
+                    timeout=_COMPRESS_INVOKE_TIMEOUT_SECONDS,
                 )
-                try:
-                    resp = future.result(timeout=_COMPRESS_INVOKE_TIMEOUT_SECONDS)
-                except concurrent.futures.TimeoutError:
-                    log.warning(
-                        "AIMessage compression timed out after %ds at index %d",
-                        _COMPRESS_INVOKE_TIMEOUT_SECONDS,
-                        idx,
-                    )
-                    return idx, None
-            finally:
-                pool.shutdown(wait=False)
+            except TimeoutError:
+                log.warning(
+                    "AIMessage compression timed out after %ds at index %d",
+                    _COMPRESS_INVOKE_TIMEOUT_SECONDS,
+                    idx,
+                )
+                return idx, None
             summary = getattr(resp, "content", "").strip()
             return idx, summary if summary else None
         except Exception as exc:

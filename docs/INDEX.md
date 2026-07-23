@@ -49,7 +49,9 @@ docker pull ghcr.io/northlandpositronics/cogtrix-webui:latest
 | Guide | Description |
 |-------|-------------|
 | [Architecture](ARCHITECTURE.md) | System architecture, component design, data flow |
+| [Concurrency Policy](architecture/CONCURRENCY.md) | `ThreadPoolExecutor` usage rules, `invoke_with_timeout` helper, the four shared pools |
 | [Development](DEVELOPMENT.md) | Adding tools, memory modes, slash commands, testing |
+| [Agent Complexity Test Fleet](../tests/agent_complexity/README.md) | Multi-container Docker fleet that exercises the agent across complexity tiers |
 
 ## Reference & Planning
 

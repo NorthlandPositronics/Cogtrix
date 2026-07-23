@@ -6,7 +6,7 @@
 You> Find the five most-cited deep-learning papers from arXiv in 2025,
      summarize each in two sentences, and save the list to papers.md.
 
-Cogtrix> web_search("most cited arxiv deep learning papers 2025")
+Cogtrix> http_get("api.semanticscholar.org/graph/v1/paper/search?...")
          http_get("https://arxiv.org/abs/2501.…")
          http_get("https://arxiv.org/abs/2502.…")
          http_get("https://arxiv.org/abs/2503.…")
@@ -14,7 +14,7 @@ Cogtrix> web_search("most cited arxiv deep learning papers 2025")
          Done. 5 papers summarized — see papers.md.
 ```
 
-That's one prompt, six tool calls, one file on disk. Cogtrix chained them on its own.
+That's one prompt, five tool calls, one file on disk. Cogtrix knows to query Semantic Scholar for citation counts (arXiv itself doesn't publish them), pulls each paper's abstract from arXiv, and chains the steps on its own.
 
 ---
 

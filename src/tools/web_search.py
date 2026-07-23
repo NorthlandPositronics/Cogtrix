@@ -45,11 +45,12 @@ import threading
 from collections.abc import Generator
 from contextlib import contextmanager
 from datetime import UTC
-from typing import Any
+from typing import Any, cast
 from urllib.parse import urlparse
 
 from pydantic import BaseModel, Field
 
+from src.concurrency import invoke_with_timeout
 from src.tools._web_search_aggregator import ProviderResult
 from src.tools.delegate import register_tool_categories
 from src.tools.error_sanitizer import sanitize_search_error as _sanitize_search_error
@@ -178,16 +179,25 @@ def search_web(query: str, num_results: int = 5, region: str = "wt-wt") -> str:
         except RuntimeError as exc:
             if "asyncio.run() cannot be called" not in str(exc):
                 raise
-            # Existing loop on the calling thread — schedule on a worker
-            # so we don't dead-lock the caller's loop. Mirrors the
-            # `_sync_web_search` fallback policy.
-            import concurrent.futures
-
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                raw = pool.submit(
+            # Existing loop on the calling thread — escape onto the
+            # centralized shared pool so we don't dead-lock the caller's
+            # loop.  Migrated under #1903; the previous pattern was
+            # ``with ThreadPoolExecutor(...) as pool: ... .result()``
+            # which carries the shutdown(wait=True)-on-__exit__ footgun
+            # the policy doc forbids.  30s is generous for a single DDG
+            # provider call (web_search has a 25s internal budget).
+            # ``invoke_with_timeout`` is generic over ``Callable[..., T]``;
+            # pyright cannot propagate ``asyncio.run``'s own TypeVar through
+            # the helper signature, so the call site narrows the result
+            # explicitly to the shape ``_ddg_subprocess_call`` returns.
+            raw = cast(
+                list[dict[str, Any]],
+                invoke_with_timeout(
                     asyncio.run,
                     _ddg_subprocess_call(query, region, num_results),
-                ).result()
+                    timeout=30,
+                ),
+            )
     except Exception as exc:  # noqa: BLE001
         return f"Error searching: {_sanitize_search_error(exc, context='DuckDuckGo')}"
 
@@ -840,13 +850,21 @@ def _sync_web_search(
         return asyncio.run(coro)
     except RuntimeError as exc:
         if "asyncio.run() cannot be called" in str(exc):
-            # We're inside a running loop already. Schedule on it and
-            # block via a thread-pooled future. This keeps the sync
-            # surface working from inside async hosts.
-            import concurrent.futures
-
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                return pool.submit(asyncio.run, coro).result()
+            # We're inside a running loop already. Escape onto the
+            # centralized shared pool so the sync surface works from
+            # inside async hosts.  Migrated under #1903; the previous
+            # ``with ThreadPoolExecutor(...) as pool: .result()`` shape
+            # carried the shutdown(wait=True)-on-__exit__ footgun the
+            # policy doc forbids.  60s is generous for the full
+            # web_search pipeline (its internal asyncio.wait_for budget
+            # is 25s); if the outer timer fires the caller gets a
+            # graceful error string rather than an unhandled exception.
+            try:
+                # See comment at site 1: explicit narrow to ``str`` because the
+                # helper's TypeVar can't propagate through ``asyncio.run``.
+                return cast(str, invoke_with_timeout(asyncio.run, coro, timeout=60))
+            except TimeoutError as t_exc:
+                return f"Error searching: {_sanitize_search_error(t_exc, context='web_search')}"
         raise
 
 

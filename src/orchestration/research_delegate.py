@@ -8,11 +8,14 @@ trap.
 
 from __future__ import annotations
 
+import logging
 import re
 from datetime import UTC, datetime
 from typing import Any, TypedDict
 
 from src.tools.web_search import extract_domain
+
+log = logging.getLogger("cogtrix")
 
 
 class SourceSnapshot(TypedDict):
@@ -43,11 +46,29 @@ class SourceTracker:
     def add_source(self, source_id: str, url: str, content: str) -> None:
         """Add a source and extract domain/origin information.
 
+        Duplicate ``source_id`` calls are ignored — the second call
+        logs a warning and returns without mutating any tracker state
+        (#1896).  Without this guard a caller that re-ingested the
+        same source ID would silently inflate ``total_sources`` and
+        the diversity / dominant-origin denominators, turning a
+        "perfect diversity" tracker into something noisier with no
+        signal to the caller.
+
         Args:
             source_id: Unique identifier for this source
             url: The URL of the source
             content: The content extracted from the source
         """
+        for existing in self.sources:
+            if existing["source_id"] == source_id:
+                log.warning(
+                    "SourceTracker.add_source: duplicate source_id %r ignored "
+                    "(already tracked from %r); statistics unchanged",
+                    source_id,
+                    existing["url"],
+                )
+                return
+
         domain = extract_domain(url)
         origin = self._infer_origin(content, url)
 
@@ -199,25 +220,44 @@ class ContradictionDetector:
     """Detect contradictions and lack of independent confirmation.
 
     This class helps identify claims that lack sufficient independent
-    confirmation by analyzing the diversity of supporting sources.
+    confirmation by analysing the diversity of **origins** backing each
+    claim.
+
+    ``add_claim`` takes ``supporting_origins`` — origin names like
+    ``"wikipedia"`` / ``"github"`` / ``"news_agency"`` — NOT raw source
+    IDs. Confidence is then a function of unique-origin count: five
+    source IDs all pointing at wikipedia.org should yield ``origin_count
+    == 1``, not 5, otherwise a single-origin claim looks "well supported"
+    while in fact having zero origin diversity (#1175).
+
+    If a caller has source IDs and needs to derive origins, the sibling
+    :class:`SourceTracker` exposes that mapping via ``_infer_origin`` and
+    its ``origins`` dict — feed the resulting origin names into
+    ``add_claim``.
     """
 
     def __init__(self) -> None:
         """Initialize the contradiction detector."""
         self.claims: list[dict[str, Any]] = []
 
-    def add_claim(self, claim: str, supporting_sources: list[str]) -> None:
-        """Add a claim with its supporting sources.
+    def add_claim(self, claim: str, supporting_origins: list[str]) -> None:
+        """Add a claim with its supporting origins.
 
         Args:
-            claim: The claim statement
-            supporting_sources: List of source IDs supporting this claim
+            claim: The claim statement.
+            supporting_origins: List of **origin names** supporting this
+                claim (e.g. ``["wikipedia", "github", "news_agency"]``).
+                Pass origin names — NOT raw source IDs.  Confidence is
+                derived from unique-origin diversity; passing source IDs
+                instead would silently inflate the count (#1175). Use
+                :class:`SourceTracker` to map source IDs to origin names
+                when the caller has only the former.
         """
         self.claims.append(
             {
                 "claim": claim,
-                "supporting_sources": supporting_sources,
-                "origin_count": len(set(supporting_sources)),
+                "supporting_origins": supporting_origins,
+                "origin_count": len(set(supporting_origins)),
             }
         )
 

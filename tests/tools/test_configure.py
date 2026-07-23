@@ -63,17 +63,23 @@ class TestCreateRequestToolsTool:
         assert "unknown" not in result.lower()
 
     def test_fuzzy_resolved_name_shown_in_success_message(self):
-        """BUG-G: fuzzy resolution includes '(resolved from X)' in success message."""
+        """BUG-G: fuzzy resolution includes '(resolved from X)' in success message.
+
+        #1924 added a short-request guard so ``"http"`` (4 chars, single
+        token) no longer fuzzy-resolves.  Use ``"http_req"`` (multi-
+        token, past the guard) which fuzzy-resolves to ``http_request``
+        via the prefix-token bonus on ``req``/``request``.
+        """
         from src.tools.configure import create_request_tools_tool
 
         available = {"http_request": MagicMock(description="HTTP requests")}
         catalog = {"http_request": "HTTP requests"}
         tool = create_request_tools_tool(available, catalog)
         assert tool is not None
-        result = tool.invoke({"add": ["http"], "remove": []})
+        result = tool.invoke({"add": ["http_req"], "remove": []})
         assert "http_request" in result
         assert "resolved from" in result.lower()
-        assert "'http'" in result
+        assert "'http_req'" in result
 
     def test_exact_match_no_resolved_from_annotation(self):
         """BUG-G: exact name match does not add '(resolved from X)' annotation."""
@@ -198,14 +204,19 @@ class TestCreateRequestToolsTool:
         assert "search_web" in result or "search_news" in result
 
     def test_fuzzy_add_resolves_partial_name(self):
-        """Fuzzy resolution: 'http' resolves to 'http_request'."""
+        """Fuzzy resolution: 'http_req' resolves to 'http_request'.
+
+        #1924 added a short-request guard so single-token requests of
+        ≤4 chars (like the original ``'http'``) now bail at the
+        resolver.  Multi-token requests still fuzzy-resolve normally.
+        """
         from src.tools.configure import create_request_tools_tool
 
         available = {"http_request": MagicMock(description="HTTP requests")}
         catalog = {"http_request": "HTTP requests"}
         tool = create_request_tools_tool(available, catalog)
         assert tool is not None
-        result = tool.invoke({"add": ["http"], "remove": []})
+        result = tool.invoke({"add": ["http_req"], "remove": []})
         assert "http_request" in result
         assert "loaded" in result.lower() or "active" in result.lower()
 
