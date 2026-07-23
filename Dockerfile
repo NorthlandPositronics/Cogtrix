@@ -1,5 +1,5 @@
 # ── Stage 1: Build ────────────────────────────────────────────
-FROM python:3.14-slim AS builder
+FROM python:3.13-slim AS builder
 
 # Pin to a specific patch version for reproducibility.
 # Update this when intentionally upgrading uv.
@@ -26,7 +26,7 @@ RUN uv sync --frozen --no-dev --no-install-project \
     rm -rf /root/.cache/uv /root/.cache/pip
 
 # ── Stage 2: Runtime ─────────────────────────────────────────
-FROM python:3.14-slim AS runtime
+FROM python:3.13-slim AS runtime
 
 LABEL org.opencontainers.image.title="Cogtrix" \
       org.opencontainers.image.description="Modular AI assistant with 51 built-in tools and REST/WebSocket API" \

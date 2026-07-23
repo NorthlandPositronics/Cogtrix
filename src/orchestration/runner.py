@@ -408,10 +408,12 @@ def extract_response(result: Any, log: Any = None) -> str | None:
                 return text
 
     if log:
-        log.debug(
-            f"No AI content in {len(messages)} messages. "
-            f"Types: {[type(m).__name__ for m in messages[-5:]]}"
-        )
+        if log.isEnabledFor(10):  # logging.DEBUG
+            log.debug(
+                "No AI content in %d messages. Types: %s",
+                len(messages),
+                [type(m).__name__ for m in messages[-5:]],
+            )
 
     return None
 

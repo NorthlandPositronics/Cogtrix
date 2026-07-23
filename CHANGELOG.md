@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.1.30](https://github.com/NorthlandPositronics/Cogtrix/compare/v0.1.29...v0.1.30) (2026-03-23)
+
+
+### Bug Fixes
+
+* **docker:** fix alembic invocation and Python version alignment ([25950cd](https://github.com/NorthlandPositronics/Cogtrix/commit/25950cd055226038c42fa0aabdc36e1edeb0c526))
+* **docker:** fix alembic invocation and Python version alignment ([78e94f9](https://github.com/NorthlandPositronics/Cogtrix/commit/78e94f9b286cb2de6b6d6d4c62f3b7e91a14087c))
+* **docker:** fix alembic invocation and Python version alignment ([#70](https://github.com/NorthlandPositronics/Cogtrix/issues/70)) ([25950cd](https://github.com/NorthlandPositronics/Cogtrix/commit/25950cd055226038c42fa0aabdc36e1edeb0c526))
+* replace f-string logging with lazy %-formatting (11 sites) ([e61c853](https://github.com/NorthlandPositronics/Cogtrix/commit/e61c8530a4dad4764b1555a11e3e931d54f5e8dd))
+* replace f-string logging with lazy %-formatting (11 sites) ([#72](https://github.com/NorthlandPositronics/Cogtrix/issues/72)) ([e61c853](https://github.com/NorthlandPositronics/Cogtrix/commit/e61c8530a4dad4764b1555a11e3e931d54f5e8dd))
+* replace f-string logging with lazy %-formatting across 11 call sites ([9e95182](https://github.com/NorthlandPositronics/Cogtrix/commit/9e95182b7e9d6403051f7b0dfd250bb0e1eb7ca5))
+
 ## [0.1.29](https://github.com/NorthlandPositronics/Cogtrix/compare/v0.1.28...v0.1.29) (2026-03-23)
 
 

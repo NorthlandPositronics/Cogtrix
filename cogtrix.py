@@ -3075,7 +3075,7 @@ def main():
         if not tool_names:
             log.warning("No tools loaded")
     except Exception as e:
-        log.error(f"Error loading tools: {e}")
+        log.error("Error loading tools: %s", e)
         registry = ToolRegistry()
 
     # Configure remaining tools that need runtime settings
@@ -3303,7 +3303,7 @@ def main():
             if registry.requires_confirmation(name):
                 approvals.add(name)
         if approvals:
-            log.info(f"Auto-approved {len(approvals)} tool(s) (--no-confirm)")
+            log.info("Auto-approved %d tool(s) (--no-confirm)", len(approvals))
 
     # Wrap tools with safety interceptors
     tools = []
@@ -3369,8 +3369,8 @@ def main():
             tool_instructions=provider_config.tool_instructions,
             active_tool_names={getattr(t, "name", "") for t in tools} | set(available_tools),
         )
-        log.debug(f"System prompt length: {len(system_prompt)} chars")
-        log.debug(f"Mode additions: {mode_adds if mode_adds else 'None'}")
+        log.debug("System prompt length: %d chars", len(system_prompt))
+        log.debug("Mode additions: %s", mode_adds if mode_adds else "None")
         log.debug("=== System prompt ===\n%s\n=== End system prompt ===", system_prompt)
 
         # Create LLM from provider and model configs.
@@ -3730,14 +3730,14 @@ def main():
                                 )
                             else:
                                 print(f"Switched to {new_mode} mode.")
-                            log.info(f"Live mode switch: {new_mode}")
+                            log.info("Live mode switch: %s", new_mode)
                         except Exception as exc:
                             restored = session_orch.rollback(_snap, tools_list=tools)
                             memory_manager = restored["memory_manager"]
                             system_prompt = restored["system_prompt"]
                             available_tools = restored["available_tools"]
                             registry.tools = _snap.registry_tools
-                            log.error(f"Mode switch failed: {exc}")
+                            log.error("Mode switch failed: %s", exc)
                             if console is not None:
                                 console.print(f"[red]Mode switch failed:[/red] {exc}")
                             else:
@@ -3840,7 +3840,7 @@ def main():
                             restored = session_orch.rollback(_snap)
                             system_prompt = restored["system_prompt"]
                             available_tools = restored["available_tools"]
-                            log.error(f"Model switch failed: {exc}")
+                            log.error("Model switch failed: %s", exc)
                             try:
                                 provider_config, _ = config.resolve_llm_config()
                                 friendly = _friendly_error(exc, provider=provider_config.name)
@@ -3919,7 +3919,7 @@ def main():
                             restored = session_orch.rollback(_snap)
                             memory_manager = restored["memory_manager"]
                             system_prompt = restored["system_prompt"]
-                            log.error(f"Session switch failed: {exc}")
+                            log.error("Session switch failed: %s", exc)
                             if console is not None:
                                 console.print(f"[red]Session switch failed:[/red] {exc}")
                             else:
@@ -4599,7 +4599,7 @@ def main():
                             f.write(f"## You\n\n{original_input}\n\n")
                             f.write(f"## Agent\n\n{output}\n\n---\n\n")
                     except Exception as e:
-                        log.error(f"Error appending to output file: {e}")
+                        log.error("Error appending to output file: %s", e)
 
                 # Only save valid responses to history (skip empty/error).
                 # Pass the full agent chain so the agent can continue

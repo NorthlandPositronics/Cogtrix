@@ -27,7 +27,7 @@ if [ "${1}" = "api" ] || [ "${1}" = "--api" ]; then
     # A non-zero exit here is treated as a warning so an already-migrated DB
     # (which returns exit 0) doesn't block startup, and partial failures are
     # surfaced on stderr for visibility.
-    if ! python -m alembic upgrade head 2>&1; then
+    if ! alembic upgrade head 2>&1; then
         echo "Warning: Alembic migration step returned non-zero (tables may already exist)" >&2
     fi
 

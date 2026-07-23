@@ -752,8 +752,10 @@ class BaseMemoryManager(ABC):
 
         if removed > 0:
             log.info(
-                f"History sanitized: removed {removed} poisoned entries "
-                f"({len(messages)} -> {len(cleaned)} messages)"
+                "History sanitized: removed %d poisoned entries (%d -> %d messages)",
+                removed,
+                len(messages),
+                len(cleaned),
             )
 
         return cleaned

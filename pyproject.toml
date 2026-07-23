@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cogtrix"
-version = "0.1.29"
+version = "0.1.30"
 description = "Modular AI assistant with 51 built-in tools, multi-provider LLM support, and hybrid memory"
 readme = "README.md"
 requires-python = "~=3.13.0"
@@ -158,6 +158,7 @@ testpaths = ["tests"]
 timeout = 30
 markers = [
     "agent_workflow: integration tests that require live LLM endpoints",
+    "docker: integration tests that require a running Docker daemon",
 ]
 
 [tool.coverage.run]
