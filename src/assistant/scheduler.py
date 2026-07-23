@@ -52,6 +52,7 @@ class ScheduledMessage:
     text: str
     send_at: float  # wall-clock time.time()
     created_at: float  # wall-clock time.time()
+    recipient: str | None = None  # human-readable: phone, username, or name
     status: str = "pending"  # pending | sending | sent | cancelled | failed | expired
     attempts: int = 0
     max_attempts: int = 3
@@ -61,7 +62,14 @@ class ScheduledMessage:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> ScheduledMessage:
-        return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
+        coerced = {k: v for k, v in data.items() if k in cls.__dataclass_fields__}
+        for float_field in ("send_at", "created_at"):
+            if float_field in coerced:
+                coerced[float_field] = float(coerced[float_field])
+        for int_field in ("attempts", "max_attempts"):
+            if int_field in coerced:
+                coerced[int_field] = int(coerced[int_field])
+        return cls(**coerced)
 
 
 @dataclass
@@ -71,6 +79,14 @@ class ScheduleReplyState:
     was_called: bool = False
     scheduled_text: str = ""
     delay_minutes: int = 0
+
+
+@dataclass
+class EditReplyState:
+    """Mutable per-call state set by the edit_last_reply tool closure."""
+
+    was_called: bool = False
+    new_text: str = ""
 
 
 @dataclass
@@ -94,6 +110,64 @@ class ScheduleReplyInput(BaseModel):
     )
 
 
+class EditReplyInput(BaseModel):
+    new_text: str = Field(description="The corrected/updated text to replace your last reply")
+
+
+class ListScheduledInput(BaseModel):
+    recipient: str = Field(
+        default="",
+        description=(
+            "Filter by recipient phone number, username, or display name (substring match). "
+            "Leave empty to skip this filter."
+        ),
+    )
+    chat_id: str = Field(
+        default="",
+        description=(
+            "Filter by exact conversation ID "
+            "(e.g. '971503308667@c.us' for WhatsApp, '123456789' for Telegram). "
+            "Leave empty to skip this filter."
+        ),
+    )
+    contact_name: str = Field(
+        default="",
+        description=(
+            "Filter by contact name from the phonebook configuration "
+            "(e.g. 'shraddha', 'alice') or a sender ID / username. "
+            "Resolves to phone/chat ID via phonebook, falls back to substring match. "
+            "Leave empty to skip this filter."
+        ),
+    )
+
+
+class EditScheduledInput(BaseModel):
+    message_id: str = Field(
+        min_length=1,
+        description="ID of the scheduled message (from list_scheduled_messages)",
+    )
+    new_text: str | None = Field(
+        default=None,
+        description="Updated message text. Leave empty to keep the current text.",
+    )
+    reschedule_minutes: int | None = Field(
+        default=None,
+        ge=1,
+        le=1440,
+        description=(
+            "Reschedule delivery to this many minutes from now. "
+            "Leave empty to keep current time."
+        ),
+    )
+
+
+class CancelScheduledInput(BaseModel):
+    message_id: str = Field(
+        min_length=1,
+        description="ID of the scheduled message to cancel (from list_scheduled_messages)",
+    )
+
+
 # ---------------------------------------------------------------------------
 # Tool factory
 # ---------------------------------------------------------------------------
@@ -107,10 +181,18 @@ def create_schedule_reply_tool(state: ScheduleReplyState) -> StructuredTool:  # 
     This function does NOT enqueue directly.
     """
 
+    _lock = threading.Lock()
+
     def _schedule_reply(text: str, delay_minutes: int) -> str:
-        state.was_called = True
-        state.scheduled_text = text
-        state.delay_minutes = delay_minutes
+        with _lock:
+            if state.was_called:
+                return (
+                    f"Reply already scheduled for delivery in {state.delay_minutes} minute(s). "
+                    "Only one scheduled reply is allowed per turn."
+                )
+            state.was_called = True
+            state.scheduled_text = text
+            state.delay_minutes = delay_minutes
         return (
             f"Reply scheduled for delivery in {delay_minutes} minute(s). "
             "Do not repeat the message — it will be sent automatically."
@@ -127,6 +209,218 @@ def create_schedule_reply_tool(state: ScheduleReplyState) -> StructuredTool:  # 
             "delivered automatically after the specified delay."
         ),
         args_schema=ScheduleReplyInput,
+    )
+
+
+def create_edit_reply_tool(state: EditReplyState) -> StructuredTool:  # type: ignore[valid-type]
+    """Return a StructuredTool whose closure captures *state*.
+
+    When the agent calls this tool the closure mutates *state* in-place
+    so the handler can route the edit after agent execution completes.
+    """
+
+    _lock = threading.Lock()
+
+    def _edit_last_reply(new_text: str) -> str:
+        with _lock:
+            if state.was_called:
+                return "Last reply already queued for update — only one edit per turn is allowed."
+            state.was_called = True
+            state.new_text = new_text
+        return "Last reply will be updated with the new text."
+
+    return StructuredTool.from_function(  # type: ignore[union-attr]
+        func=_edit_last_reply,
+        name="edit_last_reply",
+        description=(
+            "Edit/replace your most recently sent reply in this chat. "
+            "Use when you need to correct a mistake, update information, "
+            "or improve your previous response. Provide the complete new text."
+        ),
+        args_schema=EditReplyInput,
+    )
+
+
+def _resolve_message_id(scheduler: MessageScheduler, short_id: str) -> str | None:
+    """Resolve a short ID prefix to the full message UUID, or None if not found."""
+    if not short_id:
+        return None
+    with scheduler._lock:
+        for msg_id, msg in scheduler._queue.items():
+            if msg_id.startswith(short_id) and msg.status == "pending":
+                return msg_id
+    return None
+
+
+def _merge_phonebooks(services_config: dict[str, Any]) -> dict[str, list[str]]:
+    """Build a flat contact_name -> [normalized_identifiers] map from all channel phonebooks."""
+    merged: dict[str, list[str]] = {}
+    for _channel_key, channel_cfg in services_config.items():
+        if not isinstance(channel_cfg, dict):
+            continue
+        phonebook = channel_cfg.get("phonebook", {})
+        if not isinstance(phonebook, dict):
+            continue
+        for name, identifier in phonebook.items():
+            key = str(name).strip().lower()
+            normalized = (
+                str(identifier)
+                .strip()
+                .replace("+", "")
+                .replace("@c.us", "")
+                .replace("@s.whatsapp.net", "")
+                .lower()
+            )
+            merged.setdefault(key, []).append(normalized)
+    return merged
+
+
+def create_list_scheduled_tool(
+    scheduler: MessageScheduler,
+    services_config: dict[str, Any] | None = None,
+) -> StructuredTool:  # type: ignore[valid-type]
+    """Return a tool that lists pending scheduled messages."""
+    import datetime
+
+    _phonebook = _merge_phonebooks(services_config or {})
+
+    def _list_scheduled(recipient: str = "", chat_id: str = "", contact_name: str = "") -> str:
+        effective_recipient = recipient or None
+        effective_chat_id = chat_id or None
+
+        if contact_name:
+            key = contact_name.strip().lower()
+            identifiers = _phonebook.get(key)
+            if identifiers:
+                seen_ids: set[str] = set()
+                msgs: list[ScheduledMessage] = []
+                for ident in identifiers:
+                    for m in scheduler.get_pending(recipient=ident, chat_id=effective_chat_id):
+                        if m.id not in seen_ids:
+                            seen_ids.add(m.id)
+                            msgs.append(m)
+                if effective_recipient:
+                    needle = effective_recipient.lower().replace("+", "").replace("@c.us", "")
+                    msgs = [
+                        m
+                        for m in msgs
+                        if needle in (m.recipient or "").lower().replace("+", "")
+                        or needle in m.chat_id.lower().replace("@c.us", "").replace("@lid", "")
+                    ]
+                msgs.sort(key=lambda m: m.send_at)
+            else:
+                # No phonebook hit: treat contact_name as a recipient substring
+                msgs = scheduler.get_pending(recipient=contact_name, chat_id=effective_chat_id)
+                # Apply additional recipient filter for AND semantics
+                if effective_recipient and msgs:
+                    needle = effective_recipient.lower().replace("+", "").replace("@c.us", "")
+                    msgs = [
+                        m
+                        for m in msgs
+                        if needle in (m.recipient or "").lower().replace("+", "")
+                        or needle in m.chat_id.lower().replace("@c.us", "").replace("@lid", "")
+                    ]
+        else:
+            msgs = scheduler.get_pending(recipient=effective_recipient, chat_id=effective_chat_id)
+
+        if not msgs:
+            parts = []
+            if recipient:
+                parts.append(f"recipient '{recipient}'")
+            if chat_id:
+                parts.append(f"chat '{chat_id}'")
+            if contact_name:
+                parts.append(f"contact '{contact_name}'")
+            who = " for " + " and ".join(parts) if parts else ""
+            return f"No pending scheduled messages{who}."
+
+        lines = [f"{len(msgs)} pending scheduled message(s):\n"]
+        now = time.time()
+        for i, msg in enumerate(msgs, 1):
+            mins_left = max(0, int((msg.send_at - now) / 60))
+            dt = datetime.datetime.fromtimestamp(msg.send_at, tz=datetime.UTC)
+            time_str = dt.strftime("%Y-%m-%d %H:%M UTC")
+            who = msg.recipient or msg.chat_id
+            preview = msg.text[:80] + ("..." if len(msg.text) > 80 else "")
+            lines.append(
+                f"{i}. [ID: {msg.id[:8]}] To: {who}\n"
+                f'   Text: "{preview}"\n'
+                f"   Delivery: in {mins_left} min ({time_str})"
+            )
+        return "\n".join(lines)
+
+    return StructuredTool.from_function(  # type: ignore[union-attr]
+        func=_list_scheduled,
+        name="list_scheduled_messages",
+        description=(
+            "List all messages currently queued for scheduled delivery. "
+            "Filter by recipient (phone/name), chat_id (exact conversation ID), "
+            "or contact_name (phonebook key like 'shraddha'). "
+            "All filters are optional and combined with AND logic. "
+            "Returns message IDs needed for edit_scheduled_message and cancel_scheduled_message."
+        ),
+        args_schema=ListScheduledInput,
+    )
+
+
+def create_edit_scheduled_tool(scheduler: MessageScheduler) -> StructuredTool:  # type: ignore[valid-type]
+    """Return a tool that edits a pending scheduled message."""
+
+    def _edit_scheduled(
+        message_id: str, new_text: str | None = None, reschedule_minutes: int | None = None
+    ) -> str:
+        full_id = _resolve_message_id(scheduler, message_id)
+        if full_id is None:
+            return f"No pending message found with ID starting with '{message_id}'."
+        new_send_at = time.time() + reschedule_minutes * 60 if reschedule_minutes else None
+        ok = scheduler.edit_message(full_id, new_text=new_text, new_send_at=new_send_at)
+        if not ok:
+            return (
+                f"Could not edit message {message_id} — "
+                "it may have already been sent or cancelled."
+            )
+        parts = []
+        if new_text is not None:
+            parts.append("text updated")
+        if reschedule_minutes is not None:
+            parts.append(f"rescheduled to {reschedule_minutes} minutes from now")
+        return f"Message {message_id} {' and '.join(parts)}."
+
+    return StructuredTool.from_function(  # type: ignore[union-attr]
+        func=_edit_scheduled,
+        name="edit_scheduled_message",
+        description=(
+            "Edit a queued message's text and/or delivery time. "
+            "Use the message ID from list_scheduled_messages. "
+            "You can update the text, reschedule the delivery, or both."
+        ),
+        args_schema=EditScheduledInput,
+    )
+
+
+def create_cancel_scheduled_tool(scheduler: MessageScheduler) -> StructuredTool:  # type: ignore[valid-type]
+    """Return a tool that cancels a specific pending scheduled message."""
+
+    def _cancel_scheduled(message_id: str) -> str:
+        full_id = _resolve_message_id(scheduler, message_id)
+        if full_id is None:
+            return f"No pending message found with ID starting with '{message_id}'."
+        ok = scheduler.cancel_message(full_id)
+        if not ok:
+            return (
+                f"Could not cancel message {message_id} — "
+                "it may have already been sent or cancelled."
+            )
+        return f"Message {message_id} cancelled. It will not be delivered."
+
+    return StructuredTool.from_function(  # type: ignore[union-attr]
+        func=_cancel_scheduled,
+        name="cancel_scheduled_message",
+        description=(
+            "Cancel a specific scheduled message so it will not be delivered. "
+            "Use the message ID from list_scheduled_messages."
+        ),
+        args_schema=CancelScheduledInput,
     )
 
 
@@ -236,7 +530,14 @@ class MessageScheduler:
     # Public API
     # ------------------------------------------------------------------
 
-    def schedule(self, channel: str, chat_id: str, text: str, send_at: float) -> str:
+    def schedule(
+        self,
+        channel: str,
+        chat_id: str,
+        text: str,
+        send_at: float,
+        recipient: str | None = None,
+    ) -> str:
         """Add a message to the queue and persist. Returns the message ID."""
         msg = ScheduledMessage(
             id=str(uuid.uuid4()),
@@ -245,6 +546,7 @@ class MessageScheduler:
             text=text,
             send_at=send_at,
             created_at=time.time(),
+            recipient=recipient,
         )
         with self._lock:
             self._queue[msg.id] = msg
@@ -267,6 +569,59 @@ class MessageScheduler:
         if cancelled:
             self.save()
         return cancelled
+
+    def get_pending(
+        self,
+        recipient: str | None = None,
+        chat_id: str | None = None,
+        include_all: bool = False,
+    ) -> list[ScheduledMessage]:
+        """Return queued messages, optionally filtered by recipient or chat_id.
+
+        By default returns only 'pending' status. Set include_all=True to
+        include sent/cancelled/failed/expired as well.
+        """
+        with self._lock:
+            result = []
+            for msg in self._queue.values():
+                if not include_all and msg.status != "pending":
+                    continue
+                if chat_id and msg.chat_id != chat_id:
+                    continue
+                if recipient:
+                    needle = recipient.lower().replace("+", "").replace("@c.us", "")
+                    haystack_r = (msg.recipient or "").lower().replace("+", "")
+                    haystack_c = msg.chat_id.lower().replace("@c.us", "").replace("@lid", "")
+                    if needle not in haystack_r and needle not in haystack_c:
+                        continue
+                result.append(msg)
+        result.sort(key=lambda m: m.send_at)
+        return result
+
+    def edit_message(
+        self, msg_id: str, new_text: str | None = None, new_send_at: float | None = None
+    ) -> bool:
+        """Edit a pending message's text and/or scheduled time. Returns True on success."""
+        with self._lock:
+            msg = self._queue.get(msg_id)
+            if msg is None or msg.status != "pending":
+                return False
+            if new_text is not None:
+                msg.text = new_text
+            if new_send_at is not None:
+                msg.send_at = new_send_at
+        self.save()
+        return True
+
+    def cancel_message(self, msg_id: str) -> bool:
+        """Cancel a specific pending message by ID. Returns True on success."""
+        with self._lock:
+            msg = self._queue.get(msg_id)
+            if msg is None or msg.status != "pending":
+                return False
+            msg.status = "cancelled"
+        self.save()
+        return True
 
     def start(self) -> None:
         """Launch the background dispatch thread (daemon)."""
@@ -309,7 +664,7 @@ class MessageScheduler:
                 try:
                     self._queue[mid] = ScheduledMessage.from_dict(data)
                 except Exception as exc:
-                    log.debug("Skipping malformed scheduled message %s: %s", mid, exc)
+                    log.warning("Skipping malformed scheduled message %s: %s", mid, exc)
             # Recover in-flight messages interrupted by a crash (at-least-once delivery).
             for msg in self._queue.values():
                 if msg.status == "sending":
@@ -410,7 +765,8 @@ class MessageScheduler:
             return
 
         try:
-            success = channel.send(msg.chat_id, msg.text)
+            result = channel.send(msg.chat_id, msg.text)
+            success = result.ok
         except Exception as exc:
             log.warning("Scheduler: send error for message %s: %s", msg.id, exc)
             success = False
@@ -467,6 +823,10 @@ class MessageScheduler:
                     json.dump(data, f, ensure_ascii=False, indent=2)
                 os.replace(tmp_path, self._persist_path)
             except Exception:
+                try:
+                    os.close(tmp_fd)
+                except OSError:
+                    pass
                 try:
                     os.unlink(tmp_path)
                 except OSError:

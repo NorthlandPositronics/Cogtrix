@@ -145,13 +145,14 @@ _CONFUSABLE_MAP: dict[str, str] = {
     "\u0396": "Z",
 }
 
+_CONFUSABLE_TRANS: dict[int, str] = str.maketrans(_CONFUSABLE_MAP)
+
 
 def _skeleton(text: str) -> str:
     """Reduce text to a Latin skeleton for confusable-resistant matching."""
     import unicodedata
 
-    text = unicodedata.normalize("NFKC", text)
-    return "".join(_CONFUSABLE_MAP.get(ch, ch) for ch in text)
+    return unicodedata.normalize("NFKC", text).translate(_CONFUSABLE_TRANS)
 
 
 # ── Tool-call guard ──────────────────────────────────────────────────
@@ -547,7 +548,7 @@ class ViolationTracker:
                 cid: [ts - _MONO_OFFSET for ts in timestamps]
                 for cid, timestamps in self._violations.items()
             }
-        self._save_snapshot(snapshot)
+            self._save_snapshot(snapshot)
 
     def _cleanup_stale(self) -> None:
         now = time.monotonic()

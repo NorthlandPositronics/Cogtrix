@@ -27,6 +27,16 @@ _COMPRESSION_THRESHOLD_RATIO = 0.72
 _FALLBACK_MAX_CHARS = 30_000
 
 
+def _content_len(msg: Any) -> int:
+    """Return character count of a message's content without redundant str() calls."""
+    c = getattr(msg, "content", None)
+    if isinstance(c, str):
+        return len(c)
+    if isinstance(c, list):
+        return sum(len(s) for s in c if isinstance(s, str))
+    return 0
+
+
 def truncate_tool_output(text: str, max_chars: int) -> str:
     """Middle-truncate *text* if it exceeds *max_chars*."""
     if len(text) <= max_chars:
@@ -130,7 +140,7 @@ def apply_message_compression(
     if max_context_tokens < 16_384:
         return messages
 
-    total_chars = sum(len(str(getattr(m, "content", "") or "")) for m in messages)
+    total_chars = sum(_content_len(m) for m in messages)
     context_chars = max_context_tokens * 4
     threshold_chars = int(context_chars * _COMPRESSION_THRESHOLD_RATIO)
 
@@ -198,9 +208,12 @@ def apply_message_compression(
             for future in concurrent.futures.as_completed(futures):
                 idx, compressed = future.result()
                 compressed_results[idx] = compressed
-                tcid = eligible[idx][2]
-                if tcid:
-                    compression_cache[tcid] = compressed
+
+        # Pool has exited; update cache sequentially — no concurrent writes.
+        for idx, compressed in compressed_results.items():
+            tcid = eligible[idx][2]
+            if tcid:
+                compression_cache[tcid] = compressed
 
     # Assemble result list.
     result = []
@@ -218,7 +231,7 @@ def apply_message_compression(
 
     compressed_count = len(compressed_results)
     if compressed_count > 0:
-        new_total = sum(len(str(getattr(m, "content", "") or "")) for m in result)
+        new_total = sum(_content_len(m) for m in result)
         log.info(
             "Compressed %d tool messages: %d chars -> %d chars (%.0f%% reduction)",
             compressed_count,

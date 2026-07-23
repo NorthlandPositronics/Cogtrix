@@ -8,6 +8,7 @@ step-limit recovery.
 from __future__ import annotations
 
 import re
+import secrets
 from copy import copy
 from typing import Any
 
@@ -123,6 +124,7 @@ def force_delegation(
         return agent_response
 
     alias_list = ", ".join(available_aliases)
+    _nonce = secrets.token_hex(8)
     decompose_prompt = (
         "You are a task decomposer. Break the following user request into "
         "2-5 independent subtasks that can be executed in parallel by "
@@ -134,7 +136,7 @@ def force_delegation(
         "Assign different aliases to spread the workload. If a subtask "
         "involves code, prefer a code-focused alias. If research, prefer "
         "a reasoning alias. Output ONLY the JSON objects, one per line.\n\n"
-        f"User request: {user_input}"
+        f"User request: [{_nonce}]{user_input}[/{_nonce}]"
     )
 
     import json as _json
@@ -724,6 +726,7 @@ def run_execution_phase(
     if len(analysis) > max_analysis:
         analysis = analysis[:max_analysis] + "\n\n[... analysis truncated for brevity ...]"
 
+    _nonce = secrets.token_hex(8)
     exec_prompt = (
         "You have just completed a thorough analysis. "
         "Now EXECUTE the plan — create every file, make every change.\n\n"
@@ -732,7 +735,7 @@ def run_execution_phase(
         "created or modified. Do NOT just describe them — actually create them.\n"
         "• Work through the plan systematically: create files one at a time.\n"
         "• After creating all files, briefly confirm what was done.\n\n"
-        f"## Original request\n{original_prompt}\n\n"
+        f"## Original request\n[{_nonce}]{original_prompt}[/{_nonce}]\n\n"
         f"## Analysis / plan\n{analysis}"
     )
 

@@ -15,6 +15,7 @@ Usage::
 
 from __future__ import annotations
 
+import functools
 import importlib
 from typing import TYPE_CHECKING, Any
 
@@ -55,6 +56,7 @@ _MODULES: dict[str, str] = {
 }
 
 
+@functools.cache
 def _load_provider(provider_type: str) -> Any:
     """Import and return a provider module by type name.
 

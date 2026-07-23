@@ -159,7 +159,7 @@ services:
     allow_send: true
     allow_receive: true
     require_confirmation: true
-    filter_mode: whitelist
+    filter_mode: allow
     contacts: ["+14155551234", "+442071234567"]
     phonebook:
       alice: "+14155551234"
@@ -176,11 +176,14 @@ services:
 | `allow_send` | bool | `true` | Enable send tools |
 | `allow_receive` | bool | `true` | Enable receive/check tools |
 | `require_confirmation` | bool | `true` | Ask for user approval before sending |
-| `filter_mode` | string | `none` | `"none"`, `"whitelist"`, or `"blacklist"` |
+| `filter_mode` | string | `none` | `"none"`, `"allow"`, `"ignore"`, or `"blacklist"` (legacy `"whitelist"` is accepted and auto-mapped to `"allow"`) |
 | `contacts` | array | `[]` | Phone numbers for the filter list (E.164 format) |
 | `phonebook` | object | `{}` | Nickname-to-number mapping |
 | `rate_limit` | int | `30` | Max outbound messages per hour (0 = unlimited) |
 | `max_message_length` | int | `4096` | Truncate outgoing messages beyond this length |
+| `ignore_archived` | bool | `true` | Skip archived chats during polling |
+| `ignore_older_than` | string | -- | Skip messages older than this duration (e.g. `"24h"`, `"7d"`) |
+| `lid_negative_ttl` | float | `300.0` | Seconds to cache a failed LID resolution before retrying |
 
 ### Environment variables
 
@@ -193,7 +196,7 @@ All options can also be set via environment variables (useful in Docker):
 | `COGTRIX_WHATSAPP_SESSION` | Waha session name |
 | `COGTRIX_WHATSAPP_SEND` | `true` / `false` |
 | `COGTRIX_WHATSAPP_RECEIVE` | `true` / `false` |
-| `COGTRIX_WHATSAPP_FILTER` | `none` / `whitelist` / `blacklist` |
+| `COGTRIX_WHATSAPP_FILTER` | `none` / `allow` / `ignore` / `blacklist` |
 | `COGTRIX_WHATSAPP_CONTACTS` | Comma-separated E.164 numbers |
 
 ### Contact filtering
@@ -202,11 +205,21 @@ Control who the agent can message:
 
 | Mode | Behavior |
 |------|----------|
-| `none` (default) | All contacts allowed |
-| `whitelist` | Only numbers in the `contacts` list can send/receive |
-| `blacklist` | Numbers in the `contacts` list are blocked |
+| `none` (default) | Respond to all contacts |
+| `allow` | Only respond to contacts in the `contacts` list (legacy value `whitelist` is accepted and auto-mapped to `allow`) |
+| `ignore` | Skip messages from contacts in the `contacts` list silently |
+| `blacklist` | Delete the message and archive the chat for contacts in the `contacts` list |
 
-Phonebook nicknames are resolved automatically. If `alice` maps to `+14155551234` and `+14155551234` is in the whitelist, then `"send alice a message"` works.
+Phonebook nicknames are resolved automatically. If `alice` maps to `+14155551234` and `+14155551234` is in the allow list, then `"send alice a message"` works.
+
+### Performance
+
+Several optimisations reduce latency and load on the Waha server:
+
+- **Pre-filtering** — `_can_skip_chat()` evaluates the contact filter against chat overview data alone, skipping the full message HTTP fetch for chats that cannot pass the filter. Groups and `blacklist` mode always fetch (side-effects require the full message).
+- **Batch LID resolution** — `_prefetch_lids()` collects all unresolved `@lid` identifiers from a polling batch and resolves them in parallel before any message is processed.
+- **Adaptive polling** — the poll interval grows when no new messages arrive and shrinks again on activity, reducing idle HTTP traffic.
+- **Error backoff** — per-chat exponential backoff (starting at 30 s, capped at `_FETCH_ERROR_MAX`) prevents hammering Waha when a chat's message fetch consistently fails.
 
 ### Rate limiting
 
@@ -262,7 +275,7 @@ You: Show my WhatsApp contacts and filter settings
 
 1. **Confirmation prompts**: By default, Cogtrix asks for your approval before sending any message. You see the recipient and message text, and can approve (`y`), deny (`n`), or approve all WhatsApp sends for the session (`all`).
 
-2. **Contact filtering**: Use whitelist mode to restrict the agent to a known set of contacts. This prevents the agent from messaging arbitrary numbers.
+2. **Contact filtering**: Use `filter_mode: allow` to restrict the agent to a known set of contacts. This prevents the agent from messaging arbitrary numbers.
 
 3. **Rate limiting**: The hourly rate limit (default 30) prevents accidental message floods.
 
@@ -305,9 +318,9 @@ curl http://localhost:3000    # Is it reachable?
 2. Re-scan the QR code from your phone
 3. Wait for status to show **WORKING**
 
-### "Blocked: Contact not in whitelist"
+### "Blocked: Contact not in allow list"
 
-**Cause:** Contact filtering is enabled and the number isn't in the list.
+**Cause:** Contact filtering is enabled (`filter_mode: allow`) and the number isn't in the `contacts` list.
 
 **Fix:** Add the number to `contacts` in your config, or change `filter_mode` to `"none"`.
 
@@ -315,7 +328,7 @@ curl http://localhost:3000    # Is it reachable?
 
 **Cause:** `allow_receive` may be `false`, or contact filter is blocking inbound messages.
 
-**Fix:** Check config, ensure `allow_receive: true` and the sender is in your whitelist (if using whitelist mode).
+**Fix:** Check config, ensure `allow_receive: true` and the sender is in your allow list (if using `filter_mode: allow`).
 
 ---
 

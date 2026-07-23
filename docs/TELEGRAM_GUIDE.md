@@ -200,7 +200,7 @@ services:
     allow_send: true
     allow_receive: true
     require_confirmation: true
-    filter_mode: whitelist
+    filter_mode: allow
     contacts: ["123456789", "987654321"]
     phonebook:
       alice: "123456789"
@@ -217,11 +217,12 @@ services:
 | `allow_send` | bool | `true` | Enable send tools |
 | `allow_receive` | bool | `true` | Enable receive/check tools |
 | `require_confirmation` | bool | `true` | Ask for user approval before sending |
-| `filter_mode` | string | `"none"` | `"none"`, `"whitelist"`, or `"blacklist"` |
+| `filter_mode` | string | `"none"` | `"none"`, `"allow"`, `"ignore"`, or `"blacklist"` (legacy `"whitelist"` is accepted and auto-mapped to `"allow"`) |
 | `contacts` | array | `[]` | Chat IDs for the filter list |
 | `phonebook` | object | `{}` | Nickname-to-chat-ID mapping |
 | `rate_limit` | int | `30` | Max outbound messages per hour (0 = unlimited) |
 | `max_message_length` | int | `4096` | Truncate outgoing messages beyond this length |
+| `ignore_older_than` | string | -- | Skip messages older than this duration (e.g. `"24h"`, `"7d"`) |
 
 ### Environment variables
 
@@ -232,7 +233,7 @@ All options can be set via environment variables (useful in Docker or CI):
 | `COGTRIX_TELEGRAM_TOKEN` | Bot token from @BotFather |
 | `COGTRIX_TELEGRAM_SEND` | `true` / `false` |
 | `COGTRIX_TELEGRAM_RECEIVE` | `true` / `false` |
-| `COGTRIX_TELEGRAM_FILTER` | `none` / `whitelist` / `blacklist` |
+| `COGTRIX_TELEGRAM_FILTER` | `none` / `allow` / `ignore` / `blacklist` |
 | `COGTRIX_TELEGRAM_CONTACTS` | Comma-separated chat IDs |
 
 ### Contact filtering
@@ -241,11 +242,12 @@ Control who the bot can communicate with:
 
 | Mode | Behavior |
 |------|----------|
-| `none` (default) | All contacts allowed |
-| `whitelist` | Only chat IDs in the `contacts` list can send/receive |
-| `blacklist` | Chat IDs in the `contacts` list are blocked |
+| `none` (default) | Respond to all contacts |
+| `allow` | Only respond to chat IDs in the `contacts` list (legacy value `whitelist` is accepted and auto-mapped to `allow`) |
+| `ignore` | Skip messages from chat IDs in the `contacts` list silently |
+| `blacklist` | Delete the message for chat IDs in the `contacts` list (Telegram has no archive API, so the chat is not archived) |
 
-Phonebook nicknames are resolved automatically. If `alice` maps to `123456789` and `123456789` is in the whitelist, then `"send alice a message"` works.
+Phonebook nicknames are resolved automatically. If `alice` maps to `123456789` and `123456789` is in the allow list, then `"send alice a message"` works.
 
 ### Rate limiting
 
@@ -362,7 +364,7 @@ You can combine Telegram and WhatsApp in the same deployment -- both sets of too
 
 1. **Confirmation prompts**: By default, Cogtrix asks for your approval before sending any message. You see the recipient and message text, and can approve (`y`), deny (`n`), or approve all Telegram sends for the session (`all`).
 
-2. **Contact filtering**: Use whitelist mode to restrict the bot to a known set of chat IDs. This prevents the agent from messaging arbitrary users or groups.
+2. **Contact filtering**: Use `filter_mode: allow` to restrict the bot to a known set of chat IDs. This prevents the agent from messaging arbitrary users or groups.
 
 3. **Rate limiting**: The hourly rate limit (default 30) prevents accidental message floods.
 
@@ -414,9 +416,9 @@ python cogtrix.py
 - Telegram's `getUpdates` returns each message only once. If you called `telegram_check` and the messages were shown, they won't appear again in the next call.
 - Send a new test message to the bot from Telegram, then run `telegram_check`.
 
-### "Blocked: Contact not in whitelist"
+### "Blocked: Contact not in allow list"
 
-**Cause:** Contact filtering is enabled and the chat ID isn't in the list.
+**Cause:** Contact filtering is enabled (`filter_mode: allow`) and the chat ID isn't in the `contacts` list.
 
 **Fix:** Add the chat ID to `contacts` in your config, or change `filter_mode` to `"none"`.
 

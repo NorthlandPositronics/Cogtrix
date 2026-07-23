@@ -326,6 +326,7 @@ class MCPManager:
         self._tool_server_map: dict[str, str] = {}
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
+        self._loop_lock = threading.Lock()
 
     # ── Internal event loop management ───────────────────────────────────────
 
@@ -333,16 +334,18 @@ class MCPManager:
         """Start the background event loop thread if it is not already running."""
         if self._loop is not None and not self._loop.is_closed():
             return
+        with self._loop_lock:
+            if self._loop is not None and not self._loop.is_closed():
+                return
+            self._loop = asyncio.new_event_loop()
 
-        self._loop = asyncio.new_event_loop()
+            def _run_loop() -> None:
+                asyncio.set_event_loop(self._loop)
+                assert self._loop is not None
+                self._loop.run_forever()
 
-        def _run_loop() -> None:
-            asyncio.set_event_loop(self._loop)
-            assert self._loop is not None
-            self._loop.run_forever()
-
-        self._thread = threading.Thread(target=_run_loop, daemon=True, name="mcp-event-loop")
-        self._thread.start()
+            self._thread = threading.Thread(target=_run_loop, daemon=True, name="mcp-event-loop")
+            self._thread.start()
 
     def _run(self, coro: Any, timeout: int = 30) -> Any:
         """

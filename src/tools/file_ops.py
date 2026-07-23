@@ -3,6 +3,7 @@ File operations tool - Read, write, and manage files.
 Write operations require user confirmation for safety.
 """
 
+import collections
 import os
 import tempfile
 import threading
@@ -17,15 +18,55 @@ _APP_DIR: Path = Path(__file__).resolve().parent.parent.parent
 
 _extra_write_dirs: list[Path] = []
 
+
+class _RefLock:
+    """A threading.Lock paired with a reference count.
+
+    The LRU registry increments ref_count while holding _append_lock_guard.
+    __exit__ decrements ref_count after releasing the file lock.
+    An entry is only evictable when ref_count == 0.
+    """
+
+    __slots__ = ("_lock", "_ref_lock", "ref_count")
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._ref_lock = threading.Lock()
+        self.ref_count: int = 0
+
+    def __enter__(self) -> "_RefLock":
+        self._lock.acquire()
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self._lock.release()
+        with self._ref_lock:
+            self.ref_count -= 1
+
+
 _append_lock_guard = threading.Lock()
-_append_locks: dict[str, threading.Lock] = {}
+_append_locks: collections.OrderedDict[str, _RefLock] = collections.OrderedDict()
+_APPEND_LOCK_MAX = 256
 
 
-def _get_append_lock(path: str) -> threading.Lock:
+def _get_append_lock(path: str) -> _RefLock:
     with _append_lock_guard:
-        if path not in _append_locks:
-            _append_locks[path] = threading.Lock()
-        return _append_locks[path]
+        if path in _append_locks:
+            _append_locks.move_to_end(path)
+            ref_lock = _append_locks[path]
+        else:
+            ref_lock = _RefLock()
+            _append_locks[path] = ref_lock
+        with ref_lock._ref_lock:
+            ref_lock.ref_count += 1
+        while len(_append_locks) > _APPEND_LOCK_MAX:
+            _, candidate = next(iter(_append_locks.items()))
+            with candidate._ref_lock:
+                if candidate.ref_count == 0:
+                    _append_locks.popitem(last=False)
+                else:
+                    break
+        return ref_lock
 
 
 def set_allowed_write_dirs(dirs: list[str] | None) -> None:
@@ -273,6 +314,10 @@ def write_file(path: str, content: str, encoding: str = "utf-8") -> str:
                 f.write(content)
             os.replace(tmp_path, str(resolved))
         except BaseException:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
             try:
                 os.unlink(tmp_path)
             except OSError:

@@ -373,7 +373,13 @@ def build_agent_graph(
     _tool_call_history: OrderedDict[str, str] = OrderedDict()
     _MAX_TOOL_CALL_HISTORY = 256
     _history_lock = threading.Lock()
-    _DUPLICATE_EXEMPT = {"request_tools", "report_progress"}
+    _DUPLICATE_EXEMPT = {
+        "request_tools",
+        "report_progress",
+        "list_scheduled_messages",
+        "edit_scheduled_message",
+        "cancel_scheduled_message",
+    }
     protected = (preset_tools or set()) | {"request_tools"}
     _bound_cache: OrderedDict[tuple[str, ...], Any] = (
         bound_cache if bound_cache is not None else OrderedDict()

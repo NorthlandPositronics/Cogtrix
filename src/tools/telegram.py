@@ -11,7 +11,7 @@ Environment variables (override config file)::
     COGTRIX_TELEGRAM_TOKEN     Bot token from @BotFather  (required)
     COGTRIX_TELEGRAM_SEND      "true"/"false"              (default: true)
     COGTRIX_TELEGRAM_RECEIVE   "true"/"false"              (default: true)
-    COGTRIX_TELEGRAM_FILTER    "none"|"whitelist"|"blacklist"
+    COGTRIX_TELEGRAM_FILTER    "none"|"allow"|"ignore"|"blacklist" (legacy: "whitelist" maps to "allow")
     COGTRIX_TELEGRAM_CONTACTS  Comma-separated chat IDs or usernames
 
 Config file (``services.telegram`` section)::
@@ -22,7 +22,7 @@ Config file (``services.telegram`` section)::
         allow_send: true
         allow_receive: true
         require_confirmation: true
-        filter_mode: "whitelist"
+        filter_mode: "allow"
         contacts:
           - "123456789"
           - "@alice_username"
@@ -72,7 +72,7 @@ class TelegramConfig:
     allow_receive: bool = True
     require_confirmation: bool = True
 
-    filter_mode: str = "none"  # "none" | "whitelist" | "blacklist"
+    filter_mode: str = "none"  # "none" | "allow" | "ignore" | "blacklist"
     contacts: list[str] = field(default_factory=list)
     phonebook: dict[str, str] = field(default_factory=dict)
 
@@ -108,9 +108,11 @@ def _load_config() -> TelegramConfig:
         cfg.bot_token = token.strip()
     cfg.allow_send = _env_bool("COGTRIX_TELEGRAM_SEND", cfg.allow_send)
     cfg.allow_receive = _env_bool("COGTRIX_TELEGRAM_RECEIVE", cfg.allow_receive)
-    if fm := os.getenv("COGTRIX_TELEGRAM_FILTER"):
-        fm = fm.strip().lower()
-        if fm in ("none", "whitelist", "blacklist"):
+    fm = os.environ.get("COGTRIX_TELEGRAM_FILTER", "").lower().strip()
+    if fm:
+        _LEGACY_MODES = {"whitelist": "allow"}
+        fm = _LEGACY_MODES.get(fm, fm)
+        if fm in ("none", "allow", "ignore", "blacklist"):
             cfg.filter_mode = fm
     if contacts_str := os.getenv("COGTRIX_TELEGRAM_CONTACTS"):
         cfg.contacts = [c.strip() for c in contacts_str.split(",") if c.strip()]
@@ -164,25 +166,36 @@ def _resolve_contact(name_or_id: str) -> str:
 
 
 def _check_contact(name_or_id: str) -> tuple[bool, str]:
-    """Enforce whitelist/blacklist rules.
+    """Enforce allow/ignore/blacklist rules for outbound messages.
 
     Returns:
         (allowed, reason) — reason is non-empty only when blocked.
     """
-    if _cfg.filter_mode == "none":
+    mode = _cfg.filter_mode
+    if mode == "none":
         return True, ""
 
     resolved = _resolve_contact(name_or_id)
     normalized_contacts = {_resolve_contact(c) for c in _cfg.contacts}
 
-    if _cfg.filter_mode == "whitelist":
-        if resolved in normalized_contacts:
-            return True, ""
-        return False, f"Contact {resolved} is not in the allowed whitelist."
+    if mode in ("allow", "whitelist"):
+        if resolved not in normalized_contacts:
+            msg = (
+                f"Contact {resolved} is not in the allow list"
+                if mode == "allow"
+                else f"Contact {resolved} is not in the allowed whitelist."
+            )
+            return False, msg
+        return True, ""
 
-    if _cfg.filter_mode == "blacklist":
+    if mode == "ignore":
         if resolved in normalized_contacts:
-            return False, f"Contact {resolved} is on the blacklist."
+            return False, f"Contact {resolved} is in the ignore list"
+        return True, ""
+
+    if mode == "blacklist":
+        if resolved in normalized_contacts:
+            return False, f"Contact {resolved} is blacklisted"
         return True, ""
 
     return True, ""
@@ -190,13 +203,14 @@ def _check_contact(name_or_id: str) -> tuple[bool, str]:
 
 def _check_receive_contact(chat_id: int | str) -> bool:
     """Check whether an inbound message passes the contact filter."""
-    if _cfg.filter_mode == "none":
+    mode = _cfg.filter_mode
+    if mode == "none":
         return True
     cid = str(chat_id)
     normalized_contacts = {_resolve_contact(c) for c in _cfg.contacts}
-    if _cfg.filter_mode == "whitelist":
+    if mode in ("allow", "whitelist"):
         return cid in normalized_contacts
-    if _cfg.filter_mode == "blacklist":
+    if mode in ("ignore", "blacklist"):
         return cid not in normalized_contacts
     return True
 

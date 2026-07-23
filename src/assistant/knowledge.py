@@ -8,6 +8,7 @@ exposing per-chat history.
 
 from __future__ import annotations
 
+import concurrent.futures as _cf
 import hashlib
 import heapq
 import json
@@ -22,6 +23,22 @@ from pathlib import Path
 from typing import Any
 
 log = logging.getLogger("cogtrix")
+
+_EXTRACTION_MAX_WORKERS = 2
+_extraction_pool: _cf.ThreadPoolExecutor | None = None
+_extraction_pool_lock = threading.Lock()
+
+
+def _get_extraction_pool() -> _cf.ThreadPoolExecutor:
+    global _extraction_pool
+    with _extraction_pool_lock:
+        if _extraction_pool is None or _extraction_pool._shutdown:
+            _extraction_pool = _cf.ThreadPoolExecutor(
+                max_workers=_EXTRACTION_MAX_WORKERS,
+                thread_name_prefix="knowledge-extract",
+            )
+    return _extraction_pool
+
 
 _DEFAULT_FACTS_SUBDIR = "knowledge/facts.json"
 _DEFAULT_FAISS_SUBDIR = "vectordb/knowledge"
@@ -115,7 +132,12 @@ class SharedKnowledgeStore:
     # ------------------------------------------------------------------
 
     def extract_and_store(self, user_input: str, agent_response: str) -> None:
-        """Extract durable facts from a conversation turn and store new ones."""
+        """Submit fact extraction to the background pool and return immediately."""
+        pool = _get_extraction_pool()
+        pool.submit(self._extract_and_store_sync, user_input, agent_response)
+
+    def _extract_and_store_sync(self, user_input: str, agent_response: str) -> None:
+        """Synchronous fact extraction — runs inside the background pool."""
         try:
             facts = self._extract_facts(user_input, agent_response)
         except Exception as exc:

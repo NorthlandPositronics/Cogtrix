@@ -3,6 +3,7 @@ HTTP request tool - Make HTTP GET and POST requests.
 POST requests require user confirmation for safety.
 """
 
+import html as _html_mod
 import ipaddress
 import json
 import logging
@@ -219,6 +220,7 @@ def _parse_headers(headers_str: str | None) -> tuple[dict, str | None]:
 _recent_failures: dict[str, float] = {}
 _recent_failures_lock = threading.Lock()
 _FAILURE_COOLDOWN = 60  # seconds
+_RECENT_FAILURES_MAX = 1000
 
 
 def _check_recent_failure(url: str) -> str | None:
@@ -244,6 +246,8 @@ def _record_failure(url: str) -> None:
         stale = [k for k, v in _recent_failures.items() if (now - v) >= _FAILURE_COOLDOWN]
         for k in stale:
             del _recent_failures[k]
+        while len(_recent_failures) > _RECENT_FAILURES_MAX:
+            _recent_failures.pop(next(iter(_recent_failures)))
 
 
 def _truncate_response(text: str, max_length: int = 10000) -> str:
@@ -329,6 +333,16 @@ def _follow_redirects(
     raise ValueError(f"Too many redirects (limit: {MAX_REDIRECTS})")
 
 
+_RE_SCRIPT = re.compile(r"<script[^>]*>.*?</script>", re.DOTALL | re.IGNORECASE)
+_RE_STYLE = re.compile(r"<style[^>]*>.*?</style>", re.DOTALL | re.IGNORECASE)
+_RE_COMMENT = re.compile(r"<!--.*?-->", re.DOTALL)
+_RE_SVG = re.compile(r"<svg[^>]*>.*?</svg>", re.DOTALL | re.IGNORECASE)
+_RE_BLOCK_ELEMENT = re.compile(r"<(?:p|div|br|h[1-6]|li|tr|section|article)[^>]*>", re.IGNORECASE)
+_RE_HTML_TAG = re.compile(r"<[^>]{0,2000}>")
+_RE_INLINE_WS = re.compile(r"[^\S\n]+")
+_RE_MULTI_BLANK = re.compile(r"\n\s*\n+")
+
+
 def _extract_text_from_html(html: str) -> str:
     """
     Extract readable text from HTML, stripping tags and noise.
@@ -337,36 +351,15 @@ def _extract_text_from_html(html: str) -> str:
     collapses whitespace into a clean text representation that is
     actually useful for an LLM (as opposed to raw markup).
     """
-    # Remove script and style elements entirely
-    text = re.sub(r"<script[^>]*>.*?</script>", " ", html, flags=re.DOTALL | re.IGNORECASE)
-    text = re.sub(r"<style[^>]*>.*?</style>", " ", text, flags=re.DOTALL | re.IGNORECASE)
-    # Remove HTML comments
-    text = re.sub(r"<!--.*?-->", " ", text, flags=re.DOTALL)
-    # Remove SVG elements (often huge and useless)
-    text = re.sub(r"<svg[^>]*>.*?</svg>", " ", text, flags=re.DOTALL | re.IGNORECASE)
-    # Insert newline before block-level elements for readability
-    text = re.sub(
-        r"<(?:p|div|br|h[1-6]|li|tr|section|article)[^>]*>", "\n", text, flags=re.IGNORECASE
-    )
-    # Remove remaining HTML tags
-    text = re.sub(r"<[^>]+>", " ", text)
-    # Decode common HTML entities
-    for entity, char in (
-        ("&amp;", "&"),
-        ("&lt;", "<"),
-        ("&gt;", ">"),
-        ("&quot;", '"'),
-        ("&#39;", "'"),
-        ("&nbsp;", " "),
-        ("&#x27;", "'"),
-        ("&ndash;", "\u2013"),
-        ("&mdash;", "\u2014"),
-    ):
-        text = text.replace(entity, char)
-    # Collapse runs of whitespace (preserve newlines)
-    text = re.sub(r"[^\S\n]+", " ", text)
-    # Collapse multiple blank lines into one
-    text = re.sub(r"\n\s*\n+", "\n\n", text)
+    text = _RE_SCRIPT.sub(" ", html)
+    text = _RE_STYLE.sub(" ", text)
+    text = _RE_COMMENT.sub(" ", text)
+    text = _RE_SVG.sub(" ", text)
+    text = _RE_BLOCK_ELEMENT.sub("\n", text)
+    text = _RE_HTML_TAG.sub(" ", text)
+    text = _html_mod.unescape(text)
+    text = _RE_INLINE_WS.sub(" ", text)
+    text = _RE_MULTI_BLANK.sub("\n\n", text)
     return text.strip()
 
 

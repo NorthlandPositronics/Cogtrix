@@ -6,6 +6,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from src.assistant.channel import SendResult
+
 # ---------------------------------------------------------------------------
 # Helper function tests
 # ---------------------------------------------------------------------------
@@ -155,6 +157,7 @@ class TestHandlerDatamarking:
         session.lock.__enter__ = MagicMock(return_value=None)
         session.lock.__exit__ = MagicMock(return_value=False)
         session.guardrail_violations = 0
+        session.last_sent_message_id = None
         session.memory_manager.prepare_context.return_value = MagicMock(
             messages=[], context_prefix=""
         )
@@ -196,7 +199,7 @@ class TestHandlerDatamarking:
 
         channel = MagicMock()
         channel.name = "whatsapp"
-        channel.send.return_value = True
+        channel.send.return_value = SendResult(ok=True)
 
         handler.handle(msg, channel)
 
@@ -226,7 +229,7 @@ class TestHandlerDatamarking:
 
         channel = MagicMock()
         channel.name = "whatsapp"
-        channel.send.return_value = True
+        channel.send.return_value = SendResult(ok=True)
 
         handler.handle(msg, channel)
 
@@ -265,7 +268,7 @@ class TestHandlerDatamarking:
 
         channel = MagicMock()
         channel.name = "whatsapp"
-        channel.send.return_value = True
+        channel.send.return_value = SendResult(ok=True)
 
         handler.handle(msg, channel)
 
@@ -288,7 +291,7 @@ class TestHandlerDatamarking:
 
         channel = MagicMock()
         channel.name = "whatsapp"
-        channel.send.return_value = True
+        channel.send.return_value = SendResult(ok=True)
 
         handler.handle(msg, channel)
 

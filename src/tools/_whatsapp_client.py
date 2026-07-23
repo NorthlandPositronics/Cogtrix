@@ -67,6 +67,7 @@ class ChatOverview:
     id: str
     name: str | None = None
     last_message: Message | None = None
+    archived: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -269,6 +270,50 @@ class WahaClient:
         except Exception as exc:
             return SendResult(ok=False, error=str(exc))
 
+    def edit_message(self, chat_id: str, message_id: str, text: str) -> SendResult:
+        """Edit a previously sent message via Waha API."""
+        try:
+            resp = requests.put(
+                self._url(f"/api/{self.session}/chats/{chat_id}/messages/{message_id}"),
+                json={"text": text},
+                headers=self._headers(),
+                timeout=self.timeout,
+            )
+            if resp.status_code >= 400:
+                return SendResult(ok=False, error=f"HTTP {resp.status_code}: {resp.text}")
+            return SendResult(ok=True, message_id=message_id)
+        except requests.exceptions.ConnectionError:
+            return SendResult(ok=False, error="Cannot connect to Waha server")
+        except requests.exceptions.Timeout:
+            return SendResult(ok=False, error="Waha request timed out")
+        except Exception as exc:
+            return SendResult(ok=False, error=str(exc))
+
+    def delete_message(self, chat_id: str, message_id: str) -> bool:
+        """Delete a message via ``DELETE /api/{session}/chats/{chatId}/messages/{messageId}``."""
+        try:
+            resp = requests.delete(
+                self._url(f"/api/{self.session}/chats/{chat_id}/messages/{message_id}"),
+                headers=self._headers(),
+                timeout=self.timeout,
+            )
+            return resp.status_code < 400
+        except Exception:
+            return False
+
+    def archive_chat(self, chat_id: str) -> bool:
+        """Archive a chat via ``POST /api/{session}/chats/{chatId}/archive``."""
+        try:
+            resp = requests.post(
+                self._url(f"/api/{self.session}/chats/{chat_id}/archive"),
+                json={},
+                headers=self._headers(),
+                timeout=self.timeout,
+            )
+            return resp.status_code < 400
+        except Exception:
+            return False
+
     # -- receive -----------------------------------------------------------
 
     def get_messages(
@@ -317,6 +362,59 @@ class WahaClient:
             )
         return messages
 
+    def get_chat_messages(
+        self,
+        chat_id: str,
+        limit: int = 20,
+        *,
+        download_media: bool = False,
+        filter_from_me: bool | None = None,
+        filter_timestamp_gte: int | None = None,
+    ) -> list[Message]:
+        """Fetch messages from a specific chat via
+        ``GET /api/{session}/chats/{chatId}/messages``.
+
+        Args:
+            chat_id: The chat to fetch messages from.
+            limit:   Maximum number of messages to return.
+            download_media: Whether to include media download URLs.
+            filter_from_me: Server-side filter by sender (``True``/``False``/``None``).
+            filter_timestamp_gte: Only return messages at or after this timestamp.
+        """
+        params: dict[str, Any] = {
+            "limit": limit,
+            "downloadMedia": download_media,
+        }
+        if filter_from_me is not None:
+            params["filter.fromMe"] = filter_from_me
+        if filter_timestamp_gte is not None:
+            params["filter.timestamp.gte"] = filter_timestamp_gte
+
+        resp = requests.get(
+            self._url(f"/api/{self.session}/chats/{chat_id}/messages"),
+            params=params,
+            headers=self._headers(),
+            timeout=self.timeout,
+        )
+        resp.raise_for_status()
+        raw_messages: list[dict[str, Any]] = resp.json()
+
+        messages: list[Message] = []
+        for raw in raw_messages:
+            messages.append(
+                Message(
+                    id=raw.get("id", ""),
+                    timestamp=raw.get("timestamp", 0),
+                    from_number=raw.get("from", ""),
+                    to=raw.get("to"),
+                    body=raw.get("body", ""),
+                    from_me=raw.get("fromMe", False),
+                    has_media=raw.get("hasMedia", False),
+                    media_url=(raw.get("media") or {}).get("url"),
+                )
+            )
+        return messages
+
     def get_chats_overview(self, limit: int = 50) -> list[ChatOverview]:
         """Fetch chat summaries via ``GET /api/{session}/chats/overview``."""
         try:
@@ -346,11 +444,16 @@ class WahaClient:
                     has_media=last_msg_raw.get("hasMedia", False),
                     media_url=(last_msg_raw.get("media") or {}).get("url"),
                 )
+            if "archive" in chat:
+                archived = bool(chat["archive"])
+            else:
+                archived = bool((chat.get("_chat") or {}).get("archive", False))
             result.append(
                 ChatOverview(
                     id=chat.get("id", ""),
                     name=chat.get("name"),
                     last_message=last_msg,
+                    archived=archived,
                 )
             )
         return result

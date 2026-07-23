@@ -179,6 +179,33 @@ class TelegramBotClient:
         except Exception as exc:
             return SendResult(ok=False, error=str(exc))
 
+    def edit_message_text(self, chat_id: int | str, message_id: int, text: str) -> SendResult:
+        """Edit a sent message via ``editMessageText``."""
+        try:
+            data = self._post(
+                "editMessageText",
+                chat_id=chat_id,
+                message_id=message_id,
+                text=text,
+            )
+            if data.get("ok"):
+                return SendResult(ok=True, message_id=data["result"].get("message_id"))
+            return SendResult(ok=False, error=data.get("description", "Unknown error"))
+        except requests.exceptions.ConnectionError:
+            return SendResult(ok=False, error="Cannot connect to Telegram API")
+        except requests.exceptions.Timeout:
+            return SendResult(ok=False, error="Telegram API request timed out")
+        except Exception as exc:
+            return SendResult(ok=False, error=str(exc))
+
+    def delete_message(self, chat_id: int | str, message_id: int) -> bool:
+        """Delete a message via ``deleteMessage``."""
+        try:
+            data = self._post("deleteMessage", chat_id=chat_id, message_id=message_id)
+            return data.get("ok", False)
+        except Exception:
+            return False
+
     # -- receive -----------------------------------------------------------
 
     def get_updates(

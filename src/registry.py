@@ -72,7 +72,7 @@ class ToolRegistry:
             return discovered_modules
 
         # Scan for Python files (excluding __init__.py)
-        for file_path in self.tools_directory.glob("*.py"):
+        for file_path in sorted(self.tools_directory.glob("*.py")):
             if file_path.name == "__init__.py":
                 continue
 

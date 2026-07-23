@@ -52,6 +52,9 @@ from pydantic import BaseModel, Field
 
 log = logging.getLogger("cogtrix")
 
+_DEEP_THINK_MAX_CONCURRENT = 4
+_deep_think_sem = threading.Semaphore(_DEEP_THINK_MAX_CONCURRENT)
+
 
 def _escape_braces(s: str) -> str:
     """Escape curly braces so they survive str.format()."""
@@ -164,6 +167,7 @@ def _call_llm(llm: Any, prompt: str, timeout: int = 180) -> str:
 
     # Use a thread so we can enforce a wall-clock timeout — explicit executor
     # management prevents executor.__exit__(wait=True) from blocking on timeout.
+    _deep_think_sem.acquire()
     pool = ThreadPoolExecutor(max_workers=1)
     try:
         future = pool.submit(llm.invoke, [HumanMessage(content=prompt)])
@@ -183,6 +187,7 @@ def _call_llm(llm: Any, prompt: str, timeout: int = 180) -> str:
         return ""
     finally:
         pool.shutdown(wait=False, cancel_futures=True)
+        _deep_think_sem.release()
 
 
 def _call_llm_parallel(llm: Any, prompts: list[str], timeout: int = 180) -> list[str]:
@@ -208,6 +213,7 @@ def _call_llm_parallel(llm: Any, prompts: list[str], timeout: int = 180) -> list
     # Explicit executor management prevents executor.__exit__(wait=True) from
     # blocking when as_completed() exhausts its timeout.
     workers = min(len(prompts), 5)
+    _deep_think_sem.acquire()
     pool = ThreadPoolExecutor(max_workers=workers)
     try:
         futures = {pool.submit(_invoke, i, p): i for i, p in enumerate(prompts)}
@@ -221,6 +227,7 @@ def _call_llm_parallel(llm: Any, prompts: list[str], timeout: int = 180) -> list
         pass
     finally:
         pool.shutdown(wait=False, cancel_futures=True)
+        _deep_think_sem.release()
 
     return results
 

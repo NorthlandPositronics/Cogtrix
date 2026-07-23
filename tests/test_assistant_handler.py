@@ -6,7 +6,7 @@ import time
 from collections.abc import Callable
 from unittest.mock import MagicMock
 
-from src.assistant.channel import IncomingMessage
+from src.assistant.channel import IncomingMessage, SendResult
 from src.assistant.handler import _DEFAULT_EXCLUDED, MessageHandler
 from src.memory.context import MemoryContext
 
@@ -34,6 +34,7 @@ def _make_session(context_prefix: str | None = None) -> MagicMock:
     session.lock.__enter__ = MagicMock(return_value=None)
     session.lock.__exit__ = MagicMock(return_value=False)
     session.guardrail_violations = 0
+    session.last_sent_message_id = None
     session.memory_manager.prepare_context.return_value = MemoryContext(
         messages=[],
         context_prefix=context_prefix,
@@ -376,7 +377,7 @@ class TestAgentErrorHandling:
     def test_successful_response_sent_via_channel(self):
         """channel.send() is called with the agent's response."""
         channel = MagicMock()
-        channel.send.return_value = True
+        channel.send.return_value = SendResult(ok=True)
         mock_runner = MagicMock(return_value="Here is the answer")
         handler, _ = _make_handler(agent_runner=mock_runner)
 
@@ -387,7 +388,7 @@ class TestAgentErrorHandling:
     def test_failed_send_logged_but_does_not_raise(self):
         """When channel.send() returns False, handle() does not raise."""
         channel = MagicMock()
-        channel.send.return_value = False
+        channel.send.return_value = SendResult(ok=False)
         mock_runner = MagicMock(return_value="Reply")
         handler, _ = _make_handler(agent_runner=mock_runner)
 
@@ -433,7 +434,7 @@ class TestSendBeforeMemoryUpdate:
         call_order: list[str] = []
 
         channel = MagicMock()
-        channel.send.side_effect = lambda *_: call_order.append("send") or True
+        channel.send.side_effect = lambda *_: call_order.append("send") or SendResult(ok=True)
 
         session = _make_session()
         session.memory_manager.update.side_effect = lambda *_: call_order.append("update")
@@ -462,7 +463,7 @@ class TestSendBeforeMemoryUpdate:
         call_order: list[str] = []
 
         channel = MagicMock()
-        channel.send.side_effect = lambda *_: call_order.append("send") or True
+        channel.send.side_effect = lambda *_: call_order.append("send") or SendResult(ok=True)
 
         knowledge_store = MagicMock()
         knowledge_store.recall.return_value = None
@@ -471,7 +472,7 @@ class TestSendBeforeMemoryUpdate:
         mock_runner = MagicMock(return_value="Response")
         handler, _ = _make_handler(knowledge_store=knowledge_store, agent_runner=mock_runner)
 
-        channel.send.side_effect = lambda *_: call_order.append("send") or True
+        channel.send.side_effect = lambda *_: call_order.append("send") or SendResult(ok=True)
 
         handler.handle(_make_msg(), channel)
 

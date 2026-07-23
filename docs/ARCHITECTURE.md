@@ -907,6 +907,8 @@ Incoming Message (from channel.poll())
     ▼
 ┌─────────────────────────────────────┐
 │ 8. Knowledge: extract_and_store()   │
+│    - Dispatched to background pool  │
+│      (max 2 workers) — non-blocking │
 │    - LLM extracts entity-centric    │
 │      durable facts from the turn    │
 │    - Deduplication by hash          │
@@ -924,9 +926,20 @@ Incoming Message (from channel.poll())
 
 - `ThreadPoolExecutor(max_workers=max_concurrent)` processes different chats in parallel
 - Per-session `threading.Lock` serializes messages within the same chat
-- One polling thread per channel (WhatsApp short-poll 5s, Telegram long-poll 30s)
-- Session eviction thread runs every 60s
+- One polling thread per channel with adaptive interval — backs off exponentially on idle (factor 1.5, max 60 s), recovers on activity (factor 2.0); configurable per channel
+- Channels are initialized concurrently via `ThreadPoolExecutor(max_workers=2)` in `_discover_channels`
+- Session eviction thread runs every 60s; `evict_idle()` saves sessions outside the registry lock
 - `available_tools` and `active_tools` are shallow-copied per call in `MessageHandler` so concurrent sessions cannot mutate each other's tool sets
+- Deep-think calls are capped at 4 concurrent via `_deep_think_sem` (module-level semaphore)
+- Knowledge extraction runs on a background `ThreadPoolExecutor(max_workers=2)` so `extract_and_store()` never blocks message delivery
+
+**WhatsApp Polling Optimizations:**
+
+- Two-phase polling: overview snapshot comparison → per-chat message fetch
+- `_can_skip_chat()` pre-filter skips HTTP fetch for chats that won't pass the contact filter (group chats always pass)
+- `_prefetch_lids()` resolves uncached `@lid` identifiers in parallel via `ThreadPoolExecutor(max_workers=min(n, 8))`
+- LRU/TTL `_lid_cache` (1024 entries, negative TTL 300 s configurable, protected by `_lid_cache_lock`)
+- Per-chat exponential error backoff (30 s base, 2x escalation, 300 s cap)
 
 **Two-Layer Memory:**
 
@@ -1147,7 +1160,7 @@ Supported types: `openai`, `ollama`, `anthropic`, `google`. OpenAI-compatible se
 To add a new native provider type:
 
 1. Create `src/providers/<name>.py` with `create_chat_model()` and (optionally) `create_embeddings()` functions, and `CHAT_AVAILABLE` / `EMBEDDINGS_AVAILABLE` booleans.
-2. Register the module in `src/providers/__init__.py` by adding it to the `_MODULES` dict.
+2. Register the module in `src/providers/__init__.py` by adding it to the `_MODULES` dict. Provider modules are cached via `@functools.cache` on `_load_provider()` to avoid redundant imports.
 3. Add default model, embedding model, and base URL entries to `src/providers/defaults.py`.
 4. Update `src/config.py` if additional validation is needed in `_parse_providers_section()`.
 
@@ -1229,6 +1242,8 @@ All file operations (`read_file`, `write_file`, `append_file`, `list_directory`,
 The dual-root model exists for Docker deployments where the working directory is set to a scratch path (e.g., `-w /tmp`) while the application source lives at `/app`. Without `_APP_DIR`, the agent cannot read project documentation or source files, forcing expensive web searches instead.
 
 **Path traversal protection:** Paths containing `..` are resolved and must still fall within an allowed root after resolution. Symlinks are followed by `Path.resolve()` before the containment check.
+
+**Concurrent append safety:** `append_file` uses `_RefLock` — a ref-counted `threading.Lock` wrapper — obtained from an LRU `OrderedDict` capped at 256 entries. Eviction skips entries with `ref_count > 0` to prevent use-after-eviction where two threads hold different lock objects for the same path.
 
 ### HTTP Request SSRF Protection
 

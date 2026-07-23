@@ -343,7 +343,6 @@ context_compression: true
 
 # Or with custom thresholds
 context_compression:
-  enabled: true
   model: fast
   min_age: 8       # call_model cycles before eligible (default: 6)
   min_chars: 6000  # minimum content length to qualify (default: 2000)
@@ -616,7 +615,7 @@ services:
     allow_send: true
     allow_receive: true
     require_confirmation: true
-    filter_mode: whitelist
+    filter_mode: allow
     contacts: ["+14155551234", "+442071234567"]
     phonebook:
       alice: "+14155551234"
@@ -637,12 +636,22 @@ services:
 | `allow_send` | bool | `true` | Enable send tools (`whatsapp_send`, `whatsapp_send_image`) |
 | `allow_receive` | bool | `true` | Enable receive tool (`whatsapp_check`) |
 | `require_confirmation` | bool | `true` | Prompt user before sending messages |
-| `filter_mode` | string | `"none"` | `"none"`, `"whitelist"`, or `"blacklist"` |
+| `filter_mode` | string | `"none"` | `"none"`, `"allow"`, `"ignore"`, or `"blacklist"`. Legacy `"whitelist"` maps to `"allow"`. |
 | `contacts` | array | `[]` | E.164 phone numbers for the filter list |
 | `phonebook` | object | `{}` | Nickname → phone number map |
 | `contact_prompts` | object | `{}` | Per-contact system prompts (see [Contact Prompts](#contact-prompts)) |
 | `rate_limit` | int | `30` | Max outbound messages per hour (0 = unlimited) |
 | `max_message_length` | int | `4096` | Truncate outgoing messages to this length |
+| `overview_limit` | int | `50` | Maximum number of chats returned per overview poll cycle. A warning is logged when the response reaches this limit, indicating that some chats may have been missed. |
+| `ignore_archived` | bool | `true` | Skip archived chats during polling. When enabled, chats marked as archived in WhatsApp are not fetched or processed. |
+| `ignore_older_than` | string | — | Skip messages older than this duration. Accepts human-readable strings like `"24h"`, `"30m"`, `"7d"`, `"1d12h"`. Disabled by default (all messages processed). |
+| `lid_negative_ttl` | float | `300.0` | Cache duration (seconds) for failed LID-to-phone resolutions |
+
+Filter mode behaviour:
+- `none` — respond to all contacts
+- `allow` — only respond to contacts in the `contacts` list
+- `ignore` — skip listed contacts (no response, message kept)
+- `blacklist` — delete the message and archive the chat for listed contacts
 
 When both `allow_send` and `allow_receive` are `false`, no WhatsApp tools are loaded.
 
@@ -659,7 +668,7 @@ services:
     allow_send: true
     allow_receive: true
     require_confirmation: true
-    filter_mode: whitelist
+    filter_mode: allow
     contacts: ["123456789", "@alice_username"]
     phonebook:
       alice: "123456789"
@@ -678,12 +687,19 @@ services:
 | `allow_send` | bool | `true` | Enable send tools (`telegram_send`, `telegram_send_photo`) |
 | `allow_receive` | bool | `true` | Enable receive tool (`telegram_check`) |
 | `require_confirmation` | bool | `true` | Prompt user before sending messages |
-| `filter_mode` | string | `"none"` | `"none"`, `"whitelist"`, or `"blacklist"` |
+| `filter_mode` | string | `"none"` | `"none"`, `"allow"`, `"ignore"`, or `"blacklist"`. Legacy `"whitelist"` maps to `"allow"`. |
 | `contacts` | array | `[]` | Chat IDs or @usernames for the filter list |
 | `phonebook` | object | `{}` | Nickname → chat ID map |
 | `contact_prompts` | object | `{}` | Per-contact system prompts (see [Contact Prompts](#contact-prompts)) |
 | `rate_limit` | int | `30` | Max outbound messages per hour (0 = unlimited) |
 | `max_message_length` | int | `4096` | Truncate outgoing messages to this length |
+| `ignore_older_than` | string | — | Skip messages older than this duration. Accepts human-readable strings like `"24h"`, `"30m"`, `"7d"`, `"1d12h"`. Disabled by default (all messages processed). |
+
+Filter mode behaviour:
+- `none` — respond to all contacts
+- `allow` — only respond to contacts in the `contacts` list
+- `ignore` — skip listed contacts (no response, message kept)
+- `blacklist` — delete the message and archive the chat for listed contacts
 
 **Quick setup:**
 
@@ -718,6 +734,7 @@ services:
     max_response_length: 4000  # truncate replies for messaging
     system_prompt: null        # null = built-in assistant persona
     excluded_tools: []         # additional tools to exclude (beyond defaults)
+    debounce_seconds: 3.0      # quiet window before rapid messages are batched
     channels:
       whatsapp:
         enabled: true
@@ -768,9 +785,15 @@ services:
 | `idle_timeout` | float | `3600` | Seconds of inactivity before a session is evicted to disk |
 | `max_response_length` | int | `4000` | Truncate agent responses to this length |
 | `system_prompt` | string | `null` | Custom system prompt (null = built-in messaging persona) |
-| `excluded_tools` | array | `[]` | Additional tools to exclude (messaging tools, shell, and write tools are always excluded) |
+| `excluded_tools` | array | `[]` | Additional tools to exclude. Messaging tools, shell, write, and read tools are always excluded. Queue management tools (`schedule_reply`, `edit_last_reply`, `list_scheduled_messages`, `edit_scheduled_message`, `cancel_scheduled_message`) can also be added here. |
+| `debounce_seconds` | float | `3.0` | Quiet window in seconds before rapid messages from the same chat are batched into a single agent turn. Increase to tolerate longer bursts; decrease for faster single-message response. |
+| `dispatch_interval` | float | `30.0` | Seconds between scheduler checks for due messages |
 | `channels.{name}.enabled` | bool | `true` | Enable/disable a specific channel |
 | `channels.{name}.poll_interval` | float | varies | Seconds between poll cycles |
+| `channels.<name>.poll_interval_min` | float | base interval | Minimum poll interval (seconds); polling backs off on idle, recovers on activity |
+| `channels.<name>.poll_interval_max` | float | `60.0` | Maximum poll interval during idle backoff |
+| `channels.<name>.poll_backoff_factor` | float | `1.5` | Multiplier when no messages received (clamped `>= 1.0`) |
+| `channels.<name>.poll_recovery_factor` | float | `2.0` | Divisor when messages received (clamped `>= 1.0`) |
 | `channels.telegram.long_poll_timeout` | int | `30` | Telegram getUpdates timeout |
 | `knowledge.enabled` | bool | `true` | Enable cross-chat fact extraction and recall |
 | `knowledge.extraction_model` | string | `null` | Model alias for fact extraction (null = main LLM) |
@@ -803,13 +826,13 @@ services:
 **How it works:**
 
 1. One polling thread per channel checks for new messages at the configured interval.
-2. New messages are dispatched to a thread pool for concurrent processing.
-3. Each incoming message is checked by the `GuardrailPipeline` (rate limit, input validation, injection detection). Blocked messages receive a canned reply without reaching the agent.
+2. New messages are passed to `MessageBuffer`, which resets a per-chat debounce timer. When the timer expires (after `debounce_seconds` of silence from that chat), all buffered messages are concatenated and dispatched as a single agent turn via `handle_batch()`. A single message with no follow-ups dispatches immediately after the quiet window.
+3. Each incoming message (or batch) is checked by the `GuardrailPipeline` (rate limit, input validation, injection detection). Blocked messages receive a canned reply without reaching the agent.
 4. Each `(channel, chat_id)` pair gets an independent `ConversationMemoryManager` — no context blending between chats.
-5. The agent runs with the same tool pipeline as interactive mode (minus excluded tools).
+5. The agent runs with the same tool pipeline as interactive mode (minus excluded tools). Five message management tools are injected per turn: `schedule_reply`, `edit_last_reply` (only when a prior message ID is available), `list_scheduled_messages`, `edit_scheduled_message`, and `cancel_scheduled_message`.
 6. After each turn, durable facts are extracted and stored in a shared knowledge store (`data/knowledge/facts.json`).
 7. On each new message, relevant facts are recalled and injected into the agent's context — enabling cross-chat knowledge without exposing raw conversation history.
-8. The agent response passes through output sanitization (PII redaction, URL stripping, banned string removal) before being sent.
+8. The agent response is routed by `_route_response`: edit and schedule paths run independently — both can fire in the same turn. Output is sanitized (PII redaction, URL stripping, banned string removal) in each delivery branch before being sent and before being written to memory.
 9. SIGINT/SIGTERM triggers graceful shutdown: all sessions saved, knowledge store persisted.
 
 **Prerequisites:** WhatsApp requires a running Waha container. Telegram requires a bot token. Both must be configured in their respective `services.whatsapp` / `services.telegram` sections.
@@ -838,17 +861,30 @@ services:
 
 ### Scheduled Reply Delivery
 
-The `schedule_reply` tool allows the agent to queue a reply for deferred delivery instead of sending it immediately. It is injected automatically when assistant mode is active and channels are configured — no extra config is required to enable it.
+Five message management tools are injected automatically when assistant mode is active — no extra config is required to enable them. They can be blocked via `excluded_tools` if not needed.
 
-The agent decides when to use it based on instructions in its system prompt (or a `contact_prompts` entry). Call it with the full reply text and a delay in minutes.
+| Tool | Purpose |
+|------|---------|
+| `schedule_reply` | Queue a reply for deferred delivery. Provide the full reply text and a delay in minutes (1–1440). |
+| `edit_last_reply` | Edit/replace the most recently sent message in this chat. Only available after at least one reply has been sent in the session. |
+| `list_scheduled_messages` | List pending queued messages. Filter by `recipient` (phone/name substring), `chat_id` (exact), or `contact_name` (phonebook key). Returns short IDs for use with the edit and cancel tools. |
+| `edit_scheduled_message` | Update the text and/or reschedule the delivery time of a pending message (identified by short ID prefix). |
+| `cancel_scheduled_message` | Cancel a specific pending message so it will not be delivered. |
 
-**Behavior:**
+The agent decides when to use these tools based on instructions in its system prompt (or a `contact_prompts` entry).
 
-- Queued messages are persisted to `data/assistant/schedule.json` and survive restarts.
+**Scheduled message behavior:**
+
+- Queued messages are persisted to `data/assistant/schedule.json` and survive restarts. Each record includes a `recipient` field (human-readable phone, username, or display name) for filtering via `list_scheduled_messages`.
 - Delivery is retried up to 3 times on failure, with backoffs of 30 s, 2 min, and 10 min.
 - Messages that are still pending more than 2 hours past their scheduled time are marked `expired`.
 - Terminal-state messages (sent, cancelled, failed, expired) are cleaned up after 24 hours.
 - When a new message arrives from the same chat, any pending scheduled reply for that chat is cancelled automatically.
+
+**Message editing behavior:**
+
+- `edit_last_reply` calls `Channel.edit_message()` on the channel that originally sent the message. WhatsApp and Telegram both support message editing; channels that do not implement it return a failure result (the tool reports the error to the agent but does not raise an exception).
+- Only one edit per agent turn is allowed (idempotency guard). If the agent calls `edit_last_reply` multiple times in a single turn, only the first call takes effect.
 
 ### Response Timing / Quiet Hours
 
@@ -928,6 +964,7 @@ Rate limit violations are recorded but do not increment the security violation c
 | `COGTRIX_SESSION` | Session ID | `my-project` |
 | `COGTRIX_MEMORY_MODE` | Memory mode | `code` |
 | `COGTRIX_DATA_DIR` | Root directory for data storage | `./data` |
+| `COGTRIX_ALLOWED_WRITE_PATHS` | Colon-separated extra write-allowed paths | `/app:/data` |
 | `COGTRIX_OLLAMA` | Ollama server address (`host` or `host:port`) | `192.168.1.100` or `192.168.1.100:8080` |
 | `OPENAI_API_KEY` | OpenAI API key | `sk-...` |
 | `ANTHROPIC_API_KEY` | Anthropic API key | `sk-ant-...` |
@@ -1088,7 +1125,7 @@ services:
     waha_url: "http://localhost:3000"
     allow_send: true
     allow_receive: true
-    filter_mode: whitelist
+    filter_mode: allow
     contacts: ["+14155551234"]
     phonebook:
       alice: "+14155551234"
@@ -1240,7 +1277,7 @@ mcp_servers:
       "waha_url": "http://localhost:3000",
       "allow_send": true,
       "allow_receive": true,
-      "filter_mode": "whitelist",
+      "filter_mode": "allow",
       "contacts": ["+14155551234"],
       "phonebook": { "alice": "+14155551234" }
     },

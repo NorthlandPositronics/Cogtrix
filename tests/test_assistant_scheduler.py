@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
 
+from src.assistant.channel import SendResult
 from src.assistant.scheduler import (
     MessageScheduler,
     QuietHoursPolicy,
@@ -220,7 +221,7 @@ class TestMessageSchedulerSchedule:
         def _cancel_during_send(_chat_id, _text):
             # Simulate cancel_pending() racing with channel.send()
             sched._queue[mid].status = "cancelled"
-            return True  # send physically succeeded
+            return SendResult(ok=True)  # send physically succeeded
 
         channel.send.side_effect = _cancel_during_send
         sched._dispatch_due()
@@ -335,7 +336,7 @@ class TestQuietHours:
     def test_scheduler_defers_during_quiet_hours(self, tmp_path):
         """_dispatch_due defers messages that fall in quiet window."""
         channel = MagicMock()
-        channel.send.return_value = True
+        channel.send.return_value = SendResult(ok=True)
 
         import datetime
 
@@ -373,7 +374,7 @@ class TestDispatchSend:
 
     def test_sends_due_message(self, tmp_path):
         channel = MagicMock()
-        channel.send.return_value = True
+        channel.send.return_value = SendResult(ok=True)
         sched = _make_channel_scheduler(tmp_path, channel)
 
         mid = sched.schedule("telegram", "42", "hi", time.time() - 10)
@@ -384,7 +385,7 @@ class TestDispatchSend:
 
     def test_failed_send_retries(self, tmp_path):
         channel = MagicMock()
-        channel.send.return_value = False
+        channel.send.return_value = SendResult(ok=False)
         sched = _make_channel_scheduler(tmp_path, channel)
 
         mid = sched.schedule("telegram", "42", "retry me", time.time() - 10)
@@ -397,7 +398,7 @@ class TestDispatchSend:
 
     def test_exhausted_attempts_marked_failed(self, tmp_path):
         channel = MagicMock()
-        channel.send.return_value = False
+        channel.send.return_value = SendResult(ok=False)
         sched = _make_channel_scheduler(tmp_path, channel)
 
         mid = sched.schedule("telegram", "42", "fail me", time.time() - 10)
@@ -490,6 +491,7 @@ class TestHandlerIntegration:
         session.lock.__enter__ = MagicMock(return_value=None)
         session.lock.__exit__ = MagicMock(return_value=False)
         session.guardrail_violations = 0
+        session.last_sent_message_id = None
         session.memory_manager.prepare_context.return_value = MemoryContext(
             messages=[], context_prefix=None
         )
@@ -527,7 +529,7 @@ class TestHandlerIntegration:
     def test_immediate_delivery_when_no_scheduler(self, tmp_path):
         """Without a scheduler, reply is sent immediately."""
         channel = MagicMock()
-        channel.send.return_value = True
+        channel.send.return_value = SendResult(ok=True)
 
         handler, _ = self._make_handler(tmp_path, scheduler=None)
         handler.handle(self._make_msg(), channel)
@@ -537,7 +539,7 @@ class TestHandlerIntegration:
     def test_immediate_delivery_when_agent_does_not_call_schedule_reply(self, tmp_path):
         """Scheduler present but agent does not call schedule_reply → immediate send."""
         channel = MagicMock()
-        channel.send.return_value = True
+        channel.send.return_value = SendResult(ok=True)
 
         sched = _make_scheduler(tmp_path)
         runner = MagicMock(return_value="immediate answer")
@@ -549,7 +551,7 @@ class TestHandlerIntegration:
     def test_scheduled_delivery_when_agent_calls_schedule_reply(self, tmp_path):
         """When agent calls schedule_reply, response is queued and NOT sent immediately."""
         channel = MagicMock()
-        channel.send.return_value = True
+        channel.send.return_value = SendResult(ok=True)
 
         sched = _make_scheduler(tmp_path)
 
@@ -575,10 +577,10 @@ class TestHandlerIntegration:
         assert queued.text == "Scheduled reply!"
         assert queued.status == "pending"
 
-    def test_cancel_on_new_message(self, tmp_path):
-        """Incoming message cancels pending replies before running agent."""
+    def test_no_auto_cancel_on_new_message(self, tmp_path):
+        """Incoming message no longer auto-cancels pending replies; agent manages the queue."""
         channel = MagicMock()
-        channel.send.return_value = True
+        channel.send.return_value = SendResult(ok=True)
 
         sched = _make_scheduler(tmp_path)
         # Pre-populate a pending message.
@@ -587,7 +589,8 @@ class TestHandlerIntegration:
         handler, _ = self._make_handler(tmp_path, scheduler=sched)
         handler.handle(self._make_msg(), channel)
 
-        assert sched._queue[mid].status == "cancelled"
+        # Message should remain pending — the agent decides whether to cancel.
+        assert sched._queue[mid].status == "pending"
 
     def test_memory_updated_with_scheduled_text(self, tmp_path):
         """Memory is updated with the scheduled text (not an empty string)."""

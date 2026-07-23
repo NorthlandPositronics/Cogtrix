@@ -913,10 +913,13 @@ class BaseMemoryManager(ABC):
             "session_id": self.session_id,
             "config": self.config,
         }
-        # Hybrid state
-        if self._summary is not None:
-            d["_summary"] = self._summary
-            d["_summary_msg_idx"] = self._summary_msg_idx
+        # Hybrid state — read under lock for consistency with background summarizer
+        with self._hybrid_lock:
+            summary = self._summary
+            summary_idx = self._summary_msg_idx
+        if summary is not None:
+            d["_summary"] = summary
+            d["_summary_msg_idx"] = summary_idx
         return d
 
     def from_dict(self, data: dict[str, Any]) -> None:
@@ -940,5 +943,6 @@ class BaseMemoryManager(ABC):
             self.config = data.get("config", {})
 
         # Restore hybrid state
-        self._summary = data.get("_summary")
-        self._summary_msg_idx = data.get("_summary_msg_idx", 0)
+        with self._hybrid_lock:
+            self._summary = data.get("_summary")
+            self._summary_msg_idx = data.get("_summary_msg_idx", 0)

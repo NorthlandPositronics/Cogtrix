@@ -7,7 +7,7 @@ from abc import ABC
 
 import pytest
 
-from src.assistant.channel import Channel, IncomingMessage
+from src.assistant.channel import Channel, IncomingMessage, parse_duration
 
 # ---------------------------------------------------------------------------
 # TestIncomingMessage
@@ -158,3 +158,70 @@ class TestChannelABC:
         # Should not raise
         result = ch.send_typing("chat1")
         assert result is None
+
+
+# ---------------------------------------------------------------------------
+# TestParseDuration
+# ---------------------------------------------------------------------------
+
+
+class TestParseDuration:
+    def test_hours(self):
+        assert parse_duration("24h") == 86400.0
+
+    def test_minutes(self):
+        assert parse_duration("30m") == 1800.0
+
+    def test_days(self):
+        assert parse_duration("7d") == 604800.0
+
+    def test_seconds(self):
+        assert parse_duration("90s") == 90.0
+
+    def test_compound(self):
+        assert parse_duration("1d12h") == 129600.0
+
+    def test_compound_hm(self):
+        assert parse_duration("1h30m") == 5400.0
+
+    def test_plain_number_string(self):
+        assert parse_duration("3600") == 3600.0
+
+    def test_int_value(self):
+        assert parse_duration(3600) == 3600.0
+
+    def test_float_value(self):
+        assert parse_duration(60.5) == 60.5
+
+    def test_none_returns_none(self):
+        assert parse_duration(None) is None
+
+    def test_empty_string_returns_none(self):
+        assert parse_duration("") is None
+
+    def test_zero_returns_none(self):
+        assert parse_duration(0) is None
+
+    def test_zero_string_returns_none(self):
+        assert parse_duration("0") is None
+
+    def test_case_insensitive(self):
+        assert parse_duration("2H") == 7200.0
+
+    def test_whitespace_in_compound(self):
+        assert parse_duration("1d 12h") == 129600.0
+
+    def test_invalid_string_returns_none(self):
+        assert parse_duration("abc") is None
+
+    def test_fractional_hours(self):
+        assert parse_duration("1.5h") == 5400.0
+
+    def test_fractional_days(self):
+        assert parse_duration("0.5d") == 43200.0
+
+    def test_negative_duration_returns_none(self):
+        assert parse_duration("-5h") is None
+
+    def test_negative_plain_number_returns_none(self):
+        assert parse_duration("-60") is None

@@ -108,7 +108,12 @@ class TestComputeHash:
 
 
 class TestFactExtraction:
-    """Tests for extract_and_store() calling the LLM."""
+    """Tests for _extract_and_store_sync() calling the LLM.
+
+    The public extract_and_store() dispatches to a background pool; tests that
+    assert on _facts state call _extract_and_store_sync() directly so they run
+    synchronously without races.
+    """
 
     def test_extraction_stores_facts_returned_by_llm(self):
         """Facts returned by the LLM are added to the store."""
@@ -120,7 +125,7 @@ class TestFactExtraction:
         )
         store._extraction_llm.invoke.return_value = mock_response
 
-        store.extract_and_store(
+        store._extract_and_store_sync(
             "Alice is a vet.", "Yes, Alice works as a veterinarian in Portland."
         )
 
@@ -140,7 +145,7 @@ class TestFactExtraction:
         )
         store._extraction_llm.invoke.return_value = mock_response
 
-        store.extract_and_store("What DB does Project X use?", "Project X uses PostgreSQL.")
+        store._extract_and_store_sync("What DB does Project X use?", "Project X uses PostgreSQL.")
 
         assert any(f.entity == "Project X" for f in store._facts)
 
@@ -157,7 +162,7 @@ class TestFactExtraction:
         )
         store._extraction_llm.invoke.return_value = mock_response
 
-        store.extract_and_store("Alice works at Acme Corp in New York.", "Correct.")
+        store._extract_and_store_sync("Alice works at Acme Corp in New York.", "Correct.")
 
         assert len(store._facts) == 2
 
@@ -170,7 +175,7 @@ class TestFactExtraction:
         store._extraction_llm.invoke.return_value = mock_response
 
         # Should not raise
-        store.extract_and_store("Tell me something.", "Sure.")
+        store._extract_and_store_sync("Tell me something.", "Sure.")
         assert len(store._facts) == 0
 
     def test_empty_json_array_adds_no_facts(self):
@@ -181,17 +186,45 @@ class TestFactExtraction:
         mock_response.content = "[]"
         store._extraction_llm.invoke.return_value = mock_response
 
-        store.extract_and_store("No facts here.", "Indeed.")
+        store._extract_and_store_sync("No facts here.", "Indeed.")
         assert len(store._facts) == 0
 
     def test_llm_exception_does_not_crash(self):
-        """If the extraction LLM raises, extract_and_store() returns silently."""
+        """If the extraction LLM raises, _extract_and_store_sync() returns silently."""
         store = _make_store()
         store._extraction_llm.invoke.side_effect = RuntimeError("LLM unavailable")
 
         # Should not raise
-        store.extract_and_store("Hello", "Hi there")
+        store._extract_and_store_sync("Hello", "Hi there")
         assert len(store._facts) == 0
+
+    def test_extract_and_store_returns_immediately(self):
+        """extract_and_store() dispatches to the pool and returns without blocking."""
+        import time
+
+        store = _make_store()
+
+        import threading
+
+        started = threading.Event()
+        blocked = threading.Event()
+
+        def _slow_invoke(messages: Any) -> MagicMock:
+            started.set()
+            blocked.wait(timeout=2.0)
+            resp = MagicMock()
+            resp.content = "[]"
+            return resp
+
+        store._extraction_llm.invoke.side_effect = _slow_invoke
+
+        t_start = time.monotonic()
+        store.extract_and_store("Hello", "Hi there")
+        elapsed = time.monotonic() - t_start
+
+        # Call must return before the LLM call starts (or nearly so)
+        assert elapsed < 0.5, f"extract_and_store blocked for {elapsed:.2f}s"
+        blocked.set()
 
 
 # ---------------------------------------------------------------------------
@@ -200,7 +233,11 @@ class TestFactExtraction:
 
 
 class TestDeduplication:
-    """Tests for fact deduplication logic."""
+    """Tests for fact deduplication logic.
+
+    Calls _extract_and_store_sync() directly so assertions on _facts are
+    not subject to background-pool scheduling.
+    """
 
     def test_same_fact_not_stored_twice(self):
         """Identical entity+fact (same casing) is deduplicated."""
@@ -210,8 +247,8 @@ class TestDeduplication:
         mock_response.content = json.dumps([{"entity": "Alice", "fact": "Is a veterinarian"}])
         store._extraction_llm.invoke.return_value = mock_response
 
-        store.extract_and_store("Alice is a vet.", "Yes.")
-        store.extract_and_store("Alice is a vet again.", "Yes.")
+        store._extract_and_store_sync("Alice is a vet.", "Yes.")
+        store._extract_and_store_sync("Alice is a vet again.", "Yes.")
 
         assert len(store._facts) == 1
 
@@ -233,8 +270,8 @@ class TestDeduplication:
 
         store._extraction_llm.invoke.side_effect = _mock_invoke
 
-        store.extract_and_store("First call", "resp")
-        store.extract_and_store("Second call", "resp")
+        store._extract_and_store_sync("First call", "resp")
+        store._extract_and_store_sync("Second call", "resp")
 
         assert len(store._facts) == 1
 
@@ -251,7 +288,7 @@ class TestDeduplication:
         )
         store._extraction_llm.invoke.return_value = mock_response
 
-        store.extract_and_store("Tell me about Alice.", "OK.")
+        store._extract_and_store_sync("Tell me about Alice.", "OK.")
         assert len(store._facts) == 2
 
 
@@ -348,7 +385,7 @@ class TestMaxFactsCap:
         mock_response.content = json.dumps([{"entity": "Fact3", "fact": "Content3"}])
         store._extraction_llm.invoke.return_value = mock_response
 
-        store.extract_and_store("input", "response")
+        store._extract_and_store_sync("input", "response")
         assert len(store._facts) == 2  # still at cap
 
 
@@ -439,6 +476,9 @@ class TestIndexFactsLockBehavior:
     BUG-028: FAISS indexing (potentially slow due to embedding network calls)
     was previously done inside `with self._lock:`, blocking concurrent recall()
     calls.  After the fix, _index_facts must be invoked after the lock releases.
+
+    These tests call _extract_and_store_sync() directly so the spy is not
+    subject to background-pool scheduling races.
     """
 
     def test_index_facts_called_outside_lock(self):
@@ -468,7 +508,7 @@ class TestIndexFactsLockBehavior:
 
         store._index_facts = _spy_index_facts
 
-        store.extract_and_store(
+        store._extract_and_store_sync(
             "Alice is a vet.", "Yes, Alice works as a veterinarian in Portland."
         )
 
@@ -494,6 +534,6 @@ class TestIndexFactsLockBehavior:
 
         store._index_facts = _spy_index_facts
 
-        store.extract_and_store("Nothing here.", "Indeed.")
+        store._extract_and_store_sync("Nothing here.", "Indeed.")
 
         assert index_call_count[0] == 0, "_index_facts should not be called when no facts added"

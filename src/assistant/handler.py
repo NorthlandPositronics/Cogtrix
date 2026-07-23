@@ -20,7 +20,16 @@ from src.assistant.datamarking import datamark_history as _datamark_history
 from src.assistant.datamarking import datamark_instruction as _datamark_instruction
 from src.assistant.datamarking import generate_datamark as _generate_datamark
 from src.assistant.guardrails import _BLOCKED_RESPONSE, GuardrailPipeline
-from src.assistant.scheduler import MessageScheduler, ScheduleReplyState, create_schedule_reply_tool
+from src.assistant.scheduler import (
+    EditReplyState,
+    MessageScheduler,
+    ScheduleReplyState,
+    create_cancel_scheduled_tool,
+    create_edit_reply_tool,
+    create_edit_scheduled_tool,
+    create_list_scheduled_tool,
+    create_schedule_reply_tool,
+)
 from src.orchestration.session_state import SessionState
 
 log = logging.getLogger("cogtrix")
@@ -171,6 +180,14 @@ class MessageHandler:
         log.debug("Resolved contact prompt for '%s'", contact_name)
         return loaded
 
+    def _resolve_recipient(self, msg: IncomingMessage) -> str | None:
+        """Derive a human-readable recipient identifier from message metadata."""
+        if msg.resolved_phone:
+            return msg.resolved_phone
+        if msg.sender_name:
+            return msg.sender_name
+        return msg.chat_id
+
     def _check_guardrails(self, msg: IncomingMessage, session: Any, channel: Channel) -> bool:
         """Return True if input passes guardrails; on failure, send blocked response and return False."""
         result = self._guardrails.check_input(msg.text, msg.chat_id)
@@ -240,8 +257,8 @@ class MessageHandler:
         effective_prompt: str,
         active_tools: list[Any],
         session: Any,
-    ) -> str:
-        """Invoke the agent runner and return the response string."""
+    ) -> tuple[str, set[str]]:
+        """Invoke the agent runner and return (response, loaded_tools)."""
         try:
             runner = self._agent_runner
             call_session_state = SessionState(
@@ -266,7 +283,8 @@ class MessageHandler:
         except Exception as exc:
             log.error("Agent error for session %s: %s", session.session_key, exc)
             response = "I encountered an error processing your message. Please try again."
-        return response
+            return response, set()
+        return response, call_session_state.loaded_tools
 
     def _route_response(
         self,
@@ -274,24 +292,73 @@ class MessageHandler:
         channel: Channel,
         response: str,
         schedule_state: ScheduleReplyState,
+        edit_state: EditReplyState,
+        session: Any,
     ) -> str:
         """Route the response to scheduled or immediate delivery and return the text for memory."""
+        if edit_state.was_called and session.last_sent_message_id:
+            new_text = self._guardrails.sanitize_output(edit_state.new_text)
+            if len(new_text) > self._max_response_length:
+                new_text = new_text[: self._max_response_length - 3] + "..."
+            result = channel.edit_message(msg.chat_id, session.last_sent_message_id, new_text)
+            if result.ok:
+                log.info("Edited last reply for %s", msg.chat_id)
+            else:
+                log.warning("Failed to edit message for %s: %s", msg.chat_id, result.error)
+            # Fall through — schedule_reply may also have been called in the same turn.
+
         if schedule_state.was_called and self._scheduler:
             reply_text = self._guardrails.sanitize_output(schedule_state.scheduled_text)
             if len(reply_text) > self._max_response_length:
                 reply_text = reply_text[: self._max_response_length - 3] + "..."
             send_at = time.time() + schedule_state.delay_minutes * 60
-            self._scheduler.schedule(msg.channel, msg.chat_id, reply_text, send_at)
+            recipient = self._resolve_recipient(msg)
+            self._scheduler.schedule(
+                msg.channel, msg.chat_id, reply_text, send_at, recipient=recipient
+            )
             log.info("Reply scheduled for %s (%d min)", msg.chat_id, schedule_state.delay_minutes)
             return reply_text
-        else:
+
+        if not edit_state.was_called:
             response = self._guardrails.sanitize_output(response)
             if len(response) > self._max_response_length:
                 response = response[: self._max_response_length - 3] + "..."
-            sent = channel.send(msg.chat_id, response)
-            if not sent:
+            result = channel.send(msg.chat_id, response)
+            if result.ok and result.message_id:
+                session.last_sent_message_id = result.message_id
+            elif not result.ok:
                 log.warning("Failed to send reply to %s via %s", msg.chat_id, channel.name)
             return response
+
+        # Edit-only (no schedule, no immediate send) — return edited text for memory
+        return self._guardrails.sanitize_output(edit_state.new_text)
+
+    def handle_batch(self, messages: list[IncomingMessage], channel: Channel) -> None:
+        """Process multiple rapid messages as a single agent turn."""
+        if not messages:
+            return
+        if len(messages) == 1:
+            self.handle(messages[0], channel)
+            return
+        combined_text = "\n".join(m.text for m in messages)
+        primary = messages[-1]
+        combined_msg = IncomingMessage(
+            channel=primary.channel,
+            chat_id=primary.chat_id,
+            message_id=primary.message_id,
+            sender_id=primary.sender_id,
+            sender_name=primary.sender_name,
+            text=combined_text,
+            timestamp=primary.timestamp,
+            metadata=primary.metadata,
+            resolved_phone=primary.resolved_phone,
+        )
+        log.info(
+            "Consolidated %d rapid messages for %s into single turn",
+            len(messages),
+            primary.chat_id,
+        )
+        self.handle(combined_msg, channel)
 
     def handle(self, msg: IncomingMessage, channel: Channel) -> None:
         """Process *msg* and send a response back via *channel*."""
@@ -300,23 +367,30 @@ class MessageHandler:
             if not self._check_guardrails(msg, session, channel):
                 return
 
-            if self._scheduler:
-                cancelled = self._scheduler.cancel_pending(msg.channel, msg.chat_id)
-                if cancelled:
-                    log.debug("Cancelled %d pending reply(s) for %s", cancelled, msg.chat_id)
-
             session.last_activity = time.monotonic()
             context, combined_prefix = self._prepare_context(msg, session)
 
             schedule_state = ScheduleReplyState()
+            edit_state = EditReplyState()
             active_tools: list[Any] = list(self._active_tools)
             if self._scheduler and "schedule_reply" not in self._excluded_tools:
                 active_tools.append(create_schedule_reply_tool(schedule_state))
+            if "edit_last_reply" not in self._excluded_tools and session.last_sent_message_id:
+                active_tools.append(create_edit_reply_tool(edit_state))
+            if self._scheduler:
+                if "list_scheduled_messages" not in self._excluded_tools:
+                    active_tools.append(
+                        create_list_scheduled_tool(self._scheduler, self._services_config)
+                    )
+                if "edit_scheduled_message" not in self._excluded_tools:
+                    active_tools.append(create_edit_scheduled_tool(self._scheduler))
+                if "cancel_scheduled_message" not in self._excluded_tools:
+                    active_tools.append(create_cancel_scheduled_tool(self._scheduler))
 
             effective_prompt, user_input, history = self._prepare_agent_call(
                 msg, context, combined_prefix
             )
-            response = self._run_agent(
+            response, turn_loaded_tools = self._run_agent(
                 user_input=user_input,
                 history_messages=history,
                 context_prefix=combined_prefix,
@@ -324,7 +398,15 @@ class MessageHandler:
                 active_tools=active_tools,
                 session=session,
             )
-            response_for_memory = self._route_response(msg, channel, response, schedule_state)
+            if turn_loaded_tools:
+                log.debug(
+                    "Session %s: tools auto-loaded this turn: %s",
+                    session.session_key,
+                    turn_loaded_tools,
+                )
+            response_for_memory = self._route_response(
+                msg, channel, response, schedule_state, edit_state, session
+            )
 
             # Memory records the response regardless of delivery success
             # (at-least-once memory semantics).

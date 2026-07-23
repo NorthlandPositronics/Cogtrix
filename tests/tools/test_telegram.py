@@ -82,6 +82,60 @@ class TestContactFiltering:
         allowed, _ = _check_contact("alice")
         assert allowed is True
 
+    def test_allow_allows_listed_contact(self):
+        from src.tools.telegram import _cfg, _check_contact
+
+        _cfg.filter_mode = "allow"
+        _cfg.contacts = ["123456789"]
+        _cfg.phonebook = {}
+
+        allowed, reason = _check_contact("123456789")
+        assert allowed is True
+        assert reason == ""
+
+    def test_allow_blocks_unlisted_contact(self):
+        from src.tools.telegram import _cfg, _check_contact
+
+        _cfg.filter_mode = "allow"
+        _cfg.contacts = ["123456789"]
+        _cfg.phonebook = {}
+
+        allowed, reason = _check_contact("999999999")
+        assert allowed is False
+        assert "allow list" in reason
+
+    def test_ignore_blocks_listed_contact(self):
+        from src.tools.telegram import _cfg, _check_contact
+
+        _cfg.filter_mode = "ignore"
+        _cfg.contacts = ["123456789"]
+        _cfg.phonebook = {}
+
+        allowed, reason = _check_contact("123456789")
+        assert allowed is False
+        assert "ignore" in reason
+
+    def test_ignore_allows_unlisted_contact(self):
+        from src.tools.telegram import _cfg, _check_contact
+
+        _cfg.filter_mode = "ignore"
+        _cfg.contacts = ["123456789"]
+        _cfg.phonebook = {}
+
+        allowed, _ = _check_contact("999999999")
+        assert allowed is True
+
+    def test_blacklist_blocks_listed_contact_via_check_contact(self):
+        from src.tools.telegram import _cfg, _check_contact
+
+        _cfg.filter_mode = "blacklist"
+        _cfg.contacts = ["123456789"]
+        _cfg.phonebook = {}
+
+        allowed, reason = _check_contact("123456789")
+        assert allowed is False
+        assert "blacklist" in reason
+
 
 # ---------------------------------------------------------------------------
 # Contact resolution

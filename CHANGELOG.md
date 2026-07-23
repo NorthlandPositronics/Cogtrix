@@ -1,5 +1,35 @@
 # Changelog
 
+## [0.1.12](https://github.com/NorthlandPositronics/Cogtrix/compare/v0.1.11...v0.1.12) (2026-03-03)
+
+
+### Features
+
+* **assistant:** add filter_mode renames and blacklist delete/archive ([2eeae99](https://github.com/NorthlandPositronics/Cogtrix/commit/2eeae993c3fbca4298f83699e56d216c54846fc8))
+* **assistant:** add message debounce buffer, edit_last_reply tool, and batch handling ([4f77f30](https://github.com/NorthlandPositronics/Cogtrix/commit/4f77f30fffe2fbf9b19c7668964ce6770d4bee25))
+* **assistant:** add message editing, queue management tools, and bug fixes ([d571508](https://github.com/NorthlandPositronics/Cogtrix/commit/d571508588fd0209f94c48a744d1a1a3a45f57a6))
+* **assistant:** add scheduler queue management tools and recipient tracking ([ef4a740](https://github.com/NorthlandPositronics/Cogtrix/commit/ef4a74090e9f5a1643e0569c4550ab47c7446469))
+* **scheduler:** add chat_id and contact_name filters to list_scheduled_messages ([d27b9df](https://github.com/NorthlandPositronics/Cogtrix/commit/d27b9df80a1d35d4395ec5ce0ffb20e00aebea05))
+* **whatsapp:** add two-phase polling tests and fix snapshot eviction order ([df3e588](https://github.com/NorthlandPositronics/Cogtrix/commit/df3e588b190bab6cebac8c7a797ddbeea1403c79))
+* **whatsapp:** implement two-phase polling architecture ([a34422a](https://github.com/NorthlandPositronics/Cogtrix/commit/a34422a5d59a8d3796ead418d0c140e728b715c0))
+
+
+### Bug Fixes
+
+* apply Round 3 audit fixes (BUG-068/069/071/072, ARCH-035-01/03/13) ([16dcba1](https://github.com/NorthlandPositronics/Cogtrix/commit/16dcba10a36b4aea39472aaeaaed501f21f56c70))
+* **assistant:** fix 5 polling and duration bugs (BUG-055 through BUG-059) ([552e0a3](https://github.com/NorthlandPositronics/Cogtrix/commit/552e0a30f3a26001cb2057f5f34c54dfe36daadb))
+* **assistant:** remove early return in _route_response so edit+schedule both fire ([0a7b1ea](https://github.com/NorthlandPositronics/Cogtrix/commit/0a7b1ead78460d3ee74d13e4dfcfd0d96991dacb))
+* close leaked file descriptors and fix TOCTOU race in MCP loop creation ([cf775b3](https://github.com/NorthlandPositronics/Cogtrix/commit/cf775b3a9da21b111be55e67c2cfe202ba2368fc))
+* implement ADR-0036 deferred audit fixes (6 items) ([3348baf](https://github.com/NorthlandPositronics/Cogtrix/commit/3348bafa40744b14ae41d5fad5f2886670e3da04))
+* **scheduler:** add lock+idempotency to tool closures and coerce from_dict types ([254d411](https://github.com/NorthlandPositronics/Cogtrix/commit/254d4119725eb29f972ce182ff552d2d32ce1b28))
+* **whatsapp:** fix 6 polling bugs (BUG-049 through BUG-054) ([893be0b](https://github.com/NorthlandPositronics/Cogtrix/commit/893be0be2ce560612405416c93ef05dadfaa04d3))
+* **whatsapp:** rewrite polling to two-phase architecture, fix stale dedup cache ([df2acab](https://github.com/NorthlandPositronics/Cogtrix/commit/df2acab9d3f0915043e88bd30e34c608903bd1c4))
+
+
+### Documentation
+
+* holistic documentation revision syncing all docs with codebase ([e70576d](https://github.com/NorthlandPositronics/Cogtrix/commit/e70576da66ddb8e34abb55ce8108baf496d39460))
+
 ## [0.1.11](https://github.com/NorthlandPositronics/Cogtrix/compare/v0.1.10...v0.1.11) (2026-03-02)
 
 
