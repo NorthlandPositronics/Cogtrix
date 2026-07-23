@@ -443,6 +443,35 @@ def _list_ollama_models(base_url: str) -> list[str]:
         return []
 
 
+def _extract_connection_error(exc: Exception) -> str:
+    """Extract a human-readable message from an LLM API exception.
+
+    The openai SDK builds ``exc.message`` as
+    ``"Error code: {status} - {body_repr}"`` which is noisy.  The clean
+    human-readable message is nested inside ``exc.body``.
+
+    For ``APIConnectionError`` (host unreachable) there is no HTTP status code,
+    so ``exc.message`` is already a clean short string like ``"Connection error."``
+    with no ``"Error code:"`` prefix — that is returned as-is.
+    """
+    # openai SDK: APIStatusError.body is the parsed JSON response body.
+    # The actual message is at body['error']['message'] or body['message'].
+    body = getattr(exc, "body", None)
+    if isinstance(body, dict):
+        err = body.get("error")
+        if isinstance(err, dict) and err.get("message"):
+            return str(err["message"])
+        if body.get("message"):
+            return str(body["message"])
+    # APIConnectionError and similar non-HTTP errors: exc.message is already
+    # a clean short string ("Connection error.", "Timeout.", etc.) with no
+    # "Error code:" prefix.
+    msg = getattr(exc, "message", None)
+    if isinstance(msg, str) and msg and not msg.startswith("Error code:"):
+        return msg
+    return str(exc)
+
+
 def _test_connection(
     provider_type: str,
     model: str,
@@ -451,21 +480,21 @@ def _test_connection(
 ) -> Any | None:
     """Test LLM connectivity. Returns the LLM instance on success, None on failure."""
 
-    from src.agent.core import create_llm_from_provider_config
-    from src.config import ModelConfig, ProviderConfig
-
-    pc = ProviderConfig(
-        name=provider_type,
-        type=provider_type,
-        api_key=api_key,
-        base_url=base_url,
-    )
-    mc = ModelConfig(provider=provider_type, model=model)
+    from src.providers import create_chat_model
 
     try:
-        llm = create_llm_from_provider_config(pc, mc)
+        # Use max_retries=0: we want the connection test to fail fast rather than
+        # retrying internally on network errors (which would make the wizard appear
+        # to hang when the host is truly unreachable).
+        llm = create_chat_model(
+            provider_type,
+            model=model,
+            api_key=api_key,
+            base_url=base_url,
+            max_retries=0,
+        )
     except Exception as exc:
-        print(f"  {_R(chr(0x2717))} Provider setup failed: {exc}")
+        print(f"  {_R(chr(0x2717))} Provider setup failed: {_extract_connection_error(exc)}")
         return None
 
     try:
@@ -479,7 +508,7 @@ def _test_connection(
         print(f"  {_BG(chr(0x2713))} Connected to {_B(provider_type)}/{_B(model)}\n")
         return llm
     except Exception as exc:
-        print(f"  {_R(chr(0x2717))} Connection failed: {exc}\n")
+        print(f"  {_R(chr(0x2717))} Connection failed: {_extract_connection_error(exc)}\n")
         return None
 
 

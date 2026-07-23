@@ -64,7 +64,7 @@ def test_app():
         async with test_engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
 
-    asyncio.get_event_loop().run_until_complete(_create())
+    asyncio.run(_create())
 
     with patch.dict(os.environ, {"COGTRIX_JWT_SECRET": _TEST_JWT_SECRET}):
         from src.api.app import create_app
@@ -85,7 +85,7 @@ def test_app():
 
         yield app
 
-    asyncio.get_event_loop().run_until_complete(test_engine.dispose())
+    asyncio.run(test_engine.dispose())
 
 
 @pytest.fixture()
@@ -274,7 +274,7 @@ class TestApiKeyAuth:
                 assert exc_info.value.status_code == 401
             await engine.dispose()
 
-        _asyncio.get_event_loop().run_until_complete(_run())
+        _asyncio.run(_run())
 
     def test_api_key_updates_last_used(self, test_app) -> None:
         """validate_api_key updates last_used_at on the key record."""
@@ -323,7 +323,7 @@ class TestApiKeyAuth:
 
             await engine.dispose()
 
-        _asyncio.get_event_loop().run_until_complete(_run())
+        _asyncio.run(_run())
 
     def test_admin_can_revoke_any_users_key(self, client: TestClient) -> None:
         # Admin is the first registered user.

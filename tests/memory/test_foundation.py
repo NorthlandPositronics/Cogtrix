@@ -109,12 +109,14 @@ class TestMemoryFactory:
     """Tests for MemoryFactory."""
 
     def setup_method(self):
-        """Clear registry before each test."""
+        """Save and clear registry before each test."""
+        self._saved_registry = dict(MemoryFactory._registry)
         MemoryFactory.clear_registry()
 
     def teardown_method(self):
-        """Clear registry after each test."""
+        """Restore registry after each test to avoid polluting subsequent tests."""
         MemoryFactory.clear_registry()
+        MemoryFactory._registry.update(self._saved_registry)
 
     def test_register_and_create(self):
         """Test basic registration and creation."""
@@ -323,12 +325,14 @@ class TestIntegration:
     """Integration tests for the foundation components."""
 
     def setup_method(self):
-        """Clear registry before each test."""
+        """Save and clear registry before each test."""
+        self._saved_registry = dict(MemoryFactory._registry)
         MemoryFactory.clear_registry()
 
     def teardown_method(self):
-        """Clear registry after each test."""
+        """Restore registry after each test to avoid polluting subsequent tests."""
         MemoryFactory.clear_registry()
+        MemoryFactory._registry.update(self._saved_registry)
 
     def test_full_workflow(self):
         """Test complete workflow: register, create, use, serialize."""

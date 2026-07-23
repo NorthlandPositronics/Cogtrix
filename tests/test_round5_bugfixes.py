@@ -140,7 +140,7 @@ class TestPerf5010EnqueueAgentStateNonBlocking:
             # Queue is still full — the new item was dropped.
             assert session.ws_queue.full()
 
-        asyncio.get_event_loop().run_until_complete(run())
+        asyncio.run(run())
 
     def test_agent_state_is_set_regardless_of_queue_full(self):
         """session.agent_state is always updated, even when the queue drops the message."""
@@ -154,7 +154,7 @@ class TestPerf5010EnqueueAgentStateNonBlocking:
             session.ws_queue.put_nowait({"type": "sentinel"})
             await _enqueue_agent_state(session, "delegating")
 
-        asyncio.get_event_loop().run_until_complete(run())
+        asyncio.run(run())
         assert session.agent_state == "delegating"
 
     def test_message_enqueued_when_queue_has_space(self):
@@ -168,7 +168,7 @@ class TestPerf5010EnqueueAgentStateNonBlocking:
         async def run():
             await _enqueue_agent_state(session, "researching")
 
-        asyncio.get_event_loop().run_until_complete(run())
+        asyncio.run(run())
         assert not session.ws_queue.empty()
         item = session.ws_queue.get_nowait()
         assert item["type"] == "agent_state"

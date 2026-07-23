@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.1.33](https://github.com/NorthlandPositronics/Cogtrix/compare/v0.1.32...v0.1.33) (2026-03-24)
+
+
+### Bug Fixes
+
+* **wizard:** fail-fast connection test and clean error messages ([#82](https://github.com/NorthlandPositronics/Cogtrix/issues/82)) ([361c72c](https://github.com/NorthlandPositronics/Cogtrix/commit/361c72c807f10940c58413487f360f9c31d12b81))
+
+
+### Documentation
+
+* **api:** exhaustive accuracy audit of API documentation ([#81](https://github.com/NorthlandPositronics/Cogtrix/issues/81)) ([d5d6bfd](https://github.com/NorthlandPositronics/Cogtrix/commit/d5d6bfdbefca64e0e45562c132b3f305dfb64e87))
+
 ## [0.1.32](https://github.com/NorthlandPositronics/Cogtrix/compare/v0.1.31...v0.1.32) (2026-03-23)
 
 

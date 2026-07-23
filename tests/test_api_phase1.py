@@ -238,7 +238,7 @@ def test_app():
         async with test_engine.begin() as conn:
             await conn.run_sync(_Base.metadata.create_all)
 
-    asyncio.get_event_loop().run_until_complete(_create())
+    asyncio.run(_create())
 
     # Import after env vars are set
     with patch.dict(os.environ, {"COGTRIX_JWT_SECRET": _TEST_JWT_SECRET}):
@@ -262,7 +262,7 @@ def test_app():
         yield app
 
     # Cleanup
-    asyncio.get_event_loop().run_until_complete(test_engine.dispose())
+    asyncio.run(test_engine.dispose())
 
 
 @pytest.fixture()

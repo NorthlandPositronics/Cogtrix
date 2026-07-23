@@ -91,7 +91,7 @@ def test_app():
         async with test_engine.begin() as conn:
             await conn.run_sync(_Base.metadata.create_all)
 
-    _asyncio.get_event_loop().run_until_complete(_create())
+    _asyncio.run(_create())
 
     with patch.dict(os.environ, {"COGTRIX_JWT_SECRET": _TEST_JWT_SECRET}):
         app = create_app()
@@ -108,7 +108,7 @@ def test_app():
         app.dependency_overrides[get_db] = _override_get_db
         yield app
 
-    _asyncio.get_event_loop().run_until_complete(test_engine.dispose())
+    _asyncio.run(test_engine.dispose())
 
 
 @pytest.fixture()

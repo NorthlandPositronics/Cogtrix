@@ -12,6 +12,7 @@ import yaml
 from src.setup_wizard import (
     _detect_environment,
     _extract_config_info,
+    _extract_connection_error,
     _extract_yaml,
     _has_yaml_block,
     _inject_bootstrap,
@@ -508,6 +509,56 @@ class TestListOllamaModels:
         assert names == []
 
 
+class TestExtractConnectionError:
+    """Unit tests for _extract_connection_error — error message prettifier.
+
+    The openai SDK builds exc.message as "Error code: {status} - {body_repr}",
+    so the human-readable text must be extracted from exc.body, not exc.message.
+    """
+
+    def test_body_dict_with_nested_error_message(self) -> None:
+        # Mirrors actual openai.BadRequestError raised by the SDK
+        exc = Exception("Error code: 400 - {'error': {'message': 'No connected db.'}}")
+        exc.message = "Error code: 400 - {'error': {'message': 'No connected db.'}}"  # type: ignore[attr-defined]
+        exc.body = {"error": {"message": "No connected db.", "type": "no_db_connection"}}  # type: ignore[attr-defined]
+        assert _extract_connection_error(exc) == "No connected db."
+
+    def test_body_dict_with_top_level_message(self) -> None:
+        exc = Exception("Error code: 503 - {'message': 'Service unavailable'}")
+        exc.body = {"message": "Service unavailable"}  # type: ignore[attr-defined]
+        assert _extract_connection_error(exc) == "Service unavailable"
+
+    def test_body_dict_error_missing_message_falls_through_to_message(self) -> None:
+        # Body has no usable message; exc.message is clean (no "Error code:" prefix)
+        exc = Exception("Connection error.")
+        exc.message = "Connection error."  # type: ignore[attr-defined]
+        exc.body = {"error": {"code": "500"}}  # type: ignore[attr-defined]
+        assert _extract_connection_error(exc) == "Connection error."
+
+    def test_clean_message_attr_used_when_no_body(self) -> None:
+        # Mirrors openai.APIConnectionError (no HTTP status, clean message)
+        exc = Exception("Connection error.")
+        exc.message = "Connection error."  # type: ignore[attr-defined]
+        assert _extract_connection_error(exc) == "Connection error."
+
+    def test_error_code_prefix_in_message_skipped(self) -> None:
+        # When body is absent, exc.message starts with "Error code:" — skip it
+        exc = Exception("Error code: 400 - some ugly body")
+        exc.message = "Error code: 400 - some ugly body"  # type: ignore[attr-defined]
+        # No body → falls through to str(exc) which is same as message
+        assert _extract_connection_error(exc) == "Error code: 400 - some ugly body"
+
+    def test_no_special_attributes_returns_str(self) -> None:
+        exc = ValueError("plain error")
+        assert _extract_connection_error(exc) == "plain error"
+
+    def test_body_not_dict_falls_through(self) -> None:
+        exc = Exception("Connection error.")
+        exc.message = "Connection error."  # type: ignore[attr-defined]
+        exc.body = "raw string body"  # type: ignore[attr-defined]
+        assert _extract_connection_error(exc) == "Connection error."
+
+
 class TestTestConnection:
     def _make_llm_mock(self, response_text: str = "ok"):
         response = MagicMock()
@@ -518,16 +569,13 @@ class TestTestConnection:
 
     def test_successful_connection_returns_llm(self):
         llm_mock = self._make_llm_mock("ok")
-        with patch(
-            "src.setup_wizard.create_llm_from_provider_config", return_value=llm_mock, create=True
-        ):
-            with patch("src.agent.core.create_llm_from_provider_config", return_value=llm_mock):
-                result = _test_connection("ollama", "qwen3:8b", None, "http://localhost:11434")
+        with patch("src.providers.create_chat_model", return_value=llm_mock):
+            result = _test_connection("ollama", "qwen3:8b", None, "http://localhost:11434")
         assert result is llm_mock
 
     def test_provider_setup_failure_returns_none(self, capsys):
         with patch(
-            "src.agent.core.create_llm_from_provider_config",
+            "src.providers.create_chat_model",
             side_effect=ValueError("bad config"),
         ):
             result = _test_connection("ollama", "bad-model", None, None)
@@ -538,7 +586,7 @@ class TestTestConnection:
     def test_invoke_failure_returns_none(self, capsys):
         llm_mock = MagicMock()
         llm_mock.invoke.side_effect = RuntimeError("timeout")
-        with patch("src.agent.core.create_llm_from_provider_config", return_value=llm_mock):
+        with patch("src.providers.create_chat_model", return_value=llm_mock):
             result = _test_connection("openai", "gpt-4.1-mini", "sk-test", None)
         assert result is None
         captured = capsys.readouterr()
@@ -546,7 +594,7 @@ class TestTestConnection:
 
     def test_empty_response_returns_none(self, capsys):
         llm_mock = self._make_llm_mock("   ")
-        with patch("src.agent.core.create_llm_from_provider_config", return_value=llm_mock):
+        with patch("src.providers.create_chat_model", return_value=llm_mock):
             result = _test_connection("openai", "gpt-4.1-mini", "sk-test", None)
         assert result is None
         captured = capsys.readouterr()
@@ -559,9 +607,40 @@ class TestTestConnection:
 
         llm_mock = MagicMock()
         llm_mock.invoke.return_value = _NoContent()
-        with patch("src.agent.core.create_llm_from_provider_config", return_value=llm_mock):
+        with patch("src.providers.create_chat_model", return_value=llm_mock):
             result = _test_connection("ollama", "llama3.2", None, "http://localhost:11434")
         assert result is llm_mock
+
+    def test_create_chat_model_called_with_max_retries_zero(self) -> None:
+        """Connection test must use max_retries=0 to fail fast on unreachable hosts."""
+        llm_mock = self._make_llm_mock("ok")
+        with patch("src.providers.create_chat_model", return_value=llm_mock) as mock_factory:
+            _test_connection("openai", "gpt-4o", "sk-test", None)
+        _kwargs = mock_factory.call_args.kwargs
+        assert _kwargs.get("max_retries") == 0, (
+            "_test_connection must pass max_retries=0 to avoid internal retry delays "
+            "when the host is unreachable"
+        )
+
+    def test_api_error_with_body_shown_cleanly(self, capsys) -> None:
+        """A structured API error must show the inner message, not the full dict repr.
+
+        The openai SDK sets exc.message = 'Error code: 400 - {body_repr}' (ugly).
+        The clean message lives in exc.body['error']['message'].
+        """
+        llm_mock = MagicMock()
+        # Mirrors the real openai.BadRequestError raised by the SDK
+        exc = RuntimeError(
+            "Error code: 400 - {'error': {'message': 'No connected db.', 'type': 'no_db_connection', 'param': None, 'code': '400'}}"
+        )
+        exc.message = "Error code: 400 - {'error': {'message': 'No connected db.', 'type': 'no_db_connection', 'param': None, 'code': '400'}}"  # type: ignore[attr-defined]
+        exc.body = {"error": {"message": "No connected db.", "type": "no_db_connection", "param": None, "code": "400"}}  # type: ignore[attr-defined]
+        llm_mock.invoke.side_effect = exc
+        with patch("src.providers.create_chat_model", return_value=llm_mock):
+            _test_connection("openai", "gpt-oss", "sk-test", "http://192.168.70.254:8080/v1")
+        captured = capsys.readouterr()
+        assert "No connected db." in captured.out
+        assert "{'error':" not in captured.out, "Raw dict repr must not appear in error output"
 
 
 class TestPrintDetections:
