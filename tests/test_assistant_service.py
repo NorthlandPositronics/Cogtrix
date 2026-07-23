@@ -408,15 +408,10 @@ class TestShutdownResilience:
 
 
 class TestInitFailureCleanup:
-    """If __init__ fails after creating the executor, it is currently NOT shut down.
+    """If __init__ fails after creating the executor, it must be shut down."""
 
-    NOTE: These tests document BUG #908 on the ``next`` branch.  PR #947 wraps
-    the remainder of __init__ in a try/except that calls executor.shutdown().
-    Until that PR lands, the executor leaks on init failure.
-    """
-
-    def test_executor_leaks_when_discover_channels_raises(self, tmp_path: Path):
-        """BUG #908: executor is created but not cleaned up when discovery fails."""
+    def test_executor_shutdown_when_discover_channels_raises(self, tmp_path: Path):
+        """FIX #908: executor is shut down when discovery fails."""
         cfg = _make_config(tmp_path)
         with (
             patch.object(
@@ -435,11 +430,10 @@ class TestInitFailureCleanup:
                     available_tools={},
                     active_tools=[],
                 )
-            # Current code does NOT call shutdown on failure
-            mock_executor.shutdown.assert_not_called()
+            mock_executor.shutdown.assert_called_once_with(wait=False)
 
-    def test_executor_leaks_when_scheduler_init_raises(self, tmp_path: Path):
-        """BUG #908: executor leaks when MessageScheduler init fails."""
+    def test_executor_shutdown_when_scheduler_init_raises(self, tmp_path: Path):
+        """FIX #908: executor is shut down when MessageScheduler init fails."""
         cfg = _make_config(tmp_path)
         with (
             patch.object(
@@ -460,10 +454,10 @@ class TestInitFailureCleanup:
                     available_tools={},
                     active_tools=[],
                 )
-            mock_executor.shutdown.assert_not_called()
+            mock_executor.shutdown.assert_called_once_with(wait=False)
 
-    def test_executor_leaks_when_handler_init_raises(self, tmp_path: Path):
-        """BUG #908: executor leaks when MessageHandler init fails."""
+    def test_executor_shutdown_when_handler_init_raises(self, tmp_path: Path):
+        """FIX #908: executor is shut down when MessageHandler init fails."""
         cfg = _make_config(tmp_path)
         with (
             patch.object(
@@ -485,7 +479,32 @@ class TestInitFailureCleanup:
                     available_tools={},
                     active_tools=[],
                 )
-            mock_executor.shutdown.assert_not_called()
+            mock_executor.shutdown.assert_called_once_with(wait=False)
+
+    def test_executor_shutdown_on_value_error(self, tmp_path: Path):
+        """FIX #908: executor is shut down on ValueError as well as RuntimeError."""
+        cfg = _make_config(tmp_path)
+        with (
+            patch.object(
+                AssistantService, "_discover_channels", return_value=[_make_channel("telegram")]
+            ),
+            patch("src.assistant.service.MessageScheduler"),
+            patch("src.assistant.service.MessageHandler") as MockHandler,
+            patch("src.assistant.service.ThreadPoolExecutor") as MockTPE,
+        ):
+            mock_executor = MagicMock()
+            MockTPE.return_value = mock_executor
+            MockHandler.side_effect = ValueError("bad config")
+            with pytest.raises(ValueError, match="bad config"):
+                AssistantService(
+                    config=cfg,
+                    llm=MagicMock(),
+                    registry=MagicMock(),
+                    system_prompt="test",
+                    available_tools={},
+                    active_tools=[],
+                )
+            mock_executor.shutdown.assert_called_once_with(wait=False)
 
 
 # ── TestDeferralWiring (#907) ────────────────────────────────────────────────

@@ -47,17 +47,19 @@ _DEFAULT_JUDGE_MODEL = "claude-sonnet-4-6"
 # ScenarioShardError.  Pick the shard with the lowest current
 # sum(timeout) to preserve balance.
 _SHARD_MAP: dict[str, frozenset[str]] = {
-    # 240s
+    # 240 + 240 = 480s
     "A": frozenset(
         {
             "regression_recovery_synthesis_no_meta_analysis",
+            "regression_no_fabrication_for_unknown_entity",
         }
     ),
-    # 120 + 90 = 210s
+    # 120 + 90 + 240 = 450s
     "B": frozenset(
         {
             "procurement_po_approval_basic",
             "safety_refuse_unauthorized_payment",
+            "regression_no_url_fabrication_in_response",
         }
     ),
     # 120 + 60 = 180s
@@ -67,11 +69,16 @@ _SHARD_MAP: dict[str, frozenset[str]] = {
             "regression_deepseek_native_tool_call_format",
         }
     ),
-    # 120 + 60 = 180s
+    # 120 + 60 + 240 + 180 (× 2 turns) = 780s worst-case
+    # Note: regression_multi_turn_effort_gate_no_carryover's 180s is
+    # per-turn (2 turns ⇒ ~360s wall worst-case); shard D's other
+    # entries are single-turn so they cap at their listed timeouts.
     "D": frozenset(
         {
             "finance_invoice_approval_workflow",
             "regression_stuck_loop_identical_tool_calls",
+            "regression_multi_turn_effort_gate_no_carryover",
+            "regression_persist_before_refusing",
         }
     ),
 }

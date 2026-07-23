@@ -233,26 +233,19 @@ class TestToolConfigs:
 
 
 class TestConcurrencyRace:
-    """Demonstrate lost-update race between send_to_agent and read_agent_inbox.
+    """Regression coverage for lost-update race between send_to_agent and read_agent_inbox.
 
-    BUG #973: there is no file-level locking.  When two threads interleave
-    read→modify→write, the second write overwrites the first and messages
-    are silently lost.
+    BUG #973: there was no file-level locking around the read-modify-write cycle.
+    When two threads interleaved read→modify→write, the second write overwrote
+    the first and messages were silently lost.
+
+    FIX: _locked_read_modify_write wraps the entire cycle with an in-process
+    threading.Lock per inbox plus an OS-level advisory lock (fcntl.flock) on a
+    companion .lock file.  This guards both intra-process and cross-process races.
     """
 
-    @pytest.mark.xfail(
-        strict=False,
-        reason="Race is non-deterministic — may not manifest on fast CI runners. "
-        "Documents BUG #973 (no file locking in agent_messaging).",
-    )
-    def test_concurrent_sends_lose_messages(self, data_dir, tmp_path):
-        """Many parallel sends to the same inbox — messages should be preserved.
-
-        When BUG #973 (no file-level locking) is present, the race condition may
-        cause message loss on slow environments.  This test inverts the assertion
-        so it PASSES when the race does NOT manifest (fast runners) and XFAILS
-        when it does manifest (slow runners).
-        """
+    def test_concurrent_sends_preserve_all_messages(self, data_dir):
+        """Many parallel sends to the same inbox — every message must survive."""
         import threading
 
         from src.tools.agent_messaging import send_to_agent
@@ -274,32 +267,27 @@ class TestConcurrencyRace:
         for t in threads:
             t.join(timeout=5)
 
+        assert not errors, f"Sender threads raised exceptions: {errors}"
+
         inbox = data_dir / "tasks" / "inbox" / "alice.json"
         messages = json.loads(inbox.read_text()) if inbox.exists() else []
-        actual_count = len(messages)
-        # Assert correct behaviour: all messages should be preserved.
-        # With BUG #973 (no file locking), the race may cause loss on slow environments.
-        assert actual_count == NUM_THREADS, (
-            f"Expected all {NUM_THREADS} messages preserved, but only {actual_count} found. "
-            "BUG #973: race condition caused message loss."
-        )
+        assert (
+            len(messages) == NUM_THREADS
+        ), f"Expected all {NUM_THREADS} messages preserved, but only {len(messages)} found."
+        payloads = {m["message"] for m in messages}
+        expected = {f"msg-{i}" for i in range(NUM_THREADS)}
+        assert payloads == expected, f"Message set mismatch: missing {expected - payloads}"
 
-    @pytest.mark.xfail(
-        strict=False,
-        reason="Race is non-deterministic — may not manifest on fast CI runners. "
-        "Documents BUG #973 (no file locking in agent_messaging).",
-    )
-    def test_concurrent_send_and_read_lose_messages(self, data_dir, tmp_path):
-        """Send while reading — new message may be overwritten by read's writeback."""
+    def test_concurrent_send_and_read_no_message_loss(self, data_dir):
+        """Send while reading — new message must never be overwritten by read's writeback."""
         import threading
 
         from src.tools.agent_messaging import read_agent_inbox, send_to_agent
 
-        # Seed one message so read_agent_inbox has something to write back
+        # Seed one message so read_agent_inbox has something to mark as read
         send_to_agent("alice", "seed")
 
         barrier = threading.Barrier(2)
-        lost = []
 
         def _reader() -> None:
             barrier.wait(timeout=2)
@@ -309,7 +297,7 @@ class TestConcurrencyRace:
             barrier.wait(timeout=2)
             send_to_agent("alice", "new")
 
-        # Run the race many times to make it likely
+        # Run many iterations to exercise the interleaving window
         for _ in range(50):
             t1 = threading.Thread(target=_reader)
             t2 = threading.Thread(target=_sender)
@@ -321,16 +309,11 @@ class TestConcurrencyRace:
             inbox = data_dir / "tasks" / "inbox" / "alice.json"
             messages = json.loads(inbox.read_text()) if inbox.exists() else []
             texts = {m["message"] for m in messages}
-            if "new" not in texts:
-                lost.append(True)
-                break
+            assert (
+                "new" in texts
+            ), "Race caused message loss: 'new' message was overwritten by read's writeback."
 
-        assert any(lost), (
-            "Expected at least one race where 'new' message was lost, but none occurred. "
-            "Race may need a slower environment or artificial delay."
-        )
-
-    def test_concurrent_reads_do_not_duplicate(self, data_dir, tmp_path):
+    def test_concurrent_reads_do_not_duplicate(self, data_dir):
         """Multiple parallel reads should not corrupt the file (no duplicates)."""
         import threading
 

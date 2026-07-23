@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 import time
 from collections.abc import Callable
 from unittest.mock import MagicMock, patch
@@ -253,7 +254,7 @@ class TestOutboundPrValidation:
         channel.send.return_value = SendResult(ok=True, message_id="m-1")
         handler, _ = self._handler("Project status: PR #508 is still open.")
 
-        def _fake_run(cmd, capture_output, text, check):
+        def _fake_run(cmd, capture_output, text, check, timeout=None):
             result = MagicMock()
             result.returncode = 0
             result.stdout = "508\n"
@@ -283,7 +284,7 @@ class TestOutboundPrValidation:
         channel.send.return_value = SendResult(ok=True, message_id="m-2")
         handler, _ = self._handler("Project status: PR #508 and PR #999 are listed.")
 
-        def _fake_run(cmd, capture_output, text, check):
+        def _fake_run(cmd, capture_output, text, check, timeout=None):
             result = MagicMock()
             pr_number = int(cmd[2].split("/")[-1])
             if pr_number == 508:
@@ -320,7 +321,7 @@ class TestOutboundPrValidation:
         channel.send.return_value = SendResult(ok=True, message_id="m-3")
         handler, _ = self._handler("Project status: PR#123 is referenced without space.")
 
-        def _fake_run(cmd, capture_output, text, check):
+        def _fake_run(cmd, capture_output, text, check, timeout=None):
             result = MagicMock()
             pr_number = int(cmd[2].split("/")[-1])
             if pr_number == 123:
@@ -349,6 +350,67 @@ class TestOutboundPrValidation:
         assert "[not found]" not in sent_text
         assert response == sent_text
         assert message_id == "m-3"
+
+    def test_timeout_expired_skips_validation_gracefully(self):
+        """subprocess.TimeoutExpired from gh API call is handled and returns True (skip)."""
+        channel = MagicMock()
+        channel.name = "slack"
+        channel.send.return_value = SendResult(ok=True, message_id="m-4")
+        handler, _ = self._handler("Project status: PR #508 is listed.")
+
+        def _fake_run(cmd, capture_output, text, check, timeout=None):
+            assert timeout == 30, "timeout=30 must be passed to subprocess.run"
+            raise subprocess.TimeoutExpired(cmd, 30)
+
+        with (
+            patch("src.assistant.handler.shutil.which", return_value="/usr/bin/gh"),
+            patch("src.assistant.handler.subprocess.run", side_effect=_fake_run),
+        ):
+            response, message_id = handler.handle_outbound(
+                contact_name="Amy",
+                instructions="Send status",
+                channel=channel,
+                chat_id="42",
+            )
+
+        # Must not flag the PR as missing — timeout means skip validation
+        sent_text = channel.send.call_args[0][1]
+        assert "PR #508" in sent_text
+        assert "[not found]" not in sent_text
+        assert response == sent_text
+
+    def test_subprocess_run_receives_timeout_30(self):
+        """Regression: _pr_reference_is_valid passes timeout=30 to subprocess.run."""
+        channel = MagicMock()
+        channel.name = "slack"
+        channel.send.return_value = SendResult(ok=True, message_id="m-5")
+        handler, _ = self._handler("Status: PR #508, PR #999.")
+        timeout_calls: list[int] = []
+
+        def _fake_run(cmd, capture_output, text, check, timeout=None):
+            if timeout is not None:
+                timeout_calls.append(timeout)
+            result = MagicMock()
+            result.returncode = 0
+            result.stdout = cmd[2].split("/")[-1] + "\n"
+            result.stderr = ""
+            return result
+
+        with (
+            patch("src.assistant.handler.shutil.which", return_value="/usr/bin/gh"),
+            patch("src.assistant.handler.subprocess.run", side_effect=_fake_run),
+        ):
+            handler.handle_outbound(
+                contact_name="Amy",
+                instructions="Send status",
+                channel=channel,
+                chat_id="42",
+            )
+
+        # Both PR checks must have received timeout=30
+        assert all(
+            t == 30 for t in timeout_calls
+        ), f"Expected all timeouts to be 30, got {timeout_calls}"
 
 
 # ---------------------------------------------------------------------------

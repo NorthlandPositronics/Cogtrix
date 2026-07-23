@@ -231,3 +231,136 @@ class TestCreateRequestToolsTool:
         assert tool is not None
         result = tool.invoke({"add": ["completely_unrelated_xyz"], "remove": []})
         assert "cannot" in result.lower() or "unknown" in result.lower()
+
+
+class _BrokenConfigureModule:
+    """Fake module that raises ImportError/OSError when specific attrs are accessed.
+
+    Used to simulate a tool module whose import succeeds (module is in sys.modules)
+    but whose body fails on a transitive dependency — the scenario from #1089.
+    """
+
+    def __init__(self, name: str, broken_attrs: dict[str, Exception]) -> None:
+        self.__name__ = name
+        self._broken_attrs = broken_attrs
+
+    def __getattr__(self, name: str) -> object:
+        if name in self._broken_attrs:
+            raise self._broken_attrs[name]
+        raise AttributeError(name)
+
+
+class TestConfigureLoggingOnImportError:
+    """Regression tests for issue #1089: configure functions must log a warning
+    when a tool module exists but fails to import due to a transitive dependency
+    error (not just when the module itself is missing).
+    """
+
+    def test_module_not_found_is_silent(self, caplog):
+        """ModuleNotFoundError (module not installed) — no warning logged."""
+        import sys
+        from unittest.mock import MagicMock
+
+        key = "src.tools.tavily_search"
+        prior = sys.modules.pop(key, None)
+        try:
+            from src.tools.configure import configure_tavily_tool
+
+            config = MagicMock()
+            configure_tavily_tool(config)
+            # Must not log any warning — tool is simply not installed.
+            assert not any(r.levelname == "WARNING" for r in caplog.records)
+        finally:
+            if prior is not None:
+                sys.modules[key] = prior
+
+    def test_transitive_import_error_logs_warning(self, caplog):
+        """ImportError (non-ModuleNotFoundError) — warning logged."""
+        import sys
+        from unittest.mock import MagicMock
+
+        key = "src.tools.tavily_search"
+        prior = sys.modules.pop(key, None)
+        fake_module = _BrokenConfigureModule(
+            key,
+            {
+                "configure_tavily": ImportError(
+                    "cannot import name 'Something' from 'transitive_dep'"
+                )
+            },
+        )
+        try:
+            sys.modules[key] = fake_module
+            from src.tools.configure import configure_tavily_tool
+
+            config = MagicMock()
+            configure_tavily_tool(config)
+            warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+            assert len(warnings) >= 1, (
+                f"Expected at least one WARNING for transitive ImportError, "
+                f"got: {[r.message for r in caplog.records]}"
+            )
+            assert "tavily" in warnings[0].message.lower()
+        finally:
+            sys.modules.pop(key, None)
+            if prior is not None:
+                sys.modules[key] = prior
+
+    def test_delegate_tool_transitive_failure_logs_warning(self, caplog):
+        """configure_delegate_tool logs warning on transitive ImportError."""
+        import sys
+        from unittest.mock import MagicMock
+
+        key = "src.tools.delegate"
+        prior = sys.modules.pop(key, None)
+        fake_module = _BrokenConfigureModule(
+            key,
+            {
+                "configure_delegate": ImportError("transitive dependency failure in delegate"),
+                "set_status_callback": ImportError("transitive dependency failure in delegate"),
+            },
+        )
+        try:
+            sys.modules[key] = fake_module
+            from src.tools.configure import configure_delegate_tool
+
+            config = MagicMock()
+            configure_delegate_tool(config)
+            warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+            assert len(warnings) >= 1, (
+                f"Expected WARNING for delegate tool transitive ImportError, "
+                f"got: {[r.message for r in caplog.records]}"
+            )
+            assert "delegate" in warnings[0].message.lower()
+        finally:
+            sys.modules.pop(key, None)
+            if prior is not None:
+                sys.modules[key] = prior
+
+    def test_cron_tool_oserror_logs_warning(self, caplog):
+        """configure_cron_tool logs warning on OSError."""
+        import sys
+        from unittest.mock import MagicMock
+
+        key = "src.tools.cron_tools"
+        prior = sys.modules.pop(key, None)
+        fake_module = _BrokenConfigureModule(
+            key,
+            {"configure_cron": OSError("permission denied on data directory")},
+        )
+        try:
+            sys.modules[key] = fake_module
+            from src.tools.configure import configure_cron_tool
+
+            config = MagicMock()
+            configure_cron_tool(config)
+            warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+            assert len(warnings) >= 1, (
+                f"Expected WARNING for cron tool OSError, "
+                f"got: {[r.message for r in caplog.records]}"
+            )
+            assert "cron" in warnings[0].message.lower()
+        finally:
+            sys.modules.pop(key, None)
+            if prior is not None:
+                sys.modules[key] = prior

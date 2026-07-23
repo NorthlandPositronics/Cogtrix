@@ -415,6 +415,61 @@ class TestForceDelegationUserCancelledRun:
 
 
 # ---------------------------------------------------------------------------
+# Regression — force_delegation must timeout on hung llm.invoke() (#1164)
+# ---------------------------------------------------------------------------
+
+
+class TestForceDelegationTimeout:
+    def test_llm_invoke_timeout_returns_original_response(self):
+        """If llm.invoke hangs, force_delegation must timeout and return agent_response."""
+        import concurrent.futures
+        from unittest.mock import patch
+
+        log_mock = MagicMock()
+        config_mock = MagicMock()
+        config_mock.resolve_llm_config.return_value = (MagicMock(), MagicMock())
+
+        fake_llm = MagicMock()
+        cancelled: list[bool] = []
+
+        class FakeFuture:
+            def result(self, timeout=None):
+                raise concurrent.futures.TimeoutError("timed out")
+
+            def cancel(self):
+                cancelled.append(True)
+
+        class FakeExecutor:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def submit(self, fn, *args, **kwargs):
+                return FakeFuture()
+
+            def shutdown(self, wait=False):
+                pass
+
+        with patch("src.orchestration.phases.build_llm_for_decomposition", return_value=fake_llm):
+            with patch("src.tools.delegate._delegate_config") as mock_cfg:
+                mock_cfg.get.return_value = {"default": {"model": "gpt-4o", "provider": "openai"}}
+                with patch("concurrent.futures.ThreadPoolExecutor", FakeExecutor):
+                    from src.orchestration.phases import force_delegation
+
+                    result = force_delegation(
+                        user_input="do this task",
+                        agent_response="original response",
+                        tool_outputs="",
+                        config=config_mock,
+                        log=log_mock,
+                    )
+
+        assert result == "original response"
+        assert cancelled == [True]
+        log_mock.warning.assert_called_once()
+        assert "timed out" in log_mock.warning.call_args[0][0].lower()
+
+
+# ---------------------------------------------------------------------------
 # Regression — run_research_delegate must not swallow UserCancelledRun (#1166)
 # ---------------------------------------------------------------------------
 

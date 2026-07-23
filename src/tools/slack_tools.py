@@ -24,6 +24,8 @@ from pydantic import BaseModel, Field
 if TYPE_CHECKING:
     from src.config import Config
 
+from src.tools.error_sanitizer import sanitize_error
+
 try:
     from slack_sdk import WebClient  # type: ignore[import-untyped,import-not-found]
     from slack_sdk.errors import SlackApiError  # type: ignore[import-untyped,import-not-found]
@@ -225,7 +227,7 @@ def cogtrix_slack_post_message(channel_id: str, text: str) -> str:
         return f"Error: Slack API returned '{err}'."
     except Exception as exc:
         log.error("Slack post failed: %s", exc)
-        return f"Error: {exc}"
+        return f"Error: {sanitize_error(exc)}"
 
 
 # ── Tool metadata ─────────────────────────────────────────────────────────────

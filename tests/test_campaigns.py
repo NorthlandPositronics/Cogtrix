@@ -475,6 +475,11 @@ def _admin_headers() -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
 
+def _superadmin_headers() -> dict[str, str]:
+    token = create_access_token(user_id=str(uuid.uuid4()), role="superadmin")
+    return {"Authorization": f"Bearer {token}"}
+
+
 def _user_headers() -> dict[str, str]:
     token = create_access_token(user_id=str(uuid.uuid4()), role="user")
     return {"Authorization": f"Bearer {token}"}
@@ -545,7 +550,7 @@ class TestCampaignAPIAuth:
 
         with TestClient(app) as c:
             app.state.assistant_service = None
-            resp = c.get("/api/v1/assistant/campaigns", headers=_admin_headers())
+            resp = c.get("/api/v1/assistant/campaigns", headers=_superadmin_headers())
         assert resp.status_code == 409
 
 
@@ -596,7 +601,7 @@ class TestCampaignAPICRUD:
             assert resp.json()["data"]["id"] == campaign_id
 
             # List
-            resp = c.get("/api/v1/assistant/campaigns", headers=_admin_headers())
+            resp = c.get("/api/v1/assistant/campaigns", headers=_superadmin_headers())
             assert resp.status_code == 200
             assert len(resp.json()["data"]) == 1
 

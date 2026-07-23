@@ -183,7 +183,7 @@ async def send_message(
         UNAUTHORIZED, TOKEN_EXPIRED, FORBIDDEN, SESSION_NOT_FOUND,
         VALIDATION_ERROR.
     """
-    await verify_session_owner(session_id, current_user, db)
+    await verify_session_owner(session_id, current_user, db, admin_bypass=True)
 
     # Enforce per-user rate and token-budget quotas before starting the turn.
     app_config = getattr(request.app.state, "config", None)
@@ -346,7 +346,7 @@ async def list_messages(
     Auth: bearer token required.
     Error codes: UNAUTHORIZED, TOKEN_EXPIRED, FORBIDDEN, SESSION_NOT_FOUND, INVALID_CURSOR.
     """
-    await verify_session_owner(session_id, current_user, db)
+    await verify_session_owner(session_id, current_user, db, admin_bypass=True)
 
     # Validate session exists (lightweight; no warm needed for read).
     from src.api.db.repositories.sessions import SessionRepository
@@ -424,7 +424,7 @@ async def clear_history(
     Auth: bearer token required.
     Error codes: UNAUTHORIZED, TOKEN_EXPIRED, FORBIDDEN, SESSION_NOT_FOUND, MEMORY_CLEAR_FAILED.
     """
-    await verify_session_owner(session_id, current_user, db)
+    await verify_session_owner(session_id, current_user, db, admin_bypass=True)
 
     from src.api.db.repositories.sessions import SessionRepository
 
@@ -599,7 +599,7 @@ async def session_websocket(
             return
 
         try:
-            await verify_session_owner(session_id, current_user, db)
+            await verify_session_owner(session_id, current_user, db, admin_bypass=True)
         except HTTPException as exc:
             code = 4003 if exc.status_code == status.HTTP_403_FORBIDDEN else 4004
             await websocket.close(code=code, reason="Session access denied")

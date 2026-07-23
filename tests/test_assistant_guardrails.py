@@ -678,6 +678,44 @@ class TestLLMJudge:
         messages = llm.invoke.call_args[0][0]
         assert len(messages) == 2
 
+    def test_timeout_returns_blocked_fail_closed(self):
+        """A hung LLM invoke must not block message processing — fail-closed on timeout."""
+        llm = MagicMock()
+        llm.invoke.side_effect = lambda _msgs: (
+            __import__("time").sleep(120),
+            self._make_response("SAFE"),
+        )[1]
+        judge = LLMJudge(llm)
+        # Reduce timeout so the test doesn't wait 60 s.
+        judge._INVOKE_TIMEOUT_SECONDS = 0
+        result = judge.classify("some message")
+        assert not result.is_safe
+        assert result.reason == "LLM judge timed out"
+        assert result.guard_name == "llm_judge"
+
+    def test_timeout_shuts_down_executor(self):
+        """The ThreadPoolExecutor must be shut down with wait=False on timeout."""
+        llm = MagicMock()
+        llm.invoke.side_effect = lambda _msgs: (
+            __import__("time").sleep(120),
+            self._make_response("SAFE"),
+        )[1]
+        judge = LLMJudge(llm)
+        judge._INVOKE_TIMEOUT_SECONDS = 0
+        with patch("concurrent.futures.ThreadPoolExecutor") as mock_executor_cls:
+            mock_pool = MagicMock()
+            mock_executor_cls.return_value = mock_pool
+            judge.classify("some message")
+            mock_pool.shutdown.assert_called_once_with(wait=False)
+
+    def test_successful_invoke_after_timeout_still_works(self):
+        """After a timeout, subsequent classify calls with a working LLM still succeed."""
+        llm = MagicMock()
+        llm.invoke.return_value = self._make_response("SAFE")
+        judge = LLMJudge(llm)
+        result = judge.classify("normal message")
+        assert result.is_safe
+
 
 # ---------------------------------------------------------------------------
 # TestEncodingDetection

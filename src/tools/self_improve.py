@@ -36,7 +36,9 @@ else:
         BaseModel = object  # type: ignore[assignment,misc]
         Field = lambda *a, **kw: None  # type: ignore[assignment]  # noqa: E731
 
+from src.logging_config import _scrub_secrets
 from src.providers import create_chat_model_from_configs
+from src.tools.error_sanitizer import sanitize_error
 
 if TYPE_CHECKING:
     from src.config import Config
@@ -356,7 +358,7 @@ def self_improve(
     try:
         llm = create_chat_model_from_configs(*_config.resolve_llm_config())
     except Exception as exc:
-        return f"Error: failed to create LLM — {exc}"
+        return f"Error: failed to create LLM: {sanitize_error(exc)}"
 
     fixed: list[_Finding] = []
     reverted: list[_Finding] = []
@@ -378,8 +380,11 @@ def self_improve(
             skipped.append((finding, f"cannot read file: {exc}"))
             continue
 
+        # Security: redact secrets before sending to LLM
+        scrubbed_content = _scrub_secrets(original_content)
+
         # Build LLM prompt and call
-        prompt = _build_patch_prompt(finding, original_content)
+        prompt = _build_patch_prompt(finding, scrubbed_content)
         pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
         try:
             future = pool.submit(llm.invoke, [_HumanMessage(content=prompt)])

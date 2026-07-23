@@ -27,6 +27,8 @@ import tempfile
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeoutError
 from typing import Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Request, status
@@ -51,6 +53,8 @@ from src.api.schemas.config import (
 log = logging.getLogger("cogtrix.api.config")
 
 router = APIRouter(prefix="/config", tags=["Configuration"])
+
+_WIZARD_LLM_TIMEOUT_SECONDS = 60
 
 
 # ---------------------------------------------------------------------------
@@ -1427,7 +1431,18 @@ def _wizard_test_connection(
     # Phase 2: live probe — soft fail; capture warning for callers to surface
     probe_warning: str | None = None
     try:
-        llm.invoke([_HumanMessage(content="Say 'ok' in one word.")])
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(llm.invoke, [_HumanMessage(content="Say 'ok' in one word.")])
+            try:
+                future.result(timeout=_WIZARD_LLM_TIMEOUT_SECONDS)
+            except FuturesTimeoutError:
+                _logging.getLogger("cogtrix.api").warning(
+                    "Wizard connection probe timed out after %ds (proceeding anyway)",
+                    _WIZARD_LLM_TIMEOUT_SECONDS,
+                )
+                probe_warning = f"timeout after {_WIZARD_LLM_TIMEOUT_SECONDS}s"
+            finally:
+                pool.shutdown(wait=False, cancel_futures=True)
     except Exception as exc:
         probe_warning = str(exc)
         _logging.getLogger("cogtrix.api").warning(
@@ -1439,7 +1454,17 @@ def _wizard_test_connection(
 
 def _wizard_invoke_llm(llm: Any, messages: list[Any]) -> str:
     """Invoke the LLM with messages. Returns the AI response text (never None)."""
-    response = llm.invoke(messages)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(llm.invoke, messages)
+        try:
+            response = future.result(timeout=_WIZARD_LLM_TIMEOUT_SECONDS)
+        except FuturesTimeoutError:
+            log.warning("Wizard LLM invoke timed out after %ds", _WIZARD_LLM_TIMEOUT_SECONDS)
+            return ""
+        except Exception:
+            return ""
+        finally:
+            pool.shutdown(wait=False, cancel_futures=True)
     content = response.content if hasattr(response, "content") else str(response)
     return content or ""
 

@@ -122,27 +122,34 @@ You: Send alice "Hello from Cogtrix!"
 
 ## Using Docker Compose
 
-> **Note:** A production-ready `docker-compose.yml` is not yet included in the
-> repository. The section below describes the intended setup for when it ships.
+A production-ready `docker-compose.yml` is included in the repository at
+[`docker/docker-compose.yml`](../docker/docker-compose.yml). It defines all
+services, networks, and volumes needed for a production-like deployment.
 
-For a production-like deployment, use Docker Compose to run both Cogtrix and
-Waha together. You will need a `docker-compose.yml` that defines:
-
-- **Waha** (`devlikeapro/waha`) on port 3000 (dashboard for QR code scanning)
-- **Cogtrix** with `COGTRIX_WHATSAPP_URL=http://waha:3000`
-- Volumes for session history and Waha session data
+To use it:
 
 ```bash
-docker compose up -d
-docker compose exec cogtrix python cogtrix.py
+cp docker/config/cogtrix.env.example docker/config/cogtrix.env   # fill in secrets
+cp docker/config/cogtrix.yml.example docker/config/cogtrix.yml   # adjust settings
+cd docker && docker compose up -d
 ```
+
+The compose file defines:
+
+- **Waha** (`devlikeapro/waha`) on port 127.0.0.1:3000 (dashboard for QR code scanning)
+- **Cogtrix** with `COGTRIX_WHATSAPP_URL=http://waha:3000`
+- **Cogtrix Web UI** (nginx) on port 80
+- **MCP Filesystem** server for workspace access
+- Volumes for session history and Waha session data
 
 ### First-time setup with Docker Compose
 
-1. `docker compose up -d` -- start both containers
+1. `cd docker && docker compose up -d` -- start all containers
 2. Open `http://localhost:3000` -- scan QR code with your phone
-3. `docker compose exec cogtrix python cogtrix.py` -- start chatting
+3. Access the Cogtrix Web UI at `http://localhost` -- start chatting
 4. `You: Check my WhatsApp messages` -- verify it works
+
+To customize, edit `docker/config/cogtrix.env` and `docker/config/cogtrix.yml`.
 
 ---
 

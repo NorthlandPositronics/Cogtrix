@@ -2088,7 +2088,7 @@ class TestToolHealthCheck:
         mock_llm.bind_tools.return_value = mock_llm
         recorded: list[list] = []
 
-        def _invoke(messages, config=None):
+        def _invoke(messages, config=None, **kwargs):
             recorded.append(list(messages))
             return responses.pop(0)
 
@@ -2239,7 +2239,7 @@ class TestToolQualityGate:
         mock_llm.bind_tools.return_value = mock_llm
         recorded: list[list] = []
 
-        def _invoke(messages, config=None):
+        def _invoke(messages, config=None, **kwargs):
             recorded.append(list(messages))
             return responses.pop(0)
 
@@ -2441,7 +2441,7 @@ class TestTopicSwitchDetection:
         mock_llm.bind_tools.return_value = mock_llm
         recorded: list[list] = []
 
-        def _invoke(messages, config=None):
+        def _invoke(messages, config=None, **kwargs):
             recorded.append(list(messages))
             return responses.pop(0)
 

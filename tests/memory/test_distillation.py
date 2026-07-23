@@ -128,6 +128,11 @@ class TestParseFacts:
 
 
 class TestDistillSummary:
+    def test_none_llm_returns_empty_list(self):
+        """Passing llm=None should return [] without raising."""
+        result = distill_summary(None, "some summary text")
+        assert result == []
+
     def test_empty_input_returns_empty_list(self):
         fake_llm = MagicMock()
         result = distill_summary(fake_llm, "")

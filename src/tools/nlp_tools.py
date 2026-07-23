@@ -8,6 +8,8 @@ from collections import Counter
 
 from pydantic import BaseModel, Field
 
+from src.tools.error_sanitizer import sanitize_error
+
 
 class SentimentAnalysisInput(BaseModel):
     """Input schema for sentiment analysis."""
@@ -348,7 +350,7 @@ def analyze_sentiment(text: str) -> str:
         )
 
     except Exception as e:
-        return f"Error analyzing sentiment: {e}"
+        return f"Error analyzing sentiment: {sanitize_error(e)}"
 
 
 def _split_sentences(text: str) -> list:
@@ -434,7 +436,7 @@ def summarize_text(text: str, num_sentences: int = 3) -> str:
         return "\n".join(result)
 
     except Exception as e:
-        return f"Error summarizing text: {e}"
+        return f"Error summarizing text: {sanitize_error(e)}"
 
 
 def extract_keywords(text: str, num_keywords: int = 10) -> str:
@@ -479,7 +481,7 @@ def extract_keywords(text: str, num_keywords: int = 10) -> str:
         return "\n".join(result)
 
     except Exception as e:
-        return f"Error extracting keywords: {e}"
+        return f"Error extracting keywords: {sanitize_error(e)}"
 
 
 # Tool configurations for registry

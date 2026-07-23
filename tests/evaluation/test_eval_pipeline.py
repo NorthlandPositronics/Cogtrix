@@ -45,7 +45,7 @@ class _ScriptedLLM:
     def bind_tools(self, tools: list[Any], **kwargs: Any) -> _ScriptedLLM:
         return self
 
-    def invoke(self, messages: list[Any], config: Any = None) -> AIMessage:
+    def invoke(self, messages: list[Any], config: Any = None, **kwargs: Any) -> AIMessage:
         prompt = messages[0].content if messages else ""
         self.prompts.append(str(prompt))
         if self._idx >= len(self.responses):
@@ -110,6 +110,10 @@ def test_all_scenarios_loaded() -> None:
         "regression_stuck_loop_identical_tool_calls",
         "regression_deepseek_native_tool_call_format",
         "regression_per_tool_budget_cutoff",
+        "regression_multi_turn_effort_gate_no_carryover",
+        "regression_no_fabrication_for_unknown_entity",
+        "regression_persist_before_refusing",
+        "regression_no_url_fabrication_in_response",
         "safety_refuse_unauthorized_payment",
     }
 
@@ -438,6 +442,110 @@ def test_response_only_predicates_ignore_tool_call_args() -> None:
     )
 
 
+def test_check_success_criteria_min_total_tool_calls() -> None:
+    """``min_total_tool_calls:`` lower-bounds total invocations. Used by
+    persistence scenarios (#1520) to assert the agent did not refuse after
+    only 1-2 shallow searches.
+    """
+    from tests.evaluation.runner import _check_success_criteria_failed
+
+    messages = [
+        AIMessage(
+            content="",
+            tool_calls=[
+                {"name": "search_web", "args": {"query": "a"}, "id": "c1"},
+                {"name": "search_web", "args": {"query": "b"}, "id": "c2"},
+            ],
+        ),
+        AIMessage(
+            content="",
+            tool_calls=[{"name": "search_web", "args": {"query": "c"}, "id": "c3"}],
+        ),
+    ]
+    final_text = "done"
+
+    # 3 total tool calls; floor of 3 passes.
+    assert (
+        _check_success_criteria_failed(["min_total_tool_calls: 3"], final_text, messages) is False
+    )
+    # Floor of 4 fails.
+    assert _check_success_criteria_failed(["min_total_tool_calls: 4"], final_text, messages) is True
+    # Malformed predicate fails closed.
+    assert (
+        _check_success_criteria_failed(["min_total_tool_calls: oops"], final_text, messages) is True
+    )
+
+
+def test_check_success_criteria_min_distinct_tool_calls() -> None:
+    """``min_distinct_tool_calls:`` lower-bounds distinct invocations of a
+    named tool, keyed on the JSON-normalised args.  Near-duplicate args
+    (same JSON content, different order) collapse to one signature.
+
+    Catches the :next24 reproducer pattern from #1520 — 5 reordered
+    variants of the same query counted as effort.
+    """
+    from tests.evaluation.runner import _check_success_criteria_failed
+
+    # Two distinct queries plus one near-duplicate of the first.
+    messages = [
+        AIMessage(
+            content="",
+            tool_calls=[
+                {"name": "search_web", "args": {"query": "ASML buy rating"}, "id": "c1"},
+            ],
+        ),
+        AIMessage(
+            content="",
+            tool_calls=[
+                {"name": "search_web", "args": {"query": "AMAT buyback program"}, "id": "c2"},
+            ],
+        ),
+        AIMessage(
+            content="",
+            tool_calls=[
+                # Same arg payload as c1 — collapses to one distinct signature.
+                {"name": "search_web", "args": {"query": "ASML buy rating"}, "id": "c3"},
+            ],
+        ),
+    ]
+    final_text = "done"
+
+    # 2 distinct signatures across 3 calls — floor of 2 passes.
+    assert (
+        _check_success_criteria_failed(
+            ["min_distinct_tool_calls: search_web=2"], final_text, messages
+        )
+        is False
+    )
+    # Floor of 3 fails (only 2 distinct).
+    assert (
+        _check_success_criteria_failed(
+            ["min_distinct_tool_calls: search_web=3"], final_text, messages
+        )
+        is True
+    )
+    # Tool name that was never called — fails (zero distinct).
+    assert (
+        _check_success_criteria_failed(
+            ["min_distinct_tool_calls: http_get=1"], final_text, messages
+        )
+        is True
+    )
+    # Malformed predicates fail closed.
+    assert (
+        _check_success_criteria_failed(
+            ["min_distinct_tool_calls: no_equals_sign"], final_text, messages
+        )
+        is True
+    )
+    assert (
+        _check_success_criteria_failed(
+            ["min_distinct_tool_calls: search_web=not_an_int"], final_text, messages
+        )
+        is True
+    )
+
+
 def test_check_success_criteria_normalizes_thousands_separators() -> None:
     """``$7,500`` in the response satisfies ``contains: 7500``.
 
@@ -606,6 +714,62 @@ def test_tool_not_called_is_case_insensitive() -> None:
         ),
     ]
     assert _check_success_criteria_failed(["tool_not_called: pay_invoice"], "", messages) is True
+
+
+# ── tool_called: predicate (#1548 — multi-turn effort-gate reproducer) ──────
+
+
+def test_tool_called_passes_when_tool_was_called() -> None:
+    """``tool_called: search_web`` succeeds when an AIMessage.tool_calls
+    entry has that name, regardless of how the response text phrases it."""
+    from tests.evaluation.runner import _check_success_criteria_failed
+
+    messages = [
+        AIMessage(
+            content="",
+            tool_calls=[{"name": "search_web", "args": {"query": "x"}, "id": "c1"}],
+        ),
+        AIMessage(content="Here is what I found."),
+    ]
+
+    assert (
+        _check_success_criteria_failed(
+            ["tool_called: search_web"], "Here is what I found.", messages
+        )
+        is False
+    )
+
+
+def test_tool_called_fails_when_tool_absent() -> None:
+    """If the named tool never appears in any AIMessage.tool_calls,
+    the criterion fails even if the response prose mentions the tool
+    name (e.g. "let me try search_web")."""
+    from tests.evaluation.runner import _check_success_criteria_failed
+
+    messages = [
+        AIMessage(
+            content="",
+            tool_calls=[{"name": "other_tool", "args": {}, "id": "c1"}],
+        ),
+        AIMessage(content="Let me try search_web — but I'll just answer instead."),
+    ]
+    final_text = "Let me try search_web — but I'll just answer instead."
+
+    assert _check_success_criteria_failed(["tool_called: search_web"], final_text, messages) is True
+
+
+def test_tool_called_is_case_insensitive() -> None:
+    """Tool-name matching for ``tool_called:`` lowers both sides — symmetric
+    with ``tool_not_called:`` so YAML/runtime variations don't matter."""
+    from tests.evaluation.runner import _check_success_criteria_failed
+
+    messages = [
+        AIMessage(
+            content="",
+            tool_calls=[{"name": "Search_Web", "args": {}, "id": "c1"}],
+        ),
+    ]
+    assert _check_success_criteria_failed(["tool_called: search_web"], "", messages) is False
 
 
 # ── max_total_tool_calls: predicate (A1 — stuck-loop guard) ──────────────────
@@ -1148,6 +1312,493 @@ def test_procurement_supplier_registration_tool_descriptions_domain_context() ->
     assert any(
         w in validate for w in ("completeness", "format", "valid", "required", "errors")
     ), "validate_supplier_data description must reference validation checks"
+
+
+# ── Multi-turn scenarios (issue #1538, PR 1 of 3) ────────────────────────────
+
+
+def test_load_scenario_multi_turn_yaml(tmp_path: Path) -> None:
+    """A YAML with `turns:` parses into Turn objects on EvalScenario.
+
+    Confirms the new multi-turn YAML shape is accepted and that
+    top-level `user_prompt` / `success_criteria` can be omitted when
+    `turns:` is present.
+    """
+    import textwrap
+
+    from tests.evaluation.runner import Turn, load_scenario
+
+    yaml_text = textwrap.dedent("""\
+        id: multi_turn_test
+        domain: test
+        title: t
+        description: d
+        system_prompt: s
+        tools_required: [foo]
+        expected_outcome: e
+        turns:
+          - user_prompt: "first"
+            success_criteria:
+              - "contains: alpha"
+          - user_prompt: "second"
+            success_criteria:
+              - "contains: beta"
+        """)
+    fp = tmp_path / "mt.yaml"
+    fp.write_text(yaml_text)
+
+    scenario = load_scenario(fp)
+    assert len(scenario.turns) == 2
+    assert all(isinstance(t, Turn) for t in scenario.turns)
+    assert scenario.turns[0].user_prompt == "first"
+    assert scenario.turns[0].success_criteria == ["contains: alpha"]
+    assert scenario.turns[1].user_prompt == "second"
+    assert scenario.turns[1].success_criteria == ["contains: beta"]
+    # Legacy fields stay empty when YAML supplied turns: instead.
+    assert scenario.user_prompt == ""
+    assert scenario.success_criteria == []
+
+
+def test_load_scenario_legacy_single_turn_folds_into_turns(tmp_path: Path) -> None:
+    """Legacy single-turn YAMLs still load; loader synthesises a 1-element
+    `turns` list so the runner has one code path.
+
+    Backward compatibility shim — every pre-existing scenario must keep
+    working unchanged.
+    """
+    import textwrap
+
+    from tests.evaluation.runner import load_scenario
+
+    yaml_text = textwrap.dedent("""\
+        id: legacy_single_turn
+        domain: test
+        title: t
+        description: d
+        user_prompt: "only question"
+        system_prompt: s
+        tools_required: [foo]
+        expected_outcome: e
+        success_criteria:
+          - "contains: foo"
+        """)
+    fp = tmp_path / "legacy.yaml"
+    fp.write_text(yaml_text)
+
+    scenario = load_scenario(fp)
+    assert len(scenario.turns) == 1
+    assert scenario.turns[0].user_prompt == "only question"
+    assert scenario.turns[0].success_criteria == ["contains: foo"]
+    # Legacy fields are preserved on the dataclass — useful for
+    # downstream code that still references them — but the runner only
+    # reads `turns`.
+    assert scenario.user_prompt == "only question"
+    assert scenario.success_criteria == ["contains: foo"]
+
+
+def test_load_scenario_rejects_mixed_legacy_and_turns(tmp_path: Path) -> None:
+    """Mixing `turns:` with top-level `user_prompt` / `success_criteria`
+    is ambiguous and rejected by the loader rather than silently picking
+    one shape over the other — debugging silent precedence rules in
+    scenario YAML is painful.
+    """
+    import textwrap
+
+    from tests.evaluation.runner import load_scenario
+
+    yaml_text = textwrap.dedent("""\
+        id: conflicting
+        domain: test
+        title: t
+        description: d
+        user_prompt: "stray legacy prompt"
+        system_prompt: s
+        tools_required: [foo]
+        expected_outcome: e
+        success_criteria:
+          - "contains: foo"
+        turns:
+          - user_prompt: "turn 1"
+            success_criteria: ["contains: foo"]
+        """)
+    fp = tmp_path / "conflict.yaml"
+    fp.write_text(yaml_text)
+
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        load_scenario(fp)
+
+
+def test_load_scenario_requires_some_user_prompt(tmp_path: Path) -> None:
+    """A scenario must provide at least one user prompt (legacy or turns).
+
+    Catches empty YAML stubs early at load time instead of producing a
+    confusing 'no LLM responses scripted' error inside the runner.
+    """
+    import textwrap
+
+    from tests.evaluation.runner import load_scenario
+
+    yaml_text = textwrap.dedent("""\
+        id: empty_prompt
+        domain: test
+        title: t
+        description: d
+        system_prompt: s
+        tools_required: [foo]
+        expected_outcome: e
+        success_criteria: ["contains: foo"]
+        """)
+    fp = tmp_path / "empty.yaml"
+    fp.write_text(yaml_text)
+
+    with pytest.raises(ValueError, match="must provide either"):
+        load_scenario(fp)
+
+
+def test_load_scenario_rejects_empty_turns_list(tmp_path: Path) -> None:
+    """`turns: []` is rejected — a turns block must contain at least one turn."""
+    import textwrap
+
+    from tests.evaluation.runner import load_scenario
+
+    yaml_text = textwrap.dedent("""\
+        id: empty_turns
+        domain: test
+        title: t
+        description: d
+        system_prompt: s
+        tools_required: []
+        expected_outcome: e
+        turns: []
+        """)
+    fp = tmp_path / "empty_turns.yaml"
+    fp.write_text(yaml_text)
+
+    with pytest.raises(ValueError, match="non-empty list"):
+        load_scenario(fp)
+
+
+def test_load_scenario_rejects_turn_missing_user_prompt(tmp_path: Path) -> None:
+    """Each turn must have a `user_prompt`."""
+    import textwrap
+
+    from tests.evaluation.runner import load_scenario
+
+    yaml_text = textwrap.dedent("""\
+        id: no_user_prompt
+        domain: test
+        title: t
+        description: d
+        system_prompt: s
+        tools_required: []
+        expected_outcome: e
+        turns:
+          - success_criteria: ["contains: foo"]
+        """)
+    fp = tmp_path / "no_prompt.yaml"
+    fp.write_text(yaml_text)
+
+    with pytest.raises(ValueError, match="missing `user_prompt`"):
+        load_scenario(fp)
+
+
+def test_run_scenario_multi_turn_threads_state_across_turns(tmp_path: Path) -> None:
+    """Multi-turn run feeds each turn's HumanMessage into the graph in
+    sequence, threading state across invocations.  Scripted LLM yields
+    one response per turn; both turns' content lands in the message
+    history.
+    """
+    import textwrap
+
+    from tests.evaluation.runner import load_scenario, run_scenario
+
+    yaml_text = textwrap.dedent("""\
+        id: mt_runtime
+        domain: test
+        title: t
+        description: d
+        system_prompt: s
+        tools_required: []
+        expected_outcome: e
+        turns:
+          - user_prompt: "first question"
+            success_criteria:
+              - "contains: alpha"
+          - user_prompt: "second question"
+            success_criteria:
+              - "contains: beta"
+        """)
+    fp = tmp_path / "mt.yaml"
+    fp.write_text(yaml_text)
+    scenario = load_scenario(fp)
+
+    runner_llm = _ScriptedLLM(
+        [
+            AIMessage(content="alpha — turn 1 complete"),
+            AIMessage(content="beta — turn 2 complete"),
+        ]
+    )
+    model = _make_mock_model_config()
+
+    with patch.dict("os.environ", {"MOCK_API_KEY": "fake-key"}):
+        with patch("tests.evaluation.runner._build_llm", return_value=runner_llm):
+            result = run_scenario(scenario, model)
+
+    assert result.error is None
+    assert result.passed is True
+    # The scripted LLM was invoked exactly twice (once per turn).
+    assert runner_llm._idx == 2
+    # Final response is the LAST turn's response.
+    assert "beta" in result.final_response
+
+
+def test_run_scenario_multi_turn_slices_assertions_per_turn(tmp_path: Path) -> None:
+    """Per-turn `success_criteria` evaluate only against that turn's
+    message slice — turn 1's response does NOT leak into turn 2's
+    haystack.
+
+    Scenario: turn 1 says "alpha", turn 2 says "beta".  Turn 2 asserts
+    ``not_contains: alpha`` — which only passes when turn 1's "alpha"
+    is correctly sliced OUT of turn 2's haystack.  If slicing leaks,
+    this test fails.
+    """
+    import textwrap
+
+    from tests.evaluation.runner import load_scenario, run_scenario
+
+    yaml_text = textwrap.dedent("""\
+        id: mt_slicing
+        domain: test
+        title: t
+        description: d
+        system_prompt: s
+        tools_required: []
+        expected_outcome: e
+        turns:
+          - user_prompt: "first"
+            success_criteria:
+              - "contains: alpha"
+          - user_prompt: "second"
+            success_criteria:
+              - "not_contains: alpha"
+              - "contains: beta"
+        """)
+    fp = tmp_path / "mt.yaml"
+    fp.write_text(yaml_text)
+    scenario = load_scenario(fp)
+
+    runner_llm = _ScriptedLLM(
+        [
+            AIMessage(content="alpha turn 1"),
+            AIMessage(content="beta turn 2"),
+        ]
+    )
+    model = _make_mock_model_config()
+
+    with patch.dict("os.environ", {"MOCK_API_KEY": "fake-key"}):
+        with patch("tests.evaluation.runner._build_llm", return_value=runner_llm):
+            result = run_scenario(scenario, model)
+
+    assert result.error is None
+    assert result.passed is True
+
+
+def test_run_scenario_multi_turn_fails_when_any_turn_fails(tmp_path: Path) -> None:
+    """A scenario passes only if EVERY turn's criteria pass.  Turn 1
+    passes, turn 2 fails → overall failure.
+    """
+    import textwrap
+
+    from tests.evaluation.runner import load_scenario, run_scenario
+
+    yaml_text = textwrap.dedent("""\
+        id: mt_partial_fail
+        domain: test
+        title: t
+        description: d
+        system_prompt: s
+        tools_required: []
+        expected_outcome: e
+        turns:
+          - user_prompt: "first"
+            success_criteria:
+              - "contains: alpha"
+          - user_prompt: "second"
+            success_criteria:
+              - "contains: beta"
+        """)
+    fp = tmp_path / "mt.yaml"
+    fp.write_text(yaml_text)
+    scenario = load_scenario(fp)
+
+    # Turn 2's response doesn't contain "beta".
+    runner_llm = _ScriptedLLM(
+        [
+            AIMessage(content="alpha turn 1"),
+            AIMessage(content="something else turn 2"),
+        ]
+    )
+    model = _make_mock_model_config()
+
+    with patch.dict("os.environ", {"MOCK_API_KEY": "fake-key"}):
+        with patch("tests.evaluation.runner._build_llm", return_value=runner_llm):
+            result = run_scenario(scenario, model)
+
+    assert result.passed is False
+
+
+# ── Per-turn judge_weight + runner turn_results (issue #1545, PR 2 of 3) ────
+
+
+def test_turn_dataclass_default_judge_weight_is_one() -> None:
+    """A turn constructed without an explicit weight defaults to 1.0 —
+    safe choice when authors haven't decided on weighting."""
+    from tests.evaluation.runner import Turn
+
+    turn = Turn(user_prompt="hi", success_criteria=[])
+    assert turn.judge_weight == 1.0
+
+
+def test_load_scenario_parses_per_turn_judge_weight(tmp_path: Path) -> None:
+    """Multi-turn YAML carries ``judge_weight`` per turn; omitted entries
+    default to 1.0 so existing PR 1 scenarios continue to load
+    unchanged."""
+    import textwrap
+
+    from tests.evaluation.runner import load_scenario
+
+    yaml_text = textwrap.dedent("""\
+        id: mt_weights
+        domain: test
+        title: t
+        description: d
+        system_prompt: s
+        tools_required: []
+        expected_outcome: e
+        turns:
+          - user_prompt: "first"
+            success_criteria: []
+          - user_prompt: "second"
+            judge_weight: 2.5
+            success_criteria: []
+          - user_prompt: "third"
+            judge_weight: 3.0
+            success_criteria: []
+        """)
+    fp = tmp_path / "mt.yaml"
+    fp.write_text(yaml_text)
+
+    scenario = load_scenario(fp)
+    assert [t.judge_weight for t in scenario.turns] == [1.0, 2.5, 3.0]
+
+
+def test_load_scenario_rejects_negative_judge_weight(tmp_path: Path) -> None:
+    """A negative weight breaks the weighted-aggregate maths — reject at load time."""
+    import textwrap
+
+    from tests.evaluation.runner import load_scenario
+
+    yaml_text = textwrap.dedent("""\
+        id: bad_weight
+        domain: test
+        title: t
+        description: d
+        system_prompt: s
+        tools_required: []
+        expected_outcome: e
+        turns:
+          - user_prompt: "first"
+            judge_weight: -1.0
+            success_criteria: []
+        """)
+    fp = tmp_path / "bad.yaml"
+    fp.write_text(yaml_text)
+
+    with pytest.raises(ValueError, match="judge_weight.*non-negative"):
+        load_scenario(fp)
+
+
+def test_load_scenario_rejects_non_numeric_judge_weight(tmp_path: Path) -> None:
+    """A typo'd weight (``judge_weight: "high"``) is a YAML authoring bug —
+    surface it at load time with a clear message."""
+    import textwrap
+
+    from tests.evaluation.runner import load_scenario
+
+    yaml_text = textwrap.dedent("""\
+        id: typo_weight
+        domain: test
+        title: t
+        description: d
+        system_prompt: s
+        tools_required: []
+        expected_outcome: e
+        turns:
+          - user_prompt: "first"
+            judge_weight: "high"
+            success_criteria: []
+        """)
+    fp = tmp_path / "typo.yaml"
+    fp.write_text(yaml_text)
+
+    with pytest.raises(ValueError, match="judge_weight.*number"):
+        load_scenario(fp)
+
+
+def test_run_scenario_populates_turn_results(tmp_path: Path) -> None:
+    """The runner must capture each turn's final response and tool calls
+    on ``EvalResult.turn_results`` — that's the data the judge consumes
+    for per-turn scoring.
+
+    Pinned with two turns: turn 1 calls foo + replies "alpha"; turn 2
+    replies "beta" with no tool calls.
+    """
+    import textwrap
+
+    from tests.evaluation.runner import load_scenario, run_scenario
+
+    yaml_text = textwrap.dedent("""\
+        id: mt_runner_outputs
+        domain: test
+        title: t
+        description: d
+        system_prompt: s
+        tools_required: [foo]
+        expected_outcome: e
+        turns:
+          - user_prompt: "first"
+            success_criteria: ["contains: alpha"]
+          - user_prompt: "second"
+            success_criteria: ["contains: beta"]
+        """)
+    fp = tmp_path / "mt.yaml"
+    fp.write_text(yaml_text)
+    scenario = load_scenario(fp)
+
+    runner_llm = _ScriptedLLM(
+        [
+            AIMessage(
+                content="",
+                tool_calls=[{"name": "foo", "args": {"query": ""}, "id": "c1"}],
+            ),
+            AIMessage(content="alpha — turn 1 complete"),
+            AIMessage(content="beta — turn 2 complete"),
+        ]
+    )
+    model = _make_mock_model_config()
+
+    with patch.dict("os.environ", {"MOCK_API_KEY": "fake-key"}):
+        with patch("tests.evaluation.runner._build_llm", return_value=runner_llm):
+            result = run_scenario(scenario, model)
+
+    assert result.passed is True
+    assert len(result.turn_results) == 2
+    # Turn 1 fired the foo tool, then replied with "alpha".
+    assert result.turn_results[0].tool_calls_made == ["foo"]
+    assert "alpha" in result.turn_results[0].final_response
+    # Turn 2 called nothing; final response is "beta".
+    assert result.turn_results[1].tool_calls_made == []
+    assert "beta" in result.turn_results[1].final_response
 
 
 def test_invoice_approval_tool_descriptions_domain_context() -> None:

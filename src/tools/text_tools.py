@@ -6,6 +6,8 @@ import re
 
 from pydantic import BaseModel, Field
 
+from src.tools.error_sanitizer import sanitize_error, sanitize_shell_error
+
 
 class WordCountInput(BaseModel):
     """Input schema for word count."""
@@ -140,9 +142,9 @@ def find_replace(
         return f"Made {count} replacement(s):\n\n{result}"
 
     except re.error as e:
-        return f"Regex error: {e}"
+        return f"Regex error: {sanitize_shell_error(e)}"
     except Exception as e:
-        return f"Error: {e}"
+        return f"Error: {sanitize_error(e)}"
 
 
 def extract_urls(text: str) -> str:

@@ -356,3 +356,130 @@ class TestSymlinkNullByteInjection:
         # Try to inject null byte
         result = read_file("real.txt\x00.jpg")
         assert result.startswith("Error:")
+
+
+# ── Issue #924: TOCTOU race in _validate_path ────────────────────────────────
+
+
+class TestValidatePathTOCTOURace:
+    """Issue #924: ``_validate_path`` previously walked path components and
+    called ``current.is_symlink()`` BEFORE the final ``p.resolve()`` —
+    creating a TOCTOU window in which a symlink target could be swapped
+    between the check and the resolution.
+
+    The fix moves resolution to the top of the function, so the
+    directory-boundary checks run on the resolved path that ``open()``
+    will actually use.  The kernel's ``realpath()`` syscall is the
+    atomic step we now rely on.
+
+    These tests pin the structural fix:
+      * boundary checks must operate on the resolved path;
+      * a swap between the upfront walk and resolve cannot succeed
+        because there is no upfront walk anymore;
+      * the function still rejects the obvious symlink-escape cases.
+    """
+
+    def test_validate_path_resolves_before_boundary_check(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The returned ``resolved_path`` must be the result of
+        ``Path.resolve()`` on the input — not the unresolved Path.
+        This is what tells us the boundary check ran on the post-
+        symlink-follow target rather than the pre-follow one.
+        """
+        from src.tools.file_ops import _validate_path
+
+        work_dir = tmp_path / "work"
+        target_dir = tmp_path / "work" / "subdir"
+        work_dir.mkdir()
+        target_dir.mkdir()
+        monkeypatch.chdir(work_dir)
+
+        # Create a symlink inside cwd pointing to a sibling subdir.
+        try:
+            link = work_dir / "link"
+            link.symlink_to(target_dir)
+        except (PermissionError, OSError):
+            pytest.skip("Cannot create symlinks")
+
+        is_valid, _err, resolved = _validate_path(str(link / "file.txt"), is_write=True)
+        assert is_valid, "Symlink to in-cwd subdir should pass validation"
+        assert resolved is not None
+        # resolved must NOT contain the symlink name — that's how we
+        # know resolve() actually followed it.
+        assert "link" not in resolved.parts
+        assert resolved.is_relative_to(target_dir.resolve())
+
+    def test_validate_path_no_upfront_is_symlink_walk(self) -> None:
+        """The defective implementation walked every path component and
+        called ``current.is_symlink()`` BEFORE resolving.  That walk is
+        what created the TOCTOU window.  After the fix the function
+        must NOT contain any such walk — verified by static source
+        inspection.
+
+        This is a structural guard against silent re-introduction.
+        Failure mode: a contributor restores the upfront walk because
+        they think it's a defence-in-depth gain, not realising it
+        re-opens the race.
+        """
+        import inspect
+
+        from src.tools.file_ops import _validate_path
+
+        source = inspect.getsource(_validate_path)
+        # The defective walk used these two patterns together.  Either
+        # one alone is acceptable in a different role (e.g. resolve in
+        # the new code path), but the COMBINATION inside _validate_path
+        # is the TOCTOU shape.
+        offending_combo = "current.is_symlink()" in source and "current = current.parent" in source
+        assert not offending_combo, (
+            "_validate_path appears to walk path components and check "
+            "is_symlink() before resolution — this re-opens the issue "
+            "#924 TOCTOU window.  Resolve the path first, then perform "
+            "boundary checks on the resolved path."
+        )
+
+    def test_validate_path_rejects_swapped_symlink_target(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Simulate the swap step of the TOCTOU attack.  The first
+        ``_validate_path`` call sees a benign symlink (pointing inside
+        cwd) and accepts it.  The attacker then swaps the symlink to
+        point at /etc and a second ``_validate_path`` call is made.
+        The second call MUST reject — it can only reject if the
+        boundary check uses the *current* resolved target, not a
+        cached or pre-swap value.
+        """
+        from src.tools.file_ops import _validate_path
+
+        work_dir = tmp_path / "work"
+        good_target = work_dir / "good"
+        work_dir.mkdir()
+        good_target.mkdir()
+        monkeypatch.chdir(work_dir)
+
+        try:
+            link = work_dir / "swappable"
+            link.symlink_to(good_target)
+        except (PermissionError, OSError):
+            pytest.skip("Cannot create symlinks")
+
+        # Step 1: benign target — accepted.
+        is_valid, _err, _resolved = _validate_path(str(link / "x.txt"), is_write=True)
+        assert is_valid
+
+        # Step 2: attacker swaps the symlink to point at /etc.
+        link.unlink()
+        link.symlink_to("/etc")
+
+        # Step 3: re-validate — MUST reject because the resolved target
+        # /etc is not inside cwd.  If the function cached state from
+        # step 1 or did the upfront walk, this could squeak through.
+        is_valid_after_swap, err_after_swap, _ = _validate_path(
+            str(link / "passwd_shadow"), is_write=True
+        )
+        assert not is_valid_after_swap, (
+            "After symlink swap to /etc, validation must reject — "
+            "if it doesn't, the TOCTOU window is open (issue #924)"
+        )
+        assert "working directory" in err_after_swap or "Cannot resolve" in err_after_swap

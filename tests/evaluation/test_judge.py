@@ -9,12 +9,13 @@ import pytest
 
 from tests.evaluation.judge import (
     _build_judge_prompt,
+    _build_judge_prompt_for_turn,
     _fallback_score,
     _parse_score,
     judge_response,
     judge_result,
 )
-from tests.evaluation.runner import EvalResult, EvalScenario
+from tests.evaluation.runner import EvalResult, EvalScenario, Turn, TurnResult
 
 # ── Fixtures ─────────────────────────────────────────────────────────────────
 
@@ -276,3 +277,291 @@ class TestJudgeResult:
                 judged = judge_result(scenario, r)
 
         assert judged.notes == "already noted | judge_score=1.00"
+
+
+# ── Multi-turn judging (issue #1545, PR 2 of 3) ──────────────────────────────
+
+
+def _multi_turn_scenario(weights: list[float] | None = None) -> EvalScenario:
+    """Build a 3-turn scenario with author-controlled judge weights."""
+    weights = weights or [1.0, 1.0, 1.0]
+    return EvalScenario(
+        id="mt_scenario",
+        domain="test",
+        title="t",
+        description="A three-turn related-sequence workflow.",
+        system_prompt="",
+        tools_required=[],
+        expected_outcome="All three turns succeed in sequence.",
+        turns=[
+            Turn(
+                user_prompt=f"turn {i + 1} prompt",
+                success_criteria=[f"contains: turn{i + 1}"],
+                judge_weight=weights[i],
+            )
+            for i in range(3)
+        ],
+    )
+
+
+def _multi_turn_result(turn_finals: list[str]) -> EvalResult:
+    """Build an EvalResult whose turn_results aligns with the scenario above."""
+    return EvalResult(
+        scenario_id="mt_scenario",
+        model_id="m",
+        model_display_name="M",
+        passed=True,
+        tool_calls_made=[],
+        tool_calls_required=[],
+        turns_used=3,
+        elapsed_seconds=1.0,
+        final_response=turn_finals[-1],
+        turn_results=[TurnResult(final_response=f, tool_calls_made=[]) for f in turn_finals],
+    )
+
+
+class TestJudgeResponseMultiTurn:
+    def test_invokes_judge_once_per_turn(self) -> None:
+        """Multi-turn dispatch calls the judge LLM once per turn — not once for the session."""
+        scenario = _multi_turn_scenario()
+        result = _multi_turn_result(["turn1 done", "turn2 done", "turn3 done"])
+
+        mock_llm = MagicMock()
+        mock_llm.invoke.return_value = MagicMock(content='{"score": 1.0}')
+
+        with patch("tests.evaluation.judge.get_model", return_value=MagicMock()):
+            with patch("tests.evaluation.judge._build_llm", return_value=mock_llm):
+                judge_response(scenario, result)
+
+        assert mock_llm.invoke.call_count == 3
+
+    def test_weighted_aggregate(self) -> None:
+        """Aggregate = sum(score_i * weight_i) / sum(weight_i).
+
+        Three turns with weights [1, 1, 3] and scores [0.5, 0.5, 1.0]:
+        weighted = (0.5*1 + 0.5*1 + 1.0*3) / (1 + 1 + 3) = 4.0 / 5 = 0.80
+        """
+        scenario = _multi_turn_scenario(weights=[1.0, 1.0, 3.0])
+        result = _multi_turn_result(["t1", "t2", "t3"])
+
+        mock_llm = MagicMock()
+        # Three judge invocations in order: 0.5, 0.5, 1.0.
+        mock_llm.invoke.side_effect = [
+            MagicMock(content='{"score": 0.5}'),
+            MagicMock(content='{"score": 0.5}'),
+            MagicMock(content='{"score": 1.0}'),
+        ]
+
+        with patch("tests.evaluation.judge.get_model", return_value=MagicMock()):
+            with patch("tests.evaluation.judge._build_llm", return_value=mock_llm):
+                aggregate = judge_response(scenario, result)
+
+        assert aggregate == pytest.approx(0.80)
+
+    def test_equal_weights_unweighted_mean(self) -> None:
+        """Equal weights collapse to a simple mean (1+0+0.5)/3 = 0.5."""
+        scenario = _multi_turn_scenario(weights=[1.0, 1.0, 1.0])
+        result = _multi_turn_result(["t1", "t2", "t3"])
+
+        mock_llm = MagicMock()
+        mock_llm.invoke.side_effect = [
+            MagicMock(content='{"score": 1.0}'),
+            MagicMock(content='{"score": 0.0}'),
+            MagicMock(content='{"score": 0.5}'),
+        ]
+
+        with patch("tests.evaluation.judge.get_model", return_value=MagicMock()):
+            with patch("tests.evaluation.judge._build_llm", return_value=mock_llm):
+                aggregate = judge_response(scenario, result)
+
+        assert aggregate == pytest.approx(0.5)
+
+    def test_any_turn_failure_falls_back_to_heuristic(self) -> None:
+        """If any per-turn judge call errors or returns malformed output, the
+        whole result falls back to the heuristic.  Same all-or-nothing
+        semantics as the single-turn path — keeps the behaviour contract
+        consistent across multi-turn rollout."""
+        scenario = _multi_turn_scenario()
+        result = _multi_turn_result(["t1", "t2", "t3"])
+
+        mock_llm = MagicMock()
+        # First two turns score 1.0, third returns malformed output → heuristic kicks in.
+        mock_llm.invoke.side_effect = [
+            MagicMock(content='{"score": 1.0}'),
+            MagicMock(content='{"score": 1.0}'),
+            MagicMock(content="I think it did well overall."),
+        ]
+
+        with patch("tests.evaluation.judge.get_model", return_value=MagicMock()):
+            with patch("tests.evaluation.judge._build_llm", return_value=mock_llm):
+                aggregate = judge_response(scenario, result)
+
+        # tools_required=[] → fallback path: 1.0 if final_response else 0.0.
+        # Final response is "t3", so heuristic gives 1.0.
+        assert aggregate == 1.0
+
+    def test_single_turn_unaffected_when_turn_results_is_length_one(self) -> None:
+        """A scenario with one turn and turn_results of length 1 still
+        takes the single-call path — the multi-turn dispatch requires
+        ``len(turn_results) > 1``."""
+        scenario = EvalScenario(
+            id="single",
+            domain="test",
+            title="t",
+            description="d",
+            system_prompt="",
+            tools_required=[],
+            expected_outcome="",
+            turns=[Turn(user_prompt="only", success_criteria=[])],
+        )
+        result = EvalResult(
+            scenario_id="single",
+            model_id="m",
+            model_display_name="M",
+            passed=True,
+            tool_calls_made=[],
+            tool_calls_required=[],
+            turns_used=1,
+            elapsed_seconds=1.0,
+            final_response="response",
+            turn_results=[TurnResult(final_response="response", tool_calls_made=[])],
+        )
+
+        mock_llm = MagicMock()
+        mock_llm.invoke.return_value = MagicMock(content='{"score": 0.7}')
+
+        with patch("tests.evaluation.judge.get_model", return_value=MagicMock()):
+            with patch("tests.evaluation.judge._build_llm", return_value=mock_llm):
+                aggregate = judge_response(scenario, result)
+
+        assert aggregate == pytest.approx(0.7)
+        # Crucially: invoked exactly once (single-call path).
+        assert mock_llm.invoke.call_count == 1
+
+    def test_mismatched_turn_counts_falls_back_to_single_call(self) -> None:
+        """If scenario.turns and result.turn_results disagree in length —
+        e.g. a stale or hand-constructed EvalResult — the dispatch
+        cannot align per-turn pairs, so it falls back to the single-call
+        path instead of misaligning data."""
+        scenario = _multi_turn_scenario()  # 3 turns
+        # Only 2 turn_results (mismatch).
+        result = EvalResult(
+            scenario_id="mt_scenario",
+            model_id="m",
+            model_display_name="M",
+            passed=True,
+            tool_calls_made=[],
+            tool_calls_required=[],
+            turns_used=2,
+            elapsed_seconds=1.0,
+            final_response="last",
+            turn_results=[
+                TurnResult(final_response="t1", tool_calls_made=[]),
+                TurnResult(final_response="t2", tool_calls_made=[]),
+            ],
+        )
+
+        mock_llm = MagicMock()
+        mock_llm.invoke.return_value = MagicMock(content='{"score": 0.9}')
+
+        with patch("tests.evaluation.judge.get_model", return_value=MagicMock()):
+            with patch("tests.evaluation.judge._build_llm", return_value=mock_llm):
+                aggregate = judge_response(scenario, result)
+
+        assert aggregate == pytest.approx(0.9)
+        assert mock_llm.invoke.call_count == 1
+
+
+class TestJudgeResultNotesMultiTurn:
+    def test_notes_include_per_turn_breakdown(self) -> None:
+        """Multi-turn notes show the aggregate + per-turn scores."""
+        scenario = _multi_turn_scenario(weights=[1.0, 1.0, 3.0])
+        result = _multi_turn_result(["t1", "t2", "t3"])
+
+        mock_llm = MagicMock()
+        mock_llm.invoke.side_effect = [
+            MagicMock(content='{"score": 0.5}'),
+            MagicMock(content='{"score": 0.5}'),
+            MagicMock(content='{"score": 1.0}'),
+        ]
+
+        with patch("tests.evaluation.judge.get_model", return_value=MagicMock()):
+            with patch("tests.evaluation.judge._build_llm", return_value=mock_llm):
+                judged = judge_result(scenario, result)
+
+        assert judged.passed is True
+        assert "judge_score=0.80" in judged.notes
+        assert "(turns: 0.50, 0.50, 1.00)" in judged.notes
+
+    def test_notes_single_turn_unchanged(self) -> None:
+        """Single-turn note format is unchanged: ``judge_score=X.YY``
+        with no ``(turns: ...)`` suffix — backward-compat for dashboards
+        that pattern-match on this string."""
+        scenario = EvalScenario(
+            id="single",
+            domain="test",
+            title="t",
+            description="d",
+            system_prompt="",
+            tools_required=[],
+            expected_outcome="",
+            turns=[Turn(user_prompt="only", success_criteria=[])],
+        )
+        result = EvalResult(
+            scenario_id="single",
+            model_id="m",
+            model_display_name="M",
+            passed=True,
+            tool_calls_made=[],
+            tool_calls_required=[],
+            turns_used=1,
+            elapsed_seconds=1.0,
+            final_response="ok",
+            turn_results=[TurnResult(final_response="ok", tool_calls_made=[])],
+        )
+
+        mock_llm = MagicMock()
+        mock_llm.invoke.return_value = MagicMock(content='{"score": 0.9}')
+
+        with patch("tests.evaluation.judge.get_model", return_value=MagicMock()):
+            with patch("tests.evaluation.judge._build_llm", return_value=mock_llm):
+                judged = judge_result(scenario, result)
+
+        assert "judge_score=0.90" in judged.notes
+        assert "(turns:" not in judged.notes
+
+
+class TestBuildJudgePromptForTurn:
+    def test_includes_turn_position(self) -> None:
+        scenario = _multi_turn_scenario()
+        prompt = _build_judge_prompt_for_turn(
+            scenario,
+            scenario.turns[1],
+            TurnResult(final_response="t2 response", tool_calls_made=["foo"]),
+            turn_idx=1,
+            total_turns=3,
+        )
+        assert "turn 2 of 3" in prompt
+
+    def test_includes_turn_user_prompt_and_criteria(self) -> None:
+        scenario = _multi_turn_scenario()
+        prompt = _build_judge_prompt_for_turn(
+            scenario,
+            scenario.turns[0],
+            TurnResult(final_response="t1 response", tool_calls_made=[]),
+            turn_idx=0,
+            total_turns=3,
+        )
+        assert "turn 1 prompt" in prompt
+        assert "- contains: turn1" in prompt
+
+    def test_falls_back_to_none_for_empty_tools(self) -> None:
+        scenario = _multi_turn_scenario()
+        prompt = _build_judge_prompt_for_turn(
+            scenario,
+            scenario.turns[0],
+            TurnResult(final_response="t1", tool_calls_made=[]),
+            turn_idx=0,
+            total_turns=3,
+        )
+        assert "TOOLS CALLED ON THIS TURN: none" in prompt

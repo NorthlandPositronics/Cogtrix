@@ -99,7 +99,7 @@ The tool is automatically discovered:
 
 ```bash
 uv run python cogtrix.py
-# ✓ Loaded 60 tool(s):
+# ✓ Loaded 68 tool(s):
 #   - my_tool
 ```
 

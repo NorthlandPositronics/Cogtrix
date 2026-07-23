@@ -238,6 +238,53 @@ class TestFactExtraction:
         store._extract_and_store_sync("Hello", "Hi there")
         assert len(store._facts) == 0
 
+    def test_llm_timeout_returns_empty_facts(self):
+        """A hung LLM call times out and returns empty facts, freeing the pool worker."""
+        import threading
+        from unittest.mock import patch
+
+        store = _make_store()
+
+        blocked = threading.Event()
+
+        def _slow_invoke(_messages: Any) -> MagicMock:
+            blocked.wait(timeout=5.0)
+            resp = MagicMock()
+            resp.content = "[]"
+            return resp
+
+        store._extraction_llm.invoke.side_effect = _slow_invoke
+
+        with patch("src.assistant.knowledge._EXTRACTION_TIMEOUT_SECONDS", 0.1):
+            facts = store._extract_facts("Hello", "Hi there")
+
+        assert facts == []
+        blocked.set()
+
+    def test_llm_timeout_through_extract_and_store_sync(self):
+        """Timeout path through _extract_and_store_sync does not crash and stores nothing."""
+        import threading
+        from unittest.mock import patch
+
+        store = _make_store()
+
+        blocked = threading.Event()
+
+        def _slow_invoke(_messages: Any) -> MagicMock:
+            blocked.wait(timeout=5.0)
+            resp = MagicMock()
+            resp.content = "[]"
+            return resp
+
+        store._extraction_llm.invoke.side_effect = _slow_invoke
+
+        with patch("src.assistant.knowledge._EXTRACTION_TIMEOUT_SECONDS", 0.1):
+            # Should not raise
+            store._extract_and_store_sync("Hello", "Hi there")
+
+        assert len(store._facts) == 0
+        blocked.set()
+
     def test_extraction_handles_single_json_object(self):
         """LLM returning a single object (not wrapped in array) is promoted."""
         store = _make_store()

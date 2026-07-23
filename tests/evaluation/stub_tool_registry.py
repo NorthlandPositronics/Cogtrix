@@ -293,6 +293,38 @@ def _search_web_return(inp: BaseModel) -> dict[str, Any]:
     return out
 
 
+# ── http_get ──────────────────────────────────────────────────────────────────
+
+
+class HttpGetInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    url: str
+    timeout: int | None = None
+    notes: str | None = None
+
+
+def _http_get_return(inp: BaseModel) -> dict[str, Any]:
+    # Intentionally returns an empty body — the agent must reason from the
+    # status and the absence of content rather than fabricate a page that
+    # was never fetched.  Mirrors the search_web "no useful results" stub
+    # shape so the same regression scenarios (#1510 / #1532) can exercise
+    # the no-fabrication contract end-to-end.
+    payload: dict[str, Any] = inp.model_dump()
+    out: dict[str, Any] = {
+        "status": "ok",
+        "url": payload.get("url"),
+        "http_status": 200,
+        "content": "",
+        "content_length": 0,
+    }
+    if payload.get("timeout") is not None:
+        out["timeout"] = payload["timeout"]
+    if payload.get("notes") is not None:
+        out["notes"] = payload["notes"]
+    return out
+
+
 # ── validate_supplier_data ────────────────────────────────────────────────────
 
 
@@ -335,6 +367,16 @@ STUB_TOOL_REGISTRY: dict[str, StubToolSpec] = {
         description="Return the current date and time as an ISO-8601 string.",
         input_schema=GetCurrentDatetimeInput,
         return_template=_get_current_datetime_return,
+    ),
+    "http_get": StubToolSpec(
+        name="http_get",
+        description=(
+            "Fetch the body of a URL via HTTP GET and return the response. "
+            "Use this when a search result snippet is not enough and you "
+            "need to read the actual page content."
+        ),
+        input_schema=HttpGetInput,
+        return_template=_http_get_return,
     ),
     "notify_approver": StubToolSpec(
         name="notify_approver",

@@ -19,7 +19,8 @@ log = get_logger()
 # Seconds to wait for the LLM classification call before treating it as hung.
 # A hung call would block the agent's think-category classification step,
 # which runs on every agent turn.  This timeout prevents indefinite blocking.
-_CLASSIFY_TIMEOUT_SECONDS: int = 60
+# 5 seconds is appropriate for this lightweight classification call (< 10 tokens).
+_CLASSIFY_TIMEOUT_SECONDS: int = 5
 
 # ── /think task categories & prompt templates ────────────────────────────
 #

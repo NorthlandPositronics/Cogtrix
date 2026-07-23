@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field
 
 from src.agent.safety import UserCancelledRun
 from src.logging_config import get_logger, log_delegation
+from src.tools.error_sanitizer import sanitize_error
 
 log = get_logger()
 
@@ -82,6 +83,32 @@ _DELEGATE_EXCLUDED_TOOLS = frozenset(
         "telegram_send_photo",
         # Self-modification
         "self_improve",
+        # Git mutation — delegates must not bypass confirmation by calling
+        # git tools directly (closes #968, related to #1072)
+        "git_add",
+        "git_commit",
+        "git_create_branch",
+        "git_checkout",
+        # Cron job scheduling — delegates must not persist recurring prompts
+        "cron_add",
+        "cron_remove",
+        # Test generation — delegates must not write files to disk
+        "generate_tests",
+        # GitHub issue mutation — delegates must not create issues or comments
+        "gh_create_issue",
+        "gh_comment_issue",
+        # RAG mutation — delegates must not modify the knowledge base
+        "save_to_knowledge_base",
+        "rag_ingest",
+        # Calendar mutation — delegates must not create calendar events
+        "calendar_create_event",
+        # Email access — privacy-sensitive; delegates must not read user email
+        "read_email",
+        "search_email",
+        # Messaging inbox access — privacy-sensitive; delegates must not
+        # check incoming messages
+        "whatsapp_check",
+        "telegram_check",
     }
 )
 
@@ -744,7 +771,7 @@ def run_delegate_agent(
         )
     except Exception as exc:
         log.warning("Delegate agent creation/execution failed: %s", exc, exc_info=True)
-        return f"Error: delegate agent failed ({type(exc).__name__}: {exc})"
+        return f"Error: delegate agent failed: {sanitize_error(exc)}"
 
     try:
         # Build user message: context comes from the user (or upstream
@@ -787,9 +814,9 @@ def run_delegate_agent(
     except Exception as exc:
         if "recursion" in type(exc).__name__.lower() or "recursion" in str(exc).lower():
             log.warning("Delegate exceeded step limit: %s", exc, exc_info=True)
-            return f"Error: delegate exceeded step limit ({exc})"
+            return f"Error: delegate exceeded step limit: {sanitize_error(exc)}"
         log.warning("Delegate agent creation/execution failed: %s", exc, exc_info=True)
-        return f"Error: delegate agent failed ({type(exc).__name__}: {exc})"
+        return f"Error: delegate agent failed: {sanitize_error(exc)}"
 
 
 def _execute_single_task(

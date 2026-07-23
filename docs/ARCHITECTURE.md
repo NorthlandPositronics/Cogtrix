@@ -64,7 +64,7 @@ Cogtrix is a modular LangChain-based AI agent built with a layered architecture:
 ┌───────────────┴───────────────┐ ┌───────────────┴───────────────┐
 │        Memory System          │ │        Tool Modules           │
 │       (src/memory/)           │ │       (src/tools/)            │
-│  • Mode managers              │ │  • 74 built-in tools          │
+│  • Mode managers              │ │  • 68 built-in tools          │
 │  • Context preparation        │ │  • Auto-discovery             │
 │  • JSON persistence           │ │  • Pydantic schemas           │
 └───────────────────────────────┘ └───────────────────────────────┘
@@ -106,13 +106,19 @@ src/
 │   ├── defaults.py        # Default models, embedding models, base URLs, env var names, presets
 │   ├── openai.py          # OpenAI and compatible APIs (xAI, vLLM, Groq, Together)
 │   ├── ollama.py          # Ollama local inference
-│   ├── anthropic.py       # Anthropic Claude
-│   └── google.py          # Google Gemini
+    │   ├── anthropic.py       # Anthropic Claude
+    │   └── google.py          # Google Gemini
 ├── orchestration/
 │   ├── run_config.py      # AgentRunConfig dataclass (29 fields: LLM, tools, compression, ownership classifier, decision accountability)
 │   ├── runner.py          # run_agent() entry point, response extraction, ToolCallLogger
 │   ├── graph.py           # LangGraph StateGraph: call_model, process_tools, handle_phantom
-│   ├── phases.py          # Research delegation, deep think, execution phase, step-limit recovery
+│   ├── nodes/             # Graph node implementations
+│   │   ├── call_model.py  # LLM invocation node (binds tools, prepends system message)
+│   │   ├── process_tools.py  # Tool execution + on-demand tool expansion
+│   │   └── recovery.py    # Recovery strategies (step limit, phantom, recursion)
+│   ├── phases.py          # Deep think, execution phase, step-limit recovery
+│   ├── research_delegate.py  # Source diversity tracking and contradiction detection for research
+│   ├── reflection_delegate.py  # Decision accountability and counter-argumentation (ADR-0052)
 │   ├── intent.py          # Intent detection, task complexity, ownership classification pipeline
 │   ├── compression.py     # Context compression: apply_message_compression()
 │   ├── session_state.py   # SessionState dataclass (replaces 7 former module-level globals)
@@ -144,37 +150,38 @@ src/
 │   │       ├── messages.py      # MessageRepository
 │   │       ├── tokens.py        # RefreshTokenRepository
 │   │       ├── api_keys.py      # ApiKeyRepository
-│   │       ├── organization.py  # OrganizationRepository (multi-tenancy)
+│   │       ├── organizations.py  # OrganizationRepository (multi-tenancy)
 │   │       ├── teams.py         # TeamRepository, TeamMembershipRepository
 │   │       ├── workspaces.py    # WorkspaceRepository
 │   │       ├── plans.py         # PlanRepository
 │   │       └── usage.py         # UsageRepository (metering)
 │   ├── routes/
-│   │   ├── auth.py           # Registration, login, refresh, logout, profile, API key CRUD (8 endpoints)
-│   │   ├── sessions.py       # Session lifecycle: create, list, get, update, delete (5 endpoints)
-│   │   ├── messages.py       # Send message, list history, clear history; WebSocket stream (4 endpoints)
+│   │   ├── auth.py           # Registration, login, refresh, logout, logout-all, profile, API key CRUD (9 endpoints)
+│   │   ├── sessions.py       # Session lifecycle: create, list, get, update, delete (6 endpoints)
+│   │   ├── messages.py       # Send message, list history, clear history; session WebSocket lives here (3 REST + 1 WS)
 │   │   ├── memory.py         # Get memory state, switch mode, clear memory (3 endpoints)
 │   │   ├── tools.py          # List tools, load, enable, disable (4 endpoints)
-│   │   ├── config.py         # Read/write config sections, provider management, model aliases (12 endpoints)
+│   │   ├── config.py         # Read/write config sections, provider management, model aliases (15 endpoints)
 │   │   ├── assistant.py      # Start/stop assistant, channel management, phonebook, outbound, campaigns (24 endpoints)
 │   │   ├── workflows.py      # Workflow CRUD, per-workflow docs, chat bindings (11 endpoints)
 │   │   ├── users.py          # User management: list, create, update role, delete (5 admin endpoints)
-│   │   ├── admin.py          # Organization list, global stats (2 admin endpoints)
+│   │   ├── admin.py          # Org list, global stats, usage metrics, impersonation, audit log, superadmin stats (7 endpoints)
 │   │   ├── rag.py            # Upload documents, list, delete, query knowledge base (5 endpoints)
 │   │   ├── mcp.py            # List servers, connect, disconnect, restart, list tools (5 endpoints)
 │   │   ├── system.py         # Server info, shutdown; live log WebSocket (2 REST + 1 WS endpoint)
-│   │   ├── health.py         # Liveness (/health) and readiness (/health/ready) probes (2 endpoints)
+│   │   ├── health.py         # Liveness, readiness, full readiness probes (3 endpoints)
 │   │   ├── metrics.py        # Prometheus metrics export (1 endpoint)
-│   │   ├── plans.py          # Plan CRUD, assign to org (8 endpoints)
+│   │   ├── plans.py          # Plan CRUD + org-plan assignment (5 + 1 = 6 endpoints)
 │   │   ├── usage.py          # Usage summary, per-event records, manual record (3 endpoints)
 │   │   ├── enforcement.py    # Plan limit snapshot and headroom (1 endpoint)
+│   │   ├── organizations.py  # Update org-member role; most org CRUD lives in admin.py (1 endpoint)
 │   │   ├── teams.py          # Team management, membership (8 endpoints)
 │   │   ├── workspaces.py     # Workspace CRUD, membership, scoped config (10 endpoints)
-│   │   ├── cross_workspace.py # Cross-workspace message bus (5 endpoints)
-│   │   ├── saml.py           # SAML 2.0 SSO: metadata, login, ACS, SLO (4 endpoints)
+│   │   ├── cross_workspace.py # Cross-workspace message bus: post, read, delete (3 endpoints)
+│   │   ├── saml.py           # SAML 2.0 SSO: metadata, SSO, ACS (3 endpoints)
 │   │   ├── scim.py           # SCIM 2.0 user provisioning — RFC 7643/7644 (7 endpoints)
-│   │   ├── ldap.py           # LDAP/AD sync: config, trigger, status (3 endpoints)
-│   │   ├── jit.py            # Just-in-time provisioning config and policies (3 endpoints)
+│   │   ├── ldap.py           # LDAP/AD sync: status, trigger (2 endpoints)
+│   │   ├── jit.py            # Just-in-time provisioning: status, test (2 endpoints)
 │   │   ├── billing.py        # Stripe billing: Checkout, Customer Portal, subscription, webhook (4 endpoints)
 │   │   ├── agents.py         # Named agent configuration: list, get (2 endpoints)
 │   │   └── tasks.py          # Background task queue: submit, list, get, cancel, log (5 endpoints)
@@ -387,6 +394,8 @@ User Input
     │                        ├── /think <task> → deep_think() directly
     │                        ├── /delegate <task> → forced delegation pipeline
     │                        ├── /paste → multi-line input mode
+    │                        ├── /mcp [restart [name]] → list or restart MCP servers
+    │                        ├── /memory, /agents, /tasks, /spawn, /goal, /undo, /compact, /retry, /export
     │                        └── /quit → exit
     │
     └── Regular text     → Agent processing pipeline
@@ -414,12 +423,21 @@ User Input
 | `/verbose` | `/v` | Toggle verbose logging |
 | `/paste` | `/P` | Enter multi-line paste mode |
 | `/clear` | `/c` | Clear conversation history |
+| `/memory` | `/mem` | Show / inspect current memory state and rolling summary |
+| `/agents` | | List or inspect named agents from AGENTS.md; supports `reload` |
+| `/tasks` | `/task` | List background tasks; view details or filter by status |
+| `/spawn` | | Submit a background task for a named agent |
+| `/goal` | `/goals` | Manage session goals: set, complete, abandon, list |
+| `/undo` | | Remove the last exchange from conversation memory |
+| `/compact` | | Compress context in place — summarise old messages without deleting history |
+| `/retry` | | Re-run the last prompt through the agent |
+| `/export` | `/save` | Export conversation to markdown or HTML |
 
-Hidden commands (not in `/help` listing):
+Note: the `/help` listing groups commands into four categories (Session & Config, Tools & Reasoning, Logging, Input & Other). The following command is available but not shown in `/help` — it is excluded from the four main categories by design. The `SlashCommand` dataclass has no `hidden` attribute; commands are excluded from `/help` categorisation through help grouping logic:
 
 | Command | Aliases | Description |
 |---------|---------|-------------|
-| `/system_prompt` | `/sp` | Display the full system prompt |
+| `/system_prompt` | | Display the full system prompt |
 
 ### 3. Orchestration Layer (`src/orchestration/`)
 

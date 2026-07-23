@@ -518,43 +518,39 @@ class TestWebSocketLifecycle:
 
     def test_ws_rejects_missing_token(self, client: TestClient) -> None:
         """WebSocket without a token should be closed with code 4001."""
-        with client.websocket_connect(f"/ws/v1/sessions/{uuid.uuid4()}") as ws:
-            # Server sends close frame; receive until disconnect.
-            try:
+        from starlette.websockets import WebSocketDisconnect
+
+        with pytest.raises(WebSocketDisconnect) as exc_info:
+            with client.websocket_connect(f"/ws/v1/sessions/{uuid.uuid4()}") as ws:
                 ws.receive_text()
-            except Exception:
-                pass
+        assert exc_info.value.code == 4001
 
     def test_ws_rejects_invalid_token(self, client: TestClient) -> None:
         """WebSocket with an invalid token should be closed with code 4001."""
+        from starlette.websockets import WebSocketDisconnect
+
         bad_token = "not.a.valid.token"
-        try:
+        with pytest.raises(WebSocketDisconnect) as exc_info:
             with client.websocket_connect(
                 f"/ws/v1/sessions/{uuid.uuid4()}",
                 headers={"Authorization": f"Bearer {bad_token}"},
             ) as ws:
-                try:
-                    ws.receive_text()
-                except Exception:
-                    pass
-        except Exception:
-            pass  # Connection refused / closed is expected.
+                ws.receive_text()
+        assert exc_info.value.code == 4001
 
     def test_ws_rejects_unknown_session(self, client: TestClient) -> None:
         """WebSocket for an unknown session should be closed after auth."""
+        from starlette.websockets import WebSocketDisconnect
+
         user_id = str(uuid.uuid4())
         token = create_access_token(user_id=user_id, role="admin")
-        try:
+        with pytest.raises(WebSocketDisconnect) as exc_info:
             with client.websocket_connect(
                 f"/ws/v1/sessions/{uuid.uuid4()}",
                 headers={"Authorization": f"Bearer {token}"},
             ) as ws:
-                try:
-                    ws.receive_text()
-                except Exception:
-                    pass
-        except Exception:
-            pass  # Connection closure is expected.
+                ws.receive_text()
+        assert exc_info.value.code == 4004
 
     @pytest.mark.timeout(10)
     def test_ws_ping_pong(self, client: TestClient) -> None:

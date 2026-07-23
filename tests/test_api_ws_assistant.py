@@ -94,6 +94,14 @@ def _user_headers() -> dict[str, str]:
     return {"Authorization": f"Bearer {_user_token()}"}
 
 
+def _superadmin_token() -> str:
+    return create_access_token(user_id=str(uuid.uuid4()), role="superadmin")
+
+
+def _superadmin_headers() -> dict[str, str]:
+    return {"Authorization": f"Bearer {_superadmin_token()}"}
+
+
 # ---------------------------------------------------------------------------
 # Mock data builders (mirrors test_api_phase6.py helpers)
 # ---------------------------------------------------------------------------
@@ -368,64 +376,59 @@ class TestWebSocketAuth:
     def test_connect_without_token_closes_4001(self, ws_client: TestClient) -> None:
         """No token → close code 4001."""
         sid = str(uuid.uuid4())
-        try:
+        with pytest.raises(WebSocketDisconnect) as exc_info:
             with ws_client.websocket_connect(f"/ws/v1/sessions/{sid}") as ws:
                 ws.receive_text()
-        except Exception:
-            pass  # close or disconnect — both acceptable
+        assert exc_info.value.code == 4001
 
     def test_connect_with_invalid_token_closes_4001(self, ws_client: TestClient) -> None:
         """Garbage token → close code 4001."""
         sid = str(uuid.uuid4())
-        try:
+        with pytest.raises(WebSocketDisconnect) as exc_info:
             with ws_client.websocket_connect(
                 f"/ws/v1/sessions/{sid}",
                 headers={"Authorization": "Bearer not.a.jwt"},
             ) as ws:
                 ws.receive_text()
-        except Exception:
-            pass
+        assert exc_info.value.code == 4001
 
     def test_connect_with_expired_token_closes_4001(self, ws_client: TestClient) -> None:
         """Expired JWT → close code 4001."""
         sid = str(uuid.uuid4())
         expired = _expired_token()
-        try:
+        with pytest.raises(WebSocketDisconnect) as exc_info:
             with ws_client.websocket_connect(
                 f"/ws/v1/sessions/{sid}",
                 headers={"Authorization": f"Bearer {expired}"},
             ) as ws:
                 ws.receive_text()
-        except Exception:
-            pass
+        assert exc_info.value.code == 4001
 
     def test_connect_to_nonexistent_session_closes_4004(self, ws_client: TestClient) -> None:
         """Valid token but session does not exist → close code 4004."""
         user_id = str(uuid.uuid4())
         token = create_access_token(user_id=user_id, role="admin")
         sid = str(uuid.uuid4())
-        try:
+        with pytest.raises(WebSocketDisconnect) as exc_info:
             with ws_client.websocket_connect(
                 f"/ws/v1/sessions/{sid}",
                 headers={"Authorization": f"Bearer {token}"},
             ) as ws:
                 ws.receive_text()
-        except Exception:
-            pass
+        assert exc_info.value.code == 4004
 
     def test_connect_as_non_owner_closes_4003(self, ws_client: TestClient) -> None:
         """Token belonging to a different user → close code 4003."""
         session_id, owner_token = _create_session(ws_client)
         # Create a different user's token
         other_token = create_access_token(user_id=str(uuid.uuid4()), role="user")
-        try:
+        with pytest.raises(WebSocketDisconnect) as exc_info:
             with ws_client.websocket_connect(
                 f"/ws/v1/sessions/{session_id}",
                 headers={"Authorization": f"Bearer {other_token}"},
             ) as ws:
                 ws.receive_text()
-        except Exception:
-            pass
+        assert exc_info.value.code == 4003
 
 
 # ===========================================================================
@@ -710,7 +713,7 @@ class TestAssistantChats:
     """GET /api/v1/assistant/chats."""
 
     def test_no_service_returns_empty_list(self, client: TestClient) -> None:
-        resp = client.get("/api/v1/assistant/chats", headers=_admin_headers())
+        resp = client.get("/api/v1/assistant/chats", headers=_superadmin_headers())
         assert resp.status_code == 200
         assert resp.json()["data"]["items"] == []
 
@@ -730,7 +733,7 @@ class TestAssistantChats:
 
         with TestClient(app) as c:
             app.state.assistant_service = svc
-            resp = c.get("/api/v1/assistant/chats?channel=telegram", headers=_admin_headers())
+            resp = c.get("/api/v1/assistant/chats?channel=telegram", headers=_superadmin_headers())
             app.state.assistant_service = None
 
         assert resp.status_code == 200
@@ -750,7 +753,7 @@ class TestAssistantChats:
 
         with TestClient(app) as c:
             app.state.assistant_service = svc
-            resp = c.get("/api/v1/assistant/chats", headers=_admin_headers())
+            resp = c.get("/api/v1/assistant/chats", headers=_superadmin_headers())
             app.state.assistant_service = None
 
         assert resp.status_code == 200
@@ -779,7 +782,7 @@ class TestAssistantScheduled:
         )
 
     def test_get_scheduled_no_service_returns_empty(self, client: TestClient) -> None:
-        resp = client.get("/api/v1/assistant/scheduled", headers=_admin_headers())
+        resp = client.get("/api/v1/assistant/scheduled", headers=_superadmin_headers())
         assert resp.status_code == 200
         assert resp.json()["data"]["items"] == []
 
@@ -907,7 +910,7 @@ class TestAssistantDeferred:
         )
 
     def test_get_deferred_no_service_returns_empty(self, client: TestClient) -> None:
-        resp = client.get("/api/v1/assistant/deferred", headers=_admin_headers())
+        resp = client.get("/api/v1/assistant/deferred", headers=_superadmin_headers())
         assert resp.status_code == 200
         assert resp.json()["data"] == []
 
@@ -972,7 +975,7 @@ class TestAssistantDeferred:
 
         with TestClient(app) as c:
             app.state.assistant_service = svc
-            resp = c.get("/api/v1/assistant/deferred", headers=_admin_headers())
+            resp = c.get("/api/v1/assistant/deferred", headers=_superadmin_headers())
             app.state.assistant_service = None
 
         assert resp.status_code == 200
@@ -990,7 +993,7 @@ class TestAssistantGuardrails:
     """Guardrail dashboard — admin-only (P0)."""
 
     def test_get_guardrails_as_admin_returns_200(self, client: TestClient) -> None:
-        resp = client.get("/api/v1/assistant/guardrails", headers=_admin_headers())
+        resp = client.get("/api/v1/assistant/guardrails", headers=_superadmin_headers())
         assert resp.status_code == 200
         body = resp.json()["data"]
         assert "blacklisted_chats" in body
@@ -1040,7 +1043,7 @@ class TestAssistantGuardrails:
 
         with TestClient(app) as c:
             app.state.assistant_service = svc
-            resp = c.get("/api/v1/assistant/guardrails", headers=_admin_headers())
+            resp = c.get("/api/v1/assistant/guardrails", headers=_superadmin_headers())
             app.state.assistant_service = None
 
         assert resp.status_code == 200
@@ -1070,7 +1073,7 @@ class TestAssistantKnowledge:
         )
 
     def test_get_knowledge_no_service_returns_empty(self, client: TestClient) -> None:
-        resp = client.get("/api/v1/assistant/knowledge", headers=_admin_headers())
+        resp = client.get("/api/v1/assistant/knowledge", headers=_superadmin_headers())
         assert resp.status_code == 200
         assert resp.json()["data"]["items"] == []
 
@@ -1153,7 +1156,7 @@ class TestAssistantKnowledge:
 
         with TestClient(app) as c:
             app.state.assistant_service = svc
-            resp = c.get("/api/v1/assistant/knowledge", headers=_admin_headers())
+            resp = c.get("/api/v1/assistant/knowledge", headers=_superadmin_headers())
             app.state.assistant_service = None
 
         assert resp.status_code == 200
@@ -1170,7 +1173,7 @@ class TestAssistantContacts:
     """GET /api/v1/assistant/contacts."""
 
     def test_get_contacts_no_service_returns_empty(self, client: TestClient) -> None:
-        resp = client.get("/api/v1/assistant/contacts", headers=_admin_headers())
+        resp = client.get("/api/v1/assistant/contacts", headers=_superadmin_headers())
         assert resp.status_code == 200
         assert resp.json()["data"] == []
 
@@ -1193,7 +1196,7 @@ class TestAssistantContacts:
 
         with TestClient(app) as c:
             app.state.assistant_service = svc
-            resp = c.get("/api/v1/assistant/contacts", headers=_admin_headers())
+            resp = c.get("/api/v1/assistant/contacts", headers=_superadmin_headers())
             app.state.assistant_service = None
 
         assert resp.status_code == 200

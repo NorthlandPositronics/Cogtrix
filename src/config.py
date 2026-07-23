@@ -283,6 +283,11 @@ class Config:
     # Set to true ONLY if you need numpy/pandas/scipy and understand the risks.
     enable_datascience_modules: bool = False
 
+    # Enable organization scoping for admin enumeration endpoints.
+    # Phase 1 (default false): regular admins receive 403 on scoped endpoints.
+    # Phase 2 (future): per-org filtering with JWT org_id claims.
+    enable_org_scoping: bool = False
+
     # Named flag profiles: profile_name -> {config_key: value}
     profiles: dict[str, dict[str, Any]] = field(default_factory=dict)
 
@@ -1893,6 +1898,10 @@ def _apply_env_vars(config: Config) -> None:
     # Data science modules — enable numpy/pandas/scipy in python_exec
     if env_val := os.getenv("COGTRIX_ENABLE_DATASCIENCE_MODULES"):
         config.enable_datascience_modules = env_val.lower() in ("true", "1", "yes")
+
+    # Organization scoping for admin endpoints
+    if env_val := os.getenv("COGTRIX_ENABLE_ORG_SCOPING"):
+        config.enable_org_scoping = env_val.lower() in ("true", "1", "yes")
 
 
 def _apply_cli_args(config: Config, args) -> None:

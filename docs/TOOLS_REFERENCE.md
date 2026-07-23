@@ -1,6 +1,6 @@
 # Cogtrix Tools Reference
 
-Complete documentation of all 74 built-in tools. You don't need to memorize these — the agent picks the right tool automatically based on your request. This page is a reference for when you want to know exactly what's available, what parameters a tool accepts, or how to configure optional providers.
+Complete documentation of all 68 built-in tools (plus dynamic MCP-sourced tools). You don't need to memorize these — the agent picks the right tool automatically based on your request. This page is a reference for when you want to know exactly what's available, what parameters a tool accepts, or how to configure optional providers.
 
 **Quick orientation:**
 
@@ -25,11 +25,18 @@ Complete documentation of all 74 built-in tools. You don't need to memorize thes
 - [NLP Tools](#nlp-tools)
 - [WhatsApp Messaging](#whatsapp-messaging)
 - [Telegram Messaging](#telegram-messaging)
-- [Slack Messaging](#slack-messaging)
 - [Scheduling](#scheduling)
+- [Calendar Tools](#calendar-tools)
 - [Knowledge Base](#knowledge-base)
 - [Delegation](#delegation)
+- [Goal Management](#goal-management)
+- [Agent Task Management](#agent-task-management)
+- [Agent Messaging](#agent-messaging)
+- [Test Generation](#test-generation)
+- [Self-Improvement](#self-improvement)
 - [Deep Reasoning](#deep-reasoning)
+- [Email Tools](#email-tools)
+- [Slack Messaging](#slack-messaging)
 
 ---
 
@@ -705,7 +712,7 @@ Convert JSON to human-readable text.
 
 ## Search
 
-Cogtrix includes 11 search tools across 6 providers. All API-key-gated tools (search, weather,
+Cogtrix includes search tools across 7 providers (DuckDuckGo, Tavily, Exa, Brave, Google, SerpAPI, SearXNG). All API-key-gated tools (search, weather,
 WhatsApp) are automatically hidden from the agent when not configured — they simply don't appear in
 the tool list. DuckDuckGo is always available (no API key, provides both `search_web` and
 `search_news`). Other providers are automatically enabled when their API key is configured, and
@@ -1230,11 +1237,11 @@ If multiple jobs match by name or schedule, all are removed. If the ID is not re
 
 ---
 
-### schedule_reply
+### schedule_reply ⚙️
 
 Schedule a reply for delayed delivery instead of sending immediately.
 
-**Availability:** Only available in assistant mode (`--assistant`). Injected per-call by `MessageHandler` when a `MessageScheduler` is configured.
+> **Note:** This tool is documented for reference but is **not yet registered** in the static tool registry. It is injected dynamically by the `MessageHandler` in assistant mode. Do not rely on it being available via `request_tools` until it has a `TOOL_CONFIG` registration.
 
 **When Used:** The agent calls this tool when the system prompt includes timing or scheduling instructions (e.g., "reply in 3 hours", "respond after the meeting"). The agent's response is NOT sent immediately — it is queued and delivered by a background thread.
 
@@ -1261,6 +1268,63 @@ Schedule a reply for delayed delivery instead of sending immediately.
 > `edit_scheduled_message`, `cancel_scheduled_message`, `defer_processing`,
 > and `suppress_reply`. These are injected per-call and documented in the
 > [Architecture Guide](ARCHITECTURE.md).
+
+---
+
+## Calendar Tools
+
+### calendar_list_events
+
+List calendar events within a date range.
+
+**Configuration:** Requires `services.calendar.credentials_file` or `services.calendar.token_json` in `.cogtrix.yaml`.
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `start_date` | string | Yes | Start date (ISO 8601, e.g., `2026-05-17`) |
+| `end_date` | string | Yes | End date (ISO 8601) |
+| `calendar_id` | string | No | Specific calendar ID (default: primary) |
+
+**Returns:** List of events with title, start/end times, attendees, and location.
+
+---
+
+### calendar_create_event
+
+Create a new calendar event.
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `title` | string | Yes | Event title |
+| `start_time` | string | Yes | Start time (ISO 8601 datetime) |
+| `end_time` | string | Yes | End time (ISO 8601 datetime) |
+| `description` | string | No | Event description |
+| `location` | string | No | Location string |
+| `attendees` | array[string] | No | Email addresses of attendees |
+| `calendar_id` | string | No | Target calendar (default: primary) |
+
+**Returns:** Created event with ID and Google Calendar link.
+
+---
+
+### calendar_search_events
+
+Search calendar events by text query.
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `query` | string | Yes | Search text (matches title, description, location) |
+| `start_date` | string | No | Limit to events on or after this date |
+| `end_date` | string | No | Limit to events on or before this date |
+| `calendar_id` | string | No | Specific calendar ID |
+
+**Returns:** Matching events with title, times, and description excerpt.
 
 ---
 
@@ -1365,6 +1429,227 @@ Only `task` is required; other fields are optional.
 
 ---
 
+## Goal Management
+
+### set_goal
+
+Set a top-level goal for the current session. Goals are tracked across turns and guide the agent's priorities.
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `goal` | string | Yes | Goal description |
+| `deadline` | string | No | Target completion time (ISO 8601) |
+| `priority` | string | No | `high`, `medium`, or `low` (default: `medium`) |
+
+**Returns:** Confirmation with goal ID.
+
+---
+
+### add_subgoal
+
+Add a subgoal under an existing goal.
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `goal_id` | string | Yes | ID of the parent goal |
+| `subgoal` | string | Yes | Subgoal description |
+| `deadline` | string | No | Target completion time |
+
+**Returns:** Confirmation with subgoal ID.
+
+---
+
+### complete_goal
+
+Mark a goal or subgoal as completed.
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `goal_id` | string | Yes | ID of the goal or subgoal to complete |
+| `result` | string | No | Outcome summary |
+
+**Returns:** Confirmation and remaining open subgoals (if any).
+
+---
+
+### abandon_goal
+
+Mark a goal or subgoal as abandoned.
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `goal_id` | string | Yes | ID of the goal or subgoal to abandon |
+| `reason` | string | No | Reason for abandoning |
+
+**Returns:** Confirmation.
+
+---
+
+### list_goals
+
+List all active goals and subgoals with their status.
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `status` | string | No | Filter: `active`, `completed`, `abandoned`, or `all` (default: `active`) |
+
+**Returns:** Table of goal IDs, descriptions, statuses, and deadlines.
+
+---
+
+## Agent Task Management
+
+### spawn_agent
+
+Spawn a sub-agent to run a task independently and return a result.
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `task` | string | Yes | Task description for the sub-agent |
+| `context` | string | No | Additional context passed to the sub-agent |
+| `model` | string | No | Model override (default: inherits parent model) |
+| `tools` | array[string] | No | Tool names to expose to the sub-agent |
+
+**Returns:** Task ID and initial status; poll `get_task_result` for the outcome.
+
+---
+
+### get_task_status
+
+Check the status of a spawned sub-agent task.
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `task_id` | string | Yes | Task ID returned by `spawn_agent` |
+
+**Returns:** Status string (`running`, `completed`, `failed`, `cancelled`) and timestamp.
+
+---
+
+### get_task_result
+
+Retrieve the result of a completed sub-agent task.
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `task_id` | string | Yes | Task ID returned by `spawn_agent` |
+
+**Returns:** Task result (string or object), error message if failed, and completion timestamp.
+
+---
+
+### list_tasks
+
+List all active sub-agent tasks.
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `status` | string | No | Filter: `running`, `completed`, `failed`, or `all` (default: `all`) |
+
+**Returns:** Table of task IDs, descriptions, statuses, and creation times.
+
+---
+
+### cancel_task
+
+Cancel a running sub-agent task.
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `task_id` | string | Yes | Task ID to cancel |
+
+**Returns:** Confirmation or error if task already completed.
+
+---
+
+## Agent Messaging
+
+### send_to_agent
+
+Send a message to another agent's inbox.
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `target_agent` | string | Yes | Name or ID of the target agent |
+| `message` | string | Yes | Message content |
+| `priority` | string | No | `high`, `normal`, or `low` (default: `normal`) |
+
+**Returns:** Confirmation with delivery timestamp.
+
+---
+
+### read_agent_inbox
+
+Read messages from the current agent's inbox.
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `unread_only` | bool | No | Return only unread messages (default: `false`) |
+| `limit` | int | No | Maximum messages to return (default: 10) |
+
+**Returns:** List of messages with sender, timestamp, content, and read status.
+
+---
+
+## Test Generation
+
+### generate_tests
+
+Generate pytest test cases from a Python source file or function.
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `source_file` | string | Yes | Path to the Python source file |
+| `function_name` | string | No | Specific function to generate tests for (default: all functions) |
+| `num_tests` | int | No | Number of test cases to generate (default: 3) |
+
+**Returns:** Generated test code as a string, ready to write to a test file.
+
+---
+
+## Self-Improvement
+
+### self_improve
+
+Analyze recent errors and automatically generate improvements to tool prompts or agent behavior.
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `error_summary` | string | Yes | Description of the error or behavior to improve |
+| `context` | string | No | Additional context about when the error occurred |
+
+**Returns:** Summary of changes made and which files were updated.
+
+---
+
 ## Deep Reasoning
 
 ### deep_think
@@ -1426,14 +1711,62 @@ deep_think(
 
 ---
 
-## See Also
+## Email Tools
 
-- [CONFIGURATION.md](CONFIGURATION.md) — Tool configuration
-- [DEVELOPMENT.md](DEVELOPMENT.md) — Adding custom tools
-- [DEEPTHINK.md](DEEPTHINK.md) — Deep Think reasoning guide
-- [RAG_GUIDE.md](RAG_GUIDE.md) — Knowledge base setup
-- [WHATSAPP_GUIDE.md](WHATSAPP_GUIDE.md) — WhatsApp assistant setup
-- [TELEGRAM_GUIDE.md](TELEGRAM_GUIDE.md) — Telegram assistant setup
+### read_email
+
+Read emails from an IMAP mailbox.
+
+**Configuration:** Requires `services.email.imap_host`, `services.email.username`, and `services.email.password` in `.cogtrix.yaml`.
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `folder` | string | No | Mailbox folder (default: `INBOX`) |
+| `limit` | int | No | Maximum messages to return (default: 10) |
+| `unread_only` | bool | No | Return only unread messages (default: `false`) |
+| `sender` | string | No | Filter by sender email address |
+| `subject_contains` | string | No | Filter by subject keyword |
+
+**Returns:** List of emails with sender, subject, date, and body preview.
+
+---
+
+### send_email
+
+Send an email via SMTP.
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `to` | string | Yes | Recipient email address |
+| `subject` | string | Yes | Email subject line |
+| `body` | string | Yes | Email body text |
+| `cc` | string | No | CC recipient(s), comma-separated |
+| `bcc` | string | No | BCC recipient(s), comma-separated |
+| `from` | string | No | Sender address (default: configured default) |
+
+**Returns:** Confirmation with message ID on success, or error on failure.
+
+---
+
+### search_email
+
+Search emails by content across the mailbox.
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `query` | string | Yes | Search query (matches subject, body, sender) |
+| `folder` | string | No | Mailbox folder to search (default: `INBOX`) |
+| `limit` | int | No | Maximum results (default: 20) |
+| `date_after` | string | No | Filter messages after this date (ISO 8601) |
+| `date_before` | string | No | Filter messages before this date (ISO 8601) |
+
+**Returns:** Matching emails with sender, subject, date, and relevance snippet.
 
 ---
 

@@ -168,6 +168,18 @@ class TestPatchFile:
         result = patch_file("big.txt", "old", "new")
         assert "too large" in result.lower()
 
+    def test_large_file_rejected_message_uses_patchable(self, tmp_cwd: Path) -> None:
+        """Regression: error message must say 'patchable', not 'readable' (#967)."""
+        large = tmp_cwd / "big.txt"
+        large.write_bytes(b"x" * (101 * 1024 * 1024))
+        result = patch_file("big.txt", "old", "new")
+        assert (
+            "patchable" in result.lower()
+        ), f"Error message should mention 'patchable', got: {result}"
+        assert (
+            "readable" not in result.lower()
+        ), f"Error message must not say 'readable' — wrong operation name. Got: {result}"
+
 
 class TestListDirectory:
     """list_directory correctness — pre-checks on is_dir() are intentional, not TOCTOU."""
@@ -288,6 +300,77 @@ class TestAllowedWritePaths:
         set_allowed_write_dirs([str(extra_dir)])
         result = write_file(str(extra_dir / ".." / "escape.txt"), "bad")
         assert result.startswith("Error:")
+
+
+class TestDotDotSubstringNotTraversal:
+    """Regression for #927 — ".." as a filename substring is not a path traversal.
+
+    The naive ".." in path substring check (removed in the fix) caused false
+    positives on legitimate filenames like foo..bar or v1..2.tar.gz. The
+    exhaustive resolved-path relative_to checks handle all cases correctly.
+    """
+
+    def test_legitimate_filename_with_dotdot_substring_readable(self, tmp_cwd: Path) -> None:
+        """foo..bar is a valid filename — must be readable, not rejected as traversal."""
+        target = tmp_cwd / "foo..bar"
+        target.write_text("legitimate content")
+        result = read_file("foo..bar")
+        assert result == "legitimate content", (
+            "Filename containing '..' as a substring must not be rejected. "
+            "The resolved-path check is the only guard needed."
+        )
+
+    def test_version_range_filename_readable(self, tmp_cwd: Path) -> None:
+        """v1..2.tar.gz is a valid filename — must be readable."""
+        target = tmp_cwd / "v1..2.tar.gz"
+        target.write_text("archive content")
+        result = read_file("v1..2.tar.gz")
+        assert result == "archive content"
+
+    def test_dotdot_in_subdirectory_name_readable(self, tmp_cwd: Path) -> None:
+        """A file inside a directory named '..something' is valid."""
+        subdir = tmp_cwd / "..backup"
+        subdir.mkdir()
+        target = subdir / "data.txt"
+        target.write_text("backup data")
+        result = read_file("..backup/data.txt")
+        assert result == "backup data"
+
+    def test_actual_traversal_into_parent_rejected(self, tmp_cwd: Path) -> None:
+        """..  (parent dir reference) must still be rejected — resolved path escapes cwd."""
+        result = read_file("..")
+        assert result.startswith(
+            "Error:"
+        ), "Parent-dir reference '..' must be rejected — resolved path is outside cwd."
+
+    def test_traversal_via_subpath_rejected(self, tmp_cwd: Path) -> None:
+        """foo/../.. must still be rejected — resolved path escapes cwd."""
+        result = read_file("foo/../..")
+        assert result.startswith(
+            "Error:"
+        ), "Path that resolves outside cwd must be rejected regardless of '..' substring check."
+
+    def test_traversal_in_subdirectory_rejected(self, tmp_cwd: Path) -> None:
+        """foo/bar/../../escape must still be rejected."""
+        result = read_file("foo/bar/../../escape")
+        assert result.startswith("Error:")
+
+    def test_traversal_with_dotdot_in_write_target_rejected(
+        self, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Path traversal attempt with '..' in the write target must be rejected."""
+        # Create a sibling directory to cwd that we do NOT allow writes to
+        sibling = tmp_cwd.parent / "sibling_forbidden"
+        sibling.mkdir(exist_ok=True)
+        monkeypatch.chdir(tmp_cwd)
+        # The path resolves to the sibling, not cwd — must be rejected
+        result = write_file(str(sibling / "escape.txt"), "bad")
+        assert result.startswith("Error:"), "Write to path resolving outside cwd must be rejected."
+
+    def test_absolute_path_outside_cwd_rejected(self, tmp_cwd: Path) -> None:
+        """Absolute path to outside cwd must be rejected (was also not caught by '..' substring check)."""
+        result = read_file("/etc/passwd")
+        assert result.startswith("Error:"), "Absolute path resolving outside cwd must be rejected."
 
 
 class TestGetAppendLock:

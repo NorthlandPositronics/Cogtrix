@@ -42,6 +42,7 @@ from src.orchestration.nodes.recovery import (
 )
 from src.orchestration.run_config import AgentRunConfig
 from src.orchestration.session_state import SessionState
+from src.providers import RetryableChatModel
 from src.registry import LazyToolProxy as _LazyToolProxy
 from src.tools.configure import (
     TOOL_OUTPUT_CAP_MIN_CHARS,
@@ -1999,7 +2000,14 @@ def build_agent_graph(
         _executor = _get_llm_executor()
         last_exc: Exception | None = None
         for _attempt in range(_LLM_MAX_RETRIES):
-            _fut = _executor.submit(_model.invoke, _messages, _cfg)
+            # Disable the model's inner retry loop so that retries happen
+            # in this outer loop without blocking a scarce pool worker.
+            if isinstance(_model, RetryableChatModel):
+                _fut = _executor.submit(
+                    _model.invoke, _messages, _cfg, _cogtrix_disable_retries=True
+                )
+            else:
+                _fut = _executor.submit(_model.invoke, _messages, _cfg)
             try:
                 _timeout_for_attempt = _LLM_RETRY_TIMEOUT if _attempt > 0 else _timeout
                 return _fut.result(timeout=_timeout_for_attempt)
@@ -2442,7 +2450,7 @@ def build_agent_graph(
                     _per_run_state[0].tool_version[0] += 1  # force bind_tools refresh
                     return ToolMessage(
                         content=(
-                            f"Tool '{tool_name}' has been disabled after {_TOOL_BUDGET_HARD} calls "
+                            f"Tool '{_safe_tool_name(tool_name)}' has been disabled after {_TOOL_BUDGET_HARD} calls "
                             f"and is no longer available. Please synthesize your findings into a "
                             f"final response now using the data you already have."
                         ),
@@ -2475,7 +2483,7 @@ def build_agent_graph(
                 tool = _per_run_state[0].tool_lookup.get(tool_name)
             if tool is None:
                 return ToolMessage(
-                    content=f"Tool '{tool_name}' is no longer active.",
+                    content=f"Tool '{_safe_tool_name(tool_name)}' is no longer active.",
                     tool_call_id=call["id"],
                     name=tool_name,
                 )
@@ -2573,7 +2581,9 @@ def build_agent_graph(
             log = get_logger()
             log.warning("Tool %s raised: %s", tool_name, exc, exc_info=True)
             return ToolMessage(
-                content=_cap_history_tool_content(f"Error executing {tool_name}: {exc}"),
+                content=_cap_history_tool_content(
+                    f"Error executing {_safe_tool_name(tool_name)}: {exc}"
+                ),
                 tool_call_id=call["id"],
                 name=tool_name,
             )

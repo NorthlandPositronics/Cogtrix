@@ -6,6 +6,7 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 
 from src.agent.core import CogtrixState
+from src.orchestration.graph import _safe_tool_name
 from src.orchestration.nodes.process_tools import build_process_tools_node
 from src.orchestration.session_state import SessionState
 
@@ -359,3 +360,78 @@ class TestProcessToolsStuckDetection:
         assert any("Error patterns" in str(args[0]) for args in graph_log.debugs)
         # info should include patterns
         assert any("patterns" in str(args[0]) for args in graph_log.infos)
+
+
+class TestProcessToolsSanitization:
+    """Regression tests for issue #1070: _safe_tool_name sanitization inconsistency."""
+
+    def test_serial_unknown_tool_sanitizes_name_in_tool_message(self):
+        """Unknown tool names in serial path must be sanitized in ToolMessage content."""
+        malicious_name = "evil<script>alert(1)</script>"
+        safe_name = _safe_tool_name(malicious_name)
+        assert safe_name != malicious_name
+        node = _make_node(
+            _tool_lookup={},
+            _active_names=set(),
+            _safe_tool_name=_safe_tool_name,
+        )
+        ai_msg = _make_ai_msg([{"name": malicious_name, "args": {}, "id": "tc1"}])
+        state = _make_state(ai_msg)
+
+        result = node(state, RunnableConfig())
+
+        msgs = result["messages"]
+        tool_msgs = [m for m in msgs if isinstance(m, ToolMessage)]
+        assert len(tool_msgs) >= 1
+        # The first ToolMessage should contain the sanitized name, not the raw one
+        assert safe_name in tool_msgs[0].content
+        assert malicious_name not in tool_msgs[0].content
+
+    def test_parallel_unknown_tool_sanitizes_name_in_tool_message(self):
+        """Unknown tool names in parallel path must be sanitized in ToolMessage content."""
+        malicious_name = 'bad_tool"; DROP TABLE users; --'
+        safe_name = _safe_tool_name(malicious_name)
+        assert safe_name != malicious_name
+        node = _make_node(
+            _tool_lookup={},
+            _active_names=set(),
+            _safe_tool_name=_safe_tool_name,
+            parallel_tool_execution=True,
+        )
+        ai_msg = _make_ai_msg([{"name": malicious_name, "args": {}, "id": "tc1"}])
+        state = _make_state(ai_msg)
+
+        result = node(state, RunnableConfig())
+
+        msgs = result["messages"]
+        tool_msgs = [m for m in msgs if isinstance(m, ToolMessage)]
+        assert len(tool_msgs) >= 1
+        # The ToolMessage from parallel pre-filter should contain sanitized name
+        assert safe_name in tool_msgs[0].content
+        assert malicious_name not in tool_msgs[0].content
+
+    def test_serial_guidance_and_result_both_sanitized(self):
+        """Both guidance_lines and ToolMessage content must use sanitized names."""
+        malicious_name = "weird\nname\t"
+        safe_name = _safe_tool_name(malicious_name)
+        node = _make_node(
+            _tool_lookup={},
+            _active_names=set(),
+            _safe_tool_name=_safe_tool_name,
+        )
+        ai_msg = _make_ai_msg([{"name": malicious_name, "args": {}, "id": "tc1"}])
+        state = _make_state(ai_msg)
+
+        result = node(state, RunnableConfig())
+
+        msgs = result["messages"]
+        # There should be a guidance HumanMessage and a ToolMessage
+        tool_msgs = [m for m in msgs if isinstance(m, ToolMessage)]
+        human_msgs = [m for m in msgs if isinstance(m, HumanMessage)]
+        assert len(tool_msgs) >= 1
+        assert len(human_msgs) >= 1
+        # Guidance message should also contain sanitized name
+        assert safe_name in human_msgs[0].content
+        assert malicious_name not in human_msgs[0].content
+        assert safe_name in tool_msgs[0].content
+        assert malicious_name not in tool_msgs[0].content

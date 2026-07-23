@@ -28,7 +28,11 @@ import pytest
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
 from src.agent.core import CogtrixState
-from src.orchestration.nodes.call_model import CallModelContext, build_call_model_node
+from src.orchestration.nodes.call_model import (
+    CallModelContext,
+    _compute_search_effort,
+    build_call_model_node,
+)
 
 
 class _DummyLogger:
@@ -473,14 +477,34 @@ class TestCallModelStuckDetection:
         llm = MagicMock()
         llm.bind_tools.return_value = llm
 
-        # Simulate force_thinking_break being set
+        # Simulate force_thinking_break being set (e.g. by process_tools).
+        # Non-search stuck tools bypass the effort gate and fire the normal
+        # thinking break (#1520).
         node = _make_node(
             llm=llm,
             active_tools_list=[],
             force_thinking_break=[True],
             invoke_with_timeout=capture_invoke,
         )
-        state = _make_state([HumanMessage(content="hello")])
+        state = _make_state(
+            [
+                HumanMessage(content="hello"),
+                AIMessage(
+                    content="r1",
+                    tool_calls=[{"name": "merge_pull_request", "args": {}, "id": "tc1"}],
+                ),
+                ToolMessage(
+                    content="Error: rule violation", tool_call_id="tc1", name="merge_pull_request"
+                ),
+                AIMessage(
+                    content="r2",
+                    tool_calls=[{"name": "merge_pull_request", "args": {}, "id": "tc2"}],
+                ),
+                ToolMessage(
+                    content="Error: rule violation", tool_call_id="tc2", name="merge_pull_request"
+                ),
+            ]
+        )
 
         node(state, {})
 
@@ -554,6 +578,724 @@ class TestCallModelStuckDetection:
             "Polling-loop detection must arm _force_thinking_break so the "
             "next call_model round forces a tool-less, text-only response."
         )
+
+    def test_polling_loop_advisory_injected_but_thinking_break_not_armed_when_all_stubs(self):
+        """Regression test for #1510.
+
+        When every consecutive tool call returned a "not loaded" stub, the
+        polling-loop detector must NOT arm _force_thinking_break, because the
+        agent has not exhausted the tool — it is still discovering that the
+        tool is not active. The correct recovery is request_tools, and arming
+        the thinking break punishes that recovery move and forces fabrication.
+        """
+        captured_msgs: list = []
+
+        def capture_invoke(llm_obj, msgs, config, timeout):
+            captured_msgs.extend(msgs)
+            return AIMessage(content="response")
+
+        llm = MagicMock()
+        llm.bind_tools.return_value = llm
+
+        force_thinking_break: list[bool] = [False]
+        node = _make_node(
+            llm=llm,
+            active_tools_list=[],
+            force_thinking_break=force_thinking_break,
+            maybe_compress=lambda msgs: msgs,
+            invoke_with_timeout=capture_invoke,
+        )
+        # 3 consecutive ToolMessages all returning "not loaded" stubs.
+        state = _make_state(
+            [
+                HumanMessage(content="hello"),
+                AIMessage(
+                    content="r1", tool_calls=[{"name": "search_web", "args": {}, "id": "tc1"}]
+                ),
+                ToolMessage(
+                    content="Tool 'search_web' is in the catalog but not loaded. "
+                    "To load it now, issue a structured tool call: "
+                    'request_tools(add=["search_web"])',
+                    tool_call_id="tc1",
+                    name="search_web",
+                ),
+                AIMessage(
+                    content="r2", tool_calls=[{"name": "search_web", "args": {}, "id": "tc2"}]
+                ),
+                ToolMessage(
+                    content="Tool 'search_web' is in the catalog but not loaded. "
+                    "To load it now, issue a structured tool call: "
+                    'request_tools(add=["search_web"])',
+                    tool_call_id="tc2",
+                    name="search_web",
+                ),
+                AIMessage(
+                    content="r3", tool_calls=[{"name": "search_web", "args": {}, "id": "tc3"}]
+                ),
+                ToolMessage(
+                    content="Tool 'search_web' is in the catalog but not loaded. "
+                    "To load it now, issue a structured tool call: "
+                    'request_tools(add=["search_web"])',
+                    tool_call_id="tc3",
+                    name="search_web",
+                ),
+            ]
+        )
+
+        node(state, {})
+
+        # Advisory was injected (agent still needs to know it should not
+        # keep calling the unloaded tool).
+        assert any(
+            "search_web" in m.content and "in a row" in m.content.lower() for m in captured_msgs
+        ), "Polling-loop advisory should still be injected for stub-only rounds"
+
+        # Thinking-break flag must NOT be armed — agent may be recovering
+        # via request_tools and should not be punished with tool stripping.
+        assert force_thinking_break[0] is False, (
+            "Polling-loop detection must NOT arm _force_thinking_break when "
+            "all consecutive calls returned 'not loaded' stubs. The agent is "
+            "still discovering that the tool is not active; the correct "
+            "recovery (request_tools) must not be punished."
+        )
+
+    def test_thinking_break_prompt_prevents_fabrication_when_no_checkpoint_data(self):
+        """Regression test for #1510.
+
+        When the thinking break fires and no checkpoint data has been
+        accumulated, the prompt must tell the model NOT to fabricate
+        specific numbers, percentages, or authoritative-sounding claims.
+        A short honest "I could not retrieve current data" is preferred
+        over a confident fabrication.
+        """
+        captured_msgs: list = []
+
+        def capture_invoke(llm_obj, msgs, config, timeout):
+            captured_msgs.extend(msgs)
+            return AIMessage(content="answer from model")
+
+        llm = MagicMock()
+        llm.bind_tools.return_value = llm
+
+        # checkpoint_store=None simulates "no checkpoints accumulated" —
+        # the worst case for fabrication risk.
+        force_thinking_break: list[bool] = [True]
+        node = _make_node(
+            llm=llm,
+            active_tools_list=[MagicMock(name="request_tools")],
+            force_thinking_break=force_thinking_break,
+            checkpoint_store=None,  # no checkpoint data
+            calls_since_last_checkpoint=[0],
+            last_checkpoint_count=[0],
+            rounds_since_checkpoint=[0],
+            stuck_no_checkpoint_threshold=[20],
+            invoke_with_timeout=capture_invoke,
+        )
+        # Use a non-search tool so the effort gate is bypassed and the normal
+        # refusal thinking break fires (#1520).
+        state = _make_state(
+            [
+                HumanMessage(content="hello"),
+                AIMessage(
+                    content="r1", tool_calls=[{"name": "write_file", "args": {}, "id": "tc1"}]
+                ),
+                ToolMessage(
+                    content="Error: permission denied", tool_call_id="tc1", name="write_file"
+                ),
+                AIMessage(
+                    content="r2", tool_calls=[{"name": "write_file", "args": {}, "id": "tc2"}]
+                ),
+                ToolMessage(
+                    content="Error: permission denied", tool_call_id="tc2", name="write_file"
+                ),
+            ]
+        )
+
+        node(state, {})
+
+        # Find the thinking-break HumanMessage injected into LLM input.
+        tb_msgs = [
+            m
+            for m in captured_msgs
+            if isinstance(m, HumanMessage) and "THINKING BREAK" in m.content
+        ]
+        assert len(tb_msgs) == 1, f"Expected exactly one thinking-break message; got {tb_msgs}"
+        tb_content = tb_msgs[0].content
+
+        # Must NOT say "draw on your own knowledge" — that encourages fabrication.
+        assert "draw on your own knowledge" not in tb_content.lower(), (
+            "Thinking-break prompt must not encourage drawing on training knowledge "
+            "when no checkpoint data exists — that leads to fabrication."
+        )
+
+        # Must contain anti-fabrication guidance.
+        assert "do not fabricate" in tb_content.lower() or "not fabricate" in tb_content.lower(), (
+            "Thinking-break prompt must explicitly tell the model not to fabricate "
+            f"specific numbers, percentages, or claims. Got: {tb_content[:200]}"
+        )
+
+        # Must acknowledge that data could not be retrieved.
+        assert (
+            "returned nothing" in tb_content.lower()
+            or "tools returned" in tb_content.lower()
+            or "could not retrieve" in tb_content.lower()
+        ), (
+            "Thinking-break prompt must acknowledge that data could not be retrieved. "
+            f"Got: {tb_content[:200]}"
+        )
+
+        # Must contain the enhanced anti-fabrication clause from #1516 — naming
+        # the specific data categories where fabrication risk is highest.
+        anti_fab_keywords = ["live data", "current prices", "stock levels", "FX rates", "SKUs"]
+        has_enhanced_clause = any(kw in tb_content.lower() for kw in anti_fab_keywords)
+        assert has_enhanced_clause, (
+            f"Thinking-break prompt must contain the enhanced anti-fabrication clause "
+            f"(naming specific data categories: {anti_fab_keywords}). "
+            f"Got: {tb_content[:300]}"
+        )
+
+    def test_thinking_break_suppressed_when_low_effort_and_no_checkpoints(self):
+        """Regression test for #1520.
+
+        When the thinking break fires, no checkpoints exist, AND the agent has
+        made fewer than _MIN_SEARCH_EFFORT searches without trying http_get,
+        the break must be suppressed and a strategy nudge injected instead.
+        This prevents "lazy refusal" where the agent gives up after shallow
+        searches.
+        """
+        captured_msgs: list = []
+
+        def capture_invoke(llm_obj, msgs, config, timeout):
+            captured_msgs.extend(msgs)
+            return AIMessage(content="ok")
+
+        llm = MagicMock()
+        llm.bind_tools.return_value = llm
+
+        force_thinking_break: list[bool] = [True]
+        node = _make_node(
+            llm=llm,
+            active_tools_list=[MagicMock(name="request_tools")],
+            force_thinking_break=force_thinking_break,
+            checkpoint_store=None,
+            invoke_with_timeout=capture_invoke,
+        )
+        # Only 1 search_web in history — below _MIN_SEARCH_EFFORT threshold.
+        state = _make_state(
+            [
+                HumanMessage(content="hello"),
+                AIMessage(
+                    content="r1",
+                    tool_calls=[
+                        {"name": "search_web", "args": {"query": "product A"}, "id": "tc1"}
+                    ],
+                ),
+                ToolMessage(content="generic results", tool_call_id="tc1", name="search_web"),
+            ]
+        )
+
+        result = node(state, {})
+
+        # The node should NOT have returned early from a thinking break;
+        # instead it falls through to normal processing with a nudge appended.
+        assert result == {"messages": [AIMessage(content="ok")]}
+
+        # Verify strategy nudge was injected.
+        nudge_msgs = [
+            m
+            for m in captured_msgs
+            if isinstance(m, HumanMessage) and "STRATEGY NUDGE" in m.content
+        ]
+        assert len(nudge_msgs) == 1, f"Expected exactly one strategy nudge; got {nudge_msgs}"
+        nudge_content = nudge_msgs[0].content
+        assert (
+            "try harder" in nudge_content.lower()
+        ), "Strategy nudge must encourage the agent to try harder."
+        assert "http_get" in nudge_content.lower(), "Strategy nudge must suggest using http_get."
+
+        # Must NOT contain the refusal/thinking-break prompt.
+        tb_msgs = [
+            m
+            for m in captured_msgs
+            if isinstance(m, HumanMessage) and "THINKING BREAK" in m.content
+        ]
+        assert (
+            len(tb_msgs) == 0
+        ), "Thinking break must be suppressed when effort is low and no checkpoints exist."
+
+    def test_thinking_break_fires_when_high_effort_and_no_checkpoints(self):
+        """When effort threshold is met (≥3 searches), the thinking break refusal
+        prompt should still fire even without checkpoints."""
+        captured_msgs: list = []
+
+        def capture_invoke(llm_obj, msgs, config, timeout):
+            captured_msgs.extend(msgs)
+            return AIMessage(content="honest refusal")
+
+        llm = MagicMock()
+        llm.bind_tools.return_value = llm
+
+        force_thinking_break: list[bool] = [True]
+        node = _make_node(
+            llm=llm,
+            active_tools_list=[MagicMock(name="request_tools")],
+            force_thinking_break=force_thinking_break,
+            checkpoint_store=None,
+            invoke_with_timeout=capture_invoke,
+        )
+        # 3 distinct search_web calls — meets _MIN_SEARCH_EFFORT threshold.
+        state = _make_state(
+            [
+                HumanMessage(content="hello"),
+                AIMessage(
+                    content="r1",
+                    tool_calls=[
+                        {"name": "search_web", "args": {"query": "product A price"}, "id": "tc1"}
+                    ],
+                ),
+                ToolMessage(content="result1", tool_call_id="tc1", name="search_web"),
+                AIMessage(
+                    content="r2",
+                    tool_calls=[
+                        {"name": "search_web", "args": {"query": "product B price"}, "id": "tc2"}
+                    ],
+                ),
+                ToolMessage(content="result2", tool_call_id="tc2", name="search_web"),
+                AIMessage(
+                    content="r3",
+                    tool_calls=[
+                        {"name": "search_web", "args": {"query": "product C price"}, "id": "tc3"}
+                    ],
+                ),
+                ToolMessage(content="result3", tool_call_id="tc3", name="search_web"),
+            ]
+        )
+
+        node(state, {})
+
+        # Thinking break refusal prompt should fire.
+        tb_msgs = [
+            m
+            for m in captured_msgs
+            if isinstance(m, HumanMessage) and "THINKING BREAK" in m.content
+        ]
+        assert len(tb_msgs) == 1, f"Expected thinking break; got {tb_msgs}"
+        assert "do not fabricate" in tb_msgs[0].content.lower()
+
+    def test_thinking_break_fires_when_http_get_attempted_and_no_checkpoints(self):
+        """When http_get has been attempted (even with few searches), the agent
+        has earned the right to refuse — the thinking break should fire normally."""
+        captured_msgs: list = []
+
+        def capture_invoke(llm_obj, msgs, config, timeout):
+            captured_msgs.extend(msgs)
+            return AIMessage(content="honest refusal")
+
+        llm = MagicMock()
+        llm.bind_tools.return_value = llm
+
+        force_thinking_break: list[bool] = [True]
+        node = _make_node(
+            llm=llm,
+            active_tools_list=[MagicMock(name="request_tools")],
+            force_thinking_break=force_thinking_break,
+            checkpoint_store=None,
+            invoke_with_timeout=capture_invoke,
+        )
+        # Only 1 search but also 1 http_get — effort threshold met via http_get.
+        state = _make_state(
+            [
+                HumanMessage(content="hello"),
+                AIMessage(
+                    content="r1",
+                    tool_calls=[
+                        {"name": "search_web", "args": {"query": "product A"}, "id": "tc1"}
+                    ],
+                ),
+                ToolMessage(content="result1", tool_call_id="tc1", name="search_web"),
+                AIMessage(
+                    content="r2",
+                    tool_calls=[
+                        {"name": "http_get", "args": {"url": "https://example.com"}, "id": "tc2"}
+                    ],
+                ),
+                ToolMessage(content="page html", tool_call_id="tc2", name="http_get"),
+            ]
+        )
+
+        node(state, {})
+
+        tb_msgs = [
+            m
+            for m in captured_msgs
+            if isinstance(m, HumanMessage) and "THINKING BREAK" in m.content
+        ]
+        assert len(tb_msgs) == 1, f"Expected thinking break; got {tb_msgs}"
+
+    def test_thinking_break_suppressed_when_prior_turns_have_high_effort(self):
+        """Regression test for #1532 Bug 1.
+
+        In a long session with prior search activity, a fresh question that
+        triggers a thinking break must be evaluated on its OWN effort — not
+        session-cumulatively.  If the current turn has low effort, the strategy
+        nudge must fire instead of the refusal prompt.
+        """
+        captured_msgs: list = []
+
+        def capture_invoke(llm_obj, msgs, config, timeout):
+            captured_msgs.extend(msgs)
+            return AIMessage(content="ok")
+
+        llm = MagicMock()
+        llm.bind_tools.return_value = llm
+
+        force_thinking_break: list[bool] = [True]
+        node = _make_node(
+            llm=llm,
+            active_tools_list=[MagicMock(name="request_tools")],
+            force_thinking_break=force_thinking_break,
+            checkpoint_store=None,
+            invoke_with_timeout=capture_invoke,
+        )
+        # Prior turn: 3 distinct searches (meets threshold on its own).
+        # Current turn: only 1 search — below threshold.
+        state = _make_state(
+            [
+                HumanMessage(content="old question about Selene"),
+                AIMessage(
+                    content="r1",
+                    tool_calls=[
+                        {"name": "search_web", "args": {"query": "selene ai"}, "id": "tc1"}
+                    ],
+                ),
+                ToolMessage(content="result1", tool_call_id="tc1", name="search_web"),
+                AIMessage(
+                    content="r2",
+                    tool_calls=[
+                        {"name": "search_web", "args": {"query": "selene pricing"}, "id": "tc2"}
+                    ],
+                ),
+                ToolMessage(content="result2", tool_call_id="tc2", name="search_web"),
+                AIMessage(
+                    content="r3",
+                    tool_calls=[
+                        {"name": "search_web", "args": {"query": "selene features"}, "id": "tc3"}
+                    ],
+                ),
+                ToolMessage(content="result3", tool_call_id="tc3", name="search_web"),
+                # Fresh question — current turn.
+                HumanMessage(content="What about OpenClaw?"),
+                AIMessage(
+                    content="r4",
+                    tool_calls=[
+                        {"name": "search_web", "args": {"query": "openclaw ai"}, "id": "tc4"}
+                    ],
+                ),
+                ToolMessage(content="result4", tool_call_id="tc4", name="search_web"),
+            ]
+        )
+
+        result = node(state, {})
+
+        # Should fall through to normal processing with a nudge appended.
+        assert result == {"messages": [AIMessage(content="ok")]}
+
+        # Strategy nudge must be injected (current turn has only 1 search).
+        nudge_msgs = [
+            m
+            for m in captured_msgs
+            if isinstance(m, HumanMessage) and "STRATEGY NUDGE" in m.content
+        ]
+        assert len(nudge_msgs) == 1, f"Expected strategy nudge; got {nudge_msgs}"
+
+        # Thinking break must NOT fire — effort is low on the current turn.
+        tb_msgs = [
+            m
+            for m in captured_msgs
+            if isinstance(m, HumanMessage) and "THINKING BREAK" in m.content
+        ]
+        assert (
+            len(tb_msgs) == 0
+        ), "Thinking break must be suppressed when current-turn effort is low."
+
+    def test_thinking_break_suppressed_when_near_duplicate_searches(self):
+        """Regression test for :next24 reproducer (#1520).
+
+        Three reorderings of the same query should NOT pass the effort gate.
+        The strategy nudge should fire instead of the refusal prompt.
+        """
+        captured_msgs: list = []
+
+        def capture_invoke(llm_obj, msgs, config, timeout):
+            captured_msgs.extend(msgs)
+            return AIMessage(content="ok")
+
+        llm = MagicMock()
+        llm.bind_tools.return_value = llm
+
+        force_thinking_break: list[bool] = [True]
+        node = _make_node(
+            llm=llm,
+            active_tools_list=[MagicMock(name="request_tools")],
+            force_thinking_break=force_thinking_break,
+            checkpoint_store=None,
+            invoke_with_timeout=capture_invoke,
+        )
+        # 3 search_web calls with near-duplicate queries — should collapse to 1 distinct.
+        state = _make_state(
+            [
+                HumanMessage(content="hello"),
+                AIMessage(
+                    content="r1",
+                    tool_calls=[
+                        {
+                            "name": "search_web",
+                            "args": {"query": "foo bar baz qux"},
+                            "id": "tc1",
+                        }
+                    ],
+                ),
+                ToolMessage(content="results1", tool_call_id="tc1", name="search_web"),
+                AIMessage(
+                    content="r2",
+                    tool_calls=[
+                        {
+                            "name": "search_web",
+                            "args": {"query": "baz foo bar qux"},
+                            "id": "tc2",
+                        }
+                    ],
+                ),
+                ToolMessage(content="results2", tool_call_id="tc2", name="search_web"),
+                AIMessage(
+                    content="r3",
+                    tool_calls=[
+                        {
+                            "name": "search_web",
+                            "args": {"query": "bar qux baz foo"},
+                            "id": "tc3",
+                        }
+                    ],
+                ),
+                ToolMessage(content="results3", tool_call_id="tc3", name="search_web"),
+            ]
+        )
+
+        node(state, {})
+
+        # Strategy nudge should fire, not the thinking break refusal.
+        nudge_msgs = [
+            m
+            for m in captured_msgs
+            if isinstance(m, HumanMessage) and "STRATEGY NUDGE" in m.content
+        ]
+        assert len(nudge_msgs) == 1, f"Expected strategy nudge; got {nudge_msgs}"
+
+        tb_msgs = [
+            m
+            for m in captured_msgs
+            if isinstance(m, HumanMessage) and "THINKING BREAK" in m.content
+        ]
+        assert (
+            len(tb_msgs) == 0
+        ), "Thinking break must be suppressed when near-duplicate searches don't pass the gate."
+
+
+class TestSearchEffortHelper:
+    """Tests for the _compute_search_effort helper."""
+
+    def test_empty_messages(self):
+        assert _compute_search_effort([]) == (0, False)
+
+    def test_counts_distinct_search_web(self):
+        """Only distinct queries count toward effort."""
+        msgs = [
+            AIMessage(
+                content="a",
+                tool_calls=[{"name": "search_web", "args": {"query": "foo bar"}, "id": "t1"}],
+            ),
+            ToolMessage(content="a", tool_call_id="t1", name="search_web"),
+            AIMessage(
+                content="b",
+                tool_calls=[{"name": "search_web", "args": {"query": "baz qux"}, "id": "t2"}],
+            ),
+            ToolMessage(content="b", tool_call_id="t2", name="search_web"),
+        ]
+        assert _compute_search_effort(msgs) == (2, False)
+
+    def test_collapses_near_duplicate_queries(self):
+        """Reordered or near-duplicate queries should collapse to one count."""
+        msgs = [
+            AIMessage(
+                content="a",
+                tool_calls=[
+                    {"name": "search_web", "args": {"query": "Soudal Fix All Silirub"}, "id": "t1"}
+                ],
+            ),
+            ToolMessage(content="r1", tool_call_id="t1", name="search_web"),
+            AIMessage(
+                content="b",
+                tool_calls=[
+                    {"name": "search_web", "args": {"query": "Silirub Fix All Soudal"}, "id": "t2"}
+                ],
+            ),
+            ToolMessage(content="r2", tool_call_id="t2", name="search_web"),
+            AIMessage(
+                content="c",
+                tool_calls=[
+                    {"name": "search_web", "args": {"query": "Fix Soudal Silirub All"}, "id": "t3"}
+                ],
+            ),
+            ToolMessage(content="r3", tool_call_id="t3", name="search_web"),
+        ]
+        # All three normalise to the same token set {soudal, fix, all, silirub}
+        assert _compute_search_effort(msgs) == (1, False)
+
+    def test_skips_error_results(self):
+        """Search calls that returned errors should not count."""
+        msgs = [
+            AIMessage(
+                content="a",
+                tool_calls=[{"name": "search_web", "args": {"query": "foo"}, "id": "t1"}],
+            ),
+            ToolMessage(
+                content="Error searching: request failed", tool_call_id="t1", name="search_web"
+            ),
+            AIMessage(
+                content="b",
+                tool_calls=[{"name": "search_web", "args": {"query": "bar"}, "id": "t2"}],
+            ),
+            ToolMessage(
+                content="Tool 'search_web' is in the catalog but not loaded",
+                tool_call_id="t2",
+                name="search_web",
+            ),
+        ]
+        assert _compute_search_effort(msgs) == (0, False)
+
+    def test_skips_empty_queries(self):
+        """Search calls with empty/missing query args should not count."""
+        msgs = [
+            AIMessage(content="a", tool_calls=[{"name": "search_web", "args": {}, "id": "t1"}]),
+            ToolMessage(content="r1", tool_call_id="t1", name="search_web"),
+        ]
+        assert _compute_search_effort(msgs) == (0, False)
+
+    def test_detects_http_get(self):
+        msgs = [
+            AIMessage(
+                content="a",
+                tool_calls=[{"name": "search_web", "args": {"query": "foo"}, "id": "t1"}],
+            ),
+            ToolMessage(content="a", tool_call_id="t1", name="search_web"),
+            AIMessage(
+                content="b",
+                tool_calls=[
+                    {"name": "http_get", "args": {"url": "https://example.com"}, "id": "t2"}
+                ],
+            ),
+            ToolMessage(content="b", tool_call_id="t2", name="http_get"),
+        ]
+        assert _compute_search_effort(msgs) == (1, True)
+
+    def test_ignores_non_tool_messages(self):
+        msgs = [
+            HumanMessage(content="hello"),
+            AIMessage(content="response"),
+            AIMessage(
+                content="a",
+                tool_calls=[{"name": "search_web", "args": {"query": "foo"}, "id": "t1"}],
+            ),
+            ToolMessage(content="a", tool_call_id="t1", name="search_web"),
+        ]
+        assert _compute_search_effort(msgs) == (1, False)
+
+    def test_ignores_other_tools(self):
+        msgs = [
+            ToolMessage(content="a", tool_call_id="t1", name="write_file"),
+            ToolMessage(content="b", tool_call_id="t2", name="read_email"),
+        ]
+        assert _compute_search_effort(msgs) == (0, False)
+
+    def test_effort_scoped_to_current_turn(self):
+        """Regression test for #1532 Bug 1.
+
+        Searches from a prior user turn must NOT count toward the current
+        turn's effort gate.  Only messages after the most recent HumanMessage
+        are considered.
+        """
+        msgs = [
+            # Prior turn — 3 distinct searches (would meet threshold alone).
+            HumanMessage(content="old question about Selene"),
+            AIMessage(
+                content="a",
+                tool_calls=[{"name": "search_web", "args": {"query": "selene ai"}, "id": "t1"}],
+            ),
+            ToolMessage(content="r1", tool_call_id="t1", name="search_web"),
+            AIMessage(
+                content="b",
+                tool_calls=[
+                    {"name": "search_web", "args": {"query": "selene pricing"}, "id": "t2"}
+                ],
+            ),
+            ToolMessage(content="r2", tool_call_id="t2", name="search_web"),
+            AIMessage(
+                content="c",
+                tool_calls=[
+                    {"name": "search_web", "args": {"query": "selene features"}, "id": "t3"}
+                ],
+            ),
+            ToolMessage(content="r3", tool_call_id="t3", name="search_web"),
+            # Current turn — only 1 search.
+            HumanMessage(content="What about OpenClaw?"),
+            AIMessage(
+                content="d",
+                tool_calls=[{"name": "search_web", "args": {"query": "openclaw ai"}, "id": "t4"}],
+            ),
+            ToolMessage(content="r4", tool_call_id="t4", name="search_web"),
+        ]
+        # Only the current turn's 1 search should count.
+        assert _compute_search_effort(msgs) == (1, False)
+
+    def test_effort_counts_all_searches_when_no_human_message(self):
+        """When no HumanMessage exists, effort falls back to the full list."""
+        msgs = [
+            AIMessage(
+                content="a",
+                tool_calls=[{"name": "search_web", "args": {"query": "foo"}, "id": "t1"}],
+            ),
+            ToolMessage(content="r1", tool_call_id="t1", name="search_web"),
+            AIMessage(
+                content="b",
+                tool_calls=[{"name": "search_web", "args": {"query": "bar"}, "id": "t2"}],
+            ),
+            ToolMessage(content="r2", tool_call_id="t2", name="search_web"),
+        ]
+        assert _compute_search_effort(msgs) == (2, False)
+
+    def test_effort_scoped_with_multiple_human_messages(self):
+        """With multiple HumanMessages, only the last turn's searches count."""
+        msgs = [
+            HumanMessage(content="first question"),
+            AIMessage(
+                content="a",
+                tool_calls=[{"name": "search_web", "args": {"query": "q1"}, "id": "t1"}],
+            ),
+            ToolMessage(content="r1", tool_call_id="t1", name="search_web"),
+            HumanMessage(content="second question"),
+            AIMessage(
+                content="b",
+                tool_calls=[{"name": "search_web", "args": {"query": "q2"}, "id": "t2"}],
+            ),
+            ToolMessage(content="r2", tool_call_id="t2", name="search_web"),
+            HumanMessage(content="third question"),
+            AIMessage(
+                content="c",
+                tool_calls=[{"name": "search_web", "args": {"query": "q3"}, "id": "t3"}],
+            ),
+            ToolMessage(content="r3", tool_call_id="t3", name="search_web"),
+        ]
+        assert _compute_search_effort(msgs) == (1, False)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -719,8 +1461,11 @@ class TestCallModelCheckpointAndReflection:
 
         node(state, {})
 
-        # Check for checkpoint nudge message in LLM input
-        assert any("Checkpoint" in m.content for m in captured_msgs)
+        # Check for checkpoint nudge message in LLM input — must be a
+        # SystemMessage so models treat it as high-salience instruction.
+        nudge_msgs = [m for m in captured_msgs if "Checkpoint reminder" in m.content]
+        assert len(nudge_msgs) == 1
+        assert isinstance(nudge_msgs[0], SystemMessage)
 
     def test_reflection_injected_after_interval(self):
         """Reflection message should be injected after reflection_interval rounds."""

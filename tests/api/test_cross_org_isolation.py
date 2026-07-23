@@ -27,11 +27,12 @@ import pytest
 
 pytest.importorskip("fastapi")
 
+from fastapi import HTTPException  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 from sqlalchemy.ext.asyncio import async_sessionmaker  # noqa: E402
 
 from src.api.app import app  # noqa: E402
-from src.api.auth import _hash_api_key, create_access_token  # noqa: E402
+from src.api.auth import TokenData, _hash_api_key, create_access_token  # noqa: E402
 from src.api.db.engine import get_db  # noqa: E402
 from src.api.db.models import ApiSessionRecord, Workspace  # noqa: E402
 from src.api.db.repositories.api_keys import ApiKeyRepository  # noqa: E402
@@ -453,3 +454,170 @@ class TestUnauthenticatedAccess:
         client, _, _, _, _, _, _, _ = seeded_client
         r = client.get("/api/v1/auth/api-keys")
         assert r.status_code == 401, f"Expected 401, got {r.status_code}"
+
+
+# ===========================================================================
+# Superadmin bypass: superadmin can access any org's resources
+# ===========================================================================
+
+
+class TestSuperadminBypass:
+    """Verify that superadmin users can access resources across orgs."""
+
+    def test_superadmin_can_access_user_b_session(self, seeded_client):
+        client, _, _, _, _, _, sb, _ = seeded_client
+        r = client.get(
+            f"/api/v1/sessions/{sb}",
+            headers=_auth_header("superadmin-1", role="superadmin"),
+        )
+        assert r.status_code == 200, f"Superadmin should bypass: got {r.status_code}: {r.json()}"
+
+    def test_superadmin_can_list_all_sessions(self, seeded_client):
+        client, _, _, _, _, _, _, _ = seeded_client
+        r = client.get(
+            "/api/v1/sessions",
+            headers=_auth_header("superadmin-1", role="superadmin"),
+        )
+        assert r.status_code == 200, f"Superadmin list sessions failed: {r.json()}"
+        items = r.json()["data"]["items"]
+        assert len(items) >= 2, "Superadmin should see sessions from all users"
+
+    def test_superadmin_can_access_user_b_session_messages(self, seeded_client):
+        client, _, _, _, _, _, sb, _ = seeded_client
+        r = client.get(
+            f"/api/v1/sessions/{sb}/messages",
+            headers=_auth_header("superadmin-1", role="superadmin"),
+        )
+        assert r.status_code == 200, f"Superadmin should bypass: got {r.status_code}: {r.json()}"
+
+    def test_superadmin_can_access_user_b_session_memory(self, seeded_client):
+        client, _, _, _, _, _, sb, _ = seeded_client
+        r = client.get(
+            f"/api/v1/sessions/{sb}/memory",
+            headers=_auth_header("superadmin-1", role="superadmin"),
+        )
+        assert r.status_code == 200, f"Superadmin should bypass: got {r.status_code}: {r.json()}"
+
+
+# ===========================================================================
+# Admin bypass disabled: direct guard integration tests
+# ===========================================================================
+
+
+class TestAdminBypassDisabled:
+    """Verify org-scoped admin denial when admin_bypass=False.
+
+    These are integration tests against the real guard functions
+    (``verify_session_owner`` and ``_check_session_access``) using a
+    live database session.  They cover the gap left by the unit-level
+    ``test_admin_bypass_false_enforces_check`` — namely that the
+    functions themselves honour the flag at the integration boundary.
+    """
+
+    def test_verify_session_owner_bypass_false_denies_admin(self, seeded_client, engine):
+        """Org admin must be denied when admin_bypass=False."""
+        _, _, _, _, _, _, sb, admin_a = seeded_client
+        from src.api.auth import verify_session_owner
+
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+
+        async def _test():
+            async with factory() as session:
+                admin_token = TokenData(
+                    user_id=admin_a,
+                    role="admin",
+                    raw_claims={"sub": admin_a, "role": "admin"},
+                )
+                with pytest.raises(HTTPException) as exc_info:
+                    await verify_session_owner(sb, admin_token, session, admin_bypass=False)
+                assert exc_info.value.status_code == 403
+                assert exc_info.value.detail["code"] == "FORBIDDEN"
+
+        asyncio.run(_test())
+
+    def test_verify_session_owner_bypass_false_allows_owner(self, seeded_client, engine):
+        """Session owner must still pass when admin_bypass=False."""
+        _, _, _, ua, _, sa, _, _ = seeded_client
+        from src.api.auth import verify_session_owner
+
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+
+        async def _test():
+            async with factory() as session:
+                user_token = TokenData(
+                    user_id=ua,
+                    role="user",
+                    raw_claims={"sub": ua, "role": "user"},
+                )
+                # Must not raise
+                await verify_session_owner(sa, user_token, session, admin_bypass=False)
+
+        asyncio.run(_test())
+
+    def test_check_session_access_bypass_false_denies_admin(self, seeded_client, engine):
+        """Org admin must be denied when admin_bypass=False."""
+        _, _, _, _, _, _, sb, admin_a = seeded_client
+        from src.api.routes.sessions import _check_session_access
+
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+
+        async def _test():
+            async with factory() as session:
+                admin_token = TokenData(
+                    user_id=admin_a,
+                    role="admin",
+                    raw_claims={"sub": admin_a, "role": "admin"},
+                )
+                with pytest.raises(HTTPException) as exc_info:
+                    await _check_session_access(sb, admin_token, session, admin_bypass=False)
+                assert exc_info.value.status_code == 403
+                assert exc_info.value.detail["code"] == "FORBIDDEN"
+
+        asyncio.run(_test())
+
+    def test_check_session_access_bypass_false_allows_owner(self, seeded_client, engine):
+        """Session owner must still pass when admin_bypass=False."""
+        _, _, _, ua, _, sa, _, _ = seeded_client
+        from src.api.routes.sessions import _check_session_access
+
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+
+        async def _test():
+            async with factory() as session:
+                user_token = TokenData(
+                    user_id=ua,
+                    role="user",
+                    raw_claims={"sub": ua, "role": "user"},
+                )
+                record = await _check_session_access(sa, user_token, session, admin_bypass=False)
+                assert record is not None
+                assert record.id == sa
+
+        asyncio.run(_test())
+
+
+# ===========================================================================
+# ADR-0055 canary: expected future behavior on real endpoints
+# ===========================================================================
+
+
+class TestAdr0055Canary:
+    """Canary tests for ADR-0055 Phase 2 (admin bypass removal).
+
+    These document the expected endpoint-level behavior once session routes
+    stop passing ``admin_bypass=True``.  They are expected to fail until
+    Phase 2 lands and should be updated to regular tests at that time.
+    """
+
+    @pytest.mark.xfail(
+        reason="Pending ADR-0055 Phase 2: session endpoints still use admin_bypass=True",
+        strict=False,
+    )
+    def test_org_admin_cross_org_session_denied_after_adr0055(self, seeded_client):
+        """Org admin → other org session → must 403 once admin bypass is removed."""
+        client, _, _, _, _, _, sb, admin_a = seeded_client
+        r = client.get(
+            f"/api/v1/sessions/{sb}",
+            headers=_auth_header(admin_a, role="admin"),
+        )
+        assert r.status_code == 403, f"Expected 403 after ADR-0055, got {r.status_code}: {r.json()}"

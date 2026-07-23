@@ -8,6 +8,7 @@ jailbreak attempts, data exfiltration, and resource exhaustion.
 
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import logging
 import os
@@ -15,44 +16,16 @@ import re
 import tempfile
 import threading
 import time
-import unicodedata
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from src.assistant._security_patterns import INJECTION_PATTERNS, skeleton
+
 log = logging.getLogger("cogtrix")
 
 _MONO_OFFSET: float = time.monotonic() - time.time()
-
-_INJECTION_PATTERNS: list[re.Pattern[str]] = [
-    re.compile(p, re.IGNORECASE)
-    for p in [
-        r"ignore\s+(all\s+)?(previous|prior|above)\s+(instructions?|prompts?|rules?)",
-        r"(system\s+prompt|system\s+message)\s+is",
-        r"you\s+are\s+now\s+(a|an|the)\b",
-        r"disregard\s+(all\s+)?(previous|prior|your)\s+(instructions?|rules?|guidelines?)",
-        r"pretend\s+(you\s+are|to\s+be|you're)\b",
-        r"act\s+as\s+(if\s+)?(you\s+are|a|an)",
-        r"(new\s+)?instructions?:\s",
-        r"override\s+(previous|all|your)\b",
-        r"forget\s+(everything|all|previous|your)\b",
-        r"(drop|clear|reset|erase|wipe)\s+(all|everything|previous|prior|your|the)\b",
-        # "clear/reset/drop the context" — use `clear` only with an explicit determiner so
-        # adjective uses like "no clear context" or "a clear professional context" don't match.
-        r"\bclear\s+(all|the|your|my|previous|prior|entire)\s+.{0,50}\b(context|history|memory|instructions?|rules?|prompts?)\b",
-        r"\b(drop|reset|erase|wipe)\s+.{0,100}\b(context|history|memory|instructions?|rules?|prompts?)\b",
-        r"now\s+you\s+are\s+(a|an|the|my)\b",
-        r"from\s+now\s+on\s+you\s+(are|will|should|must)\b",
-        r"stop\s+being\s+(a|an|the)\b",
-        r"\bDAN\b.{0,200}\bmode\b",
-        r"jailbreak",
-        r"do\s+anything\s+now",
-        r"\[system\]",
-        r"<\|?(system|im_start|im_end)\|?>",
-        r"```\s*(system|prompt)",
-    ]
-]
 
 _DANGEROUS_CODEPOINTS: frozenset[int] = frozenset(
     [
@@ -103,58 +76,6 @@ _LEET_MAP: dict[str, str] = {
     "$": "s",
 }
 _LEET_DIGITS: frozenset[str] = frozenset("01345678")
-
-_CONFUSABLE_MAP: dict[str, str] = {
-    # Cyrillic -> Latin
-    "\u0430": "a",
-    "\u0410": "A",  # а/А
-    "\u0441": "c",
-    "\u0421": "C",  # с/С
-    "\u0435": "e",
-    "\u0415": "E",  # е/Е
-    "\u043d": "h",
-    "\u041d": "H",  # н/Н
-    "\u0456": "i",
-    "\u0406": "I",  # і/І
-    "\u0458": "j",  # ј
-    "\u043e": "o",
-    "\u041e": "O",  # о/О
-    "\u0440": "p",
-    "\u0420": "P",  # р/Р
-    "\u0455": "s",  # ѕ
-    "\u0443": "y",  # у
-    "\u0445": "x",
-    "\u0425": "X",  # х/Х
-    "\u0412": "B",  # В
-    "\u041a": "K",  # К
-    "\u041c": "M",  # М
-    "\u0422": "T",  # Т
-    # Greek -> Latin
-    "\u03b1": "a",
-    "\u0391": "A",  # α/Α
-    "\u03b5": "e",
-    "\u0395": "E",  # ε/Ε
-    "\u03bf": "o",
-    "\u039f": "O",  # ο/Ο
-    "\u0392": "B",
-    "\u0397": "H",
-    "\u0399": "I",
-    "\u039a": "K",
-    "\u039c": "M",
-    "\u039d": "N",
-    "\u03a1": "P",
-    "\u03a4": "T",
-    "\u03a7": "X",
-    "\u03a5": "Y",
-    "\u0396": "Z",
-}
-
-_CONFUSABLE_TRANS: dict[int, str] = str.maketrans(_CONFUSABLE_MAP)
-
-
-def _skeleton(text: str) -> str:
-    """Reduce text to a Latin skeleton for confusable-resistant matching."""
-    return unicodedata.normalize("NFKC", text).translate(_CONFUSABLE_TRANS)
 
 
 # ── Tool-call guard ──────────────────────────────────────────────────
@@ -284,7 +205,7 @@ class InputGuard:
     def __init__(self, config: dict[str, Any]) -> None:
         self._max_length: int = config.get("max_input_length", 4000)
         self._unicode_checks: bool = config.get("unicode_checks", True)
-        self._patterns: list[re.Pattern[str]] = list(_INJECTION_PATTERNS)
+        self._patterns: list[re.Pattern[str]] = list(INJECTION_PATTERNS)
         for p in config.get("input_patterns", []):
             self._patterns.append(re.compile(p, re.IGNORECASE))
 
@@ -312,7 +233,7 @@ class InputGuard:
                         guard_name="input_unicode",
                     )
 
-        normalized = _skeleton(text)
+        normalized = skeleton(text)
         for pattern in self._patterns:
             if pattern.search(normalized):
                 return GuardrailResult(
@@ -675,6 +596,10 @@ class LLMJudge:
     def __init__(self, llm: Any) -> None:
         self._llm = llm
 
+    # Timeout for LLM judge invoke calls.  A hung model must not block the
+    # inbound message processing path indefinitely.
+    _INVOKE_TIMEOUT_SECONDS: int = 60
+
     def classify(self, text: str) -> GuardrailResult:
         try:
             from langchain_core.messages import HumanMessage, SystemMessage
@@ -683,7 +608,30 @@ class LLMJudge:
                 SystemMessage(content=_JUDGE_SYSTEM_PROMPT),
                 HumanMessage(content=text),
             ]
-            response = self._llm.invoke(messages)
+            # Wrap the LLM call in a temporary executor so we can enforce a
+            # timeout.  Python threads cannot be cancelled; shutdown(wait=False)
+            # lets the hung thread die in the background without blocking the
+            # caller.  NOTE: Do NOT use ``with ThreadPoolExecutor(...) as pool:``
+            # because ``__exit__`` calls ``shutdown(wait=True)`` which blocks on
+            # the hung thread.  Manual management with
+            # ``finally: pool.shutdown(wait=False)`` is required.
+            pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+            try:
+                future = pool.submit(self._llm.invoke, messages)
+                try:
+                    response = future.result(timeout=self._INVOKE_TIMEOUT_SECONDS)
+                except concurrent.futures.TimeoutError:
+                    log.warning(
+                        "LLM judge timed out after %ds — blocking content as precaution",
+                        self._INVOKE_TIMEOUT_SECONDS,
+                    )
+                    return GuardrailResult(
+                        is_safe=False,
+                        reason="LLM judge timed out",
+                        guard_name="llm_judge",
+                    )
+            finally:
+                pool.shutdown(wait=False)
             raw: str = (response.content if hasattr(response, "content") else str(response)).strip()
 
             if not raw:
@@ -760,8 +708,8 @@ class ToolCallGuard:
         for key, value in tool_args.items():
             if not isinstance(value, str):
                 continue
-            normalized = _skeleton(value)
-            for pattern in _INJECTION_PATTERNS:
+            normalized = skeleton(value)
+            for pattern in INJECTION_PATTERNS:
                 if pattern.search(normalized):
                     return GuardrailResult(
                         is_safe=False,

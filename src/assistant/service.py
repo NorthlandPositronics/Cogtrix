@@ -154,162 +154,166 @@ class AssistantService:
             agent_runner = run_agent
 
         self._executor = ThreadPoolExecutor(max_workers=max_concurrent)
-        self._channels: list[Channel] = self._discover_channels(config)
+        try:
+            self._channels: list[Channel] = self._discover_channels(config)
 
-        top_data_dir = getattr(config, "data_dir", "data")
-        schedule_path = Path(top_data_dir) / "assistant" / "schedule.json"
-        channels_map = {ch.name: ch for ch in self._channels}
-        quiet_cfg: dict[str, Any] = asst_cfg.get("response_timing", {})
-        self._scheduler = MessageScheduler(
-            channels_map,
-            schedule_path,
-            quiet_cfg,
-            dispatch_interval=float(asst_cfg.get("dispatch_interval", 30.0)),
-        )
-
-        debounce_seconds = float(asst_cfg.get("debounce_seconds", 3.0))
-
-        deferral_cfg: dict[str, Any] = asst_cfg.get("deferral", {})
-        if deferral_cfg.get("enabled", True):
-            deferral_path = Path(top_data_dir) / "assistant" / "deferrals.json"
-            self._deferral_mgr: DeferralManager | None = DeferralManager(
-                persist_path=deferral_path,
-                reprocess_callback=None,  # Wired after handler construction below
-                channels=channels_map,
-                max_depth=int(deferral_cfg.get("max_depth", 3)),
-                check_interval=float(deferral_cfg.get("check_interval", 10.0)),
-                stale_threshold=float(deferral_cfg.get("stale_threshold", 7200.0)),
-            )
-        else:
-            self._deferral_mgr = None
-
-        from src.assistant.workflows import WorkflowRegistry
-
-        services_config_full: dict[str, Any] = (
-            config.services if hasattr(config, "services") else {}
-        )
-        merged_phonebook: dict[str, str] = {}
-        merged_contact_prompts: dict[str, str] = {}
-        for ch_name in ("whatsapp", "telegram"):
-            ch_cfg = services_config_full.get(ch_name, {})
-            pb = ch_cfg.get("phonebook", {})
-            if isinstance(pb, dict):
-                for name, ident in pb.items():
-                    key = str(ident).replace("@c.us", "").replace("@s.whatsapp.net", "")
-                    merged_phonebook[key] = str(name)
-            cp = ch_cfg.get("contact_prompts", {})
-            if isinstance(cp, dict):
-                merged_contact_prompts.update(cp)
-        data_dir = getattr(config, "data_dir", "data")
-        self._workflow_registry = WorkflowRegistry(
-            data_dir=data_dir,
-            contact_prompts=merged_contact_prompts,
-            phonebook=merged_phonebook,
-        )
-
-        campaign_path = Path(top_data_dir) / "assistant" / "campaigns.json"
-        campaign_cfg: dict[str, Any] = asst_cfg.get("campaigns", {})
-        self._campaign_mgr: CampaignManager | None = None
-        if campaign_cfg.get("enabled", True):
-            self._campaign_mgr = CampaignManager(
-                persist_path=campaign_path,
-                check_interval=float(campaign_cfg.get("check_interval", 60.0)),
+            top_data_dir = getattr(config, "data_dir", "data")
+            schedule_path = Path(top_data_dir) / "assistant" / "schedule.json"
+            channels_map = {ch.name: ch for ch in self._channels}
+            quiet_cfg: dict[str, Any] = asst_cfg.get("response_timing", {})
+            self._scheduler = MessageScheduler(
+                channels_map,
+                schedule_path,
+                quiet_cfg,
+                dispatch_interval=float(asst_cfg.get("dispatch_interval", 30.0)),
             )
 
-        self._handler = MessageHandler(
-            session_mgr=self._session_mgr,
-            config=asst_cfg,
-            llm=llm,
-            system_prompt=effective_prompt,
-            registry=registry,
-            approvals={"*"},
-            available_tools=available_tools,
-            active_tools=active_tools,
-            max_context_tokens=max_context_tokens,
-            compression_llm=compression_llm,
-            knowledge_store=self._knowledge_store,
-            guardrails=guardrails,
-            agent_runner=agent_runner,
-            parallel_tool_execution=bool(
-                asst_cfg.get(
-                    "parallel_tool_execution", getattr(config, "parallel_tool_execution", True)
+            debounce_seconds = float(asst_cfg.get("debounce_seconds", 3.0))
+
+            deferral_cfg: dict[str, Any] = asst_cfg.get("deferral", {})
+            if deferral_cfg.get("enabled", True):
+                deferral_path = Path(top_data_dir) / "assistant" / "deferrals.json"
+                self._deferral_mgr: DeferralManager | None = DeferralManager(
+                    persist_path=deferral_path,
+                    reprocess_callback=None,  # Wired after handler construction below
+                    channels=channels_map,
+                    max_depth=int(deferral_cfg.get("max_depth", 3)),
+                    check_interval=float(deferral_cfg.get("check_interval", 10.0)),
+                    stale_threshold=float(deferral_cfg.get("stale_threshold", 7200.0)),
                 )
-            ),
-            services_config=services_config_full,
-            scheduler=self._scheduler,
-            deferral_mgr=self._deferral_mgr,
-            workflow_registry=self._workflow_registry,
-            campaign_mgr=self._campaign_mgr,
-        )
+            else:
+                self._deferral_mgr = None
 
-        # Wire campaign manager dependencies after handler construction
-        if self._campaign_mgr is not None:
-            self._campaign_mgr.set_handler(self._handler)
-            self._campaign_mgr.set_channels(channels_map)
+            from src.assistant.workflows import WorkflowRegistry
 
-        # Wire the reprocess callback now that both handler and executor exist.
-        # BUG-105: submit handle_batch to the executor so the dispatch thread does
-        # not hold session.lock during a full LLM call (which would block
-        # session_mgr.save_all() on shutdown).
-        # BUG-109: the callback must submit and return immediately.  A near-zero
-        # timeout (50 ms) surfaces only synchronous rejections (executor shut down,
-        # coding errors raised before the first await) without misidentifying a
-        # slow LLM response as a failure.  TimeoutError from a healthy but slow LLM
-        # call is swallowed here; _fire_record's retry logic is only triggered by a
-        # genuine exception.  executor.shutdown(wait=True) in _handle_shutdown drains
-        # all submitted futures before session_mgr.save_all() runs, guaranteeing
-        # memory durability without any blocking in this callback.
-        if self._deferral_mgr is not None:
-            _exec = self._executor
-            _handler = self._handler
+            services_config_full: dict[str, Any] = (
+                config.services if hasattr(config, "services") else {}
+            )
+            merged_phonebook: dict[str, str] = {}
+            merged_contact_prompts: dict[str, str] = {}
+            for ch_name in ("whatsapp", "telegram"):
+                ch_cfg = services_config_full.get(ch_name, {})
+                pb = ch_cfg.get("phonebook", {})
+                if isinstance(pb, dict):
+                    for name, ident in pb.items():
+                        key = str(ident).replace("@c.us", "").replace("@s.whatsapp.net", "")
+                        merged_phonebook[key] = str(name)
+                cp = ch_cfg.get("contact_prompts", {})
+                if isinstance(cp, dict):
+                    merged_contact_prompts.update(cp)
+            data_dir = getattr(config, "data_dir", "data")
+            self._workflow_registry = WorkflowRegistry(
+                data_dir=data_dir,
+                contact_prompts=merged_contact_prompts,
+                phonebook=merged_phonebook,
+            )
 
-            def _reprocess_callback(msgs: Any, ch: Any, depth: int, session_key: str) -> None:
-                fut = _exec.submit(
-                    _handler.handle_batch,
-                    msgs,
-                    ch,
-                    is_reprocessing=True,
-                    deferral_depth=depth + 1,
+            campaign_path = Path(top_data_dir) / "assistant" / "campaigns.json"
+            campaign_cfg: dict[str, Any] = asst_cfg.get("campaigns", {})
+            self._campaign_mgr: CampaignManager | None = None
+            if campaign_cfg.get("enabled", True):
+                self._campaign_mgr = CampaignManager(
+                    persist_path=campaign_path,
+                    check_interval=float(campaign_cfg.get("check_interval", 60.0)),
                 )
 
-                def _handle_future_completion(f: Any) -> None:
-                    exc = f.exception()
-                    if exc is not None:
-                        log.error(
-                            "DeferralManager: reprocess handle_batch raised: %s",
-                            exc,
-                            exc_info=exc,
-                        )
-                        # Signal failure to deferral manager for retry
-                        if self._deferral_mgr is not None:
-                            self._deferral_mgr._on_reprocess_failure(session_key)
-                    else:
-                        # Signal success - record can be removed
-                        if self._deferral_mgr is not None:
-                            self._deferral_mgr._on_reprocess_success(session_key)
+            self._handler = MessageHandler(
+                session_mgr=self._session_mgr,
+                config=asst_cfg,
+                llm=llm,
+                system_prompt=effective_prompt,
+                registry=registry,
+                approvals={"*"},
+                available_tools=available_tools,
+                active_tools=active_tools,
+                max_context_tokens=max_context_tokens,
+                compression_llm=compression_llm,
+                knowledge_store=self._knowledge_store,
+                guardrails=guardrails,
+                agent_runner=agent_runner,
+                parallel_tool_execution=bool(
+                    asst_cfg.get(
+                        "parallel_tool_execution", getattr(config, "parallel_tool_execution", True)
+                    )
+                ),
+                services_config=services_config_full,
+                scheduler=self._scheduler,
+                deferral_mgr=self._deferral_mgr,
+                workflow_registry=self._workflow_registry,
+                campaign_mgr=self._campaign_mgr,
+            )
 
-                fut.add_done_callback(_handle_future_completion)
-                # Use a near-zero timeout to catch immediate executor rejection or
-                # a synchronous coding error raised before any I/O (BUG-109).
-                try:
-                    fut.result(timeout=0.05)
-                except TimeoutError:
-                    pass  # LLM call is running normally on the executor thread
-                except Exception:
-                    raise  # propagate executor rejection or coding errors to _fire_record
+            # Wire campaign manager dependencies after handler construction
+            if self._campaign_mgr is not None:
+                self._campaign_mgr.set_handler(self._handler)
+                self._campaign_mgr.set_channels(channels_map)
 
-            self._deferral_mgr.set_reprocess_callback(_reprocess_callback)
+            # Wire the reprocess callback now that both handler and executor exist.
+            # BUG-105: submit handle_batch to the executor so the dispatch thread does
+            # not hold session.lock during a full LLM call (which would block
+            # session_mgr.save_all() on shutdown).
+            # BUG-109: the callback must submit and return immediately.  A near-zero
+            # timeout (50 ms) surfaces only synchronous rejections (executor shut down,
+            # coding errors raised before the first await) without misidentifying a
+            # slow LLM response as a failure.  TimeoutError from a healthy but slow LLM
+            # call is swallowed here; _fire_record's retry logic is only triggered by a
+            # genuine exception.  executor.shutdown(wait=True) in _handle_shutdown drains
+            # all submitted futures before session_mgr.save_all() runs, guaranteeing
+            # memory durability without any blocking in this callback.
+            if self._deferral_mgr is not None:
+                _exec = self._executor
+                _handler = self._handler
 
-        self._poller = ChannelPoller(
-            self._channels,
-            self._handler,
-            self._executor,
-            asst_cfg,
-            self._session_mgr,
-            debounce_seconds=debounce_seconds,
-        )
-        self._stop_event = threading.Event()
-        self._shutting_down = False
+                def _reprocess_callback(msgs: Any, ch: Any, depth: int, session_key: str) -> None:
+                    fut = _exec.submit(
+                        _handler.handle_batch,
+                        msgs,
+                        ch,
+                        is_reprocessing=True,
+                        deferral_depth=depth + 1,
+                    )
+
+                    def _handle_future_completion(f: Any) -> None:
+                        exc = f.exception()
+                        if exc is not None:
+                            log.error(
+                                "DeferralManager: reprocess handle_batch raised: %s",
+                                exc,
+                                exc_info=exc,
+                            )
+                            # Signal failure to deferral manager for retry
+                            if self._deferral_mgr is not None:
+                                self._deferral_mgr._on_reprocess_failure(session_key)
+                        else:
+                            # Signal success - record can be removed
+                            if self._deferral_mgr is not None:
+                                self._deferral_mgr._on_reprocess_success(session_key)
+
+                    fut.add_done_callback(_handle_future_completion)
+                    # Use a near-zero timeout to catch immediate executor rejection or
+                    # a synchronous coding error raised before any I/O (BUG-109).
+                    try:
+                        fut.result(timeout=0.05)
+                    except TimeoutError:
+                        pass  # LLM call is running normally on the executor thread
+                    except Exception:
+                        raise  # propagate executor rejection or coding errors to _fire_record
+
+                self._deferral_mgr.set_reprocess_callback(_reprocess_callback)
+
+            self._poller = ChannelPoller(
+                self._channels,
+                self._handler,
+                self._executor,
+                asst_cfg,
+                self._session_mgr,
+                debounce_seconds=debounce_seconds,
+            )
+            self._stop_event = threading.Event()
+            self._shutting_down = False
+        except Exception:
+            self._executor.shutdown(wait=False)
+            raise
 
     def run(self) -> None:
         """Start polling and block until a shutdown signal is received."""

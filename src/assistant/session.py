@@ -17,6 +17,11 @@ from typing import Any
 
 log = logging.getLogger("cogtrix")
 
+#: Maximum overflow multiplier over _max_sessions before the hard cap fires.
+#: Allows transient burst growth when all sessions are busy, but caps sustained
+#: overflow at max_sessions * this value to prevent unbounded memory growth.
+_MAX_SESSION_OVERFLOW_MULTIPLIER = 1.5
+
 
 @dataclass
 class ChatSession:
@@ -111,6 +116,18 @@ class ChatSessionManager:
                                 "Skipping eviction of busy session %s; allowing over cap",
                                 oldest_key,
                             )
+
+                    # Hard cap: reject new sessions once we've exceeded the overflow
+                    # threshold. This prevents unbounded growth under sustained concurrent
+                    # load when every session is busy and non-blocking eviction fails.
+                    if len(self._sessions) >= int(
+                        self._max_sessions * _MAX_SESSION_OVERFLOW_MULTIPLIER
+                    ):
+                        raise RuntimeError(
+                            f"Session cap exceeded: {len(self._sessions)} active "
+                            f"sessions (hard cap at {int(self._max_sessions * _MAX_SESSION_OVERFLOW_MULTIPLIER)}). "
+                            f"Reduce concurrent load or increase max_sessions."
+                        )
 
                 session = self._create_session(msg)
                 self._sessions[key] = session

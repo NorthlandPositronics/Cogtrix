@@ -37,7 +37,7 @@ docker pull ghcr.io/northlandpositronics/cogtrix-webui:latest
 
 | Guide | Description |
 |-------|-------------|
-| [OpenAPI Schema](api/openapi.yaml) | OpenAPI 3.1 specification for all 87 REST endpoints ([JSON](api/openapi.json)) |
+| [OpenAPI Schema](api/openapi.yaml) | OpenAPI 3.1 specification for the REST surface (159 endpoints across 27 route groups) |
 | [Client Contract](api/client-contract.md) | TypeScript types, API client patterns, and WebSocket example code |
 | [WebSocket Protocol](api/websocket-protocol.md) | Streaming message types, authentication, connection lifecycle |
 | [WebUI Development Guide](api/webui-development-guide.md) | Page map, component hierarchy, integration patterns, and state management for React developers |

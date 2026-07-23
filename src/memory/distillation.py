@@ -55,8 +55,15 @@ def _parse_facts(text: str) -> list[str]:
     return facts
 
 
-def distill_summary(llm: Any, summary: str) -> list[str]:
-    """Return durable facts extracted from *summary* using *llm*."""
+def distill_summary(llm: Any | None, summary: str) -> list[str]:
+    """Return durable facts extracted from *summary* using *llm*.
+
+    If *llm* is ``None``, returns an empty list immediately — consistent
+    with the defensive fallback used in :func:`compress_to_tier`.
+    """
+    if llm is None:
+        return []
+
     if not summary.strip():
         return []
 

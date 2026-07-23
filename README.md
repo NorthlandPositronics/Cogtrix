@@ -1,150 +1,92 @@
-# Cogtrix Agent
+# Cogtrix
 
-A modular AI assistant with 88 built-in tools, multi-provider LLM support, and intelligent memory management.
+**An AI agent that lives on your laptop.** Talk to a local LLM, give it tools, let it do real work — read your files, search the web, write code, run shell commands, ping Slack. No API key required to start. Bring your own when you want to plug in GPT‑4, Claude, Gemini, or DeepSeek.
 
----
+```
+You> Find the five most-cited deep-learning papers from arXiv in 2025,
+     summarize each in two sentences, and save the list to papers.md.
 
-## What Is Cogtrix?
+Cogtrix> search_web("most cited arxiv deep learning papers 2025")
+         http_get("https://arxiv.org/abs/2501.…")
+         http_get("https://arxiv.org/abs/2502.…")
+         http_get("https://arxiv.org/abs/2503.…")
+         write_file("papers.md", "# Top arXiv DL papers 2025\n…")
+         Done. 5 papers summarized — see papers.md.
+```
 
-Cogtrix is an **interactive command-line AI assistant** that connects to large language models (LLMs) and extends them with tools — web search, file operations, code execution, deep reasoning, and more. You type a question or task; the agent reasons about it, calls tools as needed, and delivers the result.
-
-**Works with:** [Ollama](https://ollama.com/) (local, free), OpenAI, Anthropic Claude, Google Gemini, DeepSeek, and any OpenAI-compatible API (Groq, Together, vLLM, xAI, etc.)
-
-**Highlights:**
-
-- 88 built-in tools across 6+ search providers, file I/O, Git operations, shell, Python, HTTP, NLP, WhatsApp and Telegram messaging, and more
-- Three memory modes optimized for conversation, coding, or strategic reasoning — with hybrid memory (rolling summary + semantic recall)
-- Deep reasoning engine (Tree-of-Thought with iterative reflection) via `/think`
-- Task delegation across multiple LLM models via `/delegate`
-- Safety layer with human confirmation for sensitive operations
-- Headless assistant mode — run as a WhatsApp/Telegram daemon with per-chat context isolation and shared knowledge
-- Workflow system — bundle system prompts, knowledge bases, and tool policies into reusable workflows with auto-detection
-- Works out of the box with zero configuration if Ollama is running
+That's one prompt, six tool calls, one file on disk. Cogtrix chained them on its own.
 
 ---
 
-## Quick Start
-
-### 1. Install
+## 🚀 Try it in 60 seconds
 
 ```bash
 git clone https://github.com/NorthlandPositronics/Cogtrix.git
 cd Cogtrix
-uv sync            # or: pip install -r requirements.txt
+uv sync
+ollama pull qwen3:8b            # any GGUF model works
+uv run python cogtrix.py
 ```
 
-Install optional provider and feature extras:
+That's the whole install. No accounts, no keys, no SaaS. Cogtrix finds Ollama on `localhost:11434` by itself and loads 68 tools into the agent's toolbox.
 
-```bash
-uv pip install "cogtrix[anthropic]"    # Anthropic Claude
-uv pip install "cogtrix[google]"       # Google Gemini
-uv pip install "cogtrix[api]"          # REST API server (includes Stripe billing)
-uv pip install "cogtrix[mcp]"          # MCP server support
-uv pip install "cogtrix[search]"       # Tavily, Exa, Brave, SerpAPI search
-uv pip install "cogtrix[rag]"          # RAG/knowledge-base support (requires C++ build tools)
-uv pip install "cogtrix[saml]"         # SAML 2.0 SSO (requires libxmlsec1-dev on Linux)
-uv pip install "cogtrix[ldap]"         # LDAP/Active Directory sync
-```
+Prefer cloud LLMs? `export OPENAI_API_KEY="sk-..." && uv run python cogtrix.py -m gpt-4.1`. Or any of Anthropic, Google, DeepSeek, Groq, Together, vLLM, xAI — anything that speaks the OpenAI API.
 
-> **Prerequisite:** Python 3.13.x and [uv](https://docs.astral.sh/uv/) (recommended) or pip.
-
-### 2. Start an LLM
-
-The default backend is **Ollama** — local, free, no API key.
-
-```bash
-# Install Ollama from https://ollama.com, then:
-ollama pull qwen3:8b
-```
-
-That's it. No config file needed — Cogtrix connects to `localhost:11434` automatically.
-
-> **Using OpenAI instead?** `export OPENAI_API_KEY="sk-..." && python cogtrix.py`
-> **Using another provider?** See [Providers Guide](docs/PROVIDERS.md).
-
-### 3. Run
-
-```bash
-uv run python cogtrix.py        # if you used uv sync
-python cogtrix.py                # if you used pip install
-```
-
-### 4. Try it out
-
-```
-You: What is the capital of New Zealand?
-You: /think search for top 10 news affecting the stock market
-You: /tools
-You: /help
-You: /quit
-```
+> **Need:** Python 3.13.x and [uv](https://docs.astral.sh/uv/) (or `pip install -r requirements.txt`).
 
 ---
 
-## What Can I Do with Cogtrix?
+## 🎯 Three things that surprise people
 
-Here are some things you can try right away:
+### 1. Multi-step jobs from a single sentence
 
-**Research and questions:**
 ```
-You: What were the biggest AI breakthroughs in 2025?
-You: Compare PostgreSQL and MongoDB for a real-time analytics workload
-```
-
-**File operations and coding:**
-```
-You: Read main.py and suggest improvements
-You: Write a Python function that validates email addresses and save it to utils.py
+You> Read training_log.csv, plot the validation-loss curve,
+     find the epoch where overfitting starts, and patch
+     train.py to enable early stopping at that point.
 ```
 
-**Deep reasoning (uses the `/think` command):**
+Cogtrix reads the log, runs Python to compute the per-epoch loss delta, picks the inflection point, then applies the change to your training script with `patch_file`. Every shell or write action asks for confirmation first — you stay in control.
+
+### 2. Deep reasoning when the answer matters
+
 ```
-You: /think Design a microservices architecture for an e-commerce platform
-You: /think Should we use Kubernetes or Docker Swarm? Budget is $500/month, team of 3
+You> /think Design a real-time fraud-detection ML pipeline for 10M
+     card transactions/day at sub-100ms p99 latency and 99.95% recall.
 ```
 
-**Task delegation (splits work across multiple LLM models):**
+`/think` engages the **Tree‑of‑Thought** engine: Cogtrix proposes several candidate pipelines — feature store choice, model family, serving topology — scores each against your latency and recall targets, prunes, and explains the winner with the trade-offs against the runners-up. You see the *reasoning trail*, not just a verdict.
+
+### 3. Parallel delegation across models
+
 ```
-You: /delegate Compare Python, Rust, and Go for web backend development
-You: /delegate Research top 10 AI companies and their market cap
+You> /delegate Compare LightGBM, XGBoost, and CatBoost for credit-default
+     prediction on a heavily imbalanced dataset (positive rate ≈ 2%).
 ```
 
-**Multi-step workflows:**
-```
-You: Search the web for the latest Python 3.13 features, summarize them, and write the summary to python313.md
-```
-
-The agent decides which tools to call, chains them together, and delivers a complete answer.
+Cogtrix spawns three sub-agents in parallel — optionally on three different models — to dig into each library's class-imbalance handling, training cost, and inference latency, then synthesises a single comparison with a recommendation. Roughly the latency of one deep query, the breadth of three.
 
 ---
 
-## Common Launch Examples
+## 🧠 What's actually under the hood
 
-```bash
-python cogtrix.py                            # Ollama default
-python cogtrix.py -m gpt4                    # Named model alias from config
-python cogtrix.py -m gpt-4.1                 # Specific model alias from config
-python cogtrix.py -M code                    # Code development memory mode
-python cogtrix.py -M reasoning               # Strategic planning mode
-python cogtrix.py --prompt "Summarize X"     # Single prompt, then exit
-python cogtrix.py --prompt "Query" -o out.md # Save response to file
-python cogtrix.py -m fast                    # Use a model alias from config
-python cogtrix.py -y                         # Auto-approve all tool confirmations
-python cogtrix.py -c ~/my-config.yaml        # Use a specific config file
-python cogtrix.py --activate-tools web_search,shell  # Pin tools as active on startup
-python cogtrix.py --debug                    # Full debug logging
-python cogtrix.py --assistant                  # Headless messaging daemon (WhatsApp/Telegram)
-python cogtrix.py --assistant --debug          # Assistant mode with debug logging
-python cogtrix.py --system-prompt-file prompts/analyst.txt  # Load system prompt from file
-```
+| Capability | How Cogtrix does it |
+|---|---|
+| **Local-first** | Default backend is Ollama. Works offline, no telemetry, no rate limits. |
+| **Multi-provider** | Ollama, OpenAI, Anthropic, Gemini, DeepSeek, plus any OpenAI-compatible endpoint. Switch with `/model`. |
+| **68 built-in tools** | Files, Git, GitHub, shell, Python, HTTP, search (7 providers), text/NLP, math, scheduling, RAG, messaging — full list in [Tools Reference](docs/TOOLS_REFERENCE.md). |
+| **Three memory modes** | `conversation` for chat, `code` for programming (tracks files + errors), `reasoning` for planning (tracks goals + decisions). All modes do hybrid memory — rolling summary plus semantic recall. |
+| **Tool safety** | Sensitive tools (shell, write, patch) ask for confirmation. `-y` to auto-approve in trusted contexts. |
+| **MCP support** | Connect to any Model Context Protocol server — Anthropic's MCP ecosystem works out of the box. |
+| **Workflows** | Bundle a system prompt, knowledge base, and tool policy into a reusable named workflow with auto-detection. |
+| **Headless mode** | Run as a WhatsApp or Telegram daemon (see below). |
+| **REST + WebSocket API** | 159 endpoints, 2 WebSocket streams — drives the React web UI and any custom integration. |
 
 ---
 
-## Configuration
+## ⚙️ Configuration in one screenful
 
-Cogtrix works with zero configuration when Ollama is running on localhost. For anything more, create a config file in your project directory or home directory. Both JSON (`.cogtrix.json`) and YAML (`.cogtrix.yaml`) formats are supported:
-
-**YAML** (`.cogtrix.yaml` — recommended, easier to read):
+Cogtrix runs with zero config when Ollama is on localhost. For anything more, drop a YAML file in `.cogtrix.yaml` (project) or `~/.cogtrix.yaml` (global):
 
 ```yaml
 providers:
@@ -156,320 +98,226 @@ providers:
 
 models:
   default: local
-  local:
+  local:                          # everyday work — local qwen3 on a home GPU
     provider: my-server
     model: qwen3:8b
-  fast: my-server/qwen3:8b
-  smart: openai/gpt-4.1
+  fast: my-server/qwen3:8b        # same model, shorthand alias form
+  smart: openai/gpt-4.1           # heavy reasoning, e.g. /think and /delegate
 
 services:
   tavily:
-    api_key: "tvly-..."
+    api_key: "tvly-..."           # cleaner results than DuckDuckGo at low volume
 ```
 
-**JSON** (`.cogtrix.json`):
+JSON works too (`.cogtrix.json`). Settings are resolved highest priority first: **CLI flags** → **environment variables** → **config file** → **built-in defaults**.
 
-```json
-{
-  "providers": {
-    "my-server": {
-      "type": "ollama",
-      "base_url": "http://192.168.1.100:11434"
-    },
-    "openai": {
-      "type": "openai"
-    }
-  },
-  "models": {
-    "default": "local",
-    "local": {
-      "provider": "my-server",
-      "model": "qwen3:8b"
-    },
-    "fast": "my-server/qwen3:8b",
-    "smart": "openai/gpt-4.1"
-  },
-  "services": {
-    "tavily": { "api_key": "tvly-..." }
-  }
-}
-```
-
-**Configuration is loaded from** (highest priority first):
-
-1. Command-line flags (`-m`, `-M`, `-c`, etc.)
-2. Environment variables (`COGTRIX_MODEL`, `COGTRIX_OLLAMA`, `OPENAI_API_KEY`, etc.)
-3. Config file — pass a specific path with `-c ~/my-config.yaml`, or Cogtrix searches for `.cogtrix.json` / `.cogtrix.yaml` / `.cogtrix.yml` in the current directory, home directory, and `~/.config/cogtrix/`
-4. Built-in defaults — Ollama on localhost, conversation mode, 25-message history
-
-Full reference: **[Configuration Guide](docs/CONFIGURATION.md)**
+Full reference: **[Configuration Guide](docs/CONFIGURATION.md)**.
 
 ---
 
-## Interactive Commands
+## 💬 Interactive commands
 
-| Command | Aliases | Description |
-|---------|---------|-------------|
-| `/help [cmd]` | `/h`, `/?` | List commands or show detailed help |
-| `/info` | `/i` | Show session info (provider, model, mode) |
-| `/tools [search\|load\|enable\|disable]` | `/t`, `/tool` | List, search, load, or manage tools |
-| `/think <task>` | `/T` | Run deep Tree-of-Thought reasoning |
-| `/delegate <task>` | `/d` | Force task delegation across models |
-| `/mode [name]` | `/M` | Show / switch memory mode |
-| `/model [name]` | `/m` | Show / switch LLM model |
-| `/provider` | `/p` | List configured providers (read-only) |
-| `/session [id]` | `/s` | Show / switch session |
-| `/setup` | — | Launch interactive setup wizard |
-| `/approve` | `/a` | Toggle tool auto-approval (also: `-y` at startup) |
-| `/paste` | `/P` | Enter multi-line paste mode |
+| Command | Aliases | What it does |
+|---|---|---|
+| `/help [cmd]` | `/h`, `/?` | List commands or detailed help |
+| `/think <task>` | `/T` | Tree‑of‑Thought deep reasoning |
+| `/delegate <task>` | `/d` | Parallel multi-model investigation |
+| `/tools [search\|load\|enable\|disable]` | `/t`, `/tool` | Inspect and manage the toolbox |
+| `/model [name]` | `/m` | Show or switch LLM |
+| `/mode [name]` | `/M` | Show or switch memory mode (`conversation`, `code`, `reasoning`) |
+| `/session [id]` | `/s` | Show or switch session |
+| `/setup` | — | Interactive setup wizard |
+| `/approve` | `/a` | Toggle tool auto-approval (also `-y` at startup) |
+| `/paste` | `/P` | Multi-line paste mode |
 | `/clear` | `/c` | Clear conversation history |
 | `/optimizer [prompt]` | `/o` | Toggle prompt optimizer / force-optimize a prompt |
-| `/debug` | `/D` | Toggle debug mode |
-| `/verbose` | `/v` | Toggle verbose logging |
-| `/mcp [restart [name]]` | — | List or restart MCP server connections |
+| `/mcp [restart [name]]` | — | Manage MCP server connections |
+| `/info` | `/i` | Session info (provider, model, mode) |
 | `/quit` | `/exit`, `/q` | Exit |
-| `!<command>` | — | Execute a shell command inline (e.g. `!ls -la`) |
+| `!<command>` | — | Inline shell, e.g. `!ls -la` |
 
-Arrow keys, Home/End, and input history work out of the box (via `readline`).
-
----
-
-## Built-in Tools (88)
-
-| Category | Tools |
-|----------|-------|
-| **Search** (11) | DuckDuckGo web + news (free), Tavily, Exa, Brave, Google, SerpAPI, SearXNG |
-| **Files** (6) | `read_file`, `write_file`, `patch_file`, `append_file`, `list_directory`, `file_info` |
-| **Git** (7) | `git_status`, `git_diff`, `git_log`, `git_add`, `git_commit`, `git_create_branch`, `git_checkout` |
-| **GitHub** (4) | `gh_create_issue`, `gh_comment_issue`, `gh_list_prs`, `gh_get_file` |
-| **System** (2) | `execute_shell_command`, `execute_python` |
-| **Text & NLP** (10) | word count, find/replace, URLs, emails, compare, split, trim, sentiment, summarize, keywords |
-| **JSON & Math** (6) | parse, format, query, extract, convert, calculate |
-| **Web** (2) | `http_get`, `http_post` |
-| **Date & Weather** (4) | datetime, timezone, parse date, weather |
-| **Goal Tracking** (5) | `set_goal`, `add_subgoal`, `complete_goal`, `abandon_goal`, `list_goals` |
-| **Scheduling** (3) | `cron_add`, `cron_list`, `cron_remove` |
-| **Agent & Tasks** (7) | `spawn_agent`, `send_to_agent`, `read_agent_inbox`, `list_tasks`, `get_task_status`, `get_task_result`, `cancel_task` |
-| **WhatsApp** (4) | `whatsapp_send`, `whatsapp_send_image`, `whatsapp_check`, `whatsapp_contacts` |
-| **Telegram** (4) | `telegram_send`, `telegram_send_photo`, `telegram_check`, `telegram_contacts` |
-| **Reasoning** (3) | `deep_think`, `delegate_task`, `delegate_parallel` |
-| **Knowledge** (2) | `query_knowledge_base`, `save_to_knowledge_base` (RAG) |
-
-DuckDuckGo search works immediately with no setup. Premium search providers (Tavily, Exa, etc.)
-activate automatically when their API key is configured. WhatsApp messaging requires a
-[Waha](https://waha.devlike.pro/) container -- see the **[WhatsApp Guide](docs/WHATSAPP_GUIDE.md)**.
-Telegram requires a bot token from [@BotFather](https://t.me/BotFather) -- see the **[Telegram
-Guide](docs/TELEGRAM_GUIDE.md)**. See also [Search
-Providers](docs/CONFIGURATION.md#services-section) for details.
-
-**On-demand tool loading:** At startup you'll see something like `Tools: [██████████░░] 41 on demand
-(3 unavailable)`. All tools start in an **on-demand pool** — the agent requests only the tools it
-needs for the current task via an internal `request_tools` meta-tool. This keeps the initial prompt
-lean and context usage efficient. Tools whose API keys are missing are marked as unavailable. You
-don't need to manage any of this — the agent handles it automatically. See [Tool
-Loading](docs/CONFIGURATION.md#tool-loading) for details.
-
-Full parameter reference: **[Tools Reference](docs/TOOLS_REFERENCE.md)**
+Arrow keys, Home/End, and history all work via `readline`.
 
 ---
 
-## Memory Modes
+## 📂 What the tool library covers
 
-| Mode | Best for | Working memory |
-|------|----------|----------------|
+| Category | Examples |
+|---|---|
+| **Search** | `search_web`, `search_news`, plus auto-enabled Tavily / Exa / Brave / Google / SerpAPI / SearXNG when keys are configured |
+| **Files** | `read_file`, `write_file`, `patch_file`, `append_file`, `list_directory`, `file_info` |
+| **Git** | `git_status`, `git_diff`, `git_log`, `git_add`, `git_commit`, `git_create_branch`, `git_checkout` |
+| **GitHub** | `gh_create_issue`, `gh_comment_issue`, `gh_list_prs`, `gh_get_file` |
+| **System** | `execute_shell_command`, `execute_python` |
+| **Text & NLP** | word count, find/replace, URL/email extraction, sentiment, summarize, keywords, split, trim, compare |
+| **Data** | `parse_json`, `format_json`, `query_json`, `extract_json`, `calculate` |
+| **Web & Time** | `http_get`, `http_post`, `get_current_datetime`, `convert_timezone`, `parse_date`, `get_weather` |
+| **Goal tracking** | `set_goal`, `add_subgoal`, `complete_goal`, `abandon_goal`, `list_goals` |
+| **Scheduling** | `cron_add`, `cron_list`, `cron_remove` |
+| **Agent & tasks** | `spawn_agent`, `send_to_agent`, `read_agent_inbox`, plus task-queue tools |
+| **Reasoning** | `deep_think`, `delegate_task`, `delegate_parallel` |
+| **Knowledge (RAG)** | `query_knowledge_base`, `save_to_knowledge_base` |
+| **Messaging** | WhatsApp via [Waha](https://waha.devlike.pro/), Telegram via bot token |
+
+**Tools auto-hide when their API keys are missing** — no errors, no clutter. The startup banner reports `Tools: [██████████░░] 41 on demand (3 unavailable)` and the agent loads what it needs through an internal `request_tools` meta-tool. You don't manage any of this. Full parameter reference: **[Tools Reference](docs/TOOLS_REFERENCE.md)**.
+
+---
+
+## 🧩 Memory modes
+
+| Mode | Best for | Window |
+|---|---|---|
 | `conversation` (default) | General chat, Q&A, research | 25 messages |
-| `code` | Programming, debugging | 30 messages + file/error tracking |
-| `reasoning` | Planning, architecture decisions | 30 messages + goal/decision tracking |
+| `code` | Programming, debugging | 30 messages + file & error tracking |
+| `reasoning` | Planning, architecture decisions | 30 messages + goal & decision tracking |
 
-All modes include **hybrid memory**: older messages are automatically compressed into a rolling summary, and (when an embedding provider is available) stored for semantic recall — so the agent retains awareness of the full conversation even after messages leave the sliding window. Token-aware trimming ensures the context always fits the model's context window.
-
-Switch at startup (`-M code`) or at runtime (`/mode code`). See **[Memory Modes](docs/MEMORY_MODES.md)**.
+All three include **hybrid memory**: older messages compress into a rolling summary, then (when an embedding provider is available) move to a semantic store. The agent stays aware of the full thread even after messages leave the window. Switch at startup (`-M code`) or runtime (`/mode code`). Details: **[Memory Modes](docs/MEMORY_MODES.md)**.
 
 ---
 
-## Docker
+## 📱 Run Cogtrix as a WhatsApp / Telegram assistant
+
+A genuinely uncommon feature: Cogtrix can run **headlessly as a messaging daemon**.
+Wire it to a WhatsApp number through [Waha](https://waha.devlike.pro/) or to a Telegram bot via [@BotFather](https://t.me/BotFather), and it becomes an AI assistant your team or family talks to in their normal chat app.
+Per-chat context isolation, shared knowledge base, scheduled campaigns, and workflow auto-detection — all the CLI's smarts, delivered through the channel people already use.
+
+```bash
+python cogtrix.py --assistant
+```
+
+Setup walk-throughs: **[WhatsApp Guide](docs/WHATSAPP_GUIDE.md)** · **[Telegram Guide](docs/TELEGRAM_GUIDE.md)**.
+
+---
+
+## 🐳 Docker
 
 ```bash
 docker pull ghcr.io/northlandpositronics/cogtrix:latest
 docker run -it --network host ghcr.io/northlandpositronics/cogtrix:latest
 ```
 
-The container includes all optional packages — search providers (Tavily, Exa, SerpAPI), Anthropic Claude, Google Gemini, MCP server support, and scientific computing (NumPy, SciPy). Use `--network host` so it can reach a local Ollama server.
-
-**Passing configuration via environment variables:**
-
-```bash
-docker run -it --network host \
-  -e COGTRIX_OLLAMA="192.168.1.100" \
-  -e TAVILY_API_KEY="tvly-..." \
-  -e OPENWEATHER_API_KEY="abc123" \
-  ghcr.io/northlandpositronics/cogtrix:latest
-```
-
-**Mounting a config file:**
-
-```bash
-docker run -it --network host \
-  -v "$HOME/.cogtrix.yaml:/app/.cogtrix.yaml:ro" \
-  ghcr.io/northlandpositronics/cogtrix:latest
-```
-
-**Persisting session history across container restarts:**
-
-```bash
-docker run -it --network host \
-  -v cogtrix-data:/data \
-  ghcr.io/northlandpositronics/cogtrix:latest
-```
-
-**Running the API server in Docker:**
-
-```bash
-docker run -p 8000:8000 \
-  -e COGTRIX_JWT_SECRET="$(python -c 'import secrets; print(secrets.token_hex(32))')" \
-  ghcr.io/northlandpositronics/cogtrix:latest api
-```
-
-Pass `api` as the final argument to start the FastAPI server instead of the interactive CLI.
+The image bundles every optional package (Anthropic, Google, MCP, all search providers, NumPy/SciPy). `--network host` lets it reach a local Ollama. Mount your config (`-v "$HOME/.cogtrix.yaml:/app/.cogtrix.yaml:ro"`) and persist sessions (`-v cogtrix-data:/data`). Append `api` to the docker command to launch the REST/WS server instead of the interactive CLI.
 
 ---
 
-## API Server
+## 🔌 REST + WebSocket API
 
-Cogtrix includes a REST + WebSocket API server built with FastAPI. It exposes 140+ REST endpoints and 2 WebSocket streams, powering the React web frontend and enabling programmatic access from any HTTP client.
-
-### Starting the API server
+Cogtrix ships a FastAPI server that exposes **159 REST endpoints across 27 route groups** plus **2 WebSocket streams**. It's the same API the React web frontend uses.
 
 ```bash
-# Generate a strong secret (required)
 export COGTRIX_JWT_SECRET="$(python -c 'import secrets; print(secrets.token_hex(32))')"
-
-# Recommended — using the CLI entry point
 python -m src.api
-python -m src.api --debug                      # debug logging (stdout/stderr split)
-python -m src.api --log                        # info logging to cogtrix-api.log
-python -m src.api --config-file prod.yaml      # explicit config file
-python -m src.api --host 0.0.0.0 --port 9000   # custom bind address
-python -m src.api --reload                     # auto-reload (development)
-
-# Alternative — direct uvicorn
-uvicorn src.api.app:app --host 0.0.0.0 --port 8000
+# or: python -m src.api --debug --reload
 ```
 
-Once running, interactive API docs are available at `http://localhost:8000/api/v1/docs` (Swagger UI) and `http://localhost:8000/api/v1/redoc` (ReDoc).
+Interactive docs at `http://localhost:8000/api/v1/docs` (Swagger) and `/api/v1/redoc`.
 
-### Environment variables
+**Auth**: JWT bearer tokens (`Authorization: Bearer <token>`). First registered user gets the `admin` role automatically. API keys (prefix `cgx_live_`) can be created and managed via `/api/v1/auth/api-keys`; key-based request auth is not yet wired in — use JWTs for protected endpoints.
 
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `COGTRIX_JWT_SECRET` | Yes | — | JWT signing secret, minimum 32 characters. Generate with: `python -c "import secrets; print(secrets.token_hex(32))"` |
-| `COGTRIX_API_HOST` | No | `0.0.0.0` | Bind host for uvicorn (Docker entrypoint) |
-| `COGTRIX_API_PORT` | No | `8000` | Bind port for uvicorn (Docker entrypoint) |
-| `COGTRIX_API_WORKERS` | No | `1` | Number of uvicorn worker processes (Docker entrypoint) |
-| `COGTRIX_CONFIG_FILE` | No | Auto-detected | Path to config file (JSON or YAML) |
-| `COGTRIX_DB_URL` | No | `sqlite+aiosqlite:///./data/api/cogtrix.db` | SQLAlchemy async database URL. Use `postgresql+asyncpg://` in production |
-| `COGTRIX_CORS_ORIGINS` | No | Localhost + `app.cogtrix.ai` | Comma-separated list of allowed CORS origins |
+**WebSockets**: The session stream (`/ws/v1/sessions/{id}`) requires the JWT in the `Authorization` header; the `?token=<jwt>` query-parameter fallback was removed for security (#1128). The admin log stream (`/ws/v1/logs`) still accepts `?token=<jwt>` for clients that can't set custom WS headers.
 
-### Authentication
+Route map by group:
 
-The API uses JWT bearer tokens (`Authorization: Bearer <token>`). The first registered user is automatically granted the `admin` role. API keys (prefix `cgx_live_`) can be created and revoked via `/api/v1/auth/api-keys`, but bearer-token authentication with API keys is not yet implemented — JWT tokens are required for all protected requests.
-
-WebSocket connections that cannot set custom headers may pass the token as a `?token=<jwt>` query parameter.
-
-### What the API covers
-
-| Route group | Endpoints | Description |
-|-------------|-----------|-------------|
-| `POST /api/v1/auth/*` | 8 | Registration, login, token refresh, logout, profile, API key management |
-| `/api/v1/agents/*` | 2 | List running agents, get agent status |
-| `/api/v1/sessions/*` | 6 | Create, list, get, update, delete sessions |
-| `/api/v1/sessions/{id}/messages/*` | 3 | Send messages, list history, clear history |
-| `/api/v1/sessions/{id}/memory/*` | 3 | Get memory state, switch mode, clear memory |
-| `/api/v1/sessions/{id}/tools/*` | 4 | List, load, enable, disable tools |
-| `/api/v1/config/*` | 15 | Read/write config, provider management, model aliases, setup wizard |
-| `/api/v1/assistant/*` | 24 | Start/stop assistant mode, channel management, phonebook, outbound, campaigns |
-| `/api/v1/assistant/workflows/*` | 11 | Workflow CRUD, per-workflow documents, chat bindings |
-| `/api/v1/tasks/*` | 5 | Create, list, get, cancel tasks; stream task logs |
-| `/api/v1/users/*` | 5 | User management: list, create, update role, delete (admin) |
-| `/api/v1/rag/*` | 5 | Upload documents, list, delete, query knowledge base |
-| `/api/v1/mcp/*` | 5 | List servers, connect, disconnect, restart, list tools |
-| `/api/v1/system/*` | 2 | Server info, shutdown |
-| `/api/v1/health` | 2 | Liveness and readiness probes |
-| `/api/v1/organizations/*` | 6 | Organization CRUD, plan assignment (multi-tenancy) |
-| `/api/v1/teams/*` | 8 | Team management, membership |
-| `/api/v1/workspaces/*` | 10 | Workspace CRUD, membership, scoped config |
-| `/api/v1/plans/*` | 8 | Plan CRUD, assign to org |
-| `/api/v1/usage/*` | 3 | Usage summary, per-event records, manual record |
-| `/api/v1/enforcement/*` | 1 | Plan limit snapshot and headroom |
-| `/api/v1/saml/*` | 4 | SAML 2.0 SSO: metadata, login, ACS, SLO |
-| `/api/v1/scim/v2/*` | 7 | SCIM 2.0 user provisioning (Okta, Azure AD) |
-| `/api/v1/ldap/*` | 3 | LDAP/AD sync: config, trigger, status |
-| `/api/v1/jit/*` | 3 | Just-in-time provisioning config and policies |
-| `/api/v1/cross-workspace/*` | 5 | Cross-workspace message bus |
-| `/api/v1/billing/*` | 4 | Stripe Checkout, Customer Portal, subscription summary, webhook |
+| Group | Count | Notes |
+|---|---:|---|
+| `auth/*` | 9 | Register, login, refresh, logout, logout-all, profile, API key CRUD |
+| `agents/*` | 2 | List & get named agents |
+| `sessions/*` | 6 | Create/list/get/update/delete sessions |
+| `sessions/{id}/messages/*` | 3 | Send, list history, clear history |
+| `sessions/{id}/memory/*` | 3 | Get state, switch mode, clear |
+| `sessions/{id}/tools/*` | 4 | List, load, enable, disable |
+| `config/*` | 15 | Read/write config, providers, models, setup wizard |
+| `assistant/*` | 24 | Start/stop, channels, phonebook, outbound, campaigns |
+| `assistant/workflows/*` | 11 | Workflow CRUD, documents, chat bindings |
+| `tasks/*` | 5 | Background-task queue with log stream |
+| `users/*` | 5 | User management (admin) |
+| `rag/*` | 5 | RAG document & query CRUD |
+| `mcp/*` | 5 | MCP server connections |
+| `admin/*` | 7 | Org list, global stats, usage metrics, impersonation, audit log |
+| `system/*` | 2 | Server info, shutdown |
+| `health` | 3 | Liveness, readiness, full-readiness |
+| `metrics` | 1 | Prometheus scrape endpoint |
+| `organizations/*` | 1 | Update org-member role (other org CRUD lives in `admin/*`) |
+| `teams/*` | 8 | Team management, membership |
+| `workspaces/*` | 10 | Workspace CRUD, membership, scoped config |
+| `plans/*` | 6 | Plan CRUD + `/org-plans/{id}` assignment |
+| `usage/*` | 3 | Usage summary, per-event records, manual record |
+| `enforcement/*` | 1 | Plan limit snapshot and headroom |
+| `saml/*` | 3 | SAML 2.0 SSO: metadata, SSO, ACS |
+| `scim/v2/*` | 7 | SCIM 2.0 provisioning (Okta, Azure AD) |
+| `ldap/*` | 2 | LDAP/AD status, sync trigger |
+| `jit/*` | 2 | JIT provisioning status, test |
+| `cross-workspace/*` | 3 | Cross-workspace message bus |
+| `billing/*` | 4 | Stripe Checkout, Customer Portal, subscription, webhook |
 | `ws://host/ws/v1/sessions/{id}` | WS | Streaming agent turns, tool confirmation, token events |
 | `ws://host/ws/v1/logs` | WS | Live log stream (admin only) |
 
-Full reference: **[API Reference](docs/api/openapi.yaml)** | **[Client Contract](docs/api/client-contract.md)** | **[WebSocket Protocol](docs/api/websocket-protocol.md)**
+Full reference: **[API Reference](docs/api/openapi.yaml)** · **[Client Contract](docs/api/client-contract.md)** · **[WebSocket Protocol](docs/api/websocket-protocol.md)**.
 
 ---
 
-## Quick Troubleshooting
-
-| Symptom | Likely cause | Fix |
-|---------|--------------|-----|
-| "Connection refused" on startup | Ollama isn't running | `ollama serve` in another terminal |
-| "Model not found" | Model not pulled yet | `ollama pull qwen3:8b` |
-| No search results | DuckDuckGo rate-limited | Wait a moment and retry, or add a Tavily/Brave API key |
-| Empty or garbled response | Model too small or OOM | Try a smaller model: `-m qwen3:8b` |
-| Tool not appearing in `/tools` | Missing API key for that tool | Set the key in env or config (tools auto-hide when unconfigured) |
-| "41 on demand (3 unavailable)" — what does that mean? | Normal — on-demand tool loading | 41 tools are ready for the agent to request; 3 are hidden because their API keys aren't configured. See [Tool Loading](docs/CONFIGURATION.md#tool-loading) |
-| "Invalid API key" (OpenAI) | Key missing or expired | `export OPENAI_API_KEY="sk-..."` |
-| Not sure if config is valid | Typo or wrong structure | `python cogtrix.py --check-config` |
-
-For detailed debugging, run with `--debug` (logs every LLM call, tool input/output, and context info to `cogtrix.log`).
-
----
-
-## Documentation
-
-| Guide | What you'll learn |
-|-------|-------------------|
-| **[Configuration](docs/CONFIGURATION.md)** | Every config option, environment variables, search providers |
-| **[Providers](docs/PROVIDERS.md)** | Step-by-step: Ollama, OpenAI, Anthropic, Google, DeepSeek, xAI, Groq, Together, vLLM |
-| **[Memory Modes](docs/MEMORY_MODES.md)** | Conversation, code, and reasoning modes + hybrid memory (summary + recall) |
-| **[Tools Reference](docs/TOOLS_REFERENCE.md)** | All 88 tools with parameters and examples |
-| **[WhatsApp Guide](docs/WHATSAPP_GUIDE.md)** | Use Cogtrix as a WhatsApp assistant (with Docker Compose) |
-| **[Telegram Guide](docs/TELEGRAM_GUIDE.md)** | Use Cogtrix as a Telegram assistant via a bot |
-| **[Assistant Mode](docs/CONFIGURATION.md#assistant-mode)** | Run Cogtrix as a headless WhatsApp/Telegram messaging daemon |
-| **[Deep Think](docs/DEEPTHINK.md)** | Tree-of-Thought reasoning engine internals |
-| **[RAG Guide](docs/RAG_GUIDE.md)** | Build a knowledge base from your documents |
-| **[API Reference](docs/api/openapi.yaml)** | OpenAPI 3.1 schema for the REST + WebSocket API |
-| **[Client Contract](docs/api/client-contract.md)** | TypeScript API client contract with full type definitions |
-| **[WebSocket Protocol](docs/api/websocket-protocol.md)** | Streaming session protocol and message types |
-| **[Architecture](docs/ARCHITECTURE.md)** | System design, data flow, components |
-| **[Development](docs/DEVELOPMENT.md)** | Add tools, memory modes, slash commands; testing |
-
-**New here?** You're in the right place. Follow the [Quick Start](#quick-start) above to get running in under 5 minutes. Then:
-
-- Want to connect OpenAI, Groq, or another LLM? See [Providers](docs/PROVIDERS.md).
-- Want to customize settings, add search API keys, or set up messaging? See [Configuration](docs/CONFIGURATION.md).
-- Want to know what all 88 tools do? See [Tools Reference](docs/TOOLS_REFERENCE.md).
-
----
-
-## Testing
+## 🛠️ Optional extras
 
 ```bash
-uv run pytest tests/ -v
-uv run pytest tests/ -q -m "not agent_workflow and not live_llm and not docker"  # unit tests only (fast)
-uv run pytest tests/ -m live_llm -v --timeout=300                 # live LLM tests (requires Gemma container at localhost:18080)
+uv pip install "cogtrix[anthropic]"   # Anthropic Claude
+uv pip install "cogtrix[google]"      # Google Gemini
+uv pip install "cogtrix[api]"         # REST API server + Stripe billing
+uv pip install "cogtrix[mcp]"         # MCP server support
+uv pip install "cogtrix[search]"      # Tavily, Exa, Brave, SerpAPI
+uv pip install "cogtrix[rag]"         # RAG (needs C++ build tools)
+uv pip install "cogtrix[saml]"        # SAML 2.0 SSO (needs libxmlsec1-dev on Linux)
+uv pip install "cogtrix[ldap]"        # LDAP / Active Directory sync
 ```
 
 ---
 
-## License
+## 🚦 Troubleshooting
 
-Copyright 2025-2026 Northland Positronics (FZE). All rights reserved.
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| `Connection refused` on startup | Ollama isn't running | `ollama serve` in another terminal |
+| `Model not found` | Model not pulled yet | `ollama pull qwen3:8b` |
+| No search results | DuckDuckGo rate-limited | Wait, retry, or add a Tavily/Brave key |
+| Empty or garbled response | Model too small or OOM | Try a smaller model: `-m qwen3:8b` |
+| Tool missing from `/tools` | API key for that tool isn't set | Set the key — tools auto-hide when unconfigured |
+| `41 on demand (3 unavailable)` — meaning? | Normal on-demand loading | 41 tools ready to request, 3 hidden for missing keys ([details](docs/CONFIGURATION.md#tool-loading)) |
+| `Invalid API key` (OpenAI) | Key missing or expired | `export OPENAI_API_KEY="sk-..."` |
+| Not sure if config is valid | Typo or wrong structure | `python cogtrix.py --check-config` |
 
-This software is released under the **Cogtrix Source-Available License 1.0**. See [LICENSE](LICENSE) for full terms.
+Detailed debugging: run with `--debug` (logs every LLM call, tool input/output, and context info to `cogtrix.log`).
+
+---
+
+## 📚 Documentation
+
+| Guide | What's inside |
+|---|---|
+| [Configuration](docs/CONFIGURATION.md) | Every option, environment variable, search-provider key |
+| [Providers](docs/PROVIDERS.md) | Step-by-step for Ollama, OpenAI, Anthropic, Google, DeepSeek, xAI, Groq, Together, vLLM |
+| [Memory Modes](docs/MEMORY_MODES.md) | Conversation, code, reasoning + hybrid memory internals |
+| [Tools Reference](docs/TOOLS_REFERENCE.md) | All 68 tools, parameters, examples |
+| [WhatsApp Guide](docs/WHATSAPP_GUIDE.md) | Run Cogtrix as a WhatsApp assistant |
+| [Telegram Guide](docs/TELEGRAM_GUIDE.md) | Run Cogtrix as a Telegram bot |
+| [Deep Think](docs/DEEPTHINK.md) | Tree-of-Thought engine internals |
+| [RAG Guide](docs/RAG_GUIDE.md) | Build a knowledge base from your documents |
+| [Architecture](docs/ARCHITECTURE.md) | System design, data flow, components |
+| [Development](docs/DEVELOPMENT.md) | Add tools, memory modes, slash commands; testing |
+| [API Reference](docs/api/openapi.yaml) | OpenAPI 3.1 schema |
+| [Client Contract](docs/api/client-contract.md) | TypeScript API types |
+| [WebSocket Protocol](docs/api/websocket-protocol.md) | Streaming session protocol |
+
+---
+
+## 🧪 Testing
+
+```bash
+uv run pytest tests/ -v
+uv run pytest tests/ -q -m "not agent_workflow and not live_llm and not docker"  # fast unit suite
+uv run pytest tests/ -m live_llm -v --timeout=300                                # live LLM tests (needs Gemma container at :18080)
+```
+
+---
+
+## 📜 License
+
+Copyright 2025‑2026 Northland Positronics (FZE). Released under the **Cogtrix Source-Available License 1.0** — see [LICENSE](LICENSE) for full terms.

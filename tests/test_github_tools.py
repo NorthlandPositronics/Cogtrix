@@ -184,8 +184,10 @@ class TestGhCreateIssue:
         ):
             result = gh_create_issue(title="T", repo="owner/repo")
         assert "GitHub command failed" in result
+        # Category hint is present so the LLM can iterate remediation
         assert "authentication" in result
-        assert "authentication required" not in result  # raw stderr not leaked
+        # Raw stderr is not leaked
+        assert "authentication required" not in result
 
     def test_create_issue_strips_null_bytes(self):
         from src.tools.github_tools import gh_create_issue
@@ -245,8 +247,10 @@ class TestGhCommentIssue:
         ):
             result = gh_comment_issue(issue_number=99, body="x", repo="owner/repo")
         assert "GitHub command failed" in result
+        # Category hint is present so the LLM can iterate remediation
         assert "not-found" in result
-        assert "not found" not in result  # raw stderr not leaked
+        # Raw stderr is not leaked
+        assert "not found" not in result
 
 
 # ---------------------------------------------------------------------------
@@ -298,8 +302,10 @@ class TestGhListPrs:
             result = gh_list_prs(repo="owner/repo")
 
         assert "GitHub command failed" in result
+        # Category hint is present so the LLM can iterate remediation
         assert "rate-limit" in result
-        assert "rate limit exceeded" not in result  # raw stderr not leaked
+        # Raw stderr is not leaked
+        assert "rate limit exceeded" not in result
 
     def test_list_prs_passes_state_and_limit(self):
         from src.tools.github_tools import gh_list_prs
@@ -480,3 +486,277 @@ class TestRepoValidation:
         cmd = captured[0]
         assert "--repo" in cmd
         assert cmd[cmd.index("--repo") + 1] == "default-org/default-repo"
+
+
+# ---------------------------------------------------------------------------
+# Timeout regression tests (issue #972)
+# ---------------------------------------------------------------------------
+
+
+class TestGhCreateIssueTimeout:
+    def test_create_issue_timeout_returns_error(self):
+        from src.tools.github_tools import gh_create_issue
+
+        with patch(
+            "src.tools.github_tools.subprocess.run",
+            side_effect=subprocess.TimeoutExpired(cmd=["gh"], timeout=60),
+        ):
+            result = gh_create_issue(title="T", repo="owner/repo")
+        assert "timed out" in result
+        assert "60" in result
+
+
+class TestGhCommentIssueTimeout:
+    def test_comment_timeout_returns_error(self):
+        from src.tools.github_tools import gh_comment_issue
+
+        with patch(
+            "src.tools.github_tools.subprocess.run",
+            side_effect=subprocess.TimeoutExpired(cmd=["gh"], timeout=60),
+        ):
+            result = gh_comment_issue(issue_number=1, body="hi", repo="owner/repo")
+        assert "timed out" in result
+        assert "60" in result
+
+
+class TestGhListPrsTimeout:
+    def test_list_prs_timeout_returns_error(self):
+        from src.tools.github_tools import gh_list_prs
+
+        with patch(
+            "src.tools.github_tools.subprocess.run",
+            side_effect=subprocess.TimeoutExpired(cmd=["gh"], timeout=30),
+        ):
+            result = gh_list_prs(repo="owner/repo")
+        assert "timed out" in result
+        assert "30" in result
+
+
+class TestGhGetFileTimeout:
+    def test_get_file_timeout_returns_error(self):
+        from src.tools.github_tools import gh_get_file
+
+        with patch(
+            "src.tools.github_tools.subprocess.run",
+            side_effect=subprocess.TimeoutExpired(cmd=["gh"], timeout=30),
+        ):
+            result = gh_get_file(path="README.md", repo="owner/repo")
+        assert "timed out" in result
+        assert "30" in result
+
+
+# ---------------------------------------------------------------------------
+# Diagnostic category hints — regression for issue #1453
+# ---------------------------------------------------------------------------
+
+
+class TestGhErrorDiagnosticCategories:
+    """
+    Verify that gh tool errors return category hints so the LLM can
+    iterate remediation efficiently without blind retry.
+
+    The _classify_gh_error helper maps stderr patterns to categories:
+      authentication | rate-limit | not-found | network | unknown
+
+    Raw stderr is never leaked to the LLM.
+    """
+
+    @staticmethod
+    def _assert_category_hint(result: str, expected_category: str, raw_stderr: str) -> None:
+        """Shared assertions for all category-hint tests."""
+        assert "GitHub command failed" in result
+        assert expected_category in result
+        assert raw_stderr not in result  # raw stderr not leaked
+
+    # ── gh_create_issue ────────────────────────────────────────────────────────
+
+    def test_create_issue_authentication_error(self):
+        from src.tools.github_tools import gh_create_issue
+
+        with patch(
+            "src.tools.github_tools.subprocess.run",
+            return_value=_make_completed(stderr="Error: Http 403: Bad credentials", returncode=1),
+        ):
+            result = gh_create_issue(title="T", repo="owner/repo")
+        self._assert_category_hint(result, "authentication", "Bad credentials")
+
+    def test_create_issue_rate_limit_error(self):
+        from src.tools.github_tools import gh_create_issue
+
+        with patch(
+            "src.tools.github_tools.subprocess.run",
+            return_value=_make_completed(stderr="rate limit exceeded", returncode=1),
+        ):
+            result = gh_create_issue(title="T", repo="owner/repo")
+        self._assert_category_hint(result, "rate-limit", "rate limit exceeded")
+
+    def test_create_issue_network_error(self):
+        from src.tools.github_tools import gh_create_issue
+
+        with patch(
+            "src.tools.github_tools.subprocess.run",
+            return_value=_make_completed(stderr="could not resolve host", returncode=1),
+        ):
+            result = gh_create_issue(title="T", repo="owner/repo")
+        self._assert_category_hint(result, "network", "could not resolve host")
+
+    def test_create_issue_unknown_error(self):
+        from src.tools.github_tools import gh_create_issue
+
+        with patch(
+            "src.tools.github_tools.subprocess.run",
+            return_value=_make_completed(stderr="Something unexpected happened", returncode=1),
+        ):
+            result = gh_create_issue(title="T", repo="owner/repo")
+        # "unknown" is a valid category — it tells the LLM to try general remediation
+        self._assert_category_hint(result, "unknown", "Something unexpected happened")
+
+    # ── gh_comment_issue ───────────────────────────────────────────────────────
+
+    def test_comment_issue_authentication_error(self):
+        from src.tools.github_tools import gh_comment_issue
+
+        with patch(
+            "src.tools.github_tools.subprocess.run",
+            return_value=_make_completed(stderr="gh auth login", returncode=1),
+        ):
+            result = gh_comment_issue(issue_number=1, body="x", repo="owner/repo")
+        self._assert_category_hint(result, "authentication", "gh auth login")
+
+    def test_comment_issue_rate_limit_error(self):
+        from src.tools.github_tools import gh_comment_issue
+
+        with patch(
+            "src.tools.github_tools.subprocess.run",
+            return_value=_make_completed(stderr="abuse rate limit", returncode=1),
+        ):
+            result = gh_comment_issue(issue_number=1, body="x", repo="owner/repo")
+        self._assert_category_hint(result, "rate-limit", "abuse rate limit")
+
+    # ── gh_list_prs ────────────────────────────────────────────────────────────
+
+    def test_list_prs_authentication_error(self):
+        from src.tools.github_tools import gh_list_prs
+
+        with patch(
+            "src.tools.github_tools.subprocess.run",
+            return_value=_make_completed(stderr="requires authentication", returncode=1),
+        ):
+            result = gh_list_prs(repo="owner/repo")
+        self._assert_category_hint(result, "authentication", "requires authentication")
+
+    def test_list_prs_network_error(self):
+        from src.tools.github_tools import gh_list_prs
+
+        with patch(
+            "src.tools.github_tools.subprocess.run",
+            return_value=_make_completed(stderr="connection refused", returncode=1),
+        ):
+            result = gh_list_prs(repo="owner/repo")
+        self._assert_category_hint(result, "network", "connection refused")
+
+    # ── gh_get_file ────────────────────────────────────────────────────────────
+
+    def test_get_file_network_error(self):
+        from src.tools.github_tools import gh_get_file
+
+        with patch(
+            "src.tools.github_tools.subprocess.run",
+            return_value=_make_completed(stderr="Timeout performing GET", returncode=1),
+        ):
+            result = gh_get_file(path="README.md", repo="owner/repo")
+        self._assert_category_hint(result, "network", "Timeout performing GET")
+
+    def test_get_file_authentication_error(self):
+        from src.tools.github_tools import gh_get_file
+
+        with patch(
+            "src.tools.github_tools.subprocess.run",
+            return_value=_make_completed(stderr="authentication required", returncode=1),
+        ):
+            result = gh_get_file(path="README.md", repo="owner/repo")
+        self._assert_category_hint(result, "authentication", "authentication required")
+
+    def test_get_file_404_still_returns_specific_message(self):
+        # gh_get_file has a special 404 handler — it should take precedence
+        from src.tools.github_tools import gh_get_file
+
+        with patch(
+            "src.tools.github_tools.subprocess.run",
+            return_value=_make_completed(stderr="HTTP 404: Not Found", returncode=1),
+        ):
+            result = gh_get_file(path="missing.py", repo="owner/repo")
+        # 404 is handled specifically — no generic "GitHub command failed"
+        assert "file not found" in result
+        assert "missing.py" in result
+        # The generic category hint is NOT returned for 404
+        assert "not-found" not in result
+
+
+# ---------------------------------------------------------------------------
+# _classify_gh_error unit tests
+# ---------------------------------------------------------------------------
+
+
+class TestClassifyGhError:
+    """Unit tests for the _classify_gh_error helper function."""
+
+    def test_authentication_bad_credentials(self):
+        from src.tools.github_tools import _classify_gh_error
+
+        assert _classify_gh_error("gh auth login\nError: Bad credentials") == "authentication"
+
+    def test_authentication_requires_auth(self):
+        from src.tools.github_tools import _classify_gh_error
+
+        assert _classify_gh_error("This command requires authentication") == "authentication"
+
+    def test_rate_limit_403(self):
+        from src.tools.github_tools import _classify_gh_error
+
+        assert _classify_gh_error("HTTP 403 Forbidden") == "rate-limit"
+
+    def test_rate_limit_explicit(self):
+        from src.tools.github_tools import _classify_gh_error
+
+        assert _classify_gh_error("API rate limit exceeded") == "rate-limit"
+
+    def test_rate_limit_abuse(self):
+        from src.tools.github_tools import _classify_gh_error
+
+        assert _classify_gh_error("abuse detection triggered") == "rate-limit"
+
+    def test_not_found_404(self):
+        from src.tools.github_tools import _classify_gh_error
+
+        assert _classify_gh_error("HTTP 404: repository not found") == "not-found"
+
+    def test_not_found_explicit(self):
+        from src.tools.github_tools import _classify_gh_error
+
+        assert _classify_gh_error("not found in repository") == "not-found"
+
+    def test_network_connection(self):
+        from src.tools.github_tools import _classify_gh_error
+
+        assert _classify_gh_error("Failed to connect: connection refused") == "network"
+
+    def test_network_timeout(self):
+        from src.tools.github_tools import _classify_gh_error
+
+        assert _classify_gh_error("Request timeout after 30s") == "network"
+
+    def test_network_could_not_resolve(self):
+        from src.tools.github_tools import _classify_gh_error
+
+        assert _classify_gh_error("Could not resolve host: api.github.com") == "network"
+
+    def test_unknown_unrecognized_stderr(self):
+        from src.tools.github_tools import _classify_gh_error
+
+        assert _classify_gh_error("Something went wrong in the server") == "unknown"
+
+    def test_unknown_empty_stderr(self):
+        from src.tools.github_tools import _classify_gh_error
+
+        assert _classify_gh_error("") == "unknown"

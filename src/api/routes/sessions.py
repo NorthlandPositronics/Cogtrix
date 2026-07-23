@@ -132,10 +132,19 @@ async def _check_session_access(
     session_id: str,
     current_user: TokenData,
     db: AsyncSession,
+    *,
+    admin_bypass: bool = True,
 ) -> ApiSessionRecord:
     """Fetch session and enforce ownership; returns the record on success.
 
-    Admins may access any session.  Regular users may only access their own.
+    Admins may access any session when *admin_bypass* is ``True`` (default).
+    Regular users may only access their own.
+
+    Args:
+        session_id: UUID v4 of the session to check.
+        current_user: Decoded JWT claims from the request.
+        db: The caller's database session (from ``Depends(get_db)``).
+        admin_bypass: When ``True``, skip the ownership check for admin callers.
 
     Raises:
         HTTPException 404 SESSION_NOT_FOUND — session does not exist.
@@ -155,7 +164,7 @@ async def _check_session_access(
             },
         )
 
-    if not current_user.is_admin and record.user_id != current_user.user_id:
+    if not (admin_bypass and current_user.is_admin) and record.user_id != current_user.user_id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail={
@@ -386,7 +395,7 @@ async def get_session(
     Auth: bearer token required. Admins may access any session.
     Error codes: UNAUTHORIZED, TOKEN_EXPIRED, FORBIDDEN, SESSION_NOT_FOUND.
     """
-    record = await _check_session_access(session_id, current_user, db)
+    record = await _check_session_access(session_id, current_user, db, admin_bypass=True)
 
     registry = _get_registry(request)
     live_session = (await registry.get_cached(session_id)) if registry else None
@@ -424,7 +433,7 @@ async def patch_session(
     Error codes: UNAUTHORIZED, TOKEN_EXPIRED, FORBIDDEN, SESSION_NOT_FOUND,
                  VALIDATION_ERROR, MODEL_UNAVAILABLE, PROVIDER_UNREACHABLE.
     """
-    record = await _check_session_access(session_id, current_user, db)
+    record = await _check_session_access(session_id, current_user, db, admin_bypass=True)
     repo = SessionRepository(db)
 
     # Refuse to mutate LLM/config while an agent turn is actively running.
@@ -588,7 +597,7 @@ async def delete_session(
     Auth: bearer token required. Admins may delete any session.
     Error codes: UNAUTHORIZED, TOKEN_EXPIRED, FORBIDDEN, SESSION_NOT_FOUND.
     """
-    await _check_session_access(session_id, current_user, db)
+    await _check_session_access(session_id, current_user, db, admin_bypass=True)
     repo = SessionRepository(db)
 
     # Cancel any running turn and save memory
@@ -667,7 +676,7 @@ async def restore_session(
     Auth: bearer token required. Admins may restore any session.
     Error codes: UNAUTHORIZED, TOKEN_EXPIRED, FORBIDDEN, SESSION_NOT_FOUND.
     """
-    await _check_session_access(session_id, current_user, db)
+    await _check_session_access(session_id, current_user, db, admin_bypass=True)
     repo = SessionRepository(db)
     await repo.restore(session_id)
     record = await repo.get_by_id(session_id)

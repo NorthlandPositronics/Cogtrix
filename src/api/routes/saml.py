@@ -28,8 +28,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.api.db.engine import get_db
 from src.api.rate_limit import per_route_rate_limit
 from src.api.saml.config import SAMLConfig, get_saml_config
+from src.api.saml.nonce_cache import SAMLNonceCache
 
 log = logging.getLogger("cogtrix.api.saml")
+
+# Global nonce cache instance — TTL configured via SAMLConfig.assertion_ttl_seconds
+_nonce_cache = SAMLNonceCache(default_ttl_seconds=600)
 
 router = APIRouter(prefix="/saml", tags=["SAML SSO"])
 
@@ -178,6 +182,27 @@ async def saml_acs(
             detail={"code": "SAML_INVALID_RESPONSE", "message": str(exc)},
         ) from exc
 
+    # Replay protection: check assertion ID against nonce cache.
+    # Per ADR-0054, SAML assertions without Assertion/@ID return 400.
+    # Reject both None and empty string (though valid IdPs always include ID).
+    if not assertion.assertion_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "SAML_ASSERTION_MISSING_ID",
+                "message": "SAML assertion missing ID attribute.",
+            },
+        )
+    # Store assertion ID and detect replay. Returns False if already present.
+    if not _nonce_cache.add(assertion.assertion_id, ttl_seconds=config.assertion_ttl_seconds):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={
+                "code": "SAML_ASSERTION_REPLAYED",
+                "message": "Assertion already processed.",
+            },
+        )
+
     user, token = await _provision_user(db, assertion, config)
     return {"access_token": token, "token_type": "bearer"}  # nosec B105
 
@@ -264,6 +289,13 @@ async def _provision_user(
                         "message": "Username already taken.",
                     },
                 ) from exc
+    raise HTTPException(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        detail={
+            "code": "SAML_PROVISION_FAILED",
+            "message": "User provisioning failed unexpectedly.",
+        },
+    )
 
 
 def _unique_username(base: str) -> str:

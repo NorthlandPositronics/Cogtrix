@@ -22,6 +22,7 @@ from typing import Any, Literal, Optional
 from urllib.parse import urlparse
 
 from src.logging_config import get_logger
+from src.tools.error_sanitizer import sanitize_error
 
 try:
     from mcp import ClientSession, StdioServerParameters
@@ -1150,14 +1151,11 @@ class MCPManager:
                 call_coro.close()
                 raise
         except Exception as exc:
-            exc_type = type(exc).__name__
-            exc_msg = str(exc) or "(no details)"
             log.error(
-                "MCP tool call '%s' on server '%s' failed: %s: %s",
+                "MCP tool call '%s' on server '%s' failed: %s",
                 mcp_tool_name,
                 server_name,
-                exc_type,
-                exc_msg,
+                sanitize_error(exc),
                 exc_info=True,
             )
             # Auto-reconnect on connection-layer failures and retry once.
@@ -1183,7 +1181,7 @@ class MCPManager:
                         server_name,
                         reconnect_exc,
                     )
-            return f"Error: {exc_type}: {exc_msg}"
+            return f"Error: MCP tool call failed: {sanitize_error(exc)}"
 
     def close_all(self) -> None:
         """Close all MCP connections and stop the background event loop."""

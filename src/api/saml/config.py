@@ -74,6 +74,7 @@ class SAMLConfig:
     default_role: str = field(default="user")
     org_id: str | None = field(default=None)
     scim_base_url: str | None = field(default=None)
+    assertion_ttl_seconds: int = field(default=600)
 
     def to_python3_saml_settings(self) -> dict[str, Any]:
         """Return the settings dict expected by ``python3-saml``."""

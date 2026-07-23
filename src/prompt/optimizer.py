@@ -10,6 +10,8 @@ import re
 import secrets
 import threading
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeoutError
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -37,6 +39,11 @@ def _progress(msg: str) -> None:
 
 # Skip LLM call for prompts shorter than this
 PROMPT_OPTIMIZER_MIN_LENGTH = 400
+
+# Timeout for the LLM call in optimize_prompt() — prevents a hung model
+# from blocking the caller indefinitely. Fail-open: returns the original
+# prompt unchanged on timeout.
+_PROMPT_OPTIMIZER_TIMEOUT_SECONDS = 60
 
 # Skip LLM call for short-to-medium prompts that start with a clear action verb —
 # these are already unambiguous and do not benefit from restructuring.
@@ -218,7 +225,18 @@ def optimize_prompt(
             f"{delimiter_end}"
         )
         optimizer_prompt = base_instructions + (_MILESTONE_APPENDIX if plan_milestones else "")
-        response = llm.invoke(optimizer_prompt)
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(llm.invoke, optimizer_prompt)
+            try:
+                response = future.result(timeout=_PROMPT_OPTIMIZER_TIMEOUT_SECONDS)
+            except FuturesTimeoutError:
+                log.warning(
+                    "optimize_prompt() timed out after %ds, returning original",
+                    _PROMPT_OPTIMIZER_TIMEOUT_SECONDS,
+                )
+                future.cancel()
+                pool.shutdown(wait=False)
+                return PromptPlan(text=user_input)
         content = getattr(response, "content", str(response))
         if isinstance(content, list):
             content = " ".join(str(c.get("text", c) if isinstance(c, dict) else c) for c in content)

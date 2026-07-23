@@ -211,10 +211,14 @@ def _is_deepseek_base_url(url: str | None) -> bool:
     try:
         hostname = urlparse(url).hostname
     except Exception as exc:
-        _log.warning("Failed to parse DeepSeek base URL %r: %s", url, exc)
+        _log.warning(
+            "Failed to parse DeepSeek base URL: %s (%s)",
+            _redact_url(url),
+            type(exc).__name__,
+        )
         return False
     if hostname is None:
-        _log.warning("DeepSeek base URL %r has no hostname", url)
+        _log.warning("DeepSeek base URL has no hostname: %s", _redact_url(url))
         return False
     return hostname in _DEEPSEEK_HOSTS
 

@@ -75,19 +75,16 @@ models:
     input_price_per_1m: 0.27
     output_price_per_1m: 1.10
 
-# deepseek-v4-flash (deepseek-reasoner) — reasoning model with thinking mode.
-  # The runner now routes through create_chat_model (→ _DeepSeekChatModel) so
-  # reasoning_content is captured and re-injected automatically (issue #1391).
   - id: deepseek-v4-flash
     provider: deepseek
     display_name: "DeepSeek V4 Flash"
-    tier: A
+    tier: B
     smoke: true
     env_key: DEEPSEEK_API_KEY
-    model_id: deepseek-reasoner
-    openrouter_model_id: deepseek/deepseek-reasoner
-    input_price_per_1m: 0.55
-    output_price_per_1m: 2.20
+    model_id: deepseek-v4-flash
+    openrouter_model_id: deepseek/deepseek-v4-flash
+    input_price_per_1m: 0.14
+    output_price_per_1m: 0.28
 
   # ── Alibaba / Qwen ─────────────────────────────────────────────────────────
   - id: qwen3-72b

@@ -391,6 +391,52 @@ class TestPatchPhase:
         assert "E501" in prompt_text
         assert "x = 1  # original" in prompt_text
 
+    def test_secrets_redacted_in_llm_prompt(self, tmp_path: Path, monkeypatch):
+        import src.tools.self_improve as mod
+
+        monkeypatch.chdir(tmp_path)
+        mod._config = _DUMMY_CONFIG
+
+        src_file = tmp_path / "src" / "foo.py"
+        src_file.parent.mkdir(parents=True)
+        original = (
+            "api_key = 'sk-testsecret1234567890'\n"
+            "password = 'super_secret_password_123'\n"
+            "headers = {'Authorization': 'Bearer abcdef1234567890'}\n"
+        )
+        src_file.write_text(original, encoding="utf-8")
+
+        ruff_issue = dict(_RUFF_ISSUE, filename=str(src_file))
+        ruff_out = _ruff_stdout([ruff_issue])
+
+        mock_llm = MagicMock()
+        response = MagicMock()
+        response.content = "x = 1\n"
+        mock_llm.invoke.return_value = response
+
+        with (
+            patch("src.tools.self_improve._run") as mock_run,
+            patch("src.tools.self_improve.create_chat_model_from_configs", return_value=mock_llm),
+        ):
+            mock_run.side_effect = lambda cmd, **kw: (
+                (1, ruff_out, "")
+                if "ruff" in cmd
+                else ((0, '{"results":[]}', "") if "bandit" in cmd else (0, "1 passed", ""))
+            )
+            with patch("src.tools.self_improve._safe_patch_target", return_value=True):
+                mod.self_improve(target=str(tmp_path))
+
+        assert mock_llm.invoke.called
+        call_arg = mock_llm.invoke.call_args[0][0][0]
+        prompt_text = call_arg.content
+
+        # Secrets must be redacted
+        assert "sk-testsecret1234567890" not in prompt_text
+        assert "super_secret_password_123" not in prompt_text
+        assert "abcdef1234567890" not in prompt_text
+        # Redaction placeholders must be present
+        assert "***REDACTED***" in prompt_text or "sk-***" in prompt_text
+
     def test_invalid_python_from_llm_skipped_file_unchanged(self, tmp_path: Path, monkeypatch):
         import src.tools.self_improve as mod
 

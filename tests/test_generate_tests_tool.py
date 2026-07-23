@@ -270,7 +270,9 @@ def test_llm_error_returns_descriptive_string(configured, source_file, tmp_path,
 
     assert result.startswith("Error:")
     assert "LLM" in result
-    assert "connection refused" in result
+    # Raw error details sanitized — exception class and raw message not exposed to LLM
+    assert "connection refused" not in result
+    assert "Operation failed" in result  # sanitized fallback message
 
 
 # ---------------------------------------------------------------------------
@@ -414,3 +416,51 @@ def test_user_cancelled_run_is_raised(configured, source_file, tmp_path, monkeyp
 
         with pytest.raises(UserCancelledRun):
             generate_tests(str(source_file))
+
+
+# ---------------------------------------------------------------------------
+# 17. Secrets are redacted before sending to LLM
+# ---------------------------------------------------------------------------
+
+
+def test_secrets_redacted_in_llm_prompt(configured, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "tests").mkdir(parents=True, exist_ok=True)
+
+    src = tmp_path / "src" / "api_client.py"
+    src.parent.mkdir(parents=True)
+    original = (
+        "API_KEY = 'sk-testsecret1234567890'\n"
+        "PASSWORD = 'super_secret_password_123'\n"
+        "HEADERS = {'Authorization': 'Bearer abcdef1234567890'}\n"
+        "\n"
+        "def fetch_data():\n"
+        "    pass\n"
+    )
+    src.write_text(original, encoding="utf-8")
+
+    captured: list[str] = []
+    mock_llm = MagicMock()
+
+    def capture(msgs):
+        captured.append(msgs[0].content)
+        return _llm_response("def test_fetch(): pass")
+
+    mock_llm.invoke.side_effect = capture
+
+    with patch("src.tools.generate_tests.create_chat_model_from_configs", return_value=mock_llm):
+        from src.tools.generate_tests import generate_tests
+
+        generate_tests(str(src))
+
+    assert captured, "LLM was not called"
+    prompt = captured[0]
+
+    # Secrets must be redacted
+    assert "sk-testsecret1234567890" not in prompt
+    assert "super_secret_password_123" not in prompt
+    assert "abcdef1234567890" not in prompt
+    # Redaction placeholders must be present
+    assert "***REDACTED***" in prompt or "sk-***" in prompt
+    # Original file must NOT be modified
+    assert src.read_text(encoding="utf-8") == original

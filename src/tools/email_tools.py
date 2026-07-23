@@ -31,6 +31,8 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from typing import TYPE_CHECKING, Any
 
+from src.tools.error_sanitizer import sanitize_error
+
 if TYPE_CHECKING:
     from pydantic import BaseModel, Field
 else:
@@ -237,14 +239,14 @@ def read_email(limit: int = 10, folder: str = "INBOX") -> str:
     try:
         conn = _get_imap_connection()
     except RuntimeError as exc:
-        return f"Error: {exc}"
+        return f"Error: {sanitize_error(exc)}"
     except Exception as exc:
-        return f"Error connecting to IMAP: {exc}"
+        return f"Error connecting to IMAP: {sanitize_error(exc)}"
 
     try:
         status, data = conn.select(folder, readonly=True)
         if status != "OK":
-            return f"Error selecting folder {folder!r}: {data}"
+            return f"Error selecting folder: {sanitize_error(RuntimeError(str(data)))}"
 
         status, data = conn.search(None, "ALL")
         if status != "OK":
@@ -281,7 +283,7 @@ def read_email(limit: int = 10, folder: str = "INBOX") -> str:
 
         return "\n".join(output)
     except Exception as exc:
-        return f"Error reading email: {exc}"
+        return f"Error reading email: {sanitize_error(exc)}"
     finally:
         try:
             conn.logout()
@@ -357,9 +359,9 @@ def send_email(to: str, subject: str, body: str, cc: str = "") -> str:
     except smtplib.SMTPAuthenticationError:
         return "Error: SMTP authentication failed. Check username and password."
     except smtplib.SMTPException as exc:
-        return f"Error sending email: {exc}"
+        return f"Error sending email: {sanitize_error(exc)}"
     except Exception as exc:
-        return f"Error sending email: {exc}"
+        return f"Error sending email: {sanitize_error(exc)}"
 
 
 def _sanitize_imap_value(value: str) -> str:
@@ -402,14 +404,14 @@ def search_email(
     try:
         conn = _get_imap_connection()
     except RuntimeError as exc:
-        return f"Error: {exc}"
+        return f"Error: {sanitize_error(exc)}"
     except Exception as exc:
-        return f"Error connecting to IMAP: {exc}"
+        return f"Error connecting to IMAP: {sanitize_error(exc)}"
 
     try:
         status, data = conn.select(folder, readonly=True)
         if status != "OK":
-            return f"Error selecting folder {folder!r}: {data}"
+            return f"Error selecting folder: {sanitize_error(RuntimeError(str(data)))}"
 
         # Build IMAP SEARCH criteria (sanitize inputs to prevent injection)
         criteria_parts: list[str] = []
@@ -466,7 +468,7 @@ def search_email(
 
         return "\n".join(output)
     except Exception as exc:
-        return f"Error searching email: {exc}"
+        return f"Error searching email: {sanitize_error(exc)}"
     finally:
         try:
             conn.logout()

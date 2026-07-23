@@ -282,7 +282,7 @@ async def get_session_tools(
     Auth: bearer token required.
     Error codes: UNAUTHORIZED, TOKEN_EXPIRED, FORBIDDEN, SESSION_NOT_FOUND.
     """
-    await verify_session_owner(session_id, current_user, db)
+    await verify_session_owner(session_id, current_user, db, admin_bypass=True)
 
     registry = _get_registry(request)
     session_registry = _get_session_registry(request)
@@ -344,7 +344,7 @@ async def patch_session_tools(
         TOOL_NOT_FOUND, TOOL_ALREADY_ACTIVE, TOOL_ALREADY_DISABLED,
         TOOL_EXPANSION_FAILED.
     """
-    await verify_session_owner(session_id, current_user, db)
+    await verify_session_owner(session_id, current_user, db, admin_bypass=True)
 
     registry = _get_registry(request)
     session_registry = _get_session_registry(request)

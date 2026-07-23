@@ -364,11 +364,11 @@ class TestReDoSResistance:
 
     def test_guardrails_drop_pattern_no_backtrack(self):
         """Pattern 'drop|clear...context|history...' must not backtrack on long input."""
-        from src.assistant.guardrails import _INJECTION_PATTERNS
+        from src.assistant._security_patterns import INJECTION_PATTERNS
 
         # Find the pattern with 'drop|clear' and 'context|history'
         pattern = None
-        for p in _INJECTION_PATTERNS:
+        for p in INJECTION_PATTERNS:
             if "drop" in p.pattern and "context" in p.pattern:
                 pattern = p
                 break
@@ -380,10 +380,10 @@ class TestReDoSResistance:
 
     def test_guardrails_dan_pattern_no_backtrack(self):
         """Pattern 'DAN...mode' must not backtrack on long input."""
-        from src.assistant.guardrails import _INJECTION_PATTERNS
+        from src.assistant._security_patterns import INJECTION_PATTERNS
 
         pattern = None
-        for p in _INJECTION_PATTERNS:
+        for p in INJECTION_PATTERNS:
             if "DAN" in p.pattern and "mode" in p.pattern:
                 pattern = p
                 break

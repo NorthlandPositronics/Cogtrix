@@ -174,6 +174,7 @@ def configure_delegate_tool(
     status_callback: Callable[[str], None] | None = None,
 ) -> None:
     """Configure the delegate tool with runtime settings from config."""
+    log = get_logger()
     try:
         from src.tools.delegate import configure_delegate, set_status_callback
 
@@ -210,8 +211,10 @@ def configure_delegate_tool(
 
         if status_callback is not None:
             set_status_callback(status_callback)
-    except ImportError:
-        pass
+    except ModuleNotFoundError:
+        pass  # tool module not installed — skip silently
+    except ImportError as exc:
+        log.warning("Skipping delegate tool configuration: %s", exc)
 
 
 def configure_delegate_tools(
@@ -225,16 +228,20 @@ def configure_delegate_tools(
     request tools dynamically.  Delegation tools and ``deep_think``
     are automatically excluded to prevent recursion.
     """
+    log = get_logger()
     try:
         from src.tools.delegate import set_delegate_tools
 
         set_delegate_tools(tools, available_tools)
-    except ImportError:
-        pass
+    except ModuleNotFoundError:
+        pass  # tool module not installed — skip silently
+    except ImportError as exc:
+        log.warning("Skipping delegate tools configuration: %s", exc)
 
 
 def configure_deep_think_tool(config: Config) -> None:
     """Configure the deep_think tool with provider settings."""
+    log = get_logger()
     try:
         from src.tools.deep_think import configure_deep_think
 
@@ -263,12 +270,15 @@ def configure_deep_think_tool(config: Config) -> None:
                 "default_model_alias": config.active_model_alias,
             }
         )
-    except ImportError:
-        pass
+    except ModuleNotFoundError:
+        pass  # tool module not installed — skip silently
+    except ImportError as exc:
+        log.warning("Skipping deep_think tool configuration: %s", exc)
 
 
 def configure_tavily_tool(config: Config) -> None:
     """Configure the Tavily search tool with API key from config."""
+    log = get_logger()
     try:
         from src.tools.tavily_search import configure_tavily
 
@@ -276,12 +286,15 @@ def configure_tavily_tool(config: Config) -> None:
         if config.tavily_api_key:
             tavily_cfg["api_key"] = config.tavily_api_key
         configure_tavily(tavily_cfg)
-    except ImportError:
-        pass
+    except ModuleNotFoundError:
+        pass  # tool module not installed — skip silently
+    except ImportError as exc:
+        log.warning("Skipping tavily tool configuration: %s", exc)
 
 
 def configure_exa_tool(config: Config) -> None:
     """Configure the Exa search tool with API key from config."""
+    log = get_logger()
     try:
         from src.tools.exa_search import configure_exa
 
@@ -289,12 +302,15 @@ def configure_exa_tool(config: Config) -> None:
         if config.exa_api_key:
             exa_cfg["api_key"] = config.exa_api_key
         configure_exa(exa_cfg)
-    except ImportError:
-        pass
+    except ModuleNotFoundError:
+        pass  # tool module not installed — skip silently
+    except ImportError as exc:
+        log.warning("Skipping exa tool configuration: %s", exc)
 
 
 def configure_brave_tool(config: Config) -> None:
     """Configure the Brave Search tool with API key from config."""
+    log = get_logger()
     try:
         from src.tools.brave_search import configure_brave
 
@@ -302,12 +318,15 @@ def configure_brave_tool(config: Config) -> None:
         if config.brave_api_key:
             brave_cfg["api_key"] = config.brave_api_key
         configure_brave(brave_cfg)
-    except ImportError:
-        pass
+    except ModuleNotFoundError:
+        pass  # tool module not installed — skip silently
+    except ImportError as exc:
+        log.warning("Skipping brave tool configuration: %s", exc)
 
 
 def configure_searxng_tool(config: Config) -> None:
     """Configure the SearXNG search tool with instance URL from config."""
+    log = get_logger()
     try:
         from src.tools.searxng_search import configure_searxng
 
@@ -315,12 +334,15 @@ def configure_searxng_tool(config: Config) -> None:
         if config.searxng_url:
             searxng_cfg["url"] = config.searxng_url
         configure_searxng(searxng_cfg)
-    except ImportError:
-        pass
+    except ModuleNotFoundError:
+        pass  # tool module not installed — skip silently
+    except ImportError as exc:
+        log.warning("Skipping searxng tool configuration: %s", exc)
 
 
 def configure_serpapi_tool(config: Config) -> None:
     """Configure the SerpAPI search tool with API key from config."""
+    log = get_logger()
     try:
         from src.tools.serpapi_search import configure_serpapi
 
@@ -328,12 +350,15 @@ def configure_serpapi_tool(config: Config) -> None:
         if config.serpapi_api_key:
             serpapi_cfg["api_key"] = config.serpapi_api_key
         configure_serpapi(serpapi_cfg)
-    except ImportError:
-        pass
+    except ModuleNotFoundError:
+        pass  # tool module not installed — skip silently
+    except ImportError as exc:
+        log.warning("Skipping serpapi tool configuration: %s", exc)
 
 
 def configure_google_search_tool(config: Config) -> None:
     """Configure the Google Search tool with API key and CSE ID from config."""
+    log = get_logger()
     try:
         from src.tools.google_search import configure_google_search
 
@@ -343,19 +368,24 @@ def configure_google_search_tool(config: Config) -> None:
         if config.google_cse_id:
             google_cfg["cse_id"] = config.google_cse_id
         configure_google_search(google_cfg)
-    except ImportError:
-        pass
+    except ModuleNotFoundError:
+        pass  # tool module not installed — skip silently
+    except ImportError as exc:
+        log.warning("Skipping google_search tool configuration: %s", exc)
 
 
 def configure_python_exec_tool(config: Config) -> None:
     """Configure the Python execution tool with session ID for persistent state."""
+    log = get_logger()
     try:
         from src.tools.python_exec import configure_datascience_modules, set_session
 
         set_session(config.session)
         configure_datascience_modules(config.enable_datascience_modules)
-    except ImportError:
-        pass
+    except ModuleNotFoundError:
+        pass  # tool module not installed — skip silently
+    except ImportError as exc:
+        log.warning("Skipping python_exec tool configuration: %s", exc)
 
 
 def configure_file_ops_tool(config: Config) -> None:
@@ -385,6 +415,7 @@ def configure_cron_tool(
                      Called fresh each time a job fires, so provider / model
                      changes are reflected automatically.
     """
+    log = get_logger()
     try:
         from src.tools.cron_tools import configure_cron
 
@@ -396,8 +427,10 @@ def configure_cron_tool(
             initial_jobs=list(config.cron) if getattr(config, "cron", None) else None,
             llm_timeout=getattr(config, "cron_llm_timeout", None),
         )
-    except (ImportError, OSError):
-        pass
+    except ModuleNotFoundError:
+        pass  # tool module not installed — skip silently
+    except (ImportError, OSError) as exc:
+        log.warning("Skipping cron tool configuration: %s", exc)
 
 
 def configure_agent_tools() -> None:
@@ -407,23 +440,29 @@ def configure_agent_tools() -> None:
     ``src.tools.agent_tools`` are resolved at registry load time, surfacing
     any dependency issues early.
     """
+    log = get_logger()
     try:
         from src.tools.agent_tools import configure_agent_tools as _configure
 
         _configure()
-    except (ImportError, OSError):
-        pass
+    except ModuleNotFoundError:
+        pass  # tool module not installed — skip silently
+    except (ImportError, OSError) as exc:
+        log.warning("Skipping agent_tools configuration: %s", exc)
 
 
 def configure_email_tool(config: Config) -> None:
     """Configure the email tools with IMAP/SMTP settings from config."""
+    log = get_logger()
     try:
         from src.tools.email_tools import configure_email
 
         email_cfg = config.services.get("email", {})
         configure_email(email_cfg)
-    except ImportError:
-        pass
+    except ModuleNotFoundError:
+        pass  # tool module not installed — skip silently
+    except ImportError as exc:
+        log.warning("Skipping email tool configuration: %s", exc)
 
 
 def configure_rag_tool(config: Config) -> None:
@@ -433,6 +472,7 @@ def configure_rag_tool(config: Config) -> None:
     live index stats and sets ``_rag_auto_activate`` so callers can check
     whether to promote the tool from on-demand to active.
     """
+    log = get_logger()
     try:
         from src.tools.rag import TOOL_CONFIG as _rag_tool_config
         from src.tools.rag import (
@@ -477,8 +517,10 @@ def configure_rag_tool(config: Config) -> None:
         # to active when a knowledge base exists.
         global _rag_auto_activate
         _rag_auto_activate = knowledge_base_exists()
-    except (ImportError, OSError):
-        pass
+    except ModuleNotFoundError:
+        pass  # tool module not installed — skip silently
+    except (ImportError, OSError) as exc:
+        log.warning("Skipping RAG tool configuration: %s", exc)
 
 
 def _update_rag_tool_description(tool: Any) -> None:
@@ -487,14 +529,17 @@ def _update_rag_tool_description(tool: Any) -> None:
     Called after :func:`configure_rag_tool` has set ``TOOL_CONFIG["description"]``
     with live index stats.
     """
+    log = get_logger()
     try:
         from src.tools.rag import TOOL_CONFIG as _rag_tool_config
 
         desc = _rag_tool_config.get("description")
         if desc and hasattr(tool, "description"):
             tool.description = desc
-    except ImportError:
-        pass
+    except ModuleNotFoundError:
+        pass  # tool module not installed — skip silently
+    except ImportError as exc:
+        log.warning("Skipping RAG tool description update: %s", exc)
 
 
 _rag_auto_activate: bool = False

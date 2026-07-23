@@ -116,7 +116,7 @@ async def get_memory(
     Auth: bearer token required.
     Error codes: UNAUTHORIZED, TOKEN_EXPIRED, FORBIDDEN, SESSION_NOT_FOUND.
     """
-    await verify_session_owner(session_id, current_user, db)
+    await verify_session_owner(session_id, current_user, db, admin_bypass=True)
     live_session = await _resolve_session(session_id, request, db)
     mm = live_session.memory_manager
     return APIResponse(data=_memory_state_out(session_id, live_session, mm))
@@ -150,7 +150,7 @@ async def clear_memory(
     Auth: bearer token required.
     Error codes: UNAUTHORIZED, TOKEN_EXPIRED, FORBIDDEN, SESSION_NOT_FOUND, MEMORY_CLEAR_FAILED.
     """
-    await verify_session_owner(session_id, current_user, db)
+    await verify_session_owner(session_id, current_user, db, admin_bypass=True)
     live_session = await _resolve_session(session_id, request, db)
     mm = live_session.memory_manager
     if mm is not None:
@@ -210,7 +210,7 @@ async def switch_memory_mode(
     Auth: bearer token required.
     Error codes: UNAUTHORIZED, TOKEN_EXPIRED, FORBIDDEN, SESSION_NOT_FOUND, VALIDATION_ERROR.
     """
-    await verify_session_owner(session_id, current_user, db)
+    await verify_session_owner(session_id, current_user, db, admin_bypass=True)
     live_session = await _resolve_session(session_id, request, db)
 
     target_mode = body.mode

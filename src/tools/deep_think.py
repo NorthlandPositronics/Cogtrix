@@ -233,7 +233,21 @@ def _call_llm_parallel(llm: Any, prompts: list[str], timeout: int = 180) -> list
 
     def _invoke(idx: int, prompt: str) -> tuple:
         thread_llm = copy.copy(llm)
-        res = thread_llm.invoke([HumanMessage(content=prompt)])
+        # Per-invoke timeout enforcement for #1569.
+        # Uses the gold-standard ThreadPoolExecutor pattern from #1558:
+        # future.result(timeout=N) ensures the invoke call itself is bounded,
+        # closing the gap between the outer as_completed window and the actual
+        # LLM call. Falls back to empty string on timeout, matching the
+        # graceful-degradation pattern used in other Phase 1 fixes.
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(thread_llm.invoke, [HumanMessage(content=prompt)])
+            try:
+                res = future.result(timeout=60)
+            except FuturesTimeoutError:
+                log.warning("deep_think _invoke timed out for prompt index %d", idx)
+                return idx, ""
+            finally:
+                pool.shutdown(wait=False, cancel_futures=True)
         content = res.content
         if isinstance(content, list):
             content = " ".join(str(c.get("text", c) if isinstance(c, dict) else c) for c in content)
@@ -550,8 +564,7 @@ def _phase_branch(
     reflection_block = ""
     if prior_reflection:
         reflection_block = (
-            "\nPRIOR REFLECTION (use this to improve on previous attempts):\n"
-            f"{prior_reflection}\n"
+            f"\nPRIOR REFLECTION (use this to improve on previous attempts):\n{prior_reflection}\n"
         )
 
     prompt = _BRANCH_PROMPT.format(
@@ -791,8 +804,7 @@ def _format_report(
         for b in ranked:
             best_marker = " ★" if b is ranked[0] else ""
             lines.append(
-                f"- **[{b.score:.1f}/10]** {b.name}{best_marker} "
-                f"— {b.verdict or b.strategy[:80]}"
+                f"- **[{b.score:.1f}/10]** {b.name}{best_marker} — {b.verdict or b.strategy[:80]}"
             )
 
         if it.reflection_summary:
@@ -866,9 +878,7 @@ def deep_think(
     """
     # Guard: configuration must be set (skip if caller provided an LLM)
     if llm is None and not _config.get("providers") and not _config.get("default_provider"):
-        return (
-            "**Deep Think error:** Not configured. " "Ensure the agent has a provider configured."
-        )
+        return "**Deep Think error:** Not configured. Ensure the agent has a provider configured."
 
     # Guard: context length (100K chars ≈ 25K tokens)
     _MAX_CONTEXT = 100_000
@@ -911,7 +921,7 @@ def deep_think(
     num_branches = max(2, min(int(num_branches), 5))
     beam_width = max(1, min(int(beam_width), num_branches))
 
-    _progress(f"Starting deep analysis — " f"{max_iterations} iterations × {num_branches} branches")
+    _progress(f"Starting deep analysis — {max_iterations} iterations × {num_branches} branches")
     start_time = time.time()
 
     if llm is None:
@@ -1003,8 +1013,7 @@ def deep_think(
     total_seconds = time.time() - start_time
     total_branches = sum(len(it.branches) for it in iterations)
     _progress(
-        f"Complete — {len(iterations)} iterations, "
-        f"{total_branches} branches, {total_seconds:.1f}s"
+        f"Complete — {len(iterations)} iterations, {total_branches} branches, {total_seconds:.1f}s"
     )
 
     return _format_report(task, iterations, total_seconds)

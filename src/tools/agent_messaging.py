@@ -14,11 +14,36 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
+import threading
 import time
+from collections import OrderedDict
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+# Best-effort file locking for concurrent inbox access.
+# fcntl is POSIX-only; on Windows we fall back to a threading lock (which at
+# least guards the in-process case).
+try:
+    import fcntl as _fcntl
+
+    def _lock_file(fd: int) -> None:
+        _fcntl.flock(fd, _fcntl.LOCK_EX)
+
+    def _unlock_file(fd: int) -> None:
+        _fcntl.flock(fd, _fcntl.LOCK_UN)
+
+except ImportError:  # Windows / non-POSIX
+    _fcntl = None  # type: ignore[assignment]
+
+    def _lock_file(fd: int) -> None:  # type: ignore[misc]
+        pass
+
+    def _unlock_file(fd: int) -> None:  # type: ignore[misc]
+        pass
+
 
 if TYPE_CHECKING:
     from pydantic import BaseModel, Field
@@ -42,6 +67,58 @@ _data_dir: Path = Path("data")
 
 _TTL_SECONDS: float = 86400.0  # 24 hours
 _NAME_RE = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
+
+# In-process per-inbox locks so concurrent threads don't interleave writes.
+# Combined with OS-level flock (see _lock_file) this guards both in-process
+# and multi-process concurrent access to the same inbox file.
+#
+# LRU eviction: _inbox_locks is bounded to _INBOX_LOCKS_MAX_SIZE entries.
+_INBOX_LOCKS_MAX_SIZE = 1024
+_inbox_locks: OrderedDict[str, threading.Lock] = OrderedDict()
+_inbox_locks_meta = threading.Lock()
+
+
+def _get_inbox_lock(agent_name: str) -> threading.Lock:
+    """Return the in-process threading.Lock for *agent_name* (LRU-bounded)."""
+    with _inbox_locks_meta:
+        if agent_name in _inbox_locks:
+            _inbox_locks.move_to_end(agent_name)
+            return _inbox_locks[agent_name]
+        while len(_inbox_locks) >= _INBOX_LOCKS_MAX_SIZE:
+            _inbox_locks.popitem(last=False)
+        lock = threading.Lock()
+        _inbox_locks[agent_name] = lock
+        return lock
+
+
+def _locked_read_modify_write(path: Path, modify_fn):
+    """Acquire in-process and OS-level locks, then read-modify-write *path*.
+
+    *modify_fn* receives the current message list and should return the new
+    message list.  The write uses tempfile + os.replace for atomicity.
+
+    Returns the modified message list.
+    """
+    with _get_inbox_lock(path.stem):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path = path.with_suffix(".lock")
+        lock_fd = -1
+        try:
+            lock_fd = os.open(str(lock_path), os.O_CREAT | os.O_WRONLY, 0o600)
+            if lock_fd >= 0:
+                _lock_file(lock_fd)
+            messages = _prune(_load_messages(path))
+            messages = modify_fn(messages)
+            with atomic_write_json(path) as f:
+                json.dump(messages, f, indent=2)
+            return messages
+        finally:
+            if lock_fd >= 0:
+                _unlock_file(lock_fd)
+                try:
+                    os.close(lock_fd)
+                except OSError:
+                    pass
 
 
 # ── Configuration ─────────────────────────────────────────────────────────────
@@ -146,19 +223,18 @@ def send_to_agent(agent_name: str, message: str, from_agent: str = "") -> str:
         return path_or_err
     path: Path = path_or_err
 
-    messages = _prune(_load_messages(path))
-    messages.append(
-        {
-            "from_agent": from_agent,
-            "message": message,
-            "sent_at": time.time(),
-            "read": False,
-        }
-    )
+    def _append(messages: list[dict]) -> list[dict]:
+        messages.append(
+            {
+                "from_agent": from_agent,
+                "message": message,
+                "sent_at": time.time(),
+                "read": False,
+            }
+        )
+        return messages
 
-    with atomic_write_json(path) as f:
-        json.dump(messages, f, indent=2)
-
+    _locked_read_modify_write(path, _append)
     return f"Message sent to agent '{agent_name}'"
 
 
@@ -179,20 +255,19 @@ def read_agent_inbox(agent_name: str = "") -> str:
     if not path.exists():
         return "Inbox empty."
 
-    messages = _prune(_load_messages(path))
+    def _mark_read(messages: list[dict]) -> list[dict]:
+        messages = _prune(messages)
+        for msg in messages:
+            msg["read"] = True
+        return messages
+
+    messages = _locked_read_modify_write(path, _mark_read)
 
     if not messages:
         # All messages expired; write back empty list to clean up the file
         with atomic_write_json(path) as f:
             json.dump([], f)
         return "Inbox empty."
-
-    # Mark all as read and persist
-    for msg in messages:
-        msg["read"] = True
-
-    with atomic_write_json(path) as f:
-        json.dump(messages, f, indent=2)
 
     # Format output
     lines: list[str] = []

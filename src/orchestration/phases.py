@@ -251,7 +251,27 @@ def force_delegation(
             log.warning("Cannot build LLM for task decomposition")
             return agent_response
 
-        response = llm.invoke([_HM(content=decompose_prompt)])
+        # Wrap the decomposition LLM call in a temporary executor so we can
+        # enforce a timeout.  Python threads cannot be cancelled;
+        # shutdown(wait=False) lets the hung thread die in the background
+        # without blocking the caller.
+        import concurrent.futures as _cf
+
+        _pool = _cf.ThreadPoolExecutor(max_workers=1)
+        try:
+            _fut = _pool.submit(llm.invoke, [_HM(content=decompose_prompt)])
+            try:
+                response = _fut.result(timeout=60)
+            except _cf.TimeoutError:
+                _fut.cancel()
+                _pool.shutdown(wait=False)
+                log.warning(
+                    "Task decomposition LLM call timed out after 60s — "
+                    "returning original agent response"
+                )
+                return agent_response
+        finally:
+            _pool.shutdown(wait=False)
         raw_content = getattr(response, "content", str(response))
         if isinstance(raw_content, list):
             raw_content = " ".join(

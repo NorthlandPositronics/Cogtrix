@@ -41,6 +41,14 @@ class MockLangChainModel:
         """Mock invoke method."""
         raise NotImplementedError("Mock invoke not implemented")
 
+    def bind_tools(self, tools, **kwargs):
+        """Mock bind_tools — returns a new model with tools bound."""
+        bound = MockLangChainModel(self.provider_name)
+        bound._bound_tools = tools
+        # Copy the invoke mock so tests can assert on it
+        bound.invoke = self.invoke  # type: ignore[method-assign]
+        return bound
+
     def __repr__(self):
         return f"MockLangChainModel({self.provider_name!r})"
 
@@ -302,6 +310,119 @@ class TestCreateChatModelWrapping:
         assert result._max_retries == 5
 
 
+class TestRetryableChatModelDisableRetries:
+    """Tests for _cogtrix_disable_retries kwarg (issue #1069).
+
+    When _invoke_with_timeout submits a model call to the shared
+    ThreadPoolExecutor, the inner retry loop must be disabled so that
+    rate-limit backoff does not block a scarce worker thread.
+    """
+
+    def test_disable_retries_skips_inner_retry(self):
+        """_cogtrix_disable_retries=True bypasses retry logic entirely."""
+        mock_model = MockLangChainModel()
+        rate_limit_error = RateLimitError("Rate limit exceeded", retry_after=0.1)
+        mock_model.invoke = MagicMock(side_effect=rate_limit_error)
+
+        wrapper = RetryableChatModel(mock_model, max_retries=3, initial_delay=0.01)
+        with pytest.raises(RateLimitError):
+            wrapper.invoke("test input", _cogtrix_disable_retries=True)
+
+        # Should call the underlying model exactly once (no retries)
+        mock_model.invoke.assert_called_once()
+        # Verify the flag is NOT passed through to the underlying model
+        _, kwargs = mock_model.invoke.call_args
+        assert "_cogtrix_disable_retries" not in kwargs
+
+    def test_disable_retries_returns_success(self):
+        """_cogtrix_disable_retries=True works for successful calls."""
+        mock_model = MockLangChainModel()
+        mock_model.invoke = MagicMock(return_value="success")
+
+        wrapper = RetryableChatModel(mock_model, max_retries=3)
+        result = wrapper.invoke("test input", _cogtrix_disable_retries=True)
+
+        assert result == "success"
+        mock_model.invoke.assert_called_once()
+
+    def test_disable_retries_passes_through_kwargs(self):
+        """Other kwargs are preserved when _cogtrix_disable_retries is used."""
+        mock_model = MockLangChainModel()
+        mock_model.invoke = MagicMock(return_value="success")
+
+        wrapper = RetryableChatModel(mock_model, max_retries=3)
+        wrapper.invoke(
+            "test input",
+            temperature=0.7,
+            max_tokens=100,
+            _cogtrix_disable_retries=True,
+        )
+
+        _, kwargs = mock_model.invoke.call_args
+        assert kwargs.get("temperature") == 0.7
+        assert kwargs.get("max_tokens") == 100
+        assert "_cogtrix_disable_retries" not in kwargs
+
+    def test_default_behavior_retries_still_work(self):
+        """Without the flag, normal retry behavior is preserved."""
+        mock_model = MockLangChainModel()
+        rate_limit_error = RateLimitError("Rate limit exceeded", retry_after=0.01)
+
+        call_count = 0
+
+        def side_effect(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count <= 2:
+                raise rate_limit_error
+            return "success"
+
+        mock_model.invoke = MagicMock(side_effect=side_effect)
+
+        wrapper = RetryableChatModel(mock_model, max_retries=3, initial_delay=0.01)
+        result = wrapper.invoke("test input")
+
+        assert result == "success"
+        assert call_count == 3
+
+
+class TestRetryableChatModelBindTools:
+    """Tests for bind_tools re-wrapping (issue #1069 follow-up).
+
+    Without an explicit ``bind_tools`` override, ``llm.bind_tools()``
+    delegates through ``__getattr__`` to the raw underlying model.
+    The returned bound model bypasses ``RetryableChatModel.invoke()``,
+    causing the ``_cogtrix_disable_retries`` flag to leak to the API
+    client and trigger a TypeError.
+    """
+
+    def test_bind_tools_returns_retryable_chat_model(self):
+        """bind_tools wraps the result in RetryableChatModel."""
+        mock_model = MockLangChainModel()
+        wrapper = RetryableChatModel(mock_model, max_retries=5, initial_delay=2.0)
+
+        bound = wrapper.bind_tools(["tool_a"])
+
+        assert isinstance(bound, RetryableChatModel)
+        assert bound._max_retries == 5
+        assert bound._initial_delay == 2.0
+
+    def test_bound_model_pops_disable_retries(self):
+        """Bound model still handles _cogtrix_disable_retries correctly."""
+        mock_model = MockLangChainModel()
+        mock_model.invoke = MagicMock(return_value="success")
+
+        wrapper = RetryableChatModel(mock_model, max_retries=3)
+        bound = wrapper.bind_tools(["tool_a"])
+
+        result = bound.invoke("test input", _cogtrix_disable_retries=True)
+
+        assert result == "success"
+        mock_model.invoke.assert_called_once()
+        _, kwargs = mock_model.invoke.call_args
+        assert "_cogtrix_disable_retries" not in kwargs
+
+
 class TestExtractRetryAfter:
     """Tests for _extract_retry_after helper."""
 
@@ -347,3 +468,214 @@ class TestExtractRetryAfter:
         assert result is None
         assert "_extract_retry_after: failed to parse response" in caplog.text
         assert "boom" in caplog.text
+
+
+class TestRetryableChatModelExponentialBackoff:
+    """Regression tests for exponential backoff in RetryableChatModel (issue #1511)."""
+
+    def test_exponential_backoff_increases_sleep_duration(self):
+        """Sleep duration must double on each retry when no Retry-After header."""
+        mock_model = MockLangChainModel()
+        rate_limit_error = RateLimitError("Rate limit exceeded")
+
+        call_count = 0
+
+        def side_effect(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            raise rate_limit_error
+
+        mock_model.invoke = MagicMock(side_effect=side_effect)
+        wrapper = RetryableChatModel(mock_model, max_retries=3, initial_delay=1.0, max_delay=30.0)
+
+        sleep_durations = []
+
+        def capture_sleep(duration):
+            sleep_durations.append(duration)
+
+        with patch("src.providers.time.sleep", side_effect=capture_sleep):
+            with pytest.raises(RateLimitError):
+                wrapper.invoke("test input")
+
+        # 3 retries = 3 sleeps before exhaustion
+        assert len(sleep_durations) == 3
+        assert sleep_durations[0] == 1.0  # initial delay
+        assert sleep_durations[1] == 2.0  # doubled
+        assert sleep_durations[2] == 4.0  # doubled again
+
+    def test_server_retry_after_used_on_first_attempt(self):
+        """Server-provided Retry-After is used on first retry, then backoff."""
+        mock_model = MockLangChainModel()
+
+        # First call: no Retry-After header → use exponential backoff
+        # Second call: server says Retry-After=5.0 → use that
+        call_count = 0
+
+        class ErrorWithResponse(Exception):
+            pass
+
+        def side_effect(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            exc = ErrorWithResponse("Rate limit exceeded")
+            exc.status_code = 429
+            if call_count == 2:
+                # Second failure has Retry-After header
+                exc.response = MagicMock()
+                exc.response.headers = {"Retry-After": "5.0"}
+            else:
+                exc.response = None
+            raise exc
+
+        mock_model.invoke = MagicMock(side_effect=side_effect)
+        wrapper = RetryableChatModel(mock_model, max_retries=3, initial_delay=1.0, max_delay=30.0)
+
+        sleep_durations = []
+
+        def capture_sleep(duration):
+            sleep_durations.append(duration)
+
+        with patch("src.providers.time.sleep", side_effect=capture_sleep):
+            with pytest.raises(RateLimitError):
+                wrapper.invoke("test input")
+
+        # 3 retries = 3 sleeps
+        assert len(sleep_durations) == 3
+        # First retry: no Retry-After → use initial delay (1.0)
+        assert sleep_durations[0] == 1.0
+        # Second retry: server says 5.0 → use that
+        assert sleep_durations[1] == 5.0
+        # Third retry: no Retry-After again → use doubled delay (4.0)
+        # (delay was doubled to 2.0 after first sleep, then to 4.0 after second)
+        assert sleep_durations[2] == 4.0
+
+    def test_max_delay_caps_backoff(self):
+        """Exponential backoff is capped at max_delay."""
+        mock_model = MockLangChainModel()
+        rate_limit_error = RateLimitError("Rate limit exceeded")
+
+        call_count = 0
+
+        def side_effect(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            raise rate_limit_error
+
+        mock_model.invoke = MagicMock(side_effect=side_effect)
+        wrapper = RetryableChatModel(mock_model, max_retries=5, initial_delay=2.0, max_delay=5.0)
+
+        sleep_durations = []
+
+        def capture_sleep(duration):
+            sleep_durations.append(duration)
+
+        with patch("src.providers.time.sleep", side_effect=capture_sleep):
+            with pytest.raises(RateLimitError):
+                wrapper.invoke("test input")
+
+        # 5 retries = 5 sleeps
+        assert len(sleep_durations) == 5
+        assert sleep_durations[0] == 2.0  # initial
+        assert sleep_durations[1] == 4.0  # doubled
+        assert sleep_durations[2] == 5.0  # capped at max_delay
+        assert sleep_durations[3] == 5.0  # still capped
+        assert sleep_durations[4] == 5.0  # still capped
+
+
+class TestRedactUrl:
+    """Regression tests for _redact_url — ensure credential query params are redacted."""
+
+    def _call(self, url: str) -> str:
+        from src.providers import _redact_url
+
+        return _redact_url(url)
+
+    def test_redacts_api_key(self):
+        assert self._call("https://api.example.com/path?api_key=sk-abc123") == (
+            "https://api.example.com/path?api_key=[redacted]"
+        )
+
+    def test_redacts_apikey(self):
+        assert self._call("https://api.example.com/path?apikey=sk-xyz") == (
+            "https://api.example.com/path?apikey=[redacted]"
+        )
+
+    def test_redacts_password(self):
+        assert self._call("https://api.example.com/path?password=secret") == (
+            "https://api.example.com/path?password=[redacted]"
+        )
+
+    def test_redacts_token(self):
+        assert self._call("https://api.example.com/path?token=mytoken") == (
+            "https://api.example.com/path?token=[redacted]"
+        )
+
+    def test_redacts_auth_token(self):
+        assert self._call("https://api.example.com/path?auth_token=bearer123") == (
+            "https://api.example.com/path?auth_token=[redacted]"
+        )
+
+    def test_redacts_key(self):
+        """#1071 — 'key' is a common credential param missing from original sensitive_keys."""
+        assert self._call("https://api.example.com/path?key=sk-abc123") == (
+            "https://api.example.com/path?key=[redacted]"
+        )
+
+    def test_redacts_secret(self):
+        """#1071 — 'secret' is used by AWS-style credential embedding."""
+        assert self._call("https://api.example.com/path?secret=mysecret") == (
+            "https://api.example.com/path?secret=[redacted]"
+        )
+
+    def test_redacts_access_token(self):
+        """#1071 — 'access_token' is used by OAuth-style flows."""
+        assert self._call("https://api.example.com/path?access_token=atk_456") == (
+            "https://api.example.com/path?access_token=[redacted]"
+        )
+
+    def test_redacts_api_secret(self):
+        """#1071 — 'api_secret' is paired with api_key in some APIs."""
+        assert self._call("https://api.example.com/path?api_secret=apisecret") == (
+            "https://api.example.com/path?api_secret=[redacted]"
+        )
+
+    def test_redacts_private_token(self):
+        """#1071 — 'private_token' is used by GitLab-style APIs."""
+        assert self._call("https://api.example.com/path?private_token=pt_789") == (
+            "https://api.example.com/path?private_token=[redacted]"
+        )
+
+    def test_redacts_refresh_token(self):
+        """#1508 — 'refresh_token' used in OAuth query-param flows."""
+        assert self._call("https://auth.example.com/oauth?refresh_token=rft_abc") == (
+            "https://auth.example.com/oauth?refresh_token=[redacted]"
+        )
+
+    def test_redacts_client_secret(self):
+        """#1508 — 'client_secret' used in OAuth client credentials flow."""
+        assert self._call("https://auth.example.com/token?client_secret=cs_xyz") == (
+            "https://auth.example.com/token?client_secret=[redacted]"
+        )
+
+    def test_non_sensitive_params_preserved(self):
+        """Params not in sensitive_keys are not redacted."""
+        result = self._call("https://api.example.com/path?key=sk-abc&page=2&limit=10")
+        assert "key=[redacted]" in result
+        assert "page=2" in result
+        assert "limit=10" in result
+
+    def test_empty_query_preserved(self):
+        """URLs without query strings are returned safely."""
+        assert self._call("https://api.example.com/path") == ("https://api.example.com/path")
+
+    def test_none_url_returns_placeholder(self):
+        assert self._call(None) == "<unparseable URL>"
+
+    def test_case_insensitive_match(self):
+        """Sensitive key matching is case-insensitive."""
+        assert self._call("https://api.example.com/path?KEY=sk-abc") == (
+            "https://api.example.com/path?KEY=[redacted]"
+        )
+        assert self._call("https://api.example.com/path?Secret=topsecret") == (
+            "https://api.example.com/path?Secret=[redacted]"
+        )

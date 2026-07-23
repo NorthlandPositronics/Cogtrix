@@ -28,6 +28,7 @@ Error codes:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import time
@@ -49,6 +50,15 @@ log = logging.getLogger("cogtrix.api.auth")
 # Maps key_id -> monotonic timestamp of the last DB write.
 _API_KEY_LAST_USED: dict[str, float] = {}
 _API_KEY_DEBOUNCE_SECONDS = 60.0
+_API_KEY_LOCK = asyncio.Lock()
+
+
+def _cleanup_stale_api_key_entries() -> None:
+    """Remove entries older than twice the debounce interval."""
+    cutoff = time.monotonic() - (_API_KEY_DEBOUNCE_SECONDS * 2)
+    stale = [k for k, v in _API_KEY_LAST_USED.items() if v < cutoff]
+    for k in stale:
+        del _API_KEY_LAST_USED[k]
 
 
 def _hash_api_key(token: str) -> str:
@@ -382,6 +392,60 @@ async def require_superadmin(current_user: TokenData = Depends(get_current_user)
     return current_user
 
 
+async def get_admin_org(
+    current_user: TokenData = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> str | None:
+    """FastAPI dependency: return the admin's org_id, or None for superadmins.
+
+    Used by admin enumeration endpoints that need org-scoping.  Superadmins
+    (role == 'superadmin') receive ``None`` so they can see data across all
+    organizations.  Regular admins receive their ``org_id`` from the user
+    record so the endpoint can filter (or reject when org metadata is not
+    yet available).
+
+    When ``enable_org_scoping`` is False (default), all admins receive ``None``
+    to preserve backward compatibility until Phase 2 rollout.
+
+    Raises:
+        HTTPException 403 FORBIDDEN — authenticated user is not an admin.
+    """
+    if not current_user.is_admin:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": "FORBIDDEN",
+                "message": "Authenticated user lacks permission for this action.",
+            },
+        )
+    # Feature flag: disable org scoping by default for backward compatibility
+    if os.getenv("COGTRIX_ENABLE_ORG_SCOPING", "").lower() not in ("true", "1", "yes"):
+        return None
+    if current_user.is_superadmin:
+        return None
+    from src.api.db.repositories.users import UserRepository
+
+    repo = UserRepository(db)
+    user = await repo.get_by_id(current_user.user_id)
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": "FORBIDDEN",
+                "message": "Authenticated user lacks permission for this action.",
+            },
+        )
+    if user.org_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": "ORG_NOT_ASSIGNED",
+                "message": "Admin account is not assigned to an organization.",
+            },
+        )
+    return user.org_id
+
+
 async def get_current_user_optional(
     request: Request,
     credentials: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),
@@ -477,12 +541,14 @@ async def validate_api_key(api_key: str, db: AsyncSession) -> TokenData:
 
     # Update last_used_at only after confirming the user exists.
     # Debounce in-process to avoid write amplification at high QPS.
-    now_mono = time.monotonic()
-    last_written = _API_KEY_LAST_USED.get(key_record.id, 0)
-    if now_mono - last_written >= _API_KEY_DEBOUNCE_SECONDS:
-        await repo.update_last_used(key_record.id, datetime.now(UTC))
-        await db.commit()
-        _API_KEY_LAST_USED[key_record.id] = now_mono
+    async with _API_KEY_LOCK:
+        now_mono = time.monotonic()
+        last_written = _API_KEY_LAST_USED.get(key_record.id, 0)
+        if now_mono - last_written >= _API_KEY_DEBOUNCE_SECONDS:
+            await repo.update_last_used(key_record.id, datetime.now(UTC))
+            await db.commit()
+            _API_KEY_LAST_USED[key_record.id] = now_mono
+            _cleanup_stale_api_key_entries()
 
     return TokenData(
         user_id=user.id,
@@ -496,21 +562,29 @@ async def validate_api_key(api_key: str, db: AsyncSession) -> TokenData:
 # ---------------------------------------------------------------------------
 
 
-async def verify_session_owner(session_id: str, current_user: TokenData, db: AsyncSession) -> None:
+async def verify_session_owner(
+    session_id: str,
+    current_user: TokenData,
+    db: AsyncSession,
+    *,
+    admin_bypass: bool = True,
+) -> None:
     """Ensure the current user owns the given session.
 
-    Admins may access any session.  Regular users may only access their own.
+    Admins may access any session when *admin_bypass* is ``True`` (default).
+    Regular users may only access their own.
 
     Args:
         session_id: UUID v4 of the session to check.
         current_user: Decoded JWT claims from the request.
         db: The caller's database session (from ``Depends(get_db)``).
+        admin_bypass: When ``True``, skip the check for admin callers.
 
     Raises:
         HTTPException 404 SESSION_NOT_FOUND — session does not exist.
         HTTPException 403 FORBIDDEN — session belongs to a different user.
     """
-    if current_user.is_admin:
+    if admin_bypass and current_user.is_admin:
         return
 
     from sqlalchemy import select

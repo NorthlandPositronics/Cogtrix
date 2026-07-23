@@ -49,6 +49,11 @@ _REPO_RE = re.compile(r"^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$")
 _REF_RE = re.compile(r"^[a-zA-Z0-9_./-]+$")
 _FILE_TRUNCATE = 10_000
 
+# Timeout defaults (seconds) — prevents indefinite hangs when gh CLI hangs.
+_GH_READ_TIMEOUT = 30  # gh pr list, gh api (read operations)
+_GH_WRITE_TIMEOUT = 60  # gh issue create, gh issue comment (write operations)
+_GH_TIMEOUT_CAP = 120  # hard cap for any caller-supplied override
+
 # ── Validation helpers ─────────────────────────────────────────────────────────
 
 
@@ -110,6 +115,11 @@ def _classify_gh_error(stderr: str) -> str:
     if "connection" in s or "timeout" in s or "network" in s or "could not resolve" in s:
         return "network"
     return "unknown"
+
+
+def _run_gh(cmd: list[str], timeout: float) -> subprocess.CompletedProcess:
+    """Run *cmd* via subprocess with the given *timeout* (seconds)."""
+    return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
 
 
 # ── Configuration ──────────────────────────────────────────────────────────────
@@ -221,7 +231,10 @@ def gh_create_issue(title: str, body: str = "", repo: str = "", labels: str = ""
     if labels.strip():
         cmd += ["--label", labels.strip()]
 
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    try:
+        result = _run_gh(cmd, _GH_WRITE_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return f"Error: gh command timed out after {_GH_WRITE_TIMEOUT} seconds"
     if result.returncode != 0:
         category = _classify_gh_error(result.stderr)
         return f"Error: GitHub command failed ({category})"
@@ -253,7 +266,10 @@ def gh_comment_issue(issue_number: int, body: str, repo: str = "") -> str:
         "--body",
         body,
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    try:
+        result = _run_gh(cmd, _GH_WRITE_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return f"Error: gh command timed out after {_GH_WRITE_TIMEOUT} seconds"
     if result.returncode != 0:
         category = _classify_gh_error(result.stderr)
         return f"Error: GitHub command failed ({category})"
@@ -285,7 +301,10 @@ def gh_list_prs(repo: str = "", state: str = "open", limit: int = 10) -> str:
         "--json",
         "number,title,author,state",
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    try:
+        result = _run_gh(cmd, _GH_READ_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return f"Error: gh command timed out after {_GH_READ_TIMEOUT} seconds"
     if result.returncode != 0:
         category = _classify_gh_error(result.stderr)
         return f"Error: GitHub command failed ({category})"
@@ -327,12 +346,15 @@ def gh_get_file(path: str, repo: str = "", ref: str = "") -> str:
     if ref:
         cmd += ["--raw-field", f"ref={ref}"]
 
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    try:
+        result = _run_gh(cmd, _GH_READ_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return f"Error: gh command timed out after {_GH_READ_TIMEOUT} seconds"
     if result.returncode != 0:
         stderr = result.stderr.strip()
         if "404" in stderr or "not found" in stderr.lower():
             return f"Error: file not found: {path}"
-        category = _classify_gh_error(result.stderr)
+        category = _classify_gh_error(stderr)
         return f"Error: GitHub command failed ({category})"
 
     try:

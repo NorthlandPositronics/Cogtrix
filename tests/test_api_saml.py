@@ -390,12 +390,20 @@ class TestSAMLRoutesConfigured:
 
     def test_acs_is_rate_limited_after_five_requests(self, configured_client):
         """POST /acs should reject brute-force traffic after the 5/minute route limit."""
+        import uuid
+        from types import SimpleNamespace
         from unittest.mock import patch
+
+        # Each call must yield a fresh assertion_id; the nonce cache (ADR-0054,
+        # PR #1531) would otherwise reject the 2nd+ requests as replays before
+        # the rate-limit gate is hit.
+        def _fresh_assertion(*_args, **_kwargs):
+            return SimpleNamespace(assertion_id=f"ass-{uuid.uuid4()}")
 
         with patch("src.api.routes.saml._provision_user", return_value=(object(), "token")):
             with patch(
                 "src.api.saml.provider.process_saml_response",
-                return_value=object(),
+                side_effect=_fresh_assertion,
             ):
                 for _ in range(5):
                     r = configured_client.post(

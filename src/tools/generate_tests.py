@@ -30,7 +30,9 @@ else:
         Field = lambda *a, **kw: None  # type: ignore[assignment]  # noqa: E731
 
 from src.agent.safety import UserCancelledRun
+from src.logging_config import _scrub_secrets
 from src.providers import create_chat_model_from_configs
+from src.tools.error_sanitizer import sanitize_error, sanitize_file_error
 
 if TYPE_CHECKING:
     from src.config import Config
@@ -234,7 +236,10 @@ def generate_tests(
     try:
         source_content = src_path.read_text(encoding="utf-8")
     except OSError as exc:
-        return f"Error reading {source_file}: {exc}"
+        return f"Error reading {source_file}: {sanitize_file_error(exc)}"
+
+    # Security: redact secrets before sending to LLM
+    source_content = _scrub_secrets(source_content)
 
     # ── Resolve output path ────────────────────────────────────────────────
     out_str = output_file.strip() or _derive_output_file(source_file)
@@ -267,7 +272,7 @@ def generate_tests(
     except UserCancelledRun:
         raise
     except Exception as exc:
-        return f"Error: LLM call failed — {exc}"
+        return f"Error: LLM call failed: {sanitize_error(exc)}"
 
     # ── Extract code and write ─────────────────────────────────────────────
     code = _extract_code(str(raw))
@@ -279,7 +284,7 @@ def generate_tests(
         with atomic_write_json(out_path) as f:
             f.write(code)
     except OSError as exc:
-        return f"Error writing {out_str}: {exc}"
+        return f"Error writing {out_str}: {sanitize_file_error(exc)}"
 
     line_count = code.count("\n") + 1
     return f"Tests written to {out_str} ({line_count} lines)"

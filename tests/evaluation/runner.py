@@ -161,18 +161,59 @@ def smoke_models() -> list[ModelConfig]:
 
 
 @dataclass
+class Turn:
+    """A single user turn in a multi-turn evaluation scenario.
+
+    Per-turn ``success_criteria`` are evaluated against the slice of
+    messages produced by that turn only, so a ``tool_called: foo``
+    assertion in turn 1 does not match a tool call from turn 2.
+
+    A scenario passes iff every turn's criteria pass AND every required
+    tool was called at least once across the session.
+
+    The LLM-as-judge scores each turn independently and aggregates
+    scores by a weighted average — ``judge_weight`` controls each turn's
+    contribution to the final aggregate.  Authoring guidance:
+
+    * For **related** turn sequences (turn N builds on turn N-1's
+      outcome), set a higher weight on the final turn so the score
+      reflects whether the overall workflow succeeded.
+    * For **unrelated** turns (one scenario testing several independent
+      capabilities back-to-back), keep weights at 1.0 across the board.
+    * The default 1.0 means "treat this turn equally with its
+      neighbours" — safe when in doubt.
+    """
+
+    user_prompt: str
+    success_criteria: list[str] = field(default_factory=list)
+    judge_weight: float = 1.0
+
+
+@dataclass
 class EvalScenario:
-    """A single Finance/Procurement evaluation scenario."""
+    """A single Finance/Procurement evaluation scenario.
+
+    Two YAML shapes are accepted:
+
+    * Legacy single-turn: top-level ``user_prompt`` + ``success_criteria``.
+    * Multi-turn: top-level ``turns:`` list of ``user_prompt`` + per-turn
+      ``success_criteria``.  Mutually exclusive with the legacy fields.
+
+    After ``load_scenario`` parses either shape, ``scenario.turns`` is
+    always non-empty and the runner only reads ``scenario.turns``.
+    """
 
     id: str
     domain: str  # "procurement" | "finance"
     title: str
     description: str
-    user_prompt: str
-    system_prompt: str
-    tools_required: list[str]
-    expected_outcome: str
-    success_criteria: list[str]
+    # Legacy single-turn fields — either these, or `turns:`, must be
+    # populated.  See class docstring.
+    user_prompt: str = ""
+    system_prompt: str = ""
+    tools_required: list[str] = field(default_factory=list)
+    expected_outcome: str = ""
+    success_criteria: list[str] = field(default_factory=list)
     max_turns: int = 20
     timeout_seconds: int = 120
     tags: list[str] = field(default_factory=list)
@@ -189,13 +230,79 @@ class EvalScenario:
     # the agent did NOT call it.  Merged with tools_required when stubs
     # are built; selection-rate scoring still uses tools_required only.
     tools_available: list[str] = field(default_factory=list)
+    # Populated by ``load_scenario`` from either ``turns:`` (multi-turn)
+    # or from the legacy ``user_prompt`` / ``success_criteria`` fields
+    # (single-turn).  The runner only reads this; the legacy fields are
+    # kept on the dataclass solely so ``EvalScenario(**yaml_dict)`` keeps
+    # working for the existing single-turn shape.
+    turns: list[Turn] = field(default_factory=list)
 
 
 def load_scenario(path: Path) -> EvalScenario:
-    """Load a scenario YAML file into an EvalScenario."""
+    """Load a scenario YAML file into an EvalScenario.
+
+    Normalises both legacy and multi-turn YAML shapes so the runner only
+    has to traverse ``scenario.turns``.  Rejects ambiguous YAMLs that
+    mix top-level ``user_prompt`` / ``success_criteria`` with a
+    ``turns:`` block.
+    """
     with open(path) as f:
         data = yaml.safe_load(f)
-    return EvalScenario(**data)
+
+    raw_turns = data.pop("turns", None)
+    parsed_turns: list[Turn] = []
+    if raw_turns is not None:
+        scenario_label = data.get("id", path.name)
+        if not isinstance(raw_turns, list) or not raw_turns:
+            raise ValueError(f"Scenario {scenario_label}: `turns:` must be a non-empty list.")
+        for idx, raw_turn in enumerate(raw_turns):
+            if not isinstance(raw_turn, dict):
+                raise ValueError(f"Scenario {scenario_label} turn[{idx}]: must be a mapping.")
+            if "user_prompt" not in raw_turn:
+                raise ValueError(f"Scenario {scenario_label} turn[{idx}]: missing `user_prompt`.")
+            raw_weight = raw_turn.get("judge_weight", 1.0)
+            try:
+                judge_weight = float(raw_weight)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"Scenario {scenario_label} turn[{idx}]: `judge_weight` must be a number."
+                ) from exc
+            if judge_weight < 0:
+                raise ValueError(
+                    f"Scenario {scenario_label} turn[{idx}]: `judge_weight` must be non-negative."
+                )
+            parsed_turns.append(
+                Turn(
+                    user_prompt=raw_turn["user_prompt"],
+                    success_criteria=list(raw_turn.get("success_criteria") or []),
+                    judge_weight=judge_weight,
+                )
+            )
+
+    scenario = EvalScenario(**data, turns=parsed_turns)
+
+    # Backward-compat shim: fold legacy fields into a 1-element turns
+    # list so the runner only has one code path.  Reject ambiguous YAMLs
+    # that supply both shapes — silent precedence rules in this layer
+    # would make scenario debugging painful.
+    if not scenario.turns:
+        if not scenario.user_prompt:
+            raise ValueError(
+                f"Scenario {scenario.id}: must provide either `turns:` or `user_prompt`."
+            )
+        scenario.turns = [
+            Turn(
+                user_prompt=scenario.user_prompt,
+                success_criteria=list(scenario.success_criteria),
+            )
+        ]
+    elif scenario.user_prompt or scenario.success_criteria:
+        raise ValueError(
+            f"Scenario {scenario.id}: `turns:` is mutually exclusive with "
+            "top-level `user_prompt` / `success_criteria`."
+        )
+
+    return scenario
 
 
 def load_all_scenarios(domain: str | None = None) -> list[EvalScenario]:
@@ -217,6 +324,20 @@ def load_all_scenarios(domain: str | None = None) -> list[EvalScenario]:
 
 
 # ── Result dataclass ──────────────────────────────────────────────────────────
+
+
+@dataclass
+class TurnResult:
+    """Per-turn outputs captured by the runner for a multi-turn scenario.
+
+    Used by ``judge.py`` to score each turn independently.  Empty for
+    legacy programmatic ``EvalResult`` construction (test fixtures that
+    don't go through ``run_scenario``); the judge falls back to its
+    single-call code path when ``turn_results`` is empty or has length 1.
+    """
+
+    final_response: str = ""
+    tool_calls_made: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -247,6 +368,12 @@ class EvalResult:
     completion_tokens: int = 0
     actual_cost_usd: float = 0.0
 
+    # Per-turn outputs.  Populated by ``run_scenario`` (one entry per
+    # turn in ``scenario.turns``).  Empty when the result is constructed
+    # programmatically without going through the runner — the judge
+    # detects that and falls back to single-call mode.
+    turn_results: list[TurnResult] = field(default_factory=list)
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "scenario_id": self.scenario_id,
@@ -265,6 +392,13 @@ class EvalResult:
             "prompt_tokens": self.prompt_tokens,
             "completion_tokens": self.completion_tokens,
             "actual_cost_usd": round(self.actual_cost_usd, 6),
+            "turn_results": [
+                {
+                    "final_response": tr.final_response[:500],
+                    "tool_calls_made": tr.tool_calls_made,
+                }
+                for tr in self.turn_results
+            ],
         }
 
 
@@ -383,7 +517,7 @@ def run_scenario(
     Returns:
         EvalResult capturing pass/fail, tool usage, and timing.
     """
-    from langchain_core.messages import HumanMessage
+    from langchain_core.messages import AIMessage, HumanMessage
 
     from src.orchestration.graph import build_agent_graph
 
@@ -399,6 +533,22 @@ def run_scenario(
         if name not in all_tool_names:
             all_tool_names.append(name)
     tool_stubs = _build_stub_tools(all_tool_names, scenario.tool_descriptions)
+
+    # Backward-compat shim for scenarios constructed programmatically
+    # (i.e. not through ``load_scenario``).  Legacy callers fill
+    # ``user_prompt`` + ``success_criteria`` directly and leave
+    # ``turns`` empty; fold those into a single Turn so the loop below
+    # has something to iterate.
+    effective_turns: list[Turn] = (
+        scenario.turns
+        if scenario.turns
+        else [
+            Turn(
+                user_prompt=scenario.user_prompt,
+                success_criteria=list(scenario.success_criteria),
+            )
+        ]
+    )
 
     try:
         llm = _build_llm(model, active_key=active_key)
@@ -429,7 +579,7 @@ def run_scenario(
             parallel_tool_execution=False,
         )
 
-        # Enforce per-scenario timeout to prevent hung LLM calls from
+        # Enforce per-turn timeout to prevent hung LLM calls from
         # exhausting the CI job budget (see issue #1124).
         #
         # Bug fix: the previous ``with ThreadPoolExecutor(...) as executor:``
@@ -441,22 +591,61 @@ def run_scenario(
         # explicitly and call ``shutdown(wait=False)`` on the timeout path,
         # matching the abandon-hung-thread pattern in compression.py
         # introduced by PR #1154.
+        #
+        # Multi-turn loop: ``state["messages"]`` accumulates across turns
+        # so the graph sees the full conversation history.  After each
+        # turn we slice ``messages[msg_offset:]`` for per-turn
+        # assertions, so a ``tool_called: foo`` predicate in turn 2 does
+        # not match a tool call from turn 1.
         timeout = getattr(scenario, "timeout_seconds", 120)
-        executor = ThreadPoolExecutor(max_workers=1)
-        future = executor.submit(
-            graph.invoke,
-            {"messages": [HumanMessage(content=scenario.user_prompt)]},
-            config={"recursion_limit": scenario.max_turns * 5},
-        )
-        try:
-            result = future.result(timeout=timeout)
-        except FutureTimeoutError:
-            future.cancel()
-            executor.shutdown(wait=False)
-            raise TimeoutError(f"Scenario {scenario.id} timed out after {timeout}s") from None
-        else:
-            executor.shutdown(wait=True)
-        messages = result.get("messages", [])
+        state: dict[str, Any] = {"messages": []}
+        per_turn_failed: list[bool] = []
+        per_turn_results: list[TurnResult] = []
+
+        for turn_idx, turn in enumerate(effective_turns):
+            msg_offset = len(state["messages"])
+            invoke_state = dict(state)
+            invoke_state["messages"] = list(state["messages"]) + [
+                HumanMessage(content=turn.user_prompt)
+            ]
+            executor = ThreadPoolExecutor(max_workers=1)
+            future = executor.submit(
+                graph.invoke,
+                invoke_state,
+                config={"recursion_limit": scenario.max_turns * 5},
+            )
+            try:
+                turn_result = future.result(timeout=timeout)
+            except FutureTimeoutError:
+                future.cancel()
+                executor.shutdown(wait=False)
+                raise TimeoutError(
+                    f"Scenario {scenario.id} timed out after {timeout}s "
+                    f"on turn {turn_idx + 1}/{len(effective_turns)}"
+                ) from None
+            else:
+                executor.shutdown(wait=True)
+
+            state = turn_result
+            turn_messages = state["messages"][msg_offset:]
+            turn_final = ""
+            for msg in reversed(turn_messages):
+                if isinstance(msg, AIMessage) and msg.content:
+                    turn_final = str(msg.content)
+                    break
+            turn_tools: list[str] = []
+            for msg in turn_messages:
+                if isinstance(msg, AIMessage):
+                    for tc in msg.tool_calls or []:
+                        turn_tools.append(tc["name"])
+            per_turn_failed.append(
+                _check_success_criteria_failed(turn.success_criteria, turn_final, turn_messages)
+            )
+            per_turn_results.append(
+                TurnResult(final_response=turn_final, tool_calls_made=turn_tools)
+            )
+
+        messages = state["messages"]
 
     except Exception as exc:
         elapsed = time.monotonic() - start
@@ -476,8 +665,6 @@ def run_scenario(
     elapsed = time.monotonic() - start
 
     # Collect tool calls from AIMessages.
-    from langchain_core.messages import AIMessage
-
     tools_called = []
     for msg in messages:
         if isinstance(msg, AIMessage):
@@ -495,9 +682,11 @@ def run_scenario(
     selection_rate = len(called_set & required) / len(required) * 100 if required else 100.0
     task_completion = selection_rate >= 100.0
 
-    passed = task_completion and not _check_success_criteria_failed(
-        scenario.success_criteria, final_text, messages
-    )
+    # Scenario passes iff (a) every required tool was called somewhere in
+    # the session AND (b) every per-turn success_criteria block passed
+    # against its own message slice.
+    all_turns_passed = not any(per_turn_failed)
+    passed = task_completion and all_turns_passed
 
     prompt_tokens, completion_tokens = _sum_token_usage(messages)
     actual_cost = _estimate_cost_usd(model, prompt_tokens, completion_tokens)
@@ -517,6 +706,7 @@ def run_scenario(
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
         actual_cost_usd=actual_cost,
+        turn_results=per_turn_results,
     )
 
 
@@ -617,6 +807,27 @@ def _check_success_criteria_failed(criteria: list[str], response: str, messages:
                 for tc in msg.tool_calls or []:
                     if str(tc.get("name", "")).lower() == forbidden:
                         return True
+        elif criterion.startswith("tool_called:"):
+            # Positive structural check — mirror of tool_not_called.
+            # Required by the multi-turn effort-gate reproducer (#1548): the
+            # turn-2 contract asserts that the agent performed a fresh
+            # search even after prior session search activity.  A substring
+            # match against the haystack can be tripped by the agent
+            # mentioning the tool name in prose ("let me try search_web");
+            # this predicate looks at AIMessage.tool_calls only.
+            required = criterion[len("tool_called:") :].strip().lower()
+            found = False
+            for msg in messages:
+                if not isinstance(msg, AIMessage):
+                    continue
+                for tc in msg.tool_calls or []:
+                    if str(tc.get("name", "")).lower() == required:
+                        found = True
+                        break
+                if found:
+                    break
+            if not found:
+                return True
         elif criterion.startswith("max_total_tool_calls:"):
             # Bounds the total number of tool invocations across the trace.
             # Catches identical-call loops (Hermes 2026-05-01: 33 calls to
@@ -627,6 +838,49 @@ def _check_success_criteria_failed(criteria: list[str], response: str, messages:
                 return True  # malformed predicate fails closed
             total = sum(len(msg.tool_calls or []) for msg in messages if isinstance(msg, AIMessage))
             if total > limit:
+                return True
+        elif criterion.startswith("min_total_tool_calls:"):
+            # Lower bound on total tool invocations.  Used by persistence
+            # scenarios (#1520) to assert the agent did not refuse after
+            # only 1-2 shallow searches.  Mirrors ``max_total_tool_calls:``.
+            try:
+                floor = int(criterion[len("min_total_tool_calls:") :].strip())
+            except ValueError:
+                return True
+            total = sum(len(msg.tool_calls or []) for msg in messages if isinstance(msg, AIMessage))
+            if total < floor:
+                return True
+        elif criterion.startswith("min_distinct_tool_calls:"):
+            # Lower bound on *distinct* invocations of the named tool, keyed
+            # on the call's ``args`` payload (JSON-normalised).  Catches
+            # near-duplicate-query laziness — the :next24 reproducer of
+            # #1520, where the agent issued 5 reordered variants of the
+            # same query and counted them as effort.  Argument format:
+            # ``min_distinct_tool_calls: search_web=3``.
+            body = criterion[len("min_distinct_tool_calls:") :].strip()
+            if "=" not in body:
+                return True  # malformed predicate fails closed
+            tool_name, _, count_str = body.partition("=")
+            tool_name = tool_name.strip().lower()
+            try:
+                floor = int(count_str.strip())
+            except ValueError:
+                return True
+            import json as _json
+
+            seen_signatures: set[str] = set()
+            for msg in messages:
+                if not isinstance(msg, AIMessage):
+                    continue
+                for tc in msg.tool_calls or []:
+                    if str(tc.get("name", "")).lower() != tool_name:
+                        continue
+                    try:
+                        sig = _json.dumps(tc.get("args") or {}, sort_keys=True)
+                    except (TypeError, ValueError):
+                        sig = str(tc.get("args"))
+                    seen_signatures.add(sig)
+            if len(seen_signatures) < floor:
                 return True
     return False
 

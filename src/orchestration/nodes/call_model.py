@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import time
 from collections import OrderedDict
 from collections.abc import Callable
@@ -99,6 +100,100 @@ _TRUNCATION_HEURISTIC_MIN_ARG_CHARS = 1_000
 # qwen3-coder via OpenRouter/spark that always report finish_reason=
 # "tool_calls" regardless of whether the output was cut at the limit.
 _COMMON_TOKEN_CAPS: frozenset[int] = frozenset({512, 1024, 2048, 4096, 8192, 16384, 32768})
+
+# Minimum effort threshold before the no-checkpoint thinking break may
+# instruct the model to refuse.  Prevents "lazy refusal" where the agent
+# gives up after only shallow searches (#1520).
+_MIN_SEARCH_EFFORT = 3
+
+# Stopwords dropped when normalising search queries for distinctness.
+_SEARCH_STOPWORDS: frozenset[str] = frozenset(
+    {
+        "the",
+        "a",
+        "an",
+        "and",
+        "or",
+        "but",
+        "in",
+        "on",
+        "at",
+        "to",
+        "for",
+        "of",
+        "with",
+        "by",
+        "is",
+        "are",
+    }
+)
+
+
+def _normalise_query(query: str) -> frozenset[str]:
+    """Lower-case, tokenise, and drop stopwords for distinctness comparison."""
+    words = re.findall(r"\b\w+\b", query.lower())
+    return frozenset(w for w in words if w not in _SEARCH_STOPWORDS)
+
+
+def _compute_search_effort(messages: list[Any]) -> tuple[int, bool]:
+    """Count *distinct* search_web calls and detect http_get attempts.
+
+    Returns ``(distinct_search_count, http_get_attempted)``.  Used by the
+    thinking-break effort gate.  Near-duplicate queries (e.g. reordered
+    words or added stopwords) are collapsed to a single count so the gate
+    measures *lateral* effort, not mere repetition (#1520).
+
+    Effort is scoped to the *current user turn* only — not session-cumulative.
+    This prevents long sessions with prior search activity from short-circuiting
+    fresh questions into refusal without the strategy nudge firing (#1532).
+    """
+    # Find the last HumanMessage to scope effort to the current turn.
+    last_human_idx = max(
+        (i for i, m in enumerate(messages) if isinstance(m, HumanMessage)),
+        default=-1,
+    )
+    scope = messages[last_human_idx + 1 :] if last_human_idx >= 0 else messages
+
+    search_count = 0
+    http_get_attempted = False
+    seen_queries: set[frozenset[str]] = set()
+
+    for i, msg in enumerate(scope):
+        if not hasattr(msg, "tool_call_id"):
+            continue
+        tool_name = getattr(msg, "name", None)
+        if tool_name == "http_get":
+            http_get_attempted = True
+            continue
+        if tool_name != "search_web":
+            continue
+
+        # Skip error / stub results that indicate the search never ran.
+        content = getattr(msg, "content", "") or ""
+        if content.startswith("Error searching") or "not loaded" in content.lower():
+            continue
+
+        # Walk backward to find the AIMessage.tool_calls that triggered this
+        # search so we can extract the query text for distinctness checking.
+        tool_call_id = getattr(msg, "tool_call_id", None)
+        query = ""
+        for prev_msg in reversed(scope[:i]):
+            if not hasattr(prev_msg, "tool_calls"):
+                continue
+            for tc in getattr(prev_msg, "tool_calls", []):
+                if tc.get("id") == tool_call_id:
+                    args = tc.get("args", {})
+                    query = args.get("query", "") if isinstance(args, dict) else str(args)
+                    break
+            if query:
+                break
+
+        normalised = _normalise_query(query)
+        if normalised and normalised not in seen_queries:
+            seen_queries.add(normalised)
+            search_count += 1
+
+    return search_count, http_get_attempted
 
 
 def _guard_truncated_tool_calls(
@@ -407,7 +502,7 @@ def build_call_model_node(
                 call_count[0],
             )
             msgs.append(
-                HumanMessage(
+                SystemMessage(
                     content=(
                         "[Checkpoint reminder] You've made several actions without "
                         "recording a checkpoint. Use the checkpoint tool now to record "
@@ -447,63 +542,146 @@ def build_call_model_node(
             _graph_log.info(
                 "Stuck detected — forcing thinking break (only request_tools available)"
             )
-            msgs.append(
-                HumanMessage(
-                    content=(
+            _has_checkpoints = _checkpoint_store is not None and len(_checkpoint_store) > 0
+
+            # Determine whether the stuck state is a search loop.  The effort gate
+            # only applies when the agent is looping on search_web; for non-search
+            # stuck tools (e.g. merge_pull_request, write_file) the original
+            # THINKING BREAK behaviour is preserved (#1520).
+            _recent_tool_names = [
+                getattr(m, "name", None)
+                for m in repaired_state_messages[-6:]
+                if hasattr(m, "tool_call_id")
+            ]
+            _stuck_tool_name = _recent_tool_names[-1] if _recent_tool_names else None
+            _is_search_loop = _stuck_tool_name == "search_web"
+
+            if _has_checkpoints:
+                _tb_body = (
+                    "[THINKING BREAK — tools disabled this round]\n"
+                    "Recent attempts are not producing new information. "
+                    "You have recorded checkpoints during this session. "
+                    "Synthesize a final answer from those checkpoints.\n\n"
+                    "Write the answer directly — do not narrate your approach, do "
+                    "not enumerate what failed, do not list alternative methods. "
+                    "Just answer the question.\n\n"
+                    "Tools are restored on the next round if you still need them."
+                )
+            elif _is_search_loop:
+                _search_count, _http_get_attempted = _compute_search_effort(msgs)
+                _effort_met = _search_count >= _MIN_SEARCH_EFFORT or _http_get_attempted
+                if _effort_met:
+                    _tb_body = (
                         "[THINKING BREAK — tools disabled this round]\n"
-                        "Recent attempts are not producing new information. "
-                        "Stop and produce the final answer for the user now, drawing on "
-                        "your own knowledge of the topic where the tools have come up "
-                        "empty.\n\n"
-                        "Write the answer directly — do not narrate your approach, do "
-                        "not enumerate what failed, do not list alternative methods. "
-                        "Just answer the question.\n\n"
+                        "Recent attempts have not produced useful data. "
+                        "No checkpoint information has been accumulated in this session.\n\n"
+                        "If the topic is one where you cannot reach a definitive answer "
+                        "without live data (current prices, stock levels, recent events, "
+                        "specific SKUs, FX rates), state plainly that you could not "
+                        "retrieve the data and suggest the user contact the source "
+                        "directly. Do NOT fabricate specific numbers, percentages, "
+                        "citations, URLs, or links from your training data — that is "
+                        "a worse failure than not answering.  If you mention a website "
+                        "or repository it must come from an actual tool result, not "
+                        "from what you would expect to see online.  A pointer to a "
+                        "non-existent URL is worse than no pointer at all.\n\n"
+                        "A short honest 'I could not retrieve current data on this topic' "
+                        "is far better than a confident fabrication.\n\n"
                         "Tools are restored on the next round if you still need them."
                     )
-                )
-            )
-            # Keep request_tools bound so the model can fix the underlying
-            # 'tool not loaded' problem during the thinking break itself.
-            # Stripping every tool forces the model into a text-only mode where
-            # qwen3-coder and similar models emit XML tool calls in content.
-            _request_tools_only = [
-                t for t in (active_tools_list or []) if getattr(t, "name", "") == "request_tools"
-            ]
-            if _request_tools_only:
-                think_model = llm.bind_tools(_request_tools_only)
-            else:
-                think_model = llm
-            think_messages = [_sys_msg, *msgs] if _sys_msg is not None else list(msgs)
-            _cm_t1 = time.monotonic()
-            with start_span(
-                "src.orchestration.graph",
-                "llm.invoke",
-                attributes={
-                    "llm.provider": _llm_provider,
-                    "llm.model": _llm_model,
-                },
-            ) as _llm_span:
-                try:
-                    response = _invoke_with_timeout(think_model, think_messages, config, 180)
-                except RuntimeError as exc:
-                    _llm_span.record_exception(exc)
-                    _llm_span.set_status(Status(StatusCode.ERROR, str(exc)))
-                    _graph_log.warning("LLM timed out during thinking break")
-                    return {"messages": []}
-                from src.orchestration.phases import normalize_native_tool_calls
-
-                response = normalize_native_tool_calls(response)
-                if is_trace():
-                    _graph_log.debug(
-                        "⏱ call_model thinking_break: %.0fms",
-                        (time.monotonic() - _cm_t1) * 1000,
+                else:
+                    # Low effort — the agent has not earned the right to refuse.
+                    # Inject a strategy nudge and continue with tools enabled (#1520).
+                    _graph_log.info(
+                        "Thinking break suppressed — low effort (%d distinct searches, "
+                        "http_get=%s); injecting strategy nudge instead",
+                        _search_count,
+                        _http_get_attempted,
                     )
-                _llm_span.set_attribute("llm.tokens_input", 0)
-                _llm_span.set_attribute("llm.tokens_output", 0)
-                _llm_span.set_attribute("llm.duration_ms", int((time.monotonic() - _cm_t1) * 1000))
-                _llm_span.set_attribute("llm.status", "success")
-                _llm_span.set_status(Status(StatusCode.OK))
-            return {"messages": [response]}
+                    msgs.append(
+                        HumanMessage(
+                            content=(
+                                "[STRATEGY NUDGE] Your searches have not yet surfaced a "
+                                "definitive answer. Before giving up, try harder:\n"
+                                "  1. Change the search language if the topic is region-specific.\n"
+                                "  2. Drop overly-specific identifiers and search for broader categories.\n"
+                                "  3. Follow a promising URL from your search results with http_get.\n"
+                                "  4. Search for distributors or official contact pages instead of retailers.\n"
+                                "  5. Use the checkpoint tool to record any partial findings.\n\n"
+                                "Only refuse after you have tried at least one of these angles."
+                            )
+                        )
+                    )
+                    # Skip the forced text-only break so the model can act on the nudge.
+                    # Fall through to normal tool-enabled processing below.
+            else:
+                # Not a search loop — fire the normal refusal thinking break.
+                _tb_body = (
+                    "[THINKING BREAK — tools disabled this round]\n"
+                    "Recent attempts have not produced useful data. "
+                    "No checkpoint information has been accumulated in this session.\n\n"
+                    "If the topic is one where you cannot reach a definitive answer "
+                    "without live data (current prices, stock levels, recent events, "
+                    "specific SKUs, FX rates), state plainly that you could not "
+                    "retrieve the data and suggest the user contact the source "
+                    "directly. Do NOT fabricate specific numbers, percentages, "
+                    "citations, URLs, or links from your training data — that is a "
+                    "worse failure than not answering.  If you mention a website or "
+                    "repository it must come from an actual tool result, not from "
+                    "what you would expect to see online.  A pointer to a non-existent "
+                    "URL is worse than no pointer at all.\n\n"
+                    "A short honest 'I could not retrieve current data on this topic' "
+                    "is far better than a confident fabrication.\n\n"
+                    "Tools are restored on the next round if you still need them."
+                )
+            if _has_checkpoints or (_is_search_loop and _effort_met) or not _is_search_loop:
+                msgs.append(HumanMessage(content=_tb_body))
+                # Keep request_tools bound so the model can fix the underlying
+                # 'tool not loaded' problem during the thinking break itself.
+                # Stripping every tool forces the model into a text-only mode where
+                # qwen3-coder and similar models emit XML tool calls in content.
+                _request_tools_only = [
+                    t
+                    for t in (active_tools_list or [])
+                    if getattr(t, "name", "") == "request_tools"
+                ]
+                if _request_tools_only:
+                    think_model = llm.bind_tools(_request_tools_only)
+                else:
+                    think_model = llm
+                think_messages = [_sys_msg, *msgs] if _sys_msg is not None else list(msgs)
+                _cm_t1 = time.monotonic()
+                with start_span(
+                    "src.orchestration.graph",
+                    "llm.invoke",
+                    attributes={
+                        "llm.provider": _llm_provider,
+                        "llm.model": _llm_model,
+                    },
+                ) as _llm_span:
+                    try:
+                        response = _invoke_with_timeout(think_model, think_messages, config, 180)
+                    except RuntimeError as exc:
+                        _llm_span.record_exception(exc)
+                        _llm_span.set_status(Status(StatusCode.ERROR, str(exc)))
+                        _graph_log.warning("LLM timed out during thinking break")
+                        return {"messages": []}
+                    from src.orchestration.phases import normalize_native_tool_calls
+
+                    response = normalize_native_tool_calls(response)
+                    if is_trace():
+                        _graph_log.debug(
+                            "⏱ call_model thinking_break: %.0fms",
+                            (time.monotonic() - _cm_t1) * 1000,
+                        )
+                    _llm_span.set_attribute("llm.tokens_input", 0)
+                    _llm_span.set_attribute("llm.tokens_output", 0)
+                    _llm_span.set_attribute(
+                        "llm.duration_ms", int((time.monotonic() - _cm_t1) * 1000)
+                    )
+                    _llm_span.set_attribute("llm.status", "success")
+                    _llm_span.set_status(Status(StatusCode.OK))
+                return {"messages": [response]}
 
         if (
             _TOOL_HEALTH_CHECK_INTERVAL > 0
@@ -609,13 +787,38 @@ def build_call_model_node(
             # success-shaped ToolMessages, _consecutive_errors never advances,
             # and the loop runs to recursion_limit. Observed for Llama 3.3 70B
             # on the Gate 2 finance_invoice_approval_workflow scenario.
-            _force_thinking_break[0] = True
-            _graph_log.warning(
-                "Temporal polling loop detected — '%s' called %d+ consecutive times; "
-                "injecting advisory + arming thinking break for next round",
-                _stuck_tool,
-                _MAX_CONSECUTIVE_SAME_TOOL,
+            #
+            # However: if every consecutive call returned a "not loaded" stub,
+            # the agent has not exhausted the tool — it is still discovering
+            # that the tool is not active. Arming the thinking break here
+            # punishes the correct recovery move (request_tools) and forces
+            # the model into fabrication mode. Skip arming when all recent
+            # tool calls were "not loaded" stubs (#1510).
+            _consecutive_tool_msgs = [
+                m
+                for m in repaired_state_messages[-(max(len(repaired_state_messages), 0)) :]
+                if hasattr(m, "tool_call_id")
+            ][-_MAX_CONSECUTIVE_SAME_TOOL:]
+            _all_stub_results = all(
+                getattr(m, "content", "") and ("not loaded" in getattr(m, "content", "").lower())
+                for m in _consecutive_tool_msgs
             )
+            if not _all_stub_results:
+                _force_thinking_break[0] = True
+                _graph_log.warning(
+                    "Temporal polling loop detected — '%s' called %d+ consecutive times; "
+                    "injecting advisory + arming thinking break for next round",
+                    _stuck_tool,
+                    _MAX_CONSECUTIVE_SAME_TOOL,
+                )
+            else:
+                _graph_log.info(
+                    "Temporal polling loop detected — '%s' called %d+ times but all "
+                    "returned 'not loaded' stubs; advisory injected but thinking-break "
+                    "arm suppressed (agent may be recovering via request_tools)",
+                    _stuck_tool,
+                    _MAX_CONSECUTIVE_SAME_TOOL,
+                )
 
         if _TOOL_QUALITY_GATE_ENABLED and _all_tool_results_substanceless(repaired_state_messages):
             msgs.append(

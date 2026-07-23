@@ -1268,16 +1268,26 @@ class TestCallToolErrorEnrichment:
         mgr._run = _run_sync  # type: ignore[method-assign]
         return mgr
 
-    def test_error_message_includes_exception_type(self):
+    def test_error_message_is_sanitized_no_class_name_leak(self):
+        # Regression test for issue #1444 Phase 1: exception class names and
+        # raw messages must not appear in the LLM-facing error string.
         mgr = self._make_manager_with_failing_conn(ValueError("bad args"))
         result = mgr.call_tool("test-server", "some_tool", {})
-        assert "ValueError" in result
-        assert "bad args" in result
+        # sanitize_error maps ValueError -> "Invalid data format"
+        assert "Invalid data format" in result
+        assert "ValueError" not in result  # class name must not leak
+        assert "bad args" not in result  # raw message must not leak
 
-    def test_empty_exception_message_shows_no_details(self):
+    def test_connection_reset_error_is_sanitized(self):
+        # Regression test for issue #1444 Phase 1: connection errors must not
+        # expose exception class names or library internals.
         mgr = self._make_manager_with_failing_conn(ConnectionResetError())
         result = mgr.call_tool("test-server", "some_tool", {})
-        assert "ConnectionResetError" in result
+        # sanitize_error has a specific handler for ConnectionResetError (line 81
+        # of error_sanitizer.py) returning "Connection reset" — network-appropriate,
+        # no class name or library internals leaked.
+        assert "ConnectionResetError" not in result  # class name must not leak
+        assert "Connection reset" in result  # specific network error, not generic
 
 
 # ── MCP SSE URL SSRF validation (#302) ───────────────────────────────────────
@@ -1533,7 +1543,8 @@ class TestMCPStartupRetry:
                     with patch("src.mcp_client.MCP_AVAILABLE", True):
                         manager._ensure_loop()
                         future = asyncio.run_coroutine_threadsafe(
-                            manager._connect_one_async(cfg), manager._loop  # type: ignore[arg-type]
+                            manager._connect_one_async(cfg),
+                            manager._loop,  # type: ignore[arg-type]
                         )
                         name, conn = future.result(timeout=5)
 
@@ -1559,7 +1570,8 @@ class TestMCPStartupRetry:
                     with patch("src.mcp_client.MCP_AVAILABLE", True):
                         manager._ensure_loop()
                         future = asyncio.run_coroutine_threadsafe(
-                            manager._connect_one_async(cfg), manager._loop  # type: ignore[arg-type]
+                            manager._connect_one_async(cfg),
+                            manager._loop,  # type: ignore[arg-type]
                         )
                         name, conn = future.result(timeout=5)
 
@@ -1589,7 +1601,8 @@ class TestMCPStartupRetry:
                     with patch("src.mcp_client.MCP_AVAILABLE", True):
                         manager._ensure_loop()
                         future = asyncio.run_coroutine_threadsafe(
-                            manager._connect_one_async(cfg), manager._loop  # type: ignore[arg-type]
+                            manager._connect_one_async(cfg),
+                            manager._loop,  # type: ignore[arg-type]
                         )
                         name, conn = future.result(timeout=10)
 
@@ -1617,7 +1630,8 @@ class TestMCPStartupRetry:
                     with patch("src.mcp_client.MCP_AVAILABLE", True):
                         manager._ensure_loop()
                         future = asyncio.run_coroutine_threadsafe(
-                            manager._connect_one_async(cfg), manager._loop  # type: ignore[arg-type]
+                            manager._connect_one_async(cfg),
+                            manager._loop,  # type: ignore[arg-type]
                         )
                         name, conn = future.result(timeout=10)
 
@@ -1644,7 +1658,8 @@ class TestMCPStartupRetry:
                     with patch("src.mcp_client.MCP_AVAILABLE", True):
                         manager._ensure_loop()
                         future = asyncio.run_coroutine_threadsafe(
-                            manager._connect_one_async(cfg), manager._loop  # type: ignore[arg-type]
+                            manager._connect_one_async(cfg),
+                            manager._loop,  # type: ignore[arg-type]
                         )
                         name, conn = future.result(timeout=5)
 
@@ -1726,7 +1741,8 @@ class TestMCPReconnectRace:
                 import asyncio
 
                 future = asyncio.run_coroutine_threadsafe(
-                    manager._reconnect_server_async("srv"), manager._loop  # type: ignore[arg-type]
+                    manager._reconnect_server_async("srv"),
+                    manager._loop,  # type: ignore[arg-type]
                 )
                 future.result(timeout=10)
 

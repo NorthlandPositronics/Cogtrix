@@ -253,9 +253,12 @@ class MessageHandler:
             ".number",
         ]
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+            result = subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=30)
         except FileNotFoundError:
             log.debug("PR validation skipped — gh CLI not available")
+            return True
+        except subprocess.TimeoutExpired:
+            log.debug("PR validation skipped — gh API timed out after 30s")
             return True
 
         if result.returncode != 0:
@@ -627,14 +630,16 @@ class MessageHandler:
         """Process *msg* and send a response back via *channel*."""
         session = self._session_mgr.get_or_create(msg)
 
-        # Pre-record the user message for shutdown durability before acquiring
-        # the session lock.  Uses prerecord_user() which writes a lightweight
-        # pending file without calling update(), so existing call-count
-        # assertions are unaffected.  Cleaned up by update() on success or by
-        # discard_prerecord() on deferral/suppress paths.
-        session.memory_manager.prerecord_user(msg.text)
-
         with session.lock:
+            # Pre-record the user message for shutdown durability.  Uses
+            # prerecord_user() which writes a lightweight pending file without
+            # calling update(), so existing call-count assertions are
+            # unaffected.  Cleaned up by update() on success or by
+            # discard_prerecord() on deferral/suppress paths.  Called INSIDE
+            # the lock to prevent concurrent _flush calls (debounce timer)
+            # from racing on the same session's pending state.
+            session.memory_manager.prerecord_user(msg.text)
+
             if not self._check_guardrails(msg, session, channel):
                 session.memory_manager.discard_prerecord()
                 return

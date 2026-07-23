@@ -148,90 +148,33 @@ def _validate_path(path: str, is_write: bool = False) -> tuple[bool, str, Path |
     """
     Validate a file path for safety.
 
+    Issue #924: a previous implementation walked path components and called
+    ``current.is_symlink()`` BEFORE the final ``p.resolve()`` — opening a
+    TOCTOU window during which a symlink target could be swapped between
+    the check and the resolution.  The fix is to resolve the path first
+    and then perform the directory-boundary checks against the resolved
+    target.  ``Path.resolve()`` follows symlinks via the kernel's
+    ``realpath()`` syscall, which is significantly harder to race than
+    user-space stat() loops, and the boundary check on the resolved path
+    catches any swap whose new target escapes allowed directories — the
+    exact protection the upfront walk was approximating.
+
     Returns:
         Tuple of (is_valid, error_message, resolved_path)
     """
     try:
-        # First, check for symlinks in path components before resolving
-        # This prevents symlink attacks where a symlink points outside allowed dirs
         p = Path(path)
         cwd = Path.cwd()
 
-        # Check if any component of the path is a symlink
-        # Walk up the path and check each component
-        current = p
-        visited = set()
-        while str(current) != str(current.parent) and str(current) != "/":
-            if current in visited:
-                # Circular symlink detected
-                return False, "Path contains circular symlink", None
-            visited.add(current)
-            try:
-                if current.is_symlink():
-                    # Symlink detected - check if it points within allowed directories
-                    try:
-                        link_target = current.resolve()
-                    except (OSError, PermissionError):
-                        # Dangling symlink or unreadable link target - cannot verify
-                        return False, "Dangling symlink not allowed", None
-                    try:
-                        link_target.relative_to(cwd)
-                    except ValueError:
-                        # Not relative to cwd, check other allowed dirs
-                        in_allowed = False
-                        try:
-                            link_target.relative_to(_APP_DIR)
-                            in_allowed = True
-                        except ValueError:
-                            pass
-                        if not in_allowed:
-                            for extra_dir in _extra_write_dirs:
-                                try:
-                                    link_target.relative_to(extra_dir)
-                                    in_allowed = True
-                                except ValueError:
-                                    pass
-                            if not in_allowed:
-                                for extra_read_dir in _extra_read_dirs:
-                                    try:
-                                        link_target.relative_to(extra_read_dir)
-                                        in_allowed = True
-                                    except ValueError:
-                                        pass
-                        if not in_allowed:
-                            return False, "Symlink target escapes allowed directories", None
-            except (OSError, PermissionError):
-                # Can't stat the path component
-                pass
-            current = current.parent
-
-        # Now resolve the path and check final location
-        p = p.resolve()
+        # Resolve first.  ``strict=False`` allows non-existent paths
+        # (writes target a file that doesn't exist yet); existing files
+        # and symlinks are followed atomically per realpath() semantics.
+        try:
+            p = p.resolve()
+        except (OSError, RuntimeError) as exc:
+            # RuntimeError: symlink loop.  OSError: I/O while resolving.
+            return False, f"Cannot resolve path safely: {exc}", None
         cwd = cwd.resolve()
-
-        # Check for path traversal attempts
-        if ".." in path:
-            in_allowed = False
-            try:
-                p.relative_to(cwd)
-                in_allowed = True
-            except ValueError:
-                pass
-            if not in_allowed:
-                try:
-                    p.relative_to(_APP_DIR)
-                    in_allowed = True
-                except ValueError:
-                    pass
-            if not in_allowed:
-                for extra_dir in _extra_write_dirs:
-                    try:
-                        p.relative_to(extra_dir)
-                        in_allowed = True
-                    except ValueError:
-                        pass
-            if not in_allowed:
-                return False, "Path traversal not allowed", None
 
         # Paths must resolve within an allowed root directory.
         # Writes are restricted to cwd; reads also allow the app install directory
@@ -310,6 +253,15 @@ def read_file(
             path = path["path"]
         else:
             return "Error: Invalid arguments for read_file"
+
+    # Detect URL paths — qwen3-coder and similar models sometimes call
+    # read_file with http:// or https:// paths instead of http_get (#1532 Bug 3).
+    if isinstance(path, str) and path.startswith(("http://", "https://")):
+        return (
+            "Error: read_file is for local files only. To fetch a URL, call:\n"
+            '  request_tools(add=["http_get"])\n'
+            "then on the next turn use http_get with the same URL."
+        )
 
     is_valid, error, resolved = _validate_path(path)
     if not is_valid:
@@ -596,11 +548,11 @@ def patch_file(path: str, old_str: str, new_str: str) -> str:
     except OSError as e:
         return f"Error: Could not read file metadata: {_sanitize_file_error(e)}"
 
-    _MAX_READ_BYTES = 100 * 1024 * 1024  # 100 MB
-    if file_size > _MAX_READ_BYTES:
+    _MAX_PATCH_BYTES = 100 * 1024 * 1024  # 100 MB
+    if file_size > _MAX_PATCH_BYTES:
         return (
             f"Error: File too large ({file_size / (1024 * 1024):.1f} MB). "
-            f"Maximum readable size is {_MAX_READ_BYTES // (1024 * 1024)} MB."
+            f"Maximum patchable size is {_MAX_PATCH_BYTES // (1024 * 1024)} MB."
         )
 
     lock = _get_append_lock(str(resolved))

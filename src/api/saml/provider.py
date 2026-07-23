@@ -26,6 +26,7 @@ class SAMLAssertion:
         username:   Mapped username attribute, falls back to email local-part.
         attributes: Raw IdP attribute dict.
         session_index: SAML session index for SLO support.
+        assertion_id: SAML assertion ID for replay protection (ID attribute).
     """
 
     name_id: str
@@ -33,6 +34,7 @@ class SAMLAssertion:
     username: str
     attributes: dict[str, list[str]]
     session_index: str | None = None
+    assertion_id: str | None = None
 
 
 def _require_saml2() -> Any:
@@ -79,7 +81,7 @@ def get_metadata_xml(config: SAMLConfig) -> str:
         from onelogin.saml2.settings import OneLogin_Saml2_Settings  # type: ignore[import]
     except ImportError as exc:
         raise ImportError(
-            "The [saml] optional extra is required. " "Install with: pip install cogtrix[saml]"
+            "The [saml] optional extra is required. Install with: pip install cogtrix[saml]"
         ) from exc
 
     settings = OneLogin_Saml2_Settings(
@@ -137,6 +139,7 @@ def process_saml_response(
         raise ValueError("SAML authentication failed: user is not authenticated")
 
     name_id: str = auth.get_nameid() or ""
+    assertion_id: str | None = auth.get_assertion_id()
     attributes: dict[str, list[str]] = auth.get_attributes()
     session_index: str | None = auth.get_session_index()
 
@@ -153,6 +156,7 @@ def process_saml_response(
         username=username,
         attributes=attributes,
         session_index=session_index,
+        assertion_id=assertion_id,
     )
 
 

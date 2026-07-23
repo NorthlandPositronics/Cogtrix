@@ -26,6 +26,7 @@ from src.api.rag_index import load_faiss_store_safe, save_faiss_store
 log = logging.getLogger("cogtrix")
 
 _EXTRACTION_MAX_WORKERS = 2
+_EXTRACTION_TIMEOUT_SECONDS = 60
 _extraction_pool: _cf.ThreadPoolExecutor | None = None
 _extraction_pool_lock = threading.Lock()
 
@@ -324,7 +325,26 @@ class SharedKnowledgeStore:
             HumanMessage(content=user_content),
         ]
 
-        response = self._extraction_llm.invoke(messages)
+        # Wrap the LLM call in a temporary executor so we can enforce a timeout.
+        # Python threads cannot be cancelled; shutdown(wait=False) lets the
+        # hung thread die in the background without blocking the caller.
+        # NOTE: we use manual pool creation (not ``with``) because
+        # ThreadPoolExecutor.__exit__ calls shutdown(wait=True), which would
+        # block forever on a hung thread.
+        pool = _cf.ThreadPoolExecutor(max_workers=1)
+        future = pool.submit(self._extraction_llm.invoke, messages)
+        try:
+            response = future.result(timeout=_EXTRACTION_TIMEOUT_SECONDS)
+        except _cf.TimeoutError:
+            future.cancel()
+            log.warning(
+                "Knowledge extraction: LLM call timed out after %ds — returning empty facts",
+                _EXTRACTION_TIMEOUT_SECONDS,
+            )
+            return []
+        finally:
+            pool.shutdown(wait=False)
+
         raw_text: str = (
             response.content if hasattr(response, "content") else str(response)
         ).strip()

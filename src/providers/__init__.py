@@ -70,7 +70,20 @@ def _redact_url(url: str | None) -> str:
     path = parsed.path or "/"
 
     # Strip sensitive query params
-    sensitive_keys = {"api_key", "apikey", "password", "token", "auth_token"}
+    sensitive_keys = {
+        "api_key",
+        "apikey",
+        "password",
+        "token",
+        "auth_token",
+        "key",
+        "secret",
+        "access_token",
+        "api_secret",
+        "private_token",
+        "refresh_token",  # OAuth refresh token; #1508
+        "client_secret",  # OAuth client credentials flow; #1508
+    }
     if parsed.query:
         try:
             params = parse_qsl(parsed.query, keep_blank_values=True)
@@ -198,8 +211,6 @@ class RetryableChatModel:
         self._max_retries = max_retries if max_retries is not None else 3
         self._initial_delay = initial_delay
         self._max_delay = max_delay
-        # Delegate attribute access to wrapped model for compatibility
-        self._wrapped_attrs = set(dir(model))
 
     def _should_retry(self, error: Exception) -> tuple[bool, float | None]:
         """Determine if error is retryable and extract retry delay.
@@ -213,7 +224,7 @@ class RetryableChatModel:
         if "rate_limit" in error_str or "rate limit" in error_str:
             retry_after = _extract_retry_after(getattr(error, "response", None))
             if retry_after is None:
-                retry_after = self._initial_delay
+                retry_after = getattr(error, "retry_after", None)
             return True, retry_after
 
         # Check for 429 status code in error (type-checking safe)
@@ -221,12 +232,12 @@ class RetryableChatModel:
         if status_code is not None and int(status_code) == 429:
             retry_after = _extract_retry_after(getattr(error, "response", None))
             if retry_after is None:
-                retry_after = self._initial_delay
+                retry_after = getattr(error, "retry_after", None)
             return True, retry_after
 
         # Check for 5xx transient server errors (502, 503, 504)
         if status_code is not None and int(status_code) in (502, 503, 504):
-            return True, self._initial_delay
+            return True, None
 
         return False, None
 
@@ -268,6 +279,12 @@ class RetryableChatModel:
             ProviderAuthError: For authentication failures.
             RateLimitError: If all retries are exhausted for rate limits.
         """
+        # Internal flag used by _invoke_with_timeout to avoid nested retry
+        # loops that would block a scarce ThreadPoolExecutor worker.
+        _disable_retries = kwargs.pop("_cogtrix_disable_retries", False)
+        if _disable_retries:
+            return self._model.invoke(*args, **kwargs)
+
         last_error: Exception | None = None
         delay = self._initial_delay
 
@@ -288,10 +305,9 @@ class RetryableChatModel:
                 should_retry, retry_delay = self._should_retry(exc)
                 if should_retry:
                     if attempt < self._max_retries:
-                        # retry_delay can be None if not extracted, use initial_delay
-                        actual_delay = (
-                            retry_delay if retry_delay is not None else self._initial_delay
-                        )
+                        # Server-provided Retry-After takes precedence on first
+                        # attempt; exponential backoff is used otherwise.
+                        actual_delay = retry_delay if retry_delay is not None else delay
                         wait_time = min(actual_delay, self._max_delay)
                         time.sleep(wait_time)
                         delay = min(delay * 2, self._max_delay)
@@ -309,6 +325,24 @@ class RetryableChatModel:
         if last_error is not None:
             raise last_error
         raise RuntimeError("Unexpected retry loop exit")
+
+    def bind_tools(self, *args: Any, **kwargs: Any) -> Any:
+        """Delegate bind_tools to the wrapped model and re-wrap the result.
+
+        Without this override, ``llm.bind_tools()`` returns the raw
+        underlying model, causing all subsequent invocations to bypass
+        ``RetryableChatModel.invoke()`` — including the
+        ``_cogtrix_disable_retries`` flag used by
+        ``_invoke_with_timeout()`` to prevent nested retry loops from
+        blocking scarce ThreadPoolExecutor workers.
+        """
+        bound = self._model.bind_tools(*args, **kwargs)
+        return RetryableChatModel(
+            bound,
+            max_retries=self._max_retries,
+            initial_delay=self._initial_delay,
+            max_delay=self._max_delay,
+        )
 
     def __getattr__(self, name: str) -> Any:
         """Delegate attribute access to wrapped model for compatibility."""

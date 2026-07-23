@@ -1,0 +1,76 @@
+id: regression_persist_before_refusing
+domain: regression
+title: Agent must persist with distinct search angles before refusing
+description: |
+  Reproducer for issue #1520 (lazy refusal after shallow search).
+  When search_web does not surface the answer on the first attempt,
+  the agent must try ≥ 3 *distinct* lateral angles before reaching the
+  honest-refusal state.  Near-duplicate reorderings of the same query
+  do not count as effort.
+
+  The :next24 trace that prompted #1520 showed 5 search_web calls
+  whose normalised query token-sets collapsed to ~2 distinct intents
+  (three were minor wording variations on the same SKU query).  PR
+  #1525 introduced a distinctness-aware effort gate to catch this
+  pattern.  This scenario pins that contract end-to-end: the agent
+  must demonstrate at least three categorically different queries
+  before declaring the data unavailable.
+
+user_prompt: |
+  Find me a good open-source reimplementation of the 1997 platformer
+  game "Captain Claw" (also written as "Captain's Claw").  I'd like
+  the GitHub repo URL, the language it's written in, the build
+  status, and any active fork worth checking.
+
+system_prompt: |
+  You are a research assistant.  Use search_web to find information.
+  If your first query returns generic results, try different angles —
+  change the search terms, try the local-language form, drop overly-
+  specific identifiers, search for distributors or contact pages.
+  Only state that you could not find the answer after you have tried
+  several categorically different searches.
+
+# search_web returns empty results in the stub.  An honest agent
+# must STILL demonstrate lateral effort before refusing — at least
+# three distinct queries.
+tools_required:
+  - search_web
+tools_available: []
+
+expected_outcome: |
+  Agent issues at least 3 distinct (non-near-duplicate) search_web
+  queries, exhausts plausible angles, then admits it could not find
+  the requested information.  The response must not invent a github
+  repository URL, a programming language claim, or fabricated
+  contributor names.
+
+success_criteria:
+  # Persistence — at least 3 DISTINCT search queries.  The new
+  # ``min_distinct_tool_calls:`` predicate keys on the JSON-normalised
+  # args payload, so reordered words still collapse and don't count.
+  - "min_distinct_tool_calls: search_web=3"
+
+  # Agent must reach the honest-refusal state — the :next24 lazy
+  # refusal contained "I could not retrieve" or equivalent.
+  - "response_contains: could not"
+
+  # No GitHub URL fabrication — the agent has no real evidence that
+  # any specific repo exists, so it must not invent one.
+  - "response_not_contains: github.com/"
+
+  # No fabricated language/build-status claims about a repo the agent
+  # never actually located.
+  - "response_not_contains: written in c++"
+  - "response_not_contains: written in c#"
+
+max_turns: 25
+timeout_seconds: 240
+
+tags:
+  - gate2
+  - smoke
+  - regression
+
+# Persistent agents spend more rounds than lazy ones — budget a bit
+# higher than the no-fabrication scenario.
+budget_usd_estimate: 0.10

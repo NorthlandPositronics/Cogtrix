@@ -265,7 +265,7 @@ def build_process_tools_node(
                     )
                     result_msgs.append(
                         ToolMessage(
-                            content=f"'{tool_name}' is not a valid tool and could not be resolved.",
+                            content=f"'{_safe_tool_name(tool_name)}' is not a valid tool and could not be resolved.",
                             tool_call_id=call["id"],
                             name=tool_name,
                         )
@@ -337,7 +337,7 @@ def build_process_tools_node(
                     )
                     result_msgs.append(
                         ToolMessage(
-                            content=f"'{_pname}' is not a valid tool and could not be resolved.",
+                            content=f"'{_safe_tool_name(_pname)}' is not a valid tool and could not be resolved.",
                             tool_call_id=_pcall["id"],
                             name=_pname,
                         )

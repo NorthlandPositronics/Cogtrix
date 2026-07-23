@@ -741,7 +741,7 @@ Tools that require an API key are **automatically hidden** from the agent when t
 
 #### Search Providers
 
-Cogtrix includes six search providers. DuckDuckGo is always available with no setup. The other five require an API key and some require an additional Python package.
+Cogtrix includes seven search providers. DuckDuckGo is always available with no setup. The other six (Tavily, Exa, Brave, Google, SerpAPI, SearXNG) require an API key and some require an additional Python package.
 
 | Provider | Tools | Package | API Key | Free Tier |
 |----------|-------|---------|---------|-----------|

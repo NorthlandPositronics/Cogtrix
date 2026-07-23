@@ -60,7 +60,7 @@ def _make_fake_invoke():
     """Fake invoke: raises overflow on first main call, returns ok on retry."""
     call_log: list[str] = []
 
-    def fake_invoke(messages, config=None):
+    def fake_invoke(messages, config=None, **kwargs):
         is_compression = any("summarise" in str(m.content).lower() for m in messages)
         call_log.append("compression" if is_compression else "main")
         if is_compression:
@@ -111,7 +111,7 @@ class TestOverflowRetryLogic:
     def test_overflow_retry_failure_raises_clean_error(self):
         """If retry also overflows, RuntimeError with clear message is raised."""
 
-        def always_overflow(messages, config=None):
+        def always_overflow(messages, config=None, **kwargs):
             raise Exception("context_length_exceeded")
 
         from src.orchestration.graph import build_agent_graph
@@ -137,7 +137,7 @@ class TestOverflowRetryLogic:
     def test_non_overflow_exception_propagates(self):
         """Non-overflow exceptions propagate unchanged — not wrapped in RuntimeError."""
 
-        def connection_error(messages, config=None):
+        def connection_error(messages, config=None, **kwargs):
             raise ConnectionError("network unreachable")
 
         from src.orchestration.graph import build_agent_graph
@@ -168,7 +168,7 @@ class TestContextMessageCapInvocation:
             def bind_tools(self, tools):
                 return self
 
-            def invoke(self, messages, config=None):
+            def invoke(self, messages, config=None, **kwargs):
                 seen_messages.append(messages)
                 return AIMessage(content="final answer")
 
@@ -211,7 +211,7 @@ class TestContextMessageCapInvocation:
             def bind_tools(self, tools):
                 return self
 
-            def invoke(self, messages, config=None):
+            def invoke(self, messages, config=None, **kwargs):
                 seen_messages.append(messages)
                 return AIMessage(content="final answer")
 
@@ -273,7 +273,7 @@ class TinyContextLLM:
             return len(messages)
         return sum(len(str(getattr(m, "content", ""))) for m in messages)
 
-    def invoke(self, messages, config=None):
+    def invoke(self, messages, config=None, **kwargs):
         self.invoke_count += 1
         if self._is_compression_call(messages):
             return AIMessage(content="[compressed summary]")

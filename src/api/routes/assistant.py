@@ -37,7 +37,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 
-from src.api.auth import TokenData, get_current_user, require_admin
+from src.api.auth import TokenData, get_admin_org, get_current_user, require_admin
 from src.api.pagination import decode_cursor, encode_cursor
 from src.api.schemas.assistant import (
     AssistantStartRequest,
@@ -504,6 +504,7 @@ async def list_chats(
     limit: int = 50,
     channel: str | None = None,
     current_user: TokenData = Depends(require_admin),
+    org_id: str | None = Depends(get_admin_org),
 ) -> APIResponse[CursorPage[ChatSessionOut]]:
     """List active assistant chat sessions (paginated, admin only).
 
@@ -515,6 +516,14 @@ async def list_chats(
     Auth: admin bearer token required.
     Error codes: UNAUTHORIZED, TOKEN_EXPIRED, FORBIDDEN, INVALID_CURSOR.
     """
+    if org_id is not None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": "ORG_SCOPING_NOT_AVAILABLE",
+                "message": "Cross-tenant org scoping is not yet available for this endpoint.",
+            },
+        )
     svc = _get_service(request)
     if svc is None:
         page: CursorPage[ChatSessionOut] = CursorPage(
@@ -794,6 +803,7 @@ async def list_scheduled(
     channel: str | None = None,
     chat_id: str | None = None,
     current_user: TokenData = Depends(require_admin),
+    org_id: str | None = Depends(get_admin_org),
 ) -> APIResponse[CursorPage[ScheduledMessageOut]]:
     """List pending scheduled messages (paginated, admin only).
 
@@ -806,6 +816,14 @@ async def list_scheduled(
     Auth: admin bearer token required.
     Error codes: UNAUTHORIZED, TOKEN_EXPIRED, FORBIDDEN, INVALID_CURSOR.
     """
+    if org_id is not None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": "ORG_SCOPING_NOT_AVAILABLE",
+                "message": "Cross-tenant org scoping is not yet available for this endpoint.",
+            },
+        )
     svc = _get_service(request)
     if svc is None:
         page: CursorPage[ScheduledMessageOut] = CursorPage(
@@ -1037,12 +1055,21 @@ async def list_deferred(
     request: Request,
     channel: str | None = None,
     current_user: TokenData = Depends(require_admin),
+    org_id: str | None = Depends(get_admin_org),
 ) -> APIResponse[list[DeferredRecordOut]]:
     """List pending deferred re-processing records (admin only).
 
     Auth: admin bearer token required.
     Error codes: UNAUTHORIZED, TOKEN_EXPIRED, FORBIDDEN.
     """
+    if org_id is not None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": "ORG_SCOPING_NOT_AVAILABLE",
+                "message": "Cross-tenant org scoping is not yet available for this endpoint.",
+            },
+        )
     svc = _get_service(request)
     if svc is None:
         return APIResponse(data=[])
@@ -1130,6 +1157,7 @@ async def cancel_deferred(
 async def list_contacts(
     request: Request,
     current_user: TokenData = Depends(require_admin),
+    org_id: str | None = Depends(get_admin_org),
 ) -> APIResponse[list[ContactOut]]:
     """Return the merged phonebook from all channels (admin only).
 
@@ -1139,6 +1167,14 @@ async def list_contacts(
     Auth: admin bearer token required.
     Error codes: UNAUTHORIZED, TOKEN_EXPIRED, FORBIDDEN.
     """
+    if org_id is not None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": "ORG_SCOPING_NOT_AVAILABLE",
+                "message": "Cross-tenant org scoping is not yet available for this endpoint.",
+            },
+        )
     svc = _get_service(request)
     if svc is None:
         return APIResponse(data=[])
@@ -1215,12 +1251,21 @@ async def list_contacts(
 async def get_guardrails(
     request: Request,
     current_user: TokenData = Depends(require_admin),
+    org_id: str | None = Depends(get_admin_org),
 ) -> APIResponse[GuardrailStatusOut]:
     """Return guardrail pipeline status (admin only).
 
     Auth: admin bearer token required.
     Error codes: UNAUTHORIZED, TOKEN_EXPIRED, FORBIDDEN.
     """
+    if org_id is not None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": "ORG_SCOPING_NOT_AVAILABLE",
+                "message": "Cross-tenant org scoping is not yet available for this endpoint.",
+            },
+        )
     svc = _get_service(request)
 
     blacklisted: list[str] = []
@@ -1377,6 +1422,7 @@ async def list_knowledge(
     limit: int = 50,
     source_chat: str | None = None,
     current_user: TokenData = Depends(require_admin),
+    org_id: str | None = Depends(get_admin_org),
 ) -> APIResponse[CursorPage[KnowledgeFactOut]]:
     """List facts in the shared knowledge store (paginated, admin only).
 
@@ -1388,6 +1434,14 @@ async def list_knowledge(
     Auth: admin bearer token required.
     Error codes: UNAUTHORIZED, TOKEN_EXPIRED, FORBIDDEN, INVALID_CURSOR.
     """
+    if org_id is not None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": "ORG_SCOPING_NOT_AVAILABLE",
+                "message": "Cross-tenant org scoping is not yet available for this endpoint.",
+            },
+        )
     svc = _get_service(request)
     if svc is None:
         page: CursorPage[KnowledgeFactOut] = CursorPage(
@@ -1455,7 +1509,9 @@ async def list_knowledge(
     responses={
         200: {"description": "Search results returned."},
         401: {"description": "Not authenticated."},
-        403: {"description": "Admin required (FORBIDDEN)."},
+        403: {
+            "description": "Admin required or org scoping not available (FORBIDDEN / ORG_SCOPING_NOT_AVAILABLE)."
+        },
         422: {"description": "Validation error (VALIDATION_ERROR)."},
     },
 )
@@ -1463,12 +1519,21 @@ async def search_knowledge(
     body: KnowledgeSearchRequest,
     request: Request,
     current_user: TokenData = Depends(require_admin),
+    org_id: str | None = Depends(get_admin_org),
 ) -> APIResponse[list[KnowledgeFactOut]]:
     """Semantic search over the shared knowledge store (admin only).
 
     Auth: admin bearer token required.
     Error codes: UNAUTHORIZED, TOKEN_EXPIRED, FORBIDDEN, VALIDATION_ERROR.
     """
+    if org_id is not None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": "ORG_SCOPING_NOT_AVAILABLE",
+                "message": "Cross-tenant org scoping is not yet available for this endpoint.",
+            },
+        )
     svc = _get_service(request)
     if svc is None:
         return APIResponse(data=[])
@@ -1722,7 +1787,9 @@ def _campaign_to_out(campaign: Any) -> CampaignOut:
     responses={
         200: {"description": "Campaign list returned."},
         401: {"description": "Not authenticated."},
-        403: {"description": "Admin required (FORBIDDEN)."},
+        403: {
+            "description": "Admin required or org scoping not available (FORBIDDEN / ORG_SCOPING_NOT_AVAILABLE)."
+        },
         409: {"description": "Service not running."},
     },
 )
@@ -1730,11 +1797,20 @@ async def list_campaigns(
     request: Request,
     status_filter: CampaignStatus | None = Query(default=None, description="Filter by status."),
     current_user: TokenData = Depends(require_admin),
+    org_id: str | None = Depends(get_admin_org),
 ) -> APIResponse[list[CampaignOut]]:
     """List all campaigns (admin only).
 
     Auth: admin bearer token required.
     """
+    if org_id is not None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": "ORG_SCOPING_NOT_AVAILABLE",
+                "message": "Cross-tenant org scoping is not yet available for this endpoint.",
+            },
+        )
     mgr = _get_campaign_mgr(request)
     campaigns = mgr.list_all(status_filter=status_filter)
     return APIResponse(data=[_campaign_to_out(c) for c in campaigns])

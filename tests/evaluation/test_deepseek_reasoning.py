@@ -251,6 +251,82 @@ class TestDeepSeekJsonStoreRoundTrip:
         ), f"Expected reasoning_content restored from dict, got {rc!r}"
 
 
+class TestDeepSeekBaseUrlRedaction:
+    """Regression tests for #1106 — _is_deepseek_base_url must redact credentials in logs."""
+
+    def test_redact_url_strips_userinfo(self):
+        """_redact_url removes username:password from URL netloc."""
+        from src.providers import _redact_url
+
+        redacted = _redact_url("https://user:pass@api.deepseek.com/v1")
+        assert "user:pass@" not in redacted
+        assert redacted == "https://api.deepseek.com/v1"
+
+    def test_redact_url_strips_sensitive_query_params(self):
+        """_redact_url replaces sensitive query params with [redacted]."""
+        from src.providers import _redact_url
+
+        redacted = _redact_url("https://api.deepseek.com/v1?api_key=sk-secret123")
+        assert "sk-secret123" not in redacted
+        assert "api_key=[redacted]" in redacted
+
+    def test_is_deepseek_warning_redacts_no_hostname_url_with_userinfo(self, caplog):
+        """No-hostname warning path must not leak raw credentials (#1106).
+
+        Note: the ``except Exception`` parse-failure branch is effectively
+        unreachable for valid string input (``urlparse`` is very tolerant),
+        so this test covers the no-hostname branch — which is the one that
+        fires in practice when a misconfigured URL has userinfo but no host
+        segment.
+        """
+        import logging
+
+        from src.providers.openai import _is_deepseek_base_url
+
+        with caplog.at_level(logging.WARNING, logger="cogtrix.providers.openai"):
+            result = _is_deepseek_base_url("https://user:pass@/bad-url")
+
+        assert result is False
+        assert "user:pass@" not in caplog.text
+        assert "***@" not in caplog.text  # _redact_url strips userinfo entirely
+        # Positive assertion: redacted URL does appear in the log
+        assert "<unparseable URL>" in caplog.text
+
+    def test_is_deepseek_warning_redacts_no_hostname_url(self, caplog):
+        """No-hostname warning must not leak raw credentials (#1106)."""
+        import logging
+
+        from src.providers.openai import _is_deepseek_base_url
+
+        with caplog.at_level(logging.WARNING, logger="cogtrix.providers.openai"):
+            result = _is_deepseek_base_url("https://user:pass@/")
+
+        assert result is False
+        assert "user:pass@" not in caplog.text
+        # Positive assertion: redacted URL does appear in the log
+        assert "<unparseable URL>" in caplog.text
+
+    def test_is_deepseek_warning_redacts_on_parse_exception(self, caplog, monkeypatch):
+        """Parse-failure warning path must not leak raw credentials (#1106)."""
+        import logging
+
+        from src.providers import openai as _o
+
+        def _boom(_url):
+            raise ValueError("boom")
+
+        monkeypatch.setattr(_o, "urlparse", _boom)
+        with caplog.at_level(logging.WARNING, logger="cogtrix.providers.openai"):
+            result = _o._is_deepseek_base_url("https://user:pass@api.deepseek.com/v1")
+
+        assert result is False
+        assert "user:pass" not in caplog.text
+        # Verify the redacted URL DOES appear (not just that the raw one is absent)
+        assert "api.deepseek.com" in caplog.text
+        # Verify exception class name is logged for debuggability
+        assert "ValueError" in caplog.text
+
+
 class TestRunnerDeepSeekRouting:
     """Verify the evaluation runner uses the provider factory for deepseek models."""
 

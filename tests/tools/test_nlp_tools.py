@@ -101,7 +101,7 @@ class TestAnalyzeSentiment:
         ):
             result = analyze_sentiment("some text")
         assert "Error analyzing sentiment" in result
-        assert "mock error" in result
+        assert "Operation failed" in result  # sanitized — raw error not leaked
 
 
 class TestSplitSentences:
@@ -225,7 +225,7 @@ class TestSummarizeText:
         ):
             result = summarize_text("some text")
         assert "Error summarizing text" in result
-        assert "mock error" in result
+        assert "Operation failed" in result  # sanitized — raw error not leaked
 
 
 class TestExtractKeywords:
@@ -275,7 +275,7 @@ class TestExtractKeywords:
         ):
             result = extract_keywords("some text")
         assert "Error extracting keywords" in result
-        assert "mock error" in result
+        assert "Operation failed" in result  # sanitized — raw error not leaked
 
 
 class TestInputSchemas:

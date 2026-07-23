@@ -12,6 +12,7 @@ Usage:
 
 from __future__ import annotations
 
+import concurrent.futures
 import contextlib
 import getpass
 import ipaddress
@@ -32,6 +33,11 @@ from typing import Any
 import yaml
 
 from src.cli.args import color_enabled
+
+# Timeout for LLM calls in the setup wizard — prevents a hung model from
+# blocking the caller indefinitely. Fail-open: connection tests return None,
+# conversation exits with a clear error message on timeout.
+_SETUP_WIZARD_LLM_TIMEOUT_SECONDS = 60
 
 # Optional Rich imports for markdown rendering in wizard output
 try:
@@ -138,6 +144,28 @@ def _spinner(label: str = "Thinking"):
     finally:
         stop.set()
         t.join()
+
+
+# ── LLM invocation helper ────────────────────────────────────────────
+
+
+def _invoke_llm_with_timeout(llm: Any, messages: Any) -> Any:
+    """Invoke *llm* with a ThreadPoolExecutor timeout.
+
+    Prevents a hung provider from blocking the setup wizard indefinitely.
+    On timeout, raises :exc:`RuntimeError` with a clear message.
+    """
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    future = pool.submit(llm.invoke, messages)
+    pool.shutdown(wait=False)
+    try:
+        return future.result(timeout=_SETUP_WIZARD_LLM_TIMEOUT_SECONDS)
+    except concurrent.futures.TimeoutError:
+        future.cancel()
+        pool.shutdown(wait=False)
+        raise RuntimeError(
+            f"LLM call timed out after {_SETUP_WIZARD_LLM_TIMEOUT_SECONDS}s"
+        ) from None
 
 
 # ── Box drawing ──────────────────────────────────────────────────────
@@ -789,7 +817,9 @@ def _test_connection(
         from langchain_core.messages import HumanMessage
 
         with _spinner("Testing connection"):
-            response = llm.invoke([HumanMessage(content="Say 'ok' in one word.")])
+            response = _invoke_llm_with_timeout(
+                llm, [HumanMessage(content="Say 'ok' in one word.")]
+            )
         text = response.content if hasattr(response, "content") else str(response)
         if not text.strip():
             raise RuntimeError("Empty response from LLM")
@@ -1217,7 +1247,12 @@ def _run_conversation(
     ]
 
     with _spinner("Thinking"):
-        response = llm.invoke(messages)
+        try:
+            response = _invoke_llm_with_timeout(llm, messages)
+        except RuntimeError as exc:
+            print(f"\n  {_R(chr(0x2717))} {exc}")
+            print(f"  {_D('Setup cancelled.')}")
+            raise SystemExit(0) from None
     ai_text: str = response.content if hasattr(response, "content") else str(response)
     messages.append(AIMessage(content=ai_text))
     _print_wizard(ai_text)
@@ -1244,7 +1279,12 @@ def _run_conversation(
                 raise SystemExit(0)
             messages.append(HumanMessage(content=_augment(user_input)))
             with _spinner("Thinking"):
-                response = llm.invoke(messages)
+                try:
+                    response = _invoke_llm_with_timeout(llm, messages)
+                except RuntimeError as exc:
+                    print(f"\n  {_R(chr(0x2717))} {exc}")
+                    print(f"  {_D('Setup cancelled.')}")
+                    raise SystemExit(0) from None
             ai_text = response.content if hasattr(response, "content") else str(response)
             messages.append(AIMessage(content=ai_text))
             _print_wizard(ai_text)
@@ -1264,7 +1304,12 @@ def _run_conversation(
 
         messages.append(HumanMessage(content=_augment(user_input)))
         with _spinner("Thinking"):
-            response = llm.invoke(messages)
+            try:
+                response = _invoke_llm_with_timeout(llm, messages)
+            except RuntimeError as exc:
+                print(f"\n  {_R(chr(0x2717))} {exc}")
+                print(f"  {_D('Setup cancelled.')}")
+                raise SystemExit(0) from None
         ai_text = response.content if hasattr(response, "content") else str(response)
         messages.append(AIMessage(content=ai_text))
         _print_wizard(ai_text)

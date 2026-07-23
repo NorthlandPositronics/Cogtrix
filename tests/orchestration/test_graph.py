@@ -2,6 +2,7 @@
 
 import concurrent.futures
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -14,6 +15,7 @@ from src.orchestration.graph import (
     _is_action_intent,
     _looks_like_fabricated_success_after_tool_errors,
     _looks_like_phantom_tool_markup,
+    _safe_tool_name,
     _should_reset_summary_for_topic_switch,
     _stuck_detection_headline,
 )
@@ -1225,3 +1227,188 @@ class TestInvokeWithTimeout:
         assert "Something went wrong" in str(exc_info.value)
         # Non-retryable errors propagate immediately without sleep
         assert len(sleep_calls) == 0, "Non-retryable errors should not trigger sleep delays"
+
+    def test_passes_disable_retries_flag(self) -> None:
+        """BUG-1069: _invoke_with_timeout must pass _cogtrix_disable_retries=True.
+
+        This prevents the model's inner retry loop from blocking a scarce
+        ThreadPoolExecutor worker. The outer retry loop in _invoke_with_timeout
+        handles retries instead.
+        """
+        submitted_calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+
+        class TrackingFuture:
+            def __init__(self):
+                self.call_count = 0
+
+            def result(self, timeout=None):
+                self.call_count += 1
+                return "success"
+
+            def cancel(self):
+                pass
+
+        class FakeExecutor:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def submit(self, fn, *args, **kwargs):
+                submitted_calls.append((args, kwargs))
+                return TrackingFuture()
+
+            def shutdown(self, wait=False):
+                pass
+
+        from src.providers import RetryableChatModel
+
+        llm = RetryableChatModel(self._make_llm([AIMessage(content="test")]))
+        tool = self._make_tool("slow_tool")
+        graph = _build_agent_graph(
+            llm=llm,
+            system_prompt="",
+            active_tools_list=[tool],
+            available_tools={},
+            registry=self._make_registry(),
+            approvals=set(),
+        )
+
+        with patch(
+            "src.orchestration.graph._get_llm_executor",
+            return_value=FakeExecutor(),
+        ):
+            graph.invoke({"messages": [HumanMessage(content="test")]})
+
+        # Verify _cogtrix_disable_retries=True was passed on every submit
+        assert len(submitted_calls) >= 1, "Expected at least one LLM invocation"
+        for _args, kwargs in submitted_calls:
+            assert kwargs.get("_cogtrix_disable_retries") is True, (
+                "_invoke_with_timeout must pass _cogtrix_disable_retries=True "
+                f"to prevent inner retry loops from blocking worker threads; "
+                f"got kwargs={kwargs}"
+            )
+
+    def test_skips_disable_retries_for_raw_models(self) -> None:
+        """BUG-1069: _invoke_with_timeout must NOT pass _cogtrix_disable_retries
+        to raw (non-RetryableChatModel) models.
+
+        Raw LangChain models (ChatOpenAI, ChatAnthropic, etc.) do not recognise
+        the internal flag and would leak it to the underlying API client,
+        causing Completions.create() to raise:
+            "unexpected keyword argument '_cogtrix_disable_retries'"
+        """
+        submitted_calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+
+        class TrackingFuture:
+            def result(self, timeout=None):
+                return "success"
+
+            def cancel(self):
+                pass
+
+        class FakeExecutor:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def submit(self, fn, *args, **kwargs):
+                submitted_calls.append((args, kwargs))
+                return TrackingFuture()
+
+            def shutdown(self, wait=False):
+                pass
+
+        # Use a plain MagicMock as the LLM (not a RetryableChatModel)
+        raw_llm = self._make_llm([AIMessage(content="test")])
+        tool = self._make_tool("slow_tool")
+        graph = _build_agent_graph(
+            llm=raw_llm,
+            system_prompt="",
+            active_tools_list=[tool],
+            available_tools={},
+            registry=self._make_registry(),
+            approvals=set(),
+        )
+
+        with patch(
+            "src.orchestration.graph._get_llm_executor",
+            return_value=FakeExecutor(),
+        ):
+            graph.invoke({"messages": [HumanMessage(content="test")]})
+
+        assert len(submitted_calls) >= 1, "Expected at least one LLM invocation"
+        for _args, kwargs in submitted_calls:
+            assert "_cogtrix_disable_retries" not in kwargs, (
+                "_invoke_with_timeout must NOT pass _cogtrix_disable_retries to "
+                f"raw models; got kwargs={kwargs}"
+            )
+
+
+class TestSafeToolName:
+    """Regression tests for #1070 — tool name sanitization in ToolMessage content.
+
+    Ensures that all error-path ToolMessage content in _invoke_one uses
+    _safe_tool_name() so that anomalous tool names from providers cannot
+    inject control characters or formatting into the LLM conversation context.
+    """
+
+    @pytest.mark.parametrize(
+        "raw_name,sanitized",
+        [
+            # Control character injection
+            ("tool\x00name", "toolname"),
+            ("tool\nname", "toolname"),
+            ("tool\rname", "toolname"),
+            ("tool\x1bname", "toolname"),
+            # Newline / whitespace variants
+            ("tool\tname", "toolname"),
+            ("tool name", "toolname"),
+            # Prompt injection payloads
+            ("tool'; DROP TABLE--", "toolDROPTABLE--"),
+            ('tool"; <script>', "toolscript"),
+            # Unicode / confusables
+            ("tool\u200bname", "toolname"),  # zero-width space
+            ("tool\ufe0fname", "toolname"),  # variation selector
+            # Normal names pass through unchanged
+            ("http_get", "http_get"),
+            ("my_tool", "my_tool"),
+            ("my-tool", "my-tool"),
+            ("my.tool", "my.tool"),
+            ("MyTool123", "MyTool123"),
+        ],
+    )
+    def test_strips_injection_characters(self, raw_name: str, sanitized: str) -> None:
+        """_safe_tool_name must strip all non-word/hyphen/dot characters."""
+        result = _safe_tool_name(raw_name)
+        assert result == sanitized
+        # Sanitized result must not contain any whitespace or control chars
+        assert " " not in result
+        assert "\n" not in result
+        assert "\r" not in result
+        assert "\t" not in result
+        assert "\x00" not in result
+
+    def test_max_length_truncation(self) -> None:
+        """Long tool names are truncated to prevent buffer issues."""
+        long_name = "a" * 200
+        result = _safe_tool_name(long_name)
+        assert len(result) == 80
+        assert result == "a" * 80
+
+    def test_empty_input_returns_unknown(self) -> None:
+        """Empty or all-stripped names return <unknown> sentinel."""
+        assert _safe_tool_name("") == "<unknown>"
+        assert _safe_tool_name("\n\t\x00") == "<unknown>"
+        assert _safe_tool_name("   ") == "<unknown>"
+
+    def test_error_message_templates_use_sanitized_name(self) -> None:
+        """Sanity-check that error message templates embed _safe_tool_name output.
+
+        This is a smoke test — it verifies the function produces a string that
+        is safe to embed in an f-string error message without carrying newlines
+        or control characters into the LLM context.
+        """
+        dangerous_name = "tool\n<script>alert('xss')</script>\ndef_tool"
+        safe = _safe_tool_name(dangerous_name)
+        # Must not introduce newlines into the error message
+        assert "\n" not in safe
+        assert "\r" not in safe
+        assert "<" not in safe  # no HTML injection chars either

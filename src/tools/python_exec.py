@@ -30,6 +30,8 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from src.tools.error_sanitizer import sanitize_shell_error
+
 _logger = logging.getLogger("cogtrix.python_exec")
 
 # Configuration constants
@@ -1463,7 +1465,7 @@ def execute_python(
         return final_output
 
     except Exception as e:
-        return f"Error: Failed to execute code: {e}"
+        return f"Error: Failed to execute code: {sanitize_shell_error(e)}"
     finally:
         # Ensure process is cleaned up
         if process.is_alive():

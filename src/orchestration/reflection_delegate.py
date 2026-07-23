@@ -13,6 +13,7 @@ Milestone 2 integration points (graph.py):
 
 from __future__ import annotations
 
+import concurrent.futures
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -21,6 +22,8 @@ from typing import Any, TypedDict
 from src.logging_config import get_logger
 
 log = get_logger()
+
+_REFLECTION_LLM_TIMEOUT_SECONDS: int = 60
 
 # ── System-prompt block — injected by M2 when the feature is enabled ──────────
 
@@ -90,8 +93,24 @@ def _call_llm(llm: Any, prompt: str) -> str:
     """
     from langchain_core.messages import HumanMessage
 
+    # Wrap the LLM call in a temporary executor so we can enforce a timeout.
+    # Python threads cannot be cancelled; shutdown(wait=False) lets the
+    # hung thread die in the background without blocking the caller.
+    # NOTE: Do NOT use ``with ThreadPoolExecutor(...) as pool:`` because
+    # ``__exit__`` calls ``shutdown(wait=True)`` which blocks on the hung
+    # thread.  Manual management with ``finally: pool.shutdown(wait=False)``
+    # is required.
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
     try:
-        result = llm.invoke([HumanMessage(content=prompt)])
+        future = pool.submit(llm.invoke, [HumanMessage(content=prompt)])
+        try:
+            result = future.result(timeout=_REFLECTION_LLM_TIMEOUT_SECONDS)
+        except concurrent.futures.TimeoutError:
+            log.warning(
+                "reflection_delegate LLM call timed out after %ds — returning empty fallback",
+                _REFLECTION_LLM_TIMEOUT_SECONDS,
+            )
+            return ""
         content = result.content
         if isinstance(content, list):
             content = " ".join(str(c.get("text", c) if isinstance(c, dict) else c) for c in content)
@@ -99,6 +118,8 @@ def _call_llm(llm: Any, prompt: str) -> str:
     except Exception as exc:  # noqa: BLE001
         log.warning("reflection_delegate LLM call failed: %s", exc, exc_info=True)
         return ""
+    finally:
+        pool.shutdown(wait=False)
 
 
 def _extract_section(text: str, start_marker: str, end_marker: str) -> str:

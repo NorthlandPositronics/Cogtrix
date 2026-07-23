@@ -667,6 +667,25 @@ class TestTestConnection:
         assert "No connected db." in captured.out
         assert "{'error':" not in captured.out, "Raw dict repr must not appear in error output"
 
+    def test_timeout_returns_none(self, capsys):
+        """A hung LLM call must return None rather than blocking forever."""
+        import time
+        from concurrent.futures import TimeoutError as FuturesTimeoutError
+
+        llm_mock = MagicMock()
+        llm_mock.invoke.side_effect = FuturesTimeoutError("hung")
+
+        with patch("src.providers.create_chat_model", return_value=llm_mock):
+            with patch("src.setup_wizard._SETUP_WIZARD_LLM_TIMEOUT_SECONDS", 0.3):
+                t0 = time.monotonic()
+                result = _test_connection("openai", "gpt-4.1-mini", "sk-test", None)
+                elapsed = time.monotonic() - t0
+
+        assert result is None
+        assert elapsed < 1.5, f"Blocked for {elapsed:.1f}s — timeout not applied"
+        captured = capsys.readouterr()
+        assert "timed out" in captured.out.lower()
+
 
 class TestPrintDetections:
     def test_prints_openai_key_detection(self, capsys):
@@ -1239,6 +1258,72 @@ class TestRunConversation:
         with patch("builtins.input", side_effect=inputs):
             _run_conversation(llm, "system prompt")
         assert llm.invoke.call_count == 2
+
+    # ── timeout handling ─────────────────────────────────────────────
+
+    def test_initial_invoke_timeout_exits(self):
+        """If the first LLM call hangs, the wizard exits cleanly."""
+        import time
+        from concurrent.futures import TimeoutError as FuturesTimeoutError
+
+        llm = MagicMock()
+        llm.invoke.side_effect = FuturesTimeoutError("hung")
+
+        with patch("src.setup_wizard._SETUP_WIZARD_LLM_TIMEOUT_SECONDS", 0.3):
+            t0 = time.monotonic()
+            with pytest.raises(SystemExit):
+                _run_conversation(llm, "system prompt")
+            elapsed = time.monotonic() - t0
+
+        assert elapsed < 1.5, f"Blocked for {elapsed:.1f}s — timeout not applied"
+
+    def test_edit_invoke_timeout_exits(self):
+        """If the LLM hangs during the edit flow, the wizard exits cleanly."""
+        import time
+        from concurrent.futures import TimeoutError as FuturesTimeoutError
+
+        responses = [self._yaml_response()]
+
+        def _side_effect(*args, **kwargs):
+            if llm.invoke.call_count >= 2:
+                raise FuturesTimeoutError("hung")
+            return type("Response", (), {"content": responses[0]})()
+
+        llm = MagicMock()
+        llm.invoke.side_effect = _side_effect
+
+        inputs = iter(["no, continue editing", "add model setting"])
+        with patch("builtins.input", side_effect=inputs):
+            with patch("src.setup_wizard._SETUP_WIZARD_LLM_TIMEOUT_SECONDS", 0.3):
+                t0 = time.monotonic()
+                with pytest.raises(SystemExit):
+                    _run_conversation(llm, "system prompt")
+                elapsed = time.monotonic() - t0
+
+        assert elapsed < 1.5, f"Blocked for {elapsed:.1f}s — timeout not applied"
+
+    def test_question_invoke_timeout_exits(self):
+        """If the LLM hangs during the question-answer flow, the wizard exits cleanly."""
+        import time
+        from concurrent.futures import TimeoutError as FuturesTimeoutError
+
+        def _side_effect(*args, **kwargs):
+            if llm.invoke.call_count >= 2:
+                raise FuturesTimeoutError("hung")
+            return type("Response", (), {"content": "What do you need?"})()
+
+        llm = MagicMock()
+        llm.invoke.side_effect = _side_effect
+
+        inputs = iter(["I need a bot"])
+        with patch("builtins.input", side_effect=inputs):
+            with patch("src.setup_wizard._SETUP_WIZARD_LLM_TIMEOUT_SECONDS", 0.3):
+                t0 = time.monotonic()
+                with pytest.raises(SystemExit):
+                    _run_conversation(llm, "system prompt")
+                elapsed = time.monotonic() - t0
+
+        assert elapsed < 1.5, f"Blocked for {elapsed:.1f}s — timeout not applied"
 
 
 class TestStripNulls:

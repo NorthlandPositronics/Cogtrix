@@ -415,20 +415,12 @@ class TestBug906SubprocessTimeout:
         result = handler._pr_reference_is_valid(42)
         assert result is True, "Validation must return True (graceful skip) when gh CLI unavailable"
 
-    @pytest.mark.xfail(
-        reason="Fix commit 341999d (timeout=5) not yet merged to next",
-        strict=True,
-    )
     def test_subprocess_validation_uses_timeout(self):
         """subprocess.run calls for PR validation must include a timeout.
 
-        The fix (commit 341999d) adds ``timeout=5`` to the subprocess.run
-        call. This test verifies the pattern by confirming that the method
-        uses subprocess.run with named timeout kwarg support.
-
-        This test is marked ``xfail(strict=True)`` — it will XPASS (unexpected
-        pass) when the fix lands on ``next``, signaling that the regression
-        guard is met.
+        The fix (PR #1540) adds ``timeout=30`` to the subprocess.run call.
+        This test verifies the pattern by confirming that the method
+        uses subprocess.run with a named timeout kwarg.
         """
         import inspect
 
@@ -756,13 +748,13 @@ class TestBug967PatchFileOOM:
 # ───────────────────────────────────────────────────────────────────────────
 
 
-class TestBug968DelegateGitBypass:
-    """#968: Git mutation tools not excluded from delegate tool set.
+class TestBug968And1072DelegateSandbox:
+    """#968 / #1072: Delegate sandbox must exclude all destructive and privacy-sensitive tools.
 
-    Expected fix: ``_DELEGATE_EXCLUDED_TOOLS`` must include ``git_add``,
-    ``git_commit``, ``git_create_branch``, and ``git_checkout`` so that
-    delegate agents cannot bypass the confirmation prompt by invoking
-    git mutation tools directly.
+    ``_DELEGATE_EXCLUDED_TOOLS`` must include git mutation, cron scheduling,
+    test generation, GitHub issue mutation, RAG mutation, calendar mutation,
+    and email/messaging inbox access so that delegate agents are sandboxed
+    to read-only and research-oriented operations.
     """
 
     def test_delegate_excluded_tools_is_frozenset(self):
@@ -796,13 +788,8 @@ class TestBug968DelegateGitBypass:
         for tool in ("write_file", "patch_file", "append_file"):
             assert tool in _DELEGATE_EXCLUDED_TOOLS, f"{tool} must be excluded from delegate tools"
 
-    @pytest.mark.xfail(
-        reason="Git mutation tools (git_add, git_commit, git_create_branch, "
-        "git_checkout) not yet in _DELEGATE_EXCLUDED_TOOLS — fix #968 pending",
-        strict=True,
-    )
     def test_delegate_excluded_tools_includes_git_mutations(self):
-        """_DELEGATE_EXCLUDED_TOOLS must include git mutation tools.
+        """_DELEGATE_EXCLUDED_TOOLS must include git mutation tools (closes #968).
 
         Adding git_add, git_commit, git_create_branch, and git_checkout to
         the excluded set closes the delegate git bypass (bug #968).
@@ -820,6 +807,79 @@ class TestBug968DelegateGitBypass:
             f"Git mutation tools not excluded from delegate set: {missing}. "
             "Fix #968 requires adding these to _DELEGATE_EXCLUDED_TOOLS."
         )
+
+    def test_delegate_excluded_tools_includes_cron_tools(self):
+        """_DELEGATE_EXCLUDED_TOOLS must exclude cron scheduling tools (closes #1072).
+
+        Delegates must not be able to schedule recurring LLM prompt jobs.
+        """
+        from src.tools.delegate import _DELEGATE_EXCLUDED_TOOLS
+
+        for tool in ("cron_add", "cron_remove"):
+            assert tool in _DELEGATE_EXCLUDED_TOOLS, f"{tool} must be excluded from delegate tools"
+
+    def test_delegate_excluded_tools_includes_test_generation(self):
+        """_DELEGATE_EXCLUDED_TOOLS must exclude generate_tests (closes #1072).
+
+        Delegates must not be able to generate and write test files to disk.
+        """
+        from src.tools.delegate import _DELEGATE_EXCLUDED_TOOLS
+
+        assert (
+            "generate_tests" in _DELEGATE_EXCLUDED_TOOLS
+        ), "generate_tests must be excluded from delegate tools"
+
+    def test_delegate_excluded_tools_includes_github_mutation(self):
+        """_DELEGATE_EXCLUDED_TOOLS must exclude GitHub issue mutation tools (closes #1072).
+
+        Delegates must not be able to create issues or post comments on GitHub.
+        """
+        from src.tools.delegate import _DELEGATE_EXCLUDED_TOOLS
+
+        for tool in ("gh_create_issue", "gh_comment_issue"):
+            assert tool in _DELEGATE_EXCLUDED_TOOLS, f"{tool} must be excluded from delegate tools"
+
+    def test_delegate_excluded_tools_includes_rag_mutation(self):
+        """_DELEGATE_EXCLUDED_TOOLS must exclude RAG mutation tools (closes #1072).
+
+        Delegates must not be able to modify the RAG knowledge base.
+        """
+        from src.tools.delegate import _DELEGATE_EXCLUDED_TOOLS
+
+        for tool in ("save_to_knowledge_base", "rag_ingest"):
+            assert tool in _DELEGATE_EXCLUDED_TOOLS, f"{tool} must be excluded from delegate tools"
+
+    def test_delegate_excluded_tools_includes_calendar_mutation(self):
+        """_DELEGATE_EXCLUDED_TOOLS must exclude calendar_create_event (closes #1072).
+
+        Delegates must not be able to create Google Calendar events.
+        """
+        from src.tools.delegate import _DELEGATE_EXCLUDED_TOOLS
+
+        assert (
+            "calendar_create_event" in _DELEGATE_EXCLUDED_TOOLS
+        ), "calendar_create_event must be excluded from delegate tools"
+
+    def test_delegate_excluded_tools_includes_email_access(self):
+        """_DELEGATE_EXCLUDED_TOOLS must exclude email read/search tools (closes #1072).
+
+        Delegates must not be able to read or search user email — privacy-sensitive.
+        """
+        from src.tools.delegate import _DELEGATE_EXCLUDED_TOOLS
+
+        for tool in ("read_email", "search_email"):
+            assert tool in _DELEGATE_EXCLUDED_TOOLS, f"{tool} must be excluded from delegate tools"
+
+    def test_delegate_excluded_tools_includes_messaging_inbox_access(self):
+        """_DELEGATE_EXCLUDED_TOOLS must exclude messaging inbox-check tools (closes #1072).
+
+        Delegates must not be able to check incoming WhatsApp or Telegram messages —
+        privacy-sensitive.
+        """
+        from src.tools.delegate import _DELEGATE_EXCLUDED_TOOLS
+
+        for tool in ("whatsapp_check", "telegram_check"):
+            assert tool in _DELEGATE_EXCLUDED_TOOLS, f"{tool} must be excluded from delegate tools"
 
     def test_set_delegate_tools_respects_exclusions(self):
         """set_delegate_tools must filter out excluded tools."""
@@ -930,10 +990,6 @@ class TestBug972GithubToolsTimeout:
             "subprocess.run" in source
         ), "github_tools must use subprocess.run for gh CLI interaction"
 
-    @pytest.mark.xfail(
-        reason="subprocess.run calls in github_tools currently lack timeout= — fix #972 pending",
-        strict=True,
-    )
     def test_all_subprocess_calls_have_timeout(self):
         """Every subprocess.run call must include a timeout= parameter.
 
@@ -948,8 +1004,8 @@ class TestBug972GithubToolsTimeout:
         source = inspect.getsource(github_tools)
         # Count subprocess.run calls
         run_calls = [line for line in source.split("\n") if "subprocess.run" in line]
-        # Each call should include timeout= when the fix is applied.
-        # Currently there are 4 calls with 0 timeouts.
+        # Each call routes through _run_gh which has timeout=.
+        # The _run_gh line contains both subprocess.run and timeout.
         calls_with_timeout = sum(1 for line in run_calls if "timeout" in line)
         total_calls = len(run_calls)
         assert calls_with_timeout == total_calls, (
@@ -978,17 +1034,26 @@ class TestBug973AgentMessagingRace:
         """Both send and read must use atomic_write_json for writes."""
         import inspect
 
-        from src.tools.agent_messaging import read_agent_inbox, send_to_agent
+        from src.tools.agent_messaging import (
+            _locked_read_modify_write,
+            read_agent_inbox,
+            send_to_agent,
+        )
 
         send_source = inspect.getsource(send_to_agent)
         read_source = inspect.getsource(read_agent_inbox)
+        lock_helper_source = inspect.getsource(_locked_read_modify_write)
 
+        # The atomic write may happen directly or through the locking helper.
         assert (
-            "atomic_write_json" in send_source
-        ), "send_to_agent must use atomic_write_json for writes"
+            "atomic_write_json" in send_source or "_locked_read_modify_write" in send_source
+        ), "send_to_agent must use atomic_write_json (directly or via _locked_read_modify_write)"
         assert (
-            "atomic_write_json" in read_source
-        ), "read_agent_inbox must use atomic_write_json for writes"
+            "atomic_write_json" in read_source or "_locked_read_modify_write" in read_source
+        ), "read_agent_inbox must use atomic_write_json (directly or via _locked_read_modify_write)"
+        assert (
+            "atomic_write_json" in lock_helper_source
+        ), "_locked_read_modify_write must use atomic_write_json"
 
     def test_send_to_agent_is_callable(self):
         """send_to_agent must be callable."""
