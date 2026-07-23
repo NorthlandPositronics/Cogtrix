@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.1.32](https://github.com/NorthlandPositronics/Cogtrix/compare/v0.1.31...v0.1.32) (2026-03-23)
+
+
+### Documentation
+
+* DocsForge holistic documentation audit and update ([501b41a](https://github.com/NorthlandPositronics/Cogtrix/commit/501b41a3f51478bb7f585117d88083bd23d5042c))
+* DocsForge holistic documentation audit and update ([f661b85](https://github.com/NorthlandPositronics/Cogtrix/commit/f661b853e40c991dba7b66bf9adad386bf72276c))
+* DocsForge holistic documentation audit and update ([#78](https://github.com/NorthlandPositronics/Cogtrix/issues/78)) ([501b41a](https://github.com/NorthlandPositronics/Cogtrix/commit/501b41a3f51478bb7f585117d88083bd23d5042c))
+
 ## [0.1.31](https://github.com/NorthlandPositronics/Cogtrix/compare/v0.1.30...v0.1.31) (2026-03-23)
 
 

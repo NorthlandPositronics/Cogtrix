@@ -317,7 +317,7 @@ Pass `api` as the final argument to start the FastAPI server instead of the inte
 
 ## API Server
 
-Cogtrix includes a REST + WebSocket API server built with FastAPI. It exposes 80 REST endpoints and 2 WebSocket streams, powering the React web frontend and enabling programmatic access from any HTTP client.
+Cogtrix includes a REST + WebSocket API server built with FastAPI. It exposes 87 REST endpoints and 2 WebSocket streams, powering the React web frontend and enabling programmatic access from any HTTP client.
 
 ### Starting the API server
 
@@ -327,7 +327,7 @@ export COGTRIX_JWT_SECRET="$(python -c 'import secrets; print(secrets.token_hex(
 
 # Recommended — using the CLI entry point
 python -m src.api
-python -m src.api --debug                      # debug logging
+python -m src.api --debug                      # debug logging (stdout/stderr split)
 python -m src.api --log                        # info logging to cogtrix-api.log
 python -m src.api --config-file prod.yaml      # explicit config file
 python -m src.api --host 0.0.0.0 --port 9000   # custom bind address

@@ -1280,7 +1280,7 @@ python cogtrix.py --setup --setup-docs https://example.com/cogtrix-config-docs
 - API keys entered during bootstrap are injected into the final YAML, so the LLM never sees the actual key value.
 - The output file is shown after writing: `Config written to: ~/.cogtrix.yaml`.
 
-**Docker auto-start:** When running the official container image and no config file or API key environment variable is set, the container automatically launches the setup wizard (if stdin is a TTY). This simplifies first-run setup:
+**Docker auto-start:** When running the official container image, the container automatically launches the setup wizard if all of the following are true: (1) no config file exists at `/app/.cogtrix.yaml` or `/app/.cogtrix.json`, (2) none of `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `XAI_API_KEY`, `COGTRIX_OLLAMA`, or `OLLAMA_BASE_URL` is set, and (3) stdin is a TTY. This simplifies first-run setup:
 
 ```bash
 docker run -it -v ~/.cogtrix.yaml:/app/.cogtrix.yaml ghcr.io/northlandpositronics/cogtrix:latest
@@ -1698,6 +1698,25 @@ python cogtrix.py --log -v
 python cogtrix.py --debug
 python cogtrix.py --debug --log ~/debug.log
 ```
+
+### API Server Logging
+
+The API server (`python -m src.api`) supports the same logging flags with one addition: **debug log streaming**.
+
+```bash
+python -m src.api --debug                      # DEBUG/INFO → stdout, WARNING+ → stderr
+python -m src.api --debug --log-file /tmp/api.log  # all levels → file (overrides streaming)
+python -m src.api --log                        # INFO → cogtrix-api.log
+python -m src.api --log-file /var/log/api.log  # INFO → specified file
+```
+
+When `--debug` is used without `--log-file`, log output is split across standard streams:
+- **DEBUG and INFO** messages go to **stdout**
+- **WARNING, ERROR, and CRITICAL** messages go to **stderr**
+
+This is useful for `docker logs`, live terminals, and log aggregators that distinguish stdout from stderr. When `--log-file` is provided, it takes priority and all levels are written to the file.
+
+The `COGTRIX_LOG_STREAM=1` environment variable is set internally to propagate the stream mode to the application lifespan.
 
 ### Log Levels
 

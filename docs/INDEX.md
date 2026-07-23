@@ -9,7 +9,7 @@
 
 **Pull examples:**
 ```bash
-docker pull ghcr.io/northlandpositronics/cogtrix:v0.1.25
+docker pull ghcr.io/northlandpositronics/cogtrix:latest
 docker pull ghcr.io/northlandpositronics/cogtrix-webui:latest
 ```
 
@@ -37,7 +37,7 @@ docker pull ghcr.io/northlandpositronics/cogtrix-webui:latest
 
 | Guide | Description |
 |-------|-------------|
-| [OpenAPI Schema](api/openapi.yaml) | OpenAPI 3.1 specification for all 80 REST endpoints ([JSON](api/openapi.json)) |
+| [OpenAPI Schema](api/openapi.yaml) | OpenAPI 3.1 specification for all 87 REST endpoints ([JSON](api/openapi.json)) |
 | [Client Contract](api/client-contract.md) | TypeScript types, API client patterns, and WebSocket example code |
 | [WebSocket Protocol](api/websocket-protocol.md) | Streaming message types, authentication, connection lifecycle |
 | [WebUI Development Guide](api/webui-development-guide.md) | Page map, component hierarchy, integration patterns, and state management for React developers |

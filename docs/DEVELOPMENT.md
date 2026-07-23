@@ -411,6 +411,9 @@ Handlers receive `self` (the registry instance) which provides access to:
 # Using uv (recommended)
 uv run pytest tests/ -v
 
+# Unit tests only (fast, excludes integration tests)
+uv run pytest tests/ -q -k "not test_agent_workflow"
+
 # Or with pip/venv
 python -m pytest tests/ -v
 ```
@@ -427,6 +430,55 @@ uv run pytest tests/tools/ -v
 # Config tests
 uv run pytest tests/test_provider_config.py -v
 ```
+
+### Running the API Server Locally
+
+```bash
+# Required: set a JWT secret (minimum 32 characters)
+export COGTRIX_JWT_SECRET="$(python -c 'import secrets; print(secrets.token_hex(32))')"
+
+# Start the API server
+python -m src.api
+
+# With debug log streaming (DEBUG/INFO to stdout, WARNING+ to stderr)
+python -m src.api --debug
+
+# With file-based logging
+python -m src.api --log-file /tmp/api.log
+
+# Auto-reload for development
+python -m src.api --reload
+```
+
+### Docker Testing
+
+Build and test the Docker image locally:
+
+```bash
+# Build the image
+docker build -t cogtrix:dev .
+
+# Run interactive CLI (connects to local Ollama via host network)
+docker run -it --network host cogtrix:dev
+
+# Run the API server
+docker run -p 8000:8000 \
+  -e COGTRIX_JWT_SECRET="$(python -c 'import secrets; print(secrets.token_hex(32))')" \
+  cogtrix:dev api
+
+# Run with debug streaming (visible via docker logs)
+docker run -p 8000:8000 \
+  -e COGTRIX_JWT_SECRET="$(python -c 'import secrets; print(secrets.token_hex(32))')" \
+  cogtrix:dev api --debug
+
+# Mount a config and persist data
+docker run -it --network host \
+  -v "$HOME/.cogtrix.yaml:/app/.cogtrix.yaml:ro" \
+  -v cogtrix-data:/app/data \
+  cogtrix:dev
+```
+
+The container uses `python:3.13-slim`, runs as non-root (uid 1000), and includes all optional extras (search, anthropic, google, mcp, science, api). The healthcheck probes `GET /api/v1/health` using Python's stdlib `urllib` -- no curl or wget needed in the slim image.
 
 ### Writing Tests
 
@@ -577,6 +629,8 @@ cogtrix/
 │   │   ├── datamarking.py   # Microsoft Spotlighting prompt injection defense
 │   │   ├── scheduler.py     # MessageScheduler — deferred reply delivery
 │   │   ├── deferral.py      # DeferralManager — deferred re-processing
+│   │   ├── campaign.py      # CampaignManager — multi-contact outbound campaigns
+│   │   ├── workflows.py     # WorkflowRegistry: YAML definitions, bindings, auto-detect
 │   │   └── service.py       # Main orchestrator
 │   │
 │   ├── memory/
@@ -645,7 +699,10 @@ cogtrix/
 └── data/                     # Runtime data
     ├── history/              # Session history + hybrid meta files
     ├── knowledge/            # Cross-chat knowledge store (facts.json)
-    └── vectordb/             # FAISS vector indexes (RAG + per-session recall + knowledge)
+    ├── vectordb/             # FAISS vector indexes (RAG + per-session recall + knowledge)
+    ├── api/uploads/          # Per-document RAG indexes uploaded via API
+    ├── assistant/            # Assistant mode state (schedule, deferrals, violations, campaigns)
+    └── workflows/            # Workflow definitions, bindings, per-workflow knowledge bases
 ```
 
 ---

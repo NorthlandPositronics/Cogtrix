@@ -204,11 +204,11 @@ src/
 │   ├── poller.py          # Per-channel polling threads
 │   ├── knowledge.py       # Cross-chat fact extraction + recall
 │   ├── guardrails.py      # Security guardrails (input/output/rate-limit/LLM judge)
-│   ├── deferral.py        # DeferralManager — deferred re-processing passes
-│   ├── scheduler.py       # MessageScheduler — deferred reply delivery
-│   ├── campaign.py        # CampaignManager — multi-contact outbound campaigns
-│   ├── workflows.py       # WorkflowRegistry: YAML definitions, bindings, auto-detect
-│   └── service.py         # Main orchestrator (AssistantService)
+│   ├── deferral.py      # DeferralManager — deferred re-processing passes
+│   ├── scheduler.py     # MessageScheduler — deferred reply delivery
+│   ├── campaign.py      # CampaignManager — multi-contact outbound campaigns
+│   ├── workflows.py     # WorkflowRegistry: YAML definitions, bindings, auto-detect
+│   └── service.py       # Main orchestrator (AssistantService)
 ├── rag/
 │   ├── __init__.py        # RAG module
 │   └── ingest.py          # Document ingestion
