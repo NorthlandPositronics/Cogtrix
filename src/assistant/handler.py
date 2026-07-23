@@ -46,11 +46,24 @@ log = logging.getLogger("cogtrix")
 _UNSET: object = object()
 
 
-def _load_prompt_value(value: str) -> str:
-    """Return prompt text — reads from file path (starts with / or ~) or returns inline."""
+def _load_prompt_value(value: str, allowed_roots: list[Path] | None = None) -> str:
+    """Return prompt text — reads from file path (starts with / or ~) or returns inline.
+
+    When *allowed_roots* is provided, the resolved path must be relative to one of
+    the roots. Symlinks are followed via ``.resolve()`` before the containment check
+    so a symlink pointing outside an allowed root is correctly rejected (BUG-096).
+    """
     stripped = value.strip()
     if stripped.startswith("/") or stripped.startswith("~"):
-        path = Path(stripped).expanduser()
+        path = Path(stripped).expanduser().resolve()
+        if allowed_roots:
+            if not any(path.is_relative_to(root) for root in allowed_roots):
+                log.warning(
+                    "Contact prompt path %s is outside allowed roots %s — rejected",
+                    path,
+                    [str(r) for r in allowed_roots],
+                )
+                return ""
         try:
             return path.read_text(encoding="utf-8").strip()
         except OSError as exc:
@@ -187,7 +200,8 @@ class MessageHandler:
         if not contact_name or contact_name not in contact_prompts:
             return None
 
-        loaded = _load_prompt_value(contact_prompts[contact_name])
+        _allowed = [Path.cwd(), Path.home()]
+        loaded = _load_prompt_value(contact_prompts[contact_name], allowed_roots=_allowed)
         if not loaded:
             return None
         log.debug("Resolved contact prompt for '%s'", contact_name)
@@ -270,6 +284,8 @@ class MessageHandler:
         effective_prompt: str,
         active_tools: list[Any],
         session: Any,
+        defer_state: DeferReplyState | None = None,
+        suppress_state: SuppressReplyState | None = None,
     ) -> tuple[str, set[str]]:
         """Invoke the agent runner and return (response, loaded_tools)."""
         from src.orchestration.run_config import AgentRunConfig
@@ -301,6 +317,14 @@ class MessageHandler:
             log.error("Agent error for session %s: %s", session.session_key, exc)
             response = "I encountered an error processing your message. Please try again."
             return response, set()
+
+        # If the agent intentionally produced no content via defer or suppress,
+        # skip any empty-content recovery to avoid a wasted second LLM call (BUG-NEW).
+        if (defer_state is not None and defer_state.was_called) or (
+            suppress_state is not None and suppress_state.was_called
+        ):
+            return response, call_session_state.loaded_tools
+
         return response, call_session_state.loaded_tools
 
     def _route_response(
@@ -380,10 +404,23 @@ class MessageHandler:
                 log.warning("Failed to send reply to %s via %s", msg.chat_id, channel.name)
             return response
 
-        # Edit-only (no schedule, no immediate send) — return edited text for memory
+        # Edit was attempted.  If it succeeded, return the edited text for memory.
         if edited_text is not None:
             return edited_text
-        return self._guardrails.sanitize_output(edit_state.new_text)
+
+        # Edit failed (ok=False) and there is no schedule/queue activity.
+        # Fall back to immediate send with the original agent response so the
+        # user receives a reply rather than silence (BUG-110).
+        log.info("Edit failed for %s — falling back to immediate send", msg.chat_id)
+        fallback_text = self._guardrails.sanitize_output(edit_state.new_text)
+        if len(fallback_text) > self._max_response_length:
+            fallback_text = fallback_text[: self._max_response_length - 3] + "..."
+        result = channel.send(msg.chat_id, fallback_text)
+        if result.ok and result.message_id:
+            session.last_sent_message_id = result.message_id
+        elif not result.ok:
+            log.warning("Failed to send fallback reply to %s via %s", msg.chat_id, channel.name)
+        return fallback_text
 
     def handle_batch(
         self,
@@ -391,6 +428,7 @@ class MessageHandler:
         channel: Channel,
         *,
         is_reprocessing: bool = False,
+        deferral_depth: int = 0,
     ) -> None:
         """Process multiple rapid messages as a single agent turn."""
         if not messages:
@@ -398,19 +436,33 @@ class MessageHandler:
 
         # If a deferred record is pending for this chat and this is not a re-processing
         # pass, accumulate messages into the pending record instead of processing them.
+        # BUG-094: evaluate all add_message calls eagerly (no short-circuit) to avoid
+        # partial absorption under a race between add_message calls.
         if not is_reprocessing and self._deferral_mgr:
             primary = messages[0]
-            all_absorbed = all(self._deferral_mgr.add_message(m) for m in messages)
-            if all_absorbed:
+            absorbed = [self._deferral_mgr.add_message(m) for m in messages]
+            if all(absorbed):
                 log.info(
                     "Buffered %d message(s) for deferred session %s",
                     len(messages),
                     primary.session_key,
                 )
                 return
+            if any(absorbed):
+                # Partial absorption: at least one message was added to a record that
+                # then fired between the two add_message calls. Cancel the deferred
+                # record to prevent duplicate processing (BUG-094).
+                log.warning(
+                    "Partial deferral absorption for %s — cancelling deferred record "
+                    "to prevent duplicate processing",
+                    primary.session_key,
+                )
+                self._deferral_mgr.cancel(primary.session_key)
 
         if len(messages) == 1:
-            self.handle(messages[0], channel, is_reprocessing=is_reprocessing)
+            self.handle(
+                messages[0], channel, is_reprocessing=is_reprocessing, deferral_depth=deferral_depth
+            )
             return
         combined_text = "\n".join(m.text for m in messages)
         primary = messages[-1]
@@ -430,10 +482,17 @@ class MessageHandler:
             len(messages),
             primary.chat_id,
         )
-        self.handle(combined_msg, channel, is_reprocessing=is_reprocessing)
+        self.handle(
+            combined_msg, channel, is_reprocessing=is_reprocessing, deferral_depth=deferral_depth
+        )
 
     def handle(
-        self, msg: IncomingMessage, channel: Channel, *, is_reprocessing: bool = False
+        self,
+        msg: IncomingMessage,
+        channel: Channel,
+        *,
+        is_reprocessing: bool = False,
+        deferral_depth: int = 0,
     ) -> None:
         """Process *msg* and send a response back via *channel*."""
         session = self._session_mgr.get_or_create(msg)
@@ -482,10 +541,12 @@ class MessageHandler:
                         )
                     )
 
-            # Inject defer_processing if deferral manager is present and depth < max
+            # Inject defer_processing if deferral manager is present and depth < max.
+            # BUG-091: use the propagated deferral_depth parameter instead of querying
+            # current_depth() — the record is already deleted from _records when
+            # _fire_record calls this handler, so current_depth() would return 0.
             if self._deferral_mgr and "defer_processing" not in self._excluded_tools:
-                depth = self._deferral_mgr.current_depth(msg.session_key)
-                if depth < self._deferral_mgr.max_depth:
+                if deferral_depth < self._deferral_mgr.max_depth:
                     active_tools.append(
                         create_defer_processing_tool(defer_state, schedule_state=schedule_state)
                     )
@@ -504,6 +565,8 @@ class MessageHandler:
                 effective_prompt=effective_prompt,
                 active_tools=active_tools,
                 session=session,
+                defer_state=defer_state,
+                suppress_state=suppress_state,
             )
             if turn_loaded_tools:
                 log.debug(
@@ -518,15 +581,16 @@ class MessageHandler:
                 return
 
             # Check defer_processing — no delivery, no memory update; register deferral.
+            # BUG-091: use deferral_depth (propagated from callback) rather than
+            # current_depth() which returns 0 after _fire_record deletes the record.
             if defer_state.was_called and self._deferral_mgr:
-                depth = self._deferral_mgr.current_depth(msg.session_key)
                 log.info(
                     "Agent deferred processing for %s by %.0fs (depth %d)",
                     msg.chat_id,
                     defer_state.delay_seconds,
-                    depth,
+                    deferral_depth,
                 )
-                self._deferral_mgr.defer(msg, defer_state.delay_seconds, depth=depth)
+                self._deferral_mgr.defer(msg, defer_state.delay_seconds, depth=deferral_depth)
                 return
 
             response_for_memory = self._route_response(

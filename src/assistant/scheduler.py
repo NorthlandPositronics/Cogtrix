@@ -967,4 +967,4 @@ class MessageScheduler:
             with atomic_write_json(self._persist_path) as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
         except Exception as exc:
-            log.debug("MessageScheduler: failed to persist queue: %s", exc)
+            log.warning("MessageScheduler: failed to persist queue: %s", exc)

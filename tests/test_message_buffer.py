@@ -392,14 +392,20 @@ class TestHandleBatch:
 
         handler.handle_batch([msg], channel)
 
-        handler.handle.assert_called_once_with(msg, channel, is_reprocessing=False)
+        handler.handle.assert_called_once_with(
+            msg, channel, is_reprocessing=False, deferral_depth=0
+        )
 
     def test_multiple_messages_concatenated(self):
         """handle_batch with N>1 passes a combined message whose text is newline-joined."""
         captured: list[IncomingMessage] = []
 
         def _capture_handle(
-            msg: IncomingMessage, _ch: Any, *, is_reprocessing: bool = False
+            msg: IncomingMessage,
+            _ch: Any,
+            *,
+            is_reprocessing: bool = False,
+            deferral_depth: int = 0,
         ) -> None:
             captured.append(msg)
 
@@ -421,7 +427,11 @@ class TestHandleBatch:
         captured: list[IncomingMessage] = []
 
         def _capture_handle(
-            msg: IncomingMessage, _ch: Any, *, is_reprocessing: bool = False
+            msg: IncomingMessage,
+            _ch: Any,
+            *,
+            is_reprocessing: bool = False,
+            deferral_depth: int = 0,
         ) -> None:
             captured.append(msg)
 
@@ -441,7 +451,11 @@ class TestHandleBatch:
         handle_count = [0]
 
         def _count_handle(
-            _msg: IncomingMessage, _ch: Any, *, is_reprocessing: bool = False
+            _msg: IncomingMessage,
+            _ch: Any,
+            *,
+            is_reprocessing: bool = False,
+            deferral_depth: int = 0,
         ) -> None:
             handle_count[0] += 1
 

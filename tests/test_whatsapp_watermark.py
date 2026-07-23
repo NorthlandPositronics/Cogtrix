@@ -2,8 +2,11 @@
 
 When _evict_stale_snapshots removes a chat's watermark entry, the next call to
 _fetch_new_messages must use ``time.time() - _REACTIVATION_LOOKBACK`` as the
-filter timestamp — not self._startup_ts. This limits message replay to a short
-window (default 300 s) rather than replaying everything since process start.
+filter timestamp. This limits message replay to a short window (default 300 s)
+rather than replaying everything since process start.
+
+BUG-107: _startup_ts was removed as dead code; cold-start protection is handled
+solely via _REACTIVATION_LOOKBACK.
 """
 
 from __future__ import annotations
@@ -24,9 +27,7 @@ def _make_channel(config: dict | None = None):
         ch = WhatsAppChannel.__new__(WhatsAppChannel)
         # Manually initialize the minimal attributes needed
         import collections
-        import time
 
-        ch._startup_ts = int(time.time()) - 1000  # started 1000 s ago
         ch._chat_watermarks = {}
         ch._watermark_timestamps = {}
         ch._snapshot_timestamps = {}
@@ -40,7 +41,7 @@ def _make_channel(config: dict | None = None):
         ch._SNAPSHOT_TTL = 60.0 * 60
         ch._WATERMARK_TTL = 7 * 24 * 3600.0
         ch._FETCH_ERROR_BASE = 30.0
-        ch._fetch_errors: dict = {}
+        ch._chat_errors = {}
         ch._client = MagicMock()
 
     return ch
@@ -49,8 +50,8 @@ def _make_channel(config: dict | None = None):
 class TestWatermarkEvictionFallback:
     """BUG-055: After watermark eviction, filter_ts must be based on _REACTIVATION_LOOKBACK."""
 
-    def test_fallback_is_not_startup_ts(self):
-        """When watermark is absent, filter_ts must NOT equal self._startup_ts."""
+    def test_fallback_uses_reactivation_lookback(self):
+        """When watermark is absent, filter_ts must be time.time() - _REACTIVATION_LOOKBACK."""
         from src.assistant.channels.whatsapp import _REACTIVATION_LOOKBACK
 
         ch = _make_channel()
@@ -73,11 +74,6 @@ class TestWatermarkEvictionFallback:
         assert captured, "get_chat_messages was never called"
         used_ts = captured[0]
 
-        # Must NOT be self._startup_ts
-        assert used_ts != ch._startup_ts, (
-            f"filter_ts was startup_ts ({ch._startup_ts}), expected approximately "
-            f"{fake_now - _REACTIVATION_LOOKBACK}"
-        )
         # Must be approximately time.time() - _REACTIVATION_LOOKBACK
         expected = fake_now - _REACTIVATION_LOOKBACK
         assert (

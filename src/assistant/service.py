@@ -193,12 +193,39 @@ class AssistantService:
         )
 
         # Wire the reprocess callback now that both handler and executor exist.
+        # BUG-105: submit handle_batch to the executor so the dispatch thread does
+        # not hold session.lock during a full LLM call (which would block
+        # session_mgr.save_all() on shutdown).
+        # BUG-109: the callback must submit and return immediately.  A near-zero
+        # timeout (50 ms) surfaces only synchronous rejections (executor shut down,
+        # coding errors raised before the first await) without misidentifying a
+        # slow LLM response as a failure.  TimeoutError from a healthy but slow LLM
+        # call is swallowed here; _fire_record's retry logic is only triggered by a
+        # genuine exception.  executor.shutdown(wait=True) in _handle_shutdown drains
+        # all submitted futures before session_mgr.save_all() runs, guaranteeing
+        # memory durability without any blocking in this callback.
         if self._deferral_mgr is not None:
-            self._deferral_mgr.set_reprocess_callback(
-                lambda msgs, ch, depth: self._executor.submit(
-                    self._handler.handle_batch, msgs, ch, is_reprocessing=True
+            _exec = self._executor
+            _handler = self._handler
+
+            def _reprocess_callback(msgs: Any, ch: Any, depth: int) -> None:
+                fut = _exec.submit(
+                    _handler.handle_batch,
+                    msgs,
+                    ch,
+                    is_reprocessing=True,
+                    deferral_depth=depth + 1,
                 )
-            )
+                # Use a near-zero timeout to catch immediate executor rejection or
+                # a synchronous coding error, but not a slow LLM response (BUG-109).
+                try:
+                    fut.result(timeout=0.05)
+                except TimeoutError:
+                    pass  # LLM call is running normally on the executor thread
+                except Exception:
+                    raise  # propagate executor rejection or coding errors to _fire_record
+
+            self._deferral_mgr.set_reprocess_callback(_reprocess_callback)
 
         self._poller = ChannelPoller(
             self._channels,

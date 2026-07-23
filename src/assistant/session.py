@@ -69,43 +69,75 @@ class ChatSessionManager:
         are serialized by the per-session lock.
         """
         key = msg.session_key
+        idle_evicted: list[tuple[str, ChatSession]] = []
         evicted_session: ChatSession | None = None
         evicted_key: str | None = None
-        with self._lock:
-            if key in self._sessions:
-                return self._sessions[key]
+        try:
+            with self._lock:
+                if key in self._sessions:
+                    return self._sessions[key]
 
-            if len(self._sessions) >= self._max_sessions:
-                evicted_count = self.evict_idle()
-                if evicted_count == 0 and self._sessions:
-                    oldest_key = min(self._sessions, key=lambda k: self._sessions[k].last_activity)
-                    oldest = self._sessions[oldest_key]
-                    if oldest.lock.acquire(blocking=False):
-                        del self._sessions[oldest_key]
-                        evicted_session = oldest
-                        evicted_key = oldest_key
-                    else:
-                        log.debug(
-                            "Skipping eviction of busy session %s; allowing over cap", oldest_key
+                if len(self._sessions) >= self._max_sessions:
+                    # Inline idle eviction: collect candidates and remove from registry
+                    # under the lock, but save outside to avoid blocking other threads.
+                    now = time.monotonic()
+                    to_evict = [
+                        k
+                        for k, s in self._sessions.items()
+                        if (now - s.last_activity) > self._idle_timeout
+                    ]
+                    for k in to_evict:
+                        s = self._sessions[k]
+                        if not s.lock.acquire(blocking=False):
+                            log.debug("Skipping eviction of busy session %s", k)
+                            continue
+                        del self._sessions[k]
+                        idle_evicted.append((k, s))
+
+                    if not idle_evicted and self._sessions:
+                        oldest_key = min(
+                            self._sessions, key=lambda k: self._sessions[k].last_activity
                         )
+                        oldest = self._sessions[oldest_key]
+                        if oldest.lock.acquire(blocking=False):
+                            del self._sessions[oldest_key]
+                            evicted_session = oldest
+                            evicted_key = oldest_key
+                        else:
+                            log.debug(
+                                "Skipping eviction of busy session %s; allowing over cap",
+                                oldest_key,
+                            )
 
-            session = self._create_session(msg)
-            self._sessions[key] = session
-            log.info("Created session %s", key)
+                session = self._create_session(msg)
+                self._sessions[key] = session
+                log.info("Created session %s", key)
 
-        # Save evicted session outside the registry lock to avoid blocking
-        if evicted_session is not None:
-            try:
-                evicted_session.memory_manager.save()
-            except Exception as exc:
-                log.warning(
-                    "Failed to save session %s before eviction: %s",
-                    evicted_key,
-                    exc,
-                )
-            finally:
-                evicted_session.lock.release()
-            log.warning("Session cap reached; evicted oldest session %s", evicted_key)
+        finally:
+            # BUG-106: cleanup always runs — even if _create_session raises —
+            # so evicted session locks are always released and saves always attempted.
+            # All save I/O happens outside the registry lock.
+            for k, s in idle_evicted:
+                try:
+                    s.memory_manager.save()
+                    log.info("Evicted idle session %s", k)
+                except Exception as exc:
+                    log.warning("Failed to save session %s on eviction: %s", k, exc)
+                finally:
+                    s.lock.release()
+
+            if evicted_session is not None:
+                try:
+                    evicted_session.memory_manager.save()
+                except Exception as exc:
+                    log.warning(
+                        "Failed to save session %s before eviction: %s",
+                        evicted_key,
+                        exc,
+                    )
+                finally:
+                    evicted_session.lock.release()
+                log.warning("Session cap reached; evicted oldest session %s", evicted_key)
 
         return session
 

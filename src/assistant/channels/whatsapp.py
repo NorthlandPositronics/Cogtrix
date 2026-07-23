@@ -141,7 +141,6 @@ class WhatsAppChannel(Channel):
         self._filter_mode: str = _normalize_filter_mode(config.get("filter_mode", "none"))
         self._contacts: list[str] = config.get("contacts", [])
         self._phonebook: dict[str, str] = config.get("phonebook", {})
-        self._startup_ts: int = int(time.time())
         self._LID_CACHE_MAX: int = 1024
         self._LID_NEGATIVE_TTL: float = float(config.get("lid_negative_ttl", 300.0))
         self._lid_cache: collections.OrderedDict[str, tuple[str | None, float]] = (
@@ -268,15 +267,16 @@ class WhatsAppChannel(Channel):
         """Resolve all uncached @lid identifiers in parallel before processing."""
         now = time.monotonic()
         uncached: set[str] = set()
-        for msg in messages:
-            if "@lid" in msg.from_number:
-                entry = self._lid_cache.get(msg.from_number)
-                if entry is None:
-                    uncached.add(msg.from_number)
-                else:
-                    _, expires_at = entry
-                    if now >= expires_at:
+        with self._lid_cache_lock:
+            for msg in messages:
+                if "@lid" in msg.from_number:
+                    entry = self._lid_cache.get(msg.from_number)
+                    if entry is None:
                         uncached.add(msg.from_number)
+                    else:
+                        _, expires_at = entry
+                        if now >= expires_at:
+                            uncached.add(msg.from_number)
 
         if not uncached:
             return

@@ -279,3 +279,59 @@ class TestChatSessionManager:
 
         assert msg_a.session_key not in mgr._sessions
         assert len(mgr._sessions) == 2
+
+    # BUG-106 regression tests -----------------------------------------------
+
+    def test_evicted_lock_released_if_create_session_raises(self):
+        """BUG-106: evicted session locks must be released even when _create_session raises."""
+        mock_mm = _make_mock_memory_manager()
+        mgr = _make_manager(max_sessions=1)
+
+        # Create one session to fill the cap
+        msg_a = _make_msg(chat_id="a")
+        msg_b = _make_msg(chat_id="b")
+
+        # First call succeeds normally
+        with self._patched_create(mgr, mock_mm):
+            sa = mgr.get_or_create(msg_a)
+            sa.last_activity = time.monotonic() - 1000  # make it the oldest
+
+        # Second call with a failing _create_session: eviction should have already
+        # released sa.lock so it can be acquired here
+        def _failing_create(msg: IncomingMessage) -> ChatSession:
+            raise RuntimeError("simulated creation failure")
+
+        with patch.object(mgr, "_create_session", side_effect=_failing_create):
+            try:
+                mgr.get_or_create(msg_b)
+            except RuntimeError:
+                pass  # expected
+
+        # The evicted session's lock must be released (non-blocking acquire succeeds)
+        acquired = sa.lock.acquire(blocking=False)
+        assert acquired, "evicted session lock was not released after _create_session raised"
+        sa.lock.release()
+
+    def test_evicted_session_save_called_if_create_session_raises(self):
+        """BUG-106: memory_manager.save() must be called for evicted sessions even on error."""
+        mock_mm = _make_mock_memory_manager()
+        mgr = _make_manager(max_sessions=1)
+
+        msg_a = _make_msg(chat_id="a2")
+        msg_b = _make_msg(chat_id="b2")
+
+        with self._patched_create(mgr, mock_mm):
+            sa = mgr.get_or_create(msg_a)
+            sa.last_activity = time.monotonic() - 1000
+
+        def _failing_create(msg: IncomingMessage) -> ChatSession:
+            raise RuntimeError("simulated creation failure")
+
+        with patch.object(mgr, "_create_session", side_effect=_failing_create):
+            try:
+                mgr.get_or_create(msg_b)
+            except RuntimeError:
+                pass
+
+        # save() must have been called on the evicted session's memory manager
+        sa.memory_manager.save.assert_called_once()

@@ -78,10 +78,6 @@ class MessageBuffer:
                     timer.cancel()
         for key in keys:
             self._flush(key)
-            with self._lock:
-                timer = self._timers.pop(key, None)
-                if timer:
-                    timer.cancel()
 
 
 class ChannelPoller:

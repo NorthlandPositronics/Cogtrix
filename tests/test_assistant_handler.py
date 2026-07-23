@@ -572,3 +572,255 @@ class TestGuardrailViolationBlocksKnowledgeExtraction:
         assert (
             first_arg == f"sanitized({raw_input})"
         ), f"extract_and_store received '{first_arg}', expected 'sanitized({raw_input})'"
+
+
+# ---------------------------------------------------------------------------
+# TestBug110EditFailFallback (BUG-110)
+# ---------------------------------------------------------------------------
+
+
+class TestBug110EditFailFallback:
+    """BUG-110: When edit_last_reply's channel.edit_message() returns ok=False and
+    there is no schedule/queue activity, the handler must fall back to channel.send()
+    so the user receives a reply rather than silence."""
+
+    def _make_handler_with_edit_state(self) -> tuple:
+        """Return (handler, session, channel) wired for edit_last_reply scenarios."""
+        session = _make_session()
+        session.last_sent_message_id = "msg-prev-1"
+        session_mgr = MagicMock()
+        session_mgr.get_or_create.return_value = session
+
+        # Agent runner that sets edit_state.was_called via the closure pattern
+        edit_state_holder: list = []
+
+        def _fake_runner(**kwargs):  # type: ignore[override]
+            # Simulate the edit_last_reply tool being called during the turn.
+            # We reach into the active_tools list to find the EditReplyState.
+            # In real code the tool is a closure; here we simply expose edit_state
+            # via the holder so the test can set it directly.
+            return "New text from agent"
+
+        handler = MessageHandler(
+            session_mgr=session_mgr,
+            config={},
+            llm=MagicMock(),
+            system_prompt="sys",
+            registry=MagicMock(),
+            approvals=set(),
+            available_tools={},
+            active_tools=[],
+            agent_runner=_fake_runner,
+        )
+        channel = MagicMock()
+        return handler, session, channel, edit_state_holder
+
+    def test_failed_edit_falls_back_to_send(self):
+        """When edit_message returns ok=False and no schedule/queue, channel.send() is called."""
+        from src.assistant.scheduler import EditReplyState, QueueReplyState, ScheduleReplyState
+
+        handler, session, channel, _ = self._make_handler_with_edit_state()
+
+        msg = _make_msg()
+        edit_state = EditReplyState(was_called=True, new_text="Edited text")
+        schedule_state = ScheduleReplyState()
+        queue_state = QueueReplyState()
+
+        channel.edit_message.return_value = SendResult(ok=False, error="not supported")
+        channel.send.return_value = SendResult(ok=True, message_id="msg-new-1")
+
+        result = handler._route_response(
+            msg, channel, "original response", schedule_state, edit_state, queue_state, session
+        )
+
+        channel.send.assert_called_once_with("42", "Edited text")
+        assert result == "Edited text"
+
+    def test_failed_edit_updates_last_sent_message_id(self):
+        """Fallback send updates session.last_sent_message_id with the new message ID."""
+        from src.assistant.scheduler import EditReplyState, QueueReplyState, ScheduleReplyState
+
+        handler, session, channel, _ = self._make_handler_with_edit_state()
+
+        msg = _make_msg()
+        edit_state = EditReplyState(was_called=True, new_text="Fallback text")
+        schedule_state = ScheduleReplyState()
+        queue_state = QueueReplyState()
+
+        channel.edit_message.return_value = SendResult(ok=False)
+        channel.send.return_value = SendResult(ok=True, message_id="msg-fallback-99")
+
+        handler._route_response(
+            msg, channel, "original", schedule_state, edit_state, queue_state, session
+        )
+
+        assert session.last_sent_message_id == "msg-fallback-99"
+
+    def test_successful_edit_does_not_call_send(self):
+        """When edit_message succeeds, channel.send() must NOT be called."""
+        from src.assistant.scheduler import EditReplyState, QueueReplyState, ScheduleReplyState
+
+        handler, session, channel, _ = self._make_handler_with_edit_state()
+
+        msg = _make_msg()
+        edit_state = EditReplyState(was_called=True, new_text="Successfully edited")
+        schedule_state = ScheduleReplyState()
+        queue_state = QueueReplyState()
+
+        channel.edit_message.return_value = SendResult(ok=True)
+
+        result = handler._route_response(
+            msg, channel, "original", schedule_state, edit_state, queue_state, session
+        )
+
+        channel.send.assert_not_called()
+        assert result == "Successfully edited"
+
+    def test_failed_edit_with_schedule_does_not_call_send(self):
+        """When edit fails but schedule_reply was also called, send() is NOT triggered
+        because a scheduled delivery already covers the response."""
+        from src.assistant.scheduler import EditReplyState, QueueReplyState, ScheduleReplyState
+
+        handler, session, channel, _ = self._make_handler_with_edit_state()
+        # Wire a scheduler so schedule_reply can be processed
+        handler._scheduler = MagicMock()
+
+        msg = _make_msg()
+        edit_state = EditReplyState(was_called=True, new_text="Edit failed text")
+        schedule_state = ScheduleReplyState(
+            was_called=True, scheduled_text="Scheduled text", delay_minutes=5
+        )
+        queue_state = QueueReplyState()
+
+        channel.edit_message.return_value = SendResult(ok=False)
+
+        handler._route_response(
+            msg, channel, "original", schedule_state, edit_state, queue_state, session
+        )
+
+        # schedule_reply was called — the response is handled by the scheduler, not send()
+        channel.send.assert_not_called()
+
+    def test_failed_edit_fallback_send_failure_is_logged(self):
+        """When the fallback send also fails, the method still returns without raising."""
+        from src.assistant.scheduler import EditReplyState, QueueReplyState, ScheduleReplyState
+
+        handler, session, channel, _ = self._make_handler_with_edit_state()
+
+        msg = _make_msg()
+        edit_state = EditReplyState(was_called=True, new_text="Text")
+        schedule_state = ScheduleReplyState()
+        queue_state = QueueReplyState()
+
+        channel.edit_message.return_value = SendResult(ok=False)
+        channel.send.return_value = SendResult(ok=False, error="network error")
+
+        # Should not raise even when fallback send fails
+        result = handler._route_response(
+            msg, channel, "original", schedule_state, edit_state, queue_state, session
+        )
+        assert result == "Text"
+
+
+# ---------------------------------------------------------------------------
+# TestBugNewEmptyContentBypass (NEW)
+# ---------------------------------------------------------------------------
+
+
+class TestBugNewEmptyContentBypass:
+    """NEW: When defer_processing or suppress_reply was called, _run_agent must
+    return early without triggering empty-content recovery."""
+
+    def test_defer_state_passed_to_run_agent(self):
+        """handle() passes defer_state to _run_agent so recovery can be skipped."""
+        from unittest.mock import patch
+
+        from src.assistant.deferral import DeferReplyState
+
+        captured: list = []
+
+        def _spy_run_agent(self, **kwargs):  # type: ignore[override]
+            captured.append(kwargs.get("defer_state"))
+            return "", set()
+
+        channel = MagicMock()
+        mock_runner = MagicMock(return_value="")
+        handler, _ = _make_handler(agent_runner=mock_runner)
+
+        with patch.object(MessageHandler, "_run_agent", _spy_run_agent):
+            handler.handle(_make_msg(), channel)
+
+        assert len(captured) == 1
+        # defer_state should have been passed (not None)
+        assert captured[0] is not None
+        assert isinstance(captured[0], DeferReplyState)
+
+    def test_suppress_state_passed_to_run_agent(self):
+        """handle() passes suppress_state to _run_agent so recovery can be skipped."""
+        from unittest.mock import patch
+
+        from src.assistant.deferral import SuppressReplyState
+
+        captured: list = []
+
+        def _spy_run_agent(self, **kwargs):  # type: ignore[override]
+            captured.append(kwargs.get("suppress_state"))
+            return "", set()
+
+        channel = MagicMock()
+        mock_runner = MagicMock(return_value="")
+        handler, _ = _make_handler(agent_runner=mock_runner)
+
+        with patch.object(MessageHandler, "_run_agent", _spy_run_agent):
+            handler.handle(_make_msg(), channel)
+
+        assert len(captured) == 1
+        assert captured[0] is not None
+        assert isinstance(captured[0], SuppressReplyState)
+
+    def test_run_agent_returns_early_when_defer_called(self):
+        """_run_agent returns immediately without entering recovery when defer_state.was_called."""
+        from src.assistant.deferral import DeferReplyState
+
+        mock_runner = MagicMock(return_value="")
+        handler, _ = _make_handler(agent_runner=mock_runner)
+
+        session = _make_session()
+        defer_state = DeferReplyState(was_called=True, delay_seconds=30.0)
+
+        response, loaded = handler._run_agent(
+            user_input="hello",
+            history_messages=[],
+            context_prefix=None,
+            effective_prompt="sys",
+            active_tools=[],
+            session=session,
+            defer_state=defer_state,
+        )
+
+        # Returns normally — the early return should not cause any exception
+        assert response == ""
+        assert isinstance(loaded, set)
+
+    def test_run_agent_returns_early_when_suppress_called(self):
+        """_run_agent returns immediately when suppress_state.was_called."""
+        from src.assistant.deferral import SuppressReplyState
+
+        mock_runner = MagicMock(return_value="")
+        handler, _ = _make_handler(agent_runner=mock_runner)
+
+        session = _make_session()
+        suppress_state = SuppressReplyState(was_called=True)
+
+        response, loaded = handler._run_agent(
+            user_input="hello",
+            history_messages=[],
+            context_prefix=None,
+            effective_prompt="sys",
+            active_tools=[],
+            session=session,
+            suppress_state=suppress_state,
+        )
+
+        assert response == ""
+        assert isinstance(loaded, set)

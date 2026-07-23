@@ -14,8 +14,6 @@ import hashlib
 import heapq
 import json
 import logging
-import os
-import tempfile
 import threading
 import time
 from copy import copy
@@ -28,18 +26,16 @@ log = logging.getLogger("cogtrix")
 _EXTRACTION_MAX_WORKERS = 2
 _extraction_pool: _cf.ThreadPoolExecutor | None = None
 _extraction_pool_lock = threading.Lock()
-_pool_shutdown: bool = False
 
 
 def _get_extraction_pool() -> _cf.ThreadPoolExecutor:
-    global _extraction_pool, _pool_shutdown
+    global _extraction_pool
     with _extraction_pool_lock:
-        if _extraction_pool is None or _pool_shutdown:
+        if _extraction_pool is None:
             _extraction_pool = _cf.ThreadPoolExecutor(
                 max_workers=_EXTRACTION_MAX_WORKERS,
                 thread_name_prefix="knowledge-extract",
             )
-            _pool_shutdown = False
     return _extraction_pool
 
 
@@ -144,7 +140,10 @@ class SharedKnowledgeStore:
     def extract_and_store(self, user_input: str, agent_response: str) -> None:
         """Submit fact extraction to the background pool and return immediately."""
         pool = _get_extraction_pool()
-        pool.submit(self._extract_and_store_sync, user_input, agent_response)
+        try:
+            pool.submit(self._extract_and_store_sync, user_input, agent_response)
+        except RuntimeError as exc:
+            log.warning("Knowledge extraction pool rejected submission: %s", exc)
 
     def _extract_and_store_sync(self, user_input: str, agent_response: str) -> None:
         """Synchronous fact extraction — runs inside the background pool."""
@@ -218,22 +217,11 @@ class SharedKnowledgeStore:
             facts_snapshot = list(self._facts)
 
         try:
+            from src.utils.atomic_write import atomic_write_json
+
             data = [asdict(f) for f in facts_snapshot]
-            tmp_fd, tmp_path = tempfile.mkstemp(dir=str(self._facts_path.parent), suffix=".tmp")
-            try:
-                with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
-                    json.dump(data, f, ensure_ascii=False)
-                os.replace(tmp_path, self._facts_path)
-            except Exception:
-                try:
-                    os.close(tmp_fd)
-                except OSError:
-                    pass
-                try:
-                    os.unlink(tmp_path)
-                except OSError:
-                    pass
-                raise
+            with atomic_write_json(self._facts_path) as f:
+                json.dump(data, f, ensure_ascii=False)
             log.debug(
                 "Knowledge store: saved %d facts to %s",
                 len(facts_snapshot),

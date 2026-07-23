@@ -40,7 +40,8 @@ def atomic_write_json(path: Path, encoding: str = "utf-8") -> Generator[IO[str]]
         if f is not None:
             try:
                 f.close()
-            except OSError:
+            except (OSError, ValueError):
+                # ValueError: I/O operation on closed file (caller closed early — BUG-097)
                 pass
         else:
             # os.fdopen never succeeded — fd is still raw

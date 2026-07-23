@@ -21,8 +21,18 @@ import pytest
 
 
 class TestFlushAllCancelsPostSnapshotTimers:
-    """flush_all must cancel any timer added for a key between the initial
-    lock snapshot and the _flush(key) call."""
+    """flush_all must NOT cancel timers added for a key during the flush window.
+
+    BUG-089 was originally fixed by adding a second inner lock block after each
+    _flush() call that cancelled any new timer for that key. BUG-102 found that
+    this "fix" caused message loss: the new timer belonged to a message that
+    arrived concurrently and was silently dropped.
+
+    The inner cancel block has been removed. Double-dispatch is prevented by
+    _flush() itself: it pops the buffer under the lock as its first action, so
+    a timer firing after _flush() has already dispatched finds an empty buffer
+    and returns without submitting work.
+    """
 
     def _make_buffer(self, handler=None, executor=None):
         from src.assistant.channel import IncomingMessage
@@ -44,8 +54,15 @@ class TestFlushAllCancelsPostSnapshotTimers:
             timestamp=time.time(),
         )
 
-    def test_flush_all_cancels_timer_added_during_flush(self):
-        """A timer inserted while _flush runs for another key must be cancelled."""
+    def test_flush_all_preserves_timer_added_during_flush(self):
+        """A timer inserted while _flush runs for a key must NOT be cancelled (BUG-102).
+
+        Before BUG-102 was fixed, flush_all() had an inner lock block that cancelled
+        any new timer for each key after _flush() returned. This silently dropped
+        messages that arrived during the flush window.
+
+        The correct behaviour: new timers survive flush_all() and fire normally.
+        """
         from src.assistant.channel import Channel
         from src.assistant.poller import MessageBuffer
 
@@ -63,22 +80,17 @@ class TestFlushAllCancelsPostSnapshotTimers:
         buf.add(msg1, channel_mock)
         buf.add(msg2, channel_mock)
 
-        # Inject a side effect so that when _flush("100") is called it adds a
-        # new message (and thus a new timer) for key "100".
         new_timer_created: list[threading.Timer] = []
         original_flush = buf._flush
-
         call_count = [0]
 
         def patched_flush(key: str) -> None:
             original_flush(key)
-            # After flushing key "100", simulate a new message arrival that
-            # creates a fresh timer for "100".
+            # After flushing key "100", simulate a new message arrival.
             if key == "telegram::100" and call_count[0] == 0:
                 call_count[0] += 1
                 new_msg = self._make_msg(IncomingMessage, chat_id="100")
                 buf.add(new_msg, channel_mock)
-                # Record the timer so we can inspect it later
                 with buf._lock:
                     t = buf._timers.get("telegram::100")
                     if t:
@@ -87,11 +99,16 @@ class TestFlushAllCancelsPostSnapshotTimers:
         buf._flush = patched_flush
         buf.flush_all()
 
-        # The post-flush timer re-check must have cancelled the new timer.
+        # One new timer must exist and must still be alive (not cancelled).
         assert len(new_timer_created) == 1, "Expected exactly one new timer to be created"
-        # A cancelled threading.Timer is popped from _timers by the post-flush check.
         with buf._lock:
-            assert "telegram::100" not in buf._timers
+            # The new timer must still be registered — flush_all must not have
+            # cancelled it (that was the BUG-102 regression).
+            assert (
+                "telegram::100" in buf._timers
+            ), "flush_all() cancelled the new timer — BUG-102 has regressed."
+        # Clean up: cancel the timer so it doesn't fire during the test run.
+        new_timer_created[0].cancel()
 
     def test_flush_all_no_new_timer_leaves_state_clean(self):
         """When no new messages arrive during flush, state is clean afterwards."""

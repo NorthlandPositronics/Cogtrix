@@ -98,3 +98,49 @@ class TestAtomicWriteJson:
         with atomic_write_json(dest, encoding="latin-1") as f:
             f.write("caf\xe9")  # 'café' in latin-1
         assert dest.read_bytes() == b"caf\xe9"
+
+    def test_cleanup_catches_valueerror_on_double_close(self, tmp_path: Path) -> None:
+        """BUG-097: The cleanup except block must catch ValueError as well as OSError so that
+        a double-close (e.g. from a custom file object) does not produce a second exception
+        that masks the original error.
+
+        We simulate this by patching f.close() inside the except block to raise ValueError,
+        verifying the original exception is still re-raised cleanly.
+        """
+        import json as _json
+        from unittest.mock import patch
+
+        dest = tmp_path / "out.json"
+        original_error = RuntimeError("write failed")
+
+        # We need f to be a real file-like so the context manager opens it,
+        # but we intercept f.close() in the cleanup path to raise ValueError.
+        real_f_holder: list = []
+        original_fdopen = os.fdopen
+
+        def patched_fdopen(fd: int, *args, **kwargs):  # type: ignore[no-untyped-def]
+            f = original_fdopen(fd, *args, **kwargs)
+            real_f_holder.append(f)
+            return f
+
+        with patch("os.fdopen", side_effect=patched_fdopen):
+            with pytest.raises(RuntimeError, match="write failed"):
+                with atomic_write_json(dest) as f:
+                    _json.dump({"key": "value"}, f)
+                    # Make f.close() raise ValueError to simulate the double-close edge case.
+                    original_close = f.close
+                    call_count = [0]
+
+                    def close_that_raises():  # type: ignore[no-untyped-def]
+                        call_count[0] += 1
+                        if call_count[0] >= 2:
+                            raise ValueError("I/O operation on closed file")
+                        original_close()
+
+                    f.close = close_that_raises  # type: ignore[method-assign]
+                    raise original_error  # trigger the except BaseException branch
+
+        # The destination must not exist (write was not completed atomically).
+        assert not dest.exists()
+        # No temp file should remain.
+        assert list(tmp_path.glob("*.tmp")) == []

@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.1.15](https://github.com/NorthlandPositronics/Cogtrix/compare/v0.1.14...v0.1.15) (2026-03-04)
+
+
+### Bug Fixes
+
+* resolve BUG-091 through BUG-099 in deferral system and adjacent files ([2406222](https://github.com/NorthlandPositronics/Cogtrix/commit/2406222e769c54b86ac1ec125def172f6d1b7ef1))
+* resolve BUG-100 through BUG-104 in assistant subsystem ([efb9fd6](https://github.com/NorthlandPositronics/Cogtrix/commit/efb9fd6dbdb8d1c5c1a154fbec46a1f3d9ed2560))
+* resolve BUG-105 through BUG-108 and BUG-094 partial fix ([8b69c61](https://github.com/NorthlandPositronics/Cogtrix/commit/8b69c617dcfd880479156af17111c50b4b5c6aad))
+* resolve BUG-109 through BUG-112 and skip recovery on defer/suppress ([aca5f07](https://github.com/NorthlandPositronics/Cogtrix/commit/aca5f07049b78d59493245a02d9ca5aa48cc87c7))
+
 ## [0.1.14](https://github.com/NorthlandPositronics/Cogtrix/compare/v0.1.13...v0.1.14) (2026-03-03)
 
 

@@ -517,6 +517,10 @@ class ViolationTracker:
 
     def record_violation(self, chat_id: str) -> None:
         now = time.monotonic()
+        # BUG-095: call _save_snapshot inside the lock so concurrent record_violation
+        # calls cannot interleave their tempfile→json.dump→os.replace sequences,
+        # preventing a lost-write race where the last writer overwrites the earlier
+        # writer's violation. Low-frequency path — brief lock-held I/O is acceptable.
         with self._lock:
             if chat_id not in self._violations:
                 self._violations[chat_id] = deque()
@@ -525,8 +529,7 @@ class ViolationTracker:
                 cid: [ts - _MONO_OFFSET for ts in timestamps]
                 for cid, timestamps in self._violations.items()
             }
-
-        self._save_snapshot(snapshot)
+            self._save_snapshot(snapshot)
 
     def _cleanup_stale(self) -> None:
         now = time.monotonic()
@@ -541,15 +544,27 @@ class ViolationTracker:
         try:
             self._persist_path.parent.mkdir(parents=True, exist_ok=True)
             tmp_fd, tmp_path = tempfile.mkstemp(dir=str(self._persist_path.parent), suffix=".tmp")
+            # BUG-108: track fd ownership via sentinel so KeyboardInterrupt/SystemExit
+            # between mkstemp and fdopen cannot leak the raw file descriptor.
+            # Mirrors the pattern in src/utils/atomic_write.py (BUG-097).
+            f = None
             try:
-                with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
-                    json.dump(data, f, ensure_ascii=False)
+                f = os.fdopen(tmp_fd, "w", encoding="utf-8")
+                json.dump(data, f, ensure_ascii=False)
+                f.close()
+                f = None
                 os.replace(tmp_path, self._persist_path)
-            except Exception:
-                try:
-                    os.close(tmp_fd)
-                except OSError:
-                    pass
+            except BaseException:
+                if f is not None:
+                    try:
+                        f.close()
+                    except (OSError, ValueError):
+                        pass
+                else:
+                    try:
+                        os.close(tmp_fd)
+                    except OSError:
+                        pass
                 try:
                     os.unlink(tmp_path)
                 except OSError:
@@ -566,7 +581,7 @@ class ViolationTracker:
                 cid: [ts - _MONO_OFFSET for ts in timestamps]
                 for cid, timestamps in self._violations.items()
             }
-        self._save_snapshot(snapshot)
+            self._save_snapshot(snapshot)
 
     def save(self) -> None:
         self._save()

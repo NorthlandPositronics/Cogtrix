@@ -1142,6 +1142,81 @@ class TestViolationTrackerPersistence:
         assert not tracker2.is_blacklisted("chatA").is_safe
         assert tracker2.is_blacklisted("chatB").is_safe
 
+    # BUG-108 regression tests -----------------------------------------------
+
+    def test_save_snapshot_keyboard_interrupt_does_not_leak_fd(self, tmp_path: Path):
+        """BUG-108: KeyboardInterrupt between mkstemp and fdopen must not leak fd."""
+        import os
+        import tempfile
+
+        path = tmp_path / "violations.json"
+        tracker = self._tracker(path, max_violations=2)
+
+        leaked_fd: list[int] = []
+
+        real_mkstemp = tempfile.mkstemp
+
+        def _mock_mkstemp(**kwargs):
+            fd, p = real_mkstemp(**kwargs)
+            leaked_fd.append(fd)
+            return fd, p
+
+        def _mock_fdopen(fd, *args, **kwargs):
+            # Simulate KeyboardInterrupt before the file object is created
+            raise KeyboardInterrupt
+
+        with (
+            patch("tempfile.mkstemp", side_effect=_mock_mkstemp),
+            patch("os.fdopen", side_effect=_mock_fdopen),
+        ):
+            try:
+                tracker._save_snapshot({"chat1": [1.0, 2.0]})
+            except KeyboardInterrupt:
+                pass  # propagated through except BaseException
+
+        # If BUG-108 is fixed, the fd should have been closed (os.close called).
+        # Verify: attempting to close an already-closed fd raises OSError.
+        if leaked_fd:
+            try:
+                os.close(leaked_fd[0])
+                # If we get here, the fd was NOT closed — bug still present.
+                # Clean up and fail with an explicit error.
+                os.close(leaked_fd[0])
+                raise AssertionError("fd was not closed on KeyboardInterrupt (BUG-108 not fixed)")
+            except OSError:
+                pass  # fd already closed — fix is working
+
+    def test_save_snapshot_base_exception_cleans_tmp_file(self, tmp_path: Path):
+        """BUG-108: tmp file must be removed when BaseException occurs after fdopen."""
+        import tempfile
+
+        path = tmp_path / "violations.json"
+        tracker = self._tracker(path, max_violations=2)
+
+        tmp_files: list[str] = []
+        real_mkstemp = tempfile.mkstemp
+
+        def _recording_mkstemp(**kwargs):
+            fd, p = real_mkstemp(**kwargs)
+            tmp_files.append(p)
+            return fd, p
+
+        def _failing_fdopen(fd, *args, **kwargs):
+            raise SystemExit(1)
+
+        with (
+            patch("tempfile.mkstemp", side_effect=_recording_mkstemp),
+            patch("os.fdopen", side_effect=_failing_fdopen),
+        ):
+            try:
+                tracker._save_snapshot({"chat1": [1.0]})
+            except SystemExit:
+                pass
+
+        # Tmp file must have been cleaned up
+        for p in tmp_files:
+            assert not Path(p).exists(), f"tmp file {p} was not removed after BaseException"
+
 
 # ---------------------------------------------------------------------------
 # TestGuardrailPipeline

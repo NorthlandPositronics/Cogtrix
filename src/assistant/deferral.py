@@ -386,15 +386,22 @@ class DeferralManager:
             return record.deferral_depth
 
     def cancel(self, session_key: str) -> bool:
-        """Cancel any pending deferred record for session_key. Returns True if cancelled."""
+        """Cancel any pending or in-flight deferred record for session_key.
+
+        Covers both "pending" and "firing" states so that partial-absorption
+        detection in handle_batch can cancel a record that transitioned to
+        "firing" between the two add_message calls (BUG-094 partial fix).
+        Returns True if a record was cancelled.
+        """
         with self._lock:
             record = self._records.get(session_key)
-            if record is None or record.status != "pending":
+            if record is None or record.status not in ("pending", "firing"):
                 return False
+            prev_status = record.status
             record.status = "cancelled"
 
         self.save()
-        log.debug("Cancelled deferred record for %s", session_key)
+        log.debug("Cancelled deferred record for %s (was %s)", session_key, prev_status)
         return True
 
     def start(self) -> None:
@@ -491,27 +498,54 @@ class DeferralManager:
             self._stop_event.wait(timeout=self._check_interval)
 
     def _dispatch_due(self) -> None:
+        # BUG-092: the original elif branch ended with `pass` (dead code) and used
+        # an incorrect formula. Fixed: cancel future-dated stale records inside the
+        # lock-held block with the correct (now - created_at) > stale_threshold formula.
+        # BUG-099: re-read fire_at under lock before the overdue check to close the
+        # race with a concurrent defer() call that may have extended fire_at.
         now = time.time()
         due: list[tuple[str, DeferredRecord]] = []
+        to_cancel_stale: list[tuple[str, DeferredRecord]] = []
 
         with self._lock:
             for session_key, record in self._records.items():
-                if record.status == "pending":
-                    if record.fire_at <= now:
-                        due.append((session_key, record))
-                    elif (record.fire_at - record.created_at) + (
-                        now - record.created_at
-                    ) > self._stale_threshold:
-                        # Stale record: fire_at is so far in the future the record has aged out
-                        pass
+                if record.status != "pending":
+                    continue
+                if record.fire_at <= now:
+                    due.append((session_key, record))
+                elif (now - record.created_at) > self._stale_threshold:
+                    # Record is too old to keep even though fire_at is in the future.
+                    to_cancel_stale.append((session_key, record))
+
+            for session_key, record in to_cancel_stale:
+                if self._records.get(session_key) is record and record.status == "pending":
+                    record.status = "cancelled"
+                    log.warning(
+                        "DeferralManager: future-dated stale record for %s (age %.0fs) — cancelled",
+                        session_key,
+                        now - record.created_at,
+                    )
+
+        if to_cancel_stale:
+            self.save()
 
         for session_key, record in due:
-            # Check for stale records: past fire_at by more than stale_threshold
-            overdue = now - record.fire_at
+            # Re-validate fire_at under lock to guard against a concurrent defer()
+            # call that extended fire_at between the snapshot above and this read.
+            with self._lock:
+                current = self._records.get(session_key)
+                if current is None or current.status != "pending":
+                    continue
+                fire_at_snapshot = current.fire_at
+
+            overdue = now - fire_at_snapshot
             if overdue > self._stale_threshold:
                 with self._lock:
-                    if self._records.get(session_key) is record and record.status == "pending":
-                        record.status = "cancelled"
+                    if (
+                        self._records.get(session_key) is not None
+                        and self._records[session_key].status == "pending"
+                    ):
+                        self._records[session_key].status = "cancelled"
                 log.warning(
                     "DeferralManager: stale record for %s (overdue %.0fs) — cancelled",
                     session_key,
@@ -577,7 +611,11 @@ class DeferralManager:
         )
 
         try:
-            assert self._reprocess_callback is not None
+            if self._reprocess_callback is None:
+                raise RuntimeError(
+                    "DeferralManager._fire_record called with no reprocess callback set; "
+                    "ensure set_reprocess_callback() is called before start()."
+                )
             self._reprocess_callback(messages, channel, depth)
             # Success: remove the record.
             with self._lock:
@@ -590,7 +628,7 @@ class DeferralManager:
             )
         except Exception as exc:
             log.error(
-                "DeferralManager: reprocess callback failed for %s: %s — retrying in %.0fs",
+                "DeferralManager: reprocess callback raised on submit for %s: %s — retrying in %.0fs",
                 session_key,
                 exc,
                 _BACKOFF_SECONDS,
@@ -609,4 +647,4 @@ class DeferralManager:
             with atomic_write_json(self._persist_path) as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
         except Exception as exc:
-            log.debug("DeferralManager: failed to persist records: %s", exc)
+            log.warning("DeferralManager: failed to persist records: %s", exc)

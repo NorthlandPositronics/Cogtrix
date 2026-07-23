@@ -537,3 +537,136 @@ class TestIndexFactsLockBehavior:
         store._extract_and_store_sync("Nothing here.", "Indeed.")
 
         assert index_call_count[0] == 0, "_index_facts should not be called when no facts added"
+
+
+# ---------------------------------------------------------------------------
+# TestBug111AtomicWriteAdoption (BUG-111)
+# ---------------------------------------------------------------------------
+
+
+class TestBug111AtomicWriteAdoption:
+    """BUG-111: save() must use atomic_write_json instead of raw mkstemp/fdopen.
+
+    The manual mkstemp pattern leaked the raw fd and left a .tmp file on disk if a
+    BaseException (e.g. KeyboardInterrupt) fired between mkstemp and the inner try.
+    The fix replaces the pattern with atomic_write_json which handles BaseException
+    correctly via an fd-ownership sentinel.
+    """
+
+    def test_save_uses_atomic_write_json(self):
+        """save() source must reference atomic_write_json rather than mkstemp/fdopen."""
+        import inspect
+
+        import src.assistant.knowledge as know_module
+
+        source = inspect.getsource(know_module.SharedKnowledgeStore.save)
+        assert (
+            "atomic_write_json" in source
+        ), "save() does not call atomic_write_json — BUG-111 not fixed"
+        assert "mkstemp" not in source, "save() still contains mkstemp — BUG-111 not fixed"
+        assert "fdopen" not in source, "save() still contains fdopen — BUG-111 not fixed"
+
+    def test_save_does_not_import_tempfile(self):
+        """knowledge.py must not import tempfile at module level after BUG-111 fix."""
+        import importlib
+        import sys
+
+        # Reload the module fresh to check its actual imports
+        if "src.assistant.knowledge" in sys.modules:
+            mod = sys.modules["src.assistant.knowledge"]
+        else:
+            mod = importlib.import_module("src.assistant.knowledge")
+
+        assert not hasattr(mod, "tempfile") or not callable(
+            getattr(mod, "tempfile", None)
+        ), "knowledge.py still imports tempfile at module level"
+
+    def test_save_does_not_use_os_replace(self, tmp_path: Path):
+        """save() must not call os.replace directly (that is now handled by atomic_write_json)."""
+        import inspect
+
+        import src.assistant.knowledge as know_module
+
+        source = inspect.getsource(know_module.SharedKnowledgeStore.save)
+        assert (
+            "os.replace" not in source
+        ), "save() still contains os.replace — BUG-111 not fully fixed"
+        assert "mkstemp" not in source, "save() still contains mkstemp — BUG-111 not fully fixed"
+
+    def test_save_completes_successfully_with_atomic_write(self, tmp_path: Path):
+        """save() still writes a valid JSON file when using atomic_write_json."""
+        store = _make_store(tmp_path=tmp_path)
+        _add_fact(store, "Bob", "Is an engineer")
+        _add_fact(store, "Alice", "Is a vet")
+
+        store.save()
+
+        assert store._facts_path.exists()
+        data = json.loads(store._facts_path.read_text(encoding="utf-8"))
+        assert len(data) == 2
+        entities = {d["entity"] for d in data}
+        assert entities == {"Bob", "Alice"}
+
+
+# ---------------------------------------------------------------------------
+# TestBug112DeadPoolShutdown (BUG-112)
+# ---------------------------------------------------------------------------
+
+
+class TestBug112DeadPoolShutdown:
+    """BUG-112: The dead _pool_shutdown flag in knowledge.py must be removed.
+    Instead, RuntimeError from pool.submit() must be caught and logged as WARNING.
+    """
+
+    def test_pool_shutdown_flag_does_not_exist(self):
+        """_pool_shutdown module-level variable must not exist in knowledge.py."""
+        import src.assistant.knowledge as know_module
+
+        assert not hasattr(
+            know_module, "_pool_shutdown"
+        ), "_pool_shutdown still present in knowledge.py — BUG-112 not fixed"
+
+    def test_get_extraction_pool_no_pool_shutdown_branch(self):
+        """_get_extraction_pool must not reference _pool_shutdown."""
+        import inspect
+
+        import src.assistant.knowledge as know_module
+
+        source = inspect.getsource(know_module._get_extraction_pool)
+        assert (
+            "_pool_shutdown" not in source
+        ), "_get_extraction_pool still references _pool_shutdown"
+
+    def test_extract_and_store_handles_runtime_error_from_pool(self):
+        """When pool.submit() raises RuntimeError, extract_and_store logs a warning
+        and does not propagate the exception."""
+        from unittest.mock import patch
+
+        store = _make_store()
+
+        with patch("src.assistant.knowledge._get_extraction_pool") as mock_get_pool:
+            mock_pool = MagicMock()
+            mock_pool.submit.side_effect = RuntimeError(
+                "cannot schedule new futures after shutdown"
+            )
+            mock_get_pool.return_value = mock_pool
+
+            # Must not raise
+            store.extract_and_store("Hello", "Hi there")
+
+            # Pool submit must have been attempted
+            mock_pool.submit.assert_called_once()
+
+    def test_extract_and_store_runtime_error_does_not_crash(self):
+        """extract_and_store() must swallow RuntimeError from pool.submit()."""
+        from unittest.mock import patch
+
+        store = _make_store()
+
+        with patch("src.assistant.knowledge._get_extraction_pool") as mock_get_pool:
+            mock_pool = MagicMock()
+            mock_pool.submit.side_effect = RuntimeError("BrokenExecutor")
+            mock_get_pool.return_value = mock_pool
+
+            # Must not raise
+            store.extract_and_store("test input", "test response")
