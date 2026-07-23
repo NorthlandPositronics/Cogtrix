@@ -84,6 +84,40 @@ def _index_present(vectordb_dir: Path) -> bool:
     return any(vectordb_dir.glob("*.faiss"))
 
 
+_BM25_SIDECAR_FILENAME = "bm25.pkl"
+
+
+def _ensure_bm25_sidecar(vectordb_dir: Path) -> None:
+    """Build the BM25 sidecar from the existing FAISS docstore if it's absent (#2008).
+
+    Best-effort and embedding-free: the sidecar is derived purely from the stored
+    chunk texts (``metadata.json``), so a hash-skip (no re-ingest) can still gain
+    hybrid retrieval without re-embedding. A failure never breaks the skip path —
+    the query layer falls back to pure-vector when the sidecar is missing.
+    """
+    if (vectordb_dir / _BM25_SIDECAR_FILENAME).exists():
+        return
+    meta_path = vectordb_dir / "metadata.json"
+    if not meta_path.exists():
+        return
+    try:
+        from langchain_core.documents import Document
+
+        from cogtrix_core.rag.bm25 import build_sidecar, save_sidecar
+
+        raw = json.loads(meta_path.read_text())
+        docs = [
+            Document(page_content=d.get("page_content", ""), metadata=d.get("metadata", {}))
+            for d in raw.get("documents", [])
+        ]
+        sidecar = build_sidecar(docs)
+        if sidecar is not None:
+            save_sidecar(sidecar, vectordb_dir)
+            log.info("BM25 sidecar built from docstore (%d chunks) at %s", len(docs), vectordb_dir)
+    except Exception as exc:  # noqa: BLE001 — best-effort; pure-vector still works
+        log.warning("BM25 sidecar build from docstore skipped: %s", exc)
+
+
 def ingest_corpus_idempotent(
     corpus_dir: Path,
     vectordb_dir: Path,
@@ -118,6 +152,11 @@ def ingest_corpus_idempotent(
             expected_hash[:12],
             vectordb_dir,
         )
+        # #2008: the BM25 sidecar is derived from the (unchanged) docstore, not
+        # the embeddings, so refresh it here without a costly re-embed when it's
+        # missing — e.g. a committed index that predates hybrid retrieval. Keeps
+        # the hybrid path (use_bm25_hybrid) working after a plain hash-skip.
+        _ensure_bm25_sidecar(vectordb_dir)
         return CorpusIngestResult(
             vectordb_dir=vectordb_dir,
             skipped=True,
@@ -142,7 +181,7 @@ def ingest_corpus_idempotent(
     # the optional ``[rag]`` extra to be installed when the test
     # infrastructure is merely imported (e.g. by pyright during a
     # generic check).
-    from src.rag.ingest import IngestConfig, ingest_documents
+    from cogtrix_core.rag.ingest import IngestConfig, ingest_documents
 
     config = IngestConfig(
         docs_dir=corpus_dir,
@@ -158,6 +197,11 @@ def ingest_corpus_idempotent(
         embedding_model=embedding_model,
         base_url=base_url,
         api_key=api_key,
+        # #2008: build the BM25 sidecar so hybrid retrieval can lexically surface
+        # exact tokens (numbers, IDs, proper nouns) that qwen3-embedding buries —
+        # e.g. the $1,106,500 budget chunk sat at embedding rank ~165/296, far
+        # below the CE re-rank pool; BM25 puts it at ~#8, into the pool.
+        build_bm25_sidecar=True,
     )
 
     log.info(

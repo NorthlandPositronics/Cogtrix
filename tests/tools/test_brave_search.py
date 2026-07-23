@@ -9,25 +9,25 @@ class TestBraveSearch:
     """Unit tests for brave_search()."""
 
     def test_brave_search_not_configured_returns_error(self):
-        from src.tools.brave_search import brave_search
+        from cogtrix_core.tools.brave_search import brave_search
 
-        with patch("src.tools.brave_search._get_api_key", return_value=None):
+        with patch("cogtrix_core.tools.brave_search._get_api_key", return_value=None):
             result = brave_search("python")
 
         assert "Error" in result
         assert "Brave API key" in result
 
     def test_brave_search_empty_query_returns_error(self):
-        from src.tools.brave_search import brave_search
+        from cogtrix_core.tools.brave_search import brave_search
 
-        with patch("src.tools.brave_search._get_api_key", return_value="test-key"):
+        with patch("cogtrix_core.tools.brave_search._get_api_key", return_value="test-key"):
             result = brave_search("   ")
 
         assert "Error" in result
         assert "Empty" in result
 
     def test_brave_search_returns_web_results(self):
-        from src.tools.brave_search import brave_search
+        from cogtrix_core.tools.brave_search import brave_search
 
         mock_response = MagicMock()
         mock_response.json.return_value = {
@@ -49,7 +49,7 @@ class TestBraveSearch:
         mock_response.raise_for_status = MagicMock()
 
         with (
-            patch("src.tools.brave_search._get_api_key", return_value="test-key"),
+            patch("cogtrix_core.tools.brave_search._get_api_key", return_value="test-key"),
             patch("requests.get", return_value=mock_response),
         ):
             result = brave_search("python", count=2)
@@ -61,7 +61,7 @@ class TestBraveSearch:
         assert "PyPI" in result
 
     def test_brave_search_returns_news_results(self):
-        from src.tools.brave_search import brave_search
+        from cogtrix_core.tools.brave_search import brave_search
 
         mock_response = MagicMock()
         mock_response.json.return_value = {
@@ -77,7 +77,7 @@ class TestBraveSearch:
         mock_response.raise_for_status = MagicMock()
 
         with (
-            patch("src.tools.brave_search._get_api_key", return_value="test-key"),
+            patch("cogtrix_core.tools.brave_search._get_api_key", return_value="test-key"),
             patch("requests.get", return_value=mock_response),
         ):
             result = brave_search("python", count=1, search_type="news")
@@ -87,14 +87,14 @@ class TestBraveSearch:
         assert "2 hours ago" in result
 
     def test_brave_search_no_results(self):
-        from src.tools.brave_search import brave_search
+        from cogtrix_core.tools.brave_search import brave_search
 
         mock_response = MagicMock()
         mock_response.json.return_value = {"web": {"results": []}}
         mock_response.raise_for_status = MagicMock()
 
         with (
-            patch("src.tools.brave_search._get_api_key", return_value="test-key"),
+            patch("cogtrix_core.tools.brave_search._get_api_key", return_value="test-key"),
             patch("requests.get", return_value=mock_response),
         ):
             result = brave_search("xyzzy_nothing_matches")
@@ -102,14 +102,14 @@ class TestBraveSearch:
         assert "No results found" in result
 
     def test_brave_search_http_error(self):
-        from src.tools.brave_search import brave_search
+        from cogtrix_core.tools.brave_search import brave_search
 
         mock_response = MagicMock()
         mock_response.status_code = 403
         http_error = requests.exceptions.HTTPError("403 Forbidden", response=mock_response)
 
         with (
-            patch("src.tools.brave_search._get_api_key", return_value="test-key"),
+            patch("cogtrix_core.tools.brave_search._get_api_key", return_value="test-key"),
             patch("requests.get", side_effect=http_error),
         ):
             result = brave_search("test")
@@ -118,10 +118,10 @@ class TestBraveSearch:
         assert "403" in result
 
     def test_brave_search_connection_error(self):
-        from src.tools.brave_search import brave_search
+        from cogtrix_core.tools.brave_search import brave_search
 
         with (
-            patch("src.tools.brave_search._get_api_key", return_value="test-key"),
+            patch("cogtrix_core.tools.brave_search._get_api_key", return_value="test-key"),
             patch(
                 "requests.get",
                 side_effect=requests.exceptions.ConnectionError("connection refused"),
@@ -132,14 +132,14 @@ class TestBraveSearch:
         assert "Error" in result
 
     def test_brave_search_invalid_search_type_defaults_to_web(self):
-        from src.tools.brave_search import brave_search
+        from cogtrix_core.tools.brave_search import brave_search
 
         mock_response = MagicMock()
         mock_response.json.return_value = {"web": {"results": []}}
         mock_response.raise_for_status = MagicMock()
 
         with (
-            patch("src.tools.brave_search._get_api_key", return_value="test-key"),
+            patch("cogtrix_core.tools.brave_search._get_api_key", return_value="test-key"),
             patch("requests.get", return_value=mock_response),
         ):
             result = brave_search("test", search_type="invalid")
@@ -147,7 +147,7 @@ class TestBraveSearch:
         assert "Brave web search results" in result
 
     def test_brave_search_count_clamped(self):
-        from src.tools.brave_search import brave_search
+        from cogtrix_core.tools.brave_search import brave_search
 
         mock_response = MagicMock()
         mock_response.json.return_value = {
@@ -161,7 +161,7 @@ class TestBraveSearch:
         mock_response.raise_for_status = MagicMock()
 
         with (
-            patch("src.tools.brave_search._get_api_key", return_value="test-key"),
+            patch("cogtrix_core.tools.brave_search._get_api_key", return_value="test-key"),
             patch("requests.get", return_value=mock_response),
         ):
             result = brave_search("test", count=50)
@@ -170,7 +170,7 @@ class TestBraveSearch:
         assert result.count("Result") <= 20
 
     def test_brave_search_faq_and_infobox(self):
-        from src.tools.brave_search import brave_search
+        from cogtrix_core.tools.brave_search import brave_search
 
         mock_response = MagicMock()
         mock_response.json.return_value = {
@@ -185,7 +185,7 @@ class TestBraveSearch:
         mock_response.raise_for_status = MagicMock()
 
         with (
-            patch("src.tools.brave_search._get_api_key", return_value="test-key"),
+            patch("cogtrix_core.tools.brave_search._get_api_key", return_value="test-key"),
             patch("requests.get", return_value=mock_response),
         ):
             result = brave_search("python")
@@ -197,7 +197,7 @@ class TestBraveSearch:
         assert "A high-level language." in result
 
     def test_brave_search_extra_snippets_truncated(self):
-        from src.tools.brave_search import brave_search
+        from cogtrix_core.tools.brave_search import brave_search
 
         long_snippet = "x" * 600
         mock_response = MagicMock()
@@ -216,7 +216,7 @@ class TestBraveSearch:
         mock_response.raise_for_status = MagicMock()
 
         with (
-            patch("src.tools.brave_search._get_api_key", return_value="test-key"),
+            patch("cogtrix_core.tools.brave_search._get_api_key", return_value="test-key"),
             patch("requests.get", return_value=mock_response),
         ):
             result = brave_search("test")
@@ -232,19 +232,19 @@ class TestBraveConfigure:
     """Unit tests for configuration helpers."""
 
     def test_is_configured_false_when_no_key(self):
-        from src.tools.brave_search import is_configured
+        from cogtrix_core.tools.brave_search import is_configured
 
-        with patch("src.tools.brave_search._get_api_key", return_value=None):
+        with patch("cogtrix_core.tools.brave_search._get_api_key", return_value=None):
             assert is_configured() is False
 
     def test_is_configured_true_when_key_set(self):
-        from src.tools.brave_search import is_configured
+        from cogtrix_core.tools.brave_search import is_configured
 
-        with patch("src.tools.brave_search._get_api_key", return_value="test-key"):
+        with patch("cogtrix_core.tools.brave_search._get_api_key", return_value="test-key"):
             assert is_configured() is True
 
     def test_configure_brave_sets_key(self):
-        from src.tools.brave_search import _get_api_key, configure_brave
+        from cogtrix_core.tools.brave_search import _get_api_key, configure_brave
 
         configure_brave({"api_key": "my-key"})
         assert _get_api_key() == "my-key"
@@ -257,7 +257,7 @@ class TestBraveSearchInput:
     """Unit tests for the Pydantic input schema."""
 
     def test_brave_search_input_defaults(self):
-        from src.tools.brave_search import BraveSearchInput
+        from cogtrix_core.tools.brave_search import BraveSearchInput
 
         schema = BraveSearchInput(query="test")
         assert schema.query == "test"
@@ -266,7 +266,7 @@ class TestBraveSearchInput:
         assert schema.freshness == ""
 
     def test_brave_search_input_custom_values(self):
-        from src.tools.brave_search import BraveSearchInput
+        from cogtrix_core.tools.brave_search import BraveSearchInput
 
         schema = BraveSearchInput(query="test", count=10, search_type="news", freshness="pd")
         assert schema.count == 10

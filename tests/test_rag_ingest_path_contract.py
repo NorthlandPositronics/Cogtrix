@@ -5,7 +5,7 @@ Pre-fix, ``ingest_documents`` silently appended ``/faiss_index`` to
 ``configure_rag({"vectordb_dir": ...})`` (and ``_collect_faiss_dirs``)
 treated ``vectordb_dir`` as the directory that *directly* holds
 ``index.faiss``.  The two conventions disagreed.  Because
-``src/tools/rag.py:VECTOR_DIR`` was already ``data/vectordb/faiss_index``,
+``cogtrix_core/tools/rag.py:VECTOR_DIR`` was already ``data/vectordb/faiss_index``,
 ingest wrote to ``data/vectordb/faiss_index/faiss_index/`` and the query
 side could never find the index — every ``query_knowledge_base`` returned
 "No knowledge base found."
@@ -27,7 +27,7 @@ class TestIngestWritesDirectlyToVectordbDir:
     """``ingest_documents`` must NOT append ``/faiss_index`` (#1951)."""
 
     def test_persist_path_equals_vectordb_dir(self, tmp_path: Path) -> None:
-        from src.rag.ingest import IngestConfig, ingest_documents
+        from cogtrix_core.rag.ingest import IngestConfig, ingest_documents
 
         vectordb = tmp_path / "vectordb"
         config = IngestConfig(
@@ -41,11 +41,11 @@ class TestIngestWritesDirectlyToVectordbDir:
         fake_doc.page_content = "hello"
 
         with (
-            patch("src.rag.ingest._load_documents", return_value=([fake_doc], [])),
-            patch("src.rag.ingest._split_documents", return_value=[fake_doc]),
-            patch("src.rag.ingest._create_embeddings", return_value=MagicMock()),
-            patch("src.rag.ingest.FAISS.from_documents", return_value=MagicMock()),
-            patch("src.rag.ingest.save_faiss_store") as mock_save,
+            patch("cogtrix_core.rag.ingest._load_documents", return_value=([fake_doc], [])),
+            patch("cogtrix_core.rag.ingest._split_documents", return_value=[fake_doc]),
+            patch("cogtrix_core.rag.ingest._create_embeddings", return_value=MagicMock()),
+            patch("cogtrix_core.rag.ingest.FAISS.from_documents", return_value=MagicMock()),
+            patch("cogtrix_core.rag.ingest.save_faiss_store") as mock_save,
         ):
             result = ingest_documents(config)
 
@@ -59,7 +59,7 @@ class TestIngestWritesDirectlyToVectordbDir:
         )
 
     def test_ingest_many_persist_path_equals_vectordb_dir(self, tmp_path: Path) -> None:
-        from src.rag.ingest import IngestConfig, ingest_many
+        from cogtrix_core.rag.ingest import IngestConfig, ingest_many
 
         vectordb = tmp_path / "vectordb"
         config = IngestConfig(
@@ -72,12 +72,12 @@ class TestIngestWritesDirectlyToVectordbDir:
 
         with (
             patch(
-                "src.rag.ingest._prepare_ingest_file",
+                "cogtrix_core.rag.ingest._prepare_ingest_file",
                 side_effect=lambda p, c: (str(p), [fake_doc]),
             ),
-            patch("src.rag.ingest._create_embeddings", return_value=MagicMock()),
-            patch("src.rag.ingest.FAISS.from_documents", return_value=MagicMock()),
-            patch("src.rag.ingest.save_faiss_store") as mock_save,
+            patch("cogtrix_core.rag.ingest._create_embeddings", return_value=MagicMock()),
+            patch("cogtrix_core.rag.ingest.FAISS.from_documents", return_value=MagicMock()),
+            patch("cogtrix_core.rag.ingest.save_faiss_store") as mock_save,
         ):
             paths: list[Path] = [tmp_path / "a.txt", tmp_path / "b.txt"]
             results = ingest_many(paths, config)
@@ -103,8 +103,8 @@ class TestIngestQueryPathAlignment:
     def test_configure_rag_path_matches_ingest_save_path(self, tmp_path: Path) -> None:
         """Both ingest and ``_collect_faiss_dirs`` must agree on the index
         directory when handed the same ``vectordb_dir``."""
-        from src.rag.ingest import IngestConfig
-        from src.tools.rag import _has_faiss_index, configure_rag
+        from cogtrix_core.rag.ingest import IngestConfig
+        from cogtrix_core.tools.rag import _has_faiss_index, configure_rag
 
         vectordb = tmp_path / "kb" / "faiss_index"
         vectordb.mkdir(parents=True)
@@ -117,7 +117,7 @@ class TestIngestQueryPathAlignment:
         # Verify the query side accepts that same path.
         configure_rag({"vectordb_dir": str(config.vectordb_dir)})
 
-        import src.tools.rag as _rag_mod
+        import cogtrix_core.tools.rag as _rag_mod
 
         configured = Path(_rag_mod._rag_config["vectordb_dir"])
         assert configured == vectordb
@@ -127,14 +127,14 @@ class TestIngestQueryPathAlignment:
         )
 
     def test_tools_rag_module_default_vector_dir_layout(self) -> None:
-        """``src/tools/rag.py`` ships a default ``VECTOR_DIR`` that points at
+        """``cogtrix_core/tools/rag.py`` ships a default ``VECTOR_DIR`` that points at
         ``data/vectordb/faiss_index``.  Post-#1951 the ingest tool hands that
         same path to ``IngestConfig.vectordb_dir`` — ingest must NOT add
         another ``/faiss_index`` segment, otherwise we resurrect the
         original bug."""
-        from src.tools.rag import VECTOR_DIR
+        from cogtrix_core.tools.rag import VECTOR_DIR
 
         assert VECTOR_DIR == Path("data/vectordb/faiss_index"), (
-            "The default VECTOR_DIR in src/tools/rag.py changed; update this "
+            "The default VECTOR_DIR in cogtrix_core/tools/rag.py changed; update this "
             "regression to match the new layout."
         )

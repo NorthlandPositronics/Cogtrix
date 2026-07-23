@@ -1,4 +1,4 @@
-"""Tests for src/api/schemas/team.py."""
+"""Tests for cogtrix_core/api/schemas/team.py."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 import pytest
 from pydantic import ValidationError
 
-from src.api.schemas.team import (
+from cogtrix_core.api.schemas.team import (
     AddMemberRequest,
     MemberOut,
     TeamCreate,

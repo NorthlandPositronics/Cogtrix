@@ -13,7 +13,7 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
-from src.config import load_config
+from cogtrix_core.config import load_config
 from tests.comprehensive import env_loader
 
 CONFIG_PATH = env_loader.CONFIG_PATH

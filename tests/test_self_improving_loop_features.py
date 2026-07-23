@@ -39,25 +39,25 @@ class TestWSFieldNaming:
     """ToolStartPayload and ToolEndPayload must expose tool_name, not tool."""
 
     def test_tool_start_payload_has_tool_name_field(self):
-        from src.api.ws import ToolStartPayload
+        from cogtrix_core.api.ws import ToolStartPayload
 
         assert "tool_name" in ToolStartPayload.model_fields
         assert "tool" not in ToolStartPayload.model_fields
 
     def test_tool_end_payload_has_tool_name_field(self):
-        from src.api.ws import ToolEndPayload
+        from cogtrix_core.api.ws import ToolEndPayload
 
         assert "tool_name" in ToolEndPayload.model_fields
         assert "tool" not in ToolEndPayload.model_fields
 
     def test_tool_start_payload_instantiation(self):
-        from src.api.ws import ToolStartPayload
+        from cogtrix_core.api.ws import ToolStartPayload
 
         p = ToolStartPayload(tool_name="web_search", tool_call_id="call_1", input={"q": "test"})
         assert p.tool_name == "web_search"
 
     def test_tool_end_payload_instantiation(self):
-        from src.api.ws import ToolEndPayload
+        from cogtrix_core.api.ws import ToolEndPayload
 
         p = ToolEndPayload(tool_name="web_search", tool_call_id="call_1", duration_ms=100)
         assert p.tool_name == "web_search"
@@ -65,7 +65,7 @@ class TestWSFieldNaming:
 
     def test_callbacks_on_tool_start_enqueues_tool_name(self):
         """WebSocketCallbackHandler.on_tool_start must enqueue payload with key 'tool_name'."""
-        from src.api.callbacks import WebSocketCallbackHandler
+        from cogtrix_core.api.callbacks import WebSocketCallbackHandler
 
         loop = _asyncio.new_event_loop()
         try:
@@ -91,7 +91,7 @@ class TestWSFieldNaming:
 
     def test_callbacks_on_tool_end_enqueues_tool_name(self):
         """WebSocketCallbackHandler.on_tool_end must enqueue payload with key 'tool_name'."""
-        from src.api.callbacks import WebSocketCallbackHandler
+        from cogtrix_core.api.callbacks import WebSocketCallbackHandler
 
         loop = _asyncio.new_event_loop()
         try:
@@ -120,7 +120,7 @@ class TestWSFieldNaming:
 
     def test_callbacks_on_tool_error_enqueues_tool_name(self):
         """WebSocketCallbackHandler.on_tool_error must enqueue payload with key 'tool_name'."""
-        from src.api.callbacks import WebSocketCallbackHandler
+        from cogtrix_core.api.callbacks import WebSocketCallbackHandler
 
         loop = _asyncio.new_event_loop()
         try:
@@ -157,14 +157,14 @@ class TestWSIdleTimeout:
 
     def test_default_idle_timeout_is_300(self, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.delenv("COGTRIX_WS_IDLE_TIMEOUT", raising=False)
-        import src.api.routes.messages as msg_mod
+        import cogtrix_core.api.routes.messages as msg_mod
 
         importlib.reload(msg_mod)
         assert msg_mod._WS_IDLE_TIMEOUT == pytest.approx(300.0)
 
     def test_env_var_overrides_idle_timeout(self, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setenv("COGTRIX_WS_IDLE_TIMEOUT", "120")
-        import src.api.routes.messages as msg_mod
+        import cogtrix_core.api.routes.messages as msg_mod
 
         importlib.reload(msg_mod)
         assert msg_mod._WS_IDLE_TIMEOUT == pytest.approx(120.0)
@@ -174,7 +174,7 @@ class TestWSIdleTimeout:
 
     def test_idle_timeout_is_float(self, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setenv("COGTRIX_WS_IDLE_TIMEOUT", "45.5")
-        import src.api.routes.messages as msg_mod
+        import cogtrix_core.api.routes.messages as msg_mod
 
         importlib.reload(msg_mod)
         assert isinstance(msg_mod._WS_IDLE_TIMEOUT, float)
@@ -196,7 +196,7 @@ def tmp_cwd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 class TestPatchFileTool:
     def test_patch_replaces_unique_string(self, tmp_cwd: Path):
-        from src.tools.file_ops import patch_file
+        from cogtrix_core.tools.file_ops import patch_file
 
         f = tmp_cwd / "hello.py"
         f.write_text("def foo():\n    return 1\n")
@@ -205,7 +205,7 @@ class TestPatchFileTool:
         assert f.read_text() == "def foo():\n    return 42\n"
 
     def test_patch_returns_line_delta(self, tmp_cwd: Path):
-        from src.tools.file_ops import patch_file
+        from cogtrix_core.tools.file_ops import patch_file
 
         f = tmp_cwd / "lines.py"
         f.write_text("a = 1\n")
@@ -213,14 +213,14 @@ class TestPatchFileTool:
         assert "+" in result  # line count increased
 
     def test_patch_fails_when_old_str_not_found(self, tmp_cwd: Path):
-        from src.tools.file_ops import patch_file
+        from cogtrix_core.tools.file_ops import patch_file
 
         (tmp_cwd / "x.py").write_text("something else\n")
         result = patch_file("x.py", "nonexistent string", "replacement")
         assert "not found" in result.lower()
 
     def test_patch_fails_when_old_str_ambiguous(self, tmp_cwd: Path):
-        from src.tools.file_ops import patch_file
+        from cogtrix_core.tools.file_ops import patch_file
 
         (tmp_cwd / "y.py").write_text("x = 1\nx = 1\n")
         result = patch_file("y.py", "x = 1", "x = 2")
@@ -229,31 +229,31 @@ class TestPatchFileTool:
         assert (tmp_cwd / "y.py").read_text() == "x = 1\nx = 1\n"
 
     def test_patch_rejects_path_outside_cwd(self, tmp_cwd: Path):
-        from src.tools.file_ops import patch_file
+        from cogtrix_core.tools.file_ops import patch_file
 
         result = patch_file("/etc/passwd", "root", "noroot")
         assert "Error" in result or "not allowed" in result.lower() or "denied" in result.lower()
 
     def test_patch_file_nonexistent(self, tmp_cwd: Path):
-        from src.tools.file_ops import patch_file
+        from cogtrix_core.tools.file_ops import patch_file
 
         result = patch_file("no_such_file.py", "x", "y")
         assert "Error" in result or "not found" in result.lower()
 
     def test_patch_file_in_tool_configs(self):
-        from src.tools.file_ops import TOOL_CONFIGS
+        from cogtrix_core.tools.file_ops import TOOL_CONFIGS
 
         names = [cfg["name"] for cfg in TOOL_CONFIGS]
         assert "patch_file" in names
 
     def test_patch_file_requires_confirmation(self):
-        from src.tools.file_ops import TOOL_CONFIGS
+        from cogtrix_core.tools.file_ops import TOOL_CONFIGS
 
         cfg = next(c for c in TOOL_CONFIGS if c["name"] == "patch_file")
         assert cfg["requires_confirmation"] is True
 
     def test_patch_file_in_all_exports(self):
-        from src.tools import file_ops
+        from cogtrix_core.tools import file_ops
 
         assert "patch_file" in file_ops.__all__
         assert "PatchFileInput" in file_ops.__all__
@@ -266,10 +266,10 @@ class TestPatchFileTool:
 
 class TestGitToolsModule:
     def test_module_importable(self):
-        from src.tools import git_tools  # noqa: F401
+        from cogtrix_core.tools import git_tools  # noqa: F401
 
     def test_all_seven_functions_exist(self):
-        from src.tools.git_tools import (
+        from cogtrix_core.tools.git_tools import (
             git_add,
             git_checkout,
             git_commit,
@@ -288,7 +288,7 @@ class TestGitToolsModule:
         assert callable(git_checkout)
 
     def test_tool_configs_has_seven_entries(self):
-        from src.tools.git_tools import TOOL_CONFIGS
+        from cogtrix_core.tools.git_tools import TOOL_CONFIGS
 
         assert len(TOOL_CONFIGS) == 7
         names = {c["name"] for c in TOOL_CONFIGS}
@@ -303,7 +303,7 @@ class TestGitToolsModule:
         }
 
     def test_read_only_tools_no_confirmation(self):
-        from src.tools.git_tools import TOOL_CONFIGS
+        from cogtrix_core.tools.git_tools import TOOL_CONFIGS
 
         read_only = {"git_status", "git_diff", "git_log"}
         for cfg in TOOL_CONFIGS:
@@ -313,7 +313,7 @@ class TestGitToolsModule:
                 ), f"{cfg['name']} should not require confirmation"
 
     def test_write_tools_require_confirmation(self):
-        from src.tools.git_tools import TOOL_CONFIGS
+        from cogtrix_core.tools.git_tools import TOOL_CONFIGS
 
         write_tools = {"git_add", "git_commit", "git_create_branch", "git_checkout"}
         for cfg in TOOL_CONFIGS:
@@ -323,7 +323,7 @@ class TestGitToolsModule:
                 ), f"{cfg['name']} should require confirmation"
 
     def test_all_exports(self):
-        from src.tools.git_tools import __all__
+        from cogtrix_core.tools.git_tools import __all__
 
         expected = {
             "git_status",
@@ -345,7 +345,7 @@ class TestGitToolsModule:
         assert expected.issubset(set(__all__))
 
     def test_git_status_returns_string(self):
-        from src.tools.git_tools import git_status
+        from cogtrix_core.tools.git_tools import git_status
 
         result = git_status()
         assert isinstance(result, str)
@@ -353,31 +353,31 @@ class TestGitToolsModule:
         assert len(result) > 0
 
     def test_git_log_returns_string(self):
-        from src.tools.git_tools import git_log
+        from cogtrix_core.tools.git_tools import git_log
 
         result = git_log(max_count=3)
         assert isinstance(result, str)
 
     def test_git_diff_returns_string(self):
-        from src.tools.git_tools import git_diff
+        from cogtrix_core.tools.git_tools import git_diff
 
         result = git_diff()
         assert isinstance(result, str)
 
     def test_git_status_input_no_required_fields(self):
-        from src.tools.git_tools import GitStatusInput
+        from cogtrix_core.tools.git_tools import GitStatusInput
 
         GitStatusInput()  # should not raise
 
     def test_git_log_input_defaults(self):
-        from src.tools.git_tools import GitLogInput
+        from cogtrix_core.tools.git_tools import GitLogInput
 
         inp = GitLogInput()
         assert inp.max_count == 10
         assert inp.branch == ""
 
     def test_git_diff_input_defaults(self):
-        from src.tools.git_tools import GitDiffInput
+        from cogtrix_core.tools.git_tools import GitDiffInput
 
         inp = GitDiffInput()
         assert inp.path == ""
@@ -387,14 +387,14 @@ class TestGitToolsModule:
         """_run_git returns an error string on TimeoutExpired (never raises)."""
         import subprocess
 
-        from src.tools.git_tools import _run_git
+        from cogtrix_core.tools.git_tools import _run_git
 
         with patch("subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="git", timeout=60)):
             result = _run_git("status")
         assert "timed out" in result.lower()
 
     def test_run_git_missing_binary_returns_error_string(self):
-        from src.tools.git_tools import _run_git
+        from cogtrix_core.tools.git_tools import _run_git
 
         with patch("subprocess.run", side_effect=FileNotFoundError):
             result = _run_git("status")
@@ -402,7 +402,7 @@ class TestGitToolsModule:
 
     def test_git_log_rejects_dash_prefixed_branch(self):
         """Argument injection: branch starting with '-' is rejected."""
-        from src.tools.git_tools import git_log
+        from cogtrix_core.tools.git_tools import git_log
 
         result = git_log(branch="--exec=whoami")
         assert "Error" in result
@@ -410,7 +410,7 @@ class TestGitToolsModule:
 
     def test_git_checkout_rejects_dash_prefixed_ref(self):
         """Argument injection: ref starting with '-' is rejected."""
-        from src.tools.git_tools import git_checkout
+        from cogtrix_core.tools.git_tools import git_checkout
 
         result = git_checkout(ref="--exec=id")
         assert "Error" in result
@@ -418,7 +418,7 @@ class TestGitToolsModule:
 
     def test_git_create_branch_rejects_dash_prefixed_name(self):
         """Argument injection: branch name starting with '-' is rejected."""
-        from src.tools.git_tools import git_create_branch
+        from cogtrix_core.tools.git_tools import git_create_branch
 
         result = git_create_branch(name="--track")
         assert "Error" in result
@@ -426,7 +426,7 @@ class TestGitToolsModule:
 
     def test_git_create_branch_rejects_dash_prefixed_base(self):
         """Argument injection: base starting with '-' is rejected."""
-        from src.tools.git_tools import git_create_branch
+        from cogtrix_core.tools.git_tools import git_create_branch
 
         result = git_create_branch(name="ok-branch", base="--orphan")
         assert "Error" in result
@@ -440,12 +440,12 @@ class TestGitToolsModule:
 
 class TestDonePayloadTextField:
     def test_done_payload_has_text_field(self):
-        from src.api.ws import DonePayload
+        from cogtrix_core.api.ws import DonePayload
 
         assert "text" in DonePayload.model_fields
 
     def test_done_payload_text_defaults_to_empty_string(self):
-        from src.api.ws import DonePayload
+        from cogtrix_core.api.ws import DonePayload
 
         p = DonePayload(
             message_id="abc",
@@ -458,7 +458,7 @@ class TestDonePayloadTextField:
         assert p.text == ""
 
     def test_done_payload_text_is_str_type(self):
-        from src.api.ws import DonePayload
+        from cogtrix_core.api.ws import DonePayload
 
         # The field should accept strings; verify by instantiation.
         p = DonePayload(
@@ -480,10 +480,10 @@ class TestDonePayloadTextField:
 
 class TestSyncTurnOutSchema:
     def test_sync_turn_out_importable(self):
-        from src.api.schemas.message import SyncTurnOut  # noqa: F401
+        from cogtrix_core.api.schemas.message import SyncTurnOut  # noqa: F401
 
     def test_sync_turn_out_required_fields(self):
-        from src.api.schemas.message import SyncTurnOut
+        from cogtrix_core.api.schemas.message import SyncTurnOut
 
         p = SyncTurnOut(
             message_id="m1",
@@ -502,7 +502,7 @@ class TestSyncTurnOutSchema:
         """The send_message endpoint must accept a 'sync' query parameter."""
         import inspect
 
-        import src.api.routes.messages as mod
+        import cogtrix_core.api.routes.messages as mod
 
         sig = inspect.signature(mod.send_message)
         assert "sync" in sig.parameters
@@ -514,8 +514,8 @@ from fastapi.testclient import TestClient  # noqa: E402
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine  # noqa: E402
 from sqlalchemy.pool import StaticPool  # noqa: E402
 
-from src.api.db import models as _models  # noqa: E402, F401
-from src.api.db.engine import Base, get_db  # noqa: E402
+from cogtrix_core.api.db import models as _models  # noqa: E402, F401
+from cogtrix_core.api.db.engine import Base, get_db  # noqa: E402
 
 _VALID_PASSWORD = "TestPass1!"
 
@@ -540,7 +540,7 @@ async def _create_tables(engine):
 
 @pytest.fixture(scope="module")
 def app(_engine):
-    from src.api.app import create_app
+    from cogtrix_core.api.app import create_app
 
     factory = async_sessionmaker(_engine, expire_on_commit=False)
 
@@ -643,8 +643,10 @@ class TestSyncModeEndpoint:
         _FAKE_MSG_ID = str(uuid.uuid4())
         _FAKE_TEXT = "The capital of France is Paris."
 
-        async def _fake_run_message_turn(session, text, mode, db, app_state):
+        async def _fake_run_message_turn(session, text, mode, db, app_state, **kwargs):
             # Simulate what turn_runner does: put a done message on the queue.
+            # ``**kwargs`` absorbs optional params like stream_final_answer (#2264)
+            # so adding a run_message_turn kwarg doesn't break this double.
             await session.ws_queue.put(
                 {
                     "type": "done",
@@ -660,7 +662,7 @@ class TestSyncModeEndpoint:
                 }
             )
 
-        with patch("src.api.routes.messages.run_message_turn", _fake_run_message_turn):
+        with patch("cogtrix_core.api.routes.messages.run_message_turn", _fake_run_message_turn):
             r = client.post(
                 f"/api/v1/sessions/{sid}/messages?sync=true",
                 headers=_h(token),
@@ -688,10 +690,11 @@ class TestSyncModeEndpoint:
         mock_reg.get_or_warm = AsyncMock(return_value=live)
         app.state.session_registry = mock_reg
 
-        async def _noop_run(session, text, mode, db, app_state):
-            pass  # Don't put anything on the queue.
+        async def _noop_run(session, text, mode, db, app_state, **kwargs):
+            pass  # Don't put anything on the queue. (**kwargs absorbs #2264's
+            # stream_final_answer and any future run_message_turn kwarg.)
 
-        with patch("src.api.routes.messages.run_message_turn", _noop_run):
+        with patch("cogtrix_core.api.routes.messages.run_message_turn", _noop_run):
             r = client.post(
                 f"/api/v1/sessions/{sid}/messages?sync=true",
                 headers=_h(token),
@@ -709,7 +712,7 @@ class TestSyncModeEndpoint:
         # Instead, we verify the gate logic exists by examining the send_message code.
         import inspect
 
-        import src.api.routes.messages as mod
+        import cogtrix_core.api.routes.messages as mod
 
         src = inspect.getsource(mod.send_message)
         # The gate that checks for an in-progress turn must test .done()
@@ -727,7 +730,7 @@ class TestSyncModeEndpoint:
         mock_reg.get_or_warm = AsyncMock(return_value=live)
         app.state.session_registry = mock_reg
 
-        with patch("src.api.routes.messages.run_message_turn", AsyncMock()):
+        with patch("cogtrix_core.api.routes.messages.run_message_turn", AsyncMock()):
             r = client.post(
                 f"/api/v1/sessions/{sid}/messages?sync=true",
                 headers=_h(token),
@@ -745,21 +748,21 @@ class TestSyncModeEndpoint:
 
 class TestSessionCreateWithTools:
     def test_session_create_request_has_initial_tools_field(self):
-        from src.api.schemas.session import SessionCreateRequest
+        from cogtrix_core.api.schemas.session import SessionCreateRequest
 
         req = SessionCreateRequest()
         assert hasattr(req, "initial_tools")
         assert req.initial_tools == []
 
     def test_session_create_request_has_auto_approve_tools_field(self):
-        from src.api.schemas.session import SessionCreateRequest
+        from cogtrix_core.api.schemas.session import SessionCreateRequest
 
         req = SessionCreateRequest()
         assert hasattr(req, "auto_approve_tools")
         assert req.auto_approve_tools == []
 
     def test_session_create_request_accepts_tool_lists(self):
-        from src.api.schemas.session import SessionCreateRequest
+        from cogtrix_core.api.schemas.session import SessionCreateRequest
 
         req = SessionCreateRequest(
             initial_tools=["read_file", "write_file"],
@@ -822,7 +825,7 @@ class TestSessionCreateWithTools:
         mock_sess_reg.put = AsyncMock()
         app.state.session_registry = mock_sess_reg
 
-        with patch("src.api.routes.sessions.warm_session", AsyncMock(return_value=live)):
+        with patch("cogtrix_core.api.routes.sessions.warm_session", AsyncMock(return_value=live)):
             r = client.post(
                 "/api/v1/sessions",
                 headers=_h(token),
@@ -860,7 +863,7 @@ class TestSessionCreateWithTools:
         mock_sess_reg = MagicMock()
         app.state.session_registry = mock_sess_reg
 
-        with patch("src.api.routes.sessions.warm_session", AsyncMock(return_value=live)):
+        with patch("cogtrix_core.api.routes.sessions.warm_session", AsyncMock(return_value=live)):
             r = client.post(
                 "/api/v1/sessions",
                 headers=_h(token),
@@ -896,7 +899,7 @@ class TestSessionCreateWithTools:
         mock_sess_reg = MagicMock()
         app.state.session_registry = mock_sess_reg
 
-        with patch("src.api.routes.sessions.warm_session", AsyncMock(return_value=live)):
+        with patch("cogtrix_core.api.routes.sessions.warm_session", AsyncMock(return_value=live)):
             r = client.post(
                 "/api/v1/sessions",
                 headers=_h(token),
@@ -916,7 +919,7 @@ class TestSessionCreateWithTools:
 
 class TestExtractFinalSolution:
     def test_extracts_final_solution_section(self):
-        from src.api.turn_runner import _extract_final_solution
+        from cogtrix_core.api.turn_runner import _extract_final_solution
 
         report = (
             "## Branch 1 (confidence: 7.0/10)\nSome intermediate reasoning.\n\n"
@@ -928,19 +931,19 @@ class TestExtractFinalSolution:
         assert _extract_final_solution(report) == "The answer is 42."
 
     def test_falls_back_to_full_report_when_section_absent(self):
-        from src.api.turn_runner import _extract_final_solution
+        from cogtrix_core.api.turn_runner import _extract_final_solution
 
         report = "Just a plain response without any ToT structure."
         assert _extract_final_solution(report) == report
 
     def test_falls_back_when_solution_body_is_empty(self):
-        from src.api.turn_runner import _extract_final_solution
+        from cogtrix_core.api.turn_runner import _extract_final_solution
 
         report = "## Final Solution (confidence: 8.0/10)\n\n   \n"
         assert _extract_final_solution(report) == report
 
     def test_handles_multiline_solution(self):
-        from src.api.turn_runner import _extract_final_solution
+        from cogtrix_core.api.turn_runner import _extract_final_solution
 
         report = (
             "## Branch 1 (confidence: 6.0/10)\nA\n\n---\n\n"
@@ -953,7 +956,7 @@ class TestExtractFinalSolution:
         assert "## Branch 1" not in result
 
     def test_various_confidence_values(self):
-        from src.api.turn_runner import _extract_final_solution
+        from cogtrix_core.api.turn_runner import _extract_final_solution
 
         for conf in ("10.0", "0.5", "7.3"):
             report = f"## Final Solution (confidence: {conf}/10)\n\nThe solution.\n"
@@ -961,14 +964,14 @@ class TestExtractFinalSolution:
 
     def test_integer_confidence_value(self):
         """BUG-244: integer confidence (e.g. 8/10) must be matched by the regex."""
-        from src.api.turn_runner import _extract_final_solution
+        from cogtrix_core.api.turn_runner import _extract_final_solution
 
         report = "## Final Solution (confidence: 8/10)\n\nInteger confidence answer.\n"
         assert _extract_final_solution(report) == "Integer confidence answer."
 
     def test_header_with_extra_text_still_matches(self):
         """BUG-244: header with extra info after 'Final Solution' must still match."""
-        from src.api.turn_runner import _extract_final_solution
+        from cogtrix_core.api.turn_runner import _extract_final_solution
 
         report = "## Final Solution — Best Approach (confidence: 9.0/10)\n\nThe robust answer.\n"
         assert _extract_final_solution(report) == "The robust answer."
@@ -977,7 +980,7 @@ class TestExtractFinalSolution:
         """BUG-252: when best_solution is empty, \n+ greedily consumes blank lines
         and the footer separator ('---\\n*N iterations...*') must not be returned
         as the final solution — fall back to the full report instead."""
-        from src.api.turn_runner import _extract_final_solution
+        from cogtrix_core.api.turn_runner import _extract_final_solution
 
         # Mirrors _format_report output when best_solution == "":
         # header line, 3 blank lines (join of empty string), then footer.
@@ -1011,7 +1014,7 @@ class TestThinkModeTokenEmission:
         from unittest.mock import AsyncMock, MagicMock, patch
 
         async def _run():
-            from src.api.turn_runner import _run_message_turn_inner
+            from cogtrix_core.api.turn_runner import _run_message_turn_inner
 
             session = MagicMock()
             session.id = "sess-253"
@@ -1029,14 +1032,16 @@ class TestThinkModeTokenEmission:
             session.token_counts = {"input_tokens": 0, "output_tokens": 0}
 
             with (
-                patch("src.api.callbacks.WebSocketCallbackHandler", return_value=MagicMock()),
-                patch("src.api.confirmation.ApiConfirmationUI", return_value=MagicMock()),
                 patch(
-                    "src.orchestration.runner.run_agent",
+                    "cogtrix_core.api.callbacks.WebSocketCallbackHandler", return_value=MagicMock()
+                ),
+                patch("cogtrix_core.api.confirmation.ApiConfirmationUI", return_value=MagicMock()),
+                patch(
+                    "cogtrix_core.orchestration.runner.run_agent",
                     return_value="initial agent answer",
                 ),
                 patch(
-                    "src.api.turn_runner._run_think_pipeline",
+                    "cogtrix_core.api.turn_runner._run_think_pipeline",
                     new=AsyncMock(return_value="deep think result"),
                 ),
             ):
@@ -1075,7 +1080,7 @@ class TestThinkPipelineToolIntensiveNotSkipped:
     @pytest.mark.asyncio
     async def test_run_think_pipeline_calls_force_deep_think_for_tool_intensive(self):
         """_run_think_pipeline must call force_deep_think even for tool-intensive tasks (BUG-248)."""
-        from src.api.turn_runner import _run_think_pipeline
+        from cogtrix_core.api.turn_runner import _run_think_pipeline
 
         session = MagicMock()
         session.cancel_event = MagicMock()
@@ -1086,16 +1091,18 @@ class TestThinkPipelineToolIntensiveNotSkipped:
         run_config.research_delegate_enabled = False
 
         with (
-            patch("src.api.turn_runner._enqueue_agent_state", AsyncMock()),
+            patch("cogtrix_core.api.turn_runner._enqueue_agent_state", AsyncMock()),
             patch(
-                "src.orchestration.intent.classify_think_task",
+                "cogtrix_core.orchestration.intent.classify_think_task",
                 return_value=MagicMock(tool_intensive=True, name="tool-intensive"),
             ),
-            patch("src.orchestration.phases.was_deep_think_called", return_value=False),
-            patch("src.orchestration.phases.deep_think_had_good_context", return_value=False),
-            patch("src.orchestration.phases.force_deep_think", return_value="deep result"),
-            patch("src.orchestration.phases.collect_tool_outputs", return_value=[]),
-            patch("src.orchestration.phases.agent_used_web_tools", return_value=False),
+            patch("cogtrix_core.orchestration.phases.was_deep_think_called", return_value=False),
+            patch(
+                "cogtrix_core.orchestration.phases.deep_think_had_good_context", return_value=False
+            ),
+            patch("cogtrix_core.orchestration.phases.force_deep_think", return_value="deep result"),
+            patch("cogtrix_core.orchestration.phases.collect_tool_outputs", return_value=[]),
+            patch("cogtrix_core.orchestration.phases.agent_used_web_tools", return_value=False),
         ):
             result = await _run_think_pipeline(session, "test", "initial", [], run_config)
 
@@ -1114,7 +1121,7 @@ class TestThinkPipelineResearchDelegateSetup:
     @pytest.mark.asyncio
     async def test_run_think_pipeline_sets_delegate_tools_for_web_tools(self):
         """_run_think_pipeline must call set_delegate_tools before research delegate (BUG-249)."""
-        from src.api.turn_runner import _run_think_pipeline
+        from cogtrix_core.api.turn_runner import _run_think_pipeline
 
         session = MagicMock()
         session.cancel_event = MagicMock()
@@ -1138,20 +1145,24 @@ class TestThinkPipelineResearchDelegateSetup:
             return func(*args, **kwargs)
 
         with (
-            patch("src.api.turn_runner._enqueue_agent_state", AsyncMock()),
-            patch("src.api.turn_runner.asyncio.to_thread", new=_sync_to_thread),
-            patch("src.orchestration.phases.was_deep_think_called", return_value=False),
-            patch("src.orchestration.phases.deep_think_had_good_context", return_value=False),
-            patch("src.orchestration.phases.agent_used_web_tools", return_value=True),
+            patch("cogtrix_core.api.turn_runner._enqueue_agent_state", AsyncMock()),
+            patch("cogtrix_core.api.turn_runner.asyncio.to_thread", new=_sync_to_thread),
+            patch("cogtrix_core.orchestration.phases.was_deep_think_called", return_value=False),
             patch(
-                "src.orchestration.phases.extract_fetched_urls", return_value=["http://example.com"]
+                "cogtrix_core.orchestration.phases.deep_think_had_good_context", return_value=False
+            ),
+            patch("cogtrix_core.orchestration.phases.agent_used_web_tools", return_value=True),
+            patch(
+                "cogtrix_core.orchestration.phases.extract_fetched_urls",
+                return_value=["http://example.com"],
             ),
             patch(
-                "src.orchestration.phases.run_research_delegate", return_value="research output"
+                "cogtrix_core.orchestration.phases.run_research_delegate",
+                return_value="research output",
             ) as mock_rd,
-            patch("src.tools.delegate.set_delegate_tools") as mock_set_tools,
-            patch("src.orchestration.phases.force_deep_think", return_value="deep result"),
-            patch("src.orchestration.phases.collect_tool_outputs", return_value=[]),
+            patch("cogtrix_core.tools.delegate.set_delegate_tools") as mock_set_tools,
+            patch("cogtrix_core.orchestration.phases.force_deep_think", return_value="deep result"),
+            patch("cogtrix_core.orchestration.phases.collect_tool_outputs", return_value=[]),
         ):
             await _run_think_pipeline(session, "test", "initial", [], run_config)
 
@@ -1167,11 +1178,11 @@ class TestThinkPipelineResearchDelegateSetup:
         """Lifespan must call configure_delegate_tool and configure_deep_think_tool (BUG-250/251)."""
         from fastapi.testclient import TestClient
 
-        from src.api.app import create_app
+        from cogtrix_core.api.app import create_app
 
         with (
-            patch("src.tools.configure.configure_delegate_tool") as mock_delegate,
-            patch("src.tools.configure.configure_deep_think_tool") as mock_deep,
+            patch("cogtrix_core.tools.configure.configure_delegate_tool") as mock_delegate,
+            patch("cogtrix_core.tools.configure.configure_deep_think_tool") as mock_deep,
         ):
             fresh_app = create_app()
             with TestClient(fresh_app) as _client:
@@ -1374,7 +1385,7 @@ class TestTaskComplexityWiring:
 
     def test_run_agent_accepts_task_complexity(self):
         """run_agent must accept task_complexity so the interactive CLI can forward it (BUG-214)."""
-        from src.orchestration.runner import run_agent
+        from cogtrix_core.orchestration.runner import run_agent
 
         try:
             run_agent(

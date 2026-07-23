@@ -7,9 +7,9 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from src.memory.facts import PersistentFactsStore
-from src.memory.json_store import JsonFileMemoryStore
-from src.memory.modes.reasoning import ReasoningMemoryManager
+from cogtrix_core.memory.facts import PersistentFactsStore
+from cogtrix_core.memory.json_store import JsonFileMemoryStore
+from cogtrix_core.memory.modes.reasoning import ReasoningMemoryManager
 
 
 def _make_reasoning_manager(tmp_path: Path, session_id: str = "ctx-lifecycle"):
@@ -50,7 +50,7 @@ class TestContextLifecycle:
         mgr._llm = MagicMock()
 
         with patch(
-            "src.memory.distillation.distill_summary",
+            "cogtrix_core.memory.distillation.distill_summary",
             return_value=[
                 "PR #287 merged — SAML fix landed",
                 "Issue #291 is the current QA gate",
@@ -80,7 +80,7 @@ class TestContextLifecycle:
         mgr._summary_last_updated_at = datetime.now(UTC)
         mgr._llm = MagicMock()
 
-        with patch("src.memory.distillation.distill_summary") as distill_mock:
+        with patch("cogtrix_core.memory.distillation.distill_summary") as distill_mock:
             mgr.reset_summary()
 
         distill_mock.assert_not_called()
@@ -135,7 +135,7 @@ class TestContextLifecycle:
         mgr._llm = MagicMock()
 
         with patch(
-            "src.memory.distillation.distill_summary",
+            "cogtrix_core.memory.distillation.distill_summary",
             return_value=["PR #287 merged — SAML fix landed"],
         ):
             mgr.reset_summary()

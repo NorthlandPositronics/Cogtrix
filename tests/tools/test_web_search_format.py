@@ -1,14 +1,14 @@
-"""Tests for src/tools/_web_search_format.py (ADR-0056 PR-E stage 6)."""
+"""Tests for cogtrix_core/tools/_web_search_format.py (ADR-0056 PR-E stage 6)."""
 
 from __future__ import annotations
 
-from src.tools._http_fetch import FetchResult
-from src.tools._web_search_aggregator import CoverageInfo, ProviderResult, RankedResult
-from src.tools._web_search_domain_class import DomainClass
-from src.tools._web_search_extractor import ExtractedSource
-from src.tools._web_search_fetcher import FetchOutcome
-from src.tools._web_search_format import FormatInput, format_output
-from src.tools._web_search_synthesiser import SynthesisResult
+from cogtrix_core.tools._http_fetch import FetchResult
+from cogtrix_core.tools._web_search_aggregator import CoverageInfo, ProviderResult, RankedResult
+from cogtrix_core.tools._web_search_domain_class import DomainClass
+from cogtrix_core.tools._web_search_extractor import ExtractedSource
+from cogtrix_core.tools._web_search_fetcher import FetchOutcome
+from cogtrix_core.tools._web_search_format import FormatInput, format_output
+from cogtrix_core.tools._web_search_synthesiser import SynthesisResult
 
 
 def _rank(url: str, domain_class: DomainClass = DomainClass.UNKNOWN) -> RankedResult:

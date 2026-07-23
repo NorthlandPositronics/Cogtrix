@@ -1,0 +1,25 @@
+id: role_sa_07_broken_nginx
+area: breakfix
+title: Diagnose and fix an nginx that won't start
+
+description: |
+  Break-fix competency: the box is seeded with a broken nginx (a config syntax
+  error leaves the service failed). The agent must investigate — not just restart
+  blindly — find the actual fault, fix it, and get nginx serving. The judge grades
+  whether the hand-off report names the real root cause (the bad config) rather
+  than a symptom.
+
+assignment: |
+  Something's wrong on this server: nginx is installed but the service is not
+  running, and attempts to start it fail. Please investigate, find out what's
+  wrong, fix it so nginx is running and serving on port 80, and tell me what the
+  root cause was.
+
+acceptance:
+  check: checks/sa_07_check.sh
+  seed: seeds/sa_07/setup.sh
+  requires_rootcause: true
+
+personas:
+  lead:
+    default_scope_answer: "Just get nginx healthy again; serving the default page on port 80 is fine."

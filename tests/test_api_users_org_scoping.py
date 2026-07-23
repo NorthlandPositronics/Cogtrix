@@ -22,9 +22,9 @@ from fastapi.testclient import TestClient  # noqa: E402
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine  # noqa: E402
 from sqlalchemy.pool import StaticPool  # noqa: E402
 
-from src.api.db.engine import Base  # noqa: E402
-from src.api.db.models import Organization, User  # noqa: E402
-from src.api.db.repositories.users import UserRepository  # noqa: E402
+from cogtrix_core.api.db.engine import Base  # noqa: E402
+from cogtrix_core.api.db.models import Organization, User  # noqa: E402
+from cogtrix_core.api.db.repositories.users import UserRepository  # noqa: E402
 
 
 @pytest.fixture()
@@ -60,10 +60,10 @@ class TestCrossOrgUserCrud:
     def _make_app(self, org_a_id: str, org_b_id: str, admin_a_id: str, admin_b_id: str):
         from fastapi import FastAPI
 
-        from src.api.auth import TokenData, get_current_user
-        from src.api.db.engine import get_db
-        from src.api.org_context import OrgContext, get_org_context
-        from src.api.routes import users as users_module
+        from cogtrix_core.api.auth import TokenData, get_current_user
+        from cogtrix_core.api.db.engine import get_db
+        from cogtrix_core.api.org_context import OrgContext, get_org_context
+        from cogtrix_core.api.routes import users as users_module
 
         app = FastAPI()
 

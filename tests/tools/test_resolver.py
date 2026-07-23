@@ -1,10 +1,10 @@
-"""Tests for src/tools/resolver — canonical fuzzy tool-name resolver."""
+"""Tests for cogtrix_core/tools/resolver — canonical fuzzy tool-name resolver."""
 
 from unittest.mock import MagicMock
 
 import pytest
 
-from src.tools.resolver import _is_word_contained, resolve_tool_name, top_k_candidates
+from cogtrix_core.tools.resolver import _is_word_contained, resolve_tool_name, top_k_candidates
 
 # ---------------------------------------------------------------------------
 # _is_word_contained

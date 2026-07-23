@@ -1,1 +1,1 @@
-"""Tests for src/assistant/."""
+"""Tests for cogtrix_core/assistant/."""

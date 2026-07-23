@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from src.orchestration.intent import (
+from cogtrix_core.orchestration.intent import (
     OwnershipMode,
     OwnershipResult,
     _apply_reversibility_override,
@@ -272,7 +272,7 @@ class TestClarifyingQuestion:
 
 class TestIrreversibleTargetsRegex:
     def _matches(self, text: str) -> bool:
-        from src.orchestration.intent import _IRREVERSIBLE_TARGETS
+        from cogtrix_core.orchestration.intent import _IRREVERSIBLE_TARGETS
 
         return bool(_IRREVERSIBLE_TARGETS.search(text))
 

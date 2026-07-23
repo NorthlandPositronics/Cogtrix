@@ -1,4 +1,4 @@
-"""Tests for src/api/schemas/system.py — info, health, readiness, stats."""
+"""Tests for cogtrix_core/api/schemas/system.py — info, health, readiness, stats."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 import pytest
 from pydantic import ValidationError
 
-from src.api.schemas.system import (
+from cogtrix_core.api.schemas.system import (
     DebugToggleRequest,
     HealthOut,
     ReadinessComponentStatus,

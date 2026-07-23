@@ -12,8 +12,8 @@ from __future__ import annotations
 
 import pytest
 
-from src.memory import modes  # noqa: F401 — triggers mode registration
-from src.memory.modes.conversation import ConversationMemoryManager
+from cogtrix_core.memory import modes  # noqa: F401 — triggers mode registration
+from cogtrix_core.memory.modes.conversation import ConversationMemoryManager
 
 
 class _MockStore:
@@ -45,7 +45,7 @@ def test_tier_path_receives_message_snapshot_not_live_list(
         captured["messages"] = messages
         return ([], {})
 
-    monkeypatch.setattr("src.memory.tier_cache.assemble_from_tiers", _fake_assemble)
+    monkeypatch.setattr("cogtrix_core.memory.tier_cache.assemble_from_tiers", _fake_assemble)
 
     mgr.prepare_context("query")
 

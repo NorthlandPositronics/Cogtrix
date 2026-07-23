@@ -1,11 +1,11 @@
-"""Tests for src/agent/agents_md.py"""
+"""Tests for cogtrix_core/agent/agents_md.py"""
 
 from __future__ import annotations
 
 import textwrap
 from pathlib import Path
 
-from src.agent.agents_md import (
+from cogtrix_core.agent.agents_md import (
     AgentDefinition,
     _agent_key,
     get_agent,
@@ -344,7 +344,7 @@ def test_tools_null_becomes_empty_list(tmp_path):
 
 
 def test_get_agent_returns_definition(tmp_path, monkeypatch):
-    from src.agent import agents_md as _mod
+    from cogtrix_core.agent import agents_md as _mod
 
     p = _write(
         tmp_path,
@@ -366,14 +366,14 @@ def test_get_agent_returns_definition(tmp_path, monkeypatch):
 
 
 def test_get_agent_unknown_returns_none(monkeypatch):
-    from src.agent import agents_md as _mod
+    from cogtrix_core.agent import agents_md as _mod
 
     monkeypatch.setattr(_mod, "_agents_registry", {})
     assert get_agent("nonexistent") is None
 
 
 def test_get_agent_normalises_name(tmp_path, monkeypatch):
-    from src.agent import agents_md as _mod
+    from cogtrix_core.agent import agents_md as _mod
 
     p = _write(tmp_path, "## My Cool Agent\n\n```yaml\nmodel_alias: smart\n```\n")
     monkeypatch.setattr(_mod, "_agents_registry", load_agents_md(p))
@@ -385,7 +385,7 @@ def test_get_agent_normalises_name(tmp_path, monkeypatch):
 
 
 def test_list_agents_returns_all(tmp_path, monkeypatch):
-    from src.agent import agents_md as _mod
+    from cogtrix_core.agent import agents_md as _mod
 
     p = _write(
         tmp_path,
@@ -403,7 +403,7 @@ def test_list_agents_returns_all(tmp_path, monkeypatch):
 
 
 def test_list_agents_empty(monkeypatch):
-    from src.agent import agents_md as _mod
+    from cogtrix_core.agent import agents_md as _mod
 
     monkeypatch.setattr(_mod, "_agents_registry", {})
     assert list_agents() == []
@@ -413,7 +413,7 @@ def test_list_agents_empty(monkeypatch):
 
 
 def test_load_default_agents_no_file(monkeypatch, tmp_path):
-    from src.agent import agents_md as _mod
+    from cogtrix_core.agent import agents_md as _mod
 
     monkeypatch.setattr(_mod, "get_agents_md_path", lambda: None)
     result = _mod.load_default_agents()
@@ -422,7 +422,7 @@ def test_load_default_agents_no_file(monkeypatch, tmp_path):
 
 
 def test_load_default_agents_from_file(monkeypatch, tmp_path):
-    from src.agent import agents_md as _mod
+    from cogtrix_core.agent import agents_md as _mod
 
     p = _write(tmp_path, "## Helper\n\n```yaml\nmodel_alias: fast\n```\n")
     monkeypatch.setattr(_mod, "get_agents_md_path", lambda: p)
@@ -435,7 +435,7 @@ def test_load_default_agents_from_file(monkeypatch, tmp_path):
 
 
 def test_get_agents_md_path_cwd_preferred(tmp_path, monkeypatch):
-    from src.agent import agents_md as _mod
+    from cogtrix_core.agent import agents_md as _mod
 
     cwd_agents = tmp_path / "AGENTS.md"
     cwd_agents.write_text("", encoding="utf-8")
@@ -451,7 +451,7 @@ def test_get_agents_md_path_cwd_preferred(tmp_path, monkeypatch):
 
 
 def test_get_agents_md_path_falls_back_to_home(tmp_path, monkeypatch):
-    from src.agent import agents_md as _mod
+    from cogtrix_core.agent import agents_md as _mod
 
     home_agents = tmp_path / "AGENTS.md"
     home_agents.write_text("", encoding="utf-8")
@@ -465,7 +465,7 @@ def test_get_agents_md_path_falls_back_to_home(tmp_path, monkeypatch):
 
 
 def test_get_agents_md_path_none_when_missing(tmp_path, monkeypatch):
-    from src.agent import agents_md as _mod
+    from cogtrix_core.agent import agents_md as _mod
 
     empty = tmp_path / "no_agents_here"
     empty.mkdir()

@@ -18,7 +18,7 @@ pytest.importorskip("fastapi")
 os.environ.setdefault("COGTRIX_JWT_SECRET", "testsecret_mustbe32chars_minimum00")
 os.environ.setdefault("COGTRIX_DB_URL", "sqlite+aiosqlite:///:memory:")
 
-from src.api.saml.config import (  # noqa: E402
+from cogtrix_core.api.saml.config import (  # noqa: E402
     SAMLConfig,
     SAMLIdPConfig,
     configure_saml,
@@ -42,7 +42,7 @@ _FAKE_CERT = (
 @pytest.fixture(autouse=True)
 def reset_saml_config():
     """Reset global SAML config before and after each test."""
-    import src.api.saml.config as _cfg
+    import cogtrix_core.api.saml.config as _cfg
 
     _cfg._saml_config = None
     yield
@@ -189,8 +189,8 @@ def saml_client():
     from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
     from sqlalchemy.pool import StaticPool
 
-    from src.api.app import create_app
-    from src.api.db.engine import Base, get_db
+    from cogtrix_core.api.app import create_app
+    from cogtrix_core.api.db.engine import Base, get_db
 
     engine = create_async_engine(
         "sqlite+aiosqlite:///:memory:",
@@ -267,7 +267,7 @@ class TestSAMLProvider:
         ):
             from importlib import reload
 
-            import src.api.saml.provider as _prov
+            import cogtrix_core.api.saml.provider as _prov
 
             cfg = _make_config()
             with pytest.raises(ImportError, match="saml"):
@@ -276,7 +276,7 @@ class TestSAMLProvider:
 
     def test_provider_first_attr_helper(self):
         """_first_attr returns first value or empty string."""
-        from src.api.saml.provider import _first_attr
+        from cogtrix_core.api.saml.provider import _first_attr
 
         assert _first_attr({"k": ["a", "b"]}, "k") == "a"
         assert _first_attr({"k": []}, "k") == ""
@@ -304,7 +304,9 @@ class TestSAMLRoutesConfigured:
         """GET /metadata with a working provider returns 200 + XML."""
         from unittest.mock import patch
 
-        with patch("src.api.saml.provider.get_metadata_xml", return_value="<md:EntityDescriptor/>"):
+        with patch(
+            "cogtrix_core.api.saml.provider.get_metadata_xml", return_value="<md:EntityDescriptor/>"
+        ):
             r = configured_client.get("/api/v1/saml/metadata")
         assert r.status_code == 200
         assert "EntityDescriptor" in r.text
@@ -314,7 +316,9 @@ class TestSAMLRoutesConfigured:
         """GET /metadata raises 503 SAML_NOT_INSTALLED when import fails."""
         from unittest.mock import patch
 
-        with patch("src.api.saml.provider.get_metadata_xml", side_effect=ImportError("no saml")):
+        with patch(
+            "cogtrix_core.api.saml.provider.get_metadata_xml", side_effect=ImportError("no saml")
+        ):
             r = configured_client.get("/api/v1/saml/metadata")
         assert r.status_code == 503
         assert r.json()["error"]["code"] == "SAML_NOT_INSTALLED"
@@ -324,7 +328,7 @@ class TestSAMLRoutesConfigured:
         from unittest.mock import patch
 
         with patch(
-            "src.api.saml.provider.get_metadata_xml",
+            "cogtrix_core.api.saml.provider.get_metadata_xml",
             side_effect=ValueError("bad config"),
         ):
             r = configured_client.get("/api/v1/saml/metadata")
@@ -338,7 +342,7 @@ class TestSAMLRoutesConfigured:
         from unittest.mock import patch
 
         with patch(
-            "src.api.saml.provider.get_sso_redirect_url",
+            "cogtrix_core.api.saml.provider.get_sso_redirect_url",
             return_value="https://idp.example.com/sso?SAMLRequest=abc123",
         ):
             r = configured_client.get("/api/v1/saml/sso", follow_redirects=False)
@@ -350,7 +354,8 @@ class TestSAMLRoutesConfigured:
         from unittest.mock import patch
 
         with patch(
-            "src.api.saml.provider.get_sso_redirect_url", side_effect=ImportError("no saml")
+            "cogtrix_core.api.saml.provider.get_sso_redirect_url",
+            side_effect=ImportError("no saml"),
         ):
             r = configured_client.get("/api/v1/saml/sso")
         assert r.status_code == 503
@@ -368,7 +373,7 @@ class TestSAMLRoutesConfigured:
         from unittest.mock import patch
 
         with patch(
-            "src.api.saml.provider.process_saml_response",
+            "cogtrix_core.api.saml.provider.process_saml_response",
             side_effect=ValueError("signature invalid"),
         ):
             r = configured_client.post("/api/v1/saml/acs", data={"SAMLResponse": "bm90dmFsaWQ="})
@@ -380,10 +385,10 @@ class TestSAMLRoutesConfigured:
         import sys
         from unittest.mock import patch
 
-        # The ACS handler does `from src.api.saml.provider import process_saml_response`
+        # The ACS handler does `from cogtrix_core.api.saml.provider import process_saml_response`
         # inside the function body; we must hide the provider module so that import
         # raises ImportError (as it would when python3-saml is not installed).
-        with patch.dict(sys.modules, {"src.api.saml.provider": None}):
+        with patch.dict(sys.modules, {"cogtrix_core.api.saml.provider": None}):
             r = configured_client.post("/api/v1/saml/acs", data={"SAMLResponse": "bm90dmFsaWQ="})
         assert r.status_code == 503
         assert r.json()["error"]["code"] == "SAML_NOT_INSTALLED"
@@ -400,9 +405,11 @@ class TestSAMLRoutesConfigured:
         def _fresh_assertion(*_args, **_kwargs):
             return SimpleNamespace(assertion_id=f"ass-{uuid.uuid4()}")
 
-        with patch("src.api.routes.saml._provision_user", return_value=(object(), "token")):
+        with patch(
+            "cogtrix_core.api.routes.saml._provision_user", return_value=(object(), "token")
+        ):
             with patch(
-                "src.api.saml.provider.process_saml_response",
+                "cogtrix_core.api.saml.provider.process_saml_response",
                 side_effect=_fresh_assertion,
             ):
                 for _ in range(5):
@@ -432,7 +439,7 @@ class TestBuildRequestDataHostPinning:
         """http_host is pinned to sp_acs_url even when a spoofed Host header is present."""
         from unittest.mock import MagicMock
 
-        from src.api.routes.saml import _build_request_data
+        from cogtrix_core.api.routes.saml import _build_request_data
 
         config = _make_config(sp_acs_url="https://sp.example.com/api/v1/saml/acs")
 
@@ -453,7 +460,7 @@ class TestBuildRequestDataHostPinning:
         """Non-standard port in sp_acs_url is included in http_host."""
         from unittest.mock import MagicMock
 
-        from src.api.routes.saml import _build_request_data
+        from cogtrix_core.api.routes.saml import _build_request_data
 
         config = _make_config(sp_acs_url="https://sp.example.com:8443/api/v1/saml/acs")
 
@@ -474,7 +481,7 @@ class TestBuildRequestDataHostPinning:
         """https flag is derived from sp_acs_url scheme, not the request scheme."""
         from unittest.mock import MagicMock
 
-        from src.api.routes.saml import _build_request_data
+        from cogtrix_core.api.routes.saml import _build_request_data
 
         config = _make_config(sp_acs_url="https://sp.example.com/api/v1/saml/acs")
 

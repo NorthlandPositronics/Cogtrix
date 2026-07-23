@@ -43,12 +43,12 @@ os.environ.setdefault("COGTRIX_DB_URL", "sqlite+aiosqlite:///:memory:")
 # Imports after env is set
 # ---------------------------------------------------------------------------
 
-from src.api.auth import validate_api_key  # noqa: E402
-from src.api.db import models as _models  # noqa: E402, F401
-from src.api.db.engine import Base  # noqa: E402
-from src.api.db.models import ApiKey  # noqa: E402
-from src.api.db.repositories.api_keys import ApiKeyRepository  # noqa: E402
-from src.api.db.repositories.users import UserRepository  # noqa: E402
+from cogtrix_core.api.auth import validate_api_key  # noqa: E402
+from cogtrix_core.api.db import models as _models  # noqa: E402, F401
+from cogtrix_core.api.db.engine import Base  # noqa: E402
+from cogtrix_core.api.db.models import ApiKey  # noqa: E402
+from cogtrix_core.api.db.repositories.api_keys import ApiKeyRepository  # noqa: E402
+from cogtrix_core.api.db.repositories.users import UserRepository  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Shared fixtures
@@ -75,8 +75,8 @@ def test_app():
     loop.run_until_complete(_create())
 
     with patch.dict(os.environ, {"COGTRIX_JWT_SECRET": _TEST_JWT_SECRET}):
-        from src.api.app import create_app
-        from src.api.db.engine import get_db
+        from cogtrix_core.api.app import create_app
+        from cogtrix_core.api.db.engine import get_db
 
         app = create_app()
         app.state.test_session_factory = test_session_factory
@@ -191,7 +191,7 @@ class TestJwtSecretSnapshot:
     """JWT auth should use the startup snapshot, not the live environment."""
 
     def test_secret_remains_valid_after_env_is_cleared(self, client: TestClient) -> None:
-        from src.api.auth import _decode_jwt, create_access_token
+        from cogtrix_core.api.auth import _decode_jwt, create_access_token
 
         user_id = str(uuid.uuid4())
         with patch.dict(os.environ, {"COGTRIX_JWT_SECRET": ""}, clear=False):
@@ -259,7 +259,7 @@ class TestRefreshTokenSecurity:
         import asyncio as _asyncio
         import hashlib as _hashlib
 
-        from src.api.db.repositories.tokens import RefreshTokenRepository
+        from cogtrix_core.api.db.repositories.tokens import RefreshTokenRepository
 
         _, refresh = _register(client, "rf_2164", "rf_2164@test.com")
         token_hash = _hashlib.sha256(refresh.encode()).hexdigest()
@@ -432,7 +432,7 @@ class TestApiKeyAuth:
 
                 # Create an API key.
                 raw_key = "cgx_live_" + secrets.token_urlsafe(32)
-                from src.api.auth import _hash_api_key
+                from cogtrix_core.api.auth import _hash_api_key
 
                 key_hash = _hash_api_key(raw_key)
                 key_repo = ApiKeyRepository(db)
@@ -463,7 +463,7 @@ class TestApiKeyAuth:
         """validate_api_key debounces last_used_at writes within 60 s."""
         import asyncio as _asyncio
 
-        from src.api.auth import _API_KEY_LAST_USED
+        from cogtrix_core.api.auth import _API_KEY_LAST_USED
 
         engine = create_async_engine(
             "sqlite+aiosqlite:///:memory:",
@@ -488,7 +488,7 @@ class TestApiKeyAuth:
                 await db.commit()
 
                 raw_key = "cgx_live_" + secrets.token_urlsafe(32)
-                from src.api.auth import _hash_api_key
+                from cogtrix_core.api.auth import _hash_api_key
 
                 key_hash = _hash_api_key(raw_key)
                 key_repo = ApiKeyRepository(db)
@@ -556,7 +556,7 @@ class TestApiKeyAuth:
                 await db.commit()
 
                 raw_key = "cgx_live_" + secrets.token_urlsafe(32)
-                from src.api.auth import _hash_api_key
+                from cogtrix_core.api.auth import _hash_api_key
 
                 key_hash = _hash_api_key(raw_key)
                 key_repo = ApiKeyRepository(db)
@@ -599,7 +599,7 @@ class TestApiKeyAuth:
 
         user_id, role = _asyncio.run(_run())
 
-        from src.api.auth import create_access_token
+        from cogtrix_core.api.auth import create_access_token
 
         with patch.dict(os.environ, {"COGTRIX_JWT_SECRET": _TEST_JWT_SECRET}):
             token = create_access_token(user_id, role)

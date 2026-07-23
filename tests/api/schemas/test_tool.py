@@ -1,11 +1,11 @@
-"""Tests for src/api/schemas/tool.py."""
+"""Tests for cogtrix_core/api/schemas/tool.py."""
 
 from __future__ import annotations
 
 import pytest
 from pydantic import ValidationError
 
-from src.api.schemas.tool import (
+from cogtrix_core.api.schemas.tool import (
     ToolActionRequest,
     ToolOut,
     ToolParameterSchema,

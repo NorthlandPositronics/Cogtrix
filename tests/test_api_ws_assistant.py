@@ -54,7 +54,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 from starlette.testclient import WebSocketDenialResponse  # noqa: E402
 from starlette.websockets import WebSocketDisconnect  # noqa: E402
 
-from src.api.auth import create_access_token  # noqa: E402
+from cogtrix_core.api.auth import create_access_token  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Token / header helpers
@@ -311,7 +311,7 @@ def _make_mock_service(
 @pytest.fixture()
 def client():
     """TestClient with no assistant service."""
-    from src.api.app import app
+    from cogtrix_core.api.app import app
 
     with TestClient(app) as c:
         app.state.assistant_service = None
@@ -321,7 +321,7 @@ def client():
 @pytest.fixture()
 def client_with_service():
     """TestClient with a running mock assistant service."""
-    from src.api.app import app
+    from cogtrix_core.api.app import app
 
     with TestClient(app) as c:
         svc = _make_mock_service(channels=["whatsapp", "telegram"])
@@ -333,9 +333,9 @@ def client_with_service():
 @pytest.fixture()
 def ws_client():
     """TestClient configured for WebSocket testing (no assistant service)."""
-    with patch("src.api.session_bridge.warm_session") as mock_warm:
-        from src.api.session_bridge import ApiSession
-        from src.orchestration.session_state import SessionState
+    with patch("cogtrix_core.api.session_bridge.warm_session") as mock_warm:
+        from cogtrix_core.api.session_bridge import ApiSession
+        from cogtrix_core.orchestration.session_state import SessionState
 
         def _fake_warm(record, app_state):
             return ApiSession(
@@ -347,7 +347,7 @@ def ws_client():
 
         mock_warm.side_effect = _fake_warm
 
-        from src.api.app import app
+        from cogtrix_core.api.app import app
 
         with TestClient(app, raise_server_exceptions=False) as c:
             yield c
@@ -672,7 +672,7 @@ class TestAssistantStartStop:
         "config not available" branch without attempting actual network connections.
         Auth is still checked first (401/403 would indicate an auth bug).
         """
-        from src.api.app import app
+        from cogtrix_core.api.app import app
 
         saved_config = getattr(app.state, "config", None)
         app.state.config = None
@@ -728,7 +728,7 @@ class TestAssistantChats:
         assert resp.status_code == 401
 
     def test_channel_filter_returns_matching_sessions(self) -> None:
-        from src.api.app import app
+        from cogtrix_core.api.app import app
 
         sessions = [
             ("whatsapp::+1111", "whatsapp", "+1111@c.us"),
@@ -748,7 +748,7 @@ class TestAssistantChats:
         assert items[0]["channel"] == "telegram"
 
     def test_all_sessions_returned_without_filter(self) -> None:
-        from src.api.app import app
+        from cogtrix_core.api.app import app
 
         sessions = [
             ("whatsapp::+2222", "whatsapp", "+2222@c.us"),
@@ -805,7 +805,7 @@ class TestAssistantScheduled:
         assert resp.status_code == 409
 
     def test_patch_scheduled_not_found_returns_404(self) -> None:
-        from src.api.app import app
+        from cogtrix_core.api.app import app
 
         scheduler = _make_mock_scheduler()
         svc = _make_mock_service(scheduler=scheduler)
@@ -837,7 +837,7 @@ class TestAssistantScheduled:
         assert resp.status_code == 409
 
     def test_delete_scheduled_not_found_returns_404(self) -> None:
-        from src.api.app import app
+        from cogtrix_core.api.app import app
 
         scheduler = _make_mock_scheduler()
         svc = _make_mock_service(scheduler=scheduler)
@@ -858,7 +858,7 @@ class TestAssistantScheduled:
         assert resp.status_code == 401
 
     def test_delete_scheduled_success(self) -> None:
-        from src.api.app import app
+        from cogtrix_core.api.app import app
 
         msg = self._make_msg()
         scheduler = _make_mock_scheduler([msg])
@@ -876,7 +876,7 @@ class TestAssistantScheduled:
         assert msg.status == "cancelled"
 
     def test_patch_scheduled_success(self) -> None:
-        from src.api.app import app
+        from cogtrix_core.api.app import app
 
         msg = self._make_msg()
         scheduler = _make_mock_scheduler([msg])
@@ -932,7 +932,7 @@ class TestAssistantDeferred:
         assert resp.status_code == 409
 
     def test_delete_deferred_not_found_returns_404(self) -> None:
-        from src.api.app import app
+        from cogtrix_core.api.app import app
 
         dmgr = _make_mock_deferral_mgr({})
         svc = _make_mock_service(deferral_mgr=dmgr)
@@ -953,7 +953,7 @@ class TestAssistantDeferred:
         assert resp.status_code == 401
 
     def test_delete_deferred_success(self) -> None:
-        from src.api.app import app
+        from cogtrix_core.api.app import app
 
         key = "whatsapp::+777"
         record = self._make_record(key)
@@ -972,7 +972,7 @@ class TestAssistantDeferred:
         assert record.status == "cancelled"
 
     def test_get_deferred_with_records(self) -> None:
-        from src.api.app import app
+        from cogtrix_core.api.app import app
 
         key = "whatsapp::+888"
         record = self._make_record(key)
@@ -1014,7 +1014,7 @@ class TestAssistantGuardrails:
         assert resp.status_code == 401
 
     def test_delete_blacklist_entry_as_admin_returns_200(self) -> None:
-        from src.api.app import app
+        from cogtrix_core.api.app import app
 
         g = _make_mock_guardrails(blacklisted=["bad_chat"])
         svc = _make_mock_service(guardrails=g)
@@ -1042,7 +1042,7 @@ class TestAssistantGuardrails:
         assert resp.status_code == 401
 
     def test_get_guardrails_with_blacklisted_chats(self) -> None:
-        from src.api.app import app
+        from cogtrix_core.api.app import app
 
         g = _make_mock_guardrails(blacklisted=["chat_x", "chat_y"])
         svc = _make_mock_service(guardrails=g)
@@ -1088,7 +1088,7 @@ class TestAssistantKnowledge:
         assert resp.status_code == 401
 
     def test_delete_fact_as_admin_returns_200(self) -> None:
-        from src.api.app import app
+        from cogtrix_core.api.app import app
 
         fact = self._make_fact("Charlie", "Works remotely")
         ks = _make_mock_knowledge_store([fact])
@@ -1134,7 +1134,7 @@ class TestAssistantKnowledge:
         assert resp.status_code == 401
 
     def test_delete_fact_not_found_returns_404(self) -> None:
-        from src.api.app import app
+        from cogtrix_core.api.app import app
 
         ks = _make_mock_knowledge_store([])
         svc = _make_mock_service(knowledge_store=ks)
@@ -1151,7 +1151,7 @@ class TestAssistantKnowledge:
         assert resp.json()["error"]["code"] == "FACT_NOT_FOUND"
 
     def test_get_knowledge_with_facts(self) -> None:
-        from src.api.app import app
+        from cogtrix_core.api.app import app
 
         facts = [
             self._make_fact("Dave", "Is a chef"),
@@ -1188,7 +1188,7 @@ class TestAssistantContacts:
         assert resp.status_code == 401
 
     def test_get_contacts_with_phonebook(self) -> None:
-        from src.api.app import app
+        from cogtrix_core.api.app import app
 
         svc = _make_mock_service()
         svc._config.services = {
@@ -1245,7 +1245,7 @@ class TestAssistantOutbound:
         assert resp.status_code == 409
 
     def test_outbound_contact_not_found(self) -> None:
-        from src.api.app import app
+        from cogtrix_core.api.app import app
 
         svc = _make_mock_service(channels=["whatsapp"])
         svc._handler._services_config = {"whatsapp": {"phonebook": {"Bob": "+111"}}}
@@ -1263,7 +1263,7 @@ class TestAssistantOutbound:
         assert resp.json()["error"]["code"] == "CONTACT_NOT_FOUND"
 
     def test_outbound_channel_not_available(self) -> None:
-        from src.api.app import app
+        from cogtrix_core.api.app import app
 
         svc = _make_mock_service(channels=["whatsapp"])
         svc._handler._services_config = {"whatsapp": {"phonebook": {"Alice": "+111"}}}
@@ -1285,7 +1285,7 @@ class TestAssistantOutbound:
         assert resp.json()["error"]["code"] == "CHANNEL_NOT_AVAILABLE"
 
     def test_outbound_success(self) -> None:
-        from src.api.app import app
+        from cogtrix_core.api.app import app
 
         svc = _make_mock_service(channels=["whatsapp"])
         svc._handler._services_config = {"whatsapp": {"phonebook": {"Alice": "+1234567890"}}}
@@ -1319,7 +1319,7 @@ class TestAssistantOutbound:
         assert call_kwargs.kwargs["chat_id"] == "+1234567890@c.us"
 
     def test_outbound_case_insensitive_contact(self) -> None:
-        from src.api.app import app
+        from cogtrix_core.api.app import app
 
         svc = _make_mock_service(channels=["whatsapp"])
         svc._handler._services_config = {"whatsapp": {"phonebook": {"Alice": "+111"}}}
@@ -1338,7 +1338,7 @@ class TestAssistantOutbound:
 
     def test_outbound_whatsapp_appends_c_us(self) -> None:
         """WhatsApp identifiers without a suffix get @c.us appended."""
-        from src.api.app import app
+        from cogtrix_core.api.app import app
 
         svc = _make_mock_service(channels=["whatsapp"])
         svc._handler._services_config = {"whatsapp": {"phonebook": {"Bob": "5551234"}}}
@@ -1358,7 +1358,7 @@ class TestAssistantOutbound:
 
     def test_outbound_preferred_channel(self) -> None:
         """When contact is on multiple channels, the preferred one is used."""
-        from src.api.app import app
+        from cogtrix_core.api.app import app
 
         svc = _make_mock_service(channels=["whatsapp", "telegram"])
         svc._handler._services_config = {

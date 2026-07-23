@@ -17,8 +17,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-import src.config as cfgmod
-from src.config import (
+import cogtrix_core.config as cfgmod
+from cogtrix_core.config import (
     get_cached_config,
     load_config,
     reload_cached_config,
@@ -117,7 +117,7 @@ class TestRuntimeCallersReuseCache:
         get_cached_config()  # seed the cache
         with patch.object(cfgmod, "load_config", side_effect=AssertionError("re-read!")):
             # Importing the resolver and calling it must NOT re-invoke load_config.
-            from src.api.db.engine import _resolve_default_db_url
+            from cogtrix_core.api.db.engine import _resolve_default_db_url
 
             url = _resolve_default_db_url()
         assert url.startswith("sqlite+aiosqlite:///")
@@ -127,7 +127,7 @@ class TestRuntimeCallersReuseCache:
         reset_cached_config()
         get_cached_config()  # seed
         with patch.object(cfgmod, "load_config", side_effect=AssertionError("re-read!")):
-            from src.api.app import _get_cors_origins
+            from cogtrix_core.api.app import _get_cors_origins
 
             origins = _get_cors_origins()
         assert isinstance(origins, list) and origins

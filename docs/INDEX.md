@@ -38,11 +38,12 @@ docker pull ghcr.io/northlandpositronics/cogtrix-webui:latest
 | Guide | Description |
 |-------|-------------|
 | [API Overview](API/OVERVIEW.md) | Entry point — transport layers, authentication model, surface map |
-| [OpenAPI Schema](API/OPENAPI.yaml) ([JSON](API/OPENAPI.json)) | OpenAPI 3.1 specification for the REST surface — YAML and JSON forms are equivalent |
+| OpenAPI Schema | Live OpenAPI 3.1 spec at `/api/v1/openapi.json` on a running server — authoritative (also `/api/v1/docs` for Swagger UI) |
 | [Client Contract](API/CLIENT_CONTRACT.md) | TypeScript types, API client patterns, and WebSocket example code |
 | [WebSocket Protocol](API/WEBSOCKET_PROTOCOL.md) | Streaming message types, authentication, connection lifecycle |
 | [WebUI Development Guide](API/WEBUI_DEVELOPMENT_GUIDE.md) | Page map, component hierarchy, integration patterns, and state management for React developers |
 | [Enterprise API](API/ENTERPRISE.md) | Enterprise-tier endpoints (SAML, LDAP, JIT, teams, workspaces) |
+| [Rate Limiting](API/RATE_LIMITING.md) | Operator reference for the application-tier rate limiter |
 
 ## Developer Guides
 
@@ -59,6 +60,7 @@ docker pull ghcr.io/northlandpositronics/cogtrix-webui:latest
 | Document | Status | Description |
 |----------|--------|-------------|
 | [Versioning](VERSIONING.md) | Active | Versioning and stability policy |
+| [Releasing](RELEASING.md) | Active | Step-by-step release playbook: cut procedure, checks, stall/back-merge recovery |
 | [Migration](MIGRATION.md) | Planned | v1.0 migration guide draft |
 | [Tools Authoring](TOOLS_AUTHORING.md) | Active | How to add built-in, file-drop, and entry-point tools |
 

@@ -1,6 +1,6 @@
 """Tests for the text tools module."""
 
-from src.tools.text_tools import (
+from cogtrix_core.tools.text_tools import (
     TOOL_CONFIGS,
     ExtractEmailsInput,
     ExtractUrlsInput,

@@ -1,4 +1,4 @@
-"""Path traversal tests for `src/tools/shell.py`.
+"""Path traversal tests for `cogtrix_core/tools/shell.py`.
 
 Tests covering path traversal vectors in shell command strings:
 - ``../`` traversal in command arguments
@@ -12,9 +12,9 @@ path validation on the command string itself — these tests document
 the existing behaviour and the security gap.
 
 Related:
-  - ``src/tools/shell.py`` — the tool under test (156 lines)
-  - ``src/assistant/guardrails.py`` — ``ToolCallGuard._check_paths``
-  - ``src/utils/path_safety.py`` — path sanitisation utilities
+  - ``cogtrix_core/tools/shell.py`` — the tool under test (156 lines)
+  - ``cogtrix_core/assistant/guardrails.py`` — ``ToolCallGuard._check_paths``
+  - ``cogtrix_core/utils/path_safety.py`` — path sanitisation utilities
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from src.tools.shell import execute_shell_command
+from cogtrix_core.tools.shell import execute_shell_command
 
 
 class TestShellPathTraversal:

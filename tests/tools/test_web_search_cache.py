@@ -1,4 +1,4 @@
-"""Tests for src/tools/_web_search_cache.py (ADR-0056 stage 0)."""
+"""Tests for cogtrix_core/tools/_web_search_cache.py (ADR-0056 stage 0)."""
 
 from __future__ import annotations
 
@@ -6,8 +6,8 @@ import time
 
 import pytest
 
-from src.tools import _web_search_cache as cache_mod
-from src.tools._web_search_cache import (
+from cogtrix_core.tools import _web_search_cache as cache_mod
+from cogtrix_core.tools._web_search_cache import (
     cache_clear,
     cache_get,
     cache_put,

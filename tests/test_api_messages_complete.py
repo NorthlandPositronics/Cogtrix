@@ -32,14 +32,14 @@ from fastapi.testclient import TestClient  # noqa: E402
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine  # noqa: E402
 from sqlalchemy.pool import StaticPool  # noqa: E402
 
-from src.api.db.engine import Base, get_db  # noqa: E402
+from cogtrix_core.api.db.engine import Base, get_db  # noqa: E402
 
 _VALID_PASSWORD = "TestPass1!"
 
 
 @pytest.fixture()
 def app():
-    from src.api.app import create_app
+    from cogtrix_core.api.app import create_app
 
     engine = create_async_engine(
         "sqlite+aiosqlite:///:memory:",
@@ -741,7 +741,7 @@ class TestSendMessageSync:
         mock_reg.get_or_warm = AsyncMock(return_value=live)
         app.state.session_registry = mock_reg
 
-        with patch("src.api.routes.messages.run_message_turn", new=_mock_turn):
+        with patch("cogtrix_core.api.routes.messages.run_message_turn", new=_mock_turn):
             r = client.post(
                 f"/api/v1/sessions/{sid}/messages?sync=true",
                 headers=_h(tokens["owner"]),
@@ -768,7 +768,7 @@ class TestSendMessageSync:
         mock_reg.get_or_warm = AsyncMock(return_value=live)
         app.state.session_registry = mock_reg
 
-        with patch("src.api.routes.messages.run_message_turn", new=_mock_turn):
+        with patch("cogtrix_core.api.routes.messages.run_message_turn", new=_mock_turn):
             r = client.post(
                 f"/api/v1/sessions/{sid}/messages?sync=true",
                 headers=_h(tokens["owner"]),
@@ -803,7 +803,7 @@ class TestSendMessageSync:
         mock_reg.get_or_warm = AsyncMock(return_value=live)
         app.state.session_registry = mock_reg
 
-        with patch("src.api.routes.messages.run_message_turn", new=_mock_turn):
+        with patch("cogtrix_core.api.routes.messages.run_message_turn", new=_mock_turn):
             r = client.post(
                 f"/api/v1/sessions/{sid}/messages?sync=true",
                 headers=_h(tokens["owner"]),
@@ -861,7 +861,7 @@ class TestSendMessageSync:
         mock_reg.get_or_warm = AsyncMock(return_value=live)
         app.state.session_registry = mock_reg
 
-        with patch("src.api.routes.messages.run_message_turn", new=_mock_turn):
+        with patch("cogtrix_core.api.routes.messages.run_message_turn", new=_mock_turn):
             r = client.post(
                 f"/api/v1/sessions/{sid}/messages?sync=true",
                 headers=_h(tokens["owner"]),

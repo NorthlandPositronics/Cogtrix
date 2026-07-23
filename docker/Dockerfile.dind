@@ -133,7 +133,7 @@ COPY --chmod=0755 docker/docker-entrypoint.sh ./
 COPY alembic.ini ./
 COPY alembic/ ./alembic/
 COPY cogtrix.py ./
-COPY src/ ./src/
+COPY cogtrix_core/ ./cogtrix_core/
 
 VOLUME /data
 

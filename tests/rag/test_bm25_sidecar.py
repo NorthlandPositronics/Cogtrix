@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from src.rag.bm25 import (
+from cogtrix_core.rag.bm25 import (
     SIDECAR_VERSION,
     BM25Sidecar,
     _tokenize,

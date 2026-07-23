@@ -1,4 +1,4 @@
-"""Tests for src/api/schemas/organization.py — tenant org models."""
+"""Tests for cogtrix_core/api/schemas/organization.py — tenant org models."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 import pytest
 from pydantic import ValidationError
 
-from src.api.schemas.organization import (
+from cogtrix_core.api.schemas.organization import (
     AdminStats,
     AuditLogEntryOut,
     ImpersonateRequest,

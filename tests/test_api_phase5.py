@@ -42,7 +42,7 @@ os.environ.setdefault("COGTRIX_DB_URL", "sqlite+aiosqlite:///:memory:")
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-from src.api.auth import create_access_token  # noqa: E402
+from cogtrix_core.api.auth import create_access_token  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -54,7 +54,7 @@ def _api_client(
     extra_state: dict | None = None,
 ) -> Iterator[tuple[TestClient, str, str]]:
     """Yield (client, admin_token, user_token)."""
-    from src.api.app import create_app
+    from cogtrix_core.api.app import create_app
 
     admin_token = create_access_token(user_id=str(uuid.uuid4()), role="admin")
     user_token = create_access_token(user_id=str(uuid.uuid4()), role="user")
@@ -82,11 +82,11 @@ class TestDocumentUpload:
         with (
             _api_client() as (client, admin_token, _),
             patch(
-                "src.api.routes.rag.ingest_document_task",
+                "cogtrix_core.api.routes.rag.ingest_document_task",
                 new=AsyncMock(return_value=None),
             ),
-            patch("src.api.routes.rag._get_uploads_dir", return_value=tmp_path),
-            patch("src.api.tasks.rag._get_uploads_dir", return_value=tmp_path),
+            patch("cogtrix_core.api.routes.rag._get_uploads_dir", return_value=tmp_path),
+            patch("cogtrix_core.api.tasks.rag._get_uploads_dir", return_value=tmp_path),
         ):
             resp = client.post(
                 "/api/v1/rag/documents",
@@ -105,10 +105,10 @@ class TestDocumentUpload:
         with (
             _api_client() as (client, admin_token, _),
             patch(
-                "src.api.routes.rag.ingest_document_task",
+                "cogtrix_core.api.routes.rag.ingest_document_task",
                 new=AsyncMock(return_value=None),
             ),
-            patch("src.api.routes.rag._get_uploads_dir", return_value=tmp_path),
+            patch("cogtrix_core.api.routes.rag._get_uploads_dir", return_value=tmp_path),
         ):
             resp = client.post(
                 "/api/v1/rag/documents",
@@ -123,10 +123,10 @@ class TestDocumentUpload:
         with (
             _api_client() as (client, admin_token, _),
             patch(
-                "src.api.routes.rag.ingest_document_task",
+                "cogtrix_core.api.routes.rag.ingest_document_task",
                 new=AsyncMock(return_value=None),
             ),
-            patch("src.api.routes.rag._get_uploads_dir", return_value=tmp_path),
+            patch("cogtrix_core.api.routes.rag._get_uploads_dir", return_value=tmp_path),
         ):
             resp = client.post(
                 "/api/v1/rag/documents",
@@ -201,10 +201,10 @@ class TestDocumentListing:
         with (
             _api_client() as (client, admin_token, _),
             patch(
-                "src.api.routes.rag.ingest_document_task",
+                "cogtrix_core.api.routes.rag.ingest_document_task",
                 new=AsyncMock(return_value=None),
             ),
-            patch("src.api.routes.rag._get_uploads_dir", return_value=tmp_path),
+            patch("cogtrix_core.api.routes.rag._get_uploads_dir", return_value=tmp_path),
         ):
             seed_resp = client.post(
                 "/api/v1/rag/documents",
@@ -255,10 +255,10 @@ class TestDocumentListing:
         with (
             _api_client() as (client, admin_token, _),
             patch(
-                "src.api.routes.rag.ingest_document_task",
+                "cogtrix_core.api.routes.rag.ingest_document_task",
                 new=AsyncMock(return_value=None),
             ),
-            patch("src.api.routes.rag._get_uploads_dir", return_value=tmp_path),
+            patch("cogtrix_core.api.routes.rag._get_uploads_dir", return_value=tmp_path),
         ):
             upload_resp = client.post(
                 "/api/v1/rag/documents",
@@ -297,10 +297,10 @@ class TestDocumentListing:
         with (
             _api_client() as (client, admin_token, _),
             patch(
-                "src.api.routes.rag.ingest_document_task",
+                "cogtrix_core.api.routes.rag.ingest_document_task",
                 new=AsyncMock(return_value=None),
             ),
-            patch("src.api.routes.rag._get_uploads_dir", return_value=tmp_path),
+            patch("cogtrix_core.api.routes.rag._get_uploads_dir", return_value=tmp_path),
         ):
             client.post(
                 "/api/v1/rag/documents",
@@ -333,10 +333,10 @@ class TestDocumentListing:
         with (
             _api_client() as (client, admin_token, _),
             patch(
-                "src.api.routes.rag.ingest_document_task",
+                "cogtrix_core.api.routes.rag.ingest_document_task",
                 new=AsyncMock(return_value=None),
             ),
-            patch("src.api.routes.rag._get_uploads_dir", return_value=tmp_path),
+            patch("cogtrix_core.api.routes.rag._get_uploads_dir", return_value=tmp_path),
         ):
             client.post(
                 "/api/v1/rag/documents",
@@ -363,10 +363,10 @@ class TestDocumentDelete:
         with (
             _api_client() as (client, admin_token, _),
             patch(
-                "src.api.routes.rag.ingest_document_task",
+                "cogtrix_core.api.routes.rag.ingest_document_task",
                 new=AsyncMock(return_value=None),
             ),
-            patch("src.api.routes.rag._get_uploads_dir", return_value=tmp_path),
+            patch("cogtrix_core.api.routes.rag._get_uploads_dir", return_value=tmp_path),
         ):
             seed_resp = client.post(
                 "/api/v1/rag/documents",
@@ -399,10 +399,10 @@ class TestDocumentDelete:
         with (
             _api_client() as (client, admin_token, user_token),
             patch(
-                "src.api.routes.rag.ingest_document_task",
+                "cogtrix_core.api.routes.rag.ingest_document_task",
                 new=AsyncMock(return_value=None),
             ),
-            patch("src.api.routes.rag._get_uploads_dir", return_value=tmp_path),
+            patch("cogtrix_core.api.routes.rag._get_uploads_dir", return_value=tmp_path),
         ):
             seed_resp = client.post(
                 "/api/v1/rag/documents",
@@ -515,10 +515,10 @@ class TestDocumentContentType:
         with (
             _api_client() as (client, admin_token, _),
             patch(
-                "src.api.routes.rag.ingest_document_task",
+                "cogtrix_core.api.routes.rag.ingest_document_task",
                 new=AsyncMock(return_value=None),
             ),
-            patch("src.api.routes.rag._get_uploads_dir", return_value=tmp_path),
+            patch("cogtrix_core.api.routes.rag._get_uploads_dir", return_value=tmp_path),
         ):
             resp = client.post(
                 "/api/v1/rag/documents",
@@ -533,10 +533,10 @@ class TestDocumentContentType:
         with (
             _api_client() as (client, admin_token, _),
             patch(
-                "src.api.routes.rag.ingest_document_task",
+                "cogtrix_core.api.routes.rag.ingest_document_task",
                 new=AsyncMock(return_value=None),
             ),
-            patch("src.api.routes.rag._get_uploads_dir", return_value=tmp_path),
+            patch("cogtrix_core.api.routes.rag._get_uploads_dir", return_value=tmp_path),
         ):
             resp = client.post(
                 "/api/v1/rag/documents",

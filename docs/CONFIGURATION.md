@@ -22,6 +22,7 @@ This page covers every way to configure Cogtrix — from the simplest environmen
   - [Deferred Message Processing](#deferred-message-processing)
   - [Response Timing / Quiet Hours](#response-timing--quiet-hours)
   - [Assistant Guardrails](#assistant-guardrails)
+- [Project Context (`COGTRIX.md`)](#project-context-cogtrixmd)
 - [Environment Variables](#environment-variables)
 - [Command Line Arguments](#command-line-arguments)
   - [Setup Wizard](#setup-wizard)
@@ -656,13 +657,13 @@ mcp_servers:
 
 ### Tool Loading
 
-When Cogtrix starts, you see a line like:
+When Cogtrix starts in `full` banner mode (`banner: full`), the summary line includes a tool count, e.g.:
 
 ```
-Tools : [██████████░░] 41 on demand (3 unavailable)
+41 active (+3 on request)
 ```
 
-This means 41 tools are configured and ready to use, while 3 are hidden because their API keys aren't set. The progress bar shows the ratio of configured to total registered tools.
+This means 41 tools are active, while 3 more are available on demand (via `request_tools`) but not yet loaded. The default `compact` banner omits this line; see [Startup banner](#startup-banner) below.
 
 #### How it works
 
@@ -678,11 +679,15 @@ Released tools return to the catalog and can be re-requested later.
 
 #### Startup banner
 
-| Element | Meaning |
-|---------|---------|
-| `[██████████░░]` | Ratio of configured tools to total registered (e.g. 41/44) |
-| `41 on demand` | Tools the agent can request |
-| `(3 unavailable)` | Tools hidden due to missing API keys |
+The tool-count line only appears in `full` banner mode (`banner: full`); the default `compact` banner does not show it.
+
+| Tools text | Meaning |
+|---|---|
+| `disabled` | `--tools none` was passed — no tools loaded |
+| `N on demand` | No tools active yet; N are available to request |
+| `N on demand (M unavailable)` | Same, plus M tools hidden because their API keys aren't set |
+| `N active (+M on request)` | N tools are active now; M more are available on demand |
+| `N loaded` | N tools are active; none are on demand |
 
 #### What the agent sees
 
@@ -759,7 +764,7 @@ DuckDuckGo is always available with no setup. The other six (Tavily, Exa, Brave,
 
 | Provider | Auto-included by `web_search` when | Package | API Key | Free Tier |
 |----------|-----------------------------------|---------|---------|-----------|
-| DuckDuckGo | Always (no setup) | Included (`ddgs`) | None | Unlimited |
+| DuckDuckGo | Always (no setup) | Included (`curl_cffi` built-in scraper, `src/tools/_ddg.py`) | None | Unlimited |
 | Tavily | `TAVILY_API_KEY` set | `tavily-python` | `TAVILY_API_KEY` | 1 000/month |
 | Exa | `EXA_API_KEY` set | `exa-py` | `EXA_API_KEY` | 1 000/month |
 | Brave | `BRAVE_API_KEY` set | Included (`requests`) | `BRAVE_API_KEY` | 2 000/month |
@@ -1196,7 +1201,7 @@ auto_detect:
 3. **Auto-detect** — if any workflow has `auto_detect.enabled: true`, incoming messages are scored against keywords and regex patterns; the highest-scoring workflow above `min_confidence` is assigned and persisted as a binding
 4. **No match** — global `system_prompt` and default tool policy apply
 
-**API management:** 11 CRUD endpoints at `/api/v1/assistant/workflows/` — create, list, get, update, delete workflows; upload and manage per-workflow documents; bind and unbind chats. See the [API Reference](API/OPENAPI.yaml) for details.
+**API management:** 11 CRUD endpoints at `/api/v1/assistant/workflows/` — create, list, get, update, delete workflows; upload and manage per-workflow documents; bind and unbind chats. See the [API Overview](API/OVERVIEW.md) (or the live `/api/v1/openapi.json` schema) for details.
 
 **Per-workflow knowledge base:** when `knowledge_base: true`, upload documents to `data/workflows/<id>/docs/` via the API. A FAISS index is built at `data/workflows/<id>/vectordb/faiss_index/` and searched alongside the global index when the `query_knowledge_base` tool runs for a chat bound to that workflow.
 
@@ -1363,6 +1368,18 @@ must not bypass the guardrail. Use `llm_judge.model` to point the judge at a fas
 to avoid adding 500ms–2s to every request.
 
 **Disabling:** Set `guardrails.enabled: false` to bypass the entire pipeline. The `GuardrailPipeline` still exists in the handler but all checks return safe immediately.
+
+---
+
+## Project Context (`COGTRIX.md`)
+
+CLI mode (not the API) loads an optional `COGTRIX.md` file and prepends its content to the system prompt as `## Project Context (from COGTRIX.md)`. Cogtrix searches, first found wins:
+
+1. `./COGTRIX.md` (current working directory)
+2. `~/COGTRIX.md`
+3. `~/.config/cogtrix/COGTRIX.md`
+
+Content is truncated to 4000 characters. Use it to describe the project, conventions, and any standing instructions the agent should always see. A starter template is provided at [`docs/COGTRIX.md.template`](COGTRIX.md.template) — copy it to one of the search paths above and fill it in. Run `/info` in the CLI to see whether a `COGTRIX.md` was loaded and from which path.
 
 ---
 

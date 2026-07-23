@@ -1,6 +1,6 @@
 """Tests for SessionState dataclass — reset methods and initial state."""
 
-from src.orchestration.session_state import SessionState
+from cogtrix_core.orchestration.session_state import SessionState
 
 
 def test_initial_state_empty() -> None:

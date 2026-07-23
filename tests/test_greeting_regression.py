@@ -10,12 +10,12 @@ Bug context:
   `tool_calls=[...]` for greetings, where reasoning_content contains the actual
   response.
 - Fixes applied:
-  1. Updated DEFAULT_SYSTEM_PROMPT in src/agent/core.py to be more explicit
+  1. Updated DEFAULT_SYSTEM_PROMPT in cogtrix_core/agent/core.py to be more explicit
      about simple greetings
-  2. Updated extract_ai_content in src/orchestration/runner.py to extract
+  2. Updated extract_ai_content in cogtrix_core/orchestration/runner.py to extract
      reasoning-only content even when tool_calls is present
-  3. Increased DEFAULT_RECURSION_LIMIT from 90 to 300 in src/orchestration/graph.py
-  4. Added max_steps configuration support in src/orchestration/run_config.py
+  3. Increased DEFAULT_RECURSION_LIMIT from 90 to 300 in cogtrix_core/orchestration/graph.py
+  4. Added max_steps configuration support in cogtrix_core/orchestration/run_config.py
 """
 
 from __future__ import annotations
@@ -65,7 +65,7 @@ def require_gemma_container() -> None:
 @pytest.fixture(scope="module")
 def gemma_provider():
     """Return (ProviderConfig, ModelConfig) pointing at the local Gemma container."""
-    from src.config import ModelConfig, ProviderConfig
+    from cogtrix_core.config import ModelConfig, ProviderConfig
 
     pc = ProviderConfig(
         name="gemma-local",
@@ -85,7 +85,7 @@ def gemma_provider():
 @pytest.fixture(scope="module")
 def gemma_llm(gemma_provider):
     """LangChain ChatOpenAI instance backed by the Gemma container."""
-    from src.agent.core import create_llm_from_provider_config
+    from cogtrix_core.agent.core import create_llm_from_provider_config
 
     pc, mc = gemma_provider
     return create_llm_from_provider_config(pc, mc)
@@ -94,7 +94,7 @@ def gemma_llm(gemma_provider):
 @pytest.fixture
 def session_state():
     """Fresh no-confirm SessionState for each test."""
-    from src.orchestration.session_state import SessionState
+    from cogtrix_core.orchestration.session_state import SessionState
 
     return SessionState(no_confirm=True)
 
@@ -102,10 +102,10 @@ def session_state():
 @pytest.fixture(scope="module")
 def safe_tools_dict() -> dict[str, Any]:
     """Minimal set of deterministic tools that require no external services."""
-    from src.registry import ToolRegistry
+    from cogtrix_core.registry import ToolRegistry
 
     registry = ToolRegistry()
-    from src.registry import LazyToolProxy
+    from cogtrix_core.registry import LazyToolProxy
 
     all_tools = registry.load_all_tools()
     keep = {"calculate", "get_current_datetime", "word_count", "find_replace"}
@@ -122,7 +122,7 @@ def safe_tools_dict() -> dict[str, Any]:
 @pytest.fixture(scope="module")
 def tool_registry() -> Any:
     """A ToolRegistry instance for passing to run_agent."""
-    from src.registry import ToolRegistry
+    from cogtrix_core.registry import ToolRegistry
 
     registry = ToolRegistry()
     registry.load_all_tools()
@@ -132,7 +132,7 @@ def tool_registry() -> Any:
 @pytest.fixture
 def run_config(gemma_llm, safe_tools_dict, session_state):
     """AgentRunConfig suitable for single-turn integration tests."""
-    from src.orchestration.run_config import AgentRunConfig
+    from cogtrix_core.orchestration.run_config import AgentRunConfig
 
     return AgentRunConfig(
         llm=gemma_llm,
@@ -161,7 +161,7 @@ class TestExtractAiContentGreeting:
 
     def test_extract_ai_content_with_reasoning_only(self):
         """extract_ai_content extracts reasoning_content even when content is empty."""
-        from src.orchestration.runner import extract_ai_content
+        from cogtrix_core.orchestration.runner import extract_ai_content
 
         # Simulate a message with no content but reasoning_content
         msg = type(
@@ -180,7 +180,7 @@ class TestExtractAiContentGreeting:
 
     def test_extract_ai_content_with_empty_content_and_tool_calls(self):
         """extract_ai_content extracts reasoning_content when tool_calls is present."""
-        from src.orchestration.runner import extract_ai_content
+        from cogtrix_core.orchestration.runner import extract_ai_content
 
         # Simulate a message with tool_calls but no content, reasoning has the answer
         msg = type(
@@ -201,7 +201,7 @@ class TestExtractAiContentGreeting:
 
     def test_extract_ai_content_with_thinking_field(self):
         """extract_ai_content extracts thinking field when reasoning_content is missing."""
-        from src.orchestration.runner import extract_ai_content
+        from cogtrix_core.orchestration.runner import extract_ai_content
 
         msg = type(
             "MockMessage",
@@ -219,7 +219,7 @@ class TestExtractAiContentGreeting:
 
     def test_extract_ai_content_with_empty_content_empty_tool_calls(self):
         """extract_ai_content returns None when content is empty and no reasoning."""
-        from src.orchestration.runner import extract_ai_content
+        from cogtrix_core.orchestration.runner import extract_ai_content
 
         msg = type(
             "MockMessage",
@@ -236,7 +236,7 @@ class TestExtractAiContentGreeting:
 
     def test_extract_ai_content_with_normal_content(self):
         """extract_ai_content returns normal content when present."""
-        from src.orchestration.runner import extract_ai_content
+        from cogtrix_core.orchestration.runner import extract_ai_content
 
         msg = type(
             "MockMessage",
@@ -267,7 +267,7 @@ class TestGreetingResponses:
 
     def test_simple_greeting_hi(self, run_config, tool_registry):
         """Agent responds to simple greeting "Hi" with appropriate greeting content."""
-        from src.orchestration.runner import run_agent
+        from cogtrix_core.orchestration.runner import run_agent
 
         response = run_agent(
             user_input="Hi",
@@ -294,7 +294,7 @@ class TestGreetingResponses:
 
     def test_simple_greeting_hello(self, run_config, tool_registry):
         """Agent responds to "Hello" with appropriate greeting content."""
-        from src.orchestration.runner import run_agent
+        from cogtrix_core.orchestration.runner import run_agent
 
         response = run_agent(
             user_input="Hello",
@@ -312,7 +312,7 @@ class TestGreetingResponses:
 
     def test_simple_greeting_good_morning(self, run_config, tool_registry):
         """Agent responds to "Good morning" with appropriate greeting content."""
-        from src.orchestration.runner import run_agent
+        from cogtrix_core.orchestration.runner import run_agent
 
         response = run_agent(
             user_input="Good morning",
@@ -330,7 +330,7 @@ class TestGreetingResponses:
 
     def test_simple_greeting_hey_there(self, run_config, tool_registry):
         """Agent responds to "Hey there" with appropriate greeting content."""
-        from src.orchestration.runner import run_agent
+        from cogtrix_core.orchestration.runner import run_agent
 
         response = run_agent(
             user_input="Hey there",
@@ -351,7 +351,7 @@ class TestGreetingResponses:
 
     def test_greeting_with_empty_history(self, run_config, tool_registry):
         """Agent handles greeting with empty history correctly."""
-        from src.orchestration.runner import run_agent
+        from cogtrix_core.orchestration.runner import run_agent
 
         # No history at all
         response = run_agent(
@@ -371,7 +371,7 @@ class TestGreetingResponses:
         """Agent handles greeting after prior conversation history."""
         from langchain_core.messages import AIMessage, HumanMessage
 
-        from src.orchestration.runner import run_agent
+        from cogtrix_core.orchestration.runner import run_agent
 
         history = [
             HumanMessage(content="Hello, I have a question."),
@@ -402,7 +402,7 @@ class TestAgentGreetingBehavior:
 
     def test_agent_does_not_trigger_recovery_for_greeting(self, run_config, tool_registry):
         """Agent completes greeting interaction without recovery/step-limit messages."""
-        from src.orchestration.runner import run_agent
+        from cogtrix_core.orchestration.runner import run_agent
 
         # Try multiple greeting variations
         greetings = ["Hi", "Hello", "Hey", "Good morning", "Greetings"]
@@ -430,7 +430,7 @@ class TestAgentGreetingBehavior:
 
     def test_greeting_response_contains_meaningful_content(self, run_config, tool_registry):
         """Greeting responses contain actual greeting content, not placeholders."""
-        from src.orchestration.runner import run_agent
+        from cogtrix_core.orchestration.runner import run_agent
 
         response = run_agent(
             user_input="Hi",
@@ -452,7 +452,7 @@ class TestAgentGreetingBehavior:
 
     def test_greeting_response_is_not_empty_string(self, run_config, tool_registry):
         """Regression test: Agent must never return empty string for greeting."""
-        from src.orchestration.runner import run_agent
+        from cogtrix_core.orchestration.runner import run_agent
 
         # This is the core regression - we must never get content=""
         response = run_agent(
@@ -481,9 +481,9 @@ class TestMultiTurnGreeting:
         """Agent handles greeting -> question flow correctly."""
         from langchain_core.messages import AIMessage, HumanMessage
 
-        from src.orchestration.run_config import AgentRunConfig
-        from src.orchestration.runner import run_agent
-        from src.orchestration.session_state import SessionState
+        from cogtrix_core.orchestration.run_config import AgentRunConfig
+        from cogtrix_core.orchestration.runner import run_agent
+        from cogtrix_core.orchestration.session_state import SessionState
 
         cfg = AgentRunConfig(
             llm=gemma_llm,
@@ -528,9 +528,9 @@ class TestMultiTurnGreeting:
     def test_multiple_greetings_in_sequence(self, gemma_llm, tool_registry):
         """Agent handles multiple greetings in sequence without issues."""
 
-        from src.orchestration.run_config import AgentRunConfig
-        from src.orchestration.runner import run_agent
-        from src.orchestration.session_state import SessionState
+        from cogtrix_core.orchestration.run_config import AgentRunConfig
+        from cogtrix_core.orchestration.runner import run_agent
+        from cogtrix_core.orchestration.session_state import SessionState
 
         cfg = AgentRunConfig(
             llm=gemma_llm,

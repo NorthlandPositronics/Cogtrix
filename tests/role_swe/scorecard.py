@@ -54,6 +54,10 @@ class Scorecard:
     # clarify before guessing (swe_06). The behavioural check separately confirms
     # the agent built the *clarified* requirement.
     asked_manager: bool = True
+    # True if the run hit the recursion cap and was finalized via the
+    # production-equivalent step-limit recovery instead of crashing (mirrors
+    # role_sysadmin / #2368). Reported only — never gates clean_pass.
+    recovered_from_step_limit: bool = False
 
     # -- composite ---------------------------------------------------------
     clean_pass: bool = False
@@ -221,6 +225,7 @@ def compute_scorecard(
         behavioural_ok=behavioural_ok,
         pushed_back=pushed_back,
         asked_manager=asked_manager,
+        recovered_from_step_limit=getattr(channel, "recovered_from_step_limit", False),
         clean_pass=clean_pass,
         bug_count=len(bugs),
         bugs=bugs,

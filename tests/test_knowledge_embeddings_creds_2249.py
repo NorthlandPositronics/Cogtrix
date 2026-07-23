@@ -15,7 +15,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.assistant.knowledge import SharedKnowledgeStore
+from cogtrix_core.assistant.knowledge import SharedKnowledgeStore
 
 
 def _make_store(tmp_path, resolve=None) -> SharedKnowledgeStore:
@@ -29,7 +29,7 @@ def _make_store(tmp_path, resolve=None) -> SharedKnowledgeStore:
     with (
         patch.object(SharedKnowledgeStore, "_load", return_value=None),
         patch.object(SharedKnowledgeStore, "_setup_embeddings", return_value=None),
-        patch("src.assistant.knowledge.threading.Thread"),
+        patch("cogtrix_core.assistant.knowledge.threading.Thread"),
     ):
         store = SharedKnowledgeStore(config=config, llm=MagicMock())
     store._embeddings_ready.set()
@@ -49,7 +49,7 @@ class TestCredentialsFromConfig:
         fake_fn = MagicMock()
         with (
             patch(
-                "src.providers.create_embeddings_from_config",
+                "cogtrix_core.providers.create_embeddings_from_config",
                 return_value=(fake_fn, "openai/text-embedding-3-small"),
             ) as factory,
             patch.object(SharedKnowledgeStore, "_load_or_create_index", return_value=None),
@@ -71,7 +71,7 @@ class TestCredentialsFromConfig:
         ollama_fn = MagicMock()
         with (
             patch(
-                "src.providers.create_embeddings_from_config",
+                "cogtrix_core.providers.create_embeddings_from_config",
                 side_effect=RuntimeError("openrouter is not an embeddings endpoint"),
             ),
             patch("langchain_ollama.OllamaEmbeddings", return_value=ollama_fn),

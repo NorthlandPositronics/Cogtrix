@@ -21,7 +21,7 @@ os.environ.setdefault("COGTRIX_DB_URL", "sqlite+aiosqlite:///:memory:")
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage  # noqa: E402
 
-from src.orchestration.graph import _repair_tool_message_pairs  # noqa: E402
+from cogtrix_core.orchestration.graph import _repair_tool_message_pairs  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -184,19 +184,19 @@ class TestAIMessagePreservation:
 
 class TestWithinLimitUnlimited:
     def test_cap_zero_with_zero_current(self):
-        from src.api.plan_enforcement import PlanLimitSnapshot
+        from cogtrix_core.api.plan_enforcement import PlanLimitSnapshot
 
         snap = PlanLimitSnapshot("free", 0, 0, 0, 0, 0, 0, 0)
         assert snap.within_limit(0, 0) is True
 
     def test_cap_zero_with_large_current(self):
-        from src.api.plan_enforcement import PlanLimitSnapshot
+        from cogtrix_core.api.plan_enforcement import PlanLimitSnapshot
 
         snap = PlanLimitSnapshot("free", 0, 0, 0, 0, 50000, 0, 0)
         assert snap.within_limit(0, 50000) is True
 
     def test_cap_zero_can_always_add_user(self):
-        from src.api.plan_enforcement import PlanLimitSnapshot
+        from cogtrix_core.api.plan_enforcement import PlanLimitSnapshot
 
         snap = PlanLimitSnapshot("free", 0, 0, 0, 0, 99999, 0, 0)
         assert snap.can_add_user is True

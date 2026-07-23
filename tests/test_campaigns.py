@@ -23,7 +23,7 @@ import pytest
 # ---------------------------------------------------------------------------
 # Unit tests for CampaignManager (no API/DB dependency)
 # ---------------------------------------------------------------------------
-from src.assistant.campaign import (
+from cogtrix_core.assistant.campaign import (
     Campaign,
     CampaignManager,
     CampaignOutcomeState,
@@ -255,6 +255,57 @@ class TestCampaignReplyTracking:
         result = mgr.on_reply("whatsapp", "+999@c.us")
         assert result is None
 
+    def test_on_reply_updates_all_overlapping_active_campaigns(self, tmp_path) -> None:
+        """#2143: a contact targeted by more than one active campaign must have
+        last_reply_at updated in EVERY matching active campaign, not just the
+        first — otherwise the others treat the contact as non-responsive and
+        keep firing follow-ups / wrongly escalate."""
+        mgr = CampaignManager(tmp_path / "campaigns.json")
+
+        def _target() -> CampaignTarget:
+            return CampaignTarget(
+                contact_name="Alice", channel="whatsapp", chat_id="+111@c.us", status="active"
+            )
+
+        c1 = _make_campaign(name="Campaign 1", targets=[_target()], status="active")
+        c2 = _make_campaign(name="Campaign 2", targets=[_target()], status="active")
+        mgr.create(c1)
+        mgr.create(c2)
+
+        result = mgr.on_reply("whatsapp", "+111@c.us")
+
+        # Backward-compatible return: the first matching active campaign.
+        assert result is not None and result.id == c1.id
+        # BOTH overlapping campaigns recorded the reply (the #2143 fix).
+        assert c1.targets[0].last_reply_at is not None
+        assert c2.targets[0].last_reply_at is not None
+
+    def test_on_reply_only_touches_active_targets_in_active_campaigns(self, tmp_path) -> None:
+        """The fan-out is scoped: a non-active target, and any target in a
+        non-active campaign, are left untouched."""
+        mgr = CampaignManager(tmp_path / "campaigns.json")
+        active_t = CampaignTarget(
+            contact_name="Alice", channel="whatsapp", chat_id="+111@c.us", status="active"
+        )
+        completed_t = CampaignTarget(
+            contact_name="Alice", channel="whatsapp", chat_id="+111@c.us", status="completed"
+        )
+        draft_t = CampaignTarget(
+            contact_name="Alice", channel="whatsapp", chat_id="+111@c.us", status="active"
+        )
+        c_active = _make_campaign(name="active", targets=[active_t], status="active")
+        c_done_target = _make_campaign(name="done-target", targets=[completed_t], status="active")
+        c_draft = _make_campaign(name="draft", targets=[draft_t], status="draft")
+        mgr.create(c_active)
+        mgr.create(c_done_target)
+        mgr.create(c_draft)
+
+        mgr.on_reply("whatsapp", "+111@c.us")
+
+        assert c_active.targets[0].last_reply_at is not None
+        assert c_done_target.targets[0].last_reply_at is None  # non-active target untouched
+        assert c_draft.targets[0].last_reply_at is None  # non-active campaign untouched
+
     def test_get_active_campaign_for_chat(self, tmp_path) -> None:
         mgr = CampaignManager(tmp_path / "campaigns.json")
         targets = [
@@ -467,7 +518,7 @@ os.environ.setdefault("COGTRIX_DB_URL", "sqlite+aiosqlite:///:memory:")
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-from src.api.auth import create_access_token  # noqa: E402
+from cogtrix_core.api.auth import create_access_token  # noqa: E402
 
 
 def _admin_headers() -> dict[str, str]:
@@ -523,14 +574,14 @@ class TestCampaignAPIAuth:
     """Campaign API auth and error handling."""
 
     def test_list_campaigns_no_auth(self) -> None:
-        from src.api.app import app
+        from cogtrix_core.api.app import app
 
         with TestClient(app) as c:
             resp = c.get("/api/v1/assistant/campaigns")
         assert resp.status_code == 401
 
     def test_create_campaign_non_admin(self) -> None:
-        from src.api.app import app
+        from cogtrix_core.api.app import app
 
         with TestClient(app) as c:
             resp = c.post(
@@ -546,7 +597,7 @@ class TestCampaignAPIAuth:
         assert resp.status_code == 403
 
     def test_list_campaigns_no_service(self) -> None:
-        from src.api.app import app
+        from cogtrix_core.api.app import app
 
         with TestClient(app) as c:
             app.state.assistant_service = None
@@ -558,7 +609,7 @@ class TestCampaignAPICRUD:
     """Campaign CRUD via API."""
 
     def test_create_and_get_campaign(self, tmp_path) -> None:
-        from src.api.app import app
+        from cogtrix_core.api.app import app
 
         mgr = CampaignManager(tmp_path / "campaigns.json")
         svc = _make_mock_service(
@@ -608,7 +659,7 @@ class TestCampaignAPICRUD:
             app.state.assistant_service = None
 
     def test_update_campaign(self, tmp_path) -> None:
-        from src.api.app import app
+        from cogtrix_core.api.app import app
 
         mgr = CampaignManager(tmp_path / "campaigns.json")
         svc = _make_mock_service(
@@ -646,7 +697,7 @@ class TestCampaignAPICRUD:
             app.state.assistant_service = None
 
     def test_delete_campaign(self, tmp_path) -> None:
-        from src.api.app import app
+        from cogtrix_core.api.app import app
 
         mgr = CampaignManager(tmp_path / "campaigns.json")
         svc = _make_mock_service(
@@ -685,7 +736,7 @@ class TestCampaignAPICRUD:
             app.state.assistant_service = None
 
     def test_launch_campaign(self, tmp_path) -> None:
-        from src.api.app import app
+        from cogtrix_core.api.app import app
 
         mgr = CampaignManager(tmp_path / "campaigns.json")
         svc = _make_mock_service(
@@ -723,7 +774,7 @@ class TestCampaignAPICRUD:
             app.state.assistant_service = None
 
     def test_contact_not_found(self, tmp_path) -> None:
-        from src.api.app import app
+        from cogtrix_core.api.app import app
 
         mgr = CampaignManager(tmp_path / "campaigns.json")
         svc = _make_mock_service(
@@ -749,7 +800,7 @@ class TestCampaignAPICRUD:
             app.state.assistant_service = None
 
     def test_auto_launch(self, tmp_path) -> None:
-        from src.api.app import app
+        from cogtrix_core.api.app import app
 
         mgr = CampaignManager(tmp_path / "campaigns.json")
         svc = _make_mock_service(
@@ -779,7 +830,7 @@ class TestCampaignAPICRUD:
             app.state.assistant_service = None
 
     def test_multi_target_campaign(self, tmp_path) -> None:
-        from src.api.app import app
+        from cogtrix_core.api.app import app
 
         mgr = CampaignManager(tmp_path / "campaigns.json")
         svc = _make_mock_service(
@@ -973,7 +1024,7 @@ class TestCampaignAPIBugfixRegressions:
 
     def test_invalid_campaign_id_returns_400(self, tmp_path) -> None:
         """BUG-227: Non-UUID campaign_id must be rejected with 400."""
-        from src.api.app import app
+        from cogtrix_core.api.app import app
 
         mgr = CampaignManager(tmp_path / "campaigns.json")
         svc = _make_mock_service(channels=["whatsapp"], campaign_mgr=mgr)
@@ -995,7 +1046,7 @@ class TestCampaignAPIBugfixRegressions:
 
     def test_invalid_campaign_id_on_all_methods(self, tmp_path) -> None:
         """BUG-227: All campaign_id endpoints must validate format."""
-        from src.api.app import app
+        from cogtrix_core.api.app import app
 
         mgr = CampaignManager(tmp_path / "campaigns.json")
         svc = _make_mock_service(channels=["whatsapp"], campaign_mgr=mgr)
@@ -1033,7 +1084,7 @@ class TestCampaignAPIBugfixRegressions:
 
     def test_status_filter_rejects_invalid_value(self, tmp_path) -> None:
         """ARCH: status_filter query param must reject invalid values."""
-        from src.api.app import app
+        from cogtrix_core.api.app import app
 
         mgr = CampaignManager(tmp_path / "campaigns.json")
         svc = _make_mock_service(channels=["whatsapp"], campaign_mgr=mgr)
@@ -1049,7 +1100,7 @@ class TestCampaignAPIBugfixRegressions:
 
     def test_status_filter_accepts_valid_values(self, tmp_path) -> None:
         """ARCH: status_filter must accept all valid CampaignStatus values."""
-        from src.api.app import app
+        from cogtrix_core.api.app import app
 
         mgr = CampaignManager(tmp_path / "campaigns.json")
         svc = _make_mock_service(channels=["whatsapp"], campaign_mgr=mgr)

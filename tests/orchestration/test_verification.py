@@ -13,11 +13,11 @@ import pytest
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.messages.modifier import RemoveMessage
 
-from src.orchestration.nodes.recovery import (
+from cogtrix_core.orchestration.nodes.recovery import (
     build_handle_unverified_claim_node,
     build_handle_unverified_entity_node,
 )
-from src.orchestration.verification import (
+from cogtrix_core.orchestration.verification import (
     VERIFICATION_RULES,
     VerificationRule,
     _extract_specific_entities,
@@ -239,7 +239,7 @@ class TestFileContentClaimDetector:
         assert rule.name == "file_content_claim"
 
     def test_path_prefix(self) -> None:
-        text = "src/orchestration/graph.py defines build_agent_graph."
+        text = "cogtrix_core/orchestration/graph.py defines build_agent_graph."
         assert detect_unverified_claim(text, []) is not None
 
     def test_according_to_form(self) -> None:
@@ -696,7 +696,7 @@ class TestDetectUnsupportedQuote:
     )
 
     def test_next67_fabricated_quote_is_flagged(self) -> None:
-        from src.orchestration.verification import detect_unsupported_quote
+        from cogtrix_core.orchestration.verification import detect_unsupported_quote
 
         # The model's fabricated blockquote — subject swapped to the
         # *current* version; this string is NOT in the tool output.
@@ -713,7 +713,7 @@ class TestDetectUnsupportedQuote:
         assert any("discontinued" in q.lower() for q in flagged)
 
     def test_genuine_verbatim_quote_passes(self) -> None:
-        from src.orchestration.verification import detect_unsupported_quote
+        from cogtrix_core.orchestration.verification import detect_unsupported_quote
 
         # An accurate quote of the real sentence (markdown/whitespace differs
         # but the text is faithful) must NOT be flagged.
@@ -725,7 +725,7 @@ class TestDetectUnsupportedQuote:
         assert detect_unsupported_quote(response, [self.TOOL_OUTPUT]) == []
 
     def test_paraphrase_without_quotes_is_not_flagged(self) -> None:
-        from src.orchestration.verification import detect_unsupported_quote
+        from cogtrix_core.orchestration.verification import detect_unsupported_quote
 
         # No quote marks / blockquote → paraphrase, deliberately out of scope.
         response = (
@@ -735,14 +735,14 @@ class TestDetectUnsupportedQuote:
         assert detect_unsupported_quote(response, [self.TOOL_OUTPUT]) == []
 
     def test_short_quoted_token_not_flagged(self) -> None:
-        from src.orchestration.verification import detect_unsupported_quote
+        from cogtrix_core.orchestration.verification import detect_unsupported_quote
 
         # A short quoted word/phrase is below the substantive threshold.
         response = 'The model replied "OK" and the status is "active".'
         assert detect_unsupported_quote(response, [self.TOOL_OUTPUT]) == []
 
     def test_quote_of_user_prompt_is_grounded(self) -> None:
-        from src.orchestration.verification import detect_unsupported_quote
+        from cogtrix_core.orchestration.verification import detect_unsupported_quote
 
         # Quoting the user's own words back is legitimate even if absent
         # from tool output.
@@ -753,12 +753,12 @@ class TestDetectUnsupportedQuote:
         assert detect_unsupported_quote(response, [self.TOOL_OUTPUT], user_prompt=user_prompt) == []
 
     def test_no_tool_output_no_quotes_empty(self) -> None:
-        from src.orchestration.verification import detect_unsupported_quote
+        from cogtrix_core.orchestration.verification import detect_unsupported_quote
 
         assert detect_unsupported_quote("plain answer, no quotes", []) == []
 
     def test_capped_at_max_returned(self) -> None:
-        from src.orchestration.verification import detect_unsupported_quote
+        from cogtrix_core.orchestration.verification import detect_unsupported_quote
 
         response = "\n".join(
             f'> "fabricated authoritative statement number {n} that is not present anywhere in sources"'
@@ -785,7 +785,7 @@ class TestUnsupportedQuoteRecoveryNode:
         ]
 
     def test_injects_nudge_on_fabricated_quote(self) -> None:
-        from src.orchestration.nodes.recovery import build_handle_unsupported_quote_node
+        from cogtrix_core.orchestration.nodes.recovery import build_handle_unsupported_quote_node
 
         counter = [0]
         log = _DummyLogger()
@@ -814,7 +814,7 @@ class TestUnsupportedQuoteRecoveryNode:
         assert log.warnings
 
     def test_short_circuits_when_quote_is_grounded(self) -> None:
-        from src.orchestration.nodes.recovery import build_handle_unsupported_quote_node
+        from cogtrix_core.orchestration.nodes.recovery import build_handle_unsupported_quote_node
 
         counter = [0]
         log = _DummyLogger()
@@ -831,7 +831,7 @@ class TestUnsupportedQuoteRecoveryNode:
         assert result["messages"] == []
 
     def test_accepts_response_after_max_retries(self) -> None:
-        from src.orchestration.nodes.recovery import build_handle_unsupported_quote_node
+        from cogtrix_core.orchestration.nodes.recovery import build_handle_unsupported_quote_node
 
         counter = [1]  # already at max for max_retries=1
         log = _DummyLogger()
@@ -847,7 +847,7 @@ class TestUnsupportedQuoteRecoveryNode:
         assert any("retries exhausted" in str(args).lower() for args in log.infos)
 
     def test_handles_non_string_content(self) -> None:
-        from src.orchestration.nodes.recovery import build_handle_unsupported_quote_node
+        from cogtrix_core.orchestration.nodes.recovery import build_handle_unsupported_quote_node
 
         counter = [0]
         log = _DummyLogger()
@@ -882,7 +882,7 @@ class TestDetectVersionScopeMismatch:
     )
 
     def test_next67_k2_6_misattribution_is_flagged(self) -> None:
-        from src.orchestration.verification import detect_version_scope_mismatch
+        from cogtrix_core.orchestration.verification import detect_version_scope_mismatch
 
         response = (
             "Based on the Kimi documentation, `kimi-k2.6` was officially "
@@ -899,7 +899,7 @@ class TestDetectVersionScopeMismatch:
         # challenge. A table row is not a quote (so #1841 misses it), but the
         # scope-collapse onto k2.5 — also a child of the discontinued series —
         # is caught here.
-        from src.orchestration.verification import detect_version_scope_mismatch
+        from cogtrix_core.orchestration.verification import detect_version_scope_mismatch
 
         response = (
             "You're absolutely right. Here are the confirmed facts:\n\n"
@@ -916,7 +916,7 @@ class TestDetectVersionScopeMismatch:
         # When the source DOES scope the status to the exact version, the
         # claim is true and must not trip — "no false positives on legitimate
         # version-specific claims."
-        from src.orchestration.verification import detect_version_scope_mismatch
+        from cogtrix_core.orchestration.verification import detect_version_scope_mismatch
 
         source = "The `kimi-k2.6` model was officially discontinued on May 25, 2026."
         response = "Note that `kimi-k2.6` has been discontinued."
@@ -925,13 +925,13 @@ class TestDetectVersionScopeMismatch:
     def test_contrastive_sentence_is_not_flagged(self) -> None:
         # The correct answer mentions BOTH ids and the status, but scopes the
         # status to the parent. Nearest-ID attribution keeps the child clean.
-        from src.orchestration.verification import detect_version_scope_mismatch
+        from cogtrix_core.orchestration.verification import detect_version_scope_mismatch
 
         response = "`kimi-k2.6` is the current model, unlike the discontinued " "`kimi-k2` series."
         assert detect_version_scope_mismatch(response, [self.TOOL_OUTPUT]) == []
 
     def test_negated_status_is_not_flagged(self) -> None:
-        from src.orchestration.verification import detect_version_scope_mismatch
+        from cogtrix_core.orchestration.verification import detect_version_scope_mismatch
 
         response = "To be clear, `kimi-k2.6` is not discontinued; it is the current model."
         assert detect_version_scope_mismatch(response, [self.TOOL_OUTPUT]) == []
@@ -939,7 +939,7 @@ class TestDetectVersionScopeMismatch:
     def test_both_versions_discontinued_in_source_not_flagged(self) -> None:
         # If the evidence scopes the status to the child too (same sentence),
         # the claim is supported — not a collapse.
-        from src.orchestration.verification import detect_version_scope_mismatch
+        from cogtrix_core.orchestration.verification import detect_version_scope_mismatch
 
         source = "`kimi-k2.6` and the `kimi-k2` series are both discontinued."
         response = "`kimi-k2.6` was discontinued."
@@ -949,7 +949,7 @@ class TestDetectVersionScopeMismatch:
         # An invented status for an unrelated id (no prefix-parent in the
         # evidence) is a different bug class (pure fabrication) and is left to
         # the other guards — this detector only fires on genuine scope collapse.
-        from src.orchestration.verification import detect_version_scope_mismatch
+        from cogtrix_core.orchestration.verification import detect_version_scope_mismatch
 
         response = "`gpt-5.0` was discontinued last week."
         assert detect_version_scope_mismatch(response, [self.TOOL_OUTPUT]) == []
@@ -957,32 +957,32 @@ class TestDetectVersionScopeMismatch:
     def test_prefix_boundary_collision_not_flagged(self) -> None:
         # `kimi-k2` is a textual prefix of `kimi-k20`, but the boundary char
         # is a digit, not a version separator — not a parent/child relation.
-        from src.orchestration.verification import detect_version_scope_mismatch
+        from cogtrix_core.orchestration.verification import detect_version_scope_mismatch
 
         source = "The `kimi-k2` series was discontinued on May 25, 2026."
         response = "`kimi-k20` was discontinued."
         assert detect_version_scope_mismatch(response, [source]) == []
 
     def test_no_status_claim_returns_empty(self) -> None:
-        from src.orchestration.verification import detect_version_scope_mismatch
+        from cogtrix_core.orchestration.verification import detect_version_scope_mismatch
 
         response = "`kimi-k2.6` is a great model for reasoning tasks."
         assert detect_version_scope_mismatch(response, [self.TOOL_OUTPUT]) == []
 
     def test_empty_tool_content_returns_empty(self) -> None:
-        from src.orchestration.verification import detect_version_scope_mismatch
+        from cogtrix_core.orchestration.verification import detect_version_scope_mismatch
 
         response = "`kimi-k2.6` was discontinued."
         assert detect_version_scope_mismatch(response, []) == []
 
     def test_empty_response_returns_empty(self) -> None:
-        from src.orchestration.verification import detect_version_scope_mismatch
+        from cogtrix_core.orchestration.verification import detect_version_scope_mismatch
 
         assert detect_version_scope_mismatch("", [self.TOOL_OUTPUT]) == []
         assert detect_version_scope_mismatch("   ", [self.TOOL_OUTPUT]) == []
 
     def test_capped_at_max_returned(self) -> None:
-        from src.orchestration.verification import detect_version_scope_mismatch
+        from cogtrix_core.orchestration.verification import detect_version_scope_mismatch
 
         response = (
             "`kimi-k2.6` was discontinued.\n"
@@ -994,7 +994,7 @@ class TestDetectVersionScopeMismatch:
         assert len(flagged) == 2
 
     def test_nudge_names_child_and_parent(self) -> None:
-        from src.orchestration.verification import (
+        from cogtrix_core.orchestration.verification import (
             VersionScopeMismatch,
             format_version_scope_nudge,
         )
@@ -1022,7 +1022,7 @@ class TestVersionScopeRecoveryNode:
     TOOL_OUTPUT = TestDetectVersionScopeMismatch.TOOL_OUTPUT
 
     def test_injects_nudge_on_same_turn_mismatch(self) -> None:
-        from src.orchestration.nodes.recovery import build_handle_version_scope_node
+        from cogtrix_core.orchestration.nodes.recovery import build_handle_version_scope_node
 
         counter = [0]
         log = _DummyLogger()
@@ -1056,7 +1056,7 @@ class TestVersionScopeRecoveryNode:
         # that did NO fresh research. Current-turn-only collection would see
         # an empty corpus and miss it; conversation-wide collection catches it
         # against the turn-1 search result.
-        from src.orchestration.nodes.recovery import build_handle_version_scope_node
+        from cogtrix_core.orchestration.nodes.recovery import build_handle_version_scope_node
 
         counter = [0]
         log = _DummyLogger()
@@ -1089,7 +1089,7 @@ class TestVersionScopeRecoveryNode:
         assert "kimi-k2.5" in out[1].content
 
     def test_short_circuits_when_claim_is_grounded(self) -> None:
-        from src.orchestration.nodes.recovery import build_handle_version_scope_node
+        from cogtrix_core.orchestration.nodes.recovery import build_handle_version_scope_node
 
         counter = [0]
         log = _DummyLogger()
@@ -1111,7 +1111,7 @@ class TestVersionScopeRecoveryNode:
         assert result["messages"] == []
 
     def test_accepts_response_after_max_retries(self) -> None:
-        from src.orchestration.nodes.recovery import build_handle_version_scope_node
+        from cogtrix_core.orchestration.nodes.recovery import build_handle_version_scope_node
 
         counter = [1]  # already at max for max_retries=1
         log = _DummyLogger()
@@ -1131,7 +1131,7 @@ class TestVersionScopeRecoveryNode:
         assert any("retries exhausted" in str(args).lower() for args in log.infos)
 
     def test_handles_non_string_content(self) -> None:
-        from src.orchestration.nodes.recovery import build_handle_version_scope_node
+        from cogtrix_core.orchestration.nodes.recovery import build_handle_version_scope_node
 
         counter = [0]
         log = _DummyLogger()
@@ -1163,7 +1163,7 @@ class TestDetectUnsupportedAttribution:
     ]
 
     def test_next69_native_linux_build_is_flagged(self) -> None:
-        from src.orchestration.verification import detect_unsupported_attribution
+        from cogtrix_core.orchestration.verification import detect_unsupported_attribution
 
         response = (
             "Note: Voices of The Void has both a native Linux build and Windows "
@@ -1176,7 +1176,7 @@ class TestDetectUnsupportedAttribution:
         assert "native linux build" in flagged[0].lower()
 
     def test_legit_attribution_to_grounded_fact_not_flagged(self) -> None:
-        from src.orchestration.verification import detect_unsupported_attribution
+        from cogtrix_core.orchestration.verification import detect_unsupported_attribution
 
         # The same content the sources actually describe — attributed faithfully.
         response = (
@@ -1187,7 +1187,7 @@ class TestDetectUnsupportedAttribution:
         assert detect_unsupported_attribution(response, self.GROUNDED) == []
 
     def test_paraphrased_grounded_attribution_not_flagged(self) -> None:
-        from src.orchestration.verification import detect_unsupported_attribution
+        from cogtrix_core.orchestration.verification import detect_unsupported_attribution
 
         # Heavy paraphrase but every distinctive token comes from the source.
         response = (
@@ -1200,13 +1200,13 @@ class TestDetectUnsupportedAttribution:
         # The fabrication is real but no attribution — this is #1841's territory
         # (if quoted) or out of scope (if pure paraphrase). The attribution guard
         # only inspects paragraphs that credit a source.
-        from src.orchestration.verification import detect_unsupported_attribution
+        from cogtrix_core.orchestration.verification import detect_unsupported_attribution
 
         response = "Voices of The Void has a native Linux build. Use it directly."
         assert detect_unsupported_attribution(response, self.GROUNDED) == []
 
     def test_attribution_with_no_grounding_at_all_flagged(self) -> None:
-        from src.orchestration.verification import detect_unsupported_attribution
+        from cogtrix_core.orchestration.verification import detect_unsupported_attribution
 
         response = (
             "According to the docs, the install path is /opt/votv/bin and the "
@@ -1217,12 +1217,12 @@ class TestDetectUnsupportedAttribution:
     def test_short_attribution_below_minimum_distinctive_tokens(self) -> None:
         # Too little content to assess with confidence — skip rather than
         # over-trip on short hedged paraphrases.
-        from src.orchestration.verification import detect_unsupported_attribution
+        from cogtrix_core.orchestration.verification import detect_unsupported_attribution
 
         assert detect_unsupported_attribution("Per the spec, this is correct.", []) == []
 
     def test_attribution_to_user_prompt_not_flagged(self) -> None:
-        from src.orchestration.verification import detect_unsupported_attribution
+        from cogtrix_core.orchestration.verification import detect_unsupported_attribution
 
         response = (
             "According to your message, the configuration path is "
@@ -1236,7 +1236,7 @@ class TestDetectUnsupportedAttribution:
         assert detect_unsupported_attribution(response, [], user_prompt=user_prompt) == []
 
     def test_officially_announced_fabrication_flagged(self) -> None:
-        from src.orchestration.verification import detect_unsupported_attribution
+        from cogtrix_core.orchestration.verification import detect_unsupported_attribution
 
         response = (
             "Officially announced: Voices of The Void was deprecated last week "
@@ -1246,13 +1246,13 @@ class TestDetectUnsupportedAttribution:
         assert detect_unsupported_attribution(response, ground) != []
 
     def test_empty_response_returns_empty(self) -> None:
-        from src.orchestration.verification import detect_unsupported_attribution
+        from cogtrix_core.orchestration.verification import detect_unsupported_attribution
 
         assert detect_unsupported_attribution("", self.GROUNDED) == []
         assert detect_unsupported_attribution("   ", self.GROUNDED) == []
 
     def test_capped_at_max_returned(self) -> None:
-        from src.orchestration.verification import detect_unsupported_attribution
+        from cogtrix_core.orchestration.verification import detect_unsupported_attribution
 
         response = "\n\n".join(
             f"According to the docs, fabricated paragraph {n} mentions a "
@@ -1264,7 +1264,7 @@ class TestDetectUnsupportedAttribution:
         assert len(flagged) == 3
 
     def test_nudge_names_the_snippet(self) -> None:
-        from src.orchestration.verification import format_unsupported_attribution_nudge
+        from cogtrix_core.orchestration.verification import format_unsupported_attribution_nudge
 
         nudge = format_unsupported_attribution_nudge(
             ["Voices of The Void has a native Linux build as confirmed by community guides"]
@@ -1285,7 +1285,7 @@ class TestDetectUnsupportedAttribution:
         # pushback from the user, the model flipped on its initial
         # correct answer about ``_is_sycophantic_prefix`` and
         # manufactured authority via ``Re-reading the file confirms``.
-        from src.orchestration.verification import detect_unsupported_attribution
+        from cogtrix_core.orchestration.verification import detect_unsupported_attribution
 
         actual_file_excerpt = (
             "def _is_sycophantic_prefix(message):\n"
@@ -1305,7 +1305,7 @@ class TestDetectUnsupportedAttribution:
         assert flagged, "Q3 fabricated self-introspection must be flagged"
 
     def test_group_a_the_file_shows_unsupported(self) -> None:
-        from src.orchestration.verification import detect_unsupported_attribution
+        from cogtrix_core.orchestration.verification import detect_unsupported_attribution
 
         # Model claims the file says X; grounded file is unrelated.
         response = (
@@ -1319,7 +1319,7 @@ class TestDetectUnsupportedAttribution:
         assert flagged
 
     def test_group_a_the_code_demonstrates_unsupported(self) -> None:
-        from src.orchestration.verification import detect_unsupported_attribution
+        from cogtrix_core.orchestration.verification import detect_unsupported_attribution
 
         response = (
             "The code demonstrates that pull_request_handler uses a "
@@ -1330,7 +1330,7 @@ class TestDetectUnsupportedAttribution:
         assert flagged
 
     def test_group_a_looking_at_the_source_unsupported(self) -> None:
-        from src.orchestration.verification import detect_unsupported_attribution
+        from cogtrix_core.orchestration.verification import detect_unsupported_attribution
 
         response = (
             "Looking at the source confirms validator_pipeline runs "
@@ -1343,7 +1343,7 @@ class TestDetectUnsupportedAttribution:
         assert flagged
 
     def test_group_b_the_readme_confirms_unsupported(self) -> None:
-        from src.orchestration.verification import detect_unsupported_attribution
+        from cogtrix_core.orchestration.verification import detect_unsupported_attribution
 
         response = (
             "The README confirms that the Frobnicator module supports both "
@@ -1356,7 +1356,7 @@ class TestDetectUnsupportedAttribution:
         assert flagged
 
     def test_group_b_the_article_states_unsupported(self) -> None:
-        from src.orchestration.verification import detect_unsupported_attribution
+        from cogtrix_core.orchestration.verification import detect_unsupported_attribution
 
         response = (
             "The article states that the Banana protocol was deprecated in "
@@ -1369,7 +1369,7 @@ class TestDetectUnsupportedAttribution:
         assert flagged
 
     def test_group_b_the_changelog_notes_unsupported(self) -> None:
-        from src.orchestration.verification import detect_unsupported_attribution
+        from cogtrix_core.orchestration.verification import detect_unsupported_attribution
 
         response = (
             "The changelog notes that the WebSocket disconnect-rebalance "
@@ -1386,7 +1386,7 @@ class TestDetectUnsupportedAttribution:
     def test_fp_the_readme_needs_updating_not_flagged(self) -> None:
         # "The README" is the grammatical subject of an action verb
         # ("needs"), not a corroborating source. Must NOT fire.
-        from src.orchestration.verification import detect_unsupported_attribution
+        from cogtrix_core.orchestration.verification import detect_unsupported_attribution
 
         response = (
             "The README needs updating to say that the install path now "
@@ -1395,14 +1395,14 @@ class TestDetectUnsupportedAttribution:
         assert detect_unsupported_attribution(response, []) == []
 
     def test_fp_the_file_is_missing_not_flagged(self) -> None:
-        from src.orchestration.verification import detect_unsupported_attribution
+        from cogtrix_core.orchestration.verification import detect_unsupported_attribution
 
         response = "The file is missing — please supply it before I continue the analysis."
         assert detect_unsupported_attribution(response, []) == []
 
     def test_fp_the_code_i_wrote_not_flagged(self) -> None:
         # First-person ownership; not a corroborating attribution.
-        from src.orchestration.verification import detect_unsupported_attribution
+        from cogtrix_core.orchestration.verification import detect_unsupported_attribution
 
         response = (
             "The code I wrote does not handle the edge case where the "
@@ -1446,7 +1446,7 @@ class TestDetectNoncanonicalForkRecommendation:
     # ── Q5 verbatim reproducer ─────────────────────────────────────────
 
     def test_q5_reproducer_two_forks_flagged_canonical_kept(self) -> None:
-        from src.orchestration.verification import (
+        from cogtrix_core.orchestration.verification import (
             detect_noncanonical_fork_recommendation,
         )
 
@@ -1462,7 +1462,7 @@ class TestDetectNoncanonicalForkRecommendation:
     # ── Positive cases ─────────────────────────────────────────────────
 
     def test_personal_fork_with_recommendation_language(self) -> None:
-        from src.orchestration.verification import (
+        from cogtrix_core.orchestration.verification import (
             detect_noncanonical_fork_recommendation,
         )
 
@@ -1475,7 +1475,7 @@ class TestDetectNoncanonicalForkRecommendation:
         assert "RandomUser/wasmer" in flagged[0]
 
     def test_inactive_fork_with_recommendation_language(self) -> None:
-        from src.orchestration.verification import (
+        from cogtrix_core.orchestration.verification import (
             detect_noncanonical_fork_recommendation,
         )
 
@@ -1490,7 +1490,7 @@ class TestDetectNoncanonicalForkRecommendation:
     # ── Negative: canonical allowlist (org owners) ─────────────────────
 
     def test_canonical_bytecodealliance_not_flagged(self) -> None:
-        from src.orchestration.verification import (
+        from cogtrix_core.orchestration.verification import (
             detect_noncanonical_fork_recommendation,
         )
 
@@ -1501,7 +1501,7 @@ class TestDetectNoncanonicalForkRecommendation:
         assert detect_noncanonical_fork_recommendation(response) == []
 
     def test_canonical_kubernetes_not_flagged(self) -> None:
-        from src.orchestration.verification import (
+        from cogtrix_core.orchestration.verification import (
             detect_noncanonical_fork_recommendation,
         )
 
@@ -1513,7 +1513,7 @@ class TestDetectNoncanonicalForkRecommendation:
         assert detect_noncanonical_fork_recommendation(response) == []
 
     def test_canonical_torvalds_individual_owner_not_flagged(self) -> None:
-        from src.orchestration.verification import (
+        from cogtrix_core.orchestration.verification import (
             detect_noncanonical_fork_recommendation,
         )
 
@@ -1525,7 +1525,7 @@ class TestDetectNoncanonicalForkRecommendation:
     def test_canonical_owner_contains_repo_not_flagged(self) -> None:
         # wasmerio/wasmer — the org name is a superset of the project name,
         # a common canonical pattern.
-        from src.orchestration.verification import (
+        from cogtrix_core.orchestration.verification import (
             detect_noncanonical_fork_recommendation,
         )
 
@@ -1538,7 +1538,7 @@ class TestDetectNoncanonicalForkRecommendation:
     # ── Negative: no recommendation language ───────────────────────────
 
     def test_url_without_recommendation_language_not_flagged(self) -> None:
-        from src.orchestration.verification import (
+        from cogtrix_core.orchestration.verification import (
             detect_noncanonical_fork_recommendation,
         )
 
@@ -1555,7 +1555,7 @@ class TestDetectNoncanonicalForkRecommendation:
     # ── Negative: user explicitly asked for forks ──────────────────────
 
     def test_user_explicitly_asked_for_forks_suppresses(self) -> None:
-        from src.orchestration.verification import (
+        from cogtrix_core.orchestration.verification import (
             detect_noncanonical_fork_recommendation,
         )
 
@@ -1569,7 +1569,7 @@ class TestDetectNoncanonicalForkRecommendation:
     # ── Negative: empty / no URLs ──────────────────────────────────────
 
     def test_empty_response_returns_empty(self) -> None:
-        from src.orchestration.verification import (
+        from cogtrix_core.orchestration.verification import (
             detect_noncanonical_fork_recommendation,
         )
 
@@ -1577,7 +1577,7 @@ class TestDetectNoncanonicalForkRecommendation:
         assert detect_noncanonical_fork_recommendation("   ") == []
 
     def test_response_without_github_urls_not_flagged(self) -> None:
-        from src.orchestration.verification import (
+        from cogtrix_core.orchestration.verification import (
             detect_noncanonical_fork_recommendation,
         )
 
@@ -1590,7 +1590,7 @@ class TestDetectNoncanonicalForkRecommendation:
     # ── Nudge format ───────────────────────────────────────────────────
 
     def test_nudge_names_the_flagged_url(self) -> None:
-        from src.orchestration.verification import (
+        from cogtrix_core.orchestration.verification import (
             format_noncanonical_fork_nudge,
         )
 
@@ -1619,7 +1619,7 @@ class TestNoncanonicalForkRecoveryNode:
             self.infos.append(args)
 
     def _q5_msgs(self) -> list:
-        from src.orchestration.verification import (
+        from cogtrix_core.orchestration.verification import (
             detect_noncanonical_fork_recommendation,
         )
 
@@ -1632,7 +1632,7 @@ class TestNoncanonicalForkRecoveryNode:
         ]
 
     def test_injects_nudge_on_flagged_url(self) -> None:
-        from src.orchestration.nodes.recovery import (
+        from cogtrix_core.orchestration.nodes.recovery import (
             build_handle_noncanonical_fork_node,
         )
 
@@ -1657,7 +1657,7 @@ class TestNoncanonicalForkRecoveryNode:
         assert log.warnings
 
     def test_short_circuits_when_response_no_longer_flags(self) -> None:
-        from src.orchestration.nodes.recovery import (
+        from cogtrix_core.orchestration.nodes.recovery import (
             build_handle_noncanonical_fork_node,
         )
 
@@ -1680,7 +1680,7 @@ class TestNoncanonicalForkRecoveryNode:
         assert result["messages"] == []
 
     def test_accepts_response_after_max_retries(self) -> None:
-        from src.orchestration.nodes.recovery import (
+        from cogtrix_core.orchestration.nodes.recovery import (
             build_handle_noncanonical_fork_node,
         )
 
@@ -1694,7 +1694,7 @@ class TestNoncanonicalForkRecoveryNode:
         assert any("retries exhausted" in str(args).lower() for args in log.infos)
 
     def test_handles_empty_messages(self) -> None:
-        from src.orchestration.nodes.recovery import (
+        from cogtrix_core.orchestration.nodes.recovery import (
             build_handle_noncanonical_fork_node,
         )
 
@@ -1721,7 +1721,7 @@ class TestUnsupportedAttributionRecoveryNode:
         ]
 
     def test_injects_nudge_on_fabricated_attribution(self) -> None:
-        from src.orchestration.nodes.recovery import (
+        from cogtrix_core.orchestration.nodes.recovery import (
             build_handle_unsupported_attribution_node,
         )
 
@@ -1756,7 +1756,7 @@ class TestUnsupportedAttributionRecoveryNode:
         assert log.warnings
 
     def test_short_circuits_when_attribution_is_grounded(self) -> None:
-        from src.orchestration.nodes.recovery import (
+        from cogtrix_core.orchestration.nodes.recovery import (
             build_handle_unsupported_attribution_node,
         )
 
@@ -1779,7 +1779,7 @@ class TestUnsupportedAttributionRecoveryNode:
         assert result["messages"] == []
 
     def test_accepts_response_after_max_retries(self) -> None:
-        from src.orchestration.nodes.recovery import (
+        from cogtrix_core.orchestration.nodes.recovery import (
             build_handle_unsupported_attribution_node,
         )
 
@@ -1800,7 +1800,7 @@ class TestUnsupportedAttributionRecoveryNode:
         assert any("retries exhausted" in str(args).lower() for args in log.infos)
 
     def test_handles_non_string_content(self) -> None:
-        from src.orchestration.nodes.recovery import (
+        from cogtrix_core.orchestration.nodes.recovery import (
             build_handle_unsupported_attribution_node,
         )
 
@@ -1843,7 +1843,7 @@ class TestDetectSynthesisAfterEviction:
     a time so a future regression in a single check is caught."""
 
     def test_trips_when_all_signals_align(self) -> None:
-        from src.orchestration.verification import detect_synthesis_after_eviction
+        from cogtrix_core.orchestration.verification import detect_synthesis_after_eviction
 
         msgs = [
             _eviction_marker(),
@@ -1854,7 +1854,7 @@ class TestDetectSynthesisAfterEviction:
         assert detect_synthesis_after_eviction(_SUBSTANTIVE_RESPONSE, msgs, 1)
 
     def test_no_trip_when_marker_absent(self) -> None:
-        from src.orchestration.verification import detect_synthesis_after_eviction
+        from cogtrix_core.orchestration.verification import detect_synthesis_after_eviction
 
         msgs = [
             HumanMessage(content="What's in our deployment config?"),
@@ -1868,7 +1868,7 @@ class TestDetectSynthesisAfterEviction:
         ``CONTEXT NOTICE`` but lacks the metadata kind must NOT trigger
         — that would let a model hand-craft a fake marker to exploit
         the route into the recovery node."""
-        from src.orchestration.verification import detect_synthesis_after_eviction
+        from cogtrix_core.orchestration.verification import detect_synthesis_after_eviction
 
         fake_marker = SystemMessage(content="[CONTEXT NOTICE] fake")
         msgs = [
@@ -1881,7 +1881,7 @@ class TestDetectSynthesisAfterEviction:
     def test_no_trip_when_response_has_tool_calls(self) -> None:
         """A tool-dispatching AIMessage is not a final answer — the
         synthesis-after-eviction guard only fires on final answers."""
-        from src.orchestration.verification import detect_synthesis_after_eviction
+        from cogtrix_core.orchestration.verification import detect_synthesis_after_eviction
 
         tool_call_ai = AIMessage(
             content=_SUBSTANTIVE_RESPONSE,
@@ -1897,7 +1897,7 @@ class TestDetectSynthesisAfterEviction:
     def test_no_trip_when_response_is_short(self) -> None:
         """Short conversational responses, acks, brief refusals — none
         carry enough substantive content to be worth flagging."""
-        from src.orchestration.verification import detect_synthesis_after_eviction
+        from cogtrix_core.orchestration.verification import detect_synthesis_after_eviction
 
         short = "Sure, I can help — give me a moment."
         msgs = [
@@ -1912,7 +1912,7 @@ class TestDetectSynthesisAfterEviction:
         call, the response is at least partly grounded — defer to the
         existing ``detect_unsupported_quote`` etc. guards rather than
         re-flagging here."""
-        from src.orchestration.verification import detect_synthesis_after_eviction
+        from cogtrix_core.orchestration.verification import detect_synthesis_after_eviction
 
         msgs = [
             _eviction_marker(),
@@ -1932,7 +1932,7 @@ class TestDetectSynthesisAfterEviction:
     def test_no_trip_on_compliant_context_was_lost(self) -> None:
         """An honest acknowledgement of the loss is the GOOD outcome —
         never flag it."""
-        from src.orchestration.verification import detect_synthesis_after_eviction
+        from cogtrix_core.orchestration.verification import detect_synthesis_after_eviction
 
         compliant = (
             "The earlier context was removed from this conversation, so I no "
@@ -1948,7 +1948,7 @@ class TestDetectSynthesisAfterEviction:
         assert not detect_synthesis_after_eviction(compliant, msgs, 1)
 
     def test_no_trip_on_compliant_could_you_re_share(self) -> None:
-        from src.orchestration.verification import detect_synthesis_after_eviction
+        from cogtrix_core.orchestration.verification import detect_synthesis_after_eviction
 
         compliant = (
             "I am unable to recall the specifics from earlier in this "
@@ -1970,7 +1970,7 @@ class TestDetectSynthesisAfterEviction:
         be flagged.  This guards against partial-acknowledgement
         fabrication where the model says "in the prior discussion..."
         and then invents the prior discussion."""
-        from src.orchestration.verification import detect_synthesis_after_eviction
+        from cogtrix_core.orchestration.verification import detect_synthesis_after_eviction
 
         # 250+ chars, no compliant phrase.
         deceptive = (
@@ -1990,7 +1990,7 @@ class TestDetectSynthesisAfterEviction:
         """The recovery nudge must spell out the three compliant
         revision paths so the model has explicit alternatives to
         regenerate against."""
-        from src.orchestration.verification import format_synthesis_after_eviction_nudge
+        from cogtrix_core.orchestration.verification import format_synthesis_after_eviction_nudge
 
         nudge = format_synthesis_after_eviction_nudge()
         low = nudge.lower()
@@ -2028,7 +2028,7 @@ class TestSynthesisAfterEvictionRecoveryNode:
         ]
 
     def test_injects_nudge_on_flagged_response(self) -> None:
-        from src.orchestration.nodes.recovery import (
+        from cogtrix_core.orchestration.nodes.recovery import (
             build_handle_synthesis_after_eviction_node,
         )
 
@@ -2055,7 +2055,7 @@ class TestSynthesisAfterEvictionRecoveryNode:
     def test_short_circuits_when_response_no_longer_flags(self) -> None:
         """If a concurrent path already revised the response into a
         compliant form, re-detection fails and the node no-ops."""
-        from src.orchestration.nodes.recovery import (
+        from cogtrix_core.orchestration.nodes.recovery import (
             build_handle_synthesis_after_eviction_node,
         )
 
@@ -2084,7 +2084,7 @@ class TestSynthesisAfterEvictionRecoveryNode:
         assert result["messages"] == []
 
     def test_accepts_response_after_max_retries(self) -> None:
-        from src.orchestration.nodes.recovery import (
+        from cogtrix_core.orchestration.nodes.recovery import (
             build_handle_synthesis_after_eviction_node,
         )
 
@@ -2102,7 +2102,7 @@ class TestSynthesisAfterEvictionRecoveryNode:
         """Anthropic content-block style AIMessages must not crash the
         node — detector takes ``str`` only, so non-string content
         short-circuits cleanly."""
-        from src.orchestration.nodes.recovery import (
+        from cogtrix_core.orchestration.nodes.recovery import (
             build_handle_synthesis_after_eviction_node,
         )
 
@@ -2120,7 +2120,7 @@ class TestSynthesisAfterEvictionRecoveryNode:
         assert result["messages"] == []
 
     def test_handles_empty_messages(self) -> None:
-        from src.orchestration.nodes.recovery import (
+        from cogtrix_core.orchestration.nodes.recovery import (
             build_handle_synthesis_after_eviction_node,
         )
 
@@ -2162,12 +2162,12 @@ class TestRefusalShortCircuit:
     """
 
     def test_text_is_refusal_recognises_canonical_text(self) -> None:
-        from src.orchestration.response_detectors import text_is_refusal
+        from cogtrix_core.orchestration.response_detectors import text_is_refusal
 
         assert text_is_refusal(_REFUSAL_TEXT)
 
     def test_text_is_refusal_negative_cases(self) -> None:
-        from src.orchestration.response_detectors import text_is_refusal
+        from cogtrix_core.orchestration.response_detectors import text_is_refusal
 
         # Affirmative completion claim — must NOT be classified as refusal.
         assert not text_is_refusal("I have paid invoice INV-2026-0510.")
@@ -2183,7 +2183,7 @@ class TestRefusalShortCircuit:
         detector sees this as an unsupported quote because it only
         consults tool results, not the system prompt.  Refusal
         short-circuit makes that moot."""
-        from src.orchestration.verification import detect_unsupported_quote
+        from cogtrix_core.orchestration.verification import detect_unsupported_quote
 
         result = detect_unsupported_quote(
             response_content=_REFUSAL_TEXT,
@@ -2196,7 +2196,7 @@ class TestRefusalShortCircuit:
         """The refusal echoes ``INV-2026-0510`` from the user prompt
         while declining the action.  Not an unverified entity claim
         — just a reference to what the user asked about."""
-        from src.orchestration.verification import detect_unverified_entities
+        from cogtrix_core.orchestration.verification import detect_unverified_entities
 
         result = detect_unverified_entities(
             response_content=_REFUSAL_TEXT,
@@ -2209,7 +2209,7 @@ class TestRefusalShortCircuit:
         """The refusal cites ``According to our payment policies`` —
         attribution to the system prompt's policy block.  Grounded by
         definition; detector must not fire."""
-        from src.orchestration.verification import detect_unsupported_attribution
+        from cogtrix_core.orchestration.verification import detect_unsupported_attribution
 
         result = detect_unsupported_attribution(
             response_content=_REFUSAL_TEXT,
@@ -2224,7 +2224,7 @@ class TestRefusalShortCircuit:
         success claim.  Detector must not fire."""
         from langchain_core.messages import AIMessage, HumanMessage
 
-        from src.orchestration.response_detectors import (
+        from cogtrix_core.orchestration.response_detectors import (
             _looks_like_fabricated_action_success_without_tool_call,
         )
 
@@ -2246,7 +2246,7 @@ class TestRefusalShortCircuit:
         so a future refactor doesn't "fix" the inconsistency."""
         from langchain_core.messages import AIMessage, HumanMessage
 
-        from src.orchestration.response_detectors import (
+        from cogtrix_core.orchestration.response_detectors import (
             _looks_like_fabricated_tool_error_quote,
         )
 
@@ -2267,7 +2267,7 @@ class TestRefusalShortCircuit:
     def test_detectors_still_fire_on_non_refusal_fabrication(self) -> None:
         """Sanity check: the short-circuit must ONLY trigger on
         refusals.  An affirmative fabrication must still be caught."""
-        from src.orchestration.verification import (
+        from cogtrix_core.orchestration.verification import (
             detect_unsupported_attribution,
             detect_unsupported_quote,
         )
@@ -2376,7 +2376,7 @@ class TestDetectorRefusalMatrix:
     def test_phantom_tool_markup_does_not_fire(self, sample_name: str) -> None:
         from langchain_core.messages import AIMessage
 
-        from src.orchestration.response_detectors import _looks_like_phantom_tool_markup
+        from cogtrix_core.orchestration.response_detectors import _looks_like_phantom_tool_markup
 
         text, _ = _REFUSAL_SAMPLES[sample_name]
         msg = AIMessage(content=text)
@@ -2388,7 +2388,9 @@ class TestDetectorRefusalMatrix:
     def test_markdown_phantom_report_does_not_fire(self, sample_name: str) -> None:
         from langchain_core.messages import AIMessage
 
-        from src.orchestration.response_detectors import _looks_like_markdown_phantom_report
+        from cogtrix_core.orchestration.response_detectors import (
+            _looks_like_markdown_phantom_report,
+        )
 
         text, _ = _REFUSAL_SAMPLES[sample_name]
         msg = AIMessage(content=text)
@@ -2400,7 +2402,7 @@ class TestDetectorRefusalMatrix:
     def test_sycophantic_prefix_does_not_fire(self, sample_name: str) -> None:
         from langchain_core.messages import AIMessage
 
-        from src.orchestration.response_detectors import _is_sycophantic_prefix
+        from cogtrix_core.orchestration.response_detectors import _is_sycophantic_prefix
 
         text, _ = _REFUSAL_SAMPLES[sample_name]
         msg = AIMessage(content=text)
@@ -2415,7 +2417,7 @@ class TestDetectorRefusalMatrix:
         classified as not-a-fabricated-success."""
         from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
-        from src.orchestration.response_detectors import (
+        from cogtrix_core.orchestration.response_detectors import (
             _looks_like_fabricated_success_after_tool_errors,
         )
 
@@ -2443,7 +2445,7 @@ class TestDetectorRefusalMatrix:
         claims (weather, FX rates, latest version of X, file
         contents).  A refusal that DECLINES to make such a claim must
         not be classified as having made one."""
-        from src.orchestration.verification import detect_unverified_claim
+        from cogtrix_core.orchestration.verification import detect_unverified_claim
 
         text, _ = _REFUSAL_SAMPLES[sample_name]
         result = detect_unverified_claim(text, tool_names_called_this_turn=[])
@@ -2453,7 +2455,7 @@ class TestDetectorRefusalMatrix:
 
     @pytest.mark.parametrize("sample_name", list(_REFUSAL_SAMPLES.keys()))
     def test_detect_version_scope_mismatch_does_not_fire(self, sample_name: str) -> None:
-        from src.orchestration.verification import detect_version_scope_mismatch
+        from cogtrix_core.orchestration.verification import detect_version_scope_mismatch
 
         text, _ = _REFUSAL_SAMPLES[sample_name]
         result = detect_version_scope_mismatch(text, [])
@@ -2464,7 +2466,7 @@ class TestDetectorRefusalMatrix:
 
     @pytest.mark.parametrize("sample_name", list(_REFUSAL_SAMPLES.keys()))
     def test_detect_noncanonical_fork_recommendation_does_not_fire(self, sample_name: str) -> None:
-        from src.orchestration.verification import detect_noncanonical_fork_recommendation
+        from cogtrix_core.orchestration.verification import detect_noncanonical_fork_recommendation
 
         text, prompt = _REFUSAL_SAMPLES[sample_name]
         result = detect_noncanonical_fork_recommendation(text, user_prompt=prompt)

@@ -2,7 +2,7 @@
 
 from collections import Counter
 
-from src.tools.nlp_tools import (
+from cogtrix_core.tools.nlp_tools import (
     TOOL_CONFIGS,
     KeywordExtractionInput,
     SentimentAnalysisInput,
@@ -96,7 +96,7 @@ class TestAnalyzeSentiment:
         from unittest.mock import patch
 
         with patch(
-            "src.tools.nlp_tools._simple_sentiment",
+            "cogtrix_core.tools.nlp_tools._simple_sentiment",
             side_effect=RuntimeError("mock error"),
         ):
             result = analyze_sentiment("some text")
@@ -220,7 +220,7 @@ class TestSummarizeText:
         from unittest.mock import patch
 
         with patch(
-            "src.tools.nlp_tools._split_sentences",
+            "cogtrix_core.tools.nlp_tools._split_sentences",
             side_effect=RuntimeError("mock error"),
         ):
             result = summarize_text("some text")
@@ -270,7 +270,7 @@ class TestExtractKeywords:
         from unittest.mock import patch
 
         with patch(
-            "src.tools.nlp_tools.re.findall",
+            "cogtrix_core.tools.nlp_tools.re.findall",
             side_effect=RuntimeError("mock error"),
         ):
             result = extract_keywords("some text")

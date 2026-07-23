@@ -14,7 +14,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.assistant.service import AssistantService
+from cogtrix_core.assistant.service import AssistantService
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -76,14 +76,14 @@ class TestBuildSystemPrompt:
         assert result == "file prompt content"
 
     def test_file_config_missing_file_falls_to_default(self):
-        from src.assistant.service import _ASSISTANT_SYSTEM_PROMPT
+        from cogtrix_core.assistant.service import _ASSISTANT_SYSTEM_PROMPT
 
         asst_cfg = {"system_prompt_file": "/nonexistent/path/prompt.txt"}
         result = AssistantService._build_system_prompt(asst_cfg, "fallback")
         assert result == _ASSISTANT_SYSTEM_PROMPT
 
     def test_file_config_empty_file_falls_to_default(self, tmp_path):
-        from src.assistant.service import _ASSISTANT_SYSTEM_PROMPT
+        from cogtrix_core.assistant.service import _ASSISTANT_SYSTEM_PROMPT
 
         prompt_file = tmp_path / "empty.txt"
         prompt_file.write_text("   ")
@@ -92,13 +92,13 @@ class TestBuildSystemPrompt:
         assert result == _ASSISTANT_SYSTEM_PROMPT
 
     def test_default_prompt_when_nothing_configured(self):
-        from src.assistant.service import _ASSISTANT_SYSTEM_PROMPT
+        from cogtrix_core.assistant.service import _ASSISTANT_SYSTEM_PROMPT
 
         result = AssistantService._build_system_prompt({}, "fallback")
         assert result == _ASSISTANT_SYSTEM_PROMPT
 
     def test_default_prompt_mentions_slack_status_dedup(self):
-        from src.assistant.service import _ASSISTANT_SYSTEM_PROMPT
+        from cogtrix_core.assistant.service import _ASSISTANT_SYSTEM_PROMPT
 
         assert "Before posting a recurring status update to Slack" in _ASSISTANT_SYSTEM_PROMPT
 
@@ -115,7 +115,7 @@ class TestBuildSystemPrompt:
         assert result == "cli wins"
 
     def test_data_dir_none_enforces_cwd_containment(self, tmp_path):
-        from src.assistant.service import _ASSISTANT_SYSTEM_PROMPT
+        from cogtrix_core.assistant.service import _ASSISTANT_SYSTEM_PROMPT
 
         # Create a prompt file that points outside cwd when data_dir=None
         outside_file = tmp_path / "outside" / "prompt.txt"
@@ -141,12 +141,12 @@ class TestLifecycle:
             patch.object(
                 AssistantService, "_discover_channels", return_value=[_make_channel("telegram")]
             ),
-            patch("src.assistant.service.ChatSessionManager") as MockSessionMgr,
-            patch("src.assistant.service.MessageScheduler"),
-            patch("src.assistant.service.ChannelPoller"),
-            patch("src.assistant.service.MessageHandler"),
-            patch("src.assistant.service.GuardrailPipeline"),
-            patch("src.assistant.workflows.WorkflowRegistry"),
+            patch("cogtrix_core.assistant.service.ChatSessionManager") as MockSessionMgr,
+            patch("cogtrix_core.assistant.service.MessageScheduler"),
+            patch("cogtrix_core.assistant.service.ChannelPoller"),
+            patch("cogtrix_core.assistant.service.MessageHandler"),
+            patch("cogtrix_core.assistant.service.GuardrailPipeline"),
+            patch("cogtrix_core.assistant.workflows.WorkflowRegistry"),
         ):
             MockSessionMgr.return_value.save_all.return_value = None
             svc = AssistantService(
@@ -185,7 +185,7 @@ class TestLifecycle:
                 active_tools=[],
             )
             # run() should return early when no channels are found
-            with patch("src.assistant.service.log") as mock_log:
+            with patch("cogtrix_core.assistant.service.log") as mock_log:
                 svc.run()
                 mock_log.error.assert_called_once()
                 assert "No messaging channels are ready" in mock_log.error.call_args[0][0]
@@ -230,13 +230,13 @@ class TestLifecycle:
             patch.object(
                 AssistantService, "_discover_channels", return_value=[_make_channel("telegram")]
             ),
-            patch("src.assistant.service.ChatSessionManager"),
-            patch("src.assistant.service.MessageScheduler"),
-            patch("src.assistant.service.ChannelPoller"),
-            patch("src.assistant.service.MessageHandler"),
-            patch("src.assistant.service.GuardrailPipeline"),
-            patch("src.assistant.workflows.WorkflowRegistry"),
-            patch("src.assistant.service.SharedKnowledgeStore") as MockKS,
+            patch("cogtrix_core.assistant.service.ChatSessionManager"),
+            patch("cogtrix_core.assistant.service.MessageScheduler"),
+            patch("cogtrix_core.assistant.service.ChannelPoller"),
+            patch("cogtrix_core.assistant.service.MessageHandler"),
+            patch("cogtrix_core.assistant.service.GuardrailPipeline"),
+            patch("cogtrix_core.assistant.workflows.WorkflowRegistry"),
+            patch("cogtrix_core.assistant.service.SharedKnowledgeStore") as MockKS,
         ):
             ks_instance = MockKS.return_value
             svc = AssistantService(
@@ -276,12 +276,12 @@ class TestLifecycle:
             patch.object(
                 AssistantService, "_discover_channels", return_value=[_make_channel("telegram")]
             ),
-            patch("src.assistant.service.ChatSessionManager"),
-            patch("src.assistant.service.MessageScheduler"),
-            patch("src.assistant.service.ChannelPoller"),
-            patch("src.assistant.service.MessageHandler"),
-            patch("src.assistant.service.GuardrailPipeline"),
-            patch("src.assistant.workflows.WorkflowRegistry"),
+            patch("cogtrix_core.assistant.service.ChatSessionManager"),
+            patch("cogtrix_core.assistant.service.MessageScheduler"),
+            patch("cogtrix_core.assistant.service.ChannelPoller"),
+            patch("cogtrix_core.assistant.service.MessageHandler"),
+            patch("cogtrix_core.assistant.service.GuardrailPipeline"),
+            patch("cogtrix_core.assistant.workflows.WorkflowRegistry"),
         ):
             svc = AssistantService(
                 config=cfg,
@@ -321,12 +321,12 @@ class TestShutdownResilience:
             patch.object(
                 AssistantService, "_discover_channels", return_value=[_make_channel("telegram")]
             ),
-            patch("src.assistant.service.ChatSessionManager") as MockSessionMgr,
-            patch("src.assistant.service.MessageScheduler"),
-            patch("src.assistant.service.ChannelPoller"),
-            patch("src.assistant.service.MessageHandler"),
-            patch("src.assistant.service.GuardrailPipeline"),
-            patch("src.assistant.workflows.WorkflowRegistry"),
+            patch("cogtrix_core.assistant.service.ChatSessionManager") as MockSessionMgr,
+            patch("cogtrix_core.assistant.service.MessageScheduler"),
+            patch("cogtrix_core.assistant.service.ChannelPoller"),
+            patch("cogtrix_core.assistant.service.MessageHandler"),
+            patch("cogtrix_core.assistant.service.GuardrailPipeline"),
+            patch("cogtrix_core.assistant.workflows.WorkflowRegistry"),
         ):
             MockSessionMgr.return_value.save_all.return_value = None
             svc = AssistantService(
@@ -417,7 +417,7 @@ class TestInitFailureCleanup:
             patch.object(
                 AssistantService, "_discover_channels", side_effect=RuntimeError("discovery failed")
             ),
-            patch("src.assistant.service.ThreadPoolExecutor") as MockTPE,
+            patch("cogtrix_core.assistant.service.ThreadPoolExecutor") as MockTPE,
         ):
             mock_executor = MagicMock()
             MockTPE.return_value = mock_executor
@@ -439,8 +439,8 @@ class TestInitFailureCleanup:
             patch.object(
                 AssistantService, "_discover_channels", return_value=[_make_channel("telegram")]
             ),
-            patch("src.assistant.service.MessageScheduler") as MockScheduler,
-            patch("src.assistant.service.ThreadPoolExecutor") as MockTPE,
+            patch("cogtrix_core.assistant.service.MessageScheduler") as MockScheduler,
+            patch("cogtrix_core.assistant.service.ThreadPoolExecutor") as MockTPE,
         ):
             mock_executor = MagicMock()
             MockTPE.return_value = mock_executor
@@ -463,9 +463,9 @@ class TestInitFailureCleanup:
             patch.object(
                 AssistantService, "_discover_channels", return_value=[_make_channel("telegram")]
             ),
-            patch("src.assistant.service.MessageScheduler"),
-            patch("src.assistant.service.MessageHandler") as MockHandler,
-            patch("src.assistant.service.ThreadPoolExecutor") as MockTPE,
+            patch("cogtrix_core.assistant.service.MessageScheduler"),
+            patch("cogtrix_core.assistant.service.MessageHandler") as MockHandler,
+            patch("cogtrix_core.assistant.service.ThreadPoolExecutor") as MockTPE,
         ):
             mock_executor = MagicMock()
             MockTPE.return_value = mock_executor
@@ -488,9 +488,9 @@ class TestInitFailureCleanup:
             patch.object(
                 AssistantService, "_discover_channels", return_value=[_make_channel("telegram")]
             ),
-            patch("src.assistant.service.MessageScheduler"),
-            patch("src.assistant.service.MessageHandler") as MockHandler,
-            patch("src.assistant.service.ThreadPoolExecutor") as MockTPE,
+            patch("cogtrix_core.assistant.service.MessageScheduler"),
+            patch("cogtrix_core.assistant.service.MessageHandler") as MockHandler,
+            patch("cogtrix_core.assistant.service.ThreadPoolExecutor") as MockTPE,
         ):
             mock_executor = MagicMock()
             MockTPE.return_value = mock_executor
@@ -520,13 +520,13 @@ class TestDeferralWiring:
             patch.object(
                 AssistantService, "_discover_channels", return_value=[_make_channel("telegram")]
             ),
-            patch("src.assistant.service.ChatSessionManager"),
-            patch("src.assistant.service.MessageScheduler"),
-            patch("src.assistant.service.ChannelPoller"),
-            patch("src.assistant.service.MessageHandler") as MockHandler,
-            patch("src.assistant.service.GuardrailPipeline"),
-            patch("src.assistant.workflows.WorkflowRegistry"),
-            patch("src.assistant.service.DeferralManager") as MockDeferral,
+            patch("cogtrix_core.assistant.service.ChatSessionManager"),
+            patch("cogtrix_core.assistant.service.MessageScheduler"),
+            patch("cogtrix_core.assistant.service.ChannelPoller"),
+            patch("cogtrix_core.assistant.service.MessageHandler") as MockHandler,
+            patch("cogtrix_core.assistant.service.GuardrailPipeline"),
+            patch("cogtrix_core.assistant.workflows.WorkflowRegistry"),
+            patch("cogtrix_core.assistant.service.DeferralManager") as MockDeferral,
         ):
             handler_instance = MockHandler.return_value
             _ = MockDeferral.return_value
@@ -588,12 +588,12 @@ class TestDeferralWiring:
             patch.object(
                 AssistantService, "_discover_channels", return_value=[_make_channel("telegram")]
             ),
-            patch("src.assistant.service.ChatSessionManager"),
-            patch("src.assistant.service.MessageScheduler"),
-            patch("src.assistant.service.ChannelPoller"),
-            patch("src.assistant.service.MessageHandler"),
-            patch("src.assistant.service.GuardrailPipeline"),
-            patch("src.assistant.workflows.WorkflowRegistry"),
+            patch("cogtrix_core.assistant.service.ChatSessionManager"),
+            patch("cogtrix_core.assistant.service.MessageScheduler"),
+            patch("cogtrix_core.assistant.service.ChannelPoller"),
+            patch("cogtrix_core.assistant.service.MessageHandler"),
+            patch("cogtrix_core.assistant.service.GuardrailPipeline"),
+            patch("cogtrix_core.assistant.workflows.WorkflowRegistry"),
         ):
             svc = AssistantService(
                 config=cfg,
@@ -618,13 +618,13 @@ class TestCampaignWiring:
         ch = _make_channel("telegram")
         with (
             patch.object(AssistantService, "_discover_channels", return_value=[ch]),
-            patch("src.assistant.service.ChatSessionManager"),
-            patch("src.assistant.service.MessageScheduler"),
-            patch("src.assistant.service.ChannelPoller"),
-            patch("src.assistant.service.MessageHandler"),
-            patch("src.assistant.service.GuardrailPipeline"),
-            patch("src.assistant.workflows.WorkflowRegistry"),
-            patch("src.assistant.service.CampaignManager") as MockCampaign,
+            patch("cogtrix_core.assistant.service.ChatSessionManager"),
+            patch("cogtrix_core.assistant.service.MessageScheduler"),
+            patch("cogtrix_core.assistant.service.ChannelPoller"),
+            patch("cogtrix_core.assistant.service.MessageHandler"),
+            patch("cogtrix_core.assistant.service.GuardrailPipeline"),
+            patch("cogtrix_core.assistant.workflows.WorkflowRegistry"),
+            patch("cogtrix_core.assistant.service.CampaignManager") as MockCampaign,
         ):
             campaign_instance = MockCampaign.return_value
             svc = AssistantService(
@@ -649,12 +649,12 @@ class TestCampaignWiring:
             patch.object(
                 AssistantService, "_discover_channels", return_value=[_make_channel("telegram")]
             ),
-            patch("src.assistant.service.ChatSessionManager"),
-            patch("src.assistant.service.MessageScheduler"),
-            patch("src.assistant.service.ChannelPoller"),
-            patch("src.assistant.service.MessageHandler"),
-            patch("src.assistant.service.GuardrailPipeline"),
-            patch("src.assistant.workflows.WorkflowRegistry"),
+            patch("cogtrix_core.assistant.service.ChatSessionManager"),
+            patch("cogtrix_core.assistant.service.MessageScheduler"),
+            patch("cogtrix_core.assistant.service.ChannelPoller"),
+            patch("cogtrix_core.assistant.service.MessageHandler"),
+            patch("cogtrix_core.assistant.service.GuardrailPipeline"),
+            patch("cogtrix_core.assistant.workflows.WorkflowRegistry"),
         ):
             svc = AssistantService(
                 config=cfg,

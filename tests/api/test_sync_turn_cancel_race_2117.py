@@ -17,7 +17,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from src.api.routes.messages import _cancel_active_turn
+from cogtrix_core.api.routes.messages import _cancel_active_turn
 
 
 def _sess(turn_task: object, confirmation_ui: object = None) -> SimpleNamespace:

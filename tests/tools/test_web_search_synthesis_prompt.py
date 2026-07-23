@@ -1,4 +1,4 @@
-"""Tests for src/tools/_web_search_synthesiser.py — the
+"""Tests for cogtrix_core/tools/_web_search_synthesiser.py — the
 ``synthesise()`` entry point + 4 post-call validators
 (URL line-drop, citation-presence, schema check, length cap)
 + the two-tier primary/fallback retry policy.
@@ -14,12 +14,12 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from src.tools._http_fetch import FetchResult
-from src.tools._web_search_aggregator import RankedResult
-from src.tools._web_search_domain_class import DomainClass
-from src.tools._web_search_extractor import ExtractedSource
-from src.tools._web_search_fetcher import FetchOutcome
-from src.tools._web_search_synthesiser import (
+from cogtrix_core.tools._http_fetch import FetchResult
+from cogtrix_core.tools._web_search_aggregator import RankedResult
+from cogtrix_core.tools._web_search_domain_class import DomainClass
+from cogtrix_core.tools._web_search_extractor import ExtractedSource
+from cogtrix_core.tools._web_search_fetcher import FetchOutcome
+from cogtrix_core.tools._web_search_synthesiser import (
     SynthesisResult,
     _check_schema,
     _drop_url_lines,
@@ -385,7 +385,7 @@ async def test_existing_summary_with_synthesis_purpose_raises() -> None:
     """generate_summary's ValueError surfaces through synthesise."""
     from langchain_core.messages import HumanMessage
 
-    from src.memory.summarizer import generate_summary
+    from cogtrix_core.memory.summarizer import generate_summary
 
     with pytest.raises(ValueError, match="existing_summary must be None"):
         generate_summary(
@@ -400,7 +400,7 @@ async def test_existing_summary_with_synthesis_purpose_raises() -> None:
 async def test_purpose_default_unchanged() -> None:
     """Calling generate_summary without purpose= still hits the
     historical conversation path (verified end-to-end)."""
-    from src.memory.summarizer import generate_summary
+    from cogtrix_core.memory.summarizer import generate_summary
 
     msg = MagicMock()
     msg.content = "Hello"
@@ -566,7 +566,7 @@ def test_primary_deadline_default_fits_typical_provider_latency() -> None:
     The old 7s value was too tight; raising to 10s catches the
     common-case slow path without exceeding the 25s outer pipeline
     ceiling when combined with realistic stage 1-4 budgets."""
-    from src.tools._web_search_synthesiser import _PRIMARY_DEADLINE_S
+    from cogtrix_core.tools._web_search_synthesiser import _PRIMARY_DEADLINE_S
 
     assert _PRIMARY_DEADLINE_S >= 10, (
         f"Primary deadline {_PRIMARY_DEADLINE_S}s is too tight for "
@@ -583,11 +583,11 @@ class TestSynthesisPromptAffiliationDisclaimer:
     frames an unaffiliated source as official."""
 
     def _extract(self, url: str, text: str):
-        from src.tools._http_fetch import FetchResult
-        from src.tools._web_search_aggregator import RankedResult
-        from src.tools._web_search_domain_class import DomainClass
-        from src.tools._web_search_extractor import ExtractedSource
-        from src.tools._web_search_fetcher import FetchOutcome
+        from cogtrix_core.tools._http_fetch import FetchResult
+        from cogtrix_core.tools._web_search_aggregator import RankedResult
+        from cogtrix_core.tools._web_search_domain_class import DomainClass
+        from cogtrix_core.tools._web_search_extractor import ExtractedSource
+        from cogtrix_core.tools._web_search_fetcher import FetchOutcome
 
         rank = RankedResult(
             canonical_url=url,
@@ -612,7 +612,7 @@ class TestSynthesisPromptAffiliationDisclaimer:
         return ExtractedSource(fetch_outcome=outcome, extracted_text=text, status="extracted")
 
     def test_disclaimer_surfaced_in_human_prompt(self) -> None:
-        from src.tools._web_search_synthesiser import _format_human_prompt
+        from cogtrix_core.tools._web_search_synthesiser import _format_human_prompt
 
         src = self._extract(
             "https://platform.kimi.ai/docs",
@@ -624,7 +624,7 @@ class TestSynthesisPromptAffiliationDisclaimer:
         assert "not" in msg.content.lower()
 
     def test_neutral_source_no_disclaimer_line(self) -> None:
-        from src.tools._web_search_synthesiser import _format_human_prompt
+        from cogtrix_core.tools._web_search_synthesiser import _format_human_prompt
 
         src = self._extract("https://example.com", "Neutral documentation content here.")
         msg = _format_human_prompt("q", [src])

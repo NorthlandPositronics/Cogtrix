@@ -78,14 +78,14 @@ atexit.register(_cleanup_test_db)
 # Imports after env setup
 # ---------------------------------------------------------------------------
 
-from src.api.auth import create_access_token  # noqa: E402
-from src.api.callbacks import WebSocketCallbackHandler  # noqa: E402
-from src.api.confirmation import ApiConfirmationUI  # noqa: E402
-from src.api.db import models as _models  # noqa: E402, F401
-from src.api.db.engine import Base  # noqa: E402
-from src.api.db.repositories.sessions import SessionRepository  # noqa: E402
-from src.api.db.repositories.users import UserRepository  # noqa: E402
-from src.api.ws import ConnectionManager  # noqa: E402
+from cogtrix_core.api.auth import create_access_token  # noqa: E402
+from cogtrix_core.api.callbacks import WebSocketCallbackHandler  # noqa: E402
+from cogtrix_core.api.confirmation import ApiConfirmationUI  # noqa: E402
+from cogtrix_core.api.db import models as _models  # noqa: E402, F401
+from cogtrix_core.api.db.engine import Base  # noqa: E402
+from cogtrix_core.api.db.repositories.sessions import SessionRepository  # noqa: E402
+from cogtrix_core.api.db.repositories.users import UserRepository  # noqa: E402
+from cogtrix_core.api.ws import ConnectionManager  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # In-memory DB fixtures
@@ -432,9 +432,9 @@ class TestConnectionManager:
 def client():
     """Return a FastAPI TestClient with the app configured for testing."""
     # Patch warm_session to avoid real LLM creation.
-    with patch("src.api.session_bridge.warm_session") as mock_warm:
-        from src.api.session_bridge import ApiSession
-        from src.orchestration.session_state import SessionState
+    with patch("cogtrix_core.api.session_bridge.warm_session") as mock_warm:
+        from cogtrix_core.api.session_bridge import ApiSession
+        from cogtrix_core.orchestration.session_state import SessionState
 
         def _fake_warm(record, app_state):
             sess = ApiSession(
@@ -447,7 +447,7 @@ def client():
 
         mock_warm.side_effect = _fake_warm
 
-        from src.api.app import app
+        from cogtrix_core.api.app import app
 
         with TestClient(app, raise_server_exceptions=False) as c:
             yield c
@@ -741,7 +741,7 @@ class TestWebSocketLifecycle:
         assert sess_resp.status_code in (200, 201)
         session_id = sess_resp.json()["data"]["id"]
 
-        from src.api import oidc as _oidc_mod
+        from cogtrix_core.api import oidc as _oidc_mod
 
         mock_validator = MagicMock()
         mock_validator.validate = MagicMock(return_value={"sub": user_id})

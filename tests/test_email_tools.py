@@ -1,4 +1,4 @@
-"""Tests for src/tools/email_tools.py — mock imaplib and smtplib."""
+"""Tests for cogtrix_core/tools/email_tools.py — mock imaplib and smtplib."""
 
 from __future__ import annotations
 
@@ -7,8 +7,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
-import src.tools.email_tools as _mod
-from src.tools.email_tools import (
+import cogtrix_core.tools.email_tools as _mod
+from cogtrix_core.tools.email_tools import (
     configure_email,
     is_configured,
     read_email,
@@ -408,7 +408,7 @@ def test_search_email_since_empty_is_allowed(monkeypatch) -> None:
 
 
 def test_tool_configs_structure() -> None:
-    from src.tools.email_tools import TOOL_CONFIG, TOOL_CONFIGS
+    from cogtrix_core.tools.email_tools import TOOL_CONFIG, TOOL_CONFIGS
 
     assert len(TOOL_CONFIGS) == 3
     names = {c["name"] for c in TOOL_CONFIGS}

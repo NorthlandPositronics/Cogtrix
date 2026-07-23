@@ -27,7 +27,8 @@ Everything that is not time-critical uses REST. Everything real-time uses WebSoc
 | `WEBSOCKET_PROTOCOL.md` | Frontend developers | Full WebSocket message catalogue, connection lifecycle diagrams, reconnection strategy |
 | `WEBUI_DEVELOPMENT_GUIDE.md` | React frontend developers | Page-by-page integration guide, component hierarchy, state management patterns |
 | `ENTERPRISE.md` | Enterprise integrators | Enterprise-tier endpoints (SAML, LDAP, JIT, teams, workspaces, cross-workspace bus) |
-| `OPENAPI.yaml` / `OPENAPI.json` | All | Machine-readable OpenAPI 3.x schema — authoritative source for all request/response shapes |
+| `RATE_LIMITING.md` | Operators | Application-tier rate limiter reference — two-layer model, per-route limits |
+| Live OpenAPI schema | All | Machine-readable OpenAPI 3.1 schema — **authoritative** for all request/response shapes. Served at `/api/v1/openapi.json` by a running API instance (also `/api/v1/docs` for Swagger UI) |
 
 ---
 

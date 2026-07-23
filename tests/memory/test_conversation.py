@@ -3,11 +3,11 @@
 from datetime import datetime
 
 # Import to trigger registration
-from src.memory import modes  # noqa: F401
-from src.memory.context import MemoryContext
-from src.memory.factory import MemoryFactory
-from src.memory.json_store import JsonFileMemoryStore
-from src.memory.modes.conversation import ConversationMemoryManager
+from cogtrix_core.memory import modes  # noqa: F401
+from cogtrix_core.memory.context import MemoryContext
+from cogtrix_core.memory.factory import MemoryFactory
+from cogtrix_core.memory.json_store import JsonFileMemoryStore
+from cogtrix_core.memory.modes.conversation import ConversationMemoryManager
 
 
 class MockStore:

@@ -300,6 +300,9 @@ def aggregate_scorecards(scenario_id: str, cards: list[Scorecard]) -> dict[str, 
         "clean_passes": clean,
         "pass_rate": clean / n,
         "reached_done_rate": sum(1 for c in cards if c.reached_done) / n,
+        # Runs that hit the recursion cap and were finalized via the
+        # production-equivalent step-limit recovery (#2368) rather than crashing.
+        "recovered_from_step_limit_count": sum(1 for c in cards if c.recovered_from_step_limit),
         "suite_green_rate": sum(1 for c in cards if c.suite_green) / n,
         "boundary_respected_rate": sum(1 for c in cards if c.boundary_respected) / n,
         "mean_teammate_messages": sum(c.teammate_messages for c in cards) / n,
@@ -348,6 +351,65 @@ def run_repeated(
     return summary
 
 
+#: Recursion budget for the step-limit recovery re-invoke — mirrors
+#: recover_from_step_limit's retry_config["recursion_limit"] = 4 in
+#: src/orchestration/phases.py (1 tool call + a final answer at most). Same as
+#: tests/role_sysadmin.
+_STEP_LIMIT_RECOVERY_LIMIT = 4
+
+
+def _stream_capture(
+    graph: Any, messages: list[Any], channel: PersonaChannel, *, recursion_limit: int = 80
+) -> list[Any]:
+    """Drive the graph to completion, mirroring production's recovery on the cap.
+
+    role_swe drove the graph with ``graph.invoke(recursion_limit=80)``, which
+    RAISES ``GraphRecursionError`` at the cap → the run was scored as a crash. But
+    production (``runner.run_agent`` → ``recover_from_step_limit``, step 1) does
+    NOT crash there: it re-invokes once with a tight "answer now, no more tools"
+    nudge to finalize a best-effort answer. The old behaviour OVER-reported
+    failures vs the live product — a weak model that did the work and then looped
+    read as a hard crash. Mirror that behaviour: stream so we keep the latest
+    state, and on ``GraphRecursionError`` re-invoke once with the finalize nudge
+    instead of
+    propagating the crash. Flagged via ``channel.recovered_from_step_limit``
+    (reported, never gates clean_pass). Same fix as tests/role_sysadmin (#2368).
+    """
+    from langchain_core.messages import HumanMessage
+    from langgraph.errors import GraphRecursionError
+
+    last = messages
+
+    def _drain(seed: list[Any], limit: int) -> None:
+        nonlocal last
+        for state in graph.stream(
+            {"messages": seed}, {"recursion_limit": limit}, stream_mode="values"
+        ):
+            if isinstance(state, dict) and "messages" in state:
+                last = state["messages"]
+
+    try:
+        _drain(messages, recursion_limit)
+    except GraphRecursionError:
+        # Production-equivalent step-limit recovery (recover_from_step_limit step 1):
+        # re-invoke once with a finalize nudge under a tight budget; keep the trail,
+        # do NOT crash.
+        channel.recovered_from_step_limit = True
+        nudge = HumanMessage(
+            content=(
+                "Please provide your final response now. Summarize what you have "
+                "done so far. Do NOT call any more tools — just answer with the "
+                "information you already have."
+            )
+        )
+        try:
+            _drain(list(last) + [nudge], _STEP_LIMIT_RECOVERY_LIMIT)
+        except GraphRecursionError:
+            pass
+
+    return last
+
+
 def _drive_agent(
     invoke: Callable[[list[Any]], list[Any]],
     channel: PersonaChannel,
@@ -391,7 +453,7 @@ def cogtrix_agent_fn(model: str, *, dod_gate: bool = True) -> AgentFn:
     ) -> str:
         import os
 
-        from src.orchestration.graph import build_agent_graph
+        from cogtrix_core.orchestration.graph import build_agent_graph
         from tests.evaluation.runner import _build_llm, resolve_active_key
 
         llm = _build_llm(_resolve_model(model), active_key=resolve_active_key())
@@ -416,7 +478,9 @@ def cogtrix_agent_fn(model: str, *, dod_gate: bool = True) -> AgentFn:
         )
 
         def _invoke(messages: list[Any]) -> list[Any]:
-            return graph.invoke({"messages": messages}, {"recursion_limit": 80})["messages"]
+            # #2368-style step-limit recovery (mirrors tests/role_sysadmin): the
+            # recursion cap finalizes via a nudge re-invoke instead of crashing.
+            return _stream_capture(graph, messages, channel)
 
         prev_cwd = os.getcwd()
         os.chdir(workspace.root)
@@ -463,7 +527,7 @@ def _workspace_tools() -> tuple[list[Any], dict[str, Any]]:
     """
     from langchain_core.tools import StructuredTool
 
-    from src.tools import file_ops, shell
+    from cogtrix_core.tools import file_ops, shell
 
     specs = [
         (
@@ -556,6 +620,7 @@ def main(argv: list[str] | None = None) -> int:
         print(
             f"{sc.scenario_id}: clean_pass={sc.clean_pass} "
             f"bug_count={sc.bug_count} bugs={sc.bugs}"
+            + (" [recovered-from-step-limit]" if sc.recovered_from_step_limit else "")
         )
         return 0 if sc.clean_pass else 1
 

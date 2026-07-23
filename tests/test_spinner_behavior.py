@@ -15,8 +15,8 @@ from unittest import mock
 
 import pytest
 
-from src.ui import spinner
-from src.ui.spinner import ActivityIndicator
+from cogtrix_core.ui import spinner
+from cogtrix_core.ui.spinner import ActivityIndicator
 
 # _SPINNER_MESSAGES is a module-level constant, not an instance attribute
 _SPINNER_MESSAGES = spinner._SPINNER_MESSAGES

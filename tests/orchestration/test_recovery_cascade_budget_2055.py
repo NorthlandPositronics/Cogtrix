@@ -17,8 +17,8 @@ from __future__ import annotations
 
 from langchain_core.messages import AIMessage, HumanMessage
 
-from src.orchestration.graph import _last_human_msg_idx
-from src.orchestration.nodes.recovery import _RECOVERY_INJECTED_MARKER
+from cogtrix_core.orchestration.graph import _last_human_msg_idx
+from cogtrix_core.orchestration.nodes.recovery import _RECOVERY_INJECTED_MARKER
 
 
 def _nudge(text: str = "[recovery nudge]") -> HumanMessage:

@@ -24,7 +24,7 @@ def _reimport_engine(env: dict[str, str]) -> ModuleType:
     """
     # Remove any cached module so _resolve_default_db_url() runs fresh
     for key in list(sys.modules):
-        if "api.db.engine" in key or key == "src.api.db.engine":
+        if "api.db.engine" in key or key == "cogtrix_core.api.db.engine":
             del sys.modules[key]
 
     # Keys to mask (remove) from the real environment during re-import
@@ -42,8 +42,8 @@ def _reimport_engine(env: dict[str, str]) -> ModuleType:
         # Patch load_config to avoid needing a real config file
         mock_cfg = MagicMock()
         mock_cfg.data_dir = env.get("_MOCK_DATA_DIR", "data")
-        with patch("src.config.load_config", return_value=mock_cfg):
-            mod = importlib.import_module("src.api.db.engine")
+        with patch("cogtrix_core.config.load_config", return_value=mock_cfg):
+            mod = importlib.import_module("cogtrix_core.api.db.engine")
             # URL resolution is lazy (PEP 562); force it now while the
             # load_config patch and env-var patches are still active.
             mod._get_db_url()
@@ -60,7 +60,9 @@ class TestDbUrlResolution:
         # Snapshot the engine module(s) so teardown can restore the original
         # Base class (with model registrations) after each reimport test.
         self._saved_engine_modules = {
-            k: v for k, v in sys.modules.items() if "api.db.engine" in k or k == "src.api.db.engine"
+            k: v
+            for k, v in sys.modules.items()
+            if "api.db.engine" in k or k == "cogtrix_core.api.db.engine"
         }
 
     def teardown_method(self, _: Any) -> None:
@@ -68,7 +70,7 @@ class TestDbUrlResolution:
         # the original Base (with models registered) stays in sys.modules for
         # subsequent tests.
         for key in list(sys.modules):
-            if "api.db.engine" in key or key == "src.api.db.engine":
+            if "api.db.engine" in key or key == "cogtrix_core.api.db.engine":
                 del sys.modules[key]
         sys.modules.update(self._saved_engine_modules)
 
@@ -120,11 +122,11 @@ class TestDbUrlResolution:
         saved_data_dir = os.environ.pop("COGTRIX_DATA_DIR", None)
         try:
             for key in list(sys.modules):
-                if "api.db.engine" in key or key == "src.api.db.engine":
+                if "api.db.engine" in key or key == "cogtrix_core.api.db.engine":
                     del sys.modules[key]
 
-            with patch("src.config.load_config", side_effect=RuntimeError("no config")):
-                mod = importlib.import_module("src.api.db.engine")
+            with patch("cogtrix_core.config.load_config", side_effect=RuntimeError("no config")):
+                mod = importlib.import_module("cogtrix_core.api.db.engine")
                 # Force lazy resolution while the patch is still active.
                 mod._get_db_url()
 
@@ -161,7 +163,7 @@ class TestDbUrlResolution:
 
 class TestAlembicEnvAlignment:
     """Regression for #1877: alembic/env.py must consume the same
-    ``_get_db_url`` helper as ``src/api/db/engine`` so the two code
+    ``_get_db_url`` helper as ``cogtrix_core/api/db/engine`` so the two code
     paths cannot drift apart again.
 
     The pre-fix bug: alembic/env.py read ``COGTRIX_DB_URL`` directly
@@ -181,12 +183,14 @@ class TestAlembicEnvAlignment:
         # original Base (with model registrations) after each reimport
         # test. Mirrors TestDbUrlResolution's pattern.
         self._saved_engine_modules = {
-            k: v for k, v in sys.modules.items() if "api.db.engine" in k or k == "src.api.db.engine"
+            k: v
+            for k, v in sys.modules.items()
+            if "api.db.engine" in k or k == "cogtrix_core.api.db.engine"
         }
 
     def teardown_method(self, _: Any) -> None:
         for key in list(sys.modules):
-            if "api.db.engine" in key or key == "src.api.db.engine":
+            if "api.db.engine" in key or key == "cogtrix_core.api.db.engine":
                 del sys.modules[key]
         sys.modules.update(self._saved_engine_modules)
 
@@ -199,7 +203,7 @@ class TestAlembicEnvAlignment:
         env_py_path = Path(__file__).resolve().parent.parent / "alembic" / "env.py"
         source = env_py_path.read_text(encoding="utf-8")
         # Import line must reference ``_get_db_url`` from the engine module.
-        assert "from src.api.db.engine import" in source
+        assert "from cogtrix_core.api.db.engine import" in source
         assert "_get_db_url" in source
         # The resolved DB URL must come from the shared helper, not a
         # local ``os.environ.get(..., ...)`` fallback.

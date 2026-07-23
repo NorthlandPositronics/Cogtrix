@@ -79,7 +79,7 @@ class _FakeSlackApiErrorNoRetry(Exception):
 
 class TestDiscordRateLimitError:
     def test_exception_has_retry_after_and_route_attrs(self):
-        from src.assistant.channels.discord import RateLimitError
+        from cogtrix_core.assistant.channels.discord import RateLimitError
 
         exc = RateLimitError(retry_after=10.5, route="/channels/123/messages")
         assert exc.retry_after == 10.5
@@ -88,13 +88,13 @@ class TestDiscordRateLimitError:
         assert "/channels/123/messages" in str(exc)
 
     def test_retry_after_floored_at_1_second(self):
-        from src.assistant.channels.discord import RateLimitError
+        from cogtrix_core.assistant.channels.discord import RateLimitError
 
         exc = RateLimitError(retry_after=0.3)
         assert exc.retry_after == 1.0
 
     def test_empty_route_handled_gracefully(self):
-        from src.assistant.channels.discord import RateLimitError
+        from cogtrix_core.assistant.channels.discord import RateLimitError
 
         exc = RateLimitError(retry_after=5.0)
         assert exc.route == ""
@@ -108,13 +108,13 @@ class TestDiscordRateLimitError:
 
 class TestDiscordRestClientRateLimit:
     def test_raises_rate_limit_error_on_429(self):
-        from src.assistant.channels.discord import RateLimitError, _DiscordRestClient
+        from cogtrix_core.assistant.channels.discord import RateLimitError, _DiscordRestClient
 
         mock_resp = MagicMock()
         mock_resp.status_code = 429
         mock_resp.headers = {"Retry-After": "3"}
 
-        with patch("src.assistant.channels.discord._requests") as mock_requests:
+        with patch("cogtrix_core.assistant.channels.discord._requests") as mock_requests:
             mock_requests.get.return_value = mock_resp
             with pytest.raises(RateLimitError) as exc_info:
                 _DiscordRestClient("tok")._get("/channels/123/messages")
@@ -122,78 +122,78 @@ class TestDiscordRestClientRateLimit:
             assert exc_info.value.route == "/channels/123/messages"
 
     def test_parses_retry_after_header_seconds(self):
-        from src.assistant.channels.discord import RateLimitError, _DiscordRestClient
+        from cogtrix_core.assistant.channels.discord import RateLimitError, _DiscordRestClient
 
         mock_resp = MagicMock()
         mock_resp.status_code = 429
         mock_resp.headers = {"Retry-After": "7"}
 
-        with patch("src.assistant.channels.discord._requests") as mock_requests:
+        with patch("cogtrix_core.assistant.channels.discord._requests") as mock_requests:
             mock_requests.get.return_value = mock_resp
             with pytest.raises(RateLimitError) as exc_info:
                 _DiscordRestClient("tok")._get("/guilds/456/channels")
             assert exc_info.value.retry_after == 7.0
 
     def test_parses_x_rate_limit_reset_after_header_milliseconds(self):
-        from src.assistant.channels.discord import RateLimitError, _DiscordRestClient
+        from cogtrix_core.assistant.channels.discord import RateLimitError, _DiscordRestClient
 
         mock_resp = MagicMock()
         mock_resp.status_code = 429
         mock_resp.headers = {"X-RateLimit-Reset-After": "2500"}  # 2500ms = 2.5s
 
-        with patch("src.assistant.channels.discord._requests") as mock_requests:
+        with patch("cogtrix_core.assistant.channels.discord._requests") as mock_requests:
             mock_requests.get.return_value = mock_resp
             with pytest.raises(RateLimitError) as exc_info:
                 _DiscordRestClient("tok")._get("/users/@me/guilds")
             assert exc_info.value.retry_after == 2.5
 
     def test_falls_back_to_5s_when_no_retry_header(self):
-        from src.assistant.channels.discord import RateLimitError, _DiscordRestClient
+        from cogtrix_core.assistant.channels.discord import RateLimitError, _DiscordRestClient
 
         mock_resp = MagicMock()
         mock_resp.status_code = 429
         mock_resp.headers = {}
 
-        with patch("src.assistant.channels.discord._requests") as mock_requests:
+        with patch("cogtrix_core.assistant.channels.discord._requests") as mock_requests:
             mock_requests.get.return_value = mock_resp
             with pytest.raises(RateLimitError) as exc_info:
                 _DiscordRestClient("tok")._get("/channels/789/messages")
             assert exc_info.value.retry_after == 5.0
 
     def test_passthrough_on_non_429_http_error(self):
-        from src.assistant.channels.discord import _DiscordRestClient
+        from cogtrix_core.assistant.channels.discord import _DiscordRestClient
 
         mock_resp = MagicMock()
         mock_resp.status_code = 500
         mock_resp.headers = {}
         mock_resp.raise_for_status.side_effect = RuntimeError("server error")
 
-        with patch("src.assistant.channels.discord._requests") as mock_requests:
+        with patch("cogtrix_core.assistant.channels.discord._requests") as mock_requests:
             mock_requests.get.return_value = mock_resp
             with pytest.raises(RuntimeError, match="server error"):
                 _DiscordRestClient("tok")._get("/channels/123/messages")
 
     def test_post_raises_rate_limit_error_on_429(self):
-        from src.assistant.channels.discord import RateLimitError, _DiscordRestClient
+        from cogtrix_core.assistant.channels.discord import RateLimitError, _DiscordRestClient
 
         mock_resp = MagicMock()
         mock_resp.status_code = 429
         mock_resp.headers = {"Retry-After": "4"}
 
-        with patch("src.assistant.channels.discord._requests") as mock_requests:
+        with patch("cogtrix_core.assistant.channels.discord._requests") as mock_requests:
             mock_requests.post.return_value = mock_resp
             with pytest.raises(RateLimitError) as exc_info:
                 _DiscordRestClient("tok")._post("/channels/123/messages", {})
             assert exc_info.value.retry_after == 4.0
 
     def test_patch_raises_rate_limit_error_on_429(self):
-        from src.assistant.channels.discord import RateLimitError, _DiscordRestClient
+        from cogtrix_core.assistant.channels.discord import RateLimitError, _DiscordRestClient
 
         mock_resp = MagicMock()
         mock_resp.status_code = 429
         mock_resp.headers = {"Retry-After": "2"}
 
-        with patch("src.assistant.channels.discord._requests") as mock_requests:
+        with patch("cogtrix_core.assistant.channels.discord._requests") as mock_requests:
             mock_requests.patch.return_value = mock_resp
             with pytest.raises(RateLimitError) as exc_info:
                 _DiscordRestClient("tok")._patch("/channels/123/messages/456", {})
@@ -207,7 +207,7 @@ class TestDiscordRestClientRateLimit:
 
 class TestDiscordChannelPollRateLimit:
     def test_poll_retries_on_rate_limit_error_and_returns_messages(self):
-        from src.assistant.channels.discord import DiscordChannel, RateLimitError
+        from cogtrix_core.assistant.channels.discord import DiscordChannel, RateLimitError
 
         mock_client = MagicMock()
         mock_client.get_messages.side_effect = [
@@ -215,8 +215,8 @@ class TestDiscordChannelPollRateLimit:
             [{"id": "999", "content": "hello", "author": {"id": "U1", "username": "user1"}}],
         ]
 
-        with patch("src.assistant.channels.discord._HAS_DISCORD", True):
-            with patch("src.assistant.channels.discord._REQUESTS_AVAILABLE", True):
+        with patch("cogtrix_core.assistant.channels.discord._HAS_DISCORD", True):
+            with patch("cogtrix_core.assistant.channels.discord._REQUESTS_AVAILABLE", True):
                 channel = DiscordChannel({"bot_token": "fake"})
         channel._client = mock_client
         channel._last_seen = {"C1": "998"}
@@ -231,7 +231,7 @@ class TestDiscordChannelPollRateLimit:
         assert mock_client.get_messages.call_count == 2
 
     def test_poll_falls_back_to_warning_on_retry_failure(self):
-        from src.assistant.channels.discord import DiscordChannel, RateLimitError
+        from cogtrix_core.assistant.channels.discord import DiscordChannel, RateLimitError
 
         mock_client = MagicMock()
         mock_client.get_messages.side_effect = [
@@ -239,8 +239,8 @@ class TestDiscordChannelPollRateLimit:
             RuntimeError("still broken"),
         ]
 
-        with patch("src.assistant.channels.discord._HAS_DISCORD", True):
-            with patch("src.assistant.channels.discord._REQUESTS_AVAILABLE", True):
+        with patch("cogtrix_core.assistant.channels.discord._HAS_DISCORD", True):
+            with patch("cogtrix_core.assistant.channels.discord._REQUESTS_AVAILABLE", True):
                 channel = DiscordChannel({"bot_token": "fake"})
         channel._client = mock_client
         channel._last_seen = {"C1": "998"}
@@ -261,7 +261,7 @@ class TestDiscordChannelPollRateLimit:
 
 class TestDiscordChannelSendRateLimit:
     def test_send_retries_on_rate_limit_error_and_returns_ok(self):
-        from src.assistant.channels.discord import DiscordChannel, RateLimitError
+        from cogtrix_core.assistant.channels.discord import DiscordChannel, RateLimitError
 
         mock_client = MagicMock()
         mock_client.send_message.side_effect = [
@@ -269,8 +269,8 @@ class TestDiscordChannelSendRateLimit:
             {"id": "1000"},
         ]
 
-        with patch("src.assistant.channels.discord._HAS_DISCORD", True):
-            with patch("src.assistant.channels.discord._REQUESTS_AVAILABLE", True):
+        with patch("cogtrix_core.assistant.channels.discord._HAS_DISCORD", True):
+            with patch("cogtrix_core.assistant.channels.discord._REQUESTS_AVAILABLE", True):
                 channel = DiscordChannel({"bot_token": "fake"})
         channel._client = mock_client
 
@@ -282,7 +282,7 @@ class TestDiscordChannelSendRateLimit:
         assert mock_client.send_message.call_count == 2
 
     def test_send_returns_error_on_retry_failure(self):
-        from src.assistant.channels.discord import DiscordChannel, RateLimitError
+        from cogtrix_core.assistant.channels.discord import DiscordChannel, RateLimitError
 
         mock_client = MagicMock()
         mock_client.send_message.side_effect = [
@@ -290,8 +290,8 @@ class TestDiscordChannelSendRateLimit:
             RuntimeError("still broken"),
         ]
 
-        with patch("src.assistant.channels.discord._HAS_DISCORD", True):
-            with patch("src.assistant.channels.discord._REQUESTS_AVAILABLE", True):
+        with patch("cogtrix_core.assistant.channels.discord._HAS_DISCORD", True):
+            with patch("cogtrix_core.assistant.channels.discord._REQUESTS_AVAILABLE", True):
                 channel = DiscordChannel({"bot_token": "fake"})
         channel._client = mock_client
 
@@ -311,7 +311,7 @@ class TestDiscordChannelSendRateLimit:
 
 class TestSlackRetryAfterHelper:
     def test_returns_delay_from_retry_after_header(self):
-        from src.assistant.channels.slack import _parse_slack_retry_after
+        from cogtrix_core.assistant.channels.slack import _parse_slack_retry_after
 
         mock_resp = MagicMock()
         mock_resp.headers = {"Retry-After": "8.5"}
@@ -323,13 +323,13 @@ class TestSlackRetryAfterHelper:
         assert result == 8.5
 
     def test_returns_none_when_no_response_attr(self):
-        from src.assistant.channels.slack import _parse_slack_retry_after
+        from cogtrix_core.assistant.channels.slack import _parse_slack_retry_after
 
         exc = RuntimeError("not a SlackApiError")
         assert _parse_slack_retry_after(exc) is None
 
     def test_returns_none_when_response_has_no_headers(self):
-        from src.assistant.channels.slack import _parse_slack_retry_after
+        from cogtrix_core.assistant.channels.slack import _parse_slack_retry_after
 
         mock_exc = MagicMock()
         mock_exc.response = MagicMock()
@@ -338,7 +338,7 @@ class TestSlackRetryAfterHelper:
         assert _parse_slack_retry_after(mock_exc) is None
 
     def test_returns_none_on_invalid_header_value(self):
-        from src.assistant.channels.slack import _parse_slack_retry_after
+        from cogtrix_core.assistant.channels.slack import _parse_slack_retry_after
 
         mock_resp = MagicMock()
         mock_resp.headers = {"Retry-After": "not-a-number"}
@@ -371,7 +371,7 @@ def _make_slack_channel_with_mock_client(mock_client: MagicMock) -> Any:
         RateLimitErrorRetryHandler as RealRateLimitErrorRetryHandler,
     )
 
-    import src.assistant.channels.slack as slack_mod
+    import cogtrix_core.assistant.channels.slack as slack_mod
 
     # Patch all module-level names that were set incorrectly on first import.
     # _HAS_SLACK controls the ImportError guard; WebClient/RetryHandler are
@@ -382,7 +382,7 @@ def _make_slack_channel_with_mock_client(mock_client: MagicMock) -> Any:
     slack_mod.RetryHandler = RealRetryHandler
     slack_mod.RateLimitErrorRetryHandler = RealRateLimitErrorRetryHandler
 
-    from src.assistant.channels.slack import SlackChannel
+    from cogtrix_core.assistant.channels.slack import SlackChannel
 
     channel = SlackChannel({"bot_token": "fake"})
     channel._client = mock_client

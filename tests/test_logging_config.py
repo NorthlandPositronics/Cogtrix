@@ -1,4 +1,4 @@
-"""Tests for src/logging_config — secret scrubbing, observability handler, stream routing."""
+"""Tests for cogtrix_core/logging_config — secret scrubbing, observability handler, stream routing."""
 
 import json
 import logging
@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from src.logging_config import (
+from cogtrix_core.logging_config import (
     LLMObservabilityHandler,
     _MaxLevelFilter,
     _scrub_secrets,

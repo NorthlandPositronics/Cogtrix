@@ -1,4 +1,4 @@
-"""Tests for src/tools/configure — tool configuration factories."""
+"""Tests for cogtrix_core/tools/configure — tool configuration factories."""
 
 from unittest.mock import MagicMock, patch
 
@@ -7,7 +7,7 @@ class TestCreateRequestToolsTool:
     """Tests for the request_tools meta-tool factory."""
 
     def test_returns_tool_with_correct_name(self):
-        from src.tools.configure import create_request_tools_tool
+        from cogtrix_core.tools.configure import create_request_tools_tool
 
         available = {"web_search": MagicMock(description="Search the web")}
         catalog = {"web_search": "Search the web"}
@@ -27,7 +27,7 @@ class TestCreateRequestToolsTool:
         # The function has a try/except that returns None on ImportError.
 
     def test_valid_add_returns_message(self):
-        from src.tools.configure import create_request_tools_tool
+        from cogtrix_core.tools.configure import create_request_tools_tool
 
         available = {"web_search": MagicMock(description="Search")}
         catalog = {"web_search": "Search"}
@@ -38,7 +38,7 @@ class TestCreateRequestToolsTool:
         assert "requested" in result.lower() or "loaded" in result.lower()
 
     def test_invalid_add_returns_error(self):
-        from src.tools.configure import create_request_tools_tool
+        from cogtrix_core.tools.configure import create_request_tools_tool
 
         available = {"web_search": MagicMock(description="Search")}
         catalog = {"web_search": "Search"}
@@ -50,7 +50,7 @@ class TestCreateRequestToolsTool:
 
     def test_already_active_add_returns_distinct_message(self):
         """BUG-C: tools already active produce a different message than truly unknown tools."""
-        from src.tools.configure import create_request_tools_tool
+        from cogtrix_core.tools.configure import create_request_tools_tool
 
         available = {}
         catalog = {}
@@ -70,7 +70,7 @@ class TestCreateRequestToolsTool:
         token, past the guard) which fuzzy-resolves to ``http_request``
         via the prefix-token bonus on ``req``/``request``.
         """
-        from src.tools.configure import create_request_tools_tool
+        from cogtrix_core.tools.configure import create_request_tools_tool
 
         available = {"http_request": MagicMock(description="HTTP requests")}
         catalog = {"http_request": "HTTP requests"}
@@ -83,7 +83,7 @@ class TestCreateRequestToolsTool:
 
     def test_exact_match_no_resolved_from_annotation(self):
         """BUG-G: exact name match does not add '(resolved from X)' annotation."""
-        from src.tools.configure import create_request_tools_tool
+        from cogtrix_core.tools.configure import create_request_tools_tool
 
         available = {"search_web": MagicMock(description="Search")}
         catalog = {"search_web": "Search"}
@@ -94,7 +94,7 @@ class TestCreateRequestToolsTool:
         assert "resolved from" not in result.lower()
 
     def test_protected_release_blocked(self):
-        from src.tools.configure import create_request_tools_tool
+        from cogtrix_core.tools.configure import create_request_tools_tool
 
         available = {}
         catalog = {}
@@ -109,7 +109,7 @@ class TestCreateRequestToolsTool:
         assert "cannot" in result.lower() or "core" in result.lower()
 
     def test_valid_release(self):
-        from src.tools.configure import create_request_tools_tool
+        from cogtrix_core.tools.configure import create_request_tools_tool
 
         available = {}
         catalog = {}
@@ -125,7 +125,7 @@ class TestCreateRequestToolsTool:
 
     def test_add_wins_over_remove_dedup(self):
         """If a tool appears in both add and remove, add wins."""
-        from src.tools.configure import create_request_tools_tool
+        from cogtrix_core.tools.configure import create_request_tools_tool
 
         available = {"dual_tool": MagicMock(description="Dual")}
         catalog = {"dual_tool": "Dual"}
@@ -137,7 +137,7 @@ class TestCreateRequestToolsTool:
         assert "requested" in result.lower() or "loaded" in result.lower() or "dual_tool" in result
 
     def test_no_names_provided_returns_catalog(self):
-        from src.tools.configure import create_request_tools_tool
+        from cogtrix_core.tools.configure import create_request_tools_tool
 
         available = {"x": MagicMock(description="X")}
         catalog = {"x": "X"}
@@ -148,7 +148,7 @@ class TestCreateRequestToolsTool:
         assert "x" in result
 
     def test_no_names_provided_uses_compact_catalog_when_many_tools_active(self):
-        from src.tools.configure import create_request_tools_tool
+        from cogtrix_core.tools.configure import create_request_tools_tool
 
         available = {f"tool_{i}": MagicMock(description=f"Tool {i}") for i in range(12)}
         catalog = {name: tool.description for name, tool in available.items()}
@@ -162,7 +162,7 @@ class TestCreateRequestToolsTool:
 
     def test_description_does_not_contain_tool_names(self):
         """Tool names must not appear in the description; they are in the return value."""
-        from src.tools.configure import create_request_tools_tool
+        from cogtrix_core.tools.configure import create_request_tools_tool
 
         available = {"web_search": MagicMock(description="Search the web")}
         catalog = {"web_search": "Search the web"}
@@ -174,7 +174,7 @@ class TestCreateRequestToolsTool:
         assert "web_search" in result
 
     def test_full_catalog_still_lists_tool_names_for_small_active_sets(self):
-        from src.tools.configure import create_request_tools_tool
+        from cogtrix_core.tools.configure import create_request_tools_tool
 
         available = {
             "search_web": MagicMock(description="Search"),
@@ -190,7 +190,7 @@ class TestCreateRequestToolsTool:
 
     def test_fuzzy_add_resolves_abbreviated_name(self):
         """BUG-076: gpt-4o sends 'search' instead of 'search_web'."""
-        from src.tools.configure import create_request_tools_tool
+        from cogtrix_core.tools.configure import create_request_tools_tool
 
         available = {
             "search_web": MagicMock(description="Search the web"),
@@ -210,7 +210,7 @@ class TestCreateRequestToolsTool:
         ≤4 chars (like the original ``'http'``) now bail at the
         resolver.  Multi-token requests still fuzzy-resolve normally.
         """
-        from src.tools.configure import create_request_tools_tool
+        from cogtrix_core.tools.configure import create_request_tools_tool
 
         available = {"http_request": MagicMock(description="HTTP requests")}
         catalog = {"http_request": "HTTP requests"}
@@ -222,7 +222,7 @@ class TestCreateRequestToolsTool:
 
     def test_fuzzy_add_exact_match_takes_priority(self):
         """Exact name match should still work and take priority."""
-        from src.tools.configure import create_request_tools_tool
+        from cogtrix_core.tools.configure import create_request_tools_tool
 
         available = {"search_web": MagicMock(description="Search")}
         catalog = {"search_web": "Search"}
@@ -234,7 +234,7 @@ class TestCreateRequestToolsTool:
 
     def test_fuzzy_no_match_still_rejected(self):
         """Completely unrelated names should still be rejected."""
-        from src.tools.configure import create_request_tools_tool
+        from cogtrix_core.tools.configure import create_request_tools_tool
 
         available = {"search_web": MagicMock(description="Search")}
         catalog = {"search_web": "Search"}
@@ -272,10 +272,10 @@ class TestConfigureLoggingOnImportError:
         import sys
         from unittest.mock import MagicMock
 
-        key = "src.tools.tavily_search"
+        key = "cogtrix_core.tools.tavily_search"
         prior = sys.modules.pop(key, None)
         try:
-            from src.tools.configure import configure_tavily_tool
+            from cogtrix_core.tools.configure import configure_tavily_tool
 
             config = MagicMock()
             configure_tavily_tool(config)
@@ -290,7 +290,7 @@ class TestConfigureLoggingOnImportError:
         import sys
         from unittest.mock import MagicMock
 
-        key = "src.tools.tavily_search"
+        key = "cogtrix_core.tools.tavily_search"
         prior = sys.modules.pop(key, None)
         fake_module = _BrokenConfigureModule(
             key,
@@ -302,7 +302,7 @@ class TestConfigureLoggingOnImportError:
         )
         try:
             sys.modules[key] = fake_module
-            from src.tools.configure import configure_tavily_tool
+            from cogtrix_core.tools.configure import configure_tavily_tool
 
             config = MagicMock()
             configure_tavily_tool(config)
@@ -322,7 +322,7 @@ class TestConfigureLoggingOnImportError:
         import sys
         from unittest.mock import MagicMock
 
-        key = "src.tools.delegate"
+        key = "cogtrix_core.tools.delegate"
         prior = sys.modules.pop(key, None)
         fake_module = _BrokenConfigureModule(
             key,
@@ -333,7 +333,7 @@ class TestConfigureLoggingOnImportError:
         )
         try:
             sys.modules[key] = fake_module
-            from src.tools.configure import configure_delegate_tool
+            from cogtrix_core.tools.configure import configure_delegate_tool
 
             config = MagicMock()
             configure_delegate_tool(config)
@@ -353,7 +353,7 @@ class TestConfigureLoggingOnImportError:
         import sys
         from unittest.mock import MagicMock
 
-        key = "src.tools.cron_tools"
+        key = "cogtrix_core.tools.cron_tools"
         prior = sys.modules.pop(key, None)
         fake_module = _BrokenConfigureModule(
             key,
@@ -361,7 +361,7 @@ class TestConfigureLoggingOnImportError:
         )
         try:
             sys.modules[key] = fake_module
-            from src.tools.configure import configure_cron_tool
+            from cogtrix_core.tools.configure import configure_cron_tool
 
             config = MagicMock()
             configure_cron_tool(config)
@@ -384,7 +384,7 @@ class TestRequestToolsQueryRecovery:
     that the model mistakes for success."""
 
     def test_query_naming_a_tool_loads_it(self):
-        from src.tools.configure import create_request_tools_tool
+        from cogtrix_core.tools.configure import create_request_tools_tool
 
         available = {"web_search": MagicMock(description="Search the web")}
         catalog = {"web_search": "Search the web"}
@@ -401,7 +401,7 @@ class TestRequestToolsQueryRecovery:
         assert "add=" in result
 
     def test_query_description_without_index_is_loud_noop(self):
-        from src.tools.configure import create_request_tools_tool
+        from cogtrix_core.tools.configure import create_request_tools_tool
 
         # The exact malformed call from the next66 trial run, no semantic index.
         available = {"web_search": MagicMock(description="Search the web")}
@@ -418,7 +418,7 @@ class TestRequestToolsQueryRecovery:
         assert "Tools you can ADD" not in result
 
     def test_query_description_with_index_is_loud_noop(self):
-        from src.tools.configure import create_request_tools_tool
+        from cogtrix_core.tools.configure import create_request_tools_tool
 
         index = MagicMock()
         index.search.return_value = ["web_search"]

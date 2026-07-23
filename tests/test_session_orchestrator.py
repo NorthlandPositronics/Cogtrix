@@ -5,7 +5,7 @@ from __future__ import annotations
 import threading
 from unittest.mock import MagicMock
 
-from src.orchestration.session_orchestrator import SessionOrchestrator, SessionSnapshot
+from cogtrix_core.orchestration.session_orchestrator import SessionOrchestrator, SessionSnapshot
 
 
 def _make_orchestrator(

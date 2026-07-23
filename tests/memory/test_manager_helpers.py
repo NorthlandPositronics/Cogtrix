@@ -9,8 +9,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.common.message_validation import _coerce_content, is_bad_ai_content
-from src.memory.manager import (
+from cogtrix_core.common.message_validation import _coerce_content, is_bad_ai_content
+from cogtrix_core.memory.manager import (
     _msg_tokens,
     _sanitize_session_id,
 )
@@ -167,8 +167,8 @@ class TestIsBadAiContent:
 
 def _make_manager(tmp_path: Path):
     """Create a minimal concrete BaseMemoryManager for testing base methods."""
-    from src.memory.json_store import JsonFileMemoryStore
-    from src.memory.modes.conversation import ConversationMemoryManager
+    from cogtrix_core.memory.json_store import JsonFileMemoryStore
+    from cogtrix_core.memory.modes.conversation import ConversationMemoryManager
 
     store = JsonFileMemoryStore(base_dir=str(tmp_path))
     return ConversationMemoryManager(store=store, session_id="test-session")
@@ -192,7 +192,7 @@ class TestBaseMemoryManagerHelpers:
         # Patch _sanitize_session_id to return "../out" so the resolved path escapes.
         # The method builds f"{safe_id}_hybrid.json", so "../out_hybrid.json" resolves
         # one level above base_path (outside the store directory).
-        with patch("src.memory.manager._sanitize_session_id", return_value="../out"):
+        with patch("cogtrix_core.memory.manager._sanitize_session_id", return_value="../out"):
             with pytest.raises(ValueError, match="Path traversal"):
                 mgr._hybrid_meta_path()
 
@@ -255,7 +255,7 @@ class TestBaseMemoryManagerHelpers:
             emb_api_key="invalid-key",
         )
         with patch(
-            "src.providers.create_embeddings_from_config",
+            "cogtrix_core.providers.create_embeddings_from_config",
             side_effect=RuntimeError("401 Unauthorized"),
         ):
             with caplog.at_level(WARNING, logger="cogtrix"):
@@ -281,7 +281,7 @@ class TestBaseMemoryManagerHelpers:
             emb_api_key="invalid-key",
         )
         with patch(
-            "src.providers.create_embeddings_from_config",
+            "cogtrix_core.providers.create_embeddings_from_config",
             side_effect=RuntimeError("401 Unauthorized"),
         ):
             with caplog.at_level(WARNING, logger="cogtrix"):

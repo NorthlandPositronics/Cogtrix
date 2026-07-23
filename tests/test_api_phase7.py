@@ -45,30 +45,30 @@ from fastapi.testclient import TestClient  # noqa: E402
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine  # noqa: E402
 from sqlalchemy.pool import StaticPool  # noqa: E402
 
-from src.api.app import (  # noqa: E402
+from cogtrix_core.api.app import (  # noqa: E402
     _generic_exception_handler,
     _http_exception_handler,
     _validation_exception_handler,
 )
-from src.api.auth import (  # noqa: E402
+from cogtrix_core.api.auth import (  # noqa: E402
     TokenData,
     _decode_jwt,
     create_access_token,
     hash_password,
     verify_password,
 )
-from src.api.callbacks import WebSocketCallbackHandler  # noqa: E402
-from src.api.confirmation import _ACTION_MAP, ApiConfirmationUI  # noqa: E402
-from src.api.pagination import decode_cursor, encode_cursor, paginate_list  # noqa: E402
-from src.api.turn_runner import _build_history, _extract_token_counts  # noqa: E402
-from src.api.validation import (  # noqa: E402
+from cogtrix_core.api.callbacks import WebSocketCallbackHandler  # noqa: E402
+from cogtrix_core.api.confirmation import _ACTION_MAP, ApiConfirmationUI  # noqa: E402
+from cogtrix_core.api.pagination import decode_cursor, encode_cursor, paginate_list  # noqa: E402
+from cogtrix_core.api.turn_runner import _build_history, _extract_token_counts  # noqa: E402
+from cogtrix_core.api.validation import (  # noqa: E402
     _build_fallback_message,
     _extract_field_path,
     _humanize_name,
     _set_nested,
     translate_validation_errors,
 )
-from src.api.ws import ClientMessage, ConnectionManager, ServerMessage  # noqa: E402
+from cogtrix_core.api.ws import ClientMessage, ConnectionManager, ServerMessage  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Shared test fixtures
@@ -81,9 +81,9 @@ def test_app():
     import asyncio as _asyncio
     from unittest.mock import patch
 
-    from src.api.app import create_app
-    from src.api.db.engine import Base as _Base
-    from src.api.db.engine import get_db
+    from cogtrix_core.api.app import create_app
+    from cogtrix_core.api.db.engine import Base as _Base
+    from cogtrix_core.api.db.engine import get_db
 
     test_engine = create_async_engine(
         "sqlite+aiosqlite:///:memory:",

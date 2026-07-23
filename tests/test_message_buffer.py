@@ -7,9 +7,9 @@ from collections.abc import Callable
 from typing import Any
 from unittest.mock import MagicMock
 
-from src.assistant.channel import Channel, IncomingMessage, SendResult
-from src.assistant.poller import MessageBuffer
-from src.assistant.scheduler import (
+from cogtrix_core.assistant.channel import Channel, IncomingMessage, SendResult
+from cogtrix_core.assistant.poller import MessageBuffer
+from cogtrix_core.assistant.scheduler import (
     EditReplyState,
     MessageScheduler,
     ScheduledMessage,
@@ -22,7 +22,7 @@ from src.assistant.scheduler import (
     create_list_scheduled_tool,
     create_schedule_reply_tool,
 )
-from src.memory.context import MemoryContext
+from cogtrix_core.memory.context import MemoryContext
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -67,7 +67,7 @@ def _make_handler(
     session: MagicMock | None = None,
 ) -> tuple[Any, MagicMock, MagicMock]:
     """Return (handler, session_mgr, session)."""
-    from src.assistant.handler import MessageHandler
+    from cogtrix_core.assistant.handler import MessageHandler
 
     if session is None:
         session = _make_session()

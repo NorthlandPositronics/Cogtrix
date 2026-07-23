@@ -1,4 +1,4 @@
-"""Unit tests for src/assistant/knowledge.py — SharedKnowledgeStore."""
+"""Unit tests for cogtrix_core/assistant/knowledge.py — SharedKnowledgeStore."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
 
-from src.assistant.knowledge import Fact, SharedKnowledgeStore, _compute_hash
+from cogtrix_core.assistant.knowledge import Fact, SharedKnowledgeStore, _compute_hash
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -44,7 +44,7 @@ def _make_store(
     with (
         patch.object(SharedKnowledgeStore, "_load", return_value=None),
         patch.object(SharedKnowledgeStore, "_setup_embeddings", return_value=None),
-        patch("src.assistant.knowledge.threading.Thread") as mock_thread_cls,
+        patch("cogtrix_core.assistant.knowledge.threading.Thread") as mock_thread_cls,
     ):
         mock_thread = MagicMock()
         mock_thread_cls.return_value = mock_thread
@@ -255,7 +255,7 @@ class TestFactExtraction:
 
         store._extraction_llm.invoke.side_effect = _slow_invoke
 
-        with patch("src.assistant.knowledge._EXTRACTION_TIMEOUT_SECONDS", 0.1):
+        with patch("cogtrix_core.assistant.knowledge._EXTRACTION_TIMEOUT_SECONDS", 0.1):
             facts = store._extract_facts("Hello", "Hi there")
 
         assert facts == []
@@ -278,7 +278,7 @@ class TestFactExtraction:
 
         store._extraction_llm.invoke.side_effect = _slow_invoke
 
-        with patch("src.assistant.knowledge._EXTRACTION_TIMEOUT_SECONDS", 0.1):
+        with patch("cogtrix_core.assistant.knowledge._EXTRACTION_TIMEOUT_SECONDS", 0.1):
             # Should not raise
             store._extract_and_store_sync("Hello", "Hi there")
 
@@ -416,7 +416,7 @@ class TestFactExtraction:
 
         store = _make_store()
 
-        with patch("src.assistant.knowledge._get_extraction_pool") as mock_get_pool:
+        with patch("cogtrix_core.assistant.knowledge._get_extraction_pool") as mock_get_pool:
             mock_pool = MagicMock()
             mock_get_pool.return_value = mock_pool
 
@@ -765,13 +765,15 @@ class TestBug111AtomicWriteAdoption:
 
     def test_save_uses_atomic_write_json(self, tmp_path: Path):
         """save() should invoke the atomic writer helper and persist facts."""
-        from src.utils.atomic_write import atomic_write_json
+        from cogtrix_core.utils.atomic_write import atomic_write_json
 
         store = _make_store(tmp_path=tmp_path)
         _add_fact(store, "Bob", "Is an engineer")
         _add_fact(store, "Alice", "Is a vet")
 
-        with patch("src.utils.atomic_write.atomic_write_json", wraps=atomic_write_json) as mock_aw:
+        with patch(
+            "cogtrix_core.utils.atomic_write.atomic_write_json", wraps=atomic_write_json
+        ) as mock_aw:
             store.save()
 
         mock_aw.assert_called_once_with(store._facts_path)
@@ -787,10 +789,10 @@ class TestBug111AtomicWriteAdoption:
         import sys
 
         # Reload the module fresh to check its actual imports
-        if "src.assistant.knowledge" in sys.modules:
-            mod = sys.modules["src.assistant.knowledge"]
+        if "cogtrix_core.assistant.knowledge" in sys.modules:
+            mod = sys.modules["cogtrix_core.assistant.knowledge"]
         else:
-            mod = importlib.import_module("src.assistant.knowledge")
+            mod = importlib.import_module("cogtrix_core.assistant.knowledge")
 
         assert not hasattr(mod, "tempfile") or not callable(
             getattr(mod, "tempfile", None)
@@ -823,7 +825,7 @@ class TestBug112DeadPoolShutdown:
 
     def test_pool_shutdown_flag_does_not_exist(self):
         """_pool_shutdown module-level variable must not exist in knowledge.py."""
-        import src.assistant.knowledge as know_module
+        import cogtrix_core.assistant.knowledge as know_module
 
         assert not hasattr(
             know_module, "_pool_shutdown"
@@ -836,7 +838,7 @@ class TestBug112DeadPoolShutdown:
 
         store = _make_store()
 
-        with patch("src.assistant.knowledge._get_extraction_pool") as mock_get_pool:
+        with patch("cogtrix_core.assistant.knowledge._get_extraction_pool") as mock_get_pool:
             mock_pool = MagicMock()
             mock_pool.submit.side_effect = RuntimeError(
                 "cannot schedule new futures after shutdown"
@@ -855,7 +857,7 @@ class TestBug112DeadPoolShutdown:
 
         store = _make_store()
 
-        with patch("src.assistant.knowledge._get_extraction_pool") as mock_get_pool:
+        with patch("cogtrix_core.assistant.knowledge._get_extraction_pool") as mock_get_pool:
             mock_pool = MagicMock()
             mock_pool.submit.side_effect = RuntimeError("BrokenExecutor")
             mock_get_pool.return_value = mock_pool

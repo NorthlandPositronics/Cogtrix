@@ -1,10 +1,10 @@
 # Migration Guide: v0.x → v1.0 (production-stability track)
 
-> **Current shipping version: v0.2.12.** The production-grade features described
-> below are landing incrementally across the v0.2.x series and are usable today —
+> **Current shipping version: v0.5.1.** The production-grade features described
+> below are landing incrementally across the v0.x series and are usable today —
 > they are not gated behind a future v1.0 release. The "v1.0" label denotes the
 > stability marker for when these features are considered GA, not a version
-> number you must wait for. Operators on v0.2.x can adopt each feature when it
+> number you must wait for. Operators on v0.x can adopt each feature when it
 > ships; this document is the running guide to the cross-cutting work.
 
 This guide covers every breaking change, new requirement, and recommended

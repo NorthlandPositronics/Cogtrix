@@ -1,22 +1,24 @@
-"""Tests for src/mcp_client.py."""
+"""Tests for cogtrix_core/mcp_client.py."""
 
 from __future__ import annotations
 
 import asyncio
 import re
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.mcp_client import (
+from cogtrix_core.mcp_client import (
     _STARTUP_MAX_RETRIES,
     DOC_ONLY_MCP_FIELDS,
     KNOWN_MCP_FIELDS,
     MCPConnection,
     MCPManager,
     MCPServerConfig,
+    _mcp_category_from_annotations,
     _result_to_str,
     json_schema_to_pydantic,
 )
@@ -94,7 +96,7 @@ class TestMCPServerConfig:
             raise ConnectionError("test sentinel — not a real connection")
             yield  # type: ignore[misc]
 
-        with patch("src.mcp_client.sse_client", side_effect=_fake_sse):
+        with patch("cogtrix_core.mcp_client.sse_client", side_effect=_fake_sse):
             try:
                 asyncio.run(conn.connect())
             except Exception:
@@ -459,7 +461,7 @@ class TestResultToStr:
 
     def test_filesystem_access_denied_hint_appended(self):
         """Access-denied errors include the /workspace/ prefix hint (#135)."""
-        msg = "Access denied - path outside allowed directories: /src/foo.py not in /data"
+        msg = "Access denied - path outside allowed directories: /cogtrix_core/foo.py not in /data"
         result = _make_result([_make_text(msg)], is_error=True)
         output = _result_to_str(result)
         assert "Error:" in output
@@ -495,13 +497,13 @@ def _make_mock_tool(name: str = "test_tool", description: str = "A test tool") -
 class TestMCPManager:
     def test_connect_all_empty_config_returns_empty_dict(self):
         manager = MCPManager()
-        with patch("src.mcp_client.MCP_AVAILABLE", True):
+        with patch("cogtrix_core.mcp_client.MCP_AVAILABLE", True):
             result = manager.connect_all([])
         assert result == {}
 
     def test_connect_all_mcp_unavailable_returns_empty(self):
         manager = MCPManager()
-        with patch("src.mcp_client.MCP_AVAILABLE", False):
+        with patch("cogtrix_core.mcp_client.MCP_AVAILABLE", False):
             result = manager.connect_all([MCPServerConfig(name="s", command="cmd")])
         assert result == {}
 
@@ -513,7 +515,7 @@ class TestMCPManager:
         async def fake_connect(self_conn: MCPConnection) -> None:
             self_conn._tools = [mock_tool]
 
-        with patch("src.mcp_client.MCP_AVAILABLE", True):
+        with patch("cogtrix_core.mcp_client.MCP_AVAILABLE", True):
             with patch.object(MCPConnection, "connect", fake_connect):
                 tools = manager.connect_all([cfg])
 
@@ -534,7 +536,7 @@ class TestMCPManager:
                 raise ConnectionError("refused")
             self_conn._tools = [mock_tool]
 
-        with patch("src.mcp_client.MCP_AVAILABLE", True):
+        with patch("cogtrix_core.mcp_client.MCP_AVAILABLE", True):
             with patch.object(MCPConnection, "connect", fake_connect):
                 tools = manager.connect_all([cfg_bad, cfg_good])
 
@@ -556,7 +558,7 @@ class TestMCPManager:
             else:
                 self_conn._tools = [tool_b]
 
-        with patch("src.mcp_client.MCP_AVAILABLE", True):
+        with patch("cogtrix_core.mcp_client.MCP_AVAILABLE", True):
             with patch.object(MCPConnection, "connect", fake_connect):
                 tools = manager.connect_all([cfg1, cfg2])
 
@@ -581,7 +583,7 @@ class TestMCPManager:
         async def fake_call_tool(_self_conn: MCPConnection, _name: str, _args: dict) -> str:
             return "tool result"
 
-        with patch("src.mcp_client.MCP_AVAILABLE", True):
+        with patch("cogtrix_core.mcp_client.MCP_AVAILABLE", True):
             with patch.object(MCPConnection, "connect", fake_connect):
                 with patch.object(MCPConnection, "call_tool", fake_call_tool):
                     manager.connect_all([cfg])
@@ -607,7 +609,7 @@ class TestMCPManager:
             received_name.append(name)
             return "ok"
 
-        with patch("src.mcp_client.MCP_AVAILABLE", True):
+        with patch("cogtrix_core.mcp_client.MCP_AVAILABLE", True):
             with patch.object(MCPConnection, "connect", fake_connect):
                 with patch.object(MCPConnection, "call_tool", fake_call_tool):
                     manager.connect_all([cfg])
@@ -624,7 +626,7 @@ class TestMCPManager:
         async def fake_connect(self_conn: MCPConnection) -> None:
             self_conn._tools = [mock_tool]
 
-        with patch("src.mcp_client.MCP_AVAILABLE", True):
+        with patch("cogtrix_core.mcp_client.MCP_AVAILABLE", True):
             with patch.object(MCPConnection, "connect", fake_connect):
                 manager.connect_all([cfg])
 
@@ -645,7 +647,7 @@ class TestMCPManager:
         async def fake_close(_self_conn: MCPConnection) -> None:
             pass
 
-        with patch("src.mcp_client.MCP_AVAILABLE", True):
+        with patch("cogtrix_core.mcp_client.MCP_AVAILABLE", True):
             with patch.object(MCPConnection, "connect", fake_connect):
                 with patch.object(MCPConnection, "close", fake_close):
                     manager.connect_all([cfg])
@@ -679,7 +681,7 @@ class TestMCPManager:
             release.wait(timeout=5.0)
             return "slow-result"
 
-        with patch("src.mcp_client.MCP_AVAILABLE", True):
+        with patch("cogtrix_core.mcp_client.MCP_AVAILABLE", True):
             with patch.object(MCPConnection, "connect", fake_connect):
                 with patch.object(MCPConnection, "close", fake_close):
                     with patch.object(MCPConnection, "call_tool", slow_call_tool):
@@ -726,7 +728,7 @@ class TestMCPManager:
         async def fake_close(_self_conn: MCPConnection) -> None:
             pass
 
-        with patch("src.mcp_client.MCP_AVAILABLE", True):
+        with patch("cogtrix_core.mcp_client.MCP_AVAILABLE", True):
             with patch.object(MCPConnection, "connect", fake_connect):
                 with patch.object(MCPConnection, "close", fake_close):
                     manager.connect_all([cfg_stdio, cfg_sse])
@@ -810,7 +812,7 @@ class TestMCPManager:
 
         builtin_names = {"read_file", "write_file", "shell"}
 
-        with patch("src.mcp_client.MCP_AVAILABLE", True):
+        with patch("cogtrix_core.mcp_client.MCP_AVAILABLE", True):
             with patch.object(MCPConnection, "connect", fake_connect):
                 tools = manager.connect_all([cfg], builtin_tool_names=builtin_names)
 
@@ -826,7 +828,7 @@ class TestMCPManager:
         async def fake_connect(self_conn: MCPConnection) -> None:
             self_conn._tools = [mock_tool]
 
-        with patch("src.mcp_client.MCP_AVAILABLE", True):
+        with patch("cogtrix_core.mcp_client.MCP_AVAILABLE", True):
             with patch.object(MCPConnection, "connect", fake_connect):
                 tools = manager.connect_all([cfg])
 
@@ -841,7 +843,7 @@ class TestMCPManager:
         async def fake_connect(self_conn: MCPConnection) -> None:
             self_conn._tools = [mock_tool]
 
-        with patch("src.mcp_client.MCP_AVAILABLE", True):
+        with patch("cogtrix_core.mcp_client.MCP_AVAILABLE", True):
             with patch.object(MCPConnection, "connect", fake_connect):
                 tools = manager.connect_all([cfg], builtin_tool_names=None)
 
@@ -861,7 +863,7 @@ class TestCreateMcpToolWrapper:
         server_name: str = "myserver",
         requires_confirmation: bool = True,
     ):
-        from src.mcp_client import _create_mcp_tool_wrapper
+        from cogtrix_core.mcp_client import _create_mcp_tool_wrapper
 
         if schema is None:
             schema = {
@@ -918,7 +920,7 @@ class TestCreateMcpToolWrapper:
         assert result == "search results"
 
     def test_returns_none_on_schema_failure(self):
-        from src.mcp_client import _create_mcp_tool_wrapper
+        from cogtrix_core.mcp_client import _create_mcp_tool_wrapper
 
         bad_tool = MagicMock()
         bad_tool.name = "broken"
@@ -927,13 +929,15 @@ class TestCreateMcpToolWrapper:
         cfg = MCPServerConfig(name="s", command="cmd")
         manager = MagicMock(spec=MCPManager)
 
-        with patch("src.mcp_client.json_schema_to_pydantic", side_effect=Exception("schema error")):
+        with patch(
+            "cogtrix_core.mcp_client.json_schema_to_pydantic", side_effect=Exception("schema error")
+        ):
             result = _create_mcp_tool_wrapper(bad_tool, "s", cfg, manager)
 
         assert result is None
 
     def test_fallback_description_when_none(self):
-        from src.mcp_client import _create_mcp_tool_wrapper
+        from cogtrix_core.mcp_client import _create_mcp_tool_wrapper
 
         mock_tool = MagicMock()
         mock_tool.name = "no_desc"
@@ -1032,14 +1036,14 @@ class TestCreateMcpToolWrapper:
 
 class TestConfigMcpServers:
     def test_config_has_mcp_servers_field(self):
-        from src.config import Config
+        from cogtrix_core.config import Config
 
         cfg = Config()
         assert hasattr(cfg, "mcp_servers")
         assert cfg.mcp_servers == {}
 
     def test_apply_config_file_parses_mcp_servers(self, tmp_path: Path):
-        from src.config import Config, _apply_config_file
+        from cogtrix_core.config import Config, _apply_config_file
 
         cfg_file = tmp_path / ".cogtrix.yaml"
         cfg_file.write_text(
@@ -1060,7 +1064,7 @@ class TestConfigMcpServers:
         assert config.mcp_servers["webfetch"]["url"] == "http://localhost:8080/sse"
 
     def test_apply_config_file_no_mcp_servers_leaves_empty(self, tmp_path: Path):
-        from src.config import Config, _apply_config_file
+        from cogtrix_core.config import Config, _apply_config_file
 
         cfg_file = tmp_path / ".cogtrix.yaml"
         cfg_file.write_text("provider: ollama\n")
@@ -1071,7 +1075,7 @@ class TestConfigMcpServers:
     def test_apply_config_file_mcp_servers_allow_insecure_preserved(self, tmp_path: Path):
         """Regression for #395: allow_insecure must survive the config-file parsing
         round-trip so it reaches MCPServerConfig (not silently stripped)."""
-        from src.config import Config, _apply_config_file
+        from cogtrix_core.config import Config, _apply_config_file
 
         cfg_file = tmp_path / ".cogtrix.yaml"
         cfg_file.write_text(
@@ -1123,7 +1127,7 @@ class TestConfigMcpServers:
         assert cfg.allow_insecure is False
 
     def test_apply_config_file_mcp_servers_not_dict_ignored(self, tmp_path: Path):
-        from src.config import Config, _apply_config_file
+        from cogtrix_core.config import Config, _apply_config_file
 
         cfg_file = tmp_path / ".cogtrix.yaml"
         cfg_file.write_text("mcp_servers: not_a_dict\n")
@@ -1137,7 +1141,7 @@ class TestConfigMcpServers:
 
 class TestRegistryHelpers:
     def _make_registry_with_mcp_tool(self, tool_name: str = "mcp_search", server: str = "srv"):
-        from src.registry import ToolRegistry
+        from cogtrix_core.registry import ToolRegistry
 
         registry = ToolRegistry.__new__(ToolRegistry)
         registry.tools = {}
@@ -1154,7 +1158,7 @@ class TestRegistryHelpers:
         return registry
 
     def _make_registry_with_regular_tool(self, tool_name: str = "read_file"):
-        from src.registry import ToolRegistry
+        from cogtrix_core.registry import ToolRegistry
 
         registry = ToolRegistry.__new__(ToolRegistry)
         registry.tools = {}
@@ -1203,40 +1207,40 @@ class TestIsConnectionError:
     def test_cancelled_error_is_connection_error(self):
         import asyncio
 
-        from src.mcp_client import _is_connection_error
+        from cogtrix_core.mcp_client import _is_connection_error
 
         assert _is_connection_error(asyncio.CancelledError()) is True
 
     def test_timeout_error_is_connection_error(self):
-        from src.mcp_client import _is_connection_error
+        from cogtrix_core.mcp_client import _is_connection_error
 
         assert _is_connection_error(TimeoutError()) is True
 
     def test_connection_reset_is_connection_error(self):
-        from src.mcp_client import _is_connection_error
+        from cogtrix_core.mcp_client import _is_connection_error
 
         assert _is_connection_error(ConnectionResetError()) is True
 
     def test_broken_pipe_is_connection_error(self):
-        from src.mcp_client import _is_connection_error
+        from cogtrix_core.mcp_client import _is_connection_error
 
         assert _is_connection_error(BrokenPipeError()) is True
 
     def test_value_error_is_not_connection_error(self):
-        from src.mcp_client import _is_connection_error
+        from cogtrix_core.mcp_client import _is_connection_error
 
         assert _is_connection_error(ValueError("not a connection issue")) is False
 
     def test_chained_connection_error_detected(self):
         """Exception wrapping a connection error should still be detected."""
-        from src.mcp_client import _is_connection_error
+        from cogtrix_core.mcp_client import _is_connection_error
 
         outer = RuntimeError("tool failed")
         outer.__cause__ = ConnectionResetError("connection lost")
         assert _is_connection_error(outer) is True
 
     def test_generic_exception_not_connection_error(self):
-        from src.mcp_client import _is_connection_error
+        from cogtrix_core.mcp_client import _is_connection_error
 
         assert _is_connection_error(Exception("generic")) is False
 
@@ -1299,26 +1303,26 @@ class TestMCPUrlValidation:
     """SSRF guards for MCP SSE URLs (issue #302)."""
 
     def test_https_url_accepted(self):
-        from src.mcp_client import _validate_mcp_url
+        from cogtrix_core.mcp_client import _validate_mcp_url
 
         # Should not raise for a public HTTPS URL.
         _validate_mcp_url("https://example.com/sse")
 
     def test_http_rejected_by_default(self):
-        from src.mcp_client import _validate_mcp_url
+        from cogtrix_core.mcp_client import _validate_mcp_url
 
         with pytest.raises(ValueError, match="Insecure MCP SSE URL"):
             _validate_mcp_url("http://example.com/sse")
 
     def test_http_allowed_when_allow_insecure_true(self):
-        from src.mcp_client import _validate_mcp_url
+        from cogtrix_core.mcp_client import _validate_mcp_url
 
         _validate_mcp_url("http://example.com/sse", allow_insecure=True)
 
     def test_rfc1918_allowed_when_allow_insecure_true(self):
         """Regression for #395: allow_insecure must also bypass the RFC1918/private-IP
         block so internal Docker network MCP servers (e.g. 172.20.x.x) can connect."""
-        from src.mcp_client import _validate_mcp_url
+        from cogtrix_core.mcp_client import _validate_mcp_url
 
         # 172.20.x.x is the Docker bridge range used by cogtrix_cogtrix-net
         _validate_mcp_url("http://172.20.0.2/sse", allow_insecure=True)
@@ -1326,43 +1330,43 @@ class TestMCPUrlValidation:
         _validate_mcp_url("http://10.0.0.1/sse", allow_insecure=True)
 
     def test_localhost_rejected(self):
-        from src.mcp_client import _validate_mcp_url
+        from cogtrix_core.mcp_client import _validate_mcp_url
 
         with pytest.raises(ValueError, match="internal host"):
             _validate_mcp_url("https://localhost/sse")
 
     def test_loopback_ip_rejected(self):
-        from src.mcp_client import _validate_mcp_url
+        from cogtrix_core.mcp_client import _validate_mcp_url
 
         with pytest.raises(ValueError, match="blocked IP"):
             _validate_mcp_url("https://127.0.0.1/sse")
 
     def test_rfc1918_ip_rejected(self):
-        from src.mcp_client import _validate_mcp_url
+        from cogtrix_core.mcp_client import _validate_mcp_url
 
         with pytest.raises(ValueError, match="blocked IP"):
             _validate_mcp_url("https://192.168.1.1/sse")
 
     def test_link_local_ip_rejected(self):
-        from src.mcp_client import _validate_mcp_url
+        from cogtrix_core.mcp_client import _validate_mcp_url
 
         with pytest.raises(ValueError, match="internal host"):
             _validate_mcp_url("https://169.254.169.254/latest/meta-data/")
 
     def test_aws_metadata_host_rejected(self):
-        from src.mcp_client import _validate_mcp_url
+        from cogtrix_core.mcp_client import _validate_mcp_url
 
         with pytest.raises(ValueError, match="internal host"):
             _validate_mcp_url("https://169.254.169.254/")
 
     def test_invalid_url_rejected(self):
-        from src.mcp_client import _validate_mcp_url
+        from cogtrix_core.mcp_client import _validate_mcp_url
 
         with pytest.raises(ValueError, match="Invalid MCP SSE URL"):
             _validate_mcp_url("not-a-url")
 
     def test_unsupported_scheme_rejected(self):
-        from src.mcp_client import _validate_mcp_url
+        from cogtrix_core.mcp_client import _validate_mcp_url
 
         with pytest.raises(ValueError, match="scheme must be http or https"):
             _validate_mcp_url("ftp://example.com/sse")
@@ -1373,7 +1377,7 @@ class TestMCPUrlValidation:
 
     def test_connect_raises_for_blocked_url(self):
         """MCPConnection.connect() rejects a blocked URL before opening SSE."""
-        from src.mcp_client import MCPConnection
+        from cogtrix_core.mcp_client import MCPConnection
 
         cfg = MCPServerConfig(name="bad-server", url="https://127.0.0.1:9000/sse")
         conn = MCPConnection(cfg)
@@ -1461,7 +1465,7 @@ class TestMCPShutdownTraceback:
         captured = io.StringIO()
         old_stderr = sys.stderr
 
-        with patch("src.mcp_client.MCP_AVAILABLE", True):
+        with patch("cogtrix_core.mcp_client.MCP_AVAILABLE", True):
             with patch.object(MCPConnection, "connect", fake_connect):
                 with patch.object(MCPConnection, "close", noisy_close):
                     manager.connect_all([MCPServerConfig(name="noisy", command="cmd")])
@@ -1505,7 +1509,7 @@ class TestMCPShutdownTraceback:
         async def fake_close(_self_conn: MCPConnection) -> None:
             pass
 
-        with patch("src.mcp_client.MCP_AVAILABLE", True):
+        with patch("cogtrix_core.mcp_client.MCP_AVAILABLE", True):
             with patch.object(MCPConnection, "connect", fake_connect):
                 with patch.object(MCPConnection, "close", fake_close):
                     manager.connect_all([MCPServerConfig(name="s", command="cmd")])
@@ -1539,10 +1543,10 @@ class TestMCPStartupRetry:
         async def tracking_close(self_conn: MCPConnection) -> None:
             close_calls.append(self_conn._config.name)
 
-        with patch("src.mcp_client._STARTUP_MAX_RETRIES", 0):
+        with patch("cogtrix_core.mcp_client._STARTUP_MAX_RETRIES", 0):
             with patch.object(MCPConnection, "connect", failing_connect):
                 with patch.object(MCPConnection, "close", tracking_close):
-                    with patch("src.mcp_client.MCP_AVAILABLE", True):
+                    with patch("cogtrix_core.mcp_client.MCP_AVAILABLE", True):
                         manager._ensure_loop()
                         future = asyncio.run_coroutine_threadsafe(
                             manager._connect_one_async(cfg),
@@ -1566,10 +1570,10 @@ class TestMCPStartupRetry:
         async def raising_close(_self: MCPConnection) -> None:
             raise RuntimeError("Attempted to exit cancel scope in a different task")
 
-        with patch("src.mcp_client._STARTUP_MAX_RETRIES", 0):
+        with patch("cogtrix_core.mcp_client._STARTUP_MAX_RETRIES", 0):
             with patch.object(MCPConnection, "connect", failing_connect):
                 with patch.object(MCPConnection, "close", raising_close):
-                    with patch("src.mcp_client.MCP_AVAILABLE", True):
+                    with patch("cogtrix_core.mcp_client.MCP_AVAILABLE", True):
                         manager._ensure_loop()
                         future = asyncio.run_coroutine_threadsafe(
                             manager._connect_one_async(cfg),
@@ -1597,10 +1601,10 @@ class TestMCPStartupRetry:
         async def noop_close(_self: MCPConnection) -> None:
             pass
 
-        with patch("src.mcp_client._STARTUP_RETRY_DELAYS", (0.0, 0.0)):
+        with patch("cogtrix_core.mcp_client._STARTUP_RETRY_DELAYS", (0.0, 0.0)):
             with patch.object(MCPConnection, "connect", flaky_connect):
                 with patch.object(MCPConnection, "close", noop_close):
-                    with patch("src.mcp_client.MCP_AVAILABLE", True):
+                    with patch("cogtrix_core.mcp_client.MCP_AVAILABLE", True):
                         manager._ensure_loop()
                         future = asyncio.run_coroutine_threadsafe(
                             manager._connect_one_async(cfg),
@@ -1626,10 +1630,10 @@ class TestMCPStartupRetry:
         async def noop_close(_self: MCPConnection) -> None:
             pass
 
-        with patch("src.mcp_client._STARTUP_RETRY_DELAYS", (0.0, 0.0)):
+        with patch("cogtrix_core.mcp_client._STARTUP_RETRY_DELAYS", (0.0, 0.0)):
             with patch.object(MCPConnection, "connect", always_fail):
                 with patch.object(MCPConnection, "close", noop_close):
-                    with patch("src.mcp_client.MCP_AVAILABLE", True):
+                    with patch("cogtrix_core.mcp_client.MCP_AVAILABLE", True):
                         manager._ensure_loop()
                         future = asyncio.run_coroutine_threadsafe(
                             manager._connect_one_async(cfg),
@@ -1654,10 +1658,10 @@ class TestMCPStartupRetry:
         async def noop_close(_self: MCPConnection) -> None:
             pass
 
-        with patch("src.mcp_client._STARTUP_RETRY_DELAYS", (0.0, 0.0)):
+        with patch("cogtrix_core.mcp_client._STARTUP_RETRY_DELAYS", (0.0, 0.0)):
             with patch.object(MCPConnection, "connect", bad_config_connect):
                 with patch.object(MCPConnection, "close", noop_close):
-                    with patch("src.mcp_client.MCP_AVAILABLE", True):
+                    with patch("cogtrix_core.mcp_client.MCP_AVAILABLE", True):
                         manager._ensure_loop()
                         future = asyncio.run_coroutine_threadsafe(
                             manager._connect_one_async(cfg),
@@ -1703,10 +1707,10 @@ class TestMCPStartupRetry:
         async def noop_close(_self: MCPConnection) -> None:
             pass
 
-        with patch("src.mcp_client._STARTUP_RETRY_DELAYS", (0.0, 0.0)):
+        with patch("cogtrix_core.mcp_client._STARTUP_RETRY_DELAYS", (0.0, 0.0)):
             with patch.object(MCPConnection, "connect", group_wrapped_connect):
                 with patch.object(MCPConnection, "close", noop_close):
-                    with patch("src.mcp_client.MCP_AVAILABLE", True):
+                    with patch("cogtrix_core.mcp_client.MCP_AVAILABLE", True):
                         manager._ensure_loop()
                         with caplog.at_level(logging.WARNING, logger="cogtrix"):
                             future = asyncio.run_coroutine_threadsafe(
@@ -1750,10 +1754,10 @@ class TestMCPStartupRetry:
         async def noop_close(_self: MCPConnection) -> None:
             pass
 
-        with patch("src.mcp_client._STARTUP_RETRY_DELAYS", (0.0, 0.0)):
+        with patch("cogtrix_core.mcp_client._STARTUP_RETRY_DELAYS", (0.0, 0.0)):
             with patch.object(MCPConnection, "connect", nested_group_connect):
                 with patch.object(MCPConnection, "close", noop_close):
-                    with patch("src.mcp_client.MCP_AVAILABLE", True):
+                    with patch("cogtrix_core.mcp_client.MCP_AVAILABLE", True):
                         manager._ensure_loop()
                         with caplog.at_level(logging.WARNING, logger="cogtrix"):
                             future = asyncio.run_coroutine_threadsafe(
@@ -1790,10 +1794,10 @@ class TestMCPStartupRetry:
         async def noop_close(_self: MCPConnection) -> None:
             pass
 
-        with patch("src.mcp_client._STARTUP_RETRY_DELAYS", (0.0, 0.0, 0.0)):
+        with patch("cogtrix_core.mcp_client._STARTUP_RETRY_DELAYS", (0.0, 0.0, 0.0)):
             with patch.object(MCPConnection, "connect", group_wrapped_nxdomain):
                 with patch.object(MCPConnection, "close", noop_close):
-                    with patch("src.mcp_client.MCP_AVAILABLE", True):
+                    with patch("cogtrix_core.mcp_client.MCP_AVAILABLE", True):
                         manager._ensure_loop()
                         future = asyncio.run_coroutine_threadsafe(
                             manager._connect_one_async(cfg),
@@ -1823,10 +1827,10 @@ class TestMCPStartupRetry:
         async def noop_close(_self: MCPConnection) -> None:
             pass
 
-        with patch("src.mcp_client._STARTUP_RETRY_DELAYS", (0.0, 0.0, 0.0)):
+        with patch("cogtrix_core.mcp_client._STARTUP_RETRY_DELAYS", (0.0, 0.0, 0.0)):
             with patch.object(MCPConnection, "connect", gaierror_connect):
                 with patch.object(MCPConnection, "close", noop_close):
-                    with patch("src.mcp_client.MCP_AVAILABLE", True):
+                    with patch("cogtrix_core.mcp_client.MCP_AVAILABLE", True):
                         manager._ensure_loop()
                         future = asyncio.run_coroutine_threadsafe(
                             manager._connect_one_async(cfg),
@@ -1857,10 +1861,10 @@ class TestMCPStartupRetry:
         async def noop_close(_self: MCPConnection) -> None:
             pass
 
-        with patch("src.mcp_client._STARTUP_RETRY_DELAYS", (0.0, 0.0, 0.0)):
+        with patch("cogtrix_core.mcp_client._STARTUP_RETRY_DELAYS", (0.0, 0.0, 0.0)):
             with patch.object(MCPConnection, "connect", transient_connect):
                 with patch.object(MCPConnection, "close", noop_close):
-                    with patch("src.mcp_client.MCP_AVAILABLE", True):
+                    with patch("cogtrix_core.mcp_client.MCP_AVAILABLE", True):
                         manager._ensure_loop()
                         future = asyncio.run_coroutine_threadsafe(
                             manager._connect_one_async(cfg),
@@ -1892,10 +1896,10 @@ class TestMCPStartupRetry:
         async def noop_close(_self: MCPConnection) -> None:
             pass
 
-        with patch("src.mcp_client._STARTUP_RETRY_DELAYS", (0.0, 0.0, 0.0)):
+        with patch("cogtrix_core.mcp_client._STARTUP_RETRY_DELAYS", (0.0, 0.0, 0.0)):
             with patch.object(MCPConnection, "connect", refused):
                 with patch.object(MCPConnection, "close", noop_close):
-                    with patch("src.mcp_client.MCP_AVAILABLE", True):
+                    with patch("cogtrix_core.mcp_client.MCP_AVAILABLE", True):
                         manager._ensure_loop()
                         with caplog.at_level(logging.DEBUG, logger="cogtrix"):
                             future = asyncio.run_coroutine_threadsafe(
@@ -1933,10 +1937,10 @@ class TestMCPStartupRetry:
         async def noop_close(_self: MCPConnection) -> None:
             pass
 
-        with patch("src.mcp_client._STARTUP_RETRY_DELAYS", (0.0, 0.0, 0.0)):
+        with patch("cogtrix_core.mcp_client._STARTUP_RETRY_DELAYS", (0.0, 0.0, 0.0)):
             with patch.object(MCPConnection, "connect", novel_failure):
                 with patch.object(MCPConnection, "close", noop_close):
-                    with patch("src.mcp_client.MCP_AVAILABLE", True):
+                    with patch("cogtrix_core.mcp_client.MCP_AVAILABLE", True):
                         manager._ensure_loop()
                         with caplog.at_level(logging.DEBUG, logger="cogtrix"):
                             future = asyncio.run_coroutine_threadsafe(
@@ -1975,10 +1979,10 @@ class TestMCPStartupRetry:
         async def noop_close(_self: MCPConnection) -> None:
             pass
 
-        with patch("src.mcp_client._STARTUP_RETRY_DELAYS", (0.0, 0.0, 0.0)):
+        with patch("cogtrix_core.mcp_client._STARTUP_RETRY_DELAYS", (0.0, 0.0, 0.0)):
             with patch.object(MCPConnection, "connect", group_wrapped_missing_exec):
                 with patch.object(MCPConnection, "close", noop_close):
-                    with patch("src.mcp_client.MCP_AVAILABLE", True):
+                    with patch("cogtrix_core.mcp_client.MCP_AVAILABLE", True):
                         manager._ensure_loop()
                         future = asyncio.run_coroutine_threadsafe(
                             manager._connect_one_async(cfg),
@@ -2009,8 +2013,8 @@ class TestMCPStartupRetry:
         async def noop_close(_self: MCPConnection) -> None:
             pass
 
-        with patch("src.mcp_client._STARTUP_RETRY_DELAYS", (0.0, 0.0)):
-            with patch("src.mcp_client.MCP_AVAILABLE", True):
+        with patch("cogtrix_core.mcp_client._STARTUP_RETRY_DELAYS", (0.0, 0.0)):
+            with patch("cogtrix_core.mcp_client.MCP_AVAILABLE", True):
                 with patch.object(MCPConnection, "connect", flaky_connect):
                     with patch.object(MCPConnection, "close", noop_close):
                         tools = manager.connect_all([cfg])
@@ -2035,7 +2039,7 @@ class TestMCPReconnectRace:
         async def tracking_reconnect_async(server_name: str) -> None:
             calls.append(server_name)
 
-        with patch("src.mcp_client.MCP_AVAILABLE", True):
+        with patch("cogtrix_core.mcp_client.MCP_AVAILABLE", True):
             with patch.object(MCPConnection, "connect", fake_connect):
                 manager.connect_all([cfg])
 
@@ -2059,7 +2063,7 @@ class TestMCPReconnectRace:
         async def fake_connect(self_conn: MCPConnection) -> None:
             self_conn._tools = []
 
-        with patch("src.mcp_client.MCP_AVAILABLE", True):
+        with patch("cogtrix_core.mcp_client.MCP_AVAILABLE", True):
             with patch.object(MCPConnection, "connect", fake_connect):
                 manager.connect_all([cfg])
                 manager._ensure_loop()
@@ -2093,7 +2097,7 @@ class TestMCPReconnectTimeout:
                 await asyncio.sleep(60)
             self_conn._tools = []
 
-        with patch("src.mcp_client.MCP_AVAILABLE", True):
+        with patch("cogtrix_core.mcp_client.MCP_AVAILABLE", True):
             with patch.object(MCPConnection, "connect", stateful_connect):
                 manager.connect_all([cfg])
                 manager._ensure_loop()
@@ -2129,7 +2133,7 @@ class TestMCPReconnectTimeout:
             closed_connections.append(self_conn)
             await original_close(self_conn)
 
-        with patch("src.mcp_client.MCP_AVAILABLE", True):
+        with patch("cogtrix_core.mcp_client.MCP_AVAILABLE", True):
             with patch.object(MCPConnection, "connect", stateful_connect):
                 with patch.object(MCPConnection, "close", tracking_close):
                     manager.connect_all([cfg])
@@ -2158,7 +2162,7 @@ class TestMCPReconnectTimeout:
             mock_tool = _make_mock_tool(f"tool_{connect_calls}")
             self_conn._tools = [mock_tool]
 
-        with patch("src.mcp_client.MCP_AVAILABLE", True):
+        with patch("cogtrix_core.mcp_client.MCP_AVAILABLE", True):
             with patch.object(MCPConnection, "connect", flaky_connect):
                 manager.connect_all([cfg])
                 manager._ensure_loop()
@@ -2204,7 +2208,7 @@ class TestMCPShutdownRace:
         async def fake_connect(self_conn: MCPConnection) -> None:
             pass
 
-        with patch("src.mcp_client.MCP_AVAILABLE", True):
+        with patch("cogtrix_core.mcp_client.MCP_AVAILABLE", True):
             with patch.object(MCPConnection, "connect", fake_connect):
                 manager.connect_all([MCPServerConfig(name="srv", command="cmd")])
 
@@ -2276,7 +2280,7 @@ class TestMCPConfigFieldAllowlists:
 
         # Reproduce the loader's filter logic against the published
         # constants (the same logic lives in cogtrix.py and
-        # src/api/app.py; this exercises the contract both sites
+        # cogtrix_core/api/app.py; this exercises the contract both sites
         # depend on).
         srv_cfg = {
             "url": "http://mcp-filesystem:8002/sse",
@@ -2340,7 +2344,7 @@ class TestMCPRestart2152:
         async def fake_close(self_conn: MCPConnection) -> None:
             return None
 
-        with patch("src.mcp_client.MCP_AVAILABLE", True):
+        with patch("cogtrix_core.mcp_client.MCP_AVAILABLE", True):
             with patch.object(MCPConnection, "connect", fake_connect):
                 with patch.object(MCPConnection, "close", fake_close):
                     manager.connect_all([cfg])
@@ -2371,7 +2375,7 @@ class TestMCPUrlValidationOffLoop2154:
         import socket
         import threading
 
-        from src.mcp_client import _validate_mcp_url_off_loop
+        from cogtrix_core.mcp_client import _validate_mcp_url_off_loop
 
         seen: dict[str, int] = {}
 
@@ -2381,7 +2385,7 @@ class TestMCPUrlValidationOffLoop2154:
 
         async def run() -> int:
             loop_thread = threading.get_ident()
-            with patch("src.mcp_client.socket.getaddrinfo", fake_getaddrinfo):
+            with patch("cogtrix_core.mcp_client.socket.getaddrinfo", fake_getaddrinfo):
                 await _validate_mcp_url_off_loop("https://example.com/sse")
             return loop_thread
 
@@ -2390,7 +2394,7 @@ class TestMCPUrlValidationOffLoop2154:
         assert seen["dns_thread"] != loop_thread, "DNS resolution ran on the event-loop thread"
 
     def test_off_loop_wrapper_still_blocks_internal_host(self) -> None:
-        from src.mcp_client import _validate_mcp_url_off_loop
+        from cogtrix_core.mcp_client import _validate_mcp_url_off_loop
 
         with pytest.raises(ValueError, match="blocked IP"):
             asyncio.run(_validate_mcp_url_off_loop("https://127.0.0.1/sse"))
@@ -2398,10 +2402,106 @@ class TestMCPUrlValidationOffLoop2154:
     def test_off_loop_wrapper_accepts_public_https(self) -> None:
         import socket
 
-        from src.mcp_client import _validate_mcp_url_off_loop
+        from cogtrix_core.mcp_client import _validate_mcp_url_off_loop
 
         def fake_getaddrinfo(host: str, *a: object, **k: object) -> list:
             return [(socket.AF_INET, socket.SOCK_STREAM, 0, "", ("93.184.216.34", 0))]
 
-        with patch("src.mcp_client.socket.getaddrinfo", fake_getaddrinfo):
+        with patch("cogtrix_core.mcp_client.socket.getaddrinfo", fake_getaddrinfo):
             asyncio.run(_validate_mcp_url_off_loop("https://example.com/sse"))
+
+
+# ── #2213: MCP annotation → budget category ─────────────────────────────────────
+
+
+class TestMCPCategoryFromAnnotations:
+    """MCP ToolAnnotations map to the #2213 budget category the graph consumes."""
+
+    @staticmethod
+    def _ann(**hints: object) -> Any:
+        return SimpleNamespace(**hints)
+
+    def test_read_only_hint_is_retrieval(self) -> None:
+        tool = SimpleNamespace(annotations=self._ann(readOnlyHint=True))
+        assert _mcp_category_from_annotations(tool) == "retrieval"
+
+    def test_destructive_hint_is_action(self) -> None:
+        tool = SimpleNamespace(annotations=self._ann(destructiveHint=True, readOnlyHint=None))
+        assert _mcp_category_from_annotations(tool) == "action"
+
+    def test_read_only_takes_precedence_over_destructive(self) -> None:
+        # A read-only tool is not destructive; readOnly wins if both are (oddly) set.
+        tool = SimpleNamespace(annotations=self._ann(readOnlyHint=True, destructiveHint=True))
+        assert _mcp_category_from_annotations(tool) == "retrieval"
+
+    def test_no_annotations_object_is_none(self) -> None:
+        assert _mcp_category_from_annotations(SimpleNamespace(annotations=None)) is None
+
+    def test_missing_annotations_attr_is_none(self) -> None:
+        assert _mcp_category_from_annotations(SimpleNamespace()) is None
+
+    def test_annotations_without_relevant_hints_is_none(self) -> None:
+        # e.g. only a title / idempotentHint — nothing we map → default STANDARD.
+        tool = SimpleNamespace(annotations=self._ann(title="X", idempotentHint=True))
+        assert _mcp_category_from_annotations(tool) is None
+
+    def test_hints_must_be_true_not_just_truthy(self) -> None:
+        # Guard against a stray truthy value flipping the category.
+        tool = SimpleNamespace(annotations=self._ann(readOnlyHint="yes"))
+        assert _mcp_category_from_annotations(tool) is None
+
+
+class TestMCPWrapperBudgetCategoryWiring:
+    """#2437 — the INTEGRATION seam: _create_mcp_tool_wrapper must actually write
+    the annotation-derived category onto the wrapper metadata under the namespaced
+    key, and graph.resolve_tool_category must honor it end-to-end. This is the path
+    that shipped inert (producer defined, never called) and had no test."""
+
+    @staticmethod
+    def _mcp_tool(annotations: object) -> Any:
+        return SimpleNamespace(
+            name="acme_thing",
+            description="an acme tool",
+            inputSchema={"type": "object", "properties": {}},
+            annotations=annotations,
+        )
+
+    def _wrap(self, annotations: object) -> Any:
+        from cogtrix_core.mcp_client import _create_mcp_tool_wrapper
+
+        tool = _create_mcp_tool_wrapper(
+            self._mcp_tool(annotations),
+            "acme-server",
+            MCPServerConfig(name="acme-server"),
+            MagicMock(),  # manager — only used inside _call_fn, never invoked here
+        )
+        assert tool is not None
+        return tool
+
+    def test_read_only_wrapper_gets_retrieval_end_to_end(self) -> None:
+        from cogtrix_core.orchestration.graph import ToolCategory, resolve_tool_category
+
+        tool = self._wrap(SimpleNamespace(readOnlyHint=True))
+        assert tool.metadata["budget_category"] == "retrieval"
+        assert resolve_tool_category(tool) is ToolCategory.RETRIEVAL
+
+    def test_destructive_wrapper_gets_action_end_to_end(self) -> None:
+        from cogtrix_core.orchestration.graph import ToolCategory, resolve_tool_category
+
+        tool = self._wrap(SimpleNamespace(destructiveHint=True, readOnlyHint=None))
+        assert tool.metadata["budget_category"] == "action"
+        assert resolve_tool_category(tool) is ToolCategory.ACTION
+
+    def test_no_annotations_wrapper_has_no_budget_category(self) -> None:
+        from cogtrix_core.orchestration.graph import ToolCategory, resolve_tool_category
+
+        tool = self._wrap(None)
+        assert "budget_category" not in tool.metadata
+        # Falls back to the name taxonomy → unknown MCP name → STANDARD.
+        assert resolve_tool_category(tool) is ToolCategory.STANDARD
+
+    def test_wrapper_preserves_existing_metadata_keys(self) -> None:
+        tool = self._wrap(SimpleNamespace(readOnlyHint=True))
+        assert tool.metadata["source"] == "mcp"
+        assert tool.metadata["server"] == "acme-server"
+        assert "requires_confirmation" in tool.metadata

@@ -29,11 +29,15 @@ from fastapi.testclient import TestClient  # noqa: E402
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine  # noqa: E402
 from sqlalchemy.pool import StaticPool  # noqa: E402
 
-from src.api.auth import create_access_token  # noqa: E402
-from src.api.db.engine import Base, get_db  # noqa: E402
-from src.api.db.repositories.organization import OrganizationRepository  # noqa: E402
-from src.api.db.repositories.users import UserRepository  # noqa: E402
-from src.api.org_context import OrgContext, get_org_context, require_org_context  # noqa: E402
+from cogtrix_core.api.auth import create_access_token  # noqa: E402
+from cogtrix_core.api.db.engine import Base, get_db  # noqa: E402
+from cogtrix_core.api.db.repositories.organization import OrganizationRepository  # noqa: E402
+from cogtrix_core.api.db.repositories.users import UserRepository  # noqa: E402
+from cogtrix_core.api.org_context import (  # noqa: E402
+    OrgContext,
+    get_org_context,
+    require_org_context,
+)
 
 # ---------------------------------------------------------------------------
 # App fixture with test routes

@@ -16,7 +16,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.config import (
+from cogtrix_core.config import (
     Config,
     ConfigError,
     ModelConfig,
@@ -280,14 +280,14 @@ class TestParseModelsSectionDefault:
 
 class TestCreateChatModelFromConfigs:
     def test_basic_call_passes_correct_params(self) -> None:
-        from src.providers import create_chat_model_from_configs
+        from cogtrix_core.providers import create_chat_model_from_configs
 
         pc = ProviderConfig(
             name="spark", type="openai", base_url="http://spark:8080/v1", api_key="sk-test"
         )
         mc = ModelConfig(provider="spark", model="gpt-oss", temperature=0.7)
 
-        with patch("src.providers.create_chat_model") as mock_create:
+        with patch("cogtrix_core.providers.create_chat_model") as mock_create:
             mock_create.return_value = MagicMock()
             create_chat_model_from_configs(pc, mc)
             mock_create.assert_called_once_with(
@@ -303,79 +303,79 @@ class TestCreateChatModelFromConfigs:
             )
 
     def test_temperature_defaults_to_half_when_none(self) -> None:
-        from src.providers import create_chat_model_from_configs
+        from cogtrix_core.providers import create_chat_model_from_configs
 
         pc = ProviderConfig(name="openai", type="openai", api_key="sk-openai")
         mc = ModelConfig(provider="openai", model="gpt-4o", temperature=None)
 
-        with patch("src.providers.create_chat_model") as mock_create:
+        with patch("cogtrix_core.providers.create_chat_model") as mock_create:
             mock_create.return_value = MagicMock()
             create_chat_model_from_configs(pc, mc)
             _, call_kwargs = mock_create.call_args
             assert call_kwargs["temperature"] == 0.5
 
     def test_num_ctx_passed_only_for_ollama_provider(self) -> None:
-        from src.providers import create_chat_model_from_configs
+        from cogtrix_core.providers import create_chat_model_from_configs
 
         pc = ProviderConfig(name="local", type="ollama", base_url="http://localhost:11434")
         mc = ModelConfig(provider="local", model="qwen3:8b", context_window=8192)
 
-        with patch("src.providers.create_chat_model") as mock_create:
+        with patch("cogtrix_core.providers.create_chat_model") as mock_create:
             mock_create.return_value = MagicMock()
             create_chat_model_from_configs(pc, mc)
             _, call_kwargs = mock_create.call_args
             assert call_kwargs["num_ctx"] == 8192
 
     def test_num_ctx_not_passed_for_openai_provider(self) -> None:
-        from src.providers import create_chat_model_from_configs
+        from cogtrix_core.providers import create_chat_model_from_configs
 
         pc = ProviderConfig(name="openai", type="openai", api_key="sk-openai")
         mc = ModelConfig(provider="openai", model="gpt-4o", context_window=8192)
 
-        with patch("src.providers.create_chat_model") as mock_create:
+        with patch("cogtrix_core.providers.create_chat_model") as mock_create:
             mock_create.return_value = MagicMock()
             create_chat_model_from_configs(pc, mc)
             _, call_kwargs = mock_create.call_args
             assert call_kwargs["num_ctx"] is None
 
     def test_streaming_flag_forwarded(self) -> None:
-        from src.providers import create_chat_model_from_configs
+        from cogtrix_core.providers import create_chat_model_from_configs
 
         pc = ProviderConfig(name="openai", type="openai", api_key="sk-openai")
         mc = ModelConfig(provider="openai", model="gpt-4o")
 
-        with patch("src.providers.create_chat_model") as mock_create:
+        with patch("cogtrix_core.providers.create_chat_model") as mock_create:
             mock_create.return_value = MagicMock()
             create_chat_model_from_configs(pc, mc, streaming=True)
             _, call_kwargs = mock_create.call_args
             assert call_kwargs["streaming"] is True
 
     def test_max_tokens_from_model_config_passed(self) -> None:
-        from src.providers import create_chat_model_from_configs
+        from cogtrix_core.providers import create_chat_model_from_configs
 
         pc = ProviderConfig(name="openai", type="openai", api_key="sk-openai")
         mc = ModelConfig(provider="openai", model="gpt-4o", max_tokens=2048)
 
-        with patch("src.providers.create_chat_model") as mock_create:
+        with patch("cogtrix_core.providers.create_chat_model") as mock_create:
             mock_create.return_value = MagicMock()
             create_chat_model_from_configs(pc, mc)
             _, call_kwargs = mock_create.call_args
             assert call_kwargs["max_tokens"] == 2048
 
     def test_returns_value_from_create_chat_model(self) -> None:
-        from src.providers import create_chat_model_from_configs
+        from cogtrix_core.providers import create_chat_model_from_configs
 
         pc = ProviderConfig(name="openai", type="openai", api_key="sk-openai")
         mc = ModelConfig(provider="openai", model="gpt-4o")
         sentinel = MagicMock()
 
-        with patch("src.providers.create_chat_model", return_value=sentinel):
+        with patch("cogtrix_core.providers.create_chat_model", return_value=sentinel):
             result = create_chat_model_from_configs(pc, mc)
             assert result is sentinel
 
     def test_model_kwargs_forwarded_to_create_chat_model(self) -> None:
         """#2122: sampling passthrough reaches the low-level factory verbatim."""
-        from src.providers import create_chat_model_from_configs
+        from cogtrix_core.providers import create_chat_model_from_configs
 
         pc = ProviderConfig(name="spark", type="openai", base_url="http://spark:8080/v1")
         mc = ModelConfig(
@@ -388,7 +388,7 @@ class TestCreateChatModelFromConfigs:
             },
         )
 
-        with patch("src.providers.create_chat_model") as mock_create:
+        with patch("cogtrix_core.providers.create_chat_model") as mock_create:
             mock_create.return_value = MagicMock()
             create_chat_model_from_configs(pc, mc)
             _, call_kwargs = mock_create.call_args
@@ -398,12 +398,12 @@ class TestCreateChatModelFromConfigs:
 
     def test_empty_model_kwargs_adds_no_extra_params(self) -> None:
         """Default (empty) model_kwargs must not perturb the existing call shape."""
-        from src.providers import create_chat_model_from_configs
+        from cogtrix_core.providers import create_chat_model_from_configs
 
         pc = ProviderConfig(name="openai", type="openai", api_key="sk-openai")
         mc = ModelConfig(provider="openai", model="gpt-4o")
 
-        with patch("src.providers.create_chat_model") as mock_create:
+        with patch("cogtrix_core.providers.create_chat_model") as mock_create:
             mock_create.return_value = MagicMock()
             create_chat_model_from_configs(pc, mc)
             _, call_kwargs = mock_create.call_args
@@ -421,7 +421,7 @@ class TestCreateChatModelFromConfigs:
     def test_reserved_model_kwargs_keys_are_dropped(self) -> None:
         """Reserved keys in model_kwargs must not override explicit params or
         raise a duplicate-keyword TypeError."""
-        from src.providers import create_chat_model_from_configs
+        from cogtrix_core.providers import create_chat_model_from_configs
 
         pc = ProviderConfig(name="openai", type="openai", api_key="sk-openai")
         mc = ModelConfig(
@@ -431,7 +431,7 @@ class TestCreateChatModelFromConfigs:
             model_kwargs={"temperature": 1.9, "max_tokens": 99, "frequency_penalty": 0.5},
         )
 
-        with patch("src.providers.create_chat_model") as mock_create:
+        with patch("cogtrix_core.providers.create_chat_model") as mock_create:
             mock_create.return_value = MagicMock()
             create_chat_model_from_configs(pc, mc)
             _, call_kwargs = mock_create.call_args
@@ -724,7 +724,7 @@ class TestLoadConfigSyntheticDefault:
     def test_synthetic_default_created_when_alias_none_and_providers_exist(
         self,
     ) -> None:
-        from src.config import load_config
+        from cogtrix_core.config import load_config
 
         yaml_content = """
 providers:
@@ -737,8 +737,8 @@ providers:
             tmp_path = Path(f.name)
 
         try:
-            with patch("src.config.find_config_file", return_value=tmp_path):
-                with patch("src.providers.get_default_model", return_value="qwen3:8b"):
+            with patch("cogtrix_core.config.find_config_file", return_value=tmp_path):
+                with patch("cogtrix_core.providers.get_default_model", return_value="qwen3:8b"):
                     cfg = load_config()
             assert cfg.active_model_alias == "myollama/qwen3:8b"
             assert "myollama/qwen3:8b" in cfg.models
@@ -748,7 +748,7 @@ providers:
             tmp_path.unlink(missing_ok=True)
 
     def test_synthetic_default_not_duplicated_if_already_present(self) -> None:
-        from src.config import load_config
+        from cogtrix_core.config import load_config
 
         yaml_content = """
 providers:
@@ -761,8 +761,8 @@ providers:
             tmp_path = Path(f.name)
 
         try:
-            with patch("src.config.find_config_file", return_value=tmp_path):
-                with patch("src.providers.get_default_model", return_value="qwen3:8b"):
+            with patch("cogtrix_core.config.find_config_file", return_value=tmp_path):
+                with patch("cogtrix_core.providers.get_default_model", return_value="qwen3:8b"):
                     cfg1 = load_config()
                     cfg2 = load_config()
             # Both runs should produce identical alias
@@ -771,9 +771,9 @@ providers:
             tmp_path.unlink(missing_ok=True)
 
     def test_no_synthetic_default_when_no_providers(self) -> None:
-        from src.config import load_config
+        from cogtrix_core.config import load_config
 
-        with patch("src.config.find_config_file", return_value=None):
+        with patch("cogtrix_core.config.find_config_file", return_value=None):
             cfg = load_config()
         # No providers → no synthetic default created
         assert cfg.active_model_alias is None
@@ -786,9 +786,9 @@ class TestCreateChatModelMaxTokensMapping:
     """Verify max_tokens is mapped to the correct kwarg name per provider."""
 
     def test_openai_uses_max_tokens(self) -> None:
-        from src.providers import create_chat_model
+        from cogtrix_core.providers import create_chat_model
 
-        with patch("src.providers._load_provider") as mock_load:
+        with patch("cogtrix_core.providers._load_provider") as mock_load:
             mock_mod = MagicMock()
             mock_load.return_value = mock_mod
             create_chat_model("openai", model="gpt-4o", max_tokens=1024)
@@ -798,9 +798,9 @@ class TestCreateChatModelMaxTokensMapping:
             assert "max_output_tokens" not in call_kwargs
 
     def test_ollama_uses_num_predict(self) -> None:
-        from src.providers import create_chat_model
+        from cogtrix_core.providers import create_chat_model
 
-        with patch("src.providers._load_provider") as mock_load:
+        with patch("cogtrix_core.providers._load_provider") as mock_load:
             mock_mod = MagicMock()
             mock_load.return_value = mock_mod
             create_chat_model("ollama", model="qwen3:8b", max_tokens=2048)
@@ -809,9 +809,9 @@ class TestCreateChatModelMaxTokensMapping:
             assert "max_tokens" not in call_kwargs
 
     def test_google_uses_max_output_tokens(self) -> None:
-        from src.providers import create_chat_model
+        from cogtrix_core.providers import create_chat_model
 
-        with patch("src.providers._load_provider") as mock_load:
+        with patch("cogtrix_core.providers._load_provider") as mock_load:
             mock_mod = MagicMock()
             mock_load.return_value = mock_mod
             create_chat_model("google", model="gemini-2.5-flash", max_tokens=4096)
@@ -820,9 +820,9 @@ class TestCreateChatModelMaxTokensMapping:
             assert "max_tokens" not in call_kwargs
 
     def test_anthropic_uses_max_tokens(self) -> None:
-        from src.providers import create_chat_model
+        from cogtrix_core.providers import create_chat_model
 
-        with patch("src.providers._load_provider") as mock_load:
+        with patch("cogtrix_core.providers._load_provider") as mock_load:
             mock_mod = MagicMock()
             mock_load.return_value = mock_mod
             create_chat_model("anthropic", model="claude-sonnet-4-5", max_tokens=512)
@@ -830,9 +830,9 @@ class TestCreateChatModelMaxTokensMapping:
             assert call_kwargs["max_tokens"] == 512
 
     def test_none_max_tokens_not_added_to_kwargs(self) -> None:
-        from src.providers import create_chat_model
+        from cogtrix_core.providers import create_chat_model
 
-        with patch("src.providers._load_provider") as mock_load:
+        with patch("cogtrix_core.providers._load_provider") as mock_load:
             mock_mod = MagicMock()
             mock_load.return_value = mock_mod
             create_chat_model("openai", model="gpt-4o", max_tokens=None)
@@ -842,9 +842,9 @@ class TestCreateChatModelMaxTokensMapping:
             assert "max_output_tokens" not in call_kwargs
 
     def test_num_ctx_only_passed_for_ollama(self) -> None:
-        from src.providers import create_chat_model
+        from cogtrix_core.providers import create_chat_model
 
-        with patch("src.providers._load_provider") as mock_load:
+        with patch("cogtrix_core.providers._load_provider") as mock_load:
             mock_mod = MagicMock()
             mock_load.return_value = mock_mod
             create_chat_model("openai", model="gpt-4o", num_ctx=8192)
@@ -852,9 +852,9 @@ class TestCreateChatModelMaxTokensMapping:
             assert "num_ctx" not in call_kwargs
 
     def test_num_ctx_passed_for_ollama(self) -> None:
-        from src.providers import create_chat_model
+        from cogtrix_core.providers import create_chat_model
 
-        with patch("src.providers._load_provider") as mock_load:
+        with patch("cogtrix_core.providers._load_provider") as mock_load:
             mock_mod = MagicMock()
             mock_load.return_value = mock_mod
             create_chat_model("ollama", model="qwen3:8b", num_ctx=16384)
@@ -862,9 +862,9 @@ class TestCreateChatModelMaxTokensMapping:
             assert call_kwargs["num_ctx"] == 16384
 
     def test_api_key_none_not_added_to_kwargs(self) -> None:
-        from src.providers import create_chat_model
+        from cogtrix_core.providers import create_chat_model
 
-        with patch("src.providers._load_provider") as mock_load:
+        with patch("cogtrix_core.providers._load_provider") as mock_load:
             mock_mod = MagicMock()
             mock_load.return_value = mock_mod
             create_chat_model("openai", model="gpt-4o", api_key=None)
@@ -877,23 +877,23 @@ class TestCreateChatModelMaxTokensMapping:
 
 class TestProviderAvailability:
     def test_is_chat_available_unknown_type_returns_false(self) -> None:
-        from src.providers import is_chat_available
+        from cogtrix_core.providers import is_chat_available
 
         assert is_chat_available("nonexistent_provider") is False
 
     def test_is_embeddings_available_unknown_type_returns_false(self) -> None:
-        from src.providers import is_embeddings_available
+        from cogtrix_core.providers import is_embeddings_available
 
         assert is_embeddings_available("nonexistent_provider") is False
 
     def test_is_chat_available_known_type(self) -> None:
-        from src.providers import is_chat_available
+        from cogtrix_core.providers import is_chat_available
 
         # openai should always be available in the test env
         assert is_chat_available("openai") is True
 
     def test_is_embeddings_available_known_type(self) -> None:
-        from src.providers import is_embeddings_available
+        from cogtrix_core.providers import is_embeddings_available
 
         assert is_embeddings_available("openai") is True
 
@@ -903,7 +903,7 @@ class TestProviderAvailability:
 
 class TestProviderHelpers:
     def test_get_default_model_all_types(self) -> None:
-        from src.providers import get_default_model
+        from cogtrix_core.providers import get_default_model
 
         assert get_default_model("openai") == "gpt-4.1-mini"
         assert get_default_model("ollama") == "qwen3:8b"
@@ -911,26 +911,26 @@ class TestProviderHelpers:
         assert get_default_model("google") == "gemini-2.5-flash"
 
     def test_get_default_model_unknown_falls_back_to_openai(self) -> None:
-        from src.providers import get_default_model
+        from cogtrix_core.providers import get_default_model
 
         assert get_default_model("unknown") == "gpt-4.1-mini"
 
     def test_get_default_embedding_model_anthropic_is_none(self) -> None:
-        from src.providers import get_default_embedding_model
+        from cogtrix_core.providers import get_default_embedding_model
 
         assert get_default_embedding_model("anthropic") is None
 
     def test_get_default_embedding_model_openai(self) -> None:
-        from src.providers import get_default_embedding_model
+        from cogtrix_core.providers import get_default_embedding_model
 
         assert get_default_embedding_model("openai") == "text-embedding-3-small"
 
     def test_get_default_base_url_ollama(self) -> None:
-        from src.providers import get_default_base_url
+        from cogtrix_core.providers import get_default_base_url
 
         assert get_default_base_url("ollama") == "http://localhost:11434"
 
     def test_get_default_base_url_openai_is_none(self) -> None:
-        from src.providers import get_default_base_url
+        from cogtrix_core.providers import get_default_base_url
 
         assert get_default_base_url("openai") is None

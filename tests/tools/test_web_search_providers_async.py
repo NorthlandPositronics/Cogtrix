@@ -17,7 +17,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from src.tools._web_search_aggregator import ProviderResult
+from cogtrix_core.tools._web_search_aggregator import ProviderResult
 
 
 class _FakeProc:
@@ -52,7 +52,7 @@ class TestDdgAsync:
         (Bug D fix). We mock the subprocess boundary; the field-mapping
         contract is the same as the pre-sandbox in-process code path.
         """
-        from src.tools import web_search as mod
+        from cogtrix_core.tools import web_search as mod
 
         proc = _FakeProc(
             stdout=json.dumps(
@@ -92,7 +92,7 @@ class TestDdgAsync:
 
     @pytest.mark.asyncio
     async def test_empty_query_returns_empty_list(self) -> None:
-        from src.tools import web_search as mod
+        from cogtrix_core.tools import web_search as mod
 
         with patch.object(mod, "DDGS_AVAILABLE", True):
             assert await mod._search_async("   ") == []
@@ -102,7 +102,7 @@ class TestDdgAsync:
         """When the DDG scraper deps (curl_cffi → ``_ddg``) are
         unavailable, ``_search_async`` must raise a clear RuntimeError
         so the aggregator records this as a per-provider failure."""
-        from src.tools import web_search as mod
+        from cogtrix_core.tools import web_search as mod
 
         with patch.object(mod, "DDG_AVAILABLE", False):
             with pytest.raises(RuntimeError, match="curl_cffi"):
@@ -115,7 +115,7 @@ class TestDdgAsync:
 class TestTavilyAsync:
     @pytest.mark.asyncio
     async def test_returns_provider_results(self) -> None:
-        from src.tools import tavily_search as mod
+        from cogtrix_core.tools import tavily_search as mod
 
         fake_client = MagicMock()
         fake_client.search.return_value = {
@@ -141,7 +141,7 @@ class TestTavilyAsync:
 
     @pytest.mark.asyncio
     async def test_missing_sdk_raises(self) -> None:
-        from src.tools import tavily_search as mod
+        from cogtrix_core.tools import tavily_search as mod
 
         with patch.object(mod, "TAVILY_AVAILABLE", False):
             with pytest.raises(RuntimeError, match="Tavily SDK"):
@@ -149,7 +149,7 @@ class TestTavilyAsync:
 
     @pytest.mark.asyncio
     async def test_missing_api_key_raises(self) -> None:
-        from src.tools import tavily_search as mod
+        from cogtrix_core.tools import tavily_search as mod
 
         with (
             patch.object(mod, "TAVILY_AVAILABLE", True),
@@ -165,7 +165,7 @@ class TestTavilyAsync:
 class TestBraveAsync:
     @pytest.mark.asyncio
     async def test_returns_provider_results(self) -> None:
-        from src.tools import brave_search as mod
+        from cogtrix_core.tools import brave_search as mod
 
         fake_response = MagicMock()
         fake_response.json.return_value = {
@@ -192,7 +192,7 @@ class TestBraveAsync:
 
     @pytest.mark.asyncio
     async def test_missing_api_key_raises(self) -> None:
-        from src.tools import brave_search as mod
+        from cogtrix_core.tools import brave_search as mod
 
         with patch.object(mod, "_get_api_key", return_value=None):
             with pytest.raises(RuntimeError, match="Brave"):
@@ -205,7 +205,7 @@ class TestBraveAsync:
 class TestGoogleAsync:
     @pytest.mark.asyncio
     async def test_returns_results_with_date_extraction(self) -> None:
-        from src.tools import google_search as mod
+        from cogtrix_core.tools import google_search as mod
 
         fake_response = MagicMock()
         fake_response.json.return_value = {
@@ -234,7 +234,7 @@ class TestGoogleAsync:
 
     @pytest.mark.asyncio
     async def test_missing_key_or_cse_raises(self) -> None:
-        from src.tools import google_search as mod
+        from cogtrix_core.tools import google_search as mod
 
         with patch.object(mod, "_get_api_key", return_value=None):
             with pytest.raises(RuntimeError, match="Google API key"):
@@ -254,7 +254,7 @@ class TestGoogleAsync:
 class TestExaAsync:
     @pytest.mark.asyncio
     async def test_returns_provider_results(self) -> None:
-        from src.tools import exa_search as mod
+        from cogtrix_core.tools import exa_search as mod
 
         class FakeExaResult:
             def __init__(self, url: str, title: str, text: str) -> None:
@@ -282,7 +282,7 @@ class TestExaAsync:
 
     @pytest.mark.asyncio
     async def test_missing_sdk_raises(self) -> None:
-        from src.tools import exa_search as mod
+        from cogtrix_core.tools import exa_search as mod
 
         with patch.object(mod, "EXA_AVAILABLE", False):
             with pytest.raises(RuntimeError, match="Exa SDK"):
@@ -295,7 +295,7 @@ class TestExaAsync:
 class TestSerpApiAsync:
     @pytest.mark.asyncio
     async def test_returns_provider_results(self) -> None:
-        from src.tools import serpapi_search as mod
+        from cogtrix_core.tools import serpapi_search as mod
 
         fake_search = MagicMock()
         fake_search.get_dict.return_value = {
@@ -320,7 +320,7 @@ class TestSerpApiAsync:
 
     @pytest.mark.asyncio
     async def test_api_error_in_response_raises(self) -> None:
-        from src.tools import serpapi_search as mod
+        from cogtrix_core.tools import serpapi_search as mod
 
         fake_search = MagicMock()
         fake_search.get_dict.return_value = {"error": "Invalid API key"}
@@ -334,7 +334,7 @@ class TestSerpApiAsync:
 
     @pytest.mark.asyncio
     async def test_missing_sdk_raises(self) -> None:
-        from src.tools import serpapi_search as mod
+        from cogtrix_core.tools import serpapi_search as mod
 
         with patch.object(mod, "SERPAPI_AVAILABLE", False):
             with pytest.raises(RuntimeError, match="SerpAPI SDK"):
@@ -349,7 +349,7 @@ class TestSearXNGAsync:
     async def test_returns_provider_results(self) -> None:
         import httpx
 
-        from src.tools import searxng_search as mod
+        from cogtrix_core.tools import searxng_search as mod
 
         def handler(request: httpx.Request) -> httpx.Response:
             return httpx.Response(
@@ -383,7 +383,7 @@ class TestSearXNGAsync:
 
     @pytest.mark.asyncio
     async def test_missing_url_raises(self) -> None:
-        from src.tools import searxng_search as mod
+        from cogtrix_core.tools import searxng_search as mod
 
         with patch.object(mod, "_get_url", return_value=None):
             with pytest.raises(RuntimeError, match="SearXNG URL"):
@@ -402,7 +402,7 @@ class TestProviderResultUniformity:
         short name. This is what the stage-1 aggregator uses for the
         consensus-count signal and the Coverage block."""
 
-        from src.tools import (
+        from cogtrix_core.tools import (
             brave_search,
             exa_search,
             google_search,
@@ -410,7 +410,7 @@ class TestProviderResultUniformity:
             serpapi_search,
             tavily_search,
         )
-        from src.tools import (
+        from cogtrix_core.tools import (
             web_search as ddg,
         )
 

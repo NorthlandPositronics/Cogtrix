@@ -1,4 +1,4 @@
-"""Tests for src/orchestration/compression.py — non-string content guard and tool name sanitization."""
+"""Tests for cogtrix_core/orchestration/compression.py — non-string content guard and tool name sanitization."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from src.orchestration.compression import (
+from cogtrix_core.orchestration.compression import (
     _CHARS_PER_TOKEN,
     _COMPRESSION_THRESHOLD_RATIO,
     apply_message_compression,
@@ -381,7 +381,7 @@ class TestCompressionTimeout:
         Without fix: no deadline code → all 5 items compressed (mock is fast).
         With fix: deadline=0 → items skipped, result unchanged.
         """
-        import src.orchestration.compression as comp_mod
+        import cogtrix_core.orchestration.compression as comp_mod
 
         # Force immediate deadline
         monkeypatch.setattr(comp_mod, "_COMPRESSION_TOTAL_TIMEOUT_SECS", 0)
@@ -415,7 +415,7 @@ class TestCompressionTimeout:
 
     def test_compression_timeout_constant_exists(self) -> None:
         """_COMPRESSION_TOTAL_TIMEOUT_SECS is defined as a positive int."""
-        from src.orchestration.compression import _COMPRESSION_TOTAL_TIMEOUT_SECS
+        from cogtrix_core.orchestration.compression import _COMPRESSION_TOTAL_TIMEOUT_SECS
 
         assert isinstance(_COMPRESSION_TOTAL_TIMEOUT_SECS, int)
         assert _COMPRESSION_TOTAL_TIMEOUT_SECS > 0
@@ -436,7 +436,7 @@ class TestCompressionInternalTimeout:
         import time
         from unittest.mock import patch
 
-        from src.orchestration.compression import compress_tool_message
+        from cogtrix_core.orchestration.compression import compress_tool_message
 
         mock_llm = MagicMock()
 
@@ -447,7 +447,7 @@ class TestCompressionInternalTimeout:
         mock_llm.invoke.side_effect = _slow_invoke
 
         content = "A" * 5000
-        with patch("src.orchestration.compression._COMPRESS_INVOKE_TIMEOUT_SECONDS", 0.1):
+        with patch("cogtrix_core.orchestration.compression._COMPRESS_INVOKE_TIMEOUT_SECONDS", 0.1):
             result = compress_tool_message(content, "read_file", mock_llm)
 
         # Must be truncated fallback, not the LLM response
@@ -459,7 +459,7 @@ class TestCompressionInternalTimeout:
         import time
         from unittest.mock import patch
 
-        from src.orchestration.compression import compress_tool_message
+        from cogtrix_core.orchestration.compression import compress_tool_message
 
         slow_llm = MagicMock()
 
@@ -473,7 +473,7 @@ class TestCompressionInternalTimeout:
         fast_llm.invoke.return_value = MagicMock(content="fast compressed result")
 
         content = "B" * 5000
-        with patch("src.orchestration.compression._COMPRESS_INVOKE_TIMEOUT_SECONDS", 0.1):
+        with patch("cogtrix_core.orchestration.compression._COMPRESS_INVOKE_TIMEOUT_SECONDS", 0.1):
             # 5 sequential timeouts — each returns fallback without hanging
             for _ in range(5):
                 result = compress_tool_message(content, "read_file", slow_llm)
@@ -489,7 +489,7 @@ class TestCompressionInternalTimeout:
         import time
         from unittest.mock import patch
 
-        from src.orchestration.compression import apply_message_compression
+        from cogtrix_core.orchestration.compression import apply_message_compression
 
         large_ai_content = "A" * 10_000
         old_ais = [AIMessage(content=large_ai_content) for _ in range(5)]
@@ -503,7 +503,7 @@ class TestCompressionInternalTimeout:
 
         llm.invoke.side_effect = _slow_invoke
 
-        with patch("src.orchestration.compression._COMPRESS_INVOKE_TIMEOUT_SECONDS", 0.1):
+        with patch("cogtrix_core.orchestration.compression._COMPRESS_INVOKE_TIMEOUT_SECONDS", 0.1):
             result = apply_message_compression(
                 msgs,
                 call_count=10,
@@ -533,7 +533,7 @@ class TestCompressionInternalTimeout:
         import time
         from unittest.mock import patch
 
-        from src.orchestration.compression import compress_tool_message
+        from cogtrix_core.orchestration.compression import compress_tool_message
 
         mock_llm = MagicMock()
         stop_event = threading.Event()
@@ -546,7 +546,7 @@ class TestCompressionInternalTimeout:
 
         content = "A" * 5000
         start = time.monotonic()
-        with patch("src.orchestration.compression._COMPRESS_INVOKE_TIMEOUT_SECONDS", 0.1):
+        with patch("cogtrix_core.orchestration.compression._COMPRESS_INVOKE_TIMEOUT_SECONDS", 0.1):
             result = compress_tool_message(content, "read_file", mock_llm)
         elapsed = time.monotonic() - start
 
@@ -557,4 +557,72 @@ class TestCompressionInternalTimeout:
         assert elapsed < 5, f"Function blocked for {elapsed:.1f}s — likely __exit__ hang"
         # Must be truncated fallback, not the LLM response
         assert "compressed" not in result
+        assert len(result) < len(content)
+
+
+class TestCompressionInputBounding:
+    """#2399 — the summary LLM call must ingest a bounded head+tail window so it
+    stays within the per-call timeout on slow, large-window models instead of
+    timing out (60s dead wait) and degrading to raw truncation every run.
+    """
+
+    def test_oversized_content_bounds_the_llm_input(self) -> None:
+        from cogtrix_core.orchestration.compression import (
+            _COMPRESSION_MAX_INPUT_CHARS,
+            compress_tool_message,
+        )
+
+        # A 60K-char tool message — the size that reliably timed out (#2399).
+        content = "Z" * 60_000
+        llm = MagicMock()
+        llm.invoke.return_value = MagicMock(content="short summary of the output")
+
+        result = compress_tool_message(content, "read_file", llm)
+
+        # The prompt actually sent to the model must carry a bounded window,
+        # not the full 60K payload. Allow headroom for the fixed prompt scaffold
+        # and the truncation marker, but it must be nowhere near the original.
+        llm.invoke.assert_called_once()
+        sent_prompt = llm.invoke.call_args.args[0]
+        assert isinstance(sent_prompt, str)
+        assert len(sent_prompt) < _COMPRESSION_MAX_INPUT_CHARS + 2_000
+        # Middle-truncation marker proves the head+tail window was used.
+        assert "chars truncated to fit context budget" in sent_prompt
+        # The LLM summary replaces the FULL original content.
+        assert result == "short summary of the output"
+
+    def test_small_content_is_sent_in_full(self) -> None:
+        from cogtrix_core.orchestration.compression import (
+            _COMPRESSION_MAX_INPUT_CHARS,
+            compress_tool_message,
+        )
+
+        # Comfortably under the cap — must not be truncated before summarizing.
+        marker = "UNIQUE_MARKER_" + "q" * 200
+        content = marker + ("a" * 4_000) + marker
+        assert len(content) < _COMPRESSION_MAX_INPUT_CHARS
+        llm = MagicMock()
+        llm.invoke.return_value = MagicMock(content="tiny")
+
+        compress_tool_message(content, "read_file", llm)
+
+        sent_prompt = llm.invoke.call_args.args[0]
+        # Full content present (both marker occurrences), no truncation marker.
+        assert sent_prompt.count(marker) == 2
+        assert "chars truncated to fit context budget" not in sent_prompt
+
+    def test_bounded_input_summary_still_beats_original_size(self) -> None:
+        """With bounded input the summary replaces the full message and the
+        size guard compares against the untruncated length, so a genuine
+        reduction is kept (not rejected as 'did not reduce size')."""
+        from cogtrix_core.orchestration.compression import compress_tool_message
+
+        content = "Y" * 60_000
+        # Summary larger than the 16K window but smaller than the 60K original.
+        llm = MagicMock()
+        llm.invoke.return_value = MagicMock(content="S" * 20_000)
+
+        result = compress_tool_message(content, "read_file", llm)
+
+        assert result == "S" * 20_000
         assert len(result) < len(content)

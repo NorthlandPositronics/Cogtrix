@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.tools.http_request import (
+from cogtrix_core.tools.http_request import (
     _BLOCKED_HEADERS,
     _MAX_TIMEOUT,
     _dns_pins,
@@ -52,12 +52,12 @@ def _fake_follow_redirects_factory(captured: list[int]):  # type: ignore[no-unty
 def test_http_get_timeout_clamping(timeout_in: int, expected: int) -> None:
     captured: list[int] = []
     with (
-        patch("src.tools.http_request.REQUESTS_AVAILABLE", True),
+        patch("cogtrix_core.tools.http_request.REQUESTS_AVAILABLE", True),
         patch(
-            "src.tools.http_request._follow_redirects",
+            "cogtrix_core.tools.http_request._follow_redirects",
             side_effect=_fake_follow_redirects_factory(captured),
         ),
-        patch("src.tools.http_request._check_recent_failure", return_value=None),
+        patch("cogtrix_core.tools.http_request._check_recent_failure", return_value=None),
     ):
         http_get("https://example.com", timeout=timeout_in)
     assert captured[0] == expected
@@ -74,12 +74,12 @@ def test_http_get_timeout_clamping(timeout_in: int, expected: int) -> None:
 def test_http_post_timeout_clamping(timeout_in: int, expected: int) -> None:
     captured: list[int] = []
     with (
-        patch("src.tools.http_request.REQUESTS_AVAILABLE", True),
+        patch("cogtrix_core.tools.http_request.REQUESTS_AVAILABLE", True),
         patch(
-            "src.tools.http_request._follow_redirects",
+            "cogtrix_core.tools.http_request._follow_redirects",
             side_effect=_fake_follow_redirects_factory(captured),
         ),
-        patch("src.tools.http_request._check_recent_failure", return_value=None),
+        patch("cogtrix_core.tools.http_request._check_recent_failure", return_value=None),
     ):
         http_post("https://example.com", data='{"key": "value"}', timeout=timeout_in)
     assert captured[0] == expected
@@ -218,14 +218,18 @@ class TestValidateUrlSsrf:
     def test_dns_resolves_to_private_ip_blocked(self) -> None:
         """Hostname that DNS resolves to a private IP must be blocked."""
         fake_addrinfo = [(socket.AF_INET, socket.SOCK_STREAM, 0, "", ("10.0.0.1", 0))]
-        with patch("src.tools._http_safety.socket.getaddrinfo", return_value=fake_addrinfo):
+        with patch(
+            "cogtrix_core.tools._http_safety.socket.getaddrinfo", return_value=fake_addrinfo
+        ):
             ok, _err, _ip = _validate_url("http://internal.corp.example/")
         assert ok is False
 
     def test_dns_resolves_to_public_ip_allowed(self) -> None:
         """Hostname that DNS resolves to a public IP must be allowed."""
         fake_addrinfo = [(socket.AF_INET, socket.SOCK_STREAM, 0, "", ("93.184.216.34", 0))]
-        with patch("src.tools._http_safety.socket.getaddrinfo", return_value=fake_addrinfo):
+        with patch(
+            "cogtrix_core.tools._http_safety.socket.getaddrinfo", return_value=fake_addrinfo
+        ):
             ok, err, _ip = _validate_url("http://example.com/")
         assert ok is True
         assert err == ""
@@ -243,7 +247,9 @@ class TestValidateUrlSsrf:
     def test_dns_resolves_to_multicast_ip_blocked(self) -> None:
         """Hostname that DNS resolves to a multicast IP must be blocked."""
         fake_addrinfo = [(socket.AF_INET, socket.SOCK_STREAM, 0, "", ("239.255.255.250", 0))]
-        with patch("src.tools._http_safety.socket.getaddrinfo", return_value=fake_addrinfo):
+        with patch(
+            "cogtrix_core.tools._http_safety.socket.getaddrinfo", return_value=fake_addrinfo
+        ):
             ok, _err, _ip = _validate_url("http://ssdp-local.corp.example/")
         assert ok is False
 
@@ -254,7 +260,9 @@ class TestDnsPinning:
     def test_validate_url_returns_resolved_ip(self) -> None:
         """_validate_url returns the first public IP as the third element."""
         fake_addrinfo = [(socket.AF_INET, socket.SOCK_STREAM, 0, "", ("93.184.216.34", 0))]
-        with patch("src.tools._http_safety.socket.getaddrinfo", return_value=fake_addrinfo):
+        with patch(
+            "cogtrix_core.tools._http_safety.socket.getaddrinfo", return_value=fake_addrinfo
+        ):
             ok, err, ip = _validate_url("https://example.com/")
         assert ok is True
         assert err == ""
@@ -263,7 +271,7 @@ class TestDnsPinning:
     def test_validate_url_rejects_on_dns_failure(self) -> None:
         """_validate_url rejects URLs when DNS resolution fails (SEC-002)."""
         with patch(
-            "src.tools._http_safety.socket.getaddrinfo",
+            "cogtrix_core.tools._http_safety.socket.getaddrinfo",
             side_effect=socket.gaierror("DNS failure"),
         ):
             ok, err, ip = _validate_url("https://example.com/")
@@ -288,7 +296,7 @@ class TestDnsPinning:
     def test_follow_redirects_pins_dns_for_each_hop(self) -> None:
         """_follow_redirects uses the pinned IP for the initial request, then validates
         and re-pins for each redirect hop."""
-        from src.tools.http_request import _follow_redirects
+        from cogtrix_core.tools.http_request import _follow_redirects
 
         public_ip = "93.184.216.34"
         pinned_calls: list[str] = []
@@ -310,7 +318,7 @@ class TestDnsPinning:
         session = MagicMock()
         session.request.side_effect = [redirect_response, final_response]
 
-        with patch("src.tools.http_request._validate_url", side_effect=fake_validate):
+        with patch("cogtrix_core.tools.http_request._validate_url", side_effect=fake_validate):
             result = _follow_redirects(
                 session,
                 "GET",
@@ -432,7 +440,7 @@ class TestHttpGetMaxChars:
 
     def test_http_get_default_max_chars_is_10000(self) -> None:
         """Default max_chars is 10,000."""
-        from src.tools.http_request import HttpGetInput
+        from cogtrix_core.tools.http_request import HttpGetInput
 
         schema = HttpGetInput(url="http://example.com")
         assert schema.max_chars == 10_000
@@ -448,11 +456,13 @@ class TestHttpGetMaxChars:
         mock_resp.close = MagicMock()
 
         with (
-            patch("src.tools.http_request._validate_url", return_value=(True, "", "1.2.3.4")),
-            patch("src.tools.http_request._check_recent_failure", return_value=None),
-            patch("src.tools.http_request._follow_redirects", return_value=mock_resp),
             patch(
-                "src.tools.http_request._read_bounded_response",
+                "cogtrix_core.tools.http_request._validate_url", return_value=(True, "", "1.2.3.4")
+            ),
+            patch("cogtrix_core.tools.http_request._check_recent_failure", return_value=None),
+            patch("cogtrix_core.tools.http_request._follow_redirects", return_value=mock_resp),
+            patch(
+                "cogtrix_core.tools.http_request._read_bounded_response",
                 return_value=(b"x" * 500, False),
             ),
         ):
@@ -472,11 +482,13 @@ class TestHttpGetMaxChars:
         mock_resp.close = MagicMock()
 
         with (
-            patch("src.tools.http_request._validate_url", return_value=(True, "", "1.2.3.4")),
-            patch("src.tools.http_request._check_recent_failure", return_value=None),
-            patch("src.tools.http_request._follow_redirects", return_value=mock_resp),
             patch(
-                "src.tools.http_request._read_bounded_response",
+                "cogtrix_core.tools.http_request._validate_url", return_value=(True, "", "1.2.3.4")
+            ),
+            patch("cogtrix_core.tools.http_request._check_recent_failure", return_value=None),
+            patch("cogtrix_core.tools.http_request._follow_redirects", return_value=mock_resp),
+            patch(
+                "cogtrix_core.tools.http_request._read_bounded_response",
                 return_value=(body, False),
             ),
         ):
@@ -502,16 +514,18 @@ class TestSanitizeError:
         mock_resp.close = MagicMock()
 
         with (
-            patch("src.tools.http_request.REQUESTS_AVAILABLE", True),
-            patch("src.tools.http_request._validate_url", return_value=(True, "", "1.2.3.4")),
-            patch("src.tools.http_request._check_recent_failure", return_value=None),
+            patch("cogtrix_core.tools.http_request.REQUESTS_AVAILABLE", True),
             patch(
-                "src.tools.http_request._follow_redirects",
+                "cogtrix_core.tools.http_request._validate_url", return_value=(True, "", "1.2.3.4")
+            ),
+            patch("cogtrix_core.tools.http_request._check_recent_failure", return_value=None),
+            patch(
+                "cogtrix_core.tools.http_request._follow_redirects",
                 side_effect=ConnectionError(
                     "HTTPConnectionPool(host='192.168.1.1', port=8080): Max retries exceeded"
                 ),
             ),
-            patch("src.tools.http_request._record_failure"),
+            patch("cogtrix_core.tools.http_request._record_failure"),
         ):
             result = http_get("http://example.com")
 
@@ -525,16 +539,18 @@ class TestSanitizeError:
         from requests.exceptions import RequestException
 
         with (
-            patch("src.tools.http_request.REQUESTS_AVAILABLE", True),
-            patch("src.tools.http_request._validate_url", return_value=(True, "", "1.2.3.4")),
-            patch("src.tools.http_request._check_recent_failure", return_value=None),
+            patch("cogtrix_core.tools.http_request.REQUESTS_AVAILABLE", True),
             patch(
-                "src.tools.http_request._follow_redirects",
+                "cogtrix_core.tools.http_request._validate_url", return_value=(True, "", "1.2.3.4")
+            ),
+            patch("cogtrix_core.tools.http_request._check_recent_failure", return_value=None),
+            patch(
+                "cogtrix_core.tools.http_request._follow_redirects",
                 side_effect=RequestException(
                     "requests.exceptions.ReadTimeout: HTTPConnectionPool(host='internal-srv')"
                 ),
             ),
-            patch("src.tools.http_request._record_failure"),
+            patch("cogtrix_core.tools.http_request._record_failure"),
         ):
             result = http_get("http://example.com")
 
@@ -551,16 +567,18 @@ class TestSanitizeError:
         mock_response.status_code = 503
 
         with (
-            patch("src.tools.http_request.REQUESTS_AVAILABLE", True),
-            patch("src.tools.http_request._validate_url", return_value=(True, "", "1.2.3.4")),
-            patch("src.tools.http_request._check_recent_failure", return_value=None),
+            patch("cogtrix_core.tools.http_request.REQUESTS_AVAILABLE", True),
             patch(
-                "src.tools.http_request._follow_redirects",
+                "cogtrix_core.tools.http_request._validate_url", return_value=(True, "", "1.2.3.4")
+            ),
+            patch("cogtrix_core.tools.http_request._check_recent_failure", return_value=None),
+            patch(
+                "cogtrix_core.tools.http_request._follow_redirects",
                 side_effect=HTTPError(
                     "503 Server Error: Backend unavailable", response=mock_response
                 ),
             ),
-            patch("src.tools.http_request._record_failure"),
+            patch("cogtrix_core.tools.http_request._record_failure"),
         ):
             result = http_get("http://example.com")
 
@@ -571,14 +589,16 @@ class TestSanitizeError:
     def test_unknown_exception_returns_fallback(self) -> None:
         """Unexpected exceptions must not expose class name or message to LLM."""
         with (
-            patch("src.tools.http_request.REQUESTS_AVAILABLE", True),
-            patch("src.tools.http_request._validate_url", return_value=(True, "", "1.2.3.4")),
-            patch("src.tools.http_request._check_recent_failure", return_value=None),
+            patch("cogtrix_core.tools.http_request.REQUESTS_AVAILABLE", True),
             patch(
-                "src.tools.http_request._follow_redirects",
+                "cogtrix_core.tools.http_request._validate_url", return_value=(True, "", "1.2.3.4")
+            ),
+            patch("cogtrix_core.tools.http_request._check_recent_failure", return_value=None),
+            patch(
+                "cogtrix_core.tools.http_request._follow_redirects",
                 side_effect=RuntimeError("secret internal state leaked here"),
             ),
-            patch("src.tools.http_request._record_failure"),
+            patch("cogtrix_core.tools.http_request._record_failure"),
         ):
             result = http_get("http://example.com")
 
@@ -591,15 +611,17 @@ class TestSanitizeError:
         from requests.exceptions import ConnectionError
 
         with (
-            patch("src.tools.http_request.REQUESTS_AVAILABLE", True),
-            patch("src.tools.http_request._validate_url", return_value=(True, "", "1.2.3.4")),
-            patch("src.tools.http_request._check_recent_failure", return_value=None),
-            patch("src.tools.http_request._parse_headers", return_value=({}, None)),
+            patch("cogtrix_core.tools.http_request.REQUESTS_AVAILABLE", True),
             patch(
-                "src.tools.http_request._follow_redirects",
+                "cogtrix_core.tools.http_request._validate_url", return_value=(True, "", "1.2.3.4")
+            ),
+            patch("cogtrix_core.tools.http_request._check_recent_failure", return_value=None),
+            patch("cogtrix_core.tools.http_request._parse_headers", return_value=({}, None)),
+            patch(
+                "cogtrix_core.tools.http_request._follow_redirects",
                 side_effect=ConnectionError("SSLError(SSLCertVerificationError) at 10.0.0.5"),
             ),
-            patch("src.tools.http_request._record_failure"),
+            patch("cogtrix_core.tools.http_request._record_failure"),
         ):
             result = http_post("http://example.com", '{"key": "value"}')
 
@@ -613,17 +635,19 @@ class TestSanitizeError:
         from requests.exceptions import RequestException
 
         with (
-            patch("src.tools.http_request.REQUESTS_AVAILABLE", True),
-            patch("src.tools.http_request._validate_url", return_value=(True, "", "1.2.3.4")),
-            patch("src.tools.http_request._check_recent_failure", return_value=None),
-            patch("src.tools.http_request._parse_headers", return_value=({}, None)),
+            patch("cogtrix_core.tools.http_request.REQUESTS_AVAILABLE", True),
             patch(
-                "src.tools.http_request._follow_redirects",
+                "cogtrix_core.tools.http_request._validate_url", return_value=(True, "", "1.2.3.4")
+            ),
+            patch("cogtrix_core.tools.http_request._check_recent_failure", return_value=None),
+            patch("cogtrix_core.tools.http_request._parse_headers", return_value=({}, None)),
+            patch(
+                "cogtrix_core.tools.http_request._follow_redirects",
                 side_effect=RequestException(
                     "urllib3.exceptions.NewConnectionError: '<ssl.SSLCertVerificationError>"
                 ),
             ),
-            patch("src.tools.http_request._record_failure"),
+            patch("cogtrix_core.tools.http_request._record_failure"),
         ):
             result = http_post("http://example.com", '{"key": "value"}')
 

@@ -11,7 +11,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.orchestration.session_state import SessionState
+from cogtrix_core.orchestration.session_state import SessionState
 
 # ---------------------------------------------------------------------------
 # Fixture: save/restore RAG config to prevent test pollution
@@ -21,7 +21,7 @@ from src.orchestration.session_state import SessionState
 @pytest.fixture()
 def _restore_rag_config():
     """Save and restore _rag_config around tests that call configure_rag."""
-    import src.tools.rag as _rag_mod
+    import cogtrix_core.tools.rag as _rag_mod
 
     original = dict(_rag_mod._rag_config)
     yield
@@ -38,7 +38,7 @@ class TestKnowledgeBaseExists:
 
     @pytest.mark.usefixtures("_restore_rag_config")
     def test_returns_true_when_global_index_exists(self, tmp_path: Path) -> None:
-        from src.tools.rag import configure_rag, knowledge_base_exists
+        from cogtrix_core.tools.rag import configure_rag, knowledge_base_exists
 
         idx = tmp_path / "faiss_index"
         idx.mkdir()
@@ -53,7 +53,7 @@ class TestKnowledgeBaseExists:
 
     @pytest.mark.usefixtures("_restore_rag_config")
     def test_returns_true_when_api_index_exists(self, tmp_path: Path) -> None:
-        from src.tools.rag import configure_rag, knowledge_base_exists
+        from cogtrix_core.tools.rag import configure_rag, knowledge_base_exists
 
         uploads = tmp_path / "uploads"
         api_idx = uploads / "doc1" / "vectordb" / "faiss_index"
@@ -69,7 +69,7 @@ class TestKnowledgeBaseExists:
 
     @pytest.mark.usefixtures("_restore_rag_config")
     def test_returns_false_when_no_indexes(self, tmp_path: Path) -> None:
-        from src.tools.rag import configure_rag, knowledge_base_exists
+        from cogtrix_core.tools.rag import configure_rag, knowledge_base_exists
 
         configure_rag(
             {
@@ -85,7 +85,7 @@ class TestKnowledgeBaseStats:
 
     @pytest.mark.usefixtures("_restore_rag_config")
     def test_counts_indexes_and_sizes(self, tmp_path: Path) -> None:
-        from src.tools.rag import configure_rag, knowledge_base_stats
+        from cogtrix_core.tools.rag import configure_rag, knowledge_base_stats
 
         idx = tmp_path / "faiss_index"
         idx.mkdir()
@@ -104,7 +104,7 @@ class TestKnowledgeBaseStats:
 
     @pytest.mark.usefixtures("_restore_rag_config")
     def test_empty_when_no_indexes(self, tmp_path: Path) -> None:
-        from src.tools.rag import configure_rag, knowledge_base_stats
+        from cogtrix_core.tools.rag import configure_rag, knowledge_base_stats
 
         configure_rag(
             {
@@ -122,7 +122,7 @@ class TestBuildDescription:
 
     @pytest.mark.usefixtures("_restore_rag_config")
     def test_no_indexes_returns_default(self, tmp_path: Path) -> None:
-        from src.tools.rag import _build_description, configure_rag
+        from cogtrix_core.tools.rag import _build_description, configure_rag
 
         configure_rag(
             {
@@ -135,7 +135,7 @@ class TestBuildDescription:
 
     @pytest.mark.usefixtures("_restore_rag_config")
     def test_single_index_shows_size(self, tmp_path: Path) -> None:
-        from src.tools.rag import _build_description, configure_rag
+        from cogtrix_core.tools.rag import _build_description, configure_rag
 
         idx = tmp_path / "faiss_index"
         idx.mkdir()
@@ -153,7 +153,7 @@ class TestBuildDescription:
 
     @pytest.mark.usefixtures("_restore_rag_config")
     def test_multiple_indexes_shows_count(self, tmp_path: Path) -> None:
-        from src.tools.rag import _build_description, configure_rag
+        from cogtrix_core.tools.rag import _build_description, configure_rag
 
         uploads = tmp_path / "uploads"
         for name in ["doc1", "doc2", "doc3"]:
@@ -175,7 +175,7 @@ class TestRagShouldAutoActivate:
     """rag_should_auto_activate() reflects knowledge base existence."""
 
     def test_returns_false_when_flag_unset(self) -> None:
-        import src.tools.configure as _cfg_mod
+        import cogtrix_core.tools.configure as _cfg_mod
 
         original = _cfg_mod._rag_auto_activate
         try:
@@ -185,7 +185,7 @@ class TestRagShouldAutoActivate:
             _cfg_mod._rag_auto_activate = original
 
     def test_returns_true_when_flag_set(self) -> None:
-        import src.tools.configure as _cfg_mod
+        import cogtrix_core.tools.configure as _cfg_mod
 
         original = _cfg_mod._rag_auto_activate
         try:
@@ -200,8 +200,8 @@ class TestUpdateRagToolDescription:
 
     @pytest.mark.usefixtures("_restore_rag_config")
     def test_patches_description(self, tmp_path: Path) -> None:
-        from src.tools.configure import _update_rag_tool_description
-        from src.tools.rag import TOOL_CONFIG, _build_description, configure_rag
+        from cogtrix_core.tools.configure import _update_rag_tool_description
+        from cogtrix_core.tools.rag import TOOL_CONFIG, _build_description, configure_rag
 
         idx = tmp_path / "faiss_index"
         idx.mkdir()
@@ -221,7 +221,7 @@ class TestUpdateRagToolDescription:
         assert "KB" in tool.description or "MB" in tool.description
 
     def test_noop_on_tool_without_description(self) -> None:
-        from src.tools.configure import _update_rag_tool_description
+        from cogtrix_core.tools.configure import _update_rag_tool_description
 
         tool = object()  # no description attribute
         _update_rag_tool_description(tool)  # should not raise
@@ -232,7 +232,7 @@ class TestCollectFaissDirsMultiIndex:
 
     @pytest.mark.usefixtures("_restore_rag_config")
     def test_finds_global_and_api_indexes(self, tmp_path: Path) -> None:
-        from src.tools.rag import _collect_faiss_dirs, configure_rag
+        from cogtrix_core.tools.rag import _collect_faiss_dirs, configure_rag
 
         global_idx = tmp_path / "global" / "faiss_index"
         global_idx.mkdir(parents=True)
@@ -256,7 +256,7 @@ class TestCollectFaissDirsMultiIndex:
 
     @pytest.mark.usefixtures("_restore_rag_config")
     def test_skips_non_dir_entries(self, tmp_path: Path) -> None:
-        from src.tools.rag import _collect_faiss_dirs, configure_rag
+        from cogtrix_core.tools.rag import _collect_faiss_dirs, configure_rag
 
         uploads = tmp_path / "uploads"
         uploads.mkdir()
@@ -285,28 +285,28 @@ class TestActivateToolsArgParsing:
     """--activate-tools CLI argument is parsed correctly."""
 
     def test_activate_tools_single(self) -> None:
-        from src.cli.args import parse_arguments
+        from cogtrix_core.cli.args import parse_arguments
 
         with patch.object(sys, "argv", ["cogtrix.py", "--activate-tools", "web_search"]):
             args = parse_arguments()
         assert args.activate_tools == "web_search"
 
     def test_activate_tools_comma_separated(self) -> None:
-        from src.cli.args import parse_arguments
+        from cogtrix_core.cli.args import parse_arguments
 
         with patch.object(sys, "argv", ["cogtrix.py", "--activate-tools", "shell,write_file"]):
             args = parse_arguments()
         assert args.activate_tools == "shell,write_file"
 
     def test_activate_tools_not_set(self) -> None:
-        from src.cli.args import parse_arguments
+        from cogtrix_core.cli.args import parse_arguments
 
         with patch.object(sys, "argv", ["cogtrix.py"]):
             args = parse_arguments()
         assert args.activate_tools is None
 
     def test_activate_tools_with_other_flags(self) -> None:
-        from src.cli.args import parse_arguments
+        from cogtrix_core.cli.args import parse_arguments
 
         with patch.object(
             sys,
@@ -537,7 +537,7 @@ class TestPinnedToolsLifecycle:
         assert "http_get" not in ss.loaded_tools
 
     def test_disable_overrides_pin(self) -> None:
-        from src.api.routes.tools import _classify_tool_status
+        from cogtrix_core.api.routes.tools import _classify_tool_status
 
         ss = SessionState(
             denials={"web_search"},
@@ -547,26 +547,26 @@ class TestPinnedToolsLifecycle:
         assert _classify_tool_status("web_search", ss) == "disabled"
 
     def test_on_demand_status_for_unknown_tool(self) -> None:
-        from src.api.routes.tools import _classify_tool_status
+        from cogtrix_core.api.routes.tools import _classify_tool_status
 
         ss = SessionState()
         assert _classify_tool_status("unknown_tool", ss) == "on_demand"
 
     def test_active_status_for_agent_loaded(self) -> None:
-        from src.api.routes.tools import _classify_tool_status
+        from cogtrix_core.api.routes.tools import _classify_tool_status
 
         ss = SessionState(loaded_tools={"web_search"})
         assert _classify_tool_status("web_search", ss) == "active"
 
     def test_auto_approved_status(self) -> None:
-        from src.api.routes.tools import _classify_tool_status
+        from cogtrix_core.api.routes.tools import _classify_tool_status
 
         # auto_approved requires the tool to also be loaded
         ss = SessionState(approvals={"web_search"}, loaded_tools={"web_search"})
         assert _classify_tool_status("web_search", ss) == "auto_approved"
 
     def test_approved_but_not_loaded_is_on_demand(self) -> None:
-        from src.api.routes.tools import _classify_tool_status
+        from cogtrix_core.api.routes.tools import _classify_tool_status
 
         ss = SessionState(approvals={"web_search"})
         assert _classify_tool_status("web_search", ss) == "on_demand"
@@ -581,19 +581,19 @@ class TestHasFaissIndex:
     """BUG-200: _has_faiss_index must verify actual index files exist."""
 
     def test_returns_false_for_nonexistent_directory(self, tmp_path: Path) -> None:
-        from src.tools.rag import _has_faiss_index
+        from cogtrix_core.tools.rag import _has_faiss_index
 
         assert _has_faiss_index(tmp_path / "nonexistent") is False
 
     def test_returns_false_for_empty_directory(self, tmp_path: Path) -> None:
-        from src.tools.rag import _has_faiss_index
+        from cogtrix_core.tools.rag import _has_faiss_index
 
         d = tmp_path / "empty"
         d.mkdir()
         assert _has_faiss_index(d) is False
 
     def test_returns_true_for_index_faiss(self, tmp_path: Path) -> None:
-        from src.tools.rag import _has_faiss_index
+        from cogtrix_core.tools.rag import _has_faiss_index
 
         d = tmp_path / "idx"
         d.mkdir()
@@ -601,7 +601,7 @@ class TestHasFaissIndex:
         assert _has_faiss_index(d) is True
 
     def test_returns_true_for_custom_faiss_name(self, tmp_path: Path) -> None:
-        from src.tools.rag import _has_faiss_index
+        from cogtrix_core.tools.rag import _has_faiss_index
 
         d = tmp_path / "idx"
         d.mkdir()
@@ -609,7 +609,7 @@ class TestHasFaissIndex:
         assert _has_faiss_index(d) is True
 
     def test_returns_false_for_non_faiss_files(self, tmp_path: Path) -> None:
-        from src.tools.rag import _has_faiss_index
+        from cogtrix_core.tools.rag import _has_faiss_index
 
         d = tmp_path / "idx"
         d.mkdir()
@@ -640,7 +640,7 @@ class TestDelegateFutureCancelOnTimeout:
         """Verify delegate_parallel calls future.cancel() when timeout expires."""
         from concurrent.futures import TimeoutError
 
-        from src.tools.delegate import delegate_parallel
+        from cogtrix_core.tools.delegate import delegate_parallel
 
         def _slow_task(seconds: float):
             import time
@@ -674,7 +674,7 @@ class TestCollectFaissDirsEdgeCases:
     @pytest.mark.usefixtures("_restore_rag_config")
     def test_none_api_uploads_dir(self, tmp_path: Path) -> None:
         """api_uploads_dir=None should not cause errors."""
-        from src.tools.rag import _collect_faiss_dirs, configure_rag
+        from cogtrix_core.tools.rag import _collect_faiss_dirs, configure_rag
 
         configure_rag(
             {
@@ -688,7 +688,7 @@ class TestCollectFaissDirsEdgeCases:
     @pytest.mark.usefixtures("_restore_rag_config")
     def test_empty_string_api_uploads_dir(self, tmp_path: Path) -> None:
         """api_uploads_dir='' is falsy — should skip API index scan."""
-        from src.tools.rag import _collect_faiss_dirs, configure_rag
+        from cogtrix_core.tools.rag import _collect_faiss_dirs, configure_rag
 
         configure_rag(
             {
@@ -702,7 +702,7 @@ class TestCollectFaissDirsEdgeCases:
     @pytest.mark.usefixtures("_restore_rag_config")
     def test_nonexistent_api_uploads_dir(self, tmp_path: Path) -> None:
         """api_uploads_dir pointing to a non-existent directory returns empty."""
-        from src.tools.rag import _collect_faiss_dirs, configure_rag
+        from cogtrix_core.tools.rag import _collect_faiss_dirs, configure_rag
 
         configure_rag(
             {
@@ -716,7 +716,7 @@ class TestCollectFaissDirsEdgeCases:
     @pytest.mark.usefixtures("_restore_rag_config")
     def test_only_global_index_when_no_api_uploads(self, tmp_path: Path) -> None:
         """Global index is found even when api_uploads_dir is None."""
-        from src.tools.rag import _collect_faiss_dirs, configure_rag
+        from cogtrix_core.tools.rag import _collect_faiss_dirs, configure_rag
 
         global_idx = tmp_path / "faiss_index"
         global_idx.mkdir()
@@ -738,7 +738,7 @@ class TestConfigureRagValidation:
 
     @pytest.mark.usefixtures("_restore_rag_config")
     def test_rejects_api_uploads_dir_traversal(self, tmp_path: Path) -> None:
-        from src.tools.rag import configure_rag
+        from cogtrix_core.tools.rag import configure_rag
 
         with pytest.raises(ValueError, match="api_uploads_dir"):
             configure_rag(

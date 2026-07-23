@@ -1,11 +1,11 @@
-"""Tests for src/orchestration/reflection_delegate.py."""
+"""Tests for cogtrix_core/orchestration/reflection_delegate.py."""
 
 import logging
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.orchestration.reflection_delegate import (
+from cogtrix_core.orchestration.reflection_delegate import (
     CounterPlanEvaluator,
     PlanGenerator,
     _call_llm,
@@ -51,7 +51,7 @@ class TestCallLlmTimeout:
 
         with caplog.at_level(logging.WARNING, logger="cogtrix"):
             with patch(
-                "src.orchestration.reflection_delegate.invoke_with_timeout",
+                "cogtrix_core.orchestration.reflection_delegate.invoke_with_timeout",
                 side_effect=TimeoutError("timed out"),
             ):
                 result = _call_llm(llm, "generate a plan")
@@ -67,7 +67,7 @@ class TestCallLlmTimeout:
 
         with caplog.at_level(logging.WARNING, logger="cogtrix"):
             with patch(
-                "src.orchestration.reflection_delegate.invoke_with_timeout",
+                "cogtrix_core.orchestration.reflection_delegate.invoke_with_timeout",
                 side_effect=RuntimeError("model exploded"),
             ):
                 result = _call_llm(llm, "generate a plan")
@@ -85,7 +85,7 @@ class TestPlanGeneratorTimeout:
         """When _call_llm returns empty string, generate_plan falls back gracefully."""
         llm = MagicMock()
 
-        with patch("src.orchestration.reflection_delegate._call_llm", return_value=""):
+        with patch("cogtrix_core.orchestration.reflection_delegate._call_llm", return_value=""):
             generator = PlanGenerator(llm=llm)
             snapshot = generator.generate_plan("do something complex")
 
@@ -108,7 +108,7 @@ class TestCounterPlanEvaluatorTimeout:
             "timestamp": "2024-01-01T00:00:00Z",
         }
 
-        with patch("src.orchestration.reflection_delegate._call_llm", return_value=""):
+        with patch("cogtrix_core.orchestration.reflection_delegate._call_llm", return_value=""):
             evaluator = CounterPlanEvaluator(llm=llm)
             justification = evaluator.evaluate_plan(plan, "test task")
 

@@ -1,8 +1,8 @@
-"""Tests for src/tools/json_tool.py — dot-path guard and path traversal."""
+"""Tests for cogtrix_core/tools/json_tool.py — dot-path guard and path traversal."""
 
 import pytest
 
-from src.tools.json_tool import _get_by_path, query_json
+from cogtrix_core.tools.json_tool import _get_by_path, query_json
 
 
 class TestGetByPathDotGuard:

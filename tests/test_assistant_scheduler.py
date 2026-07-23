@@ -1,4 +1,4 @@
-"""Unit tests for src/assistant/scheduler.py and scheduler integration in handler."""
+"""Unit tests for cogtrix_core/assistant/scheduler.py and scheduler integration in handler."""
 
 from __future__ import annotations
 
@@ -9,8 +9,8 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
 
-from src.assistant.channel import SendResult
-from src.assistant.scheduler import (
+from cogtrix_core.assistant.channel import SendResult
+from cogtrix_core.assistant.scheduler import (
     MessageScheduler,
     QueueReplyState,
     QuietHoursPolicy,
@@ -254,7 +254,9 @@ class TestMessageSchedulerPersistence:
         """_atomic_write swallows IOErrors — save() never propagates exceptions."""
         sched = _make_scheduler(tmp_path)
         # Patch mkstemp so every write attempt fails.
-        with patch("src.utils.atomic_write.tempfile.mkstemp", side_effect=OSError("disk full")):
+        with patch(
+            "cogtrix_core.utils.atomic_write.tempfile.mkstemp", side_effect=OSError("disk full")
+        ):
             # Must not raise even though the underlying write fails.
             sched._atomic_write({"test": "data"})
 
@@ -350,7 +352,7 @@ class TestQuietHours:
         # Schedule a message due now.
         mid = sched.schedule("telegram", "42", "deferred msg", frozen_ts - 10)
 
-        with patch("src.assistant.scheduler.time") as mock_time:
+        with patch("cogtrix_core.assistant.scheduler.time") as mock_time:
             mock_time.time.return_value = frozen_ts
             sched._dispatch_due()
 
@@ -476,8 +478,8 @@ class TestHandlerIntegration:
         scheduler: MessageScheduler | None = None,
         agent_runner: Callable[..., Any] | None = None,
     ):
-        from src.assistant.handler import MessageHandler
-        from src.memory.context import MemoryContext
+        from cogtrix_core.assistant.handler import MessageHandler
+        from cogtrix_core.memory.context import MemoryContext
 
         if agent_runner is None:
             agent_runner = MagicMock(return_value="plain reply")
@@ -511,7 +513,7 @@ class TestHandlerIntegration:
         return handler, session
 
     def _make_msg(self):
-        from src.assistant.channel import IncomingMessage
+        from cogtrix_core.assistant.channel import IncomingMessage
 
         return IncomingMessage(
             channel="telegram",
@@ -1051,7 +1053,7 @@ class TestDispatchLoopBackoff:
 
     def test_backoff_caps_at_300_seconds(self, tmp_path):
         """Backoff computation is capped at 300s even for many consecutive errors."""
-        from src.assistant.scheduler import _MIN_DISPATCH_INTERVAL
+        from cogtrix_core.assistant.scheduler import _MIN_DISPATCH_INTERVAL
 
         sched = _make_scheduler(tmp_path)
         sched._consecutive_dispatch_errors = 10
@@ -1063,7 +1065,7 @@ class TestDispatchLoopBackoff:
 
     def test_backoff_grows_exponentially(self, tmp_path):
         """Backoff doubles with each consecutive error, starting from _MIN_DISPATCH_INTERVAL."""
-        from src.assistant.scheduler import _MIN_DISPATCH_INTERVAL
+        from cogtrix_core.assistant.scheduler import _MIN_DISPATCH_INTERVAL
 
         sched = _make_scheduler(tmp_path)
         for i in range(1, 5):
@@ -1076,7 +1078,7 @@ class TestDispatchLoopBackoff:
 
     def test_backoff_first_error_is_2_seconds(self, tmp_path):
         """First error backoff is 2s (_MIN_DISPATCH_INTERVAL * 2^1)."""
-        from src.assistant.scheduler import _MIN_DISPATCH_INTERVAL
+        from cogtrix_core.assistant.scheduler import _MIN_DISPATCH_INTERVAL
 
         backoff = min(_MIN_DISPATCH_INTERVAL * (2**1), 300.0)
         assert backoff == 2.0

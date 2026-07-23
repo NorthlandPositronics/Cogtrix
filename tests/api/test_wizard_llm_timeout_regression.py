@@ -1,27 +1,38 @@
-"""Regression tests for wizard LLM timeout wrapping (issue #1568).
+"""Regression tests for wizard LLM timeout wrapping (#1568, #1186).
 
-Issue #1558 Phase 2 Rank 7 — two bare ``llm.invoke()`` calls in
-``src/api/routes/config.py`` (``_wizard_test_connection``,
-``_wizard_invoke_llm``) were wrapped in ThreadPoolExecutor with 60s timeout.
+Two bare ``llm.invoke()`` calls in ``cogtrix_core/api/routes/config.py``
+(``_wizard_test_connection``, ``_wizard_invoke_llm``) are bounded by a hard
+timeout. Under #1186 the raw ``with ThreadPoolExecutor(...) as pool`` block was
+replaced by the centralized ``src.concurrency.invoke_with_timeout`` — the ``with``
+form's ``__exit__`` calls ``shutdown(wait=True)``, which joins (and therefore
+BLOCKS on) a worker still hung inside ``llm.invoke`` against an unresponsive
+provider, defeating the timeout it wraps.
 
-Tests verify:
-- Normal success paths are unchanged
-- Timeout raises ``FuturesTimeoutError`` and is handled gracefully
-- Pool is always shut down regardless of outcome
+Tests verify BEHAVIOR (not the internal pool mechanics):
+- Normal success paths are unchanged.
+- A timeout returns gracefully AND — critically — returns quickly rather than
+  blocking on the hung worker (the #1186 contract).
+- A non-timeout exception is handled gracefully.
 """
 
 from __future__ import annotations
 
+import threading
 import time
-from concurrent.futures import TimeoutError as FuturesTimeoutError
 from unittest.mock import MagicMock, patch
 
 
-class _SlowLLM:
-    """Fake LLM whose ``invoke`` hangs past the 60s timeout."""
+class _HangingLLM:
+    """Fake LLM whose ``invoke`` blocks until released (or a hard cap) — models a
+    provider that is not responding, to prove the caller is not blocked with it."""
+
+    def __init__(self) -> None:
+        self.release = threading.Event()
 
     def invoke(self, messages: list) -> MagicMock:
-        time.sleep(120)  # deliberately longer than the 60s timeout
+        # Unblocked by the test after it asserts; the cap keeps a leaked thread
+        # from lingering the whole session if an assertion fails first.
+        self.release.wait(timeout=30)
         return MagicMock(content="ok")
 
 
@@ -46,82 +57,46 @@ class _ErrorLLM:
 
 def test_returns_content_on_success() -> None:
     """Normal path: ``_wizard_invoke_llm`` returns the LLM response content."""
-    from src.api.routes.config import _wizard_invoke_llm
+    from cogtrix_core.api.routes.config import _wizard_invoke_llm
 
     result = _wizard_invoke_llm(_FastLLM(), [])
     assert result == "wizard response text"
 
 
-def test_returns_empty_on_timeout() -> None:
-    """Timeout: ``_wizard_invoke_llm`` returns ``''`` on ``FuturesTimeoutError`` and logs a warning."""
-    from src.api.routes.config import _wizard_invoke_llm, log
+def test_returns_empty_on_timeout_without_blocking() -> None:
+    """Timeout: returns ``''``, logs a warning, and does NOT block on the hung
+    worker (returns in ~timeout, not ~30s) — the #1186 contract."""
+    from cogtrix_core.api.routes.config import _wizard_invoke_llm, log
 
-    with (
-        patch.object(log, "warning") as mock_warning,
-        patch("src.api.routes.config.ThreadPoolExecutor") as MockPool,
-    ):
-        mock_executor = MagicMock()
-        MockPool.return_value.__enter__.return_value = mock_executor
-        mock_future = MagicMock()
-        mock_future.result.side_effect = FuturesTimeoutError()
-        mock_executor.submit.return_value = mock_future
-
-        result = _wizard_invoke_llm(MagicMock(), [])
+    hanging = _HangingLLM()
+    try:
+        with (
+            patch.object(log, "warning") as mock_warning,
+            patch("cogtrix_core.api.routes.config._WIZARD_LLM_TIMEOUT_SECONDS", 0.2),
+        ):
+            start = time.monotonic()
+            result = _wizard_invoke_llm(hanging, [])
+            elapsed = time.monotonic() - start
+    finally:
+        hanging.release.set()
 
     assert result == ""
+    assert elapsed < 5, f"caller blocked {elapsed:.1f}s on a hung invoke (footgun back?)"
     mock_warning.assert_called_once()
     assert "timed out after" in mock_warning.call_args[0][0]
 
 
-def test_pool_shutdown_called_on_timeout() -> None:
-    """Timeout: pool.shutdown(wait=False, cancel_futures=True) is always called."""
-    from src.api.routes.config import _wizard_invoke_llm
-
-    with patch("src.api.routes.config.ThreadPoolExecutor") as MockPool:
-        mock_executor = MagicMock()
-        MockPool.return_value.__enter__.return_value = mock_executor
-        mock_executor.submit.return_value.result.side_effect = FuturesTimeoutError()
-
-        _wizard_invoke_llm(MagicMock(), [])
-
-    mock_executor.shutdown.assert_called_once_with(wait=False, cancel_futures=True)
-
-
-def test_pool_shutdown_called_on_success() -> None:
-    """Success: pool.shutdown(wait=False, cancel_futures=True) is always called."""
-    from src.api.routes.config import _wizard_invoke_llm
-
-    with patch("src.api.routes.config.ThreadPoolExecutor") as MockPool:
-        mock_executor = MagicMock()
-        MockPool.return_value.__enter__.return_value = mock_executor
-        mock_future = MagicMock()
-        mock_future.result.return_value = MagicMock(content="ok")
-        mock_executor.submit.return_value = mock_future
-
-        _wizard_invoke_llm(MagicMock(), [])
-
-    mock_executor.shutdown.assert_called_once_with(wait=False, cancel_futures=True)
-
-
 def test_returns_empty_on_llm_exception_and_logs_warning() -> None:
-    """Non-timeout exception: ``_wizard_invoke_llm`` returns ``''`` and logs a warning with exception details."""
-    from src.api.routes.config import _wizard_invoke_llm, log
+    """Non-timeout exception: returns ``''`` and logs a warning with the exception."""
+    from cogtrix_core.api.routes.config import _wizard_invoke_llm, log
 
-    exc = RuntimeError("boom")
-    with (
-        patch.object(log, "warning") as mock_warning,
-        patch("src.api.routes.config.ThreadPoolExecutor") as MockPool,
-    ):
-        mock_executor = MagicMock()
-        MockPool.return_value.__enter__.return_value = mock_executor
-        mock_executor.submit.return_value.result.side_effect = exc
-
-        result = _wizard_invoke_llm(MagicMock(), [])
+    with patch.object(log, "warning") as mock_warning:
+        result = _wizard_invoke_llm(_ErrorLLM(), [])
 
     assert result == ""
     mock_warning.assert_called_once()
     assert "raised exception: %s" in mock_warning.call_args[0][0]
-    assert mock_warning.call_args[0][1] is exc
+    assert isinstance(mock_warning.call_args[0][1], RuntimeError)
     assert mock_warning.call_args[1].get("exc_info") is True
 
 
@@ -132,9 +107,9 @@ def test_returns_empty_on_llm_exception_and_logs_warning() -> None:
 
 def test_probe_returns_no_warning_on_success() -> None:
     """Normal path: ``_wizard_test_connection`` probe succeeds with no warning."""
-    from src.api.routes.config import _wizard_test_connection
+    from cogtrix_core.api.routes.config import _wizard_test_connection
 
-    with patch("src.agent.core.create_llm_from_provider_config") as mock_create:
+    with patch("cogtrix_core.agent.core.create_llm_from_provider_config") as mock_create:
         mock_create.return_value = _FastLLM()
 
         llm, probe_warning = _wizard_test_connection(
@@ -150,9 +125,9 @@ def test_probe_returns_no_warning_on_success() -> None:
 
 def test_probe_returns_warning_on_exception() -> None:
     """Non-timeout exception: ``_wizard_test_connection`` captures warning and proceeds."""
-    from src.api.routes.config import _wizard_test_connection
+    from cogtrix_core.api.routes.config import _wizard_test_connection
 
-    with patch("src.agent.core.create_llm_from_provider_config") as mock_create:
+    with patch("cogtrix_core.agent.core.create_llm_from_provider_config") as mock_create:
         mock_create.return_value = _ErrorLLM()
 
         llm, probe_warning = _wizard_test_connection(
@@ -166,75 +141,30 @@ def test_probe_returns_warning_on_exception() -> None:
     assert llm is not None
 
 
-def test_probe_returns_warning_on_timeout() -> None:
-    """Timeout: ``_wizard_test_connection`` captures warning, logs, and proceeds."""
-    from src.api.routes.config import _wizard_test_connection
+def test_probe_returns_warning_on_timeout_without_blocking() -> None:
+    """Timeout: the probe captures a timeout warning, proceeds, and does NOT block
+    on the hung worker (the #1186 contract)."""
+    from cogtrix_core.api.routes.config import _wizard_test_connection
 
-    with (
-        patch("src.agent.core.create_llm_from_provider_config") as mock_create,
-        patch("src.api.routes.config.ThreadPoolExecutor") as MockPool,
-    ):
-        mock_executor = MagicMock()
-        MockPool.return_value.__enter__.return_value = mock_executor
-        mock_executor.submit.return_value.result.side_effect = FuturesTimeoutError()
-        mock_create.return_value = MagicMock()
-
-        llm, probe_warning = _wizard_test_connection(
-            provider_type="openai",
-            model="gpt-4",
-            api_key="sk-test",
-            base_url=None,
-        )
+    hanging = _HangingLLM()
+    try:
+        with (
+            patch("cogtrix_core.agent.core.create_llm_from_provider_config") as mock_create,
+            patch("cogtrix_core.api.routes.config._WIZARD_LLM_TIMEOUT_SECONDS", 0.2),
+        ):
+            mock_create.return_value = hanging
+            start = time.monotonic()
+            llm, probe_warning = _wizard_test_connection(
+                provider_type="openai",
+                model="gpt-4",
+                api_key="sk-test",
+                base_url=None,
+            )
+            elapsed = time.monotonic() - start
+    finally:
+        hanging.release.set()
 
     assert probe_warning is not None
     assert "timeout" in probe_warning
     assert llm is not None
-    mock_executor.shutdown.assert_called_once_with(wait=False, cancel_futures=True)
-
-
-def test_probe_pool_shutdown_called_on_timeout() -> None:
-    """Timeout: pool.shutdown(wait=False, cancel_futures=True) is always called."""
-    from src.api.routes.config import _wizard_test_connection
-
-    with (
-        patch("src.agent.core.create_llm_from_provider_config") as mock_create,
-        patch("src.api.routes.config.ThreadPoolExecutor") as MockPool,
-    ):
-        mock_executor = MagicMock()
-        MockPool.return_value.__enter__.return_value = mock_executor
-        mock_executor.submit.return_value.result.side_effect = FuturesTimeoutError()
-        mock_create.return_value = MagicMock()
-
-        _wizard_test_connection(
-            provider_type="openai",
-            model="gpt-4",
-            api_key="sk-test",
-            base_url=None,
-        )
-
-    mock_executor.shutdown.assert_called_once_with(wait=False, cancel_futures=True)
-
-
-def test_probe_pool_shutdown_called_on_success() -> None:
-    """Success: pool.shutdown(wait=False, cancel_futures=True) is always called."""
-    from src.api.routes.config import _wizard_test_connection
-
-    with (
-        patch("src.agent.core.create_llm_from_provider_config") as mock_create,
-        patch("src.api.routes.config.ThreadPoolExecutor") as MockPool,
-    ):
-        mock_executor = MagicMock()
-        MockPool.return_value.__enter__.return_value = mock_executor
-        mock_future = MagicMock()
-        mock_future.result.return_value = None
-        mock_executor.submit.return_value = mock_future
-        mock_create.return_value = _FastLLM()
-
-        _wizard_test_connection(
-            provider_type="openai",
-            model="gpt-4",
-            api_key="sk-test",
-            base_url=None,
-        )
-
-    mock_executor.shutdown.assert_called_once_with(wait=False, cancel_futures=True)
+    assert elapsed < 5, f"probe blocked {elapsed:.1f}s on a hung invoke (footgun back?)"

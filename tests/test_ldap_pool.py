@@ -20,7 +20,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.api.ldap.config import LDAPConfig
+from cogtrix_core.api.ldap.config import LDAPConfig
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -48,7 +48,7 @@ def _fake_connection(closed=False):
 
 def _fake_wrapped(conn=None, created_at=None):
     """Return a _PooledConnection-like MagicMock."""
-    from src.api.ldap.pool import _PooledConnection
+    from cogtrix_core.api.ldap.pool import _PooledConnection
 
     if conn is None:
         conn = _fake_connection()
@@ -60,7 +60,7 @@ def _fake_wrapped(conn=None, created_at=None):
 @pytest.fixture(autouse=True)
 def reset_global_pool():
     """Reset the module-level pool singleton between tests."""
-    import src.api.ldap.pool as _pool
+    import cogtrix_core.api.ldap.pool as _pool
 
     _pool.close_pool()
     yield
@@ -78,13 +78,13 @@ class TestPoolConstruction:
         with patch.dict("sys.modules", {"ldap3": None}):
             import importlib
 
-            import src.api.ldap.pool as _pool
+            import cogtrix_core.api.ldap.pool as _pool
 
             importlib.reload(_pool)
 
     def test_pool_tracks_size(self):
         pytest.importorskip("ldap3")
-        from src.api.ldap.pool import LDAPConnectionPool
+        from cogtrix_core.api.ldap.pool import LDAPConnectionPool
 
         cfg = _make_config()
         with patch.object(LDAPConnectionPool, "_create_connection", return_value=_fake_wrapped()):
@@ -104,7 +104,7 @@ class TestPoolConstruction:
 class TestPoolBorrow:
     def test_borrow_yields_connection(self):
         pytest.importorskip("ldap3")
-        from src.api.ldap.pool import LDAPConnectionPool
+        from cogtrix_core.api.ldap.pool import LDAPConnectionPool
 
         cfg = _make_config()
         fake_conn = _fake_connection()
@@ -119,7 +119,7 @@ class TestPoolBorrow:
 
     def test_borrow_returns_to_pool_on_success(self):
         pytest.importorskip("ldap3")
-        from src.api.ldap.pool import LDAPConnectionPool
+        from cogtrix_core.api.ldap.pool import LDAPConnectionPool
 
         cfg = _make_config()
         wrapped = _fake_wrapped()
@@ -134,7 +134,7 @@ class TestPoolBorrow:
 
     def test_borrow_discards_on_exception(self):
         pytest.importorskip("ldap3")
-        from src.api.ldap.pool import LDAPConnectionPool
+        from cogtrix_core.api.ldap.pool import LDAPConnectionPool
 
         cfg = _make_config()
         fake_conn = _fake_connection()
@@ -151,7 +151,7 @@ class TestPoolBorrow:
 
     def test_exhaustion_raises(self):
         pytest.importorskip("ldap3")
-        from src.api.ldap.pool import LDAPConnectionPool
+        from cogtrix_core.api.ldap.pool import LDAPConnectionPool
 
         cfg = _make_config()
         fake_conn = _fake_connection()
@@ -178,7 +178,7 @@ class TestPoolBorrow:
 
     def test_lifetime_rotation(self):
         pytest.importorskip("ldap3")
-        from src.api.ldap.pool import LDAPConnectionPool
+        from cogtrix_core.api.ldap.pool import LDAPConnectionPool
 
         cfg = _make_config()
         fake_conn = _fake_connection()
@@ -194,7 +194,7 @@ class TestPoolBorrow:
 
     def test_closed_connection_discarded(self):
         pytest.importorskip("ldap3")
-        from src.api.ldap.pool import LDAPConnectionPool
+        from cogtrix_core.api.ldap.pool import LDAPConnectionPool
 
         cfg = _make_config()
         fake_conn = _fake_connection(closed=True)
@@ -220,7 +220,7 @@ class TestPoolBorrow:
 class TestGlobalPool:
     def test_get_pool_creates_singleton(self):
         pytest.importorskip("ldap3")
-        import src.api.ldap.pool as _pool_mod
+        import cogtrix_core.api.ldap.pool as _pool_mod
 
         cfg = _make_config()
         with patch.object(
@@ -233,7 +233,7 @@ class TestGlobalPool:
 
     def test_get_pool_recreated_on_config_change(self):
         pytest.importorskip("ldap3")
-        import src.api.ldap.pool as _pool_mod
+        import cogtrix_core.api.ldap.pool as _pool_mod
 
         with patch.object(
             _pool_mod.LDAPConnectionPool, "_create_connection", return_value=_fake_wrapped()
@@ -248,7 +248,7 @@ class TestGlobalPool:
 
     def test_close_pool_idempotent(self):
         pytest.importorskip("ldap3")
-        import src.api.ldap.pool as _pool_mod
+        import cogtrix_core.api.ldap.pool as _pool_mod
 
         with patch.object(
             _pool_mod.LDAPConnectionPool, "_create_connection", return_value=_fake_wrapped()
@@ -268,7 +268,7 @@ class TestGlobalPool:
 class TestSearchGroups:
     def test_search_groups_with_mocked_connection(self):
         pytest.importorskip("ldap3")
-        from src.api.ldap.sync import search_groups
+        from cogtrix_core.api.ldap.sync import search_groups
 
         cfg = _make_config()
 
@@ -290,7 +290,7 @@ class TestSearchGroups:
 
     def test_search_groups_uses_provided_connection(self):
         pytest.importorskip("ldap3")
-        from src.api.ldap.sync import search_groups
+        from cogtrix_core.api.ldap.sync import search_groups
 
         cfg = _make_config()
 

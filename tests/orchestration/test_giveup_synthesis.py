@@ -14,11 +14,11 @@ from __future__ import annotations
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
-from src.orchestration.nodes.recovery import (
+from cogtrix_core.orchestration.nodes.recovery import (
     build_handle_action_intent_node,
     build_handle_phantom_node,
 )
-from src.orchestration.phases import (
+from cogtrix_core.orchestration.phases import (
     _extract_checkpoint_findings,
     extract_deepseek_native_tool_calls,
     normalize_native_tool_calls,

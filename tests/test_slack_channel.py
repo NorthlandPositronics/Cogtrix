@@ -1,5 +1,5 @@
 """
-Tests for src/assistant/channels/slack.py
+Tests for cogtrix_core/assistant/channels/slack.py
 
 slack_sdk is not installed in the test environment, so all tests patch
 src.assistant.channels.slack._HAS_SLACK = True and inject a MagicMock
@@ -21,12 +21,12 @@ import pytest
 
 def _make_channel(config: dict[str, Any] | None = None) -> Any:
     """Return a SlackChannel with a mocked WebClient and _HAS_SLACK=True."""
-    from src.assistant.channels.slack import SlackChannel
+    from cogtrix_core.assistant.channels.slack import SlackChannel
 
     cfg = {"bot_token": "xoxb-test-token", **(config or {})}
     with (
-        patch("src.assistant.channels.slack._HAS_SLACK", True),
-        patch("src.assistant.channels.slack.WebClient") as mock_cls,
+        patch("cogtrix_core.assistant.channels.slack._HAS_SLACK", True),
+        patch("cogtrix_core.assistant.channels.slack.WebClient") as mock_cls,
     ):
         mock_client = MagicMock()
         mock_client.conversations_history.return_value = {"messages": []}
@@ -75,15 +75,15 @@ class TestSlackChannelName:
 
 class TestIsConfigured:
     def test_returns_false_when_token_empty(self):
-        with patch("src.assistant.channels.slack._HAS_SLACK", True):
-            from src.assistant.channels.slack import SlackChannel
+        with patch("cogtrix_core.assistant.channels.slack._HAS_SLACK", True):
+            from cogtrix_core.assistant.channels.slack import SlackChannel
 
             assert SlackChannel.is_configured({}) is False
             assert SlackChannel.is_configured({"bot_token": ""}) is False
 
     def test_returns_true_when_token_set(self):
-        with patch("src.assistant.channels.slack._HAS_SLACK", True):
-            from src.assistant.channels.slack import SlackChannel
+        with patch("cogtrix_core.assistant.channels.slack._HAS_SLACK", True):
+            from cogtrix_core.assistant.channels.slack import SlackChannel
 
             assert SlackChannel.is_configured({"bot_token": "xoxb-abc"}) is True
 
@@ -95,8 +95,8 @@ class TestIsConfigured:
 
 class TestImportGuard:
     def test_raises_import_error_when_sdk_missing(self):
-        with patch("src.assistant.channels.slack._HAS_SLACK", False):
-            from src.assistant.channels.slack import SlackChannel
+        with patch("cogtrix_core.assistant.channels.slack._HAS_SLACK", False):
+            from cogtrix_core.assistant.channels.slack import SlackChannel
 
             with pytest.raises(ImportError, match="slack-sdk not installed"):
                 SlackChannel({"bot_token": "xoxb-test"})

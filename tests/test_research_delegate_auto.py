@@ -4,7 +4,7 @@
 
 
 def test_research_phrases_detected():
-    from src.orchestration.phases import _looks_like_research_query
+    from cogtrix_core.orchestration.phases import _looks_like_research_query
 
     assert _looks_like_research_query("research the best TUI frameworks")
     assert _looks_like_research_query("what is SearXNG?")
@@ -14,7 +14,7 @@ def test_research_phrases_detected():
 
 
 def test_action_phrases_excluded():
-    from src.orchestration.phases import _looks_like_research_query
+    from cogtrix_core.orchestration.phases import _looks_like_research_query
 
     assert not _looks_like_research_query("write a function that sorts a list")
     assert not _looks_like_research_query("create a new config file")
@@ -23,14 +23,14 @@ def test_action_phrases_excluded():
 
 
 def test_mixed_intent_excluded():
-    from src.orchestration.phases import _looks_like_research_query
+    from cogtrix_core.orchestration.phases import _looks_like_research_query
 
     # "research and implement" — action word present, should be False
     assert not _looks_like_research_query("research how to implement this and write the code")
 
 
 def test_plain_statement_not_research():
-    from src.orchestration.phases import _looks_like_research_query
+    from cogtrix_core.orchestration.phases import _looks_like_research_query
 
     assert not _looks_like_research_query("Hello, how are you?")
     assert not _looks_like_research_query("show me the current config")
@@ -40,7 +40,7 @@ def test_plain_statement_not_research():
 
 
 def test_config_defaults():
-    from src.config import Config
+    from cogtrix_core.config import Config
 
     c = Config()
     assert c.research_delegate_auto is False
@@ -48,7 +48,7 @@ def test_config_defaults():
 
 
 def test_config_custom():
-    from src.config import Config
+    from cogtrix_core.config import Config
 
     c = Config(research_delegate_auto=True, research_delegate_auto_threshold=0.30)
     assert c.research_delegate_auto is True
@@ -60,7 +60,7 @@ def test_config_custom():
 
 def test_preflight_not_triggered_when_disabled():
     """When research_delegate_auto=False, delegate_task is never called."""
-    from src.config import Config
+    from cogtrix_core.config import Config
 
     config = Config(research_delegate_auto=False)
     # Even with a research query and high context, pre-flight should not fire
@@ -70,7 +70,7 @@ def test_preflight_not_triggered_when_disabled():
 
 def test_preflight_not_triggered_below_threshold():
     """When session context is below threshold, pre-flight does not fire."""
-    from src.config import Config
+    from cogtrix_core.config import Config
 
     config = Config(research_delegate_auto=True, research_delegate_auto_threshold=0.80)
     # Session at 30% context — should not trigger
@@ -81,7 +81,7 @@ def test_preflight_not_triggered_below_threshold():
 
 
 def test_looks_like_research_case_insensitive():
-    from src.orchestration.phases import _looks_like_research_query
+    from cogtrix_core.orchestration.phases import _looks_like_research_query
 
     assert _looks_like_research_query("RESEARCH the topic")
     assert _looks_like_research_query("What Is the meaning of life?")

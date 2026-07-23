@@ -43,7 +43,7 @@ from sqlalchemy.ext.asyncio import (  # noqa: E402
 )
 from sqlalchemy.pool import StaticPool  # noqa: E402
 
-from src.api.db.engine import Base, get_db  # noqa: E402
+from cogtrix_core.api.db.engine import Base, get_db  # noqa: E402
 
 CONCURRENT_SESSIONS = 200
 P95_THRESHOLD_SECONDS = 5.0
@@ -74,7 +74,7 @@ def session_tokens():
     Spin up the app, register 200 unique users (bcrypt mocked), and return
     a list of 200 Bearer access tokens to use in the benchmark.
     """
-    from src.api.app import create_app
+    from cogtrix_core.api.app import create_app
 
     engine = create_async_engine(
         "sqlite+aiosqlite:///:memory:",
@@ -93,7 +93,7 @@ def session_tokens():
     _app = create_app()
 
     # Disable per-route rate limiting so fixture can register all 200 users.
-    import src.api.rate_limit as _rl_module
+    import cogtrix_core.api.rate_limit as _rl_module
 
     _rl_module._per_route_disabled = True
     if hasattr(_app.state, "limiter"):
@@ -113,8 +113,8 @@ def session_tokens():
     tokens: list[str] = []
 
     with (
-        patch("src.api.routes.auth.hash_password", side_effect=_fast_hash),
-        patch("src.api.routes.auth.verify_password", side_effect=_fast_verify),
+        patch("cogtrix_core.api.routes.auth.hash_password", side_effect=_fast_hash),
+        patch("cogtrix_core.api.routes.auth.verify_password", side_effect=_fast_verify),
         TestClient(_app, raise_server_exceptions=False) as client,
     ):
         for i in range(CONCURRENT_SESSIONS):

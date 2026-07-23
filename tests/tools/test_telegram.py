@@ -11,7 +11,7 @@ class TestContactFiltering:
     """Tests for whitelist / blacklist enforcement."""
 
     def test_whitelist_allows_listed_contact(self):
-        from src.tools.telegram import _cfg, _check_contact
+        from cogtrix_core.tools.telegram import _cfg, _check_contact
 
         _cfg.filter_mode = "whitelist"
         _cfg.contacts = ["123456789"]
@@ -22,7 +22,7 @@ class TestContactFiltering:
         assert reason == ""
 
     def test_whitelist_blocks_unlisted_contact(self):
-        from src.tools.telegram import _cfg, _check_contact
+        from cogtrix_core.tools.telegram import _cfg, _check_contact
 
         _cfg.filter_mode = "whitelist"
         _cfg.contacts = ["123456789"]
@@ -33,7 +33,7 @@ class TestContactFiltering:
         assert "not in the allowed whitelist" in reason
 
     def test_blacklist_blocks_listed_contact(self):
-        from src.tools.telegram import _cfg, _check_contact
+        from cogtrix_core.tools.telegram import _cfg, _check_contact
 
         _cfg.filter_mode = "blacklist"
         _cfg.contacts = ["123456789"]
@@ -44,7 +44,7 @@ class TestContactFiltering:
         assert "blacklist" in reason
 
     def test_blacklist_allows_unlisted_contact(self):
-        from src.tools.telegram import _cfg, _check_contact
+        from cogtrix_core.tools.telegram import _cfg, _check_contact
 
         _cfg.filter_mode = "blacklist"
         _cfg.contacts = ["123456789"]
@@ -54,7 +54,7 @@ class TestContactFiltering:
         assert allowed is True
 
     def test_filter_none_allows_all(self):
-        from src.tools.telegram import _cfg, _check_contact
+        from cogtrix_core.tools.telegram import _cfg, _check_contact
 
         _cfg.filter_mode = "none"
         _cfg.contacts = ["123456789"]
@@ -63,7 +63,7 @@ class TestContactFiltering:
         assert allowed is True
 
     def test_phonebook_nickname_resolved(self):
-        from src.tools.telegram import _cfg, _check_contact
+        from cogtrix_core.tools.telegram import _cfg, _check_contact
 
         _cfg.filter_mode = "whitelist"
         _cfg.contacts = ["123456789"]
@@ -73,7 +73,7 @@ class TestContactFiltering:
         assert allowed is True
 
     def test_phonebook_case_insensitive(self):
-        from src.tools.telegram import _cfg, _check_contact
+        from cogtrix_core.tools.telegram import _cfg, _check_contact
 
         _cfg.filter_mode = "whitelist"
         _cfg.contacts = ["123456789"]
@@ -83,7 +83,7 @@ class TestContactFiltering:
         assert allowed is True
 
     def test_allow_allows_listed_contact(self):
-        from src.tools.telegram import _cfg, _check_contact
+        from cogtrix_core.tools.telegram import _cfg, _check_contact
 
         _cfg.filter_mode = "allow"
         _cfg.contacts = ["123456789"]
@@ -94,7 +94,7 @@ class TestContactFiltering:
         assert reason == ""
 
     def test_allow_blocks_unlisted_contact(self):
-        from src.tools.telegram import _cfg, _check_contact
+        from cogtrix_core.tools.telegram import _cfg, _check_contact
 
         _cfg.filter_mode = "allow"
         _cfg.contacts = ["123456789"]
@@ -105,7 +105,7 @@ class TestContactFiltering:
         assert "allow list" in reason
 
     def test_ignore_blocks_listed_contact(self):
-        from src.tools.telegram import _cfg, _check_contact
+        from cogtrix_core.tools.telegram import _cfg, _check_contact
 
         _cfg.filter_mode = "ignore"
         _cfg.contacts = ["123456789"]
@@ -116,7 +116,7 @@ class TestContactFiltering:
         assert "ignore" in reason
 
     def test_ignore_allows_unlisted_contact(self):
-        from src.tools.telegram import _cfg, _check_contact
+        from cogtrix_core.tools.telegram import _cfg, _check_contact
 
         _cfg.filter_mode = "ignore"
         _cfg.contacts = ["123456789"]
@@ -126,7 +126,7 @@ class TestContactFiltering:
         assert allowed is True
 
     def test_blacklist_blocks_listed_contact_via_check_contact(self):
-        from src.tools.telegram import _cfg, _check_contact
+        from cogtrix_core.tools.telegram import _cfg, _check_contact
 
         _cfg.filter_mode = "blacklist"
         _cfg.contacts = ["123456789"]
@@ -146,25 +146,25 @@ class TestContactResolution:
     """Tests for phonebook nickname resolution."""
 
     def test_resolve_plain_id(self):
-        from src.tools.telegram import _cfg, _resolve_contact
+        from cogtrix_core.tools.telegram import _cfg, _resolve_contact
 
         _cfg.phonebook = {}
         assert _resolve_contact("123456789") == "123456789"
 
     def test_resolve_username(self):
-        from src.tools.telegram import _cfg, _resolve_contact
+        from cogtrix_core.tools.telegram import _cfg, _resolve_contact
 
         _cfg.phonebook = {}
         assert _resolve_contact("@alice") == "@alice"
 
     def test_resolve_nickname_to_id(self):
-        from src.tools.telegram import _cfg, _resolve_contact
+        from cogtrix_core.tools.telegram import _cfg, _resolve_contact
 
         _cfg.phonebook = {"bob": "987654321"}
         assert _resolve_contact("bob") == "987654321"
 
     def test_resolve_nickname_case_insensitive(self):
-        from src.tools.telegram import _cfg, _resolve_contact
+        from cogtrix_core.tools.telegram import _cfg, _resolve_contact
 
         _cfg.phonebook = {"Alice": "123456789"}
         assert _resolve_contact("alice") == "123456789"
@@ -179,14 +179,14 @@ class TestRateLimiter:
     """Tests for the in-memory rate limiter."""
 
     def test_rate_limit_allows_under_threshold(self):
-        from src.tools.telegram import _cfg, _rate_limit_ok, _send_timestamps
+        from cogtrix_core.tools.telegram import _cfg, _rate_limit_ok, _send_timestamps
 
         _send_timestamps.clear()
         _cfg.rate_limit = 5
         assert _rate_limit_ok() is True
 
     def test_rate_limit_blocks_at_threshold(self):
-        from src.tools.telegram import (
+        from cogtrix_core.tools.telegram import (
             _cfg,
             _rate_limit_ok,
             _record_send,
@@ -200,7 +200,7 @@ class TestRateLimiter:
         assert _rate_limit_ok() is False
 
     def test_rate_limit_unlimited(self):
-        from src.tools.telegram import _cfg, _rate_limit_ok, _send_timestamps
+        from cogtrix_core.tools.telegram import _cfg, _rate_limit_ok, _send_timestamps
 
         _send_timestamps.clear()
         _cfg.rate_limit = 0
@@ -218,47 +218,47 @@ class TestIsConfigured:
     """Tests for the is_configured gating function."""
 
     def test_configured_when_token_present(self):
-        from src.tools.telegram import _cfg
+        from cogtrix_core.tools.telegram import _cfg
 
         _cfg.bot_token = "123456:ABC"
         _cfg.allow_send = True
         _cfg.allow_receive = True
 
-        with patch("src.tools.telegram.REQUESTS_AVAILABLE", True):
-            from src.tools.telegram import is_configured
+        with patch("cogtrix_core.tools.telegram.REQUESTS_AVAILABLE", True):
+            from cogtrix_core.tools.telegram import is_configured
 
             assert is_configured() is True
 
     def test_not_configured_without_token(self):
-        from src.tools.telegram import _cfg
+        from cogtrix_core.tools.telegram import _cfg
 
         _cfg.bot_token = None
         _cfg.allow_send = True
         _cfg.allow_receive = True
 
-        with patch("src.tools.telegram.REQUESTS_AVAILABLE", True):
-            from src.tools.telegram import is_configured
+        with patch("cogtrix_core.tools.telegram.REQUESTS_AVAILABLE", True):
+            from cogtrix_core.tools.telegram import is_configured
 
             assert is_configured() is False
 
     def test_not_configured_both_disabled(self):
-        from src.tools.telegram import _cfg
+        from cogtrix_core.tools.telegram import _cfg
 
         _cfg.bot_token = "123456:ABC"
         _cfg.allow_send = False
         _cfg.allow_receive = False
 
-        with patch("src.tools.telegram.REQUESTS_AVAILABLE", True):
-            from src.tools.telegram import is_configured
+        with patch("cogtrix_core.tools.telegram.REQUESTS_AVAILABLE", True):
+            from cogtrix_core.tools.telegram import is_configured
 
             assert is_configured() is False
 
     def test_not_configured_no_requests(self):
-        from src.tools.telegram import _cfg
+        from cogtrix_core.tools.telegram import _cfg
 
         _cfg.bot_token = "123456:ABC"
-        with patch("src.tools.telegram.REQUESTS_AVAILABLE", False):
-            from src.tools.telegram import is_configured
+        with patch("cogtrix_core.tools.telegram.REQUESTS_AVAILABLE", False):
+            from cogtrix_core.tools.telegram import is_configured
 
             assert is_configured() is False
 
@@ -272,7 +272,7 @@ class TestReceiveFilter:
     """Tests for inbound message filtering."""
 
     def test_receive_whitelist_allows(self):
-        from src.tools.telegram import _cfg, _check_receive_contact
+        from cogtrix_core.tools.telegram import _cfg, _check_receive_contact
 
         _cfg.filter_mode = "whitelist"
         _cfg.contacts = ["123456789"]
@@ -281,7 +281,7 @@ class TestReceiveFilter:
         assert _check_receive_contact(123456789) is True
 
     def test_receive_whitelist_blocks(self):
-        from src.tools.telegram import _cfg, _check_receive_contact
+        from cogtrix_core.tools.telegram import _cfg, _check_receive_contact
 
         _cfg.filter_mode = "whitelist"
         _cfg.contacts = ["123456789"]
@@ -290,7 +290,7 @@ class TestReceiveFilter:
         assert _check_receive_contact(999999999) is False
 
     def test_receive_none_allows_all(self):
-        from src.tools.telegram import _cfg, _check_receive_contact
+        from cogtrix_core.tools.telegram import _cfg, _check_receive_contact
 
         _cfg.filter_mode = "none"
         assert _check_receive_contact(999999999) is True
@@ -305,7 +305,7 @@ class TestTelegramSend:
     """Tests for the telegram_send tool function."""
 
     def setup_method(self):
-        from src.tools.telegram import _cfg, _send_timestamps
+        from cogtrix_core.tools.telegram import _cfg, _send_timestamps
 
         _cfg.bot_token = "123456:ABC"
         _cfg.filter_mode = "none"
@@ -314,11 +314,11 @@ class TestTelegramSend:
         _cfg.phonebook = {}
         _send_timestamps.clear()
 
-    @patch("src.tools.telegram.REQUESTS_AVAILABLE", True)
-    @patch("src.tools.telegram._get_client")
+    @patch("cogtrix_core.tools.telegram.REQUESTS_AVAILABLE", True)
+    @patch("cogtrix_core.tools.telegram._get_client")
     def test_send_success(self, mock_get_client):
-        from src.tools._telegram_client import SendResult
-        from src.tools.telegram import telegram_send
+        from cogtrix_core.tools._telegram_client import SendResult
+        from cogtrix_core.tools.telegram import telegram_send
 
         mock_client = MagicMock()
         mock_client.send_message.return_value = SendResult(ok=True, message_id=42)
@@ -329,11 +329,11 @@ class TestTelegramSend:
         assert "42" in result
         mock_client.send_message.assert_called_once_with("123456789", "Hello!")
 
-    @patch("src.tools.telegram.REQUESTS_AVAILABLE", True)
-    @patch("src.tools.telegram._get_client")
+    @patch("cogtrix_core.tools.telegram.REQUESTS_AVAILABLE", True)
+    @patch("cogtrix_core.tools.telegram._get_client")
     def test_send_failure(self, mock_get_client):
-        from src.tools._telegram_client import SendResult
-        from src.tools.telegram import telegram_send
+        from cogtrix_core.tools._telegram_client import SendResult
+        from cogtrix_core.tools.telegram import telegram_send
 
         mock_client = MagicMock()
         mock_client.send_message.return_value = SendResult(ok=False, error="Chat not found")
@@ -342,9 +342,9 @@ class TestTelegramSend:
         result = telegram_send("123456789", "Hello!")
         assert "failed" in result.lower()
 
-    @patch("src.tools.telegram.REQUESTS_AVAILABLE", True)
+    @patch("cogtrix_core.tools.telegram.REQUESTS_AVAILABLE", True)
     def test_send_blocked_by_whitelist(self):
-        from src.tools.telegram import _cfg, telegram_send
+        from cogtrix_core.tools.telegram import _cfg, telegram_send
 
         _cfg.filter_mode = "whitelist"
         _cfg.contacts = ["000000000"]
@@ -352,9 +352,9 @@ class TestTelegramSend:
         result = telegram_send("123456789", "Hello!")
         assert "blocked" in result.lower()
 
-    @patch("src.tools.telegram.REQUESTS_AVAILABLE", True)
+    @patch("cogtrix_core.tools.telegram.REQUESTS_AVAILABLE", True)
     def test_send_rate_limited(self):
-        from src.tools.telegram import _cfg, _record_send, telegram_send
+        from cogtrix_core.tools.telegram import _cfg, _record_send, telegram_send
 
         _cfg.rate_limit = 2
         _record_send()
@@ -363,11 +363,11 @@ class TestTelegramSend:
         result = telegram_send("123456789", "Hello!")
         assert "rate limit" in result.lower()
 
-    @patch("src.tools.telegram.REQUESTS_AVAILABLE", True)
-    @patch("src.tools.telegram._get_client")
+    @patch("cogtrix_core.tools.telegram.REQUESTS_AVAILABLE", True)
+    @patch("cogtrix_core.tools.telegram._get_client")
     def test_send_truncates_long_message(self, mock_get_client):
-        from src.tools._telegram_client import SendResult
-        from src.tools.telegram import _cfg, telegram_send
+        from cogtrix_core.tools._telegram_client import SendResult
+        from cogtrix_core.tools.telegram import _cfg, telegram_send
 
         _cfg.max_message_length = 10
 
@@ -379,9 +379,9 @@ class TestTelegramSend:
         call_args = mock_client.send_message.call_args
         assert len(call_args[0][1]) == 10
 
-    @patch("src.tools.telegram.REQUESTS_AVAILABLE", True)
+    @patch("cogtrix_core.tools.telegram.REQUESTS_AVAILABLE", True)
     def test_send_without_token(self):
-        from src.tools.telegram import _cfg, telegram_send
+        from cogtrix_core.tools.telegram import _cfg, telegram_send
 
         _cfg.bot_token = None
         result = telegram_send("123456789", "Hello!")
@@ -392,17 +392,17 @@ class TestTelegramCheck:
     """Tests for the telegram_check tool function."""
 
     def setup_method(self):
-        from src.tools.telegram import _cfg
+        from cogtrix_core.tools.telegram import _cfg
 
         _cfg.bot_token = "123456:ABC"
         _cfg.filter_mode = "none"
         _cfg.phonebook = {}
 
-    @patch("src.tools.telegram.REQUESTS_AVAILABLE", True)
-    @patch("src.tools.telegram._get_client")
+    @patch("cogtrix_core.tools.telegram.REQUESTS_AVAILABLE", True)
+    @patch("cogtrix_core.tools.telegram._get_client")
     def test_check_returns_messages(self, mock_get_client):
-        from src.tools._telegram_client import TelegramMessage
-        from src.tools.telegram import telegram_check
+        from cogtrix_core.tools._telegram_client import TelegramMessage
+        from cogtrix_core.tools.telegram import telegram_check
 
         mock_client = MagicMock()
         mock_client.get_updates.return_value = [
@@ -421,10 +421,10 @@ class TestTelegramCheck:
         assert "Hi there!" in result
         assert "alice" in result
 
-    @patch("src.tools.telegram.REQUESTS_AVAILABLE", True)
-    @patch("src.tools.telegram._get_client")
+    @patch("cogtrix_core.tools.telegram.REQUESTS_AVAILABLE", True)
+    @patch("cogtrix_core.tools.telegram._get_client")
     def test_check_no_messages(self, mock_get_client):
-        from src.tools.telegram import telegram_check
+        from cogtrix_core.tools.telegram import telegram_check
 
         mock_client = MagicMock()
         mock_client.get_updates.return_value = []
@@ -433,11 +433,11 @@ class TestTelegramCheck:
         result = telegram_check()
         assert "no recent" in result.lower()
 
-    @patch("src.tools.telegram.REQUESTS_AVAILABLE", True)
-    @patch("src.tools.telegram._get_client")
+    @patch("cogtrix_core.tools.telegram.REQUESTS_AVAILABLE", True)
+    @patch("cogtrix_core.tools.telegram._get_client")
     def test_check_filters_by_contact(self, mock_get_client):
-        from src.tools._telegram_client import TelegramMessage
-        from src.tools.telegram import _cfg, telegram_check
+        from cogtrix_core.tools._telegram_client import TelegramMessage
+        from cogtrix_core.tools.telegram import _cfg, telegram_check
 
         _cfg.filter_mode = "whitelist"
         _cfg.contacts = ["123456789"]
@@ -470,14 +470,14 @@ class TestTelegramContacts:
     """Tests for the telegram_contacts tool function."""
 
     def test_contacts_empty_phonebook(self):
-        from src.tools.telegram import _cfg, telegram_contacts
+        from cogtrix_core.tools.telegram import _cfg, telegram_contacts
 
         _cfg.phonebook = {}
         result = telegram_contacts()
         assert "no telegram phonebook" in result.lower()
 
     def test_contacts_with_entries(self):
-        from src.tools.telegram import _cfg, telegram_contacts
+        from cogtrix_core.tools.telegram import _cfg, telegram_contacts
 
         _cfg.phonebook = {
             "alice": "123456789",
@@ -491,7 +491,7 @@ class TestTelegramContacts:
         assert "team" in result
 
     def test_contacts_shows_filter_mode(self):
-        from src.tools.telegram import _cfg, telegram_contacts
+        from cogtrix_core.tools.telegram import _cfg, telegram_contacts
 
         _cfg.phonebook = {"alice": "123456789"}
         _cfg.filter_mode = "whitelist"
@@ -509,9 +509,9 @@ class TestTelegramContacts:
 class TestTelegramBotClient:
     """Tests for the TelegramBotClient HTTP wrapper."""
 
-    @patch("src.tools._telegram_client.requests")
+    @patch("cogtrix_core.tools._telegram_client.requests")
     def test_send_message_success(self, mock_requests):
-        from src.tools._telegram_client import TelegramBotClient
+        from cogtrix_core.tools._telegram_client import TelegramBotClient
 
         mock_resp = MagicMock()
         mock_resp.json.return_value = {
@@ -525,9 +525,9 @@ class TestTelegramBotClient:
         assert result.ok is True
         assert result.message_id == 42
 
-    @patch("src.tools._telegram_client.requests")
+    @patch("cogtrix_core.tools._telegram_client.requests")
     def test_send_message_error(self, mock_requests):
-        from src.tools._telegram_client import TelegramBotClient
+        from cogtrix_core.tools._telegram_client import TelegramBotClient
 
         mock_resp = MagicMock()
         mock_resp.json.return_value = {
@@ -541,11 +541,11 @@ class TestTelegramBotClient:
         assert result.ok is False
         assert "chat not found" in (result.error or "")
 
-    @patch("src.tools._telegram_client.requests")
+    @patch("cogtrix_core.tools._telegram_client.requests")
     def test_send_message_connection_error(self, mock_requests):
         import requests as real_requests
 
-        from src.tools._telegram_client import TelegramBotClient
+        from cogtrix_core.tools._telegram_client import TelegramBotClient
 
         mock_requests.post.side_effect = real_requests.exceptions.ConnectionError()
         mock_requests.exceptions = real_requests.exceptions
@@ -555,9 +555,9 @@ class TestTelegramBotClient:
         assert result.ok is False
         assert "connect" in (result.error or "").lower()
 
-    @patch("src.tools._telegram_client.requests")
+    @patch("cogtrix_core.tools._telegram_client.requests")
     def test_get_updates(self, mock_requests):
-        from src.tools._telegram_client import TelegramBotClient
+        from cogtrix_core.tools._telegram_client import TelegramBotClient
 
         mock_resp = MagicMock()
         mock_resp.json.return_value = {
@@ -584,9 +584,9 @@ class TestTelegramBotClient:
         assert messages[0].from_username == "alice"
         assert messages[0].chat_id == 123456789
 
-    @patch("src.tools._telegram_client.requests")
+    @patch("cogtrix_core.tools._telegram_client.requests")
     def test_get_me_success(self, mock_requests):
-        from src.tools._telegram_client import TelegramBotClient
+        from cogtrix_core.tools._telegram_client import TelegramBotClient
 
         mock_resp = MagicMock()
         mock_resp.json.return_value = {
@@ -605,9 +605,9 @@ class TestTelegramBotClient:
         assert info.username == "test_bot"
         assert info.first_name == "Test Bot"
 
-    @patch("src.tools._telegram_client.requests")
+    @patch("cogtrix_core.tools._telegram_client.requests")
     def test_is_ready_success(self, mock_requests):
-        from src.tools._telegram_client import TelegramBotClient
+        from cogtrix_core.tools._telegram_client import TelegramBotClient
 
         mock_resp = MagicMock()
         mock_resp.json.return_value = {
@@ -624,18 +624,18 @@ class TestTelegramBotClient:
         client = TelegramBotClient(token="123456:ABC")
         assert client.is_ready() is True
 
-    @patch("src.tools._telegram_client.requests")
+    @patch("cogtrix_core.tools._telegram_client.requests")
     def test_is_ready_failure(self, mock_requests):
-        from src.tools._telegram_client import TelegramBotClient
+        from cogtrix_core.tools._telegram_client import TelegramBotClient
 
         mock_requests.get.side_effect = Exception("Network error")
 
         client = TelegramBotClient(token="invalid")
         assert client.is_ready() is False
 
-    @patch("src.tools._telegram_client.requests")
+    @patch("cogtrix_core.tools._telegram_client.requests")
     def test_send_photo_success(self, mock_requests):
-        from src.tools._telegram_client import TelegramBotClient
+        from cogtrix_core.tools._telegram_client import TelegramBotClient
 
         mock_resp = MagicMock()
         mock_resp.json.return_value = {

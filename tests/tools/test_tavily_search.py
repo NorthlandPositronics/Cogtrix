@@ -7,20 +7,20 @@ class TestTavilySearch:
     """Unit tests for tavily_search()."""
 
     def test_tavily_search_not_available_returns_error(self):
-        from src.tools.tavily_search import tavily_search
+        from cogtrix_core.tools.tavily_search import tavily_search
 
-        with patch("src.tools.tavily_search.TAVILY_AVAILABLE", False):
+        with patch("cogtrix_core.tools.tavily_search.TAVILY_AVAILABLE", False):
             result = tavily_search("python")
 
         assert "Error" in result
         assert "tavily-python is not installed" in result
 
     def test_tavily_search_missing_api_key(self):
-        from src.tools.tavily_search import tavily_search
+        from cogtrix_core.tools.tavily_search import tavily_search
 
         with (
-            patch("src.tools.tavily_search.TAVILY_AVAILABLE", True),
-            patch("src.tools.tavily_search._get_api_key", return_value=None),
+            patch("cogtrix_core.tools.tavily_search.TAVILY_AVAILABLE", True),
+            patch("cogtrix_core.tools.tavily_search._get_api_key", return_value=None),
         ):
             result = tavily_search("python")
 
@@ -28,11 +28,11 @@ class TestTavilySearch:
         assert "API key" in result
 
     def test_tavily_search_empty_query_returns_error(self):
-        from src.tools.tavily_search import tavily_search
+        from cogtrix_core.tools.tavily_search import tavily_search
 
         with (
-            patch("src.tools.tavily_search.TAVILY_AVAILABLE", True),
-            patch("src.tools.tavily_search._get_api_key", return_value="test-key"),
+            patch("cogtrix_core.tools.tavily_search.TAVILY_AVAILABLE", True),
+            patch("cogtrix_core.tools.tavily_search._get_api_key", return_value="test-key"),
         ):
             result = tavily_search("   ")
 
@@ -40,7 +40,7 @@ class TestTavilySearch:
         assert "Empty" in result
 
     def test_tavily_search_returns_results(self):
-        from src.tools.tavily_search import tavily_search
+        from cogtrix_core.tools.tavily_search import tavily_search
 
         mock_client = MagicMock()
         mock_client.search.return_value = {
@@ -64,9 +64,9 @@ class TestTavilySearch:
         mock_tavily_class = MagicMock(return_value=mock_client)
 
         with (
-            patch("src.tools.tavily_search.TAVILY_AVAILABLE", True),
-            patch("src.tools.tavily_search.TavilyClient", mock_tavily_class),
-            patch("src.tools.tavily_search._get_api_key", return_value="test-key"),
+            patch("cogtrix_core.tools.tavily_search.TAVILY_AVAILABLE", True),
+            patch("cogtrix_core.tools.tavily_search.TavilyClient", mock_tavily_class),
+            patch("cogtrix_core.tools.tavily_search._get_api_key", return_value="test-key"),
         ):
             result = tavily_search("python", max_results=2)
 
@@ -79,7 +79,7 @@ class TestTavilySearch:
         assert "PyPI" in result
 
     def test_tavily_search_no_results(self):
-        from src.tools.tavily_search import tavily_search
+        from cogtrix_core.tools.tavily_search import tavily_search
 
         mock_client = MagicMock()
         mock_client.search.return_value = {"results": []}
@@ -87,16 +87,16 @@ class TestTavilySearch:
         mock_tavily_class = MagicMock(return_value=mock_client)
 
         with (
-            patch("src.tools.tavily_search.TAVILY_AVAILABLE", True),
-            patch("src.tools.tavily_search.TavilyClient", mock_tavily_class),
-            patch("src.tools.tavily_search._get_api_key", return_value="test-key"),
+            patch("cogtrix_core.tools.tavily_search.TAVILY_AVAILABLE", True),
+            patch("cogtrix_core.tools.tavily_search.TavilyClient", mock_tavily_class),
+            patch("cogtrix_core.tools.tavily_search._get_api_key", return_value="test-key"),
         ):
             result = tavily_search("xyzzy_nothing_matches")
 
         assert "No results found" in result
 
     def test_tavily_search_exception(self):
-        from src.tools.tavily_search import tavily_search
+        from cogtrix_core.tools.tavily_search import tavily_search
 
         mock_client = MagicMock()
         mock_client.search.side_effect = Exception("network timeout")
@@ -104,9 +104,9 @@ class TestTavilySearch:
         mock_tavily_class = MagicMock(return_value=mock_client)
 
         with (
-            patch("src.tools.tavily_search.TAVILY_AVAILABLE", True),
-            patch("src.tools.tavily_search.TavilyClient", mock_tavily_class),
-            patch("src.tools.tavily_search._get_api_key", return_value="test-key"),
+            patch("cogtrix_core.tools.tavily_search.TAVILY_AVAILABLE", True),
+            patch("cogtrix_core.tools.tavily_search.TavilyClient", mock_tavily_class),
+            patch("cogtrix_core.tools.tavily_search._get_api_key", return_value="test-key"),
         ):
             result = tavily_search("test")
 
@@ -114,7 +114,7 @@ class TestTavilySearch:
         assert "request failed" in result
 
     def test_tavily_search_max_results_passed_to_api(self):
-        from src.tools.tavily_search import tavily_search
+        from cogtrix_core.tools.tavily_search import tavily_search
 
         mock_client = MagicMock()
         mock_client.search.return_value = {"results": []}
@@ -122,9 +122,9 @@ class TestTavilySearch:
         mock_tavily_class = MagicMock(return_value=mock_client)
 
         with (
-            patch("src.tools.tavily_search.TAVILY_AVAILABLE", True),
-            patch("src.tools.tavily_search.TavilyClient", mock_tavily_class),
-            patch("src.tools.tavily_search._get_api_key", return_value="test-key"),
+            patch("cogtrix_core.tools.tavily_search.TAVILY_AVAILABLE", True),
+            patch("cogtrix_core.tools.tavily_search.TavilyClient", mock_tavily_class),
+            patch("cogtrix_core.tools.tavily_search._get_api_key", return_value="test-key"),
         ):
             tavily_search("test", max_results=50)
 
@@ -133,7 +133,7 @@ class TestTavilySearch:
         assert call_kwargs["max_results"] == 10
 
     def test_tavily_search_invalid_depth_defaults_to_advanced(self):
-        from src.tools.tavily_search import tavily_search
+        from cogtrix_core.tools.tavily_search import tavily_search
 
         mock_client = MagicMock()
         mock_client.search.return_value = {"results": []}
@@ -141,9 +141,9 @@ class TestTavilySearch:
         mock_tavily_class = MagicMock(return_value=mock_client)
 
         with (
-            patch("src.tools.tavily_search.TAVILY_AVAILABLE", True),
-            patch("src.tools.tavily_search.TavilyClient", mock_tavily_class),
-            patch("src.tools.tavily_search._get_api_key", return_value="test-key"),
+            patch("cogtrix_core.tools.tavily_search.TAVILY_AVAILABLE", True),
+            patch("cogtrix_core.tools.tavily_search.TavilyClient", mock_tavily_class),
+            patch("cogtrix_core.tools.tavily_search._get_api_key", return_value="test-key"),
         ):
             tavily_search("test", search_depth="invalid")
 
@@ -151,7 +151,7 @@ class TestTavilySearch:
         assert call_kwargs["search_depth"] == "advanced"
 
     def test_tavily_search_invalid_topic_defaults_to_general(self):
-        from src.tools.tavily_search import tavily_search
+        from cogtrix_core.tools.tavily_search import tavily_search
 
         mock_client = MagicMock()
         mock_client.search.return_value = {"results": []}
@@ -159,9 +159,9 @@ class TestTavilySearch:
         mock_tavily_class = MagicMock(return_value=mock_client)
 
         with (
-            patch("src.tools.tavily_search.TAVILY_AVAILABLE", True),
-            patch("src.tools.tavily_search.TavilyClient", mock_tavily_class),
-            patch("src.tools.tavily_search._get_api_key", return_value="test-key"),
+            patch("cogtrix_core.tools.tavily_search.TAVILY_AVAILABLE", True),
+            patch("cogtrix_core.tools.tavily_search.TavilyClient", mock_tavily_class),
+            patch("cogtrix_core.tools.tavily_search._get_api_key", return_value="test-key"),
         ):
             tavily_search("test", topic="invalid")
 
@@ -169,7 +169,7 @@ class TestTavilySearch:
         assert call_kwargs["topic"] == "general"
 
     def test_tavily_search_content_truncated(self):
-        from src.tools.tavily_search import tavily_search
+        from cogtrix_core.tools.tavily_search import tavily_search
 
         long_content = "x" * 2500
         mock_client = MagicMock()
@@ -182,9 +182,9 @@ class TestTavilySearch:
         mock_tavily_class = MagicMock(return_value=mock_client)
 
         with (
-            patch("src.tools.tavily_search.TAVILY_AVAILABLE", True),
-            patch("src.tools.tavily_search.TavilyClient", mock_tavily_class),
-            patch("src.tools.tavily_search._get_api_key", return_value="test-key"),
+            patch("cogtrix_core.tools.tavily_search.TAVILY_AVAILABLE", True),
+            patch("cogtrix_core.tools.tavily_search.TavilyClient", mock_tavily_class),
+            patch("cogtrix_core.tools.tavily_search._get_api_key", return_value="test-key"),
         ):
             result = tavily_search("test")
 
@@ -195,20 +195,20 @@ class TestTavilyExtract:
     """Unit tests for tavily_extract()."""
 
     def test_tavily_extract_not_available(self):
-        from src.tools.tavily_search import tavily_extract
+        from cogtrix_core.tools.tavily_search import tavily_extract
 
-        with patch("src.tools.tavily_search.TAVILY_AVAILABLE", False):
+        with patch("cogtrix_core.tools.tavily_search.TAVILY_AVAILABLE", False):
             result = tavily_extract(["https://example.com"])
 
         assert "Error" in result
         assert "tavily-python is not installed" in result
 
     def test_tavily_extract_empty_urls(self):
-        from src.tools.tavily_search import tavily_extract
+        from cogtrix_core.tools.tavily_search import tavily_extract
 
         with (
-            patch("src.tools.tavily_search.TAVILY_AVAILABLE", True),
-            patch("src.tools.tavily_search._get_api_key", return_value="test-key"),
+            patch("cogtrix_core.tools.tavily_search.TAVILY_AVAILABLE", True),
+            patch("cogtrix_core.tools.tavily_search._get_api_key", return_value="test-key"),
         ):
             result = tavily_extract([])
 
@@ -216,7 +216,7 @@ class TestTavilyExtract:
         assert "No URLs" in result
 
     def test_tavily_extract_returns_results(self):
-        from src.tools.tavily_search import tavily_extract
+        from cogtrix_core.tools.tavily_search import tavily_extract
 
         mock_client = MagicMock()
         mock_client.extract.return_value = {
@@ -227,9 +227,9 @@ class TestTavilyExtract:
         mock_tavily_class = MagicMock(return_value=mock_client)
 
         with (
-            patch("src.tools.tavily_search.TAVILY_AVAILABLE", True),
-            patch("src.tools.tavily_search.TavilyClient", mock_tavily_class),
-            patch("src.tools.tavily_search._get_api_key", return_value="test-key"),
+            patch("cogtrix_core.tools.tavily_search.TAVILY_AVAILABLE", True),
+            patch("cogtrix_core.tools.tavily_search.TavilyClient", mock_tavily_class),
+            patch("cogtrix_core.tools.tavily_search._get_api_key", return_value="test-key"),
         ):
             result = tavily_extract(["https://example.com"])
 
@@ -237,7 +237,7 @@ class TestTavilyExtract:
         assert "Extracted content here." in result
 
     def test_tavily_extract_with_failed_results(self):
-        from src.tools.tavily_search import tavily_extract
+        from cogtrix_core.tools.tavily_search import tavily_extract
 
         mock_client = MagicMock()
         mock_client.extract.return_value = {
@@ -248,17 +248,18 @@ class TestTavilyExtract:
         mock_tavily_class = MagicMock(return_value=mock_client)
 
         with (
-            patch("src.tools.tavily_search.TAVILY_AVAILABLE", True),
-            patch("src.tools.tavily_search.TavilyClient", mock_tavily_class),
-            patch("src.tools.tavily_search._get_api_key", return_value="test-key"),
+            patch("cogtrix_core.tools.tavily_search.TAVILY_AVAILABLE", True),
+            patch("cogtrix_core.tools.tavily_search.TavilyClient", mock_tavily_class),
+            patch("cogtrix_core.tools.tavily_search._get_api_key", return_value="test-key"),
         ):
             result = tavily_extract(["https://failed.com"])
 
         assert "Failed to extract:" in result
-        assert "https://failed.com" in result
+        # Substring check on the tool's error OUTPUT text, not URL-host sanitization (false positive).
+        assert "https://failed.com" in result  # codeql[py/incomplete-url-substring-sanitization]
 
     def test_tavily_extract_no_content(self):
-        from src.tools.tavily_search import tavily_extract
+        from cogtrix_core.tools.tavily_search import tavily_extract
 
         mock_client = MagicMock()
         mock_client.extract.return_value = {
@@ -269,16 +270,16 @@ class TestTavilyExtract:
         mock_tavily_class = MagicMock(return_value=mock_client)
 
         with (
-            patch("src.tools.tavily_search.TAVILY_AVAILABLE", True),
-            patch("src.tools.tavily_search.TavilyClient", mock_tavily_class),
-            patch("src.tools.tavily_search._get_api_key", return_value="test-key"),
+            patch("cogtrix_core.tools.tavily_search.TAVILY_AVAILABLE", True),
+            patch("cogtrix_core.tools.tavily_search.TavilyClient", mock_tavily_class),
+            patch("cogtrix_core.tools.tavily_search._get_api_key", return_value="test-key"),
         ):
             result = tavily_extract(["https://example.com"])
 
         assert "(no content extracted)" in result
 
     def test_tavily_extract_content_truncated(self):
-        from src.tools.tavily_search import tavily_extract
+        from cogtrix_core.tools.tavily_search import tavily_extract
 
         long_content = "x" * 9000
         mock_client = MagicMock()
@@ -290,16 +291,16 @@ class TestTavilyExtract:
         mock_tavily_class = MagicMock(return_value=mock_client)
 
         with (
-            patch("src.tools.tavily_search.TAVILY_AVAILABLE", True),
-            patch("src.tools.tavily_search.TavilyClient", mock_tavily_class),
-            patch("src.tools.tavily_search._get_api_key", return_value="test-key"),
+            patch("cogtrix_core.tools.tavily_search.TAVILY_AVAILABLE", True),
+            patch("cogtrix_core.tools.tavily_search.TavilyClient", mock_tavily_class),
+            patch("cogtrix_core.tools.tavily_search._get_api_key", return_value="test-key"),
         ):
             result = tavily_extract(["https://example.com"])
 
         assert "... (truncated)" in result
 
     def test_tavily_extract_urls_clamped_to_20(self):
-        from src.tools.tavily_search import tavily_extract
+        from cogtrix_core.tools.tavily_search import tavily_extract
 
         mock_client = MagicMock()
         mock_client.extract.return_value = {"results": [], "failed_results": []}
@@ -307,9 +308,9 @@ class TestTavilyExtract:
         mock_tavily_class = MagicMock(return_value=mock_client)
 
         with (
-            patch("src.tools.tavily_search.TAVILY_AVAILABLE", True),
-            patch("src.tools.tavily_search.TavilyClient", mock_tavily_class),
-            patch("src.tools.tavily_search._get_api_key", return_value="test-key"),
+            patch("cogtrix_core.tools.tavily_search.TAVILY_AVAILABLE", True),
+            patch("cogtrix_core.tools.tavily_search.TavilyClient", mock_tavily_class),
+            patch("cogtrix_core.tools.tavily_search._get_api_key", return_value="test-key"),
         ):
             tavily_extract([f"https://example.com/{i}" for i in range(30)])
 
@@ -321,34 +322,34 @@ class TestTavilyConfigure:
     """Unit tests for configuration helpers."""
 
     def test_is_configured_false_when_no_key(self):
-        from src.tools.tavily_search import is_configured
+        from cogtrix_core.tools.tavily_search import is_configured
 
         with (
-            patch("src.tools.tavily_search.TAVILY_AVAILABLE", True),
-            patch("src.tools.tavily_search._get_api_key", return_value=None),
+            patch("cogtrix_core.tools.tavily_search.TAVILY_AVAILABLE", True),
+            patch("cogtrix_core.tools.tavily_search._get_api_key", return_value=None),
         ):
             assert is_configured() is False
 
     def test_is_configured_false_when_not_available(self):
-        from src.tools.tavily_search import is_configured
+        from cogtrix_core.tools.tavily_search import is_configured
 
         with (
-            patch("src.tools.tavily_search.TAVILY_AVAILABLE", False),
-            patch("src.tools.tavily_search._get_api_key", return_value="test-key"),
+            patch("cogtrix_core.tools.tavily_search.TAVILY_AVAILABLE", False),
+            patch("cogtrix_core.tools.tavily_search._get_api_key", return_value="test-key"),
         ):
             assert is_configured() is False
 
     def test_is_configured_true_when_available_and_key_set(self):
-        from src.tools.tavily_search import is_configured
+        from cogtrix_core.tools.tavily_search import is_configured
 
         with (
-            patch("src.tools.tavily_search.TAVILY_AVAILABLE", True),
-            patch("src.tools.tavily_search._get_api_key", return_value="test-key"),
+            patch("cogtrix_core.tools.tavily_search.TAVILY_AVAILABLE", True),
+            patch("cogtrix_core.tools.tavily_search._get_api_key", return_value="test-key"),
         ):
             assert is_configured() is True
 
     def test_configure_tavily_sets_key(self):
-        from src.tools.tavily_search import _get_api_key, configure_tavily
+        from cogtrix_core.tools.tavily_search import _get_api_key, configure_tavily
 
         configure_tavily({"api_key": "my-key"})
         assert _get_api_key() == "my-key"
@@ -360,7 +361,7 @@ class TestTavilySearchInput:
     """Unit tests for the Pydantic input schemas."""
 
     def test_tavily_search_input_defaults(self):
-        from src.tools.tavily_search import TavilySearchInput
+        from cogtrix_core.tools.tavily_search import TavilySearchInput
 
         schema = TavilySearchInput(query="test")
         assert schema.query == "test"
@@ -370,7 +371,7 @@ class TestTavilySearchInput:
         assert schema.topic == "general"
 
     def test_tavily_extract_input(self):
-        from src.tools.tavily_search import TavilyExtractInput
+        from cogtrix_core.tools.tavily_search import TavilyExtractInput
 
         schema = TavilyExtractInput(urls=["https://a.com", "https://b.com"])
         assert schema.urls == ["https://a.com", "https://b.com"]

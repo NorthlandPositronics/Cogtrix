@@ -1,4 +1,4 @@
-"""Tests for src/tools/_http_fetch.py — async fetch primitive
+"""Tests for cogtrix_core/tools/_http_fetch.py — async fetch primitive
 (ADR-0056 PR-A2 stage 3).
 
 Uses httpx.MockTransport to intercept HTTP calls without network. Each
@@ -14,8 +14,8 @@ from collections.abc import Callable
 import httpx
 import pytest
 
-from src.tools import _http_fetch
-from src.tools._http_fetch import USER_AGENT, FetchResult, fetch_async
+from cogtrix_core.tools import _http_fetch
+from cogtrix_core.tools._http_fetch import USER_AGENT, FetchResult, fetch_async
 
 
 def _public_dns_mock() -> Callable[..., list[tuple]]:
@@ -33,7 +33,7 @@ def _reset_state(monkeypatch: pytest.MonkeyPatch) -> None:
     _http_fetch._clear_robots_cache()
     _http_fetch._reset_host_state()
     # All tests use mocked DNS so we never hit real DNS.
-    monkeypatch.setattr("src.tools._http_safety.socket.getaddrinfo", _public_dns_mock())
+    monkeypatch.setattr("cogtrix_core.tools._http_safety.socket.getaddrinfo", _public_dns_mock())
 
 
 def _make_client(handler: Callable[[httpx.Request], httpx.Response]) -> httpx.AsyncClient:
@@ -505,7 +505,7 @@ class TestBuildPinnedUrl:
     class pins each rewriting rule."""
 
     def test_ipv4_rewrite(self) -> None:
-        from src.tools._http_fetch import _build_pinned_url
+        from cogtrix_core.tools._http_fetch import _build_pinned_url
 
         assert (
             _build_pinned_url("https://example.com/path?q=1", "1.2.3.4")
@@ -513,7 +513,7 @@ class TestBuildPinnedUrl:
         )
 
     def test_ipv6_brackets_in_url(self) -> None:
-        from src.tools._http_fetch import _build_pinned_url
+        from cogtrix_core.tools._http_fetch import _build_pinned_url
 
         assert (
             _build_pinned_url("https://example.com/", "2606:4700::1111")
@@ -521,14 +521,14 @@ class TestBuildPinnedUrl:
         )
 
     def test_explicit_port_preserved(self) -> None:
-        from src.tools._http_fetch import _build_pinned_url
+        from cogtrix_core.tools._http_fetch import _build_pinned_url
 
         assert (
             _build_pinned_url("https://example.com:8443/x", "10.0.0.1") == "https://10.0.0.1:8443/x"
         )
 
     def test_query_preserved(self) -> None:
-        from src.tools._http_fetch import _build_pinned_url
+        from cogtrix_core.tools._http_fetch import _build_pinned_url
 
         assert (
             _build_pinned_url("https://example.com/x?a=1&b=2", "1.2.3.4")
@@ -538,7 +538,7 @@ class TestBuildPinnedUrl:
     def test_default_port_not_emitted(self) -> None:
         """When the URL has no explicit port, the pinned URL also has
         none — we don't fabricate ``:443`` or ``:80``."""
-        from src.tools._http_fetch import _build_pinned_url
+        from cogtrix_core.tools._http_fetch import _build_pinned_url
 
         assert _build_pinned_url("https://example.com/x", "1.2.3.4") == "https://1.2.3.4/x"
         assert _build_pinned_url("http://example.com/x", "1.2.3.4") == "http://1.2.3.4/x"
@@ -564,7 +564,7 @@ class TestParallelDnsDoesNotSerialise:
             _time.sleep(0.5)  # simulate slow DNS resolution
             return [(None, None, None, "", ("93.184.216.34", 0))]
 
-        monkeypatch.setattr("src.tools._http_safety.socket.getaddrinfo", slow_getaddrinfo)
+        monkeypatch.setattr("cogtrix_core.tools._http_safety.socket.getaddrinfo", slow_getaddrinfo)
 
         # Six parallel fetches against six distinct hostnames. If DNS
         # blocks the event loop, they serialise: 6 × 0.5s = 3s minimum
@@ -642,7 +642,7 @@ class TestLocksSurviveLoopRecreation:
         """
         import asyncio as _asyncio
 
-        from src.tools._http_fetch import _get_host_lock
+        from cogtrix_core.tools._http_fetch import _get_host_lock
 
         captured: list[_asyncio.Lock] = []
 
@@ -665,7 +665,7 @@ class TestLocksSurviveLoopRecreation:
         """Within a single event loop, ``_get_host_lock`` must return
         the same lock for the same host so per-host rate-limit
         serialisation actually serialises."""
-        from src.tools._http_fetch import _get_host_lock
+        from cogtrix_core.tools._http_fetch import _get_host_lock
 
         lock_a1 = _get_host_lock("example.com")
         lock_a2 = _get_host_lock("example.com")

@@ -19,8 +19,8 @@ import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from src.assistant.channels.whatsapp import WhatsAppChannel
-from src.tools._whatsapp_client import ChatOverview, Message, WahaClient
+from cogtrix_core.assistant.channels.whatsapp import WhatsAppChannel
+from cogtrix_core.tools._whatsapp_client import ChatOverview, Message, WahaClient
 
 
 def _make_message(
@@ -65,24 +65,32 @@ def _wire(ch: WhatsAppChannel, overview: ChatOverview, fetched: list[Message]) -
 
 class TestSeenPersistence:
     def test_message_not_reanswered_after_restart(self, tmp_path: Path) -> None:
-        """A message answered before restart is NOT re-emitted after restart."""
+        """A message answered before restart is NOT re-emitted after restart.
+
+        Updated for #2057: the first poll of a genuine cold start (persistence
+        configured, no prior seen-ids) now SEEDS watermarks and does not answer
+        pre-existing backlog. The answered-once-then-not-again contract is
+        exercised with a message that arrives *after* the cold-start seed.
+        """
         seen_path = tmp_path / "whatsapp_seen_ids.json"
-        msg = _make_message(id="m-restart", timestamp=int(time.time()), body="No rush")
-        overview = _make_overview(last_message=msg)
 
-        # First process (pre-restart): the message is emitted once.
         ch1 = _make_channel(seen_path)
-        _wire(ch1, overview, [msg])
-        first = ch1.poll()
-        assert len(first) == 1
-        assert first[0].message_id == "m-restart"
-        assert seen_path.exists(), "seen-ids file must be persisted after poll"
+        backlog = _make_message(id="m-backlog", timestamp=int(time.time()), body="old")
+        _wire(ch1, _make_overview(last_message=backlog), [backlog])
+        assert ch1.poll() == [], "cold-start first poll must seed, not answer backlog"
+        assert seen_path.exists(), "seed must persist a seen-ids file"
 
-        # Restart: a fresh channel loads the persisted state. The watermark/snapshot
-        # are gone (in-memory), so the same message is re-fetched — but persistence
-        # must suppress the duplicate reply.
+        # A genuinely-new message (after the seeded watermark) is answered once.
+        msg = _make_message(id="m-restart", timestamp=int(time.time()) + 5, body="No rush")
+        _wire(ch1, _make_overview(last_message=msg), [msg])
+        first = ch1.poll()
+        assert [r.message_id for r in first] == ["m-restart"]
+
+        # Restart: a fresh channel loads the persisted state (now non-empty, so a
+        # WARM restart — no re-seed). The watermark is gone (in-memory), so the same
+        # message is re-fetched — but persistence must suppress the duplicate reply.
         ch2 = _make_channel(seen_path)
-        _wire(ch2, overview, [msg])
+        _wire(ch2, _make_overview(last_message=msg), [msg])
         second = ch2.poll()
         assert second == [], "restart must not re-answer an already-seen message"
 
@@ -91,12 +99,13 @@ class TestSeenPersistence:
         seen_path = tmp_path / "whatsapp_seen_ids.json"
         old = _make_message(id="m-old", timestamp=int(time.time()), body="Earlier")
 
+        # Cold start seeds (does not answer the backlog message).
         ch1 = _make_channel(seen_path)
         _wire(ch1, _make_overview(last_message=old), [old])
-        assert len(ch1.poll()) == 1
+        assert ch1.poll() == []
 
-        # Restart, then a NEW message arrives.
-        new = _make_message(id="m-new", timestamp=int(time.time()) + 1, body="Fresh")
+        # Restart (warm — seed persisted), then a NEW message arrives.
+        new = _make_message(id="m-new", timestamp=int(time.time()) + 10, body="Fresh")
         ch2 = _make_channel(seen_path)
         _wire(ch2, _make_overview(last_message=new), [old, new])
         result = ch2.poll()

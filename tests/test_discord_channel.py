@@ -44,10 +44,10 @@ def _make_discord_channel(config: dict[str, Any] | None = None) -> Any:
     """Return a DiscordChannel with _HAS_DISCORD and _REQUESTS_AVAILABLE forced
     to True and the REST client replaced by a MagicMock."""
     with (
-        patch("src.assistant.channels.discord._HAS_DISCORD", True),
-        patch("src.assistant.channels.discord._REQUESTS_AVAILABLE", True),
+        patch("cogtrix_core.assistant.channels.discord._HAS_DISCORD", True),
+        patch("cogtrix_core.assistant.channels.discord._REQUESTS_AVAILABLE", True),
     ):
-        from src.assistant.channels.discord import DiscordChannel
+        from cogtrix_core.assistant.channels.discord import DiscordChannel
 
         ch = DiscordChannel(config or {"bot_token": "tok"})
         ch._client = MagicMock()
@@ -61,73 +61,73 @@ def _make_discord_channel(config: dict[str, Any] | None = None) -> Any:
 
 class TestNormalizeFilterMode:
     def test_valid_modes_returned_unchanged(self) -> None:
-        from src.assistant.channels.discord import _normalize_filter_mode
+        from cogtrix_core.assistant.channels.discord import _normalize_filter_mode
 
         for mode in ("none", "allow", "ignore", "blacklist"):
             assert _normalize_filter_mode(mode) == mode
 
     def test_whitelist_mapped_to_allow(self) -> None:
-        from src.assistant.channels.discord import _normalize_filter_mode
+        from cogtrix_core.assistant.channels.discord import _normalize_filter_mode
 
         assert _normalize_filter_mode("whitelist") == "allow"
 
     def test_unknown_mode_defaults_to_none(self) -> None:
-        from src.assistant.channels.discord import _normalize_filter_mode
+        from cogtrix_core.assistant.channels.discord import _normalize_filter_mode
 
         assert _normalize_filter_mode("rubbish") == "none"
 
     def test_strips_whitespace_and_lowercases(self) -> None:
-        from src.assistant.channels.discord import _normalize_filter_mode
+        from cogtrix_core.assistant.channels.discord import _normalize_filter_mode
 
         assert _normalize_filter_mode("  ALLOW  ") == "allow"
 
 
 class TestResolveContact:
     def test_phonebook_hit_case_insensitive(self) -> None:
-        from src.assistant.channels.discord import _resolve_contact
+        from cogtrix_core.assistant.channels.discord import _resolve_contact
 
         pb = {"Alice": "111", "Bob": "222"}
         assert _resolve_contact("alice", pb) == "111"
 
     def test_raw_id_returned_when_no_match(self) -> None:
-        from src.assistant.channels.discord import _resolve_contact
+        from cogtrix_core.assistant.channels.discord import _resolve_contact
 
         assert _resolve_contact("999", {}) == "999"
 
 
 class TestCheckReceiveContact:
     def test_filter_none_always_passes(self) -> None:
-        from src.assistant.channels.discord import _check_receive_contact
+        from cogtrix_core.assistant.channels.discord import _check_receive_contact
 
         assert _check_receive_contact("any", "none", [], {}) is True
 
     def test_allow_mode_passes_listed_id(self) -> None:
-        from src.assistant.channels.discord import _check_receive_contact
+        from cogtrix_core.assistant.channels.discord import _check_receive_contact
 
         assert _check_receive_contact("42", "allow", ["42"], {}) is True
 
     def test_allow_mode_blocks_unlisted_id(self) -> None:
-        from src.assistant.channels.discord import _check_receive_contact
+        from cogtrix_core.assistant.channels.discord import _check_receive_contact
 
         assert _check_receive_contact("99", "allow", ["42"], {}) is False
 
     def test_ignore_mode_blocks_listed_id(self) -> None:
-        from src.assistant.channels.discord import _check_receive_contact
+        from cogtrix_core.assistant.channels.discord import _check_receive_contact
 
         assert _check_receive_contact("42", "ignore", ["42"], {}) is False
 
     def test_ignore_mode_passes_unlisted_id(self) -> None:
-        from src.assistant.channels.discord import _check_receive_contact
+        from cogtrix_core.assistant.channels.discord import _check_receive_contact
 
         assert _check_receive_contact("99", "ignore", ["42"], {}) is True
 
     def test_blacklist_mode_blocks_listed(self) -> None:
-        from src.assistant.channels.discord import _check_receive_contact
+        from cogtrix_core.assistant.channels.discord import _check_receive_contact
 
         assert _check_receive_contact("42", "blacklist", ["42"], {}) is False
 
     def test_phonebook_resolution_in_filter(self) -> None:
-        from src.assistant.channels.discord import _check_receive_contact
+        from cogtrix_core.assistant.channels.discord import _check_receive_contact
 
         # "alice" in contacts resolves to "111" via phonebook → should pass allow
         assert _check_receive_contact("111", "allow", ["alice"], {"alice": "111"}) is True
@@ -135,7 +135,7 @@ class TestCheckReceiveContact:
 
 class TestSnowflakeToTimestamp:
     def test_epoch_zero_snowflake_gives_discord_epoch(self) -> None:
-        from src.assistant.channels.discord import _snowflake_to_timestamp
+        from cogtrix_core.assistant.channels.discord import _snowflake_to_timestamp
 
         # Snowflake with all-zero timestamp bits → should equal Discord epoch (seconds)
         # Discord epoch = 1420070400000 ms = 1420070400.0 s
@@ -143,7 +143,7 @@ class TestSnowflakeToTimestamp:
         assert ts == pytest.approx(1420070400.0, rel=1e-6)
 
     def test_recent_snowflake_gives_recent_timestamp(self) -> None:
-        from src.assistant.channels.discord import _snowflake_to_timestamp
+        from cogtrix_core.assistant.channels.discord import _snowflake_to_timestamp
 
         ts = _snowflake_to_timestamp(_RECENT_SNOWFLAKE)
         # Should be well after 2020-01-01 (1577836800)
@@ -157,15 +157,15 @@ class TestSnowflakeToTimestamp:
 
 class TestDiscordChannelInit:
     def test_raises_import_error_when_discord_not_installed(self) -> None:
-        with patch("src.assistant.channels.discord._HAS_DISCORD", False):
-            from src.assistant.channels.discord import DiscordChannel
+        with patch("cogtrix_core.assistant.channels.discord._HAS_DISCORD", False):
+            from cogtrix_core.assistant.channels.discord import DiscordChannel
 
             with pytest.raises(ImportError, match="discord.py not installed"):
                 DiscordChannel({"bot_token": "tok"})
 
     def test_is_ready_true_with_token(self) -> None:
         ch = _make_discord_channel({"bot_token": "tok"})
-        with patch("src.assistant.channels.discord._HAS_DISCORD", True):
+        with patch("cogtrix_core.assistant.channels.discord._HAS_DISCORD", True):
             assert ch.is_ready() is True
 
     def test_is_ready_false_without_token(self) -> None:
@@ -173,8 +173,8 @@ class TestDiscordChannelInit:
         assert ch.is_ready() is False
 
     def test_is_configured_classmethod(self) -> None:
-        with patch("src.assistant.channels.discord._HAS_DISCORD", True):
-            from src.assistant.channels.discord import DiscordChannel
+        with patch("cogtrix_core.assistant.channels.discord._HAS_DISCORD", True):
+            from cogtrix_core.assistant.channels.discord import DiscordChannel
 
             assert DiscordChannel.is_configured({"bot_token": "tok"}) is True
             assert DiscordChannel.is_configured({}) is False

@@ -1,12 +1,12 @@
-"""Tests for src/tools/agent_tools.py — agent spawning and task management tools."""
+"""Tests for cogtrix_core/tools/agent_tools.py — agent spawning and task management tools."""
 
 from __future__ import annotations
 
 import pytest
 
-import src.agent.registry as _reg_mod
-import src.tasks.queue as _queue_mod
-from src.agent.registry import AgentConfig, AgentRegistry
+import cogtrix_core.agent.registry as _reg_mod
+import cogtrix_core.tasks.queue as _queue_mod
+from cogtrix_core.agent.registry import AgentConfig, AgentRegistry
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -33,7 +33,7 @@ def _reset_queue():
 @pytest.fixture()
 def queue(tmp_path):
     """Initialise a real SQLite-backed TaskQueue for the test."""
-    from src.tasks.queue import init_task_queue
+    from cogtrix_core.tasks.queue import init_task_queue
 
     return init_task_queue(
         db_path=tmp_path / "tasks.db",
@@ -55,7 +55,7 @@ def agent():
 class TestSpawnAgent:
     def test_background_false_returns_stub_result(self, agent) -> None:
         """Synchronous spawn returns a stub string without a queue."""
-        from src.tools.agent_tools import spawn_agent
+        from cogtrix_core.tools.agent_tools import spawn_agent
 
         result = spawn_agent("test_agent", "do something")
         assert isinstance(result, str)
@@ -65,7 +65,7 @@ class TestSpawnAgent:
 
     def test_background_false_with_queue_returns_stub(self, agent, queue) -> None:
         """Synchronous spawn uses the queue's _run_agent_task stub when available."""
-        from src.tools.agent_tools import spawn_agent
+        from cogtrix_core.tools.agent_tools import spawn_agent
 
         result = spawn_agent("test_agent", "queue task", background=False)
         assert isinstance(result, str)
@@ -74,7 +74,7 @@ class TestSpawnAgent:
 
     def test_background_true_returns_task_id(self, agent, queue) -> None:
         """Background spawn submits to the queue and returns a task_id string."""
-        from src.tools.agent_tools import spawn_agent
+        from cogtrix_core.tools.agent_tools import spawn_agent
 
         result = spawn_agent("test_agent", "background task", background=True)
         assert isinstance(result, str)
@@ -85,7 +85,7 @@ class TestSpawnAgent:
 
     def test_background_true_no_queue_returns_error(self, agent) -> None:
         """Background spawn with no queue returns a descriptive error string."""
-        from src.tools.agent_tools import spawn_agent
+        from cogtrix_core.tools.agent_tools import spawn_agent
 
         result = spawn_agent("test_agent", "task", background=True)
         assert "Error" in result
@@ -93,7 +93,7 @@ class TestSpawnAgent:
 
     def test_unknown_agent_returns_error(self) -> None:
         """spawn_agent with an unregistered agent name returns an error string."""
-        from src.tools.agent_tools import spawn_agent
+        from cogtrix_core.tools.agent_tools import spawn_agent
 
         result = spawn_agent("ghost_agent", "some task")
         assert "Unknown agent" in result or "unknown agent" in result.lower()
@@ -101,7 +101,7 @@ class TestSpawnAgent:
 
     def test_unknown_agent_lists_available(self, agent) -> None:
         """Error message for unknown agent includes the list of known agents."""
-        from src.tools.agent_tools import spawn_agent
+        from cogtrix_core.tools.agent_tools import spawn_agent
 
         result = spawn_agent("nonexistent", "task")
         assert "test_agent" in result
@@ -115,8 +115,8 @@ class TestSpawnAgent:
 class TestGetTaskStatus:
     def test_known_task_returns_formatted_status(self, agent, queue) -> None:
         """get_task_status returns task_id, agent, status, and elapsed fields."""
-        from src.tasks.queue import submit_task
-        from src.tools.agent_tools import get_task_status
+        from cogtrix_core.tasks.queue import submit_task
+        from cogtrix_core.tools.agent_tools import get_task_status
 
         task_id = submit_task("test_agent", "check me")
         result = get_task_status(task_id)
@@ -128,23 +128,23 @@ class TestGetTaskStatus:
 
     def test_unknown_task_id_returns_error(self, queue) -> None:
         """get_task_status returns an error string for an unknown task_id."""
-        from src.tools.agent_tools import get_task_status
+        from cogtrix_core.tools.agent_tools import get_task_status
 
         result = get_task_status("00000000-0000-0000-0000-000000000000")
         assert "not found" in result.lower() or "Error" in result
 
     def test_no_queue_returns_error(self) -> None:
         """get_task_status returns an error string when queue is not initialised."""
-        from src.tools.agent_tools import get_task_status
+        from cogtrix_core.tools.agent_tools import get_task_status
 
         result = get_task_status("any-id")
         assert "Error" in result
 
     def test_result_preview_truncated_to_500(self, agent, queue) -> None:
         """Result field is truncated to 500 chars with trailing ellipsis."""
-        import src.tasks.queue as _qmod
-        from src.tasks.queue import TaskStatus, submit_task
-        from src.tools.agent_tools import get_task_status
+        import cogtrix_core.tasks.queue as _qmod
+        from cogtrix_core.tasks.queue import TaskStatus, submit_task
+        from cogtrix_core.tools.agent_tools import get_task_status
 
         task_id = submit_task("test_agent", "p")
         # Manually set a long result
@@ -171,9 +171,9 @@ class TestGetTaskStatus:
 class TestGetTaskResult:
     def test_completed_task_returns_full_result(self, agent, queue) -> None:
         """get_task_result returns the full result string for a COMPLETED task."""
-        import src.tasks.queue as _qmod
-        from src.tasks.queue import TaskStatus, submit_task
-        from src.tools.agent_tools import get_task_result
+        import cogtrix_core.tasks.queue as _qmod
+        from cogtrix_core.tasks.queue import TaskStatus, submit_task
+        from cogtrix_core.tools.agent_tools import get_task_result
 
         task_id = submit_task("test_agent", "finish me")
         the_result = "finished successfully"
@@ -186,9 +186,9 @@ class TestGetTaskResult:
         assert get_task_result(task_id) == the_result
 
     def test_failed_task_returns_error_message(self, agent, queue) -> None:
-        import src.tasks.queue as _qmod
-        from src.tasks.queue import TaskStatus, submit_task
-        from src.tools.agent_tools import get_task_result
+        import cogtrix_core.tasks.queue as _qmod
+        from cogtrix_core.tasks.queue import TaskStatus, submit_task
+        from cogtrix_core.tools.agent_tools import get_task_result
 
         task_id = submit_task("test_agent", "fail me")
         with _qmod._queue._lock:
@@ -202,9 +202,9 @@ class TestGetTaskResult:
         assert "boom" in result
 
     def test_running_task_returns_still_running(self, agent, queue) -> None:
-        import src.tasks.queue as _qmod
-        from src.tasks.queue import TaskStatus, submit_task
-        from src.tools.agent_tools import get_task_result
+        import cogtrix_core.tasks.queue as _qmod
+        from cogtrix_core.tasks.queue import TaskStatus, submit_task
+        from cogtrix_core.tools.agent_tools import get_task_result
 
         task_id = submit_task("test_agent", "run me")
         with _qmod._queue._lock:
@@ -216,15 +216,15 @@ class TestGetTaskResult:
         assert "running" in get_task_result(task_id).lower()
 
     def test_pending_task_returns_pending_message(self, agent, queue) -> None:
-        from src.tasks.queue import submit_task
-        from src.tools.agent_tools import get_task_result
+        from cogtrix_core.tasks.queue import submit_task
+        from cogtrix_core.tools.agent_tools import get_task_result
 
         task_id = submit_task("test_agent", "wait for me")
         result = get_task_result(task_id)
         assert "pending" in result.lower()
 
     def test_unknown_task_returns_error(self, queue) -> None:
-        from src.tools.agent_tools import get_task_result
+        from cogtrix_core.tools.agent_tools import get_task_result
 
         result = get_task_result("00000000-0000-0000-0000-000000000000")
         assert "not found" in result.lower() or "Error" in result
@@ -238,8 +238,8 @@ class TestGetTaskResult:
 class TestListTasks:
     def test_returns_formatted_table(self, agent, queue) -> None:
         """list_tasks returns a header row and data rows."""
-        from src.tasks.queue import submit_task
-        from src.tools.agent_tools import list_tasks
+        from cogtrix_core.tasks.queue import submit_task
+        from cogtrix_core.tools.agent_tools import list_tasks
 
         submit_task("test_agent", "task one")
         submit_task("test_agent", "task two")
@@ -252,8 +252,8 @@ class TestListTasks:
 
     def test_filter_by_status(self, agent, queue) -> None:
         """list_tasks with status='PENDING' returns only PENDING tasks."""
-        from src.tasks.queue import submit_task
-        from src.tools.agent_tools import list_tasks
+        from cogtrix_core.tasks.queue import submit_task
+        from cogtrix_core.tools.agent_tools import list_tasks
 
         submit_task("test_agent", "pending task")
         result = list_tasks(status="PENDING")
@@ -261,28 +261,28 @@ class TestListTasks:
         assert "Error" not in result
 
     def test_invalid_status_returns_error(self, queue) -> None:
-        from src.tools.agent_tools import list_tasks
+        from cogtrix_core.tools.agent_tools import list_tasks
 
         result = list_tasks(status="BOGUS")
         assert "Error" in result
         assert "BOGUS" in result
 
     def test_empty_queue_returns_no_tasks_message(self, queue) -> None:
-        from src.tools.agent_tools import list_tasks
+        from cogtrix_core.tools.agent_tools import list_tasks
 
         result = list_tasks()
         assert "No tasks" in result
 
     def test_no_queue_returns_error(self) -> None:
-        from src.tools.agent_tools import list_tasks
+        from cogtrix_core.tools.agent_tools import list_tasks
 
         result = list_tasks()
         assert "Error" in result
 
     def test_limit_respected(self, agent, queue) -> None:
         """list_tasks(limit=1) returns at most one data row."""
-        from src.tasks.queue import submit_task
-        from src.tools.agent_tools import list_tasks
+        from cogtrix_core.tasks.queue import submit_task
+        from cogtrix_core.tools.agent_tools import list_tasks
 
         submit_task("test_agent", "a")
         submit_task("test_agent", "b")
@@ -301,8 +301,8 @@ class TestListTasks:
 class TestCancelTask:
     def test_cancels_pending_task(self, agent, queue) -> None:
         """cancel_task returns confirmation for a PENDING task."""
-        from src.tasks.queue import TaskStatus, get_task_queue, submit_task
-        from src.tools.agent_tools import cancel_task
+        from cogtrix_core.tasks.queue import TaskStatus, get_task_queue, submit_task
+        from cogtrix_core.tools.agent_tools import cancel_task
 
         task_id = submit_task("test_agent", "cancel me")
         result = cancel_task(task_id)
@@ -310,9 +310,9 @@ class TestCancelTask:
         assert get_task_queue().get(task_id).status == TaskStatus.CANCELLED
 
     def test_cannot_cancel_completed_task(self, agent, queue) -> None:
-        import src.tasks.queue as _qmod
-        from src.tasks.queue import TaskStatus, submit_task
-        from src.tools.agent_tools import cancel_task
+        import cogtrix_core.tasks.queue as _qmod
+        from cogtrix_core.tasks.queue import TaskStatus, submit_task
+        from cogtrix_core.tools.agent_tools import cancel_task
 
         task_id = submit_task("test_agent", "done task")
         with _qmod._queue._lock:
@@ -325,13 +325,13 @@ class TestCancelTask:
         assert "Error" in result or "cannot" in result.lower()
 
     def test_unknown_task_returns_error(self, queue) -> None:
-        from src.tools.agent_tools import cancel_task
+        from cogtrix_core.tools.agent_tools import cancel_task
 
         result = cancel_task("00000000-0000-0000-0000-000000000000")
         assert "not found" in result.lower() or "Error" in result
 
     def test_no_queue_returns_error(self) -> None:
-        from src.tools.agent_tools import cancel_task
+        from cogtrix_core.tools.agent_tools import cancel_task
 
         result = cancel_task("any-id")
         assert "Error" in result
@@ -344,24 +344,24 @@ class TestCancelTask:
 
 class TestToolConfigs:
     def test_has_five_entries(self) -> None:
-        from src.tools.agent_tools import TOOL_CONFIGS
+        from cogtrix_core.tools.agent_tools import TOOL_CONFIGS
 
         assert len(TOOL_CONFIGS) == 5
 
     def test_spawn_agent_requires_confirmation(self) -> None:
-        from src.tools.agent_tools import TOOL_CONFIGS
+        from cogtrix_core.tools.agent_tools import TOOL_CONFIGS
 
         cfg = next(c for c in TOOL_CONFIGS if c["name"] == "spawn_agent")
         assert cfg["requires_confirmation"] is True
 
     def test_cancel_task_requires_confirmation(self) -> None:
-        from src.tools.agent_tools import TOOL_CONFIGS
+        from cogtrix_core.tools.agent_tools import TOOL_CONFIGS
 
         cfg = next(c for c in TOOL_CONFIGS if c["name"] == "cancel_task")
         assert cfg["requires_confirmation"] is True
 
     def test_read_only_tools_do_not_require_confirmation(self) -> None:
-        from src.tools.agent_tools import TOOL_CONFIGS
+        from cogtrix_core.tools.agent_tools import TOOL_CONFIGS
 
         no_confirm = {"get_task_status", "get_task_result", "list_tasks"}
         for cfg in TOOL_CONFIGS:
@@ -369,14 +369,14 @@ class TestToolConfigs:
                 assert cfg["requires_confirmation"] is False, cfg["name"]
 
     def test_all_entries_have_required_keys(self) -> None:
-        from src.tools.agent_tools import TOOL_CONFIGS
+        from cogtrix_core.tools.agent_tools import TOOL_CONFIGS
 
         required = {"name", "description", "input_schema", "requires_confirmation", "function"}
         for cfg in TOOL_CONFIGS:
             assert required <= cfg.keys(), f"Missing keys in {cfg['name']}"
 
     def test_tool_config_alias_points_to_spawn_agent(self) -> None:
-        from src.tools.agent_tools import TOOL_CONFIG, TOOL_CONFIGS
+        from cogtrix_core.tools.agent_tools import TOOL_CONFIG, TOOL_CONFIGS
 
         assert TOOL_CONFIG is TOOL_CONFIGS[0]
         assert TOOL_CONFIG["name"] == "spawn_agent"

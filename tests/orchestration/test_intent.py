@@ -1,4 +1,4 @@
-"""Tests for src/orchestration/intent.py — BUG-042 and related."""
+"""Tests for cogtrix_core/orchestration/intent.py — BUG-042 and related."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ class TestClassifyThinkTaskPromptFormat:
         return mock_llm
 
     def test_prompt_uses_xml_task_tags(self):
-        from src.orchestration.intent import classify_think_task
+        from cogtrix_core.orchestration.intent import classify_think_task
 
         llm = self._make_llm("general")
         # Task matches 2+ keyword categories → forces LLM fallback path
@@ -28,7 +28,7 @@ class TestClassifyThinkTaskPromptFormat:
         assert "</task_text>" in prompt
 
     def test_prompt_does_not_use_triple_quotes(self):
-        from src.orchestration.intent import classify_think_task
+        from cogtrix_core.orchestration.intent import classify_think_task
 
         llm = self._make_llm("general")
         classify_think_task("some task", llm)
@@ -37,7 +37,7 @@ class TestClassifyThinkTaskPromptFormat:
         assert '"""' not in prompt
 
     def test_task_text_embedded_between_xml_tags(self):
-        from src.orchestration.intent import classify_think_task
+        from cogtrix_core.orchestration.intent import classify_think_task
 
         llm = self._make_llm("general")
         task = "analyze the codebase"
@@ -48,7 +48,7 @@ class TestClassifyThinkTaskPromptFormat:
 
     def test_triple_quote_injection_does_not_escape_delimiter(self):
         """A task containing triple quotes must not break the delimiter structure."""
-        from src.orchestration.intent import classify_think_task
+        from cogtrix_core.orchestration.intent import classify_think_task
 
         llm = self._make_llm("general")
         # Task with triple-quote sequences; matches 2+ categories → forces LLM path
@@ -63,7 +63,7 @@ class TestClassifyThinkTaskPromptFormat:
         assert prompt.count("</task_text>") == 1
 
     def test_double_quotes_replaced_with_single_quotes_in_sanitized(self):
-        from src.orchestration.intent import classify_think_task
+        from cogtrix_core.orchestration.intent import classify_think_task
 
         llm = self._make_llm("general")
         task = 'say "hello"'
@@ -74,7 +74,7 @@ class TestClassifyThinkTaskPromptFormat:
         assert "say 'hello'" in prompt
 
     def test_newlines_replaced_with_spaces_in_sanitized(self):
-        from src.orchestration.intent import classify_think_task
+        from cogtrix_core.orchestration.intent import classify_think_task
 
         llm = self._make_llm("general")
         task = "line1\nline2\r\nline3"
@@ -84,7 +84,7 @@ class TestClassifyThinkTaskPromptFormat:
         assert "line1 line2  line3" in prompt or "line1 line2" in prompt
 
     def test_null_bytes_stripped_from_sanitized(self):
-        from src.orchestration.intent import classify_think_task
+        from cogtrix_core.orchestration.intent import classify_think_task
 
         llm = self._make_llm("general")
         task = "task\x00with\x00nulls"
@@ -94,10 +94,10 @@ class TestClassifyThinkTaskPromptFormat:
         assert "\x00" not in prompt
 
     def test_returns_category_on_valid_label(self):
-        from src.orchestration.intent import THINK_DEFAULT_CATEGORY, classify_think_task
+        from cogtrix_core.orchestration.intent import THINK_DEFAULT_CATEGORY, classify_think_task
 
         first_non_default_name = None
-        from src.orchestration.intent import THINK_CATEGORIES
+        from cogtrix_core.orchestration.intent import THINK_CATEGORIES
 
         for cat in THINK_CATEGORIES:
             if cat.name != THINK_DEFAULT_CATEGORY.name:
@@ -112,14 +112,14 @@ class TestClassifyThinkTaskPromptFormat:
         assert result.name == first_non_default_name
 
     def test_returns_default_category_on_unknown_label(self):
-        from src.orchestration.intent import THINK_DEFAULT_CATEGORY, classify_think_task
+        from cogtrix_core.orchestration.intent import THINK_DEFAULT_CATEGORY, classify_think_task
 
         llm = self._make_llm("totally_unknown_label_xyz")
         result = classify_think_task("some task", llm)
         assert result == THINK_DEFAULT_CATEGORY
 
     def test_returns_default_category_on_llm_exception(self):
-        from src.orchestration.intent import THINK_DEFAULT_CATEGORY, classify_think_task
+        from cogtrix_core.orchestration.intent import THINK_DEFAULT_CATEGORY, classify_think_task
 
         llm = MagicMock()
         llm.invoke.side_effect = RuntimeError("connection error")
@@ -135,7 +135,7 @@ class TestClassifyThinkTaskTimeout:
         import time
         from unittest.mock import patch
 
-        from src.orchestration.intent import THINK_DEFAULT_CATEGORY, classify_think_task
+        from cogtrix_core.orchestration.intent import THINK_DEFAULT_CATEGORY, classify_think_task
 
         llm = MagicMock()
 
@@ -148,7 +148,7 @@ class TestClassifyThinkTaskTimeout:
         llm.invoke.side_effect = _slow_invoke
 
         # Patch timeout to a very small value so the test completes quickly.
-        with patch("src.orchestration.intent._CLASSIFY_TIMEOUT_SECONDS", 0.1):
+        with patch("cogtrix_core.orchestration.intent._CLASSIFY_TIMEOUT_SECONDS", 0.1):
             # Use a task that does not match any single keyword category,
             # forcing the LLM fallback path.
             result = classify_think_task("compare and plan a project", llm)

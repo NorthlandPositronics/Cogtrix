@@ -1,7 +1,7 @@
 """Tests for the #2015 corpus-aware attribution-mismatch recovery node.
 
 Covers ``build_handle_corpus_attribution_mismatch_node`` from
-``src/orchestration/nodes/recovery.py``.  The node is corpus-agnostic:
+``cogtrix_core/orchestration/nodes/recovery.py``.  The node is corpus-agnostic:
 it consumes a caller-supplied ``corpus_attribution_detector`` closure
 that returns a list of human-readable mismatch strings.  Tests inject
 fake detectors so the cases are deterministic and don't depend on the
@@ -13,7 +13,7 @@ from __future__ import annotations
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.messages.modifier import RemoveMessage
 
-from src.orchestration.nodes.recovery import (
+from cogtrix_core.orchestration.nodes.recovery import (
     _format_corpus_attribution_mismatch_nudge,
     build_handle_corpus_attribution_mismatch_node,
 )

@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 import pytest
 
-from src.config import (
+from cogtrix_core.config import (
     Config,
     ConfigError,
     ModelConfig,
@@ -51,13 +51,13 @@ class TestProviderConfig:
 
     def test_get_model_openai_default(self):
         """Test OpenAI default model from providers registry."""
-        from src.providers import get_default_model
+        from cogtrix_core.providers import get_default_model
 
         assert get_default_model("openai") == "gpt-4.1-mini"
 
     def test_get_model_ollama_default(self):
         """Test Ollama default model from providers registry."""
-        from src.providers import get_default_model
+        from cogtrix_core.providers import get_default_model
 
         assert get_default_model("ollama") == "qwen3:8b"
 
@@ -428,7 +428,7 @@ class TestProvidersConfigFile:
             config_path = f.name
 
         try:
-            with patch("src.config.find_config_file", return_value=Path(config_path)):
+            with patch("cogtrix_core.config.find_config_file", return_value=Path(config_path)):
                 config = load_config()
 
             assert config.active_model_alias is not None
@@ -469,7 +469,7 @@ class TestProvidersConfigFile:
             config_path = f.name
 
         try:
-            with patch("src.config.find_config_file", return_value=Path(config_path)):
+            with patch("cogtrix_core.config.find_config_file", return_value=Path(config_path)):
                 config = load_config()
 
             assert "gpu-server" in config.providers
@@ -496,7 +496,7 @@ class TestModelResolution:
             config_path = f.name
 
         try:
-            with patch("src.config.find_config_file", return_value=Path(config_path)):
+            with patch("cogtrix_core.config.find_config_file", return_value=Path(config_path)):
                 config = load_config()
 
             assert "custom-model:7b" in config.models
@@ -529,7 +529,7 @@ class TestModelResolution:
                 debug = False
                 log = None
 
-            with patch("src.config.find_config_file", return_value=Path(config_path)):
+            with patch("cogtrix_core.config.find_config_file", return_value=Path(config_path)):
                 config = load_config(MockArgs())
 
             assert config.active_model_alias == "custom"
@@ -555,7 +555,7 @@ class TestModelResolution:
             config_path = f.name
 
         try:
-            with patch("src.config.find_config_file", return_value=Path(config_path)):
+            with patch("cogtrix_core.config.find_config_file", return_value=Path(config_path)):
                 config = load_config()
 
             assert config.active_model_alias == "fast"
@@ -582,7 +582,7 @@ class TestModelResolution:
             config_path = f.name
 
         try:
-            with patch("src.config.find_config_file", return_value=Path(config_path)):
+            with patch("cogtrix_core.config.find_config_file", return_value=Path(config_path)):
                 config = load_config()
 
             pc, mc = config.resolve_llm_config()
@@ -614,7 +614,7 @@ class TestModelResolution:
             config_path = f.name
 
         try:
-            with patch("src.config.find_config_file", return_value=Path(config_path)):
+            with patch("cogtrix_core.config.find_config_file", return_value=Path(config_path)):
                 config = load_config()
 
             original = config.providers["ollama"]
@@ -646,7 +646,7 @@ class TestModelResolution:
             config_path = f.name
 
         try:
-            with patch("src.config.find_config_file", return_value=Path(config_path)):
+            with patch("cogtrix_core.config.find_config_file", return_value=Path(config_path)):
                 config = load_config()
 
             assert "fast" in config.models
@@ -721,7 +721,7 @@ class TestDefaultProvider:
         """Test that COGTRIX_OLLAMA env var auto-creates an ollama provider."""
         env = {"COGTRIX_OLLAMA": "localhost"}
         with (
-            patch("src.config.find_config_file", return_value=None),
+            patch("cogtrix_core.config.find_config_file", return_value=None),
             patch.dict("os.environ", env, clear=False),
         ):
             config = load_config()
@@ -738,7 +738,7 @@ class TestDefaultProvider:
             json.dump(config_data, f)
             config_path = f.name
         try:
-            with patch("src.config.find_config_file", return_value=Path(config_path)):
+            with patch("cogtrix_core.config.find_config_file", return_value=Path(config_path)):
                 config = load_config()
             pc, mc = config.resolve_llm_config()
             assert pc.type == "ollama"
@@ -791,7 +791,7 @@ class TestParseOllamaAddress:
         """Test COGTRIX_OLLAMA env var is parsed and applied."""
         env = {"COGTRIX_OLLAMA": "10.0.0.5:9999"}
         with (
-            patch("src.config.find_config_file", return_value=None),
+            patch("cogtrix_core.config.find_config_file", return_value=None),
             patch.dict("os.environ", env, clear=False),
         ):
             config = load_config()
@@ -806,7 +806,7 @@ class TestParseOllamaAddress:
             "OLLAMA_BASE_URL": "http://old-server:11434",
         }
         with (
-            patch("src.config.find_config_file", return_value=None),
+            patch("cogtrix_core.config.find_config_file", return_value=None),
             patch.dict("os.environ", env, clear=False),
         ):
             config = load_config()
@@ -867,7 +867,7 @@ class TestBuildSystemPrompt:
         system prompt should not include raw-JSON formatting examples that
         can conflict with the structured tool_calls response format.
         """
-        from src.agent.core import build_system_prompt
+        from cogtrix_core.agent.core import build_system_prompt
 
         prompt = build_system_prompt()
         # Raw JSON formatting instructions should not appear in the system
@@ -876,22 +876,22 @@ class TestBuildSystemPrompt:
 
     def test_custom_tool_instructions(self):
         """Custom tool instructions are included when explicitly provided."""
-        from src.agent.core import build_system_prompt
+        from cogtrix_core.agent.core import build_system_prompt
 
         prompt = build_system_prompt(tool_instructions="Custom instructions")
         assert "Custom instructions" in prompt
 
     def test_empty_tool_instructions(self):
         """Empty string does not inject instructions."""
-        from src.agent.core import build_system_prompt
+        from cogtrix_core.agent.core import build_system_prompt
 
         prompt = build_system_prompt(tool_instructions="")
         assert "output ONLY a valid tool call" not in prompt
 
     def test_models_appear_in_system_prompt(self):
         """Models registry entries appear in system prompt when provided."""
-        from src.agent.core import build_system_prompt
-        from src.config import ModelConfig
+        from cogtrix_core.agent.core import build_system_prompt
+        from cogtrix_core.config import ModelConfig
 
         models = {
             "fast": ModelConfig(provider="ollama", model="qwen3:4b"),
@@ -904,7 +904,7 @@ class TestBuildSystemPrompt:
 
     def test_merge_guard_included_only_for_merge_tools(self):
         """The merge CI guard is injected only when merge tools are active."""
-        from src.agent.core import build_system_prompt
+        from cogtrix_core.agent.core import build_system_prompt
 
         guarded = build_system_prompt(active_tool_names={"merge_pull_request"})
         assert "Before every `merge_pull_request` call" in guarded
@@ -919,7 +919,7 @@ class TestContextCompressionConfig:
 
     def test_context_compression_bool_false(self):
         """context_compression: false disables compression."""
-        from src.config import Config
+        from cogtrix_core.config import Config
 
         config = Config()
         assert config.context_compression is True  # default
@@ -933,7 +933,7 @@ class TestContextCompressionConfig:
         import tempfile
         from pathlib import Path
 
-        from src.config import Config, _apply_config_file
+        from cogtrix_core.config import Config, _apply_config_file
 
         config_data = {
             "context_compression": {
@@ -961,7 +961,7 @@ class TestContextCompressionConfig:
         import tempfile
         from pathlib import Path
 
-        from src.config import Config, _apply_config_file
+        from cogtrix_core.config import Config, _apply_config_file
 
         config = Config()
         data = {"context_compression": {"enabled": True, "model": "fast", "min_age": 4}}
@@ -982,7 +982,7 @@ class TestContextMessageCapConfig:
         import tempfile
         from pathlib import Path
 
-        from src.config import Config, _apply_config_file
+        from cogtrix_core.config import Config, _apply_config_file
 
         data = {"context_max_messages": 144}
         with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
@@ -1000,7 +1000,7 @@ class TestContextMessageCapConfig:
         import tempfile
         from pathlib import Path
 
-        from src.config import Config, _apply_config_file
+        from cogtrix_core.config import Config, _apply_config_file
 
         data = {"context_max_tokens": 4096}
         with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
@@ -1019,7 +1019,7 @@ class TestConfigureRagVectordbDir:
 
     def test_configure_rag_vectordb_dir_updates_config(self):
         """configure_rag() with vectordb_dir updates _rag_config used by query functions."""
-        import src.tools.rag as _rag_mod
+        import cogtrix_core.tools.rag as _rag_mod
 
         original = _rag_mod._rag_config["vectordb_dir"]
         test_dir = "data/test_vectordb"
@@ -1031,7 +1031,7 @@ class TestConfigureRagVectordbDir:
 
     def test_configure_rag_vectordb_dir_ignored_when_absent(self):
         """configure_rag() without vectordb_dir leaves the existing value intact."""
-        import src.tools.rag as _rag_mod
+        import cogtrix_core.tools.rag as _rag_mod
 
         original = _rag_mod._rag_config["vectordb_dir"]
         test_dir = "data/test_before"
@@ -1044,9 +1044,11 @@ class TestConfigureRagVectordbDir:
 
     def test_query_knowledge_base_uses_configured_dir(self):
         """query_knowledge_base() checks the configured vectordb_dir, not the default."""
-        from src.tools.rag import configure_rag, query_knowledge_base
+        from cogtrix_core.tools.rag import configure_rag, query_knowledge_base
 
-        original = __import__("src.tools.rag", fromlist=["_rag_config"])._rag_config["vectordb_dir"]
+        original = __import__("cogtrix_core.tools.rag", fromlist=["_rag_config"])._rag_config[
+            "vectordb_dir"
+        ]
         try:
             configure_rag({"vectordb_dir": "data/nonexistent_test_index"})
             result = query_knowledge_base("test question")
@@ -1056,9 +1058,11 @@ class TestConfigureRagVectordbDir:
 
     def test_get_knowledge_base_info_uses_configured_dir(self):
         """get_knowledge_base_info() checks the configured vectordb_dir, not the default."""
-        from src.tools.rag import configure_rag, get_knowledge_base_info
+        from cogtrix_core.tools.rag import configure_rag, get_knowledge_base_info
 
-        original = __import__("src.tools.rag", fromlist=["_rag_config"])._rag_config["vectordb_dir"]
+        original = __import__("cogtrix_core.tools.rag", fromlist=["_rag_config"])._rag_config[
+            "vectordb_dir"
+        ]
         try:
             configure_rag({"vectordb_dir": "data/nonexistent_test_index"})
             result = get_knowledge_base_info()
@@ -1078,7 +1082,7 @@ class TestNegativeValueValidation:
         import tempfile
         from pathlib import Path
 
-        from src.config import Config, _apply_config_file
+        from cogtrix_core.config import Config, _apply_config_file
 
         config_data = {"rag": {"chunk_size": -1}}
         with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
@@ -1100,7 +1104,7 @@ class TestNegativeValueValidation:
         import tempfile
         from pathlib import Path
 
-        from src.config import Config, _apply_config_file
+        from cogtrix_core.config import Config, _apply_config_file
 
         config_data = {"rag": {"chunk_size": 0}}
         with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
@@ -1122,7 +1126,7 @@ class TestNegativeValueValidation:
         import tempfile
         from pathlib import Path
 
-        from src.config import Config, _apply_config_file
+        from cogtrix_core.config import Config, _apply_config_file
 
         config_data = {"rag": {"chunk_overlap": -1}}
         with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
@@ -1141,7 +1145,7 @@ class TestNegativeValueValidation:
         import tempfile
         from pathlib import Path
 
-        from src.config import Config, _apply_config_file
+        from cogtrix_core.config import Config, _apply_config_file
 
         config_data = {"delegate": {"default_timeout": -5}}
         with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
@@ -1224,10 +1228,12 @@ class TestCreateEmbeddingsFromConfig:
         from unittest.mock import MagicMock
         from unittest.mock import patch as mock_patch
 
-        from src.providers import create_embeddings_from_config
+        from cogtrix_core.providers import create_embeddings_from_config
 
         mock_emb = MagicMock()
-        with mock_patch("src.providers.create_embeddings", return_value=mock_emb) as mock_create:
+        with mock_patch(
+            "cogtrix_core.providers.create_embeddings", return_value=mock_emb
+        ) as mock_create:
             fn, tag = create_embeddings_from_config(
                 "openai", model="text-embedding-3-small", api_key="sk-x"
             )
@@ -1243,23 +1249,23 @@ class TestCreateEmbeddingsFromConfig:
         from unittest.mock import MagicMock
         from unittest.mock import patch as mock_patch
 
-        from src.providers import create_embeddings_from_config
+        from cogtrix_core.providers import create_embeddings_from_config
 
-        with mock_patch("src.providers.create_embeddings", return_value=MagicMock()):
+        with mock_patch("cogtrix_core.providers.create_embeddings", return_value=MagicMock()):
             _, tag = create_embeddings_from_config("ollama")
 
         assert tag == "ollama/nomic-embed-text"
 
     def test_unknown_provider_raises_value_error(self):
         """Unknown provider type should raise ValueError."""
-        from src.providers import create_embeddings_from_config
+        from cogtrix_core.providers import create_embeddings_from_config
 
         with pytest.raises(ValueError, match="Unknown provider type"):
             create_embeddings_from_config("nonexistent")
 
     def test_anthropic_raises_not_implemented(self):
         """Anthropic has no embedding API and should raise NotImplementedError."""
-        from src.providers import create_embeddings_from_config
+        from cogtrix_core.providers import create_embeddings_from_config
 
         with pytest.raises(NotImplementedError):
             create_embeddings_from_config("anthropic")
@@ -1269,9 +1275,11 @@ class TestCreateEmbeddingsFromConfig:
         from unittest.mock import MagicMock
         from unittest.mock import patch as mock_patch
 
-        from src.providers import create_embeddings_from_config
+        from cogtrix_core.providers import create_embeddings_from_config
 
-        with mock_patch("src.providers.create_embeddings", return_value=MagicMock()) as mock_create:
+        with mock_patch(
+            "cogtrix_core.providers.create_embeddings", return_value=MagicMock()
+        ) as mock_create:
             create_embeddings_from_config("ollama", base_url="http://10.0.0.1:11434")
 
         mock_create.assert_called_once_with(

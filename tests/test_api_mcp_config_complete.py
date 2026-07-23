@@ -42,8 +42,8 @@ from fastapi.testclient import TestClient  # noqa: E402
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine  # noqa: E402
 from sqlalchemy.pool import StaticPool  # noqa: E402
 
-from src.api.app import create_app  # noqa: E402
-from src.api.db.engine import Base, get_db  # noqa: E402
+from cogtrix_core.api.app import create_app  # noqa: E402
+from cogtrix_core.api.db.engine import Base, get_db  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -242,7 +242,7 @@ class TestMCPAddServer:
         app.state.config = cfg
         app.state.mcp_manager = None
 
-        with patch("src.api.routes.mcp._persist_mcp_servers"):
+        with patch("cogtrix_core.api.routes.mcp._persist_mcp_servers"):
             r = client.post(
                 "/api/v1/mcp/servers",
                 headers=_ah(tokens),
@@ -280,7 +280,7 @@ class TestMCPAddServer:
         app.state.mcp_manager = None
 
         with patch(
-            "src.api.routes.mcp._persist_mcp_servers",
+            "cogtrix_core.api.routes.mcp._persist_mcp_servers",
             side_effect=RuntimeError("No config file path"),
         ):
             r = client.post(
@@ -359,7 +359,7 @@ class TestMCPRemoveServer:
         app.state.mcp_manager = mcp
 
     def test_remove_existing_returns_204(self, client, tokens):
-        with patch("src.api.routes.mcp._persist_mcp_servers"):
+        with patch("cogtrix_core.api.routes.mcp._persist_mcp_servers"):
             r = client.delete("/api/v1/mcp/servers/py_server", headers=_ah(tokens))
         assert r.status_code == 204
         assert r.content == b""
@@ -387,7 +387,7 @@ class TestMCPRemoveServer:
         app.state.mcp_manager = None
 
         with patch(
-            "src.api.routes.mcp._persist_mcp_servers",
+            "cogtrix_core.api.routes.mcp._persist_mcp_servers",
             side_effect=RuntimeError("No config file path"),
         ):
             r = client.delete("/api/v1/mcp/servers/py_server", headers=_ah(tokens))
@@ -467,7 +467,7 @@ class TestMCPRestartServer:
         app.state.mcp_manager = mcp
 
         with patch(
-            "src.api.routes.mcp.asyncio.to_thread", new_callable=AsyncMock, return_value={}
+            "cogtrix_core.api.routes.mcp.asyncio.to_thread", new_callable=AsyncMock, return_value={}
         ) as mock_to_thread:
             r = client.post("/api/v1/mcp/servers/restart_srv/restart", headers=_ah(tokens))
             assert r.status_code == 200
@@ -519,7 +519,7 @@ class TestMCPRuntimeWiring:
         ]
         app.state.mcp_manager = mcp
 
-        with patch("src.api.routes.mcp._persist_mcp_servers"):
+        with patch("cogtrix_core.api.routes.mcp._persist_mcp_servers"):
             r = client.post(
                 "/api/v1/mcp/servers",
                 headers=_ah(tokens),
@@ -559,7 +559,7 @@ class TestMCPRuntimeWiring:
         mcp.get_server_info.return_value = []
         app.state.mcp_manager = mcp
 
-        with patch("src.api.routes.mcp._persist_mcp_servers"):
+        with patch("cogtrix_core.api.routes.mcp._persist_mcp_servers"):
             r = client.delete("/api/v1/mcp/servers/gone", headers=_ah(tokens))
         assert r.status_code == 204
         mcp.disconnect.assert_called_once_with("gone")
@@ -742,7 +742,7 @@ class TestPatchConfig:
 class TestReloadConfig:
     def test_admin_triggers_reload(self, client, tokens):
         # load_config is imported locally in the handler; patch at source module
-        with patch("src.config.load_config") as mock_load:
+        with patch("cogtrix_core.config.load_config") as mock_load:
             mock_load.return_value = _make_mock_config()
             r = client.post("/api/v1/config/reload", headers=_ah(tokens))
         assert r.status_code == 200
@@ -760,7 +760,7 @@ class TestReloadConfig:
         assert r.status_code == 401
 
     def test_reload_config_failure_returns_422(self, client, tokens):
-        with patch("src.config.load_config") as mock_load:
+        with patch("cogtrix_core.config.load_config") as mock_load:
             mock_load.side_effect = RuntimeError("bad config")
             r = client.post("/api/v1/config/reload", headers=_ah(tokens))
         assert r.status_code == 422
@@ -879,8 +879,8 @@ class TestProviderHealth:
 
         # create_chat_model and get_default_model are imported locally
         with (
-            patch("src.providers.create_chat_model") as mock_create,
-            patch("src.providers.get_default_model") as mock_default,
+            patch("cogtrix_core.providers.create_chat_model") as mock_create,
+            patch("cogtrix_core.providers.get_default_model") as mock_default,
         ):
             mock_default.return_value = "gpt-4"
             mock_create.return_value = MagicMock()
@@ -903,8 +903,8 @@ class TestProviderHealth:
         app.state.config = _make_mock_config(providers={"openai": pc})
 
         with (
-            patch("src.providers.create_chat_model") as mock_create,
-            patch("src.providers.get_default_model") as mock_default,
+            patch("cogtrix_core.providers.create_chat_model") as mock_create,
+            patch("cogtrix_core.providers.get_default_model") as mock_default,
         ):
             mock_default.return_value = "gpt-4"
             mock_create.side_effect = ConnectionError("cannot reach")
@@ -982,8 +982,8 @@ class TestSwitchModel:
 
         # _resolve_model and invalidate_llm_caches are imported locally
         with (
-            patch("src.config._resolve_model") as mock_resolve,
-            patch("src.orchestration.runner.invalidate_llm_caches"),
+            patch("cogtrix_core.config._resolve_model") as mock_resolve,
+            patch("cogtrix_core.orchestration.runner.invalidate_llm_caches"),
         ):
             mock_resolve.return_value = None
             r = client.post(
@@ -1012,6 +1012,27 @@ class TestSwitchModel:
 
 
 class TestWizardEndpoints:
+    @pytest.fixture(autouse=True)
+    def _isolate_wizard_sessions(self):
+        """Restore the module-global wizard session store after each test.
+
+        Several tests here start a wizard via the real route (mutating
+        ``src.api.routes.config._wizard_sessions``) without cancelling/completing
+        it, so the session lingers. In a single-process run that residue leaks into
+        later files and breaks order-dependent assertions — e.g.
+        ``test_wizard_sessions_dict_access_is_lock_protected`` (#2247). Snapshot the
+        store before each test and clear-and-restore it afterwards so collection
+        order can't matter.
+        """
+        import cogtrix_core.api.routes.config as _config_mod
+
+        snapshot = dict(_config_mod._wizard_sessions)
+        try:
+            yield
+        finally:
+            _config_mod._wizard_sessions.clear()
+            _config_mod._wizard_sessions.update(snapshot)
+
     def test_start_wizard_non_admin_returns_403(self, client, tokens):
         r = client.post(
             "/api/v1/config/wizard",
@@ -1062,8 +1083,8 @@ class TestWizardEndpoints:
 
     def test_start_wizard_admin_with_detect_env_mocked(self, client, tokens):
         with (
-            patch("src.api.routes.config._wizard_detect_env") as mock_env,
-            patch("src.api.routes.config._wizard_load_existing") as mock_load,
+            patch("cogtrix_core.api.routes.config._wizard_detect_env") as mock_env,
+            patch("cogtrix_core.api.routes.config._wizard_load_existing") as mock_load,
         ):
             mock_env.return_value = {"openai_key": None, "ollama": False}
             mock_load.return_value = ""
@@ -1080,7 +1101,7 @@ class TestWizardEndpoints:
         wid = data["wizard_id"]
 
         # Now cancel it
-        with patch("src.api.routes.config._wizard_detect_env"):
+        with patch("cogtrix_core.api.routes.config._wizard_detect_env"):
             r2 = client.delete(
                 f"/api/v1/config/wizard/{wid}",
                 headers=_ah(tokens),
@@ -1089,8 +1110,8 @@ class TestWizardEndpoints:
 
     def test_advance_wizard_step0_connection_failure(self, client, tokens):
         with (
-            patch("src.api.routes.config._wizard_detect_env") as mock_env,
-            patch("src.api.routes.config._wizard_load_existing") as mock_load,
+            patch("cogtrix_core.api.routes.config._wizard_detect_env") as mock_env,
+            patch("cogtrix_core.api.routes.config._wizard_load_existing") as mock_load,
         ):
             mock_env.return_value = {}
             mock_load.return_value = ""
@@ -1101,7 +1122,7 @@ class TestWizardEndpoints:
             )
         wid = start_r.json()["data"]["wizard_id"]
 
-        with patch("src.api.routes.config._wizard_test_connection") as mock_test:
+        with patch("cogtrix_core.api.routes.config._wizard_test_connection") as mock_test:
             mock_test.side_effect = ConnectionError("no provider")
             r = client.post(
                 f"/api/v1/config/wizard/{wid}/step",
@@ -1120,8 +1141,8 @@ class TestWizardEndpoints:
         Template.substitute() raises KeyError for any missing $placeholder.
         """
         with (
-            patch("src.api.routes.config._wizard_detect_env") as mock_env,
-            patch("src.api.routes.config._wizard_load_existing") as mock_load,
+            patch("cogtrix_core.api.routes.config._wizard_detect_env") as mock_env,
+            patch("cogtrix_core.api.routes.config._wizard_load_existing") as mock_load,
         ):
             mock_env.return_value = {}
             mock_load.return_value = ""
@@ -1135,10 +1156,13 @@ class TestWizardEndpoints:
 
         with (
             patch(
-                "src.api.routes.config._wizard_test_connection", return_value=(MagicMock(), None)
+                "cogtrix_core.api.routes.config._wizard_test_connection",
+                return_value=(MagicMock(), None),
             ),
-            patch("src.api.routes.config._wizard_load_docs", return_value="docs content"),
-            patch("src.api.routes.config._wizard_invoke_llm", return_value="Hi, I can help!"),
+            patch("cogtrix_core.api.routes.config._wizard_load_docs", return_value="docs content"),
+            patch(
+                "cogtrix_core.api.routes.config._wizard_invoke_llm", return_value="Hi, I can help!"
+            ),
         ):
             r = client.post(
                 f"/api/v1/config/wizard/{wid}/step",
@@ -1161,8 +1185,8 @@ class TestWizardEndpoints:
         containing only a SystemMessage.
         """
         with (
-            patch("src.api.routes.config._wizard_detect_env") as mock_env,
-            patch("src.api.routes.config._wizard_load_existing") as mock_load,
+            patch("cogtrix_core.api.routes.config._wizard_detect_env") as mock_env,
+            patch("cogtrix_core.api.routes.config._wizard_load_existing") as mock_load,
         ):
             mock_env.return_value = {}
             mock_load.return_value = ""
@@ -1182,10 +1206,11 @@ class TestWizardEndpoints:
 
         with (
             patch(
-                "src.api.routes.config._wizard_test_connection", return_value=(MagicMock(), None)
+                "cogtrix_core.api.routes.config._wizard_test_connection",
+                return_value=(MagicMock(), None),
             ),
-            patch("src.api.routes.config._wizard_load_docs", return_value="docs content"),
-            patch("src.api.routes.config._wizard_invoke_llm", side_effect=_capture_invoke),
+            patch("cogtrix_core.api.routes.config._wizard_load_docs", return_value="docs content"),
+            patch("cogtrix_core.api.routes.config._wizard_invoke_llm", side_effect=_capture_invoke),
         ):
             r = client.post(
                 f"/api/v1/config/wizard/{wid}/step",
@@ -1223,8 +1248,8 @@ class TestWizardEndpoints:
         is logged as a warning and the wizard continues so the user can still configure.
         """
         with (
-            patch("src.api.routes.config._wizard_detect_env") as mock_env,
-            patch("src.api.routes.config._wizard_load_existing") as mock_load,
+            patch("cogtrix_core.api.routes.config._wizard_detect_env") as mock_env,
+            patch("cogtrix_core.api.routes.config._wizard_load_existing") as mock_load,
         ):
             mock_env.return_value = {}
             mock_load.return_value = ""
@@ -1238,11 +1263,12 @@ class TestWizardEndpoints:
 
         with (
             patch(
-                "src.api.routes.config._wizard_test_connection", return_value=(MagicMock(), None)
+                "cogtrix_core.api.routes.config._wizard_test_connection",
+                return_value=(MagicMock(), None),
             ),
-            patch("src.api.routes.config._wizard_load_docs", return_value="docs"),
+            patch("cogtrix_core.api.routes.config._wizard_load_docs", return_value="docs"),
             patch(
-                "src.api.routes.config._wizard_invoke_llm",
+                "cogtrix_core.api.routes.config._wizard_invoke_llm",
                 side_effect=Exception(
                     "Error code: 400 - {'error': {'message': 'No connected db.'}}"
                 ),
@@ -1271,8 +1297,8 @@ class TestWizardEndpoints:
         return the default first question rather than an empty or None question field.
         """
         with (
-            patch("src.api.routes.config._wizard_detect_env") as mock_env,
-            patch("src.api.routes.config._wizard_load_existing") as mock_load,
+            patch("cogtrix_core.api.routes.config._wizard_detect_env") as mock_env,
+            patch("cogtrix_core.api.routes.config._wizard_load_existing") as mock_load,
         ):
             mock_env.return_value = {}
             mock_load.return_value = ""
@@ -1286,10 +1312,11 @@ class TestWizardEndpoints:
 
         with (
             patch(
-                "src.api.routes.config._wizard_test_connection", return_value=(MagicMock(), None)
+                "cogtrix_core.api.routes.config._wizard_test_connection",
+                return_value=(MagicMock(), None),
             ),
-            patch("src.api.routes.config._wizard_load_docs", return_value="docs"),
-            patch("src.api.routes.config._wizard_invoke_llm", return_value=""),
+            patch("cogtrix_core.api.routes.config._wizard_load_docs", return_value="docs"),
+            patch("cogtrix_core.api.routes.config._wizard_invoke_llm", return_value=""),
         ):
             r = client.post(
                 f"/api/v1/config/wizard/{wid}/step",
@@ -1306,7 +1333,7 @@ class TestWizardEndpoints:
         assert r.status_code == 200, f"empty content must not fail the wizard: {r.text}"
         data = r.json()["data"]
         assert data["step"] == 1
-        from src.api.routes.config import _WIZARD_DEFAULT_FIRST_QUESTION
+        from cogtrix_core.api.routes.config import _WIZARD_DEFAULT_FIRST_QUESTION
 
         assert data["question"] == _WIZARD_DEFAULT_FIRST_QUESTION
 
@@ -1317,7 +1344,7 @@ class TestResolveApiKeyFromExisting:
     def _fn(
         self, yaml_text: str, *, provider_name: str | None = None, base_url: str | None = None
     ) -> str | None:
-        from src.api.routes.config import _resolve_api_key_from_existing
+        from cogtrix_core.api.routes.config import _resolve_api_key_from_existing
 
         return _resolve_api_key_from_existing(
             yaml_text, provider_name=provider_name, base_url=base_url
@@ -1366,8 +1393,8 @@ providers:
     api_key: "sk-resolved-from-config"
 """
         with (
-            patch("src.api.routes.config._wizard_detect_env") as mock_env,
-            patch("src.api.routes.config._wizard_load_existing") as mock_load,
+            patch("cogtrix_core.api.routes.config._wizard_detect_env") as mock_env,
+            patch("cogtrix_core.api.routes.config._wizard_load_existing") as mock_load,
         ):
             mock_env.return_value = {}
             mock_load.return_value = existing_yaml
@@ -1386,9 +1413,13 @@ providers:
             return MagicMock(), None
 
         with (
-            patch("src.api.routes.config._wizard_test_connection", side_effect=_capture_test),
-            patch("src.api.routes.config._wizard_load_docs", return_value="docs"),
-            patch("src.api.routes.config._wizard_invoke_llm", return_value="First question?"),
+            patch(
+                "cogtrix_core.api.routes.config._wizard_test_connection", side_effect=_capture_test
+            ),
+            patch("cogtrix_core.api.routes.config._wizard_load_docs", return_value="docs"),
+            patch(
+                "cogtrix_core.api.routes.config._wizard_invoke_llm", return_value="First question?"
+            ),
         ):
             r = client.post(
                 f"/api/v1/config/wizard/{wid}/step",
@@ -1415,7 +1446,7 @@ class TestResolveWizardProvider:
 
     @staticmethod
     def _fn(provider_name, api_key=None, base_url=None, env=None):
-        from src.api.routes.config import _resolve_wizard_provider
+        from cogtrix_core.api.routes.config import _resolve_wizard_provider
 
         return _resolve_wizard_provider(provider_name, api_key, base_url, env or {})
 
@@ -1490,8 +1521,8 @@ class TestWizardStep0PresetResolution:
 
     def _start_wizard(self, client, tokens):
         with (
-            patch("src.api.routes.config._wizard_detect_env", return_value={}),
-            patch("src.api.routes.config._wizard_load_existing", return_value=None),
+            patch("cogtrix_core.api.routes.config._wizard_detect_env", return_value={}),
+            patch("cogtrix_core.api.routes.config._wizard_load_existing", return_value=None),
         ):
             r = client.post(
                 "/api/v1/config/wizard",
@@ -1511,9 +1542,9 @@ class TestWizardStep0PresetResolution:
             return MagicMock(), None
 
         with (
-            patch("src.api.routes.config._wizard_test_connection", side_effect=_capture),
-            patch("src.api.routes.config._wizard_load_docs", return_value="docs"),
-            patch("src.api.routes.config._wizard_invoke_llm", return_value="Q?"),
+            patch("cogtrix_core.api.routes.config._wizard_test_connection", side_effect=_capture),
+            patch("cogtrix_core.api.routes.config._wizard_load_docs", return_value="docs"),
+            patch("cogtrix_core.api.routes.config._wizard_invoke_llm", return_value="Q?"),
         ):
             r = client.post(
                 f"/api/v1/config/wizard/{wid}/step",
@@ -1534,9 +1565,9 @@ class TestWizardStep0PresetResolution:
             return MagicMock(), None
 
         with (
-            patch("src.api.routes.config._wizard_test_connection", side_effect=_capture),
-            patch("src.api.routes.config._wizard_load_docs", return_value="docs"),
-            patch("src.api.routes.config._wizard_invoke_llm", return_value="Q?"),
+            patch("cogtrix_core.api.routes.config._wizard_test_connection", side_effect=_capture),
+            patch("cogtrix_core.api.routes.config._wizard_load_docs", return_value="docs"),
+            patch("cogtrix_core.api.routes.config._wizard_invoke_llm", return_value="Q?"),
         ):
             r = client.post(
                 f"/api/v1/config/wizard/{wid}/step",
@@ -1557,9 +1588,9 @@ class TestWizardStep0PresetResolution:
             return MagicMock(), None
 
         with (
-            patch("src.api.routes.config._wizard_test_connection", side_effect=_capture),
-            patch("src.api.routes.config._wizard_load_docs", return_value="docs"),
-            patch("src.api.routes.config._wizard_invoke_llm", return_value="Q?"),
+            patch("cogtrix_core.api.routes.config._wizard_test_connection", side_effect=_capture),
+            patch("cogtrix_core.api.routes.config._wizard_load_docs", return_value="docs"),
+            patch("cogtrix_core.api.routes.config._wizard_invoke_llm", return_value="Q?"),
         ):
             r = client.post(
                 f"/api/v1/config/wizard/{wid}/step",
@@ -1582,9 +1613,9 @@ class TestWizardStep0PresetResolution:
             return MagicMock(), None
 
         with (
-            patch("src.api.routes.config._wizard_test_connection", side_effect=_capture),
-            patch("src.api.routes.config._wizard_load_docs", return_value="docs"),
-            patch("src.api.routes.config._wizard_invoke_llm", return_value="Q?"),
+            patch("cogtrix_core.api.routes.config._wizard_test_connection", side_effect=_capture),
+            patch("cogtrix_core.api.routes.config._wizard_load_docs", return_value="docs"),
+            patch("cogtrix_core.api.routes.config._wizard_invoke_llm", return_value="Q?"),
         ):
             r = client.post(
                 f"/api/v1/config/wizard/{wid}/step",
@@ -1608,9 +1639,9 @@ class TestWizardStep0PresetResolution:
             return MagicMock(), None
 
         with (
-            patch("src.api.routes.config._wizard_test_connection", side_effect=_capture),
-            patch("src.api.routes.config._wizard_load_docs", return_value="docs"),
-            patch("src.api.routes.config._wizard_invoke_llm", return_value="Q?"),
+            patch("cogtrix_core.api.routes.config._wizard_test_connection", side_effect=_capture),
+            patch("cogtrix_core.api.routes.config._wizard_load_docs", return_value="docs"),
+            patch("cogtrix_core.api.routes.config._wizard_invoke_llm", return_value="Q?"),
         ):
             r = client.post(
                 f"/api/v1/config/wizard/{wid}/step",
@@ -1631,9 +1662,9 @@ class TestWizardStep0PresetResolution:
             return MagicMock(), None
 
         with (
-            patch("src.api.routes.config._wizard_test_connection", side_effect=_capture),
-            patch("src.api.routes.config._wizard_load_docs", return_value="docs"),
-            patch("src.api.routes.config._wizard_invoke_llm", return_value="Q?"),
+            patch("cogtrix_core.api.routes.config._wizard_test_connection", side_effect=_capture),
+            patch("cogtrix_core.api.routes.config._wizard_load_docs", return_value="docs"),
+            patch("cogtrix_core.api.routes.config._wizard_invoke_llm", return_value="Q?"),
         ):
             r = client.post(
                 f"/api/v1/config/wizard/{wid}/step",
@@ -1656,9 +1687,9 @@ class TestWizardStep0PresetResolution:
             return MagicMock(), None
 
         with (
-            patch("src.api.routes.config._wizard_test_connection", side_effect=_capture),
-            patch("src.api.routes.config._wizard_load_docs", return_value="docs"),
-            patch("src.api.routes.config._wizard_invoke_llm", return_value="Q?"),
+            patch("cogtrix_core.api.routes.config._wizard_test_connection", side_effect=_capture),
+            patch("cogtrix_core.api.routes.config._wizard_load_docs", return_value="docs"),
+            patch("cogtrix_core.api.routes.config._wizard_invoke_llm", return_value="Q?"),
         ):
             r = client.post(
                 f"/api/v1/config/wizard/{wid}/step",
@@ -1676,10 +1707,11 @@ class TestWizardStep0PresetResolution:
 
         with (
             patch(
-                "src.api.routes.config._wizard_test_connection", return_value=(MagicMock(), None)
+                "cogtrix_core.api.routes.config._wizard_test_connection",
+                return_value=(MagicMock(), None),
             ),
-            patch("src.api.routes.config._wizard_load_docs", return_value="docs"),
-            patch("src.api.routes.config._wizard_invoke_llm", return_value="Q?"),
+            patch("cogtrix_core.api.routes.config._wizard_load_docs", return_value="docs"),
+            patch("cogtrix_core.api.routes.config._wizard_invoke_llm", return_value="Q?"),
         ):
             r = client.post(
                 f"/api/v1/config/wizard/{wid}/step",
@@ -1689,7 +1721,7 @@ class TestWizardStep0PresetResolution:
 
         assert r.status_code == 200, r.text
         # Inspect the stored wizard session state via the internal registry
-        from src.api.routes.config import _wizard_sessions
+        from cogtrix_core.api.routes.config import _wizard_sessions
 
         ws = _wizard_sessions.get(wid)
         assert ws is not None

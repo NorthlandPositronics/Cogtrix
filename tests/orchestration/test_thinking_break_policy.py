@@ -34,8 +34,8 @@ from unittest.mock import MagicMock, patch
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
-from src.orchestration.nodes.call_model import CallModelContext
-from src.orchestration.nodes.thinking_break_policy import maybe_apply_thinking_break
+from cogtrix_core.orchestration.nodes.call_model import CallModelContext
+from cogtrix_core.orchestration.nodes.thinking_break_policy import maybe_apply_thinking_break
 
 
 class _DummyLogger:
@@ -60,6 +60,7 @@ def _make_context(**overrides: Any) -> CallModelContext:
         "tools_ready": None,
         "active_tools_list": [],
         "active_names": set(),
+        "budget_stopped_tools": set(),
         "bound_cache": OrderedDict(),
         "bound_cache_lock": MagicMock(),
         "cached_fingerprint": [()],
@@ -232,7 +233,7 @@ class TestClearsFlagAfterInvoke:
         ]
         msgs = list(repaired)
         with patch(
-            "src.orchestration.nodes.call_model._compute_search_effort",
+            "cogtrix_core.orchestration.nodes.call_model._compute_search_effort",
             return_value=(0, False),
         ):
             result = maybe_apply_thinking_break(context, list(repaired), repaired, msgs, {}, log)

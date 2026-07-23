@@ -13,7 +13,7 @@ class TestCopyWithContent:
     """_copy_with_content must work with model_copy, copy, and plain objects."""
 
     def _fn(self):
-        from src.agent.core import _copy_with_content
+        from cogtrix_core.agent.core import _copy_with_content
 
         return _copy_with_content
 
@@ -82,7 +82,7 @@ class TestLoadDocumentsRecursion:
     """_load_documents must include files nested inside subdirectories."""
 
     def _fn(self):
-        from src.rag.ingest import _load_documents
+        from cogtrix_core.rag.ingest import _load_documents
 
         return _load_documents
 
@@ -103,7 +103,7 @@ class TestLoadDocumentsRecursion:
         fake_doc = MagicMock()
         fake_loader = self._make_loader([fake_doc])
 
-        with patch("src.rag.ingest._get_loader", return_value=fake_loader):
+        with patch("cogtrix_core.rag.ingest._get_loader", return_value=fake_loader):
             docs, errors = load_documents(tmp_path)
 
         assert fake_doc in docs
@@ -120,7 +120,7 @@ class TestLoadDocumentsRecursion:
         fake_doc = MagicMock()
         fake_loader = self._make_loader([fake_doc])
 
-        with patch("src.rag.ingest._get_loader", return_value=fake_loader):
+        with patch("cogtrix_core.rag.ingest._get_loader", return_value=fake_loader):
             docs, errors = load_documents(tmp_path)
 
         assert fake_doc in docs
@@ -132,7 +132,7 @@ class TestLoadDocumentsRecursion:
         subdir = tmp_path / "empty_dir"
         subdir.mkdir()
 
-        with patch("src.rag.ingest._get_loader") as mock_get:
+        with patch("cogtrix_core.rag.ingest._get_loader") as mock_get:
             docs, errors = load_documents(tmp_path)
 
         # _get_loader should never be called with a directory
@@ -154,7 +154,7 @@ class TestLoadDocumentsRecursion:
         broken_loader = MagicMock()
         broken_loader.load.side_effect = RuntimeError("disk error")
 
-        with patch("src.rag.ingest._get_loader", return_value=broken_loader):
+        with patch("cogtrix_core.rag.ingest._get_loader", return_value=broken_loader):
             _, errors = load_documents(tmp_path)
 
         assert any("sub/bad.txt" in e or "sub" in e for e in errors)
@@ -167,7 +167,7 @@ class TestLoadDocumentsRecursion:
         subdir.mkdir()
         (subdir / "file.xyz").write_text("x")
 
-        with patch("src.rag.ingest._get_loader", return_value=None):
+        with patch("cogtrix_core.rag.ingest._get_loader", return_value=None):
             _, errors = load_documents(tmp_path)
 
         assert any("docs/file.xyz" in e or "docs" in e for e in errors)
@@ -181,7 +181,7 @@ class TestLoadDocumentsRecursion:
         fake_doc = MagicMock()
         fake_loader = self._make_loader([fake_doc])
 
-        with patch("src.rag.ingest._get_loader", return_value=fake_loader):
+        with patch("cogtrix_core.rag.ingest._get_loader", return_value=fake_loader):
             docs, errors = load_documents(tmp_path)
 
         assert fake_doc in docs

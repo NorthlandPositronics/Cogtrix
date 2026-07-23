@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import pytest
 
-from src.config import Config
-from src.orchestration.run_config import AgentRunConfig, ExecutionSettings
+from cogtrix_core.config import Config
+from cogtrix_core.orchestration.run_config import AgentRunConfig, ExecutionSettings
 
 
 def test_config_to_execution_settings_maps_execution_fields() -> None:

@@ -15,7 +15,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from src.config import load_config
+from cogtrix_core.config import load_config
 
 _SPARK_YAML = textwrap.dedent("""
     providers:

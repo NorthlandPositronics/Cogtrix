@@ -1,4 +1,4 @@
-"""Tests for src/tools/semantic_tool_index.py and the query= parameter on request_tools."""
+"""Tests for cogtrix_core/tools/semantic_tool_index.py and the query= parameter on request_tools."""
 
 from __future__ import annotations
 
@@ -40,19 +40,21 @@ def _make_embeddings_mock(dim: int = 4) -> MagicMock:
 
 class TestToolIndexIsReady:
     def test_is_ready_false_before_search(self):
-        from src.tools.semantic_tool_index import ToolIndex
+        from cogtrix_core.tools.semantic_tool_index import ToolIndex
 
         idx = ToolIndex(_CATALOG)
         assert not idx.is_ready()
 
     def test_is_ready_true_after_successful_embed(self):
-        from src.tools.semantic_tool_index import ToolIndex
+        from cogtrix_core.tools.semantic_tool_index import ToolIndex
 
         emb_mock = _make_embeddings_mock()
         with (
-            patch("src.tools.semantic_tool_index._HAS_NUMPY", True),
-            patch("src.tools.semantic_tool_index._np") as np_mock,
-            patch("src.tools.semantic_tool_index.create_embeddings", return_value=emb_mock),
+            patch("cogtrix_core.tools.semantic_tool_index._HAS_NUMPY", True),
+            patch("cogtrix_core.tools.semantic_tool_index._np") as np_mock,
+            patch(
+                "cogtrix_core.tools.semantic_tool_index.create_embeddings", return_value=emb_mock
+            ),
         ):
             import numpy as np
 
@@ -78,7 +80,7 @@ class TestToolIndexSemanticSearch:
         """Build a ToolIndex with real numpy but mocked embeddings."""
         import numpy as np
 
-        from src.tools.semantic_tool_index import ToolIndex
+        from cogtrix_core.tools.semantic_tool_index import ToolIndex
 
         cat = catalog if catalog is not None else _CATALOG
         emb_mock = MagicMock()
@@ -91,14 +93,16 @@ class TestToolIndexSemanticSearch:
         emb_mock.embed_query.return_value = vecs[0].tolist()
 
         with (
-            patch("src.tools.semantic_tool_index._HAS_NUMPY", True),
-            patch("src.tools.semantic_tool_index.create_embeddings", return_value=emb_mock),
+            patch("cogtrix_core.tools.semantic_tool_index._HAS_NUMPY", True),
+            patch(
+                "cogtrix_core.tools.semantic_tool_index.create_embeddings", return_value=emb_mock
+            ),
         ):
             idx = ToolIndex(cat)
             idx.search("anything")  # trigger build
 
         # Manually replace _np reference so subsequent calls use real numpy
-        import src.tools.semantic_tool_index as _mod
+        import cogtrix_core.tools.semantic_tool_index as _mod
 
         _mod._np = np  # type: ignore[attr-defined]
         idx._embeddings = emb_mock
@@ -107,7 +111,7 @@ class TestToolIndexSemanticSearch:
     def test_search_returns_list_of_tool_names(self):
         import numpy as np
 
-        from src.tools.semantic_tool_index import ToolIndex
+        from cogtrix_core.tools.semantic_tool_index import ToolIndex
 
         emb_mock = MagicMock()
         dim = 4
@@ -118,9 +122,11 @@ class TestToolIndexSemanticSearch:
         emb_mock.embed_query.return_value = vecs[0].tolist()
 
         with (
-            patch("src.tools.semantic_tool_index._HAS_NUMPY", True),
-            patch("src.tools.semantic_tool_index.create_embeddings", return_value=emb_mock),
-            patch("src.tools.semantic_tool_index._np", np),
+            patch("cogtrix_core.tools.semantic_tool_index._HAS_NUMPY", True),
+            patch(
+                "cogtrix_core.tools.semantic_tool_index.create_embeddings", return_value=emb_mock
+            ),
+            patch("cogtrix_core.tools.semantic_tool_index._np", np),
         ):
             idx = ToolIndex(_CATALOG)
             results = idx.search("email")
@@ -131,7 +137,7 @@ class TestToolIndexSemanticSearch:
     def test_search_respects_k_limit(self):
         import numpy as np
 
-        from src.tools.semantic_tool_index import ToolIndex
+        from cogtrix_core.tools.semantic_tool_index import ToolIndex
 
         emb_mock = MagicMock()
         dim = 4
@@ -142,9 +148,11 @@ class TestToolIndexSemanticSearch:
         emb_mock.embed_query.return_value = vecs[0].tolist()
 
         with (
-            patch("src.tools.semantic_tool_index._HAS_NUMPY", True),
-            patch("src.tools.semantic_tool_index.create_embeddings", return_value=emb_mock),
-            patch("src.tools.semantic_tool_index._np", np),
+            patch("cogtrix_core.tools.semantic_tool_index._HAS_NUMPY", True),
+            patch(
+                "cogtrix_core.tools.semantic_tool_index.create_embeddings", return_value=emb_mock
+            ),
+            patch("cogtrix_core.tools.semantic_tool_index._np", np),
         ):
             idx = ToolIndex(_CATALOG)
             results = idx.search("anything", k=2)
@@ -154,7 +162,7 @@ class TestToolIndexSemanticSearch:
     def test_search_k_larger_than_catalog_returns_all(self):
         import numpy as np
 
-        from src.tools.semantic_tool_index import ToolIndex
+        from cogtrix_core.tools.semantic_tool_index import ToolIndex
 
         small = {"tool_a": "does A", "tool_b": "does B"}
         emb_mock = MagicMock()
@@ -166,9 +174,11 @@ class TestToolIndexSemanticSearch:
         emb_mock.embed_query.return_value = vecs[0].tolist()
 
         with (
-            patch("src.tools.semantic_tool_index._HAS_NUMPY", True),
-            patch("src.tools.semantic_tool_index.create_embeddings", return_value=emb_mock),
-            patch("src.tools.semantic_tool_index._np", np),
+            patch("cogtrix_core.tools.semantic_tool_index._HAS_NUMPY", True),
+            patch(
+                "cogtrix_core.tools.semantic_tool_index.create_embeddings", return_value=emb_mock
+            ),
+            patch("cogtrix_core.tools.semantic_tool_index._np", np),
         ):
             idx = ToolIndex(small)
             results = idx.search("something", k=100)
@@ -177,7 +187,7 @@ class TestToolIndexSemanticSearch:
         assert set(results) == {"tool_a", "tool_b"}
 
     def test_search_empty_catalog_returns_empty(self):
-        from src.tools.semantic_tool_index import ToolIndex
+        from cogtrix_core.tools.semantic_tool_index import ToolIndex
 
         idx = ToolIndex({})
         results = idx.search("email")
@@ -186,7 +196,7 @@ class TestToolIndexSemanticSearch:
     def test_embeddings_cached_across_searches(self):
         import numpy as np
 
-        from src.tools.semantic_tool_index import ToolIndex
+        from cogtrix_core.tools.semantic_tool_index import ToolIndex
 
         emb_mock = MagicMock()
         dim = 4
@@ -197,9 +207,11 @@ class TestToolIndexSemanticSearch:
         emb_mock.embed_query.return_value = vecs[0].tolist()
 
         with (
-            patch("src.tools.semantic_tool_index._HAS_NUMPY", True),
-            patch("src.tools.semantic_tool_index.create_embeddings", return_value=emb_mock),
-            patch("src.tools.semantic_tool_index._np", np),
+            patch("cogtrix_core.tools.semantic_tool_index._HAS_NUMPY", True),
+            patch(
+                "cogtrix_core.tools.semantic_tool_index.create_embeddings", return_value=emb_mock
+            ),
+            patch("cogtrix_core.tools.semantic_tool_index._np", np),
         ):
             idx = ToolIndex(_CATALOG)
             idx.search("email")
@@ -216,9 +228,9 @@ class TestToolIndexSemanticSearch:
 
 class TestToolIndexFallback:
     def test_keyword_fallback_when_numpy_unavailable(self):
-        from src.tools.semantic_tool_index import ToolIndex
+        from cogtrix_core.tools.semantic_tool_index import ToolIndex
 
-        with patch("src.tools.semantic_tool_index._HAS_NUMPY", False):
+        with patch("cogtrix_core.tools.semantic_tool_index._HAS_NUMPY", False):
             idx = ToolIndex(_CATALOG)
             results = idx.search("email")
 
@@ -226,12 +238,12 @@ class TestToolIndexFallback:
         assert "send_email" in results
 
     def test_keyword_fallback_when_embedding_provider_raises(self):
-        from src.tools.semantic_tool_index import ToolIndex
+        from cogtrix_core.tools.semantic_tool_index import ToolIndex
 
         with (
-            patch("src.tools.semantic_tool_index._HAS_NUMPY", True),
+            patch("cogtrix_core.tools.semantic_tool_index._HAS_NUMPY", True),
             patch(
-                "src.tools.semantic_tool_index.create_embeddings",
+                "cogtrix_core.tools.semantic_tool_index.create_embeddings",
                 side_effect=RuntimeError("provider down"),
             ),
         ):
@@ -242,9 +254,9 @@ class TestToolIndexFallback:
         assert any("file" in r for r in results)
 
     def test_keyword_fallback_caps_at_k(self):
-        from src.tools.semantic_tool_index import ToolIndex
+        from cogtrix_core.tools.semantic_tool_index import ToolIndex
 
-        with patch("src.tools.semantic_tool_index._HAS_NUMPY", False):
+        with patch("cogtrix_core.tools.semantic_tool_index._HAS_NUMPY", False):
             idx = ToolIndex(_CATALOG)
             results = idx.search("file", k=1)
 
@@ -258,8 +270,8 @@ class TestToolIndexFallback:
 
 class TestConfigure:
     def test_configure_stores_values(self):
-        import src.tools.semantic_tool_index as _mod
-        from src.tools.semantic_tool_index import configure
+        import cogtrix_core.tools.semantic_tool_index as _mod
+        from cogtrix_core.tools.semantic_tool_index import configure
 
         configure(provider="openai", model="text-embedding-3-small", api_key="sk-test")
         assert _mod._config["provider"] == "openai"
@@ -267,7 +279,7 @@ class TestConfigure:
         assert _mod._config["api_key"] == "sk-test"
 
     def test_tool_setup_calls_configure(self):
-        from src.tools.semantic_tool_index import TOOL_SETUP, configure
+        from cogtrix_core.tools.semantic_tool_index import TOOL_SETUP, configure
 
         mock_config = MagicMock()
         mock_config.resolve_embedding_config.return_value = (
@@ -277,7 +289,7 @@ class TestConfigure:
             "gkey",
         )
 
-        with patch("src.tools.semantic_tool_index.configure", wraps=configure) as mock_cfg:
+        with patch("cogtrix_core.tools.semantic_tool_index.configure", wraps=configure) as mock_cfg:
             TOOL_SETUP(mock_config)
 
         mock_cfg.assert_called_once_with(
@@ -295,7 +307,7 @@ class TestConfigure:
 
 class TestConfigField:
     def test_semantic_tool_index_default_is_true(self):
-        from src.config import Config
+        from cogtrix_core.config import Config
 
         cfg = Config()
         assert cfg.semantic_tool_index is True
@@ -303,7 +315,7 @@ class TestConfigField:
     def test_semantic_tool_index_false_from_yaml(self, tmp_path):
         import yaml
 
-        from src.config import Config, _apply_config_file
+        from cogtrix_core.config import Config, _apply_config_file
 
         cfg = Config()
         cfg_file = tmp_path / "cogtrix.yaml"
@@ -320,7 +332,7 @@ class TestConfigField:
 
 class TestRequestToolsQuery:
     def _make_tool(self, tool_index=None):
-        from src.tools.configure import create_request_tools_tool
+        from cogtrix_core.tools.configure import create_request_tools_tool
 
         available = {k: MagicMock() for k in _CATALOG}
         return create_request_tools_tool(

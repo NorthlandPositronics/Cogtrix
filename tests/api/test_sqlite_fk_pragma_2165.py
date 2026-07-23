@@ -11,7 +11,7 @@ from __future__ import annotations
 import pytest
 import sqlalchemy as sa
 
-from src.api.db import engine as eng
+from cogtrix_core.api.db import engine as eng
 
 
 @pytest.mark.asyncio

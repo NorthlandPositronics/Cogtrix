@@ -1,6 +1,6 @@
 """Unit tests for the MCP runtime-wiring helpers (#2151 / #2153).
 
-Covers the pure registry helpers in ``src/api/mcp_runtime.py``, the
+Covers the pure registry helpers in ``cogtrix_core/api/mcp_runtime.py``, the
 session-reconciliation eviction logic, and ``MCPManager.disconnect``'s
 no-loop early-out. All fast — no FAISS, no real MCP event loop, no network.
 """
@@ -11,7 +11,7 @@ import asyncio
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
-from src.api.mcp_runtime import (
+from cogtrix_core.api.mcp_runtime import (
     mcp_builtin_tool_names,
     register_mcp_tools,
     unregister_mcp_server_tools,
@@ -115,7 +115,7 @@ class TestUnregisterMcpServerTools:
 
 class TestReconcileTools:
     def _registry(self):
-        from src.api.session_bridge import ApiSessionRegistry
+        from cogtrix_core.api.session_bridge import ApiSessionRegistry
 
         reg = ApiSessionRegistry(app_state=MagicMock())
         return reg
@@ -154,7 +154,7 @@ class TestReconcileTools:
 
 class TestManagerDisconnectEarlyOut:
     def test_unknown_server_returns_false_without_loop(self) -> None:
-        from src.mcp_client import MCPManager
+        from cogtrix_core.mcp_client import MCPManager
 
         mgr = MCPManager()
         # No connect ever happened → no background loop. disconnect must not
@@ -163,7 +163,7 @@ class TestManagerDisconnectEarlyOut:
         assert mgr._loop is None
 
     def test_purges_stray_tool_server_mapping(self) -> None:
-        from src.mcp_client import MCPManager
+        from cogtrix_core.mcp_client import MCPManager
 
         mgr = MCPManager()
         mgr._tool_server_map = {"orphan_tool": "ghost"}

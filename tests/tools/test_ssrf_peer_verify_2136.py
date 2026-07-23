@@ -19,8 +19,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-import src.tools.http_request as hr
-from src.tools.http_request import (
+import cogtrix_core.tools.http_request as hr
+from cogtrix_core.tools.http_request import (
     _follow_redirects,
     _install_dns_pin_hook,
     _peer_ip_from_response,
@@ -87,7 +87,9 @@ class TestFollowRedirectsPeerVerification:
         session = MagicMock()
         session.request.return_value = _resp(peer_ip="127.0.0.1", status_code=200)
 
-        with patch("src.tools.http_request._validate_url", return_value=(True, "", "8.8.8.8")):
+        with patch(
+            "cogtrix_core.tools.http_request._validate_url", return_value=(True, "", "8.8.8.8")
+        ):
             with pytest.raises(ValueError, match="rebinding"):
                 _follow_redirects(
                     session, "GET", "https://example.com/", pinned_ip="8.8.8.8", timeout=10

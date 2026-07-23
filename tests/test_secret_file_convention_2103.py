@@ -18,7 +18,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from src.config import (
+from cogtrix_core.config import (
     ConfigError,
     _read_secret_from_file,
     _secret_env,

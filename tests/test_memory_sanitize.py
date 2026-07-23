@@ -50,7 +50,7 @@ class TestSanitizeHistoryBug033:
 
     def test_human_ai_tc_tool_bad_ai_all_removed(self):
         """[human, ai-tc, tool, bad-ai] — all four must be removed."""
-        from src.memory.manager import BaseMemoryManager
+        from cogtrix_core.memory.manager import BaseMemoryManager
 
         messages = _make_messages(
             [
@@ -65,7 +65,7 @@ class TestSanitizeHistoryBug033:
 
     def test_human_bad_ai_both_removed(self):
         """[human, bad-ai] — both must be removed."""
-        from src.memory.manager import BaseMemoryManager
+        from cogtrix_core.memory.manager import BaseMemoryManager
 
         messages = _make_messages(
             [
@@ -78,7 +78,7 @@ class TestSanitizeHistoryBug033:
 
     def test_good_pair_then_bad_chain_only_bad_removed(self):
         """[human, good-ai, human, ai-tc, tool, bad-ai] — last four removed, first two preserved."""
-        from src.memory.manager import BaseMemoryManager
+        from cogtrix_core.memory.manager import BaseMemoryManager
 
         messages = _make_messages(
             [
@@ -97,7 +97,7 @@ class TestSanitizeHistoryBug033:
 
     def test_standalone_bad_ai_without_human_removed(self):
         """A standalone bad AI with no preceding human is removed."""
-        from src.memory.manager import BaseMemoryManager
+        from cogtrix_core.memory.manager import BaseMemoryManager
 
         messages = _make_messages(
             [
@@ -109,7 +109,7 @@ class TestSanitizeHistoryBug033:
 
     def test_valid_tool_chain_preserved(self):
         """[human, ai-tc, tool, good-ai] — nothing removed."""
-        from src.memory.manager import BaseMemoryManager
+        from cogtrix_core.memory.manager import BaseMemoryManager
 
         messages = _make_messages(
             [
@@ -128,7 +128,7 @@ class TestSanitizeHistoryBug064:
 
     def test_human_then_ai_tc_then_tool_then_bad_ai_all_removed(self):
         """[human, ai-tc, tool, bad-ai] detected in the is_human forward-scan."""
-        from src.memory.manager import BaseMemoryManager
+        from cogtrix_core.memory.manager import BaseMemoryManager
 
         messages = _make_messages(
             [
@@ -143,7 +143,7 @@ class TestSanitizeHistoryBug064:
 
     def test_human_then_multiple_tool_chain_steps_then_bad_ai_all_removed(self):
         """[human, ai-tc1, tool1, ai-tc2, tool2, bad-ai] — all six removed."""
-        from src.memory.manager import BaseMemoryManager
+        from cogtrix_core.memory.manager import BaseMemoryManager
 
         messages = _make_messages(
             [
@@ -160,7 +160,7 @@ class TestSanitizeHistoryBug064:
 
     def test_good_human_pair_then_bad_chain_selective(self):
         """First pair preserved; second chain with tool steps is removed."""
-        from src.memory.manager import BaseMemoryManager
+        from cogtrix_core.memory.manager import BaseMemoryManager
 
         messages = _make_messages(
             [
@@ -183,7 +183,7 @@ class TestSanitizeHistoryParity:
 
     def test_result_length_even_for_human_ai_pairs(self):
         """When all bad messages are removed, only good human+AI pairs remain (even count)."""
-        from src.memory.manager import BaseMemoryManager
+        from cogtrix_core.memory.manager import BaseMemoryManager
 
         messages = _make_messages(
             [
@@ -202,13 +202,13 @@ class TestSanitizeHistoryParity:
 
     def test_empty_history_returns_empty(self):
         """Empty input returns empty list."""
-        from src.memory.manager import BaseMemoryManager
+        from cogtrix_core.memory.manager import BaseMemoryManager
 
         assert BaseMemoryManager.sanitize_history([]) == []
 
     def test_all_good_messages_unchanged(self):
         """History with no bad messages is returned unchanged."""
-        from src.memory.manager import BaseMemoryManager
+        from cogtrix_core.memory.manager import BaseMemoryManager
 
         messages = _make_messages(
             [

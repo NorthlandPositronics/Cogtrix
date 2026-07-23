@@ -184,16 +184,18 @@ class TestEntrypointLogic:
     def test_alembic_runs_before_api_server(self) -> None:
         text = _entrypoint_text()
         alembic_pos = text.find("alembic upgrade head")
-        api_pos = text.find("exec python -m src.api")
+        api_pos = text.find("exec python -m cogtrix_core.api")
         assert alembic_pos != -1, "Entrypoint must run 'alembic upgrade head'"
-        assert api_pos != -1, "Entrypoint must exec 'python -m src.api'"
-        assert alembic_pos < api_pos, "alembic upgrade head must run BEFORE exec python -m src.api"
+        assert api_pos != -1, "Entrypoint must exec 'python -m cogtrix_core.api'"
+        assert (
+            alembic_pos < api_pos
+        ), "alembic upgrade head must run BEFORE exec python -m cogtrix_core.api"
 
     def test_api_server_command(self) -> None:
         text = _entrypoint_text()
         assert (
-            "exec python -m src.api" in text
-        ), "API mode must use 'exec python -m src.api' as the server command"
+            "exec python -m cogtrix_core.api" in text
+        ), "API mode must use 'exec python -m cogtrix_core.api' as the server command"
 
     def test_wizard_skipped_when_args_present(self) -> None:
         text = _entrypoint_text()

@@ -1,4 +1,4 @@
-"""Tests for src/tools/_web_search_extractor.py — stage 4 trafilatura
+"""Tests for cogtrix_core/tools/_web_search_extractor.py — stage 4 trafilatura
 wrapper (ADR-0056 PR-C)."""
 
 from __future__ import annotations
@@ -7,11 +7,11 @@ import concurrent.futures
 
 import pytest
 
-from src.tools._http_fetch import FetchResult
-from src.tools._web_search_aggregator import RankedResult
-from src.tools._web_search_domain_class import DomainClass
-from src.tools._web_search_extractor import ExtractedSource, extract
-from src.tools._web_search_fetcher import FetchOutcome
+from cogtrix_core.tools._http_fetch import FetchResult
+from cogtrix_core.tools._web_search_aggregator import RankedResult
+from cogtrix_core.tools._web_search_domain_class import DomainClass
+from cogtrix_core.tools._web_search_extractor import ExtractedSource, extract
+from cogtrix_core.tools._web_search_fetcher import FetchOutcome
 
 
 def _rank(url: str = "https://example.com/a") -> RankedResult:
@@ -216,7 +216,7 @@ class TestLxmlProcessPool:
     def _executor_override(self):
         """Swap in a ThreadPoolExecutor so monkey-patches reach the
         workers. Cleared after each test."""
-        from src.tools._web_search_extractor import _set_executor_override
+        from cogtrix_core.tools._web_search_extractor import _set_executor_override
 
         executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)
         _set_executor_override(executor)
@@ -312,7 +312,7 @@ class TestLxmlProcessPool:
         production code ignored it, the monkey-patches in the other
         tests in this class would be invisible to workers and the
         suite would silently fail."""
-        from src.tools._web_search_extractor import (
+        from cogtrix_core.tools._web_search_extractor import (
             _get_process_pool,
             _set_executor_override,
         )

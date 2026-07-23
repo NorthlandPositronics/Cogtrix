@@ -34,7 +34,7 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 # to the offending import path.
 _ENTRY_POINTS = [
     "import cogtrix",
-    "import src.api.app",
+    "import cogtrix_core.api.app",
 ]
 
 

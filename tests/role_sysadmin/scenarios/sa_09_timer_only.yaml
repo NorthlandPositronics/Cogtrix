@@ -1,0 +1,35 @@
+id: role_sa_09_timer_only
+area: ops
+title: Create a systemd service + timer (timer wiring only)
+
+description: |
+  The "sa_06-lite" graded counterpart to sa_06 (cycle-1 recommendation #3).
+  sa_06 conflates two competencies — wiring a systemd service+timer AND producing
+  a correct dated tar backup — into a single 0% universal wall. This scenario
+  isolates the WIRING: the service only has to do something trivially verifiable
+  (write a timestamp marker), so a model that can author + enable systemd units
+  but fumbles the tar/date logic still scores here, separating "systemd timer
+  competence" from "working dated backup competence".
+
+  Numbered sa_09 (not sa_06b) so the `find_scenario` numeric-prefix selector
+  stays unambiguous against sa_06.
+
+assignment: |
+  Please set up a simple scheduled "heartbeat" on this server using systemd:
+    - a service unit named "heartbeat.service" that writes the current date/time
+      to the file /var/lib/heartbeat/last-run (overwriting it each run is fine);
+    - a timer unit named "heartbeat.timer" that runs it daily and is enabled.
+  Make sure starting the service actually writes /var/lib/heartbeat/last-run
+  (create the directory if it doesn't exist). Tell me when it's done and how you
+  verified it.
+
+acceptance:
+  check: checks/sa_09_check.sh
+
+personas:
+  lead:
+    default_scope_answer: "A daily timer is fine; the marker file at /var/lib/heartbeat/last-run is all I need."
+    scope_answers:
+      time: "Any time overnight is fine for the daily run."
+      format: "Just the date/time in the file is fine — no particular format required."
+      retention: "Overwriting the marker on each run is fine; no history needed."

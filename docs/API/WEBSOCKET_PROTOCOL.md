@@ -147,6 +147,39 @@ The frontend appends `text` to the response buffer.
 | text          | string | Incremental token text |
 | final         | bool   | `true` when this token is part of the **final response** (after all tool calls complete). `false` during preamble text before tool calls. Use this to distinguish intermediate reasoning from the actual answer. Only meaningful when `tool_call_count > 0`; `false` until the first tool call is seen. |
 
+**Streaming of the post-tool final answer (#2251 / #2264).** By default, the
+post-tool **final** answer is *not* streamed token-by-token — it is delivered as a
+single `token` frame (`final: true`) at turn end. This avoids a double-render when
+the server's verification-recovery loop discards a fully-generated answer and
+regenerates it. A client that handles the [`discard_pending`](#discard_pending--drop-the-in-progress-answer)
+frame (below) can opt in to **live** final-answer streaming by setting
+`stream_final_answer: true` on the send-message request
+(`POST /api/v1/sessions/{id}/messages`); the server then streams `final: true`
+tokens incrementally and emits `discard_pending` when it supersedes a partial.
+
+---
+
+#### `discard_pending` — Drop the In-Progress Answer
+
+Emitted only when the client opted in via `stream_final_answer: true` (#2264).
+Signals that the final-answer tokens streamed so far this turn were **discarded**
+by server-side verification-recovery and a fresh generation will stream next. The
+client MUST **clear its in-progress assistant buffer** on this frame; at most one
+is sent before the surviving generation streams. The turn-ending `done` frame text
+remains authoritative — reconcile the rendered text against it.
+
+```json
+{
+  "type": "discard_pending",
+  "session_id": "3f2504e0-4f89-11d3-9a0c-0305e82c3301",
+  "payload": {},
+  "seq": 51,
+  "ts": "2026-03-04T12:34:56.789Z"
+}
+```
+
+(No payload fields.)
+
 ---
 
 #### `tool_start` — Tool Execution Began

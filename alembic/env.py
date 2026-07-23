@@ -1,4 +1,4 @@
-"""Alembic environment — wired to the async SQLAlchemy engine from src.api.db.engine."""
+"""Alembic environment — wired to the async SQLAlchemy engine from cogtrix_core.api.db.engine."""
 
 from __future__ import annotations
 
@@ -18,8 +18,8 @@ if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
 # Import all models so their tables appear in target_metadata
-import src.api.db.models  # noqa: E402, F401 — registers model classes on Base.metadata
-from src.api.db.engine import Base, _get_db_url  # noqa: E402
+import cogtrix_core.api.db.models  # noqa: E402, F401 — registers model classes on Base.metadata
+from cogtrix_core.api.db.engine import Base, _get_db_url  # noqa: E402
 
 target_metadata = Base.metadata
 

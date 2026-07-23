@@ -31,13 +31,13 @@ from fastapi import HTTPException  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 from sqlalchemy.ext.asyncio import async_sessionmaker  # noqa: E402
 
-from src.api.app import app  # noqa: E402
-from src.api.auth import TokenData, _hash_api_key, create_access_token  # noqa: E402
-from src.api.db.engine import get_db  # noqa: E402
-from src.api.db.models import ApiSessionRecord, Workspace  # noqa: E402
-from src.api.db.repositories.api_keys import ApiKeyRepository  # noqa: E402
-from src.api.db.repositories.organization import OrganizationRepository  # noqa: E402
-from src.api.db.repositories.users import UserRepository  # noqa: E402
+from cogtrix_core.api.app import app  # noqa: E402
+from cogtrix_core.api.auth import TokenData, _hash_api_key, create_access_token  # noqa: E402
+from cogtrix_core.api.db.engine import get_db  # noqa: E402
+from cogtrix_core.api.db.models import ApiSessionRecord, Workspace  # noqa: E402
+from cogtrix_core.api.db.repositories.api_keys import ApiKeyRepository  # noqa: E402
+from cogtrix_core.api.db.repositories.organization import OrganizationRepository  # noqa: E402
+from cogtrix_core.api.db.repositories.users import UserRepository  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -165,7 +165,7 @@ def seeded_client(engine):
         from unittest.mock import MagicMock
         from unittest.mock import patch as _patch
 
-        with _patch("src.api.session_bridge._build_llm", return_value=MagicMock()):
+        with _patch("cogtrix_core.api.session_bridge._build_llm", return_value=MagicMock()):
             with TestClient(app, raise_server_exceptions=False) as client:
                 yield (
                     client,
@@ -517,7 +517,7 @@ class TestAdminBypassDisabled:
     def test_verify_session_owner_bypass_false_denies_admin(self, seeded_client, engine):
         """Org admin must be denied when admin_bypass=False."""
         _, _, _, _, _, _, sb, admin_a = seeded_client
-        from src.api.auth import verify_session_owner
+        from cogtrix_core.api.auth import verify_session_owner
 
         factory = async_sessionmaker(engine, expire_on_commit=False)
 
@@ -538,7 +538,7 @@ class TestAdminBypassDisabled:
     def test_verify_session_owner_bypass_false_allows_owner(self, seeded_client, engine):
         """Session owner must still pass when admin_bypass=False."""
         _, _, _, ua, _, sa, _, _ = seeded_client
-        from src.api.auth import verify_session_owner
+        from cogtrix_core.api.auth import verify_session_owner
 
         factory = async_sessionmaker(engine, expire_on_commit=False)
 
@@ -557,7 +557,7 @@ class TestAdminBypassDisabled:
     def test_check_session_access_bypass_false_denies_admin(self, seeded_client, engine):
         """Org admin must be denied when admin_bypass=False."""
         _, _, _, _, _, _, sb, admin_a = seeded_client
-        from src.api.routes.sessions import _check_session_access
+        from cogtrix_core.api.routes.sessions import _check_session_access
 
         factory = async_sessionmaker(engine, expire_on_commit=False)
 
@@ -578,7 +578,7 @@ class TestAdminBypassDisabled:
     def test_check_session_access_bypass_false_allows_owner(self, seeded_client, engine):
         """Session owner must still pass when admin_bypass=False."""
         _, _, _, ua, _, sa, _, _ = seeded_client
-        from src.api.routes.sessions import _check_session_access
+        from cogtrix_core.api.routes.sessions import _check_session_access
 
         factory = async_sessionmaker(engine, expire_on_commit=False)
 
@@ -646,7 +646,7 @@ class TestOrgScopedAdminBypass:
         """Org-A admin must be denied an Org-B session when scoping is on."""
         monkeypatch.setenv("COGTRIX_ENABLE_ORG_SCOPING", "true")
         _, _, _, _, _, _, sb, admin_a = seeded_client
-        from src.api.auth import verify_session_owner
+        from cogtrix_core.api.auth import verify_session_owner
 
         factory = async_sessionmaker(engine, expire_on_commit=False)
 
@@ -668,7 +668,7 @@ class TestOrgScopedAdminBypass:
         """Org-A admin must still bypass for an Org-A session when scoping is on."""
         monkeypatch.setenv("COGTRIX_ENABLE_ORG_SCOPING", "true")
         _, _, _, _, _, sa, _, admin_a = seeded_client
-        from src.api.auth import verify_session_owner
+        from cogtrix_core.api.auth import verify_session_owner
 
         factory = async_sessionmaker(engine, expire_on_commit=False)
 
@@ -690,7 +690,7 @@ class TestOrgScopedAdminBypass:
         """Superadmin keeps the global bypass even with scoping on."""
         monkeypatch.setenv("COGTRIX_ENABLE_ORG_SCOPING", "true")
         _, _, _, _, _, _, sb, _ = seeded_client
-        from src.api.auth import verify_session_owner
+        from cogtrix_core.api.auth import verify_session_owner
 
         factory = async_sessionmaker(engine, expire_on_commit=False)
 
@@ -710,7 +710,7 @@ class TestOrgScopedAdminBypass:
         """With scoping off (default), an admin keeps the legacy global bypass."""
         monkeypatch.delenv("COGTRIX_ENABLE_ORG_SCOPING", raising=False)
         _, _, _, _, _, _, sb, admin_a = seeded_client
-        from src.api.auth import verify_session_owner
+        from cogtrix_core.api.auth import verify_session_owner
 
         factory = async_sessionmaker(engine, expire_on_commit=False)
 
@@ -730,7 +730,7 @@ class TestOrgScopedAdminBypass:
         """An org-scoped admin with no org assigned is denied (ORG_NOT_ASSIGNED)."""
         monkeypatch.setenv("COGTRIX_ENABLE_ORG_SCOPING", "true")
         _, _, _, _, _, _, sb, _ = seeded_client
-        from src.api.auth import verify_session_owner
+        from cogtrix_core.api.auth import verify_session_owner
 
         factory = async_sessionmaker(engine, expire_on_commit=False)
 
@@ -756,7 +756,7 @@ class TestOrgScopedAdminBypass:
         owned by an Org-A user but assigned to an Org-B workspace."""
         monkeypatch.setenv("COGTRIX_ENABLE_ORG_SCOPING", "true")
         _, _, org_b, ua, _, _, _, admin_a = seeded_client
-        from src.api.auth import verify_session_owner
+        from cogtrix_core.api.auth import verify_session_owner
 
         factory = async_sessionmaker(engine, expire_on_commit=False)
         ws_b_id = _uid()

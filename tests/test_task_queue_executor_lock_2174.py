@@ -14,7 +14,7 @@ from concurrent.futures import Future
 
 import pytest
 
-from src.tasks.queue import TaskQueue, TaskStatus
+from cogtrix_core.tasks.queue import TaskQueue, TaskStatus
 
 
 @pytest.fixture()

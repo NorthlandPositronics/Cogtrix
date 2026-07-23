@@ -10,8 +10,8 @@ caught as fabricated), instead of the cryptic validation error.
 
 from __future__ import annotations
 
-from src.orchestration.tool_arg_correction import detect_url_tool_misuse
-from src.orchestration.tool_message_kinds import (
+from cogtrix_core.orchestration.tool_arg_correction import detect_url_tool_misuse
+from cogtrix_core.orchestration.tool_message_kinds import (
     KIND_TOOL_MISUSE_REDIRECT,
     TOOL_RESOLUTION_FAILURE_KINDS,
     is_resolution_failure_message,
@@ -74,7 +74,7 @@ class TestMisuseKindClassification:
     def test_is_resolution_failure_message_recognises_the_tag(self) -> None:
         from langchain_core.messages import ToolMessage
 
-        from src.orchestration.tool_message_kinds import COGTRIX_KIND_KEY
+        from cogtrix_core.orchestration.tool_message_kinds import COGTRIX_KIND_KEY
 
         tm = ToolMessage(
             content="use web_search",
@@ -93,8 +93,8 @@ class TestInvokerWiring:
     def test_misuse_short_circuits_before_invoke(self) -> None:
         from unittest.mock import MagicMock
 
-        from src.orchestration.deduped_tool_invoker import DedupedToolInvoker
-        from src.orchestration.tool_message_kinds import COGTRIX_KIND_KEY
+        from cogtrix_core.orchestration.deduped_tool_invoker import DedupedToolInvoker
+        from cogtrix_core.orchestration.tool_message_kinds import COGTRIX_KIND_KEY
 
         http_get = MagicMock()
         http_get.name = "http_get"
@@ -126,7 +126,7 @@ class TestInvokerWiring:
 
         from langchain_core.messages import ToolMessage
 
-        from src.orchestration.deduped_tool_invoker import DedupedToolInvoker
+        from cogtrix_core.orchestration.deduped_tool_invoker import DedupedToolInvoker
 
         http_get = MagicMock()
         http_get.name = "http_get"
@@ -152,6 +152,6 @@ class TestInvokerWiring:
         # only assert the guard did NOT intercept (the tool is reached). Any
         # AttributeError past the guard would be from un-shimmed budget machinery,
         # which is out of scope here — so we assert the guard returned None first.
-        from src.orchestration.tool_arg_correction import detect_url_tool_misuse
+        from cogtrix_core.orchestration.tool_arg_correction import detect_url_tool_misuse
 
         assert detect_url_tool_misuse("http_get", call["args"]) is None

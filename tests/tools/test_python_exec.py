@@ -2,7 +2,7 @@
 
 import pytest
 
-from src.tools.python_exec import (
+from cogtrix_core.tools.python_exec import (
     _MAX_SESSIONS,
     DANGEROUS_ATTRS,
     PythonExecInput,
@@ -267,7 +267,7 @@ class TestLoopLimiterRejectsOnFailure:
         def _boom(_code):
             raise RuntimeError("AST explosion")
 
-        monkeypatch.setattr("src.tools.python_exec._add_loop_limits", _boom)
+        monkeypatch.setattr("cogtrix_core.tools.python_exec._add_loop_limits", _boom)
 
         result = _execute_code_internal("x = 1 + 1", {})
 
@@ -280,7 +280,7 @@ class TestLoopLimiterRejectsOnFailure:
         def _boom(_code):
             raise RuntimeError("AST explosion")
 
-        monkeypatch.setattr("src.tools.python_exec._add_loop_limits", _boom)
+        monkeypatch.setattr("cogtrix_core.tools.python_exec._add_loop_limits", _boom)
 
         with caplog.at_level("WARNING", logger="cogtrix.python_exec"):
             _execute_code_internal("x = 1 + 1", {})
@@ -380,7 +380,7 @@ class TestSessionLruEviction:
         reset_default_session()
 
     def test_eviction_occurs_when_exceeding_max_sessions(self, monkeypatch) -> None:
-        import src.tools.python_exec as mod
+        import cogtrix_core.tools.python_exec as mod
 
         monkeypatch.setattr(mod, "_MAX_SESSIONS", 3)
 
@@ -396,7 +396,7 @@ class TestSessionLruEviction:
         assert "s4" in _session_states
 
     def test_accessing_existing_session_moves_it_to_end(self, monkeypatch) -> None:
-        import src.tools.python_exec as mod
+        import cogtrix_core.tools.python_exec as mod
 
         monkeypatch.setattr(mod, "_MAX_SESSIONS", 3)
 
@@ -495,7 +495,7 @@ class TestToolConfigDescription:
 
     def test_configure_datascience_modules_updates_description(self, monkeypatch) -> None:
         """configure_datascience_modules(True) must refresh TOOL_CONFIG['description']."""
-        import src.tools.python_exec as mod
+        import cogtrix_core.tools.python_exec as mod
 
         # Enable datascience modules — only actually-importable ones are listed
         mod.configure_datascience_modules(True)
@@ -531,7 +531,7 @@ class TestTimeSleepDoSCap:
         """Asking for a 999-second sleep must complete in ≤ 5 s + slack."""
         import time
 
-        from src.tools.python_exec import execute_python
+        from cogtrix_core.tools.python_exec import execute_python
 
         start = time.monotonic()
         # ``execute_python`` returns once the sandboxed call returns;
@@ -553,7 +553,7 @@ class TestTimeSleepDoSCap:
         """
         import time
 
-        from src.tools.python_exec import execute_python
+        from cogtrix_core.tools.python_exec import execute_python
 
         start = time.monotonic()
         result = execute_python("import time; time.sleep(0.1); 'short_sleep_ok'")
@@ -567,7 +567,7 @@ class TestTimeSleepDoSCap:
     def test_time_time_still_returns_real_timestamp(self) -> None:
         """``time.time()`` must still return the real Unix timestamp.
         Capping ``sleep`` should not regress other time functions."""
-        from src.tools.python_exec import execute_python
+        from cogtrix_core.tools.python_exec import execute_python
 
         result = execute_python("import time; t = time.time(); 'got=' + str(int(t))")
         assert "got=" in result
@@ -586,7 +586,7 @@ class TestTimeSleepDoSCap:
     def test_negative_sleep_rejected(self) -> None:
         """Negative sleeps are rejected by the shim, matching the
         contract of the real ``time.sleep``."""
-        from src.tools.python_exec import execute_python
+        from cogtrix_core.tools.python_exec import execute_python
 
         result = execute_python("import time; time.sleep(-1)")
         # The error surfaces as a Value Error from the sandboxed run.
@@ -600,7 +600,7 @@ class TestTimeSleepDoSCap:
         """
         import time
 
-        from src.tools.python_exec import execute_python
+        from cogtrix_core.tools.python_exec import execute_python
 
         start = time.monotonic()
         # No ``import time`` — uses the preloaded global.
@@ -620,7 +620,7 @@ class TestTimeSleepDoSCap:
         ``__spec__`` that could be used to reach back to the real
         module via reflection.
         """
-        from src.tools.python_exec import _make_safe_time_module
+        from cogtrix_core.tools.python_exec import _make_safe_time_module
 
         shim = _make_safe_time_module()
         # SimpleNamespace lacks module dunders by construction; double-
@@ -636,7 +636,7 @@ class TestTimeSleepDoSCap:
         """The cap value is a module-level constant so future tuning
         is a one-line edit and operators can audit it.
         """
-        from src.tools.python_exec import _TIME_SLEEP_CAP_SECONDS
+        from cogtrix_core.tools.python_exec import _TIME_SLEEP_CAP_SECONDS
 
         assert isinstance(_TIME_SLEEP_CAP_SECONDS, int | float)
         assert _TIME_SLEEP_CAP_SECONDS > 0

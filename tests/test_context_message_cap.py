@@ -13,7 +13,7 @@ from langchain_core.messages import (  # noqa: E402
     ToolMessage,
 )
 
-from src.orchestration.graph import _apply_context_message_cap  # noqa: E402
+from cogtrix_core.orchestration.graph import _apply_context_message_cap  # noqa: E402
 
 
 def _ai(tool_call_id: str) -> AIMessage:

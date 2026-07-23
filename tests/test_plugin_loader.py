@@ -22,7 +22,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.plugins.loader import ToolPluginLoader, _SyntheticModule
+from cogtrix_core.plugins.loader import ToolPluginLoader, _SyntheticModule
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -250,7 +250,7 @@ def test_load_from_entrypoints_class_plugin() -> None:
 
     eps = [_make_fake_ep("my_ep", MyPlugin)]
     loader = ToolPluginLoader()
-    with patch("src.plugins.loader.importlib.metadata.entry_points", return_value=eps):
+    with patch("cogtrix_core.plugins.loader.importlib.metadata.entry_points", return_value=eps):
         modules = loader._load_from_entrypoints()
     assert len(modules) == 1
     assert modules[0].TOOL_CONFIGS == configs
@@ -261,14 +261,14 @@ def test_load_from_entrypoints_load_failure() -> None:
     ep.name = "failing_ep"
     ep.load.side_effect = ImportError("no module")
     loader = ToolPluginLoader()
-    with patch("src.plugins.loader.importlib.metadata.entry_points", return_value=[ep]):
+    with patch("cogtrix_core.plugins.loader.importlib.metadata.entry_points", return_value=[ep]):
         modules = loader._load_from_entrypoints()
     assert modules == []
 
 
 def test_load_from_entrypoints_empty() -> None:
     loader = ToolPluginLoader()
-    with patch("src.plugins.loader.importlib.metadata.entry_points", return_value=[]):
+    with patch("cogtrix_core.plugins.loader.importlib.metadata.entry_points", return_value=[]):
         modules = loader._load_from_entrypoints()
     assert modules == []
 
@@ -283,10 +283,10 @@ def test_registry_calls_tool_setup_when_config_provided(tmp_path: Path) -> None:
     fake_config = MagicMock()
     fake_config.tool_dirs = [str(tmp_path)]
 
-    from src.registry import ToolRegistry
+    from cogtrix_core.registry import ToolRegistry
 
     registry = ToolRegistry()
-    with patch("src.plugins.loader.importlib.metadata.entry_points", return_value=[]):
+    with patch("cogtrix_core.plugins.loader.importlib.metadata.entry_points", return_value=[]):
         registry.load_all_tools(config=fake_config)
 
     # The plugin's TOOL_SETUP should have been called with the config object
@@ -298,10 +298,10 @@ def test_registry_calls_tool_setup_when_config_provided(tmp_path: Path) -> None:
 
 def test_registry_no_plugin_loading_without_config() -> None:
     """When config=None, ToolPluginLoader must NOT be invoked."""
-    from src.registry import ToolRegistry
+    from cogtrix_core.registry import ToolRegistry
 
     registry = ToolRegistry()
-    with patch("src.plugins.loader.ToolPluginLoader.load_all") as mock_load:
+    with patch("cogtrix_core.plugins.loader.ToolPluginLoader.load_all") as mock_load:
         registry.load_all_tools(config=None)
     mock_load.assert_not_called()
 
@@ -311,7 +311,7 @@ def test_registry_no_plugin_loading_without_config() -> None:
 
 def test_config_tool_dirs_from_file(tmp_path: Path) -> None:
     """Config parses tool_dirs list from a YAML config file."""
-    from src.config import Config, _apply_config_file
+    from cogtrix_core.config import Config, _apply_config_file
 
     cfg_file = tmp_path / "config.yaml"
     cfg_file.write_text("tool_dirs:\n  - /some/dir\n  - /another/dir\n")
@@ -322,7 +322,7 @@ def test_config_tool_dirs_from_file(tmp_path: Path) -> None:
 
 def test_config_tool_dirs_string_value(tmp_path: Path) -> None:
     """tool_dirs accepts a bare string (single directory)."""
-    from src.config import Config, _apply_config_file
+    from cogtrix_core.config import Config, _apply_config_file
 
     cfg_file = tmp_path / "config.yaml"
     cfg_file.write_text("tool_dirs: /single/dir\n")
@@ -332,7 +332,7 @@ def test_config_tool_dirs_string_value(tmp_path: Path) -> None:
 
 
 def test_config_tool_dirs_default_empty() -> None:
-    from src.config import Config
+    from cogtrix_core.config import Config
 
     config = Config()
     assert config.tool_dirs == []
@@ -340,7 +340,7 @@ def test_config_tool_dirs_default_empty() -> None:
 
 def test_config_tool_dirs_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """COGTRIX_TOOL_DIRS env var populates tool_dirs (comma-separated)."""
-    from src.config import Config, _apply_env_vars
+    from cogtrix_core.config import Config, _apply_env_vars
 
     monkeypatch.setenv("COGTRIX_TOOL_DIRS", "/a/b,/c/d")
     config = Config()
@@ -351,7 +351,7 @@ def test_config_tool_dirs_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_config_cron_from_file(tmp_path: Path) -> None:
     """Config parses cron job definitions from a YAML config file."""
-    from src.config import Config, _apply_config_file
+    from cogtrix_core.config import Config, _apply_config_file
 
     cfg_file = tmp_path / "config.yaml"
     cfg_file.write_text(
@@ -378,12 +378,12 @@ def test_config_cron_from_file(tmp_path: Path) -> None:
 
 def test_load_tools_passes_config_to_registry() -> None:
     """load_tools(config=...) must forward config to registry.load_all_tools()."""
-    from src.tools.configure import load_tools
+    from cogtrix_core.tools.configure import load_tools
 
     fake_config = MagicMock()
     fake_config.tool_dirs = []
 
-    with patch("src.registry.ToolRegistry.load_all_tools") as mock_lat:
+    with patch("cogtrix_core.registry.ToolRegistry.load_all_tools") as mock_lat:
         mock_lat.return_value = {}
         load_tools(config=fake_config)
 

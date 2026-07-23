@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from src.setup_wizard import _index_docs, _retrieve_relevant_sections
+from cogtrix_core.setup_wizard import _index_docs, _retrieve_relevant_sections
 
 # ---------------------------------------------------------------------------
 # _index_docs

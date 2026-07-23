@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from src.api.session_bridge import (
+from cogtrix_core.api.session_bridge import (
     _API_DENIED_DANGEROUS_TOOL_ALIASES,
     _API_DENIED_DANGEROUS_TOOLS,
     _API_DENIED_EXEC_TOOLS,
@@ -28,8 +28,8 @@ from src.api.session_bridge import (
 
 
 def _all_canonical_tool_names() -> set[str]:
-    """Canonical tool names declared across ``src/tools/*.py`` (AST scan, no import)."""
-    import src.registry as registry
+    """Canonical tool names declared across ``cogtrix_core/tools/*.py`` (AST scan, no import)."""
+    import cogtrix_core.registry as registry
 
     tools_dir = Path(registry.__file__).parent / "tools"
     names: set[str] = set()

@@ -19,12 +19,12 @@ pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient  # noqa: E402
 from sqlalchemy.ext.asyncio import async_sessionmaker  # noqa: E402
 
-from src.api.app import create_app  # noqa: E402
-from src.api.db.models import Organization  # noqa: E402
-from src.api.db.repositories.organization import OrganizationRepository  # noqa: E402
-from src.api.db.repositories.sessions import SessionRepository  # noqa: E402
-from src.api.db.repositories.usage import UsageRepository  # noqa: E402
-from src.api.db.repositories.users import UserRepository  # noqa: E402
+from cogtrix_core.api.app import create_app  # noqa: E402
+from cogtrix_core.api.db.models import Organization  # noqa: E402
+from cogtrix_core.api.db.repositories.organization import OrganizationRepository  # noqa: E402
+from cogtrix_core.api.db.repositories.sessions import SessionRepository  # noqa: E402
+from cogtrix_core.api.db.repositories.usage import UsageRepository  # noqa: E402
+from cogtrix_core.api.db.repositories.users import UserRepository  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -40,7 +40,7 @@ def client(engine):
     # Create a fresh app with the test engine
     _app = create_app()
 
-    from src.api.db import get_db
+    from cogtrix_core.api.db import get_db
 
     async def _override_get_db():
         async with async_sessionmaker(engine, expire_on_commit=False)() as session:
@@ -53,7 +53,7 @@ def client(engine):
     try:
         # ``with TestClient(...)`` runs the FastAPI lifespan startup hook,
         # which resets the module-level ``_shutdown_initiated`` flag in
-        # ``src/api/app.py``. Without the context manager, the flag persists
+        # ``cogtrix_core/api/app.py``. Without the context manager, the flag persists
         # from any earlier test in the same worker that triggered the
         # shutdown path, and the ``_request_context_middleware`` rejects
         # every request with 503 Service Unavailable.
@@ -70,7 +70,7 @@ def client(engine):
 
 def _admin_token() -> str:
     """Return a valid admin JWT for test requests."""
-    from src.api.auth import create_access_token
+    from cogtrix_core.api.auth import create_access_token
 
     return create_access_token(
         user_id=str(uuid.uuid4()),
@@ -80,7 +80,7 @@ def _admin_token() -> str:
 
 def _superadmin_token() -> str:
     """Return a valid superadmin JWT for test requests."""
-    from src.api.auth import create_access_token
+    from cogtrix_core.api.auth import create_access_token
 
     return create_access_token(
         user_id=str(uuid.uuid4()),
@@ -90,7 +90,7 @@ def _superadmin_token() -> str:
 
 def _user_token() -> str:
     """Return a valid non-admin JWT for test requests."""
-    from src.api.auth import create_access_token
+    from cogtrix_core.api.auth import create_access_token
 
     return create_access_token(
         user_id=str(uuid.uuid4()),
@@ -357,7 +357,7 @@ class TestAdminOrgListFilters:
     def test_member_count_computed(self, client, sf):
         async def _seed():
             async with sf() as session:
-                from src.api.auth import hash_password
+                from cogtrix_core.api.auth import hash_password
 
                 org_repo = OrganizationRepository(session)
                 user_repo = UserRepository(session)
@@ -416,7 +416,7 @@ class TestAdminStatsAuth:
 
 class TestAdminStatsCounts:
     def test_stats_match_seeded_data(self, client, sf):
-        from src.api.auth import hash_password
+        from cogtrix_core.api.auth import hash_password
 
         async def _seed():
             async with sf() as session:
@@ -626,7 +626,7 @@ class TestAdminOrgAudit:
 @pytest.fixture(autouse=True)
 def _clear_system_cache():
     """Clear the system stats cache before each test."""
-    from src.api.routes.admin import _cache
+    from cogtrix_core.api.routes.admin import _cache
 
     _cache.set(None)
     _cache._data = None
@@ -657,7 +657,7 @@ class TestAdminSystemStatsAuth:
     def test_superadmin_gets_200(self, client):
         """Superadmin users should get 200 OK."""
         # Create a superadmin token
-        from src.api.auth import create_access_token
+        from cogtrix_core.api.auth import create_access_token
 
         superadmin_token = create_access_token(
             user_id=str(uuid.uuid4()),
@@ -695,7 +695,7 @@ class TestAdminSystemStatsValues:
 
     def test_system_stats_counts(self, client, sf):
         """Verify statistics match seeded data - uses shared session factory (sf)."""
-        from src.api.auth import hash_password
+        from cogtrix_core.api.auth import hash_password
 
         async def _seed():
             async with sf() as session:
@@ -763,7 +763,7 @@ class TestAdminSystemStatsValues:
         asyncio.run(_seed())
 
         # Create superadmin token
-        from src.api.auth import create_access_token
+        from cogtrix_core.api.auth import create_access_token
 
         superadmin_token = create_access_token(
             user_id=str(uuid.uuid4()),
@@ -782,7 +782,7 @@ class TestAdminSystemStatsValues:
 
     def test_system_stats_cached(self, client, sf):
         """Verify response is served from cache after first fetch."""
-        from src.api.auth import create_access_token
+        from cogtrix_core.api.auth import create_access_token
 
         async def _seed():
             async with sf() as session:
@@ -840,7 +840,7 @@ class TestAdminPoolMaxFormula:
 
     def test_db_pool_max_uses_configured_size_not_checked_out(self, client, engine):
         """QueuePool.size() returns checked-out count; db_pool_max must use configured size."""
-        from src.api.auth import create_access_token
+        from cogtrix_core.api.auth import create_access_token
 
         real_pool = engine.pool
 
@@ -911,7 +911,7 @@ class TestImpersonationAuth:
 
 class TestImpersonationLifecycle:
     def test_start_impersonation_success(self, client, sf):
-        from src.api.auth import hash_password
+        from cogtrix_core.api.auth import hash_password
 
         async def _seed():
             async with sf() as session:
@@ -943,7 +943,7 @@ class TestImpersonationLifecycle:
 
         org_id, superadmin_id, member_id = asyncio.run(_seed())
 
-        from src.api.auth import create_access_token
+        from cogtrix_core.api.auth import create_access_token
 
         token = create_access_token(superadmin_id, "superadmin")
         response = client.post(
@@ -961,7 +961,7 @@ class TestImpersonationLifecycle:
         # Verify the returned token is a valid JWT that decodes correctly.
         import jwt as _jwt
 
-        from src.api.auth import _get_jwt_secret
+        from cogtrix_core.api.auth import _get_jwt_secret
 
         decoded = _jwt.decode(
             data["impersonation_token"],
@@ -974,7 +974,7 @@ class TestImpersonationLifecycle:
         assert "impersonation_session_id" in decoded
 
     def test_cannot_chain_impersonation(self, client, sf):
-        from src.api.auth import hash_password
+        from cogtrix_core.api.auth import hash_password
 
         async def _seed():
             async with sf() as session:
@@ -1006,7 +1006,7 @@ class TestImpersonationLifecycle:
 
         org_id, superadmin_id, member_id = asyncio.run(_seed())
 
-        from src.api.auth import create_access_token
+        from cogtrix_core.api.auth import create_access_token
 
         token = create_access_token(superadmin_id, "superadmin")
         # First impersonation
@@ -1059,7 +1059,7 @@ class TestImpersonationLifecycle:
         assert response.json()["error"]["code"] == "NOT_FOUND"
 
     def test_stop_impersonation_by_superadmin(self, client, sf):
-        from src.api.auth import hash_password
+        from cogtrix_core.api.auth import hash_password
 
         async def _seed():
             async with sf() as session:
@@ -1091,7 +1091,7 @@ class TestImpersonationLifecycle:
 
         org_id, superadmin_id, member_id = asyncio.run(_seed())
 
-        from src.api.auth import create_access_token
+        from cogtrix_core.api.auth import create_access_token
 
         token = create_access_token(superadmin_id, "superadmin")
         r1 = client.post(
@@ -1109,7 +1109,7 @@ class TestImpersonationLifecycle:
         assert r2.json()["data"]["status"] == "ended"
 
     def test_stop_impersonation_by_token(self, client, sf):
-        from src.api.auth import hash_password
+        from cogtrix_core.api.auth import hash_password
 
         async def _seed():
             async with sf() as session:
@@ -1141,7 +1141,7 @@ class TestImpersonationLifecycle:
 
         org_id, superadmin_id, member_id = asyncio.run(_seed())
 
-        from src.api.auth import create_access_token
+        from cogtrix_core.api.auth import create_access_token
 
         super_token = create_access_token(superadmin_id, "superadmin")
         r1 = client.post(
@@ -1167,7 +1167,7 @@ class TestImpersonationLifecycle:
 
 class TestImpersonationToken:
     def test_impersonation_token_rejected_after_stop(self, client, sf):
-        from src.api.auth import hash_password
+        from cogtrix_core.api.auth import hash_password
 
         async def _seed():
             async with sf() as session:
@@ -1199,7 +1199,7 @@ class TestImpersonationToken:
 
         org_id, superadmin_id, member_id = asyncio.run(_seed())
 
-        from src.api.auth import create_access_token
+        from cogtrix_core.api.auth import create_access_token
 
         super_token = create_access_token(superadmin_id, "superadmin")
         r1 = client.post(
@@ -1232,7 +1232,7 @@ class TestImpersonationToken:
 
 class TestImpersonationAudit:
     def test_audit_entries_created(self, client, sf):
-        from src.api.auth import hash_password
+        from cogtrix_core.api.auth import hash_password
 
         async def _seed():
             async with sf() as session:
@@ -1264,7 +1264,7 @@ class TestImpersonationAudit:
 
         org_id, superadmin_id, member_id = asyncio.run(_seed())
 
-        from src.api.auth import create_access_token
+        from cogtrix_core.api.auth import create_access_token
 
         super_token = create_access_token(superadmin_id, "superadmin")
         r1 = client.post(

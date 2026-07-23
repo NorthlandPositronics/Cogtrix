@@ -1,4 +1,4 @@
-"""Tests for src/concurrency.py — the centralized invoke_with_timeout helper.
+"""Tests for cogtrix_core/concurrency.py — the centralized invoke_with_timeout helper.
 
 The helper is the canonical replacement for the per-call
 ThreadPoolExecutor(max_workers=1) + submit + result(timeout=...) +
@@ -30,7 +30,7 @@ import time
 
 import pytest
 
-from src.concurrency import _get_invoke_pool, invoke_with_timeout
+from cogtrix_core.concurrency import _get_invoke_pool, invoke_with_timeout
 
 # ---------------------------------------------------------------------------
 # Success / argument forwarding
@@ -199,7 +199,7 @@ class TestSharedPoolContract:
     def test_pool_is_bounded(self) -> None:
         """Pool size is bounded — without this guard, unbounded
         concurrent calls could spawn arbitrary OS threads."""
-        from src.concurrency import _INVOKE_POOL_WORKERS
+        from cogtrix_core.concurrency import _INVOKE_POOL_WORKERS
 
         pool = _get_invoke_pool()
         # ProcessPoolExecutor / ThreadPoolExecutor expose _max_workers.

@@ -3,10 +3,10 @@
 from datetime import datetime
 
 # Import to trigger registration
-from src.memory import modes  # noqa: F401
-from src.memory.factory import MemoryFactory
-from src.memory.json_store import JsonFileMemoryStore
-from src.memory.modes.code import CodeDevelopmentMemoryManager
+from cogtrix_core.memory import modes  # noqa: F401
+from cogtrix_core.memory.factory import MemoryFactory
+from cogtrix_core.memory.json_store import JsonFileMemoryStore
+from cogtrix_core.memory.modes.code import CodeDevelopmentMemoryManager
 
 
 class MockStore:
@@ -156,11 +156,11 @@ class TestFileTracking:
         manager = CodeDevelopmentMemoryManager(MockStore(), "test")
         manager.load()
 
-        manager.set_file_context("src/auth.py", "def login():\n    pass")
+        manager.set_file_context("cogtrix_core/auth.py", "def login():\n    pass")
 
-        assert "src/auth.py" in manager._files
-        assert manager._current_file == "src/auth.py"
-        assert manager._files["src/auth.py"].snippet is not None
+        assert "cogtrix_core/auth.py" in manager._files
+        assert manager._current_file == "cogtrix_core/auth.py"
+        assert manager._files["cogtrix_core/auth.py"].snippet is not None
 
     def test_file_extraction_from_message(self):
         """Test automatic file extraction from messages."""
@@ -168,11 +168,11 @@ class TestFileTracking:
         manager.load()
 
         manager.update(
-            "Please check `src/auth.py` and `models/user.py`",
+            "Please check `cogtrix_core/auth.py` and `models/user.py`",
             "I'll look at those files.",
         )
 
-        assert "src/auth.py" in manager._files
+        assert "cogtrix_core/auth.py" in manager._files
         assert "models/user.py" in manager._files
 
     def test_file_extraction_quoted(self):
@@ -216,12 +216,12 @@ class TestFileTracking:
         manager = CodeDevelopmentMemoryManager(MockStore(), "test")
         manager.load()
 
-        manager.set_file_context("src/main.py", "print('hello')")
+        manager.set_file_context("cogtrix_core/main.py", "print('hello')")
 
         context = manager.prepare_context("next")
 
         assert context.has_context_prefix()
-        assert "src/main.py" in (context.context_prefix or "")
+        assert "cogtrix_core/main.py" in (context.context_prefix or "")
 
 
 class TestErrorTracking:

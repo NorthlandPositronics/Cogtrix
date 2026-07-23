@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.config import (
+from cogtrix_core.config import (
     Config,
     ConfigError,
     RAGConfig,
@@ -219,15 +219,15 @@ class TestCLIDataDir:
 
 class TestSetEmbeddingsVectorStoreDir:
     def test_set_embeddings_vector_store_dir(self):
-        from src.memory.base import BaseMemoryStore
-        from src.memory.modes.conversation import ConversationMemoryManager
+        from cogtrix_core.memory.base import BaseMemoryStore
+        from cogtrix_core.memory.modes.conversation import ConversationMemoryManager
 
         store = MagicMock(spec=BaseMemoryStore)
         manager = ConversationMemoryManager(store=store, session_id="test-session")
 
         embedding_fn = MagicMock()
 
-        with patch("src.memory.recall.SessionVectorStore") as MockVS:
+        with patch("cogtrix_core.memory.recall.SessionVectorStore") as MockVS:
             mock_vs_instance = MagicMock()
             MockVS.return_value = mock_vs_instance
 
@@ -244,15 +244,15 @@ class TestSetEmbeddingsVectorStoreDir:
             mock_vs_instance.configure.assert_called_once_with(embedding_fn, "nomic-embed-text")
 
     def test_set_embeddings_default_vector_store_dir(self):
-        from src.memory.base import BaseMemoryStore
-        from src.memory.modes.conversation import ConversationMemoryManager
+        from cogtrix_core.memory.base import BaseMemoryStore
+        from cogtrix_core.memory.modes.conversation import ConversationMemoryManager
 
         store = MagicMock(spec=BaseMemoryStore)
         manager = ConversationMemoryManager(store=store, session_id="test-session-default")
 
         embedding_fn = MagicMock()
 
-        with patch("src.memory.recall.SessionVectorStore") as MockVS:
+        with patch("cogtrix_core.memory.recall.SessionVectorStore") as MockVS:
             mock_vs_instance = MagicMock()
             MockVS.return_value = mock_vs_instance
 
@@ -267,15 +267,15 @@ class TestSetEmbeddingsVectorStoreDir:
             )
 
     def test_set_embeddings_vector_store_dir_none_uses_default(self):
-        from src.memory.base import BaseMemoryStore
-        from src.memory.modes.conversation import ConversationMemoryManager
+        from cogtrix_core.memory.base import BaseMemoryStore
+        from cogtrix_core.memory.modes.conversation import ConversationMemoryManager
 
         store = MagicMock(spec=BaseMemoryStore)
         manager = ConversationMemoryManager(store=store, session_id="test-session-none")
 
         embedding_fn = MagicMock()
 
-        with patch("src.memory.recall.SessionVectorStore") as MockVS:
+        with patch("cogtrix_core.memory.recall.SessionVectorStore") as MockVS:
             mock_vs_instance = MagicMock()
             MockVS.return_value = mock_vs_instance
 

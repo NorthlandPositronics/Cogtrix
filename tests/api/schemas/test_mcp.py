@@ -1,4 +1,4 @@
-"""Tests for src/api/schemas/mcp.py."""
+"""Tests for cogtrix_core/api/schemas/mcp.py."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 import pytest
 from pydantic import ValidationError
 
-from src.api.schemas.mcp import (
+from cogtrix_core.api.schemas.mcp import (
     MCPServerAddRequest,
     MCPServerOut,
     MCPToolSummary,

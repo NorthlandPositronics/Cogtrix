@@ -24,7 +24,7 @@ class TestDeepSeekChatModelReasoning:
     """_DeepSeekChatModel correctly preserves reasoning_content."""
 
     def _make_model(self) -> object:
-        from src.providers.openai import _DeepSeekChatModel
+        from cogtrix_core.providers.openai import _DeepSeekChatModel
 
         return _DeepSeekChatModel(
             model="deepseek-v4-pro",
@@ -37,7 +37,7 @@ class TestDeepSeekChatModelReasoning:
 
         from langchain_core.messages import AIMessage, HumanMessage
 
-        from src.providers.openai import _DeepSeekChatModel
+        from cogtrix_core.providers.openai import _DeepSeekChatModel
 
         model = self._make_model()
         messages = [
@@ -84,7 +84,7 @@ class TestDeepSeekChatModelReasoning:
 
         from langchain_core.messages import AIMessage, HumanMessage
 
-        from src.providers.openai import _DeepSeekChatModel
+        from cogtrix_core.providers.openai import _DeepSeekChatModel
 
         model = self._make_model()
         messages = [
@@ -114,7 +114,7 @@ class TestDeepSeekChatModelReasoning:
 
         from langchain_core.messages import AIMessage, HumanMessage
 
-        from src.providers.openai import _DeepSeekChatModel
+        from cogtrix_core.providers.openai import _DeepSeekChatModel
 
         model = self._make_model()
         # Even if a HumanMessage somehow carried reasoning_content, it should
@@ -145,7 +145,7 @@ class TestDeepSeekChatModelReasoning:
 
         from langchain_core.messages import AIMessage, HumanMessage
 
-        from src.providers.openai import _DeepSeekChatModel
+        from cogtrix_core.providers.openai import _DeepSeekChatModel
 
         model = self._make_model()
         messages = [
@@ -180,7 +180,7 @@ class TestDeepSeekProviderSelection:
     """create_chat_model uses _DeepSeekChatModel for the DeepSeek endpoint."""
 
     def test_deepseek_url_returns_deepseek_model(self) -> None:
-        from src.providers.openai import _DeepSeekChatModel, create_chat_model
+        from cogtrix_core.providers.openai import _DeepSeekChatModel, create_chat_model
 
         model = create_chat_model(
             model="deepseek-chat",
@@ -194,14 +194,14 @@ class TestDeepSeekProviderSelection:
     def test_openai_url_returns_standard_model(self) -> None:
         from langchain_openai import ChatOpenAI
 
-        from src.providers.openai import _DeepSeekChatModel, create_chat_model
+        from cogtrix_core.providers.openai import _DeepSeekChatModel, create_chat_model
 
         model = create_chat_model(model="gpt-4.1-mini", api_key="sk-test")
         assert not isinstance(model, _DeepSeekChatModel)
         assert isinstance(model, ChatOpenAI)
 
     def test_xai_url_returns_standard_model(self) -> None:
-        from src.providers.openai import _DeepSeekChatModel, create_chat_model
+        from cogtrix_core.providers.openai import _DeepSeekChatModel, create_chat_model
 
         model = create_chat_model(
             model="grok-4.1-fast",
@@ -213,7 +213,7 @@ class TestDeepSeekProviderSelection:
     def test_deepseek_model_is_subclass_of_chatopenai(self) -> None:
         from langchain_openai import ChatOpenAI
 
-        from src.providers.openai import _DeepSeekChatModel
+        from cogtrix_core.providers.openai import _DeepSeekChatModel
 
         assert issubclass(_DeepSeekChatModel, ChatOpenAI)
 
@@ -221,7 +221,7 @@ class TestDeepSeekProviderSelection:
 
     def test_lookalike_domain_not_selected(self) -> None:
         """Lookalike domain (api.deepseek.com.evil.com) must NOT activate DeepSeek."""
-        from src.providers.openai import _DeepSeekChatModel, create_chat_model
+        from cogtrix_core.providers.openai import _DeepSeekChatModel, create_chat_model
 
         model = create_chat_model(
             model="gpt-4.1-mini",
@@ -235,7 +235,7 @@ class TestDeepSeekProviderSelection:
 
     def test_path_contains_deepseek_not_selected(self) -> None:
         """Path segment containing 'api.deepseek.com' must NOT activate DeepSeek."""
-        from src.providers.openai import _DeepSeekChatModel, create_chat_model
+        from cogtrix_core.providers.openai import _DeepSeekChatModel, create_chat_model
 
         model = create_chat_model(
             model="gpt-4.1-mini",
@@ -249,7 +249,7 @@ class TestDeepSeekProviderSelection:
 
     def test_base_url_none_standard_model(self) -> None:
         """base_url=None must return standard ChatOpenAI, not _DeepSeekChatModel."""
-        from src.providers.openai import _DeepSeekChatModel, create_chat_model
+        from cogtrix_core.providers.openai import _DeepSeekChatModel, create_chat_model
 
         model = create_chat_model(model="gpt-4.1-mini", api_key="sk-test")
         assert not isinstance(
@@ -258,7 +258,7 @@ class TestDeepSeekProviderSelection:
 
     def test_is_deepseek_base_url_helper(self) -> None:
         """_is_deepseek_base_url returns True only for known DeepSeek hostnames."""
-        from src.providers.openai import _is_deepseek_base_url
+        from cogtrix_core.providers.openai import _is_deepseek_base_url
 
         # Legitimate DeepSeek URLs
         assert _is_deepseek_base_url("https://api.deepseek.com/v1") is True
@@ -289,7 +289,7 @@ class TestDeepSeekChatModelCapture:
     }
 
     def _make_model(self) -> object:
-        from src.providers.openai import _DeepSeekChatModel
+        from cogtrix_core.providers.openai import _DeepSeekChatModel
 
         return _DeepSeekChatModel(
             model="deepseek-v4-pro",
@@ -349,7 +349,7 @@ class TestDeepSeekChatModelCapture:
 
         from langchain_core.messages import HumanMessage
 
-        from src.providers.openai import _DeepSeekChatModel
+        from cogtrix_core.providers.openai import _DeepSeekChatModel
 
         model = self._make_model()
 
@@ -405,7 +405,7 @@ class TestDeepSeekStreamingCapture:
     """_convert_chunk_to_generation_chunk captures reasoning_content from streaming deltas."""
 
     def _make_model(self) -> object:
-        from src.providers.openai import _DeepSeekChatModel
+        from cogtrix_core.providers.openai import _DeepSeekChatModel
 
         return _DeepSeekChatModel(
             model="deepseek-v4-pro",
@@ -463,7 +463,7 @@ class TestDeepSeekStreamingCapture:
 
         from langchain_core.messages import AIMessageChunk
 
-        from src.providers.openai import _DeepSeekChatModel
+        from cogtrix_core.providers.openai import _DeepSeekChatModel
 
         model = self._make_model()
         with patch.object(
@@ -482,7 +482,7 @@ class TestSetProviderKeySecurityWarning:
     def test_warns_when_base_url_differs_from_preset(self, caplog) -> None:
         import logging
 
-        from src.config import Config, ProviderConfig, _set_provider_key
+        from cogtrix_core.config import Config, ProviderConfig, _set_provider_key
 
         cfg = Config()
         cfg.providers["deepseek"] = ProviderConfig(
@@ -497,7 +497,7 @@ class TestSetProviderKeySecurityWarning:
     def test_no_warning_when_base_url_matches_preset(self, caplog) -> None:
         import logging
 
-        from src.config import Config, ProviderConfig, _set_provider_key
+        from cogtrix_core.config import Config, ProviderConfig, _set_provider_key
 
         cfg = Config()
         cfg.providers["deepseek"] = ProviderConfig(
@@ -510,7 +510,7 @@ class TestSetProviderKeySecurityWarning:
     def test_no_warning_for_new_provider_creation(self, caplog) -> None:
         import logging
 
-        from src.config import Config, _set_provider_key
+        from cogtrix_core.config import Config, _set_provider_key
 
         cfg = Config()  # no existing deepseek provider
         with caplog.at_level(logging.WARNING):
@@ -528,7 +528,7 @@ class TestResponsesApiPayloadInjection:
 
         from langchain_core.messages import AIMessage, HumanMessage
 
-        from src.providers.openai import _DeepSeekChatModel
+        from cogtrix_core.providers.openai import _DeepSeekChatModel
 
         model = _DeepSeekChatModel(
             model="deepseek-v4-pro", api_key="sk-test", base_url="https://api.deepseek.com/v1"
@@ -557,7 +557,7 @@ class TestResponsesApiPayloadInjection:
 
         from langchain_core.messages import AIMessage, HumanMessage
 
-        from src.providers.openai import _DeepSeekChatModel
+        from cogtrix_core.providers.openai import _DeepSeekChatModel
 
         model = _DeepSeekChatModel(
             model="deepseek-v4-pro", api_key="sk-test", base_url="https://api.deepseek.com/v1"
@@ -583,7 +583,7 @@ class TestResponsesApiPayloadInjection:
 
         from langchain_core.messages import AIMessage, HumanMessage
 
-        from src.providers.openai import _DeepSeekChatModel
+        from cogtrix_core.providers.openai import _DeepSeekChatModel
 
         model = _DeepSeekChatModel(
             model="deepseek-reasoner", api_key="sk-test", base_url="https://api.deepseek.com/v1"
@@ -625,7 +625,7 @@ class TestResponsesApiPayloadInjection:
 
         from langchain_core.messages import AIMessage, HumanMessage
 
-        from src.providers.openai import _DeepSeekChatModel
+        from cogtrix_core.providers.openai import _DeepSeekChatModel
 
         model = _DeepSeekChatModel(
             model="deepseek-chat", api_key="sk-test", base_url="https://api.deepseek.com/v1"

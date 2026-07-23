@@ -7,12 +7,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from src.logging_config import get_session_id
+from cogtrix_core.logging_config import get_session_id
 
 
 @pytest.mark.asyncio
 async def test_run_message_turn_propagates_session_id(monkeypatch: pytest.MonkeyPatch) -> None:
-    from src.api.turn_runner import run_message_turn
+    from cogtrix_core.api.turn_runner import run_message_turn
 
     session = SimpleNamespace(
         id="sess-abc",
@@ -35,7 +35,7 @@ async def test_run_message_turn_propagates_session_id(monkeypatch: pytest.Monkey
         seen["session_id"] = get_session_id()
         return "ok"
 
-    monkeypatch.setattr("src.orchestration.runner.run_agent", _fake_run_agent)
+    monkeypatch.setattr("cogtrix_core.orchestration.runner.run_agent", _fake_run_agent)
 
     await run_message_turn(session, "hello")
 

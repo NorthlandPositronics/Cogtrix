@@ -6,13 +6,13 @@ from unittest.mock import MagicMock, patch
 
 from langchain_core.messages import AIMessage, HumanMessage
 
-from src.memory.distillation import distill_summary
-from src.memory.json_store import JsonFileMemoryStore
-from src.memory.modes.code import CodeDevelopmentMemoryManager
-from src.memory.modes.conversation import ConversationMemoryManager
-from src.memory.modes.reasoning import ReasoningMemoryManager
-from src.memory.recall import SessionVectorStore
-from src.memory.summarizer import _format_messages_text, generate_summary
+from cogtrix_core.memory.distillation import distill_summary
+from cogtrix_core.memory.json_store import JsonFileMemoryStore
+from cogtrix_core.memory.modes.code import CodeDevelopmentMemoryManager
+from cogtrix_core.memory.modes.conversation import ConversationMemoryManager
+from cogtrix_core.memory.modes.reasoning import ReasoningMemoryManager
+from cogtrix_core.memory.recall import SessionVectorStore
+from cogtrix_core.memory.summarizer import _format_messages_text, generate_summary
 
 # ── Summarizer unit tests ───────────────────────────────────────────
 
@@ -151,7 +151,7 @@ class TestGenerateSummary:
         real timeout and does NOT use ``with ThreadPoolExecutor(...) as pool:``
         (which overrides pool.shutdown(wait=False) and blocks anyway).
         """
-        import src.memory.summarizer as _summarizer_mod
+        import cogtrix_core.memory.summarizer as _summarizer_mod
 
         # Shorten the module timeout so the test completes in < 3 s.
         monkeypatch.setattr(_summarizer_mod, "_SUMMARIZE_TIMEOUT_SECONDS", 0.5)
@@ -226,7 +226,7 @@ class TestDistillSummary:
 
         mock_llm.invoke.side_effect = _slow_invoke
 
-        with patch("src.memory.distillation._DISTILL_TIMEOUT_SECONDS", 0.1):
+        with patch("cogtrix_core.memory.distillation._DISTILL_TIMEOUT_SECONDS", 0.1):
             facts = distill_summary(mock_llm, "Some session summary")
 
         assert facts == []
@@ -260,7 +260,7 @@ class TestDistillSummary:
         mock_llm.invoke.side_effect = _never_return
 
         start = time.monotonic()
-        with patch("src.memory.distillation._DISTILL_TIMEOUT_SECONDS", 0.1):
+        with patch("cogtrix_core.memory.distillation._DISTILL_TIMEOUT_SECONDS", 0.1):
             facts = distill_summary(mock_llm, "Some session summary")
         elapsed = time.monotonic() - start
 
@@ -582,7 +582,7 @@ class TestHybridPersistence:
         mgr._ensure_embeddings_initialized = MagicMock()
 
         before = datetime.now(UTC)
-        with patch("src.memory.summarizer.generate_summary", return_value="Fresh summary"):
+        with patch("cogtrix_core.memory.summarizer.generate_summary", return_value="Fresh summary"):
             mgr._run_slow_path([HumanMessage(content="hello")], unsummarized_end=1)
 
         assert mgr._summary == "Fresh summary"

@@ -1,10 +1,10 @@
-"""Tests for src/memory/distillation.py distill_summary() and helpers."""
+"""Tests for cogtrix_core/memory/distillation.py distill_summary() and helpers."""
 
 from __future__ import annotations
 
 from unittest.mock import MagicMock
 
-from src.memory.distillation import _coerce_text, _parse_facts, distill_summary
+from cogtrix_core.memory.distillation import _coerce_text, _parse_facts, distill_summary
 
 # ---------------------------------------------------------------------------
 # _coerce_text
@@ -152,7 +152,7 @@ class TestDistillSummary:
         # by checking the source code contains the expected try/except around import
         import inspect
 
-        import src.memory.distillation as distillation_module
+        import cogtrix_core.memory.distillation as distillation_module
 
         source = inspect.getsource(distillation_module.distill_summary)
         # Verify the ImportError handling is present
@@ -272,6 +272,6 @@ class TestDistillSummary:
 
     def test_timeout_setting_60_seconds(self):
         """Verify the timeout constant is set correctly."""
-        from src.memory import distillation
+        from cogtrix_core.memory import distillation
 
         assert distillation._DISTILL_TIMEOUT_SECONDS == 60

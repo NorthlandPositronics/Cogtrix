@@ -1,6 +1,6 @@
 """Comprehensive workflow API endpoint coverage.
 
-Covers all endpoints in src/api/routes/workflows.py:
+Covers all endpoints in cogtrix_core/api/routes/workflows.py:
     GET    /api/v1/assistant/workflows                           — list
     POST   /api/v1/assistant/workflows                           — create (admin)
     GET    /api/v1/assistant/workflows/bindings                  — list bindings
@@ -38,7 +38,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine  # noqa: E402
 from sqlalchemy.pool import StaticPool  # noqa: E402
 
-from src.api.db.engine import Base, get_db  # noqa: E402
+from cogtrix_core.api.db.engine import Base, get_db  # noqa: E402
 
 _VALID_PASSWORD = "TestPass1!"
 
@@ -50,7 +50,7 @@ _VALID_PASSWORD = "TestPass1!"
 
 @pytest.fixture()
 def app():
-    from src.api.app import create_app
+    from cogtrix_core.api.app import create_app
 
     engine = create_async_engine(
         "sqlite+aiosqlite:///:memory:",
@@ -89,7 +89,7 @@ def app():
 
 @pytest.fixture()
 def client(app, tmp_path):
-    from src.assistant.workflows import WorkflowRegistry
+    from cogtrix_core.assistant.workflows import WorkflowRegistry
 
     with TestClient(app, raise_server_exceptions=False) as c:
         # Override with a fresh registry AFTER the lifespan startup runs

@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.providers import _load_provider, _provider_cache, _provider_cache_lock
+from cogtrix_core.providers import _load_provider, _provider_cache, _provider_cache_lock
 
 
 class TestProviderCache:
@@ -30,7 +30,7 @@ class TestProviderCache:
         with _provider_cache_lock:
             _provider_cache["openai"] = fake_module
 
-        with patch("src.providers.__init__.importlib.import_module") as mock_import:
+        with patch("cogtrix_core.providers.__init__.importlib.import_module") as mock_import:
             result = _load_provider("openai")
 
         assert result is fake_module
@@ -40,7 +40,9 @@ class TestProviderCache:
         """An uncached provider is imported and stored in the cache."""
         fake_module = MagicMock()
 
-        with patch("src.providers.__init__.importlib.import_module", return_value=fake_module):
+        with patch(
+            "cogtrix_core.providers.__init__.importlib.import_module", return_value=fake_module
+        ):
             result = _load_provider("openai")
 
         assert result is fake_module
@@ -81,7 +83,9 @@ class TestProviderCache:
             result = _load_provider("ollama")
             reader_result.append(result)
 
-        with patch("src.providers.__init__.importlib.import_module", side_effect=slow_import):
+        with patch(
+            "cogtrix_core.providers.__init__.importlib.import_module", side_effect=slow_import
+        ):
             slow_thread = threading.Thread(target=_load_provider, args=("openai",))
             read_thread = threading.Thread(target=reader)
 
@@ -107,7 +111,9 @@ class TestProviderCache:
             time.sleep(0.05)
             return fake_module
 
-        with patch("src.providers.__init__.importlib.import_module", side_effect=counting_import):
+        with patch(
+            "cogtrix_core.providers.__init__.importlib.import_module", side_effect=counting_import
+        ):
             threads = [threading.Thread(target=_load_provider, args=("openai",)) for _ in range(5)]
             for t in threads:
                 t.start()

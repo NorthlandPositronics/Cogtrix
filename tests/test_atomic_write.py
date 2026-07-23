@@ -17,7 +17,7 @@ from unittest.mock import patch
 
 import pytest
 
-from src.utils.atomic_write import atomic_write_json
+from cogtrix_core.utils.atomic_write import atomic_write_json
 
 
 class TestAtomicWriteJson:

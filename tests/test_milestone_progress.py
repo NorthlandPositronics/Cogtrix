@@ -1,32 +1,32 @@
 """Tests for the milestone progress tracking feature.
 
 Covers:
-- PromptPlan / Milestone dataclasses (src/prompt/optimizer.py)
+- PromptPlan / Milestone dataclasses (cogtrix_core/prompt/optimizer.py)
 - _parse_plan_response parser
 - optimize_prompt short-circuit and milestone-aware paths
-- report_progress callback mechanism (src/tools/report_progress.py)
+- report_progress callback mechanism (cogtrix_core/tools/report_progress.py)
 - create_report_progress_tool factory
-- ActivityIndicator context helpers (src/ui/spinner.py)
-- format_milestone_instructions / build_system_prompt (src/agent/core.py)
+- ActivityIndicator context helpers (cogtrix_core/ui/spinner.py)
+- format_milestone_instructions / build_system_prompt (cogtrix_core/agent/core.py)
 """
 
 from __future__ import annotations
 
 import threading
 
-from src.agent.core import build_system_prompt, format_milestone_instructions
-from src.prompt.optimizer import (
+from cogtrix_core.agent.core import build_system_prompt, format_milestone_instructions
+from cogtrix_core.prompt.optimizer import (
     Milestone,
     PromptPlan,
     _parse_plan_response,
     optimize_prompt,
 )
-from src.tools.report_progress import (
+from cogtrix_core.tools.report_progress import (
     create_report_progress_tool,
     report_progress,
     set_progress_callback,
 )
-from src.ui.spinner import ActivityIndicator
+from cogtrix_core.ui.spinner import ActivityIndicator
 
 # ---------------------------------------------------------------------------
 # Helpers

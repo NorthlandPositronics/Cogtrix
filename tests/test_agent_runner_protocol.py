@@ -13,8 +13,8 @@ import inspect
 
 def test_agent_runner_protocol_core_params_present():
     """Protocol must accept the core positional parameters of run_agent."""
-    from src.agent.core import AgentRunner
-    from src.orchestration.runner import run_agent
+    from cogtrix_core.agent.core import AgentRunner
+    from cogtrix_core.orchestration.runner import run_agent
 
     protocol_sig = inspect.signature(AgentRunner.__call__)
     run_agent_sig = inspect.signature(run_agent)
@@ -32,8 +32,8 @@ def test_agent_runner_protocol_core_params_present():
 
 def test_run_agent_satisfies_protocol():
     """run_agent must satisfy the AgentRunner Protocol at runtime."""
-    from src.agent.core import AgentRunner
-    from src.orchestration.runner import run_agent
+    from cogtrix_core.agent.core import AgentRunner
+    from cogtrix_core.orchestration.runner import run_agent
 
     assert isinstance(run_agent, AgentRunner), (
         "run_agent does not satisfy the AgentRunner Protocol. "

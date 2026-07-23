@@ -1,4 +1,4 @@
-"""Tests for src/api/redis_sessions.py — Redis-backed session presence store.
+"""Tests for cogtrix_core/api/redis_sessions.py — Redis-backed session presence store.
 
 All tests use a mock redis.asyncio client so no real Redis server is needed.
 """
@@ -9,8 +9,8 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-import src.api.redis_sessions as redis_sessions_mod
-from src.api.redis_sessions import SessionPresenceStore, configure_redis, get_store
+import cogtrix_core.api.redis_sessions as redis_sessions_mod
+from cogtrix_core.api.redis_sessions import SessionPresenceStore, configure_redis, get_store
 
 # ---------------------------------------------------------------------------
 # Helpers

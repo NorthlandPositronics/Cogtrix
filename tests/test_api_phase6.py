@@ -50,7 +50,7 @@ os.environ.setdefault("COGTRIX_DB_URL", "sqlite+aiosqlite:///:memory:")
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-from src.api.auth import create_access_token  # noqa: E402
+from cogtrix_core.api.auth import create_access_token  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Token factories
@@ -283,7 +283,7 @@ def _make_mock_service(
 
 @pytest.fixture()
 def client():
-    from src.api.app import app
+    from cogtrix_core.api.app import app
 
     with TestClient(app) as c:
         app.state.assistant_service = None
@@ -292,7 +292,7 @@ def client():
 
 @pytest.fixture()
 def client_with_service():
-    from src.api.app import app
+    from cogtrix_core.api.app import app
 
     with TestClient(app) as c:
         svc = _make_mock_service(channels=["whatsapp", "telegram"])
@@ -342,7 +342,7 @@ class TestAssistantStatus:
         assert resp.status_code == 200
         body = resp.json()
         assert body["data"]["status"] == "stopped"
-        from src.api.app import app
+        from cogtrix_core.api.app import app
 
         assert app.state.assistant_service is None
 
@@ -380,7 +380,7 @@ class TestAssistantChats:
         assert body["data"]["has_more"] is False
 
     def test_list_chats_with_sessions(self):
-        from src.api.app import app
+        from cogtrix_core.api.app import app
 
         sessions = [
             ("whatsapp::+1234", "whatsapp", "+1234@c.us"),
@@ -403,7 +403,7 @@ class TestAssistantChats:
         assert "telegram::100" in keys
 
     def test_list_chats_filter_by_channel(self):
-        from src.api.app import app
+        from cogtrix_core.api.app import app
 
         sessions = [
             ("whatsapp::+1234", "whatsapp", "+1234@c.us"),
@@ -423,7 +423,7 @@ class TestAssistantChats:
         assert items[0]["channel"] == "whatsapp"
 
     def test_get_chat_messages_not_found(self):
-        from src.api.app import app
+        from cogtrix_core.api.app import app
 
         svc = _make_mock_service()
 
@@ -448,7 +448,7 @@ class TestAssistantChats:
     def test_get_chat_messages_returns_history(self):
         from unittest.mock import MagicMock
 
-        from src.api.app import app
+        from cogtrix_core.api.app import app
 
         sessions = [("wa::123", "whatsapp", "123")]
         sm = _make_mock_session_mgr(sessions)
@@ -498,7 +498,7 @@ class TestScheduledMessages:
         assert body["data"]["items"] == []
 
     def test_list_scheduled_with_messages(self):
-        from src.api.app import app
+        from cogtrix_core.api.app import app
 
         msg = self._make_msg()
         scheduler = _make_mock_scheduler([msg])
@@ -517,7 +517,7 @@ class TestScheduledMessages:
         assert items[0]["text"] == "Hello!"
 
     def test_list_scheduled_filter_by_channel(self):
-        from src.api.app import app
+        from cogtrix_core.api.app import app
 
         msg1 = self._make_msg()
         msg2 = self._make_msg()
@@ -546,7 +546,7 @@ class TestScheduledMessages:
         assert resp.status_code == 409
 
     def test_edit_scheduled_not_found(self):
-        from src.api.app import app
+        from cogtrix_core.api.app import app
 
         scheduler = _make_mock_scheduler()
         svc = _make_mock_service(scheduler=scheduler)
@@ -564,7 +564,7 @@ class TestScheduledMessages:
         assert resp.json()["error"]["code"] == "SCHEDULED_MSG_NOT_FOUND"
 
     def test_edit_scheduled_success(self):
-        from src.api.app import app
+        from cogtrix_core.api.app import app
 
         msg = self._make_msg()
         scheduler = _make_mock_scheduler([msg])
@@ -590,7 +590,7 @@ class TestScheduledMessages:
         assert resp.status_code == 409
 
     def test_cancel_scheduled_not_found(self):
-        from src.api.app import app
+        from cogtrix_core.api.app import app
 
         scheduler = _make_mock_scheduler()
         svc = _make_mock_service(scheduler=scheduler)
@@ -607,7 +607,7 @@ class TestScheduledMessages:
         assert resp.json()["error"]["code"] == "SCHEDULED_MSG_NOT_FOUND"
 
     def test_cancel_scheduled_success(self):
-        from src.api.app import app
+        from cogtrix_core.api.app import app
 
         msg = self._make_msg()
         scheduler = _make_mock_scheduler([msg])
@@ -650,7 +650,7 @@ class TestDeferredRecords:
         assert resp.json()["data"] == []
 
     def test_list_deferred_with_records(self):
-        from src.api.app import app
+        from cogtrix_core.api.app import app
 
         key = "whatsapp::+123"
         record = self._make_record(key)
@@ -677,7 +677,7 @@ class TestDeferredRecords:
         assert resp.status_code == 409
 
     def test_cancel_deferred_not_found(self):
-        from src.api.app import app
+        from cogtrix_core.api.app import app
 
         dmgr = _make_mock_deferral_mgr({})
         svc = _make_mock_service(deferral_mgr=dmgr)
@@ -694,7 +694,7 @@ class TestDeferredRecords:
         assert resp.json()["error"]["code"] == "DEFERRED_MSG_NOT_FOUND"
 
     def test_cancel_deferred_success(self):
-        from src.api.app import app
+        from cogtrix_core.api.app import app
 
         key = "whatsapp::+123"
         record = self._make_record(key)
@@ -714,7 +714,7 @@ class TestDeferredRecords:
         assert record.status == "cancelled"
 
     def test_list_deferred_no_deferral_mgr(self):
-        from src.api.app import app
+        from cogtrix_core.api.app import app
 
         svc = _make_mock_service(deferral_mgr=None)
         svc._deferral_mgr = None
@@ -740,7 +740,7 @@ class TestContacts:
         assert resp.json()["data"] == []
 
     def test_list_contacts_with_phonebook(self):
-        from src.api.app import app
+        from cogtrix_core.api.app import app
 
         svc = _make_mock_service()
         svc._config.services = {
@@ -768,7 +768,7 @@ class TestContacts:
             assert "whatsapp" in item["channels"]
 
     def test_list_contacts_with_contact_prompts(self):
-        from src.api.app import app
+        from cogtrix_core.api.app import app
 
         svc = _make_mock_service()
         svc._config.services = {
@@ -795,7 +795,7 @@ class TestContacts:
         assert items[0]["channels"] == ["whatsapp"]
 
     def test_list_contacts_multi_channel(self):
-        from src.api.app import app
+        from cogtrix_core.api.app import app
 
         svc = _make_mock_service()
         svc._config.services = {
@@ -841,7 +841,7 @@ class TestGuardrails:
         assert body["total_violations"] == 0
 
     def test_get_guardrails_with_blacklisted(self):
-        from src.api.app import app
+        from cogtrix_core.api.app import app
 
         g = _make_mock_guardrails(blacklisted=["chat1", "chat2"])
         svc = _make_mock_service(guardrails=g)
@@ -871,7 +871,7 @@ class TestGuardrails:
         assert resp.status_code == 409
 
     def test_remove_from_blacklist_not_found(self):
-        from src.api.app import app
+        from cogtrix_core.api.app import app
 
         g = _make_mock_guardrails(blacklisted=[])
         svc = _make_mock_service(guardrails=g)
@@ -888,7 +888,7 @@ class TestGuardrails:
         assert resp.json()["error"]["code"] == "NOT_FOUND"
 
     def test_remove_from_blacklist_success(self):
-        from src.api.app import app
+        from cogtrix_core.api.app import app
 
         g = _make_mock_guardrails(blacklisted=["bad_chat"])
         svc = _make_mock_service(guardrails=g)
@@ -932,7 +932,7 @@ class TestKnowledge:
         assert body["items"] == []
 
     def test_list_knowledge_no_store(self):
-        from src.api.app import app
+        from cogtrix_core.api.app import app
 
         svc = _make_mock_service(knowledge_store=None)
         svc._knowledge_store = None
@@ -946,7 +946,7 @@ class TestKnowledge:
         assert resp.json()["data"]["items"] == []
 
     def test_list_knowledge_with_facts(self):
-        from src.api.app import app
+        from cogtrix_core.api.app import app
 
         facts = [
             self._make_fact("Alice", "Is a veterinarian"),
@@ -968,7 +968,7 @@ class TestKnowledge:
         assert any("Bob" in t for t in texts)
 
     def test_list_knowledge_filter_by_source_chat(self):
-        from src.api.app import app
+        from cogtrix_core.api.app import app
 
         fact1 = self._make_fact("Alice", "Loves cats")
         fact1.source_session = "wa::chat111"
@@ -1000,7 +1000,7 @@ class TestKnowledge:
         assert resp.json()["data"] == []
 
     def test_search_knowledge_returns_results(self):
-        from src.api.app import app
+        from cogtrix_core.api.app import app
 
         facts = [
             self._make_fact("Alice", "Is a veterinarian in Portland"),
@@ -1023,7 +1023,7 @@ class TestKnowledge:
         assert all(item["relevance_score"] is not None for item in items)
 
     def test_search_knowledge_empty_store(self):
-        from src.api.app import app
+        from cogtrix_core.api.app import app
 
         ks = _make_mock_knowledge_store([])
         svc = _make_mock_service(knowledge_store=ks)
@@ -1055,7 +1055,7 @@ class TestKnowledge:
         assert resp.status_code == 409
 
     def test_delete_fact_not_found(self):
-        from src.api.app import app
+        from cogtrix_core.api.app import app
 
         ks = _make_mock_knowledge_store([])
         svc = _make_mock_service(knowledge_store=ks)
@@ -1072,7 +1072,7 @@ class TestKnowledge:
         assert resp.json()["error"]["code"] == "FACT_NOT_FOUND"
 
     def test_delete_fact_success(self):
-        from src.api.app import app
+        from cogtrix_core.api.app import app
 
         fact = self._make_fact("Alice", "Is a vet")
         ks = _make_mock_knowledge_store([fact])

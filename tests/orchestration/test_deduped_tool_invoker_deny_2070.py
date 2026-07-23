@@ -11,8 +11,8 @@ from __future__ import annotations
 
 import threading
 
-from src.orchestration.deduped_tool_invoker import DedupedToolInvoker
-from src.orchestration.session_state import SessionState
+from cogtrix_core.orchestration.deduped_tool_invoker import DedupedToolInvoker
+from cogtrix_core.orchestration.session_state import SessionState
 
 
 def _make_invoker(session_state: SessionState) -> DedupedToolInvoker:

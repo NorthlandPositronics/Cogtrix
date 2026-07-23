@@ -21,7 +21,7 @@ import json
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_openai.chat_models.base import _convert_message_to_dict
 
-from src.orchestration.phases import repair_tool_call_arguments
+from cogtrix_core.orchestration.phases import repair_tool_call_arguments
 
 
 def _invalid(name: str, args: str, id: str = "call_1") -> dict:

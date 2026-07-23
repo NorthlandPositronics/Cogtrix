@@ -16,7 +16,7 @@ import threading
 import time
 from pathlib import Path
 
-from src.assistant.guardrails import ViolationTracker
+from cogtrix_core.assistant.guardrails import ViolationTracker
 
 
 def _make_tracker(persist_path: Path) -> ViolationTracker:

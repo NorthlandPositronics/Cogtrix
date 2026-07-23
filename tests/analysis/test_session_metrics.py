@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from src.analysis.session_metrics import compute_session_metrics, write_session_metrics
+from cogtrix_core.analysis.session_metrics import compute_session_metrics, write_session_metrics
 
 SAMPLE_LOG = """\
 2026-05-01 10:00:00.000 [INFO] [a1b2c3d4] TOOL_START: read_text_file

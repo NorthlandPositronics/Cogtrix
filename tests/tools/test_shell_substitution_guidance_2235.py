@@ -10,7 +10,7 @@ the guard is deferred (phase 2).
 
 from __future__ import annotations
 
-import src.tools.shell as shell
+import cogtrix_core.tools.shell as shell
 
 _HEREDOC_MD = "cat > /workspace/cluster-docs.md <<'EOF'\n# Doc\n```bash\nls\n```\nEOF"
 

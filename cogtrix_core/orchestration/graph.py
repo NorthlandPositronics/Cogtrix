@@ -1,0 +1,2677 @@
+"""LangGraph agent graph for Cogtrix.
+
+Builds a custom StateGraph with three nodes:
+- call_model: binds active tools to LLM and invokes it
+- process_tools: executes tool calls, handles fuzzy matching and expansion
+- handle_phantom: recovers from phantom tool calls
+"""
+
+import json as _json
+import threading
+import time
+from collections import OrderedDict
+from collections.abc import Callable
+from dataclasses import asdict, dataclass, field, fields, is_dataclass
+from enum import StrEnum
+from typing import Any
+
+from cogtrix_core.agent.core import CogtrixState
+from cogtrix_core.logging_config import get_logger
+from cogtrix_core.orchestration.compression import (
+    _CHARS_PER_TOKEN,
+    _EMERGENCY_THRESHOLD_RATIO,
+    _MID_TURN_COMPRESSION_THRESHOLD,
+    COMPRESSION_MIN_AGE_CYCLES,
+    COMPRESSION_MIN_CHARS,
+    _content_len,
+    apply_message_compression,
+)
+from cogtrix_core.orchestration.nodes.process_tools import (
+    build_process_tools_node,
+    extract_prohibited_tools,
+)
+from cogtrix_core.orchestration.nodes.recovery import (
+    _RECOVERY_INJECTED_MARKER,
+    build_handle_action_intent_node,
+    build_handle_corpus_attribution_mismatch_node,
+    build_handle_entity_owner_mismatch_node,
+    build_handle_fabricated_action_node,
+    build_handle_fabricated_quote_node,
+    build_handle_noncanonical_fork_node,
+    build_handle_phantom_node,
+    build_handle_sycophancy_node,
+    build_handle_synthesis_after_eviction_node,
+    build_handle_topic_substitution_node,
+    build_handle_unsupported_attribution_node,
+    build_handle_unsupported_quote_node,
+    build_handle_unverified_claim_node,
+    build_handle_unverified_entity_node,
+    build_handle_version_scope_node,
+)
+from cogtrix_core.orchestration.run_config import AgentRunConfig
+from cogtrix_core.orchestration.session_state import SessionState
+from cogtrix_core.providers import RetryableChatModel, is_transient_connection_error
+from cogtrix_core.registry import LazyToolProxy as _LazyToolProxy
+from cogtrix_core.tools.configure import (
+    TOOL_OUTPUT_CAP_MIN_CHARS,
+    build_tool_catalog,
+    compute_tool_output_cap,
+)
+
+DEFAULT_RECURSION_LIMIT = 90
+EMPTY_RESPONSE_MSG = "**Error:** The model returned an empty response. Please try again."
+
+# #2342: tools whose use marks the turn as an *action / ops* task (the agent did
+# work — ran commands, edited files) rather than answering a question grounded in
+# tool results. The RAG-style grounding guards (topic-substitution, unverified-claim)
+# false-positive on such hand-off replies, so the router gates them on this set.
+_ACTION_EXEC_TOOLS = frozenset({"execute_shell_command", "write_file", "patch_file", "append_file"})
+
+# ── Per-tool call budget policy ──────────────────────────────────────────────
+# Hoisted to module level (#2213) so the classification is importable and
+# testable, and centralized in one place. Per-turn caps: a soft synthesis nudge
+# after _TOOL_BUDGET_SOFT calls, a hard stop after _TOOL_BUDGET_HARD. The budget
+# sets below decide which cap (if any) a given tool gets; they are DERIVED from
+# the per-tool category assignment (see ToolCategory / categorize_tool) so there
+# is a single source of truth. These are stateless constants; the per-graph
+# locks/dicts stay local to build_agent_graph.
+_TOOL_BUDGET_SOFT = 5  # nudge: "please synthesize"
+_TOOL_BUDGET_HARD = 8  # stop: "budget exhausted"
+# #2269: max tools the model may PIN (keep_loaded) per run. Bounded so pinning
+# can't blanket-exempt the whole toolkit and reintroduce runaway loops; pinned
+# tools also keep a recursion-aware ceiling (they're never truly uncapped).
+_MAX_PINNED_TOOLS = 5
+
+
+class ToolCategory(StrEnum):
+    """Budget-relevant *nature* of a tool (#2213 Layer 2).
+
+    The per-tool call budget used to key off hardcoded name allowlists on an
+    Internet-centric axis, which mis-budgeted the knowledge base, files, IM
+    history, and every (dynamically-named) MCP tool. The structural fix is to
+    key off a category the tool declares about itself:
+
+    - ``RETRIEVAL`` — read-only info gathering that may legitimately iterate
+      (web/KB/file/IM history, MCP data sources). Gets a recursion-aware hard
+      ceiling (``recursion_limit // divisor``) instead of the fixed cap, and is
+      still soft-nudged toward synthesis.
+    - ``ACTION`` — side-effecting sequences (shell, file writes, MCP mutations).
+      Soft-exempt (long build/edit sequences are legitimate); currently
+      hard-uncapped here — a per-category action ceiling is the next Layer-2
+      slice.
+    - ``CONTROL`` — meta / plumbing (``request_tools``, ``report_progress``,
+      scheduling, ``checkpoint``). Fully exempt from both caps.
+    - ``STANDARD`` — everything else / uncategorised: soft nudge + fixed hard
+      cap. This is today's default for unknown (incl. MCP) tools; the issue's
+      "unknown → most-restricted trust default" is a deferred semantic change
+      still tracked in #2213, kept out of this behaviour-preserving slice.
+    """
+
+    RETRIEVAL = "retrieval"
+    ACTION = "action"
+    CONTROL = "control"
+    STANDARD = "standard"
+
+
+# Canonical name → category assignment for built-in tools. This is the single
+# source of truth; the _TOOL_BUDGET_* frozensets are DERIVED from it below so
+# they cannot drift apart. MCP tools will carry their category in their manifest
+# (deferred slice); until then they fall to STANDARD via categorize_tool.
+#
+# CONTROL — meta / plumbing tools that naturally recur and carry no runaway risk.
+_TOOL_CATEGORY_CONTROL = frozenset(
+    {
+        "request_tools",
+        "report_progress",
+        "queue_reply",
+        "list_scheduled_messages",
+        "edit_scheduled_message",
+        "cancel_scheduled_message",
+        "defer_processing",
+        "suppress_reply",
+        "checkpoint",
+    }
+)
+# ACTION — side-effecting tools; long sequences (building software, multi-file
+# edits) are legitimate, so the budget does not target them here.
+_TOOL_CATEGORY_ACTION = frozenset(
+    {
+        "execute_shell_command",
+        "write_file",
+        "append_file",
+        "patch_file",
+    }
+)
+# RETRIEVAL — read-only tools that gather information progressively: must not
+# hard-stop at the *fixed* cutoff of 8 (legitimate research iterates), but "many"
+# is not "unbounded" — with no ceiling a non-converging model runs these to the
+# LangGraph recursion limit (#2014/#2213). DedupedToolInvoker gives them a
+# RECURSION-AWARE ceiling instead. The classification is content-agnostic — web
+# search, the knowledge base, files, and IM history all get the SAME ceiling. The
+# old web-only list left query_knowledge_base, file reads, and IM-history lookups
+# at the fixed cap of 8 — too tight for iterative RAG (the #2014 runaway was 85
+# query_knowledge_base calls, which that list never even covered). ADR-0056 PR-G
+# renamed search_web → web_search; both are kept so a future re-introduction of
+# search_web still classifies as retrieval.
+_TOOL_CATEGORY_RETRIEVAL = frozenset(
+    {
+        # Web / external search.
+        "search_web",
+        "web_search",
+        "search_news",
+        "google_search",
+        "brave_search",
+        "exa_search",
+        "tavily_search",
+        "serpapi_search",
+        "searxng_search",
+        "search_email",
+        "calendar_search_events",
+        # Knowledge base / RAG (#2213 — was fixed-capped at 8, the #2014 runaway).
+        "query_knowledge_base",
+        # File & document reads (#2213 — read-only, progressive lookup).
+        "read_file",
+        "read_pdf",
+        "list_directory",
+        "file_info",
+        "grep",
+        # Instant-messaging history lookup (#2213).
+        "whatsapp_check",
+        "telegram_check",
+    }
+)
+
+
+def categorize_tool(tool_name: str) -> ToolCategory:
+    """Classify a built-in tool by its budget-relevant nature (#2213 Layer 2).
+
+    Behaviour-preserving: returns the category whose set the name is in, else
+    ``STANDARD`` — the exact partition the name-based budget sets encoded before.
+    Unknown / MCP tool names fall to ``STANDARD`` for now (see
+    :class:`ToolCategory`). This is the single classification seam that MCP
+    manifest plumbing and the deferred per-category ceilings will build on.
+    """
+    if tool_name in _TOOL_CATEGORY_RETRIEVAL:
+        return ToolCategory.RETRIEVAL
+    if tool_name in _TOOL_CATEGORY_CONTROL:
+        return ToolCategory.CONTROL
+    if tool_name in _TOOL_CATEGORY_ACTION:
+        return ToolCategory.ACTION
+    return ToolCategory.STANDARD
+
+
+# Budget sets, DERIVED from the category assignment above (single source of
+# truth). Values are identical to the pre-category name lists, so runtime
+# behaviour is unchanged — this slice only replaces the flat, Internet-centric
+# allowlists with an explicit taxonomy the budget policy keys off.
+_TOOL_BUDGET_RETRIEVAL = _TOOL_CATEGORY_RETRIEVAL
+# Exempt from the SOFT nudge — control-plane + action tools that naturally
+# require many sequential calls. The budget targets runaway *retrieval* loops,
+# not legitimate action sequences.
+_TOOL_BUDGET_SOFT_EXEMPT = _TOOL_CATEGORY_CONTROL | _TOOL_CATEGORY_ACTION
+# Ceiling = recursion_limit // divisor. Calibrated in #2014: divisor 3 (ceiling 20
+# in the eval) let deepseek-v4-flash over-search (~22 queries) into a non-compliant
+# ramble on the persist-before-refusing scenario and FAIL; divisor 4 (ceiling 15)
+# forced an honest refusal in time and PASSED, while the synthesis control was
+# unaffected at every divisor (1 search). 4 also leaves ample headroom for genuine
+# deep research (chat ~22, COMPLEX_ACTION ~75).
+_TOOL_BUDGET_RETRIEVAL_CEILING_DIVISOR = 4
+# #2213 Layer 2: action tools (shell, write/patch) now get a recursion-aware
+# HARD ceiling too — Layer 1's goal is that *no* tool reaches GraphRecursionError,
+# and long side-effecting sequences (builds, multi-file edits) are legitimate, so
+# action gets a LOOSER ceiling than retrieval. Ceiling = recursion_limit //
+# divisor; divisor 3 binds at 2/3 of the recursion budget (a real margin before
+# the ~recursion_limit/2 crash point, since each agent round costs ~2 super-steps)
+# while allowing ~30 action calls at chat (90) and ~100 at COMPLEX_ACTION (300) —
+# generous for real builds, and 1.33× retrieval's ceiling. Action stays
+# soft-exempt (no "please synthesize" nudge); only the hard ceiling is added.
+_TOOL_BUDGET_ACTION = _TOOL_CATEGORY_ACTION
+_TOOL_BUDGET_ACTION_CEILING_DIVISOR = 3
+# Hard-exempt (uncapped) = CONTROL tools only, at the invoker. The set below is
+# still soft-exempt ∪ retrieval for any reader, but DedupedToolInvoker checks
+# retrieval and action FIRST (both get recursion-aware ceilings), so only control
+# tools reach the "uncapped" branch.
+_TOOL_BUDGET_HARD_EXEMPT = _TOOL_BUDGET_SOFT_EXEMPT | _TOOL_BUDGET_RETRIEVAL
+
+# #2213 Layer 2 — honor a category a tool DECLARES about itself (``metadata
+# ["category"]``), so dynamically-named MCP tools — which no static name set can
+# enumerate — get correct budgeting. Trust is ASYMMETRIC: a tool may opt INTO a
+# still-bounded bucket (RETRIEVAL and ACTION both get a recursion-aware ceiling)
+# but may NOT self-declare into CONTROL (uncapped) or otherwise dodge a cap. Any
+# unrecognised / untrusted declaration falls back to the built-in name taxonomy
+# via ``categorize_tool`` → ``STANDARD`` for unknown tools (the issue's
+# "unknown → most-restricted" default). Built-in tools carry no
+# ``metadata["category"]``, so this is behaviour-preserving for them.
+_TRUSTED_DECLARABLE_CATEGORIES = frozenset({ToolCategory.RETRIEVAL, ToolCategory.ACTION})
+
+
+def resolve_tool_category(tool: Any) -> ToolCategory:
+    """Budget category for a live tool object, honoring a *trusted* declaration.
+
+    A tool whose ``metadata["budget_category"]`` is a valid, trusted-declarable
+    category (``retrieval`` or ``action``) is classified as declared — this is how
+    MCP tools carry their nature into the budget (set from MCP annotations in
+    ``mcp_client._create_mcp_tool_wrapper``). Every other case (no declaration, an
+    invalid value, or a ``control``/``standard`` declaration we won't trust
+    optimistically) falls back to :func:`categorize_tool` on the tool name, so
+    built-ins keep their exact classification and unknown tools default to
+    ``STANDARD`` (the most-restricted bucket).
+
+    The declared key is deliberately ``budget_category``, NOT ``category`` — the
+    tool registry (``TOOL_CONFIGS``) and delegate sandbox use a *different*
+    ``category`` vocabulary (``readonly``/``mutation``/``recursive``/…) that must
+    never leak into budget policy (#2438). ``metadata`` is guarded with
+    ``isinstance`` so a truthy non-dict ``.metadata`` can't crash graph build.
+    """
+    meta = getattr(tool, "metadata", None)
+    declared = meta.get("budget_category") if isinstance(meta, dict) else None
+    if declared:
+        try:
+            cat = ToolCategory(declared)
+        except ValueError:
+            cat = None
+        if cat is not None and cat in _TRUSTED_DECLARABLE_CATEGORIES:
+            return cat
+    return categorize_tool(getattr(tool, "name", "") or "")
+
+
+def _resolve_budget_category_sets(
+    active_tools_list: list[Any],
+) -> tuple[frozenset[str], frozenset[str], frozenset[str], frozenset[str]]:
+    """Build ``(retrieval, action, soft_exempt, hard_exempt)`` budget name sets,
+    folding in any trusted per-tool category declarations.
+
+    Starts from the static built-in taxonomy (so lazily-loaded built-ins not yet
+    in ``active_tools_list`` keep their category) and ADDS any active tool whose
+    resolved category is RETRIEVAL/ACTION. ``soft_exempt`` / ``hard_exempt`` are
+    derived exactly as the module-level constants are, so with no declarations
+    the result equals ``(_TOOL_BUDGET_RETRIEVAL, _TOOL_BUDGET_ACTION,
+    _TOOL_BUDGET_SOFT_EXEMPT, _TOOL_BUDGET_HARD_EXEMPT)`` — behaviour-preserving.
+    """
+    retrieval: set[str] = set(_TOOL_BUDGET_RETRIEVAL)
+    action: set[str] = set(_TOOL_BUDGET_ACTION)
+    for tool in active_tools_list or []:
+        name = getattr(tool, "name", "") or ""
+        if not name:
+            continue
+        cat = resolve_tool_category(tool)
+        if cat is ToolCategory.RETRIEVAL:
+            retrieval.add(name)
+        elif cat is ToolCategory.ACTION:
+            action.add(name)
+    soft_exempt = frozenset(_TOOL_CATEGORY_CONTROL | action)
+    hard_exempt = frozenset(soft_exempt | retrieval)
+    return frozenset(retrieval), frozenset(action), soft_exempt, hard_exempt
+
+
+# DedupedToolInvoker hosts the per-call dedup + TOCTOU-safe execution that
+# was previously the ``_invoke_one`` closure inside ``build_agent_graph``.
+# Extracted in /forge A4 (2026-05-24).  ``_HISTORY_TOOL_MESSAGE_CAP_CHARS``
+# moved with it (sole consumer); re-exported here so any external code that
+# still imports the constant from ``graph`` keeps working.
+from cogtrix_core.orchestration.deduped_tool_invoker import (  # noqa: E402, F401
+    _HISTORY_TOOL_MESSAGE_CAP_CHARS,
+    DedupedToolInvoker,
+    duplicate_call_banner,
+)
+
+# Executors + PerRunState moved to ``src.orchestration.graph_runtime`` in the
+# /forge A1.4 extraction (2026-05-23). Re-imported here so in-file callers
+# keep working without a churn-everywhere PR.
+from cogtrix_core.orchestration.graph_runtime import (  # noqa: E402, F401
+    _LLM_EXECUTOR,
+    _LLM_EXECUTOR_LOCK,
+    _LLM_EXECUTOR_WORKERS,
+    _PARALLEL_TOOL_WORKERS,
+    _TOOL_EXECUTOR,
+    _TOOL_EXECUTOR_LOCK,
+    PerRunState,
+    _get_llm_executor,
+    _get_tool_executor,
+)
+
+# Topic-switch heuristic also extracted in the same A1.4 PR. Re-imported so
+# test imports + in-file callers keep working.
+from cogtrix_core.orchestration.topic_switch import (  # noqa: E402, F401
+    _TOPIC_SWITCH_MAX_WORDS,
+    _TOPIC_SWITCH_MESSAGE_WINDOW,
+    _TOPIC_SWITCH_MIN_SIMILARITY,
+    _TOPIC_SWITCH_NUDGE,
+    _TOPIC_SWITCH_STOPWORDS,
+    _should_reset_summary_for_topic_switch,
+    _topic_switch_tokens,
+)
+
+
+def _extract_llm_labels(llm: Any) -> tuple[str, str]:
+    """Extract provider and model labels from a LangChain LLM instance.
+
+    Falls back to ``"unknown"`` when the LLM object does not expose the
+    expected attributes.
+    """
+    if llm is None:
+        return "unknown", "unknown"
+
+    # Model name — try common attribute names across LangChain providers.
+    model = getattr(llm, "model_name", None) or getattr(llm, "model", None) or ""
+    if not model:
+        _ident = getattr(llm, "_identifying_params", None) or {}
+        model = _ident.get("model_name") or _ident.get("model") or "unknown"
+
+    # Provider — normalize from _llm_type or class name.
+    _llm_type = getattr(llm, "_llm_type", None)
+    if _llm_type:
+        provider = _llm_type.lower().replace("chat-", "").replace("-chat", "")
+    else:
+        cls_name = type(llm).__name__.lower()
+        if "openai" in cls_name:
+            provider = "openai"
+        elif "anthropic" in cls_name:
+            provider = "anthropic"
+        elif "google" in cls_name:
+            provider = "google"
+        elif "ollama" in cls_name:
+            provider = "ollama"
+        elif "deepseek" in cls_name:
+            provider = "deepseek"
+        elif "xai" in cls_name:
+            provider = "xai"
+        else:
+            provider = "unknown"
+
+    return provider, model
+
+
+# _INVALID_TOOL_RE and the message-repair helpers below moved to
+# ``src.orchestration.message_repair`` in the /forge A1.1 extraction
+# (2026-05-23). Re-imported here so any in-file callers in this module
+# (and the test imports that depended on these symbols living in graph)
+# keep working without a churn-everywhere PR.
+from cogtrix_core.orchestration.message_repair import (  # noqa: E402, F401
+    _INVALID_TOOL_RE,
+    _apply_context_message_cap,
+    _detect_invalid_tool_calls,
+    _repair_tool_message_pairs,
+    _strip_failed_tool_messages,
+)
+
+_CONTEXT_OVERFLOW_PATTERNS = (
+    "context_length_exceeded",
+    "context window",
+    "too long",
+    "maximum context",
+    "reduce the length",
+    "input is too long",
+    "prompt is too long",
+)
+
+
+def _is_context_overflow_error(exc: Exception) -> bool:
+    """Return True if *exc* is a provider context-length rejection.
+
+    Checks structured provider error fields first (OpenAI ``error.code``,
+    HTTP status codes, Anthropic ``type``), then falls back to string
+    matching against ``_CONTEXT_OVERFLOW_PATTERNS``.
+    """
+    # Structured checks — faster and language-independent
+    # OpenAI / OpenAI-compatible: BadRequestError with code field
+    code = getattr(exc, "code", None) or getattr(getattr(exc, "error", None), "code", None)
+    if code and "context_length" in str(code).lower():
+        return True
+    # HTTP status 400 paired with overflow-related type/param
+    status = getattr(exc, "status_code", None) or getattr(exc, "status", None)
+    if status == 400:
+        etype = getattr(exc, "type", None) or getattr(getattr(exc, "error", None), "type", None)
+        if etype and any(p in str(etype).lower() for p in ("context", "length", "token")):
+            return True
+    # String fallback — covers providers that embed the message in the exc string
+    msg = str(exc).lower()
+    return any(p in msg for p in _CONTEXT_OVERFLOW_PATTERNS)
+
+
+def _is_model_repetition_error(exc: Exception) -> bool:
+    """Return True if *exc* is a mid-stream model-repetition abort (#2122).
+
+    Some open-weight models (observed: qwen3 behind a LiteLLM proxy) degenerate
+    into a repetition loop; LiteLLM's repetition guard then aborts the stream
+    with an ``InternalServerError`` / ``MidStreamFallbackError`` whose message
+    says the model is repeating the same chunk. Retrying is futile (the
+    degeneracy is deterministic), so the caller ends the turn gracefully instead
+    of failing it with an unhandled error.
+
+    Matched NARROWLY — by the LiteLLM ``MidStreamFallbackError`` type or the
+    specific repetition message — so a generic provider 500/``InternalServerError``
+    is NOT misclassified (those stay retryable / re-raised as before).
+    """
+    if "midstreamfallback" in type(exc).__name__.lower():
+        return True
+    msg = str(exc).lower()
+    return "repeating the same chunk" in msg or "model is repeating" in msg
+
+
+def _is_tool_pair_mismatch_error(exc: Exception) -> bool:
+    """Return True if *exc* is a provider 400 about tool_calls left unanswered (#2365).
+
+    The provider rejects a request whose assistant ``tool_calls`` are not each
+    followed by a matching ``tool`` response — e.g. native Kimi's *"an assistant
+    message with 'tool_calls' must be followed by tool messages responding to
+    each 'tool_call_id'. The following tool_call_ids did not have response
+    messages: …"* or OpenAI's *"messages with role 'tool' must be a response to a
+    preceeding message with 'tool_calls'"*.
+
+    This is the failure ``_repair_tool_message_pairs`` is meant to prevent; when
+    it slips through anyway (repair reported the list clean, provider disagreed),
+    the caller dumps the ordered tool-pair structure so the exact mechanism
+    (duplicate declaration vs id-form mismatch) can be diagnosed from one real
+    occurrence. Matched NARROWLY by the tool-pair phrasing so generic 400s are
+    not misclassified. String-only: providers embed this in the error body, not
+    a structured field.
+    """
+    msg = str(exc).lower()
+    return (
+        "did not have response messages" in msg
+        or ("tool_calls" in msg and "must be followed by tool messages" in msg)
+        or ("role 'tool'" in msg and "must be a response to" in msg)
+    )
+
+
+def _stable_tool_call_value(value: Any, seen: set[int] | None = None) -> Any:
+    """Return a deterministic JSON-safe representation for tool-call args."""
+    if seen is None:
+        seen = set()
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, bytes):
+        return {"__type__": "builtins.bytes", "__value__": value.hex()}
+    if isinstance(value, bytearray):
+        return {"__type__": "builtins.bytearray", "__value__": bytes(value).hex()}
+    if is_dataclass(value) and not isinstance(value, type):
+        return {
+            "__type__": f"{type(value).__module__}.{type(value).__qualname__}",
+            "__state__": _stable_tool_call_value(asdict(value), seen),
+        }
+
+    model_dump = getattr(value, "model_dump", None)
+    if callable(model_dump):
+        try:
+            dumped = model_dump()
+        except Exception:
+            pass
+        else:
+            return {
+                "__type__": f"{type(value).__module__}.{type(value).__qualname__}",
+                "__state__": _stable_tool_call_value(dumped, seen),
+            }
+
+    obj_id = id(value)
+    if obj_id in seen:
+        return {
+            "__type__": f"{type(value).__module__}.{type(value).__qualname__}",
+            "__cycle__": True,
+        }
+
+    if isinstance(value, dict):
+        seen.add(obj_id)
+        try:
+            return {
+                str(key): _stable_tool_call_value(value[key], seen)
+                for key in sorted(value, key=lambda key: str(key))
+            }
+        finally:
+            seen.discard(obj_id)
+
+    if isinstance(value, list):
+        seen.add(obj_id)
+        try:
+            return [_stable_tool_call_value(item, seen) for item in value]
+        finally:
+            seen.discard(obj_id)
+
+    if isinstance(value, tuple):
+        seen.add(obj_id)
+        try:
+            return {
+                "__type__": "builtins.tuple",
+                "__items__": [_stable_tool_call_value(item, seen) for item in value],
+            }
+        finally:
+            seen.discard(obj_id)
+
+    if isinstance(value, (set, frozenset)):
+        seen.add(obj_id)
+        try:
+            items = [_stable_tool_call_value(item, seen) for item in value]
+            items.sort(key=lambda item: _json.dumps(item, sort_keys=True, separators=(",", ":")))
+            return {
+                "__type__": f"{type(value).__module__}.{type(value).__qualname__}",
+                "__items__": items,
+            }
+        finally:
+            seen.discard(obj_id)
+
+    if hasattr(value, "__dict__"):
+        seen.add(obj_id)
+        try:
+            return {
+                "__type__": f"{type(value).__module__}.{type(value).__qualname__}",
+                "__state__": {
+                    key: _stable_tool_call_value(attr, seen)
+                    for key, attr in sorted(vars(value).items())
+                    if not key.startswith("__")
+                },
+            }
+        finally:
+            seen.discard(obj_id)
+
+    slots = getattr(value, "__slots__", None)
+    if slots:
+        seen.add(obj_id)
+        try:
+            state: dict[str, Any] = {}
+            slot_names = (slots,) if isinstance(slots, str) else tuple(slots)
+            for slot in slot_names:
+                if hasattr(value, slot):
+                    state[slot] = _stable_tool_call_value(getattr(value, slot), seen)
+            return {
+                "__type__": f"{type(value).__module__}.{type(value).__qualname__}",
+                "__state__": state,
+            }
+        finally:
+            seen.discard(obj_id)
+
+    return {
+        "__type__": f"{type(value).__module__}.{type(value).__qualname__}",
+        "__value__": str(value),
+    }
+
+
+def _apply_context_budget_guard(
+    response: Any,
+    *,
+    max_context_tokens: int | None,
+    tool_context_limit_pct: float,
+) -> Any:
+    """Return a warning AIMessage when tool calls exceed the turn budget."""
+    if not max_context_tokens or not getattr(response, "tool_calls", None):
+        return response
+
+    um = getattr(response, "usage_metadata", None)
+    if not um or not isinstance(um, dict):
+        return response
+
+    turn_input = um.get("input_tokens", 0)
+    if not isinstance(turn_input, int) or turn_input <= max_context_tokens * tool_context_limit_pct:
+        return response
+
+    from langchain_core.messages import AIMessage
+
+    pct_used = int(turn_input * 100 / max_context_tokens)
+    warning = (
+        f"[Context budget reached — {pct_used}% of {max_context_tokens:,} "
+        f"tokens used this turn (limit: {int(tool_context_limit_pct * 100)}%). "
+        "Tool execution halted. Summarising based on available information.]"
+    )
+    return AIMessage(
+        content=warning,
+        id=getattr(response, "id", None),
+        response_metadata={"budget_guard": True},
+    )
+
+
+def _infer_llm_provider_name(llm: Any) -> str:
+    """Infer a stable provider label for telemetry."""
+    for attr in ("provider", "provider_name", "_provider_name"):
+        value = getattr(llm, attr, None)
+        if isinstance(value, str) and value:
+            return value
+
+    module = getattr(llm.__class__, "__module__", "").lower()
+    if "openai" in module:
+        return "openai"
+    if "anthropic" in module:
+        return "anthropic"
+    if "ollama" in module:
+        return "ollama"
+    if "google" in module or "genai" in module:
+        return "google"
+    return llm.__class__.__name__.lower()
+
+
+def _infer_llm_model_name(llm: Any) -> str:
+    """Infer the model identifier for telemetry."""
+    for attr in ("model", "model_name", "model_id", "model_name_or_path"):
+        value = getattr(llm, attr, None)
+        if isinstance(value, str) and value:
+            return value
+    kwargs = getattr(llm, "_default_params", None)
+    if isinstance(kwargs, dict):
+        for key in ("model", "model_name", "model_id"):
+            value = kwargs.get(key)
+            if isinstance(value, str) and value:
+                return value
+    return llm.__class__.__name__
+
+
+# ── Action-intent detection ───────────────────────────────────────────────────
+# Catches "I'll create X" / "Let me write Y" responses that contain no tool
+# calls — the model expressed intent but didn't act on it. Implementation
+# moved to ``src.orchestration.response_detectors`` in the /forge A1.2
+# extraction (2026-05-23). Re-imported here so in-file callers and test
+# imports that depended on these symbols living in graph keep working.
+from cogtrix_core.orchestration.response_detectors import (  # noqa: E402, F401
+    _CODE_FENCE_RE,
+    _FAKE_TOOL_OUTPUT_SIGNAL_RE,
+    _INCOMPLETENESS_SIGNAL_RE,
+    _INTENT_FALSE_POSITIVE_RE,
+    _INTENT_LEAD_RE,
+    _MARKDOWN_TABLE_ROW_RE,
+    _NEGATED_SUCCESS_RE,
+    _NUMBERED_SECTION_RE,
+    _PAST_TENSE_LIST_VERB_RE,
+    _PHANTOM_JSON_TOOL_RE,
+    _PHANTOM_TOOL_MARKUP_RE,
+    _SUCCESS_CLAIM_RE,
+    _TOOL_ERROR_INDICATORS,
+    _TOOL_VERB_RE,
+    _has_incompleteness_signal,
+    _is_action_intent,
+    _is_hallucinated_completion,
+    _is_refusal,
+    _is_sycophantic_prefix,
+    _looks_like_fabricated_action_success_without_tool_call,
+    _looks_like_fabricated_success_after_tool_errors,
+    _looks_like_fabricated_tool_error_quote,
+    _looks_like_markdown_phantom_report,
+    _looks_like_phantom_tool_markup,
+    _stuck_detection_headline,
+    _unwrap_code_fence,
+)
+
+# The original phrase / verb / detector implementations lived here; they
+# moved to ``response_detectors.py`` (see comment + re-export above).
+
+
+@dataclass
+class ToolManagementRequest:
+    """Result of scanning agent messages for ``request_tools`` calls."""
+
+    add: list[str]
+    remove: list[str]
+    # #2269: tools the model asked to keep loaded (pin) past the per-tool budget.
+    keep_loaded: list[str] = field(default_factory=list)
+
+    @property
+    def has_changes(self) -> bool:
+        return bool(self.add or self.remove or self.keep_loaded)
+
+
+def _detect_tool_request(messages: list, start_idx: int = 0) -> ToolManagementRequest | None:
+    """
+    Scan agent messages for a ``request_tools`` invocation.
+
+    Supports both the new schema (``add`` / ``remove``) and the legacy
+    schema (``names`` treated as additions).
+
+    Args:
+        messages: Full message list from the agent result.
+        start_idx: Index to start scanning from (skip history messages).
+
+    Returns a ``ToolManagementRequest`` or *None* if no request was made.
+    """
+    all_add: list[str] = []
+    all_remove: list[str] = []
+    all_keep: list[str] = []
+
+    for i in range(start_idx, len(messages)):
+        msg = messages[i]
+        tool_calls = getattr(msg, "tool_calls", None)
+        if not tool_calls:
+            continue
+        for tc in tool_calls:
+            if isinstance(tc, dict) and tc.get("name") == "request_tools":
+                args = tc.get("args", {})
+
+                # New schema: add / remove
+                add_names = args.get("add", [])
+                remove_names = args.get("remove", [])
+                # #2269: keep_loaded / pin.
+                keep_names = args.get("keep_loaded", [])
+
+                # Legacy fallback: bare ``names`` list → treat as add
+                if not add_names and not remove_names:
+                    add_names = args.get("names", [])
+
+                # Normalize bare strings to single-element lists so
+                # {"add": "web_search"} works the same as {"add": ["web_search"]}
+                # (BUG-204).
+                if isinstance(add_names, str):
+                    add_names = [add_names]
+                if isinstance(remove_names, str):
+                    remove_names = [remove_names]
+                if isinstance(keep_names, str):
+                    keep_names = [keep_names]
+
+                if isinstance(add_names, list):
+                    all_add.extend(str(n) for n in add_names)
+                if isinstance(remove_names, list):
+                    all_remove.extend(str(n) for n in remove_names)
+                if isinstance(keep_names, list):
+                    all_keep.extend(str(n) for n in keep_names)
+
+    if not all_add and not all_remove and not all_keep:
+        return None
+    # Deduplicate and strip empty strings so LLM-generated garbage (e.g.
+    # duplicate names, empty strings from JSON coercion) produces a clear
+    # no-op or guidance line rather than a silent failure.
+    seen_add: set[str] = set()
+    deduped_add: list[str] = []
+    for n in all_add:
+        if n and n not in seen_add:
+            seen_add.add(n)
+            deduped_add.append(n)
+    seen_rem: set[str] = set()
+    deduped_rem: list[str] = []
+    for n in all_remove:
+        if n and n not in seen_rem:
+            seen_rem.add(n)
+            deduped_rem.append(n)
+    seen_keep: set[str] = set()
+    deduped_keep: list[str] = []
+    for n in all_keep:
+        if n and n not in seen_keep:
+            seen_keep.add(n)
+            deduped_keep.append(n)
+    return ToolManagementRequest(add=deduped_add, remove=deduped_rem, keep_loaded=deduped_keep)
+
+
+# _correct_tool_args / _safe_tool_name + the schema cache + blocklist moved
+# to ``src.orchestration.tool_arg_correction`` in the /forge A1.3 extraction
+# (2026-05-23). Re-imported here so in-file callers and test imports that
+# depended on these symbols living in graph keep working.
+from cogtrix_core.orchestration.tool_arg_correction import (  # noqa: E402, F401
+    _FUZZY_ARG_BLOCKLIST,
+    _TOOL_ARG_SCHEMA_CACHE_MAX_SIZE,
+    _correct_tool_args,
+    _safe_tool_name,
+    _tool_arg_cache_lock,
+    _tool_arg_schema_cache,
+    _ToolArgSchemaCacheKey,
+)
+
+
+def _last_human_msg_idx(msgs: list[Any]) -> int:
+    """Return the index of the most recent *genuine user* ``HumanMessage``,
+    or -1 if none. Used by the cascade-budget bookkeeping in
+    ``route_after_model`` to detect turn boundaries.
+
+    Recovery-injected nudges are themselves ``HumanMessage``s (tagged with
+    ``_RECOVERY_INJECTED_MARKER``); they must be skipped here. Counting them
+    advanced the turn marker on every recovery round, resetting the per-turn
+    cascade budget so the #1960 kill switch never reached its cap and a
+    no-progress loop ran to the recursion limit (#2055 / #2014). Only a real
+    user message marks a new turn.
+    """
+    from langchain_core.messages import HumanMessage
+
+    for i in range(len(msgs) - 1, -1, -1):
+        m = msgs[i]
+        if isinstance(m, HumanMessage):
+            if (getattr(m, "additional_kwargs", None) or {}).get(_RECOVERY_INJECTED_MARKER):
+                continue
+            return i
+    return -1
+
+
+#: Default compression-budget cap when neither an explicit operator value nor a
+#: resolved ``Config`` supplies one. Mirrors ``Config.context_max_tokens`` (#2360)
+#: and the ``build_agent_graph`` signature default below.
+_DEFAULT_CONTEXT_MAX_TOKENS = 40_000
+
+
+def _scale_default_cap_to_window(context_max_tokens: int, llm: Any) -> int:
+    """Scale a *default* context-token cap to the model's real window (#2484 / #2360).
+
+    The low-level ``build_agent_graph(llm=...)`` path (eval harnesses, direct
+    embedders) does NOT go through ``Config.resolve_context_max_tokens()``, so a
+    big-window model was capped at the flat 40k default and force-compressed on
+    every turn — the #2484 "compression storm". When the cap is left at its
+    default, scale it to ``max(40_000, window // 2)`` (the same formula #2360
+    applies on the ``config=`` path) using the input window the provider factory
+    stamped on the llm (``_cogtrix_context_window``; see ``providers/__init__``).
+
+    Only ever *raises* the cap — never below the default — so small-window models,
+    mock LLMs without a stamped window, and any explicit operator cap are
+    unchanged (no compression/truncation regression is possible).
+    """
+    if context_max_tokens != _DEFAULT_CONTEXT_MAX_TOKENS:
+        return context_max_tokens
+    window = getattr(llm, "_cogtrix_context_window", None)
+    if isinstance(window, int) and not isinstance(window, bool) and window > 0:
+        return max(context_max_tokens, round(window / 2))
+    return context_max_tokens
+
+
+def build_agent_graph(
+    llm: Any = None,
+    system_prompt: str = "",
+    active_tools_list: list | None = None,
+    available_tools: dict | None = None,
+    registry: Any = None,
+    approvals: set | None = None,
+    max_context_tokens: int | None = None,
+    preset_tools: set[str] | None = None,
+    context_compression: bool = True,
+    compression_min_age: int = COMPRESSION_MIN_AGE_CYCLES,
+    compression_min_chars: int = COMPRESSION_MIN_CHARS,
+    compression_llm: Any = None,
+    context_max_messages: int = 200,
+    context_max_tokens: int = _DEFAULT_CONTEXT_MAX_TOKENS,
+    tool_call_guard: Any | None = None,
+    session_state: SessionState | None = None,
+    confirmation_ui: Any | None = None,
+    on_tool_expansion: Any | None = None,
+    parallel_tool_execution: bool = True,
+    git_native: bool = False,
+    tool_context_limit_pct: float = 0.80,
+    extend_run_state: Any = None,
+    *,
+    config: AgentRunConfig | None = None,
+    bound_cache: OrderedDict | None = None,
+    compression_cache_in: dict[str, str] | None = None,
+    checkpoint_store: Any | None = None,
+    corpus_attribution_detector: Callable[[str], list[str]] | None = None,
+) -> Any:
+    """Build a custom LangGraph StateGraph for the Cogtrix agent.
+
+    The graph has three nodes:
+    - call_model: binds active tools to LLM and invokes it
+    - process_tools: executes tool calls, handles fuzzy matching and expansion
+    - handle_phantom: recovers from phantom tool calls (malformed JSON)
+
+    Tool management uses closured mutable references: active_tools_list and
+    available_tools are modified in-place, so callers see the changes after
+    graph execution.
+
+    When *config* is provided, its fields take precedence over the individual
+    keyword arguments (backward-compat layer).
+    """
+    from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+    from langchain_core.messages.modifier import RemoveMessage
+    from langgraph.graph import END, StateGraph
+
+    _model_timeout = 180  # default LLM request timeout (seconds)
+
+    if config is not None:
+        if config.llm is not None:
+            llm = config.llm
+        if config.system_prompt is not None:
+            system_prompt = config.system_prompt
+        if config.active_tools_list is not None:
+            active_tools_list = config.active_tools_list
+        if config.available_tools is not None:
+            available_tools = config.available_tools
+        if config.max_context_tokens is not None:
+            max_context_tokens = config.max_context_tokens
+        if config.preset_tools is not None:
+            preset_tools = config.preset_tools
+        if config.tool_call_guard is not None:
+            tool_call_guard = config.tool_call_guard
+        if config.session_state is not None:
+            session_state = config.session_state
+        memory_manager = getattr(config, "memory_manager", None)
+        if config.confirmation_ui is not None:
+            confirmation_ui = config.confirmation_ui
+        if config.on_tool_expansion is not None:
+            on_tool_expansion = config.on_tool_expansion
+        parallel_tool_execution = config.parallel_tool_execution
+        git_native = config.git_native
+        context_compression = config.context_compression
+        _context_max_messages = getattr(config, "context_max_messages", context_max_messages) or 0
+        _context_max_tokens = getattr(config, "context_max_tokens", context_max_tokens) or 0
+        _model_timeout = getattr(config, "llm_timeout", 180)
+        if config.compression_llm is not None:
+            compression_llm = config.compression_llm
+        if config.compression_min_age is not None:
+            compression_min_age = config.compression_min_age
+        if config.compression_min_chars is not None:
+            compression_min_chars = config.compression_min_chars
+        if hasattr(config, "tool_context_limit_pct"):
+            tool_context_limit_pct = config.tool_context_limit_pct
+        if hasattr(config, "checkpoint_store"):
+            checkpoint_store = config.checkpoint_store
+        tools_ready = getattr(config, "tools_ready", None)
+        _tier_cache_enabled = getattr(config, "tier_cache_enabled", True)
+        _da_enabled = getattr(config, "decision_accountability_enabled", False)
+        _da_report_uncertainty = getattr(config, "decision_accountability_report_uncertainty", True)
+        _da_min_confidence = getattr(config, "decision_accountability_min_confidence", 7.0)
+    else:
+        _context_max_messages = context_max_messages or 0
+        # #2484: the low-level ``llm=`` path never runs
+        # ``Config.resolve_context_max_tokens()``; scale a *default* cap to the
+        # model's real window so big-window models aren't force-compressed to a
+        # flat 40k every turn (the compression storm).  No-op for small windows
+        # / mock LLMs / explicit operator caps.
+        _context_max_tokens = _scale_default_cap_to_window(context_max_tokens, llm) or 0
+        tools_ready = None
+        memory_manager = None
+        _tier_cache_enabled = False
+        _da_enabled = False
+        _da_report_uncertainty = True
+        _da_min_confidence = 7.0
+
+    if active_tools_list is None:
+        active_tools_list = []
+    if available_tools is None:
+        available_tools = {}
+    if approvals is None:
+        approvals = set()
+
+    if session_state is None:
+        session_state = SessionState()
+
+    # Mutable container so _reset_for_new_run can swap the state each run
+    # without rebuilding the compiled graph.
+    extend_run_state_ref: list[Any] = [extend_run_state]
+    if extend_run_state is not None:
+        try:
+            from langchain_core.tools import StructuredTool as _ST
+
+            from cogtrix_core.tools.extend_run import ExtendRunInput
+
+            def _extend_run_fn(
+                mode: str = "continue",
+                subtasks: list[str] | None = None,
+                reason: str = "",
+            ) -> str:
+                _state = extend_run_state_ref[0]
+                if _state is None:
+                    return "Error: extend_run is not available in this run context."
+                if mode == "delegate" and not subtasks:
+                    return (
+                        "Error: mode='delegate' requires a non-empty 'subtasks' list. "
+                        "Provide 2-5 independent subtask descriptions."
+                    )
+                _state.request_extension(mode=mode, subtasks=subtasks or [], reason=reason)
+                if mode == "delegate":
+                    count = len(subtasks or [])
+                    return (
+                        f"Extension registered: {count} subtask(s) queued for parallel "
+                        "delegation. Continue sequential work; delegation runs after this run."
+                    )
+                return (
+                    "Extension registered: the step budget will be increased when the "
+                    "current limit is reached. Continue working on the task."
+                )
+
+            _extend_tool = _ST.from_function(
+                func=_extend_run_fn,
+                name="extend_run",
+                description=(
+                    "Request more execution steps or delegate work to parallel sub-agents. "
+                    "Call when the task needs significantly more turns than available.\n\n"
+                    "Modes:\n"
+                    "- 'continue': Request more sequential steps.\n"
+                    "- 'delegate': Split into parallel sub-agents (requires 'subtasks' list).\n\n"
+                    "Call EARLY — don't wait until almost out of steps."
+                ),
+                args_schema=ExtendRunInput,
+            )
+            if not any(getattr(tool, "name", "") == "extend_run" for tool in active_tools_list):
+                active_tools_list.append(_extend_tool)
+            available_tools["extend_run"] = _extend_tool
+        except ImportError:
+            pass
+    _MAX_PHANTOM_RETRIES = 3
+    _MAX_FABRICATION_RETRIES = 3
+    _MAX_ACTION_INTENT_RETRIES = 3
+    # Bug L: unverified-claim guard. Lower retry budget than other
+    # recovery loops — one revision attempt. If the model still
+    # refuses to call the verification tool, accept and ship rather
+    # than spin.
+    _MAX_UNVERIFIED_CLAIM_RETRIES = 1
+    # cogtrix47 Issues 5+6: unverified-entity guard. Same budget as
+    # the claim guard — one revision attempt; if the model keeps
+    # repeating unverified identifiers after the nudge it is
+    # actively ignoring the guard, not unlucky.
+    _MAX_UNVERIFIED_ENTITY_RETRIES = 1
+    # #1841: output-fidelity guard.  Issue #2007 bumped 1 → 2 after PM
+    # cycle 3 showed that on the user-facing prose-fidelity detectors,
+    # the model often needs TWO attempts to converge: attempt 1 fixes
+    # the first quote but introduces another; attempt 2 cleans both.
+    # The "model still ignoring the guard" assumption from the original
+    # comment block was empirically wrong for qwen3-coder × PM scenarios.
+    _MAX_UNSUPPORTED_QUOTE_RETRIES = 2
+    # #1843: version-scope-collapse guard. One revision attempt — same
+    # rationale as the fidelity guard it composes with.
+    _MAX_VERSION_SCOPE_RETRIES = 1
+    # #1860: attributed-prose-claim guard.  Bumped to 2 alongside the
+    # quote/owner/topic siblings (#2007) — same empirical observation.
+    _MAX_UNSUPPORTED_ATTRIBUTION_RETRIES = 2
+    # #1988 (post-mortem #1987 Cluster A): entity-owner mismatch guard.
+    # Bumped to 2 by #2007 — cycle-3 PM run showed the model often
+    # swaps one attribution but introduces another on the first revision;
+    # a second attempt is needed for clean convergence.  Cost ceiling:
+    # one extra LLM call per affected scenario per detector firing.
+    _MAX_ENTITY_OWNER_MISMATCH_RETRIES = 2
+    # #2015 (post-mortem #2006 Cluster A root-cause): corpus-aware
+    # attribution mismatch guard.  Bumped to 3 by #2006 cycle-10
+    # post-mortem — log analysis showed the detector firing at
+    # attempt 1/2 and the model re-emitting the SAME wrong attribution
+    # at attempt 2/2 before the response shipped.  The nudge already
+    # names the corpus-canonical owner verbatim; giving one more
+    # attempt costs ~1 extra LLM call per affected scenario and
+    # historically converts borderline retries to clean shipments.
+    # Cycle-10 evidence: 4 of 6 surviving cluster A mismatches were
+    # detector-flagged but not repaired in the 2-retry budget.
+    _MAX_CORPUS_ATTRIBUTION_MISMATCH_RETRIES = 3
+    # #1989 (post-mortem #1987 Cluster C): topic-substitution guard.
+    # Bumped to 2 alongside the entity-owner / quote / attribution
+    # siblings (#2007) — same empirical reasoning.
+    _MAX_TOPIC_SUBSTITUTION_RETRIES = 2
+    # #1713: sycophantic-prefix guard. One revision attempt; the
+    # existing logging-only path retains visibility after the budget.
+    _MAX_SYCOPHANCY_RETRIES = 1
+    # #1869: fabricated-action-success-without-tool-call guard. One
+    # revision attempt — sibling to the existing fabrication guard,
+    # which covers the tool-error precursor case. This one covers
+    # the "no tool call at all" case.
+    _MAX_FABRICATED_ACTION_RETRIES = 1
+    # #1871: fabricated-tool-error-quote guard. One revision attempt;
+    # polarity sibling of the #1869 guard. Catches verbatim quoted
+    # error strings that never appeared in any ToolMessage this turn.
+    _MAX_FABRICATED_QUOTE_RETRIES = 1
+    # #1868: non-canonical GitHub-fork-recommendation guard. One revision
+    # attempt — sibling to the fidelity guards. Fires when the model
+    # recommends a project + cites a github.com URL whose owner is not
+    # canonical AND the surrounding context frames it as authoritative.
+    _MAX_NONCANONICAL_FORK_RETRIES = 1
+    # #1943 PR #4: synthesis-after-eviction guard. One revision attempt.
+    # Fires when the response makes substantive claims AFTER a
+    # ``context_evicted`` SystemMessage marker (PR #1 #1944) is in the
+    # visible context AND the current turn ran NO new tool calls AND the
+    # response lacks any compliant-acknowledgement phrase.  Closes the
+    # residual fabrication path that PRs #1-#3 of the cascade narrowed
+    # but could not fully prevent.
+    _MAX_SYNTHESIS_AFTER_EVICTION_RETRIES = 1
+    # #1960 follow-up: total recovery-firing budget PER TURN.  Each
+    # ``handle_*`` decision from ``route_after_model`` counts as one
+    # firing; the counter resets when a new ``HumanMessage`` arrives.
+    # When the count exceeds this cap, the router short-circuits to
+    # END to ship whatever response the agent has rather than spin
+    # the recovery cascade past the scenario timeout.  Independent of
+    # any specific detector's behaviour — works as a kill switch
+    # regardless of which combination of detectors misfires.
+    #
+    # This cross-detector backstop MUST sit strictly above the largest
+    # single-detector retry budget (the _MAX_*_RETRIES above top out at
+    # 3 for phantom / fabrication / action-intent).  A lone misfiring
+    # detector fires up to its own budget and then self-terminates with
+    # a coherent give-up message on its (budget + 1)th firing — e.g.
+    # handle_phantom synthesises a polite fallback when phantom_count
+    # exceeds _MAX_PHANTOM_RETRIES.  If this cap equalled that budget,
+    # the backstop would short-circuit to END one firing too early and
+    # eat the give-up, shipping an empty phantom instead of the fallback
+    # (regression caught by test_phantom_exhaustion once #2055 stopped
+    # the budget resetting on every recovery nudge).
+    #
+    # At 4, a single self-terminating detector always reaches its own
+    # give-up first, while the #1960 multi-detector cascade (distinct
+    # detectors firing on one response, none self-terminating) is still
+    # bounded — caught on the firing after a full cascade cycle.
+    _MAX_RECOVERY_FIRINGS_PER_TURN = 4
+    # After the 3 standard action-intent nudges are exhausted, the model
+    # gets exactly one more chance if the response contains incompleteness
+    # language ("first", "to start", "step 1") — a stronger nudge that
+    # demands completion rather than a generic "call the appropriate tool".
+    _MAX_INCOMPLETENESS_NUDGES = 1
+    _MAX_TOOL_EXPANSIONS = 3
+    _MAX_REQUEST_TOOLS_NOOPS = 3
+    _MAX_TOOL_CALL_HISTORY = 256
+    _history_lock = threading.Lock()
+    # Pending events for in-flight tool calls (BUG-1293): maps call_key -> threading.Event.
+    # Used to block duplicate parallel threads until the first thread stores the result.
+    _pending_events: dict[str, threading.Event] = {}
+    # Per-tool call counter: tracks how many times each tool is called this turn.
+    # After _TOOL_BUDGET_SOFT calls, a synthesis hint is appended to the output.
+    # After _TOOL_BUDGET_HARD calls, the tool returns a stop message.
+    _tool_budget_lock = (
+        threading.Lock()
+    )  # Protects _per_run_state[0].tool_call_counts and active_tools_list
+    # Budget policy constants (_TOOL_BUDGET_SOFT/HARD, _TOOL_BUDGET_SOFT_EXEMPT,
+    # _TOOL_BUDGET_RETRIEVAL, _TOOL_BUDGET_RETRIEVAL_CEILING_DIVISOR,
+    # _TOOL_BUDGET_HARD_EXEMPT) live at module level (#2213) — see the top of this
+    # module. They are passed to DedupedToolInvoker below; tests/eval scenarios can
+    # still override per-graph via the constructor.
+    _DUPLICATE_EXEMPT = {
+        "request_tools",
+        "report_progress",
+        "queue_reply",
+        "list_scheduled_messages",
+        "edit_scheduled_message",
+        "cancel_scheduled_message",
+        # These control tools must always return a fresh result; caching a
+        # prior error (e.g. from a ToolCallGuard block) would cause a retry
+        # to receive the stale "duplicate" error instead of being evaluated
+        # on its own merits (BUG-237).
+        "suppress_reply",
+        "defer_processing",
+    }
+    protected = (preset_tools or set()) | {"request_tools"}
+    _bound_cache_lock = threading.Lock()
+    _REFLECTION_INTERVAL = 10  # inject reflection every N call_model cycles
+    _TOOL_HEALTH_CHECK_INTERVAL = (
+        getattr(config, "tool_health_check_interval", 20) if config is not None else 20
+    )
+    _TOOL_QUALITY_GATE_ENABLED = (
+        getattr(config, "tool_quality_gate_enabled", True) if config is not None else True
+    )
+    _TOPIC_SWITCH_DETECTION_ENABLED = (
+        getattr(config, "topic_switch_detection_enabled", True) if config is not None else True
+    )
+
+    # ── Stuck detection ───────────────────────────────────────────────
+    # Tracks consecutive tool calls that produce errors.  When the count
+    # reaches _STUCK_THRESHOLD, the next call_model invokes the LLM
+    # WITHOUT tools (forced thinking break) so the model must produce
+    # a text-only Chain-of-Thought response before it can resume tool use.
+    _STUCK_THRESHOLD = 5  # consecutive error results before forcing a break
+    _CHECKPOINT_NUDGE_INTERVAL = 8  # nudge after N tool calls without checkpoint
+    _same_file_writes_lock = threading.Lock()
+    _REWRITE_SEARCH_THRESHOLD = 2  # search reminder after N writes to same file
+
+    _cached_fingerprint: list[tuple[str, ...]] = [()]
+    output_cap = (
+        compute_tool_output_cap(max_context_tokens)
+        if max_context_tokens
+        else TOOL_OUTPUT_CAP_MIN_CHARS
+    )
+    _sys_msg = SystemMessage(content=system_prompt) if system_prompt else None
+
+    # ── Per-run mutable state (structurally reset) ────────────────────
+    # All counters, collections, and lookup tables that must be zeroed
+    # between agent turns live in a single dataclass.  A fresh instance
+    # is created by _reset_for_new_run(), so a newly-added field is
+    # automatically reset — no risk of forgetting a manual reset line.
+    _tool_lookup_init: dict[str, Any] = {getattr(t, "name", ""): t for t in active_tools_list}
+    _tool_lookup_init.pop("", None)
+    _active_names_init: set[str] = set(_tool_lookup_init.keys())
+    _per_run_state: list[PerRunState] = [
+        PerRunState(
+            tool_lookup=_tool_lookup_init,
+            active_names=_active_names_init,
+            tool_catalog=build_tool_catalog(available_tools),
+            available_tools_ref=[available_tools],
+            bound_cache=(bound_cache if bound_cache is not None else OrderedDict()),
+            compression_cache=(compression_cache_in if compression_cache_in is not None else {}),
+        )
+    ]
+
+    # ── Checkpoint store ──────────────────────────────────────────────
+    from cogtrix_core.tools.checkpoint import CheckpointStore, create_checkpoint_tool
+
+    if checkpoint_store is not None:
+        _checkpoint_store: CheckpointStore = checkpoint_store
+    else:
+        _checkpoint_store = CheckpointStore()
+    _checkpoint_store_lock = threading.Lock()
+
+    _checkpoint_tool = create_checkpoint_tool(_checkpoint_store)
+    if _checkpoint_tool is not None and active_tools_list is not None:
+        _existing_names = {getattr(t, "name", "") for t in active_tools_list}
+        if "checkpoint" not in _existing_names:
+            active_tools_list.append(_checkpoint_tool)
+            _per_run_state[0].active_names.add("checkpoint")
+            _per_run_state[0].tool_lookup["checkpoint"] = _checkpoint_tool
+
+    _graph_log = get_logger()
+
+    def _warm_bound_cache() -> None:
+        """Seed the bind_tools cache for the initial active tool set."""
+        if llm is None or not active_tools_list:
+            return
+        if tools_ready is not None and not tools_ready.is_set():
+            _graph_log.debug("Skipping bind_tools warm-up until MCP tools finish reconnecting")
+            return
+        tool_list = list(active_tools_list)
+        _seen_names_rev: set[str] = set()
+        deduped_rev: list[Any] = []
+        for _t in reversed(tool_list):
+            _tname = getattr(_t, "name", "")
+            if _tname not in _seen_names_rev:
+                _seen_names_rev.add(_tname)
+                deduped_rev.append(_t)
+        tool_list = list(reversed(deduped_rev))
+        normalized_tools: list[Any] = []
+        for tool_obj in tool_list:
+            if isinstance(tool_obj, _LazyToolProxy):
+                try:
+                    tool_obj = tool_obj._resolve()
+                except Exception as exc:
+                    _graph_log.warning(
+                        "bind_tools warm-up failed to resolve lazy tool %r: %s",
+                        getattr(tool_obj, "name", ""),
+                        exc,
+                    )
+                    continue
+                if tool_obj is None:
+                    continue
+            normalized_tools.append(tool_obj)
+        if not normalized_tools:
+            return
+        fingerprint = tuple(getattr(t, "name", "") for t in normalized_tools)
+        if fingerprint in _per_run_state[0].bound_cache:
+            return
+        try:
+            if len(_per_run_state[0].bound_cache) >= 8:
+                _per_run_state[0].bound_cache.popitem(last=False)
+            _per_run_state[0].bound_cache[fingerprint] = llm.bind_tools(normalized_tools)
+            _cached_fingerprint[0] = fingerprint
+            _graph_log.debug("⏱ bind_tools warm-up: %d tool(s)", len(normalized_tools))
+        except Exception as exc:
+            _graph_log.warning("Initial bind_tools warm-up failed: %s", exc)
+
+    _warm_bound_cache()
+
+    def _maybe_compress(msgs: list) -> list:
+        """Pre-invoke compression check (mid-turn guard).
+
+        Uses actual token counts from the previous model call when available,
+        falling back to char-based estimates.  Fires at
+        _MID_TURN_COMPRESSION_THRESHOLD (0.60) — lower than the turn-start
+        token-based threshold (0.72) — so context can never grow to 100%
+        during a long tool loop before compression triggers.
+
+        When TCC is active, this guard is a safety net only — the background
+        roll-forward handles compression incrementally.  The threshold is raised
+        to 0.80 to avoid redundant mid-turn LLM calls.
+
+        At 85%+ char pressure (emergency), min_age_override=0 forces all
+        eligible ToolMessages to be compressed regardless of age.
+        """
+        _comp_llm = compression_llm or llm
+        if not context_compression or _comp_llm is None:
+            return msgs
+        # #1943 PR #1: previously bailed when ``max_context_tokens <
+        # 16_384`` on the rationale that simple truncation would be
+        # cheaper than running a compression LLM.  That rationale was a
+        # performance heuristic, but in practice the "simple truncation"
+        # is the destructive cap in ``_apply_context_message_cap`` —
+        # which drops data permanently.  Keeping the rationale meant
+        # operators running tight-window models (or the reproducer in
+        # #1943 with context_max_tokens=6000) got NO compression at all
+        # and the cap dropped tool outputs the agent later fabricated
+        # synthesis around.  The minimum sensible threshold is now just
+        # "context_max_tokens > 0" — if the operator configured a
+        # budget, compression should try to fit within it.
+        if max_context_tokens is None or max_context_tokens <= 0:
+            return msgs
+        total_chars = sum(_content_len(m) for m in msgs)
+        context_chars = max_context_tokens * _CHARS_PER_TOKEN
+        if context_chars <= 0:
+            return msgs
+        ratio = total_chars / context_chars
+        # Also check token-based ratio when real data is available — the
+        # char estimate underestimates web/JSON content density.
+        token_ratio = 0.0
+        last_tokens = _per_run_state[0].last_input_tokens[0]
+        if last_tokens > 0 and max_context_tokens > 0:
+            token_ratio = last_tokens / max_context_tokens
+        effective_ratio = max(ratio, token_ratio)
+        # When TCC is active, raise the threshold to 0.80 — the mid-turn guard
+        # is a safety net only; roll-forward handles most compression.
+        _mid_turn_threshold = 0.80 if _tier_cache_enabled else _MID_TURN_COMPRESSION_THRESHOLD
+        if effective_ratio < _mid_turn_threshold:
+            return msgs
+        # Emergency: min_age_override=0 compresses regardless of message age.
+        # Non-emergency: min_age_override=compression_min_age bypasses the
+        # internal token/char threshold check while keeping the age guard.
+        min_age_ovr = 0 if effective_ratio >= _EMERGENCY_THRESHOLD_RATIO else compression_min_age
+        return apply_message_compression(
+            msgs,
+            call_count=_per_run_state[0].call_count[0],
+            compression_cache=_per_run_state[0].compression_cache,
+            llm=_comp_llm,
+            max_context_tokens=max_context_tokens,
+            min_age_cycles=compression_min_age,
+            min_chars=compression_min_chars,
+            min_age_override=min_age_ovr,
+            actual_input_tokens=last_tokens,
+        )
+
+    # ── LLM call with timeout ─────────────────────────────────────
+    # Prevents indefinite hangs when the LLM backend disconnects.
+    _LLM_RETRY_TIMEOUT = 300  # seconds — retry timeout after first attempt fails
+    _LLM_MAX_RETRIES = 3  # total attempts (1 initial + 2 retries)
+    _LLM_RETRY_BASE_DELAY = 2.0  # seconds — doubles on each retry (2, 4)
+
+    def _is_retryable_error(exc: Exception) -> bool:
+        """Return True for transient errors worth retrying (rate limits, 5xx, and
+        connection/timeout blips — #2378)."""
+        # Connection/timeout-class blips use the shared predicate so this stays in
+        # sync with RetryableChatModel._should_retry (the bounded-timeout is caught
+        # on a separate branch above and never reaches here).
+        if is_transient_connection_error(exc):
+            return True
+        msg = str(exc).lower()
+        return any(
+            p in msg
+            for p in (
+                "rate limit",
+                "rate_limit",
+                "too many requests",
+                "429",
+                "503",
+                "502",
+                "500",
+                "server error",
+                "overloaded",
+                "capacity",
+                "temporarily",
+            )
+        )
+
+    def _invoke_with_timeout(_model: Any, _messages: list, _cfg: Any, _timeout: int) -> Any:
+        import concurrent.futures as _cf
+
+        _executor = _get_llm_executor()
+        last_exc: Exception | None = None
+        for _attempt in range(_LLM_MAX_RETRIES):
+            # Disable the model's inner retry loop so that retries happen
+            # in this outer loop without blocking a scarce pool worker.
+            if isinstance(_model, RetryableChatModel):
+                _fut = _executor.submit(
+                    _model.invoke, _messages, _cfg, _cogtrix_disable_retries=True
+                )
+            else:
+                _fut = _executor.submit(_model.invoke, _messages, _cfg)
+            try:
+                _timeout_for_attempt = _LLM_RETRY_TIMEOUT if _attempt > 0 else _timeout
+                return _fut.result(timeout=_timeout_for_attempt)
+            except _cf.TimeoutError:
+                # Cancel the future so the shared executor can reclaim the
+                # slot.  If the underlying LLM I/O is stuck the OS thread may
+                # continue running, but it is bounded by the pool's max_workers.
+                _fut.cancel()
+                last_exc = RuntimeError(
+                    f"LLM backend not responding (timed out after {_timeout_for_attempt}s)"
+                )
+                _graph_log.warning(
+                    "LLM call timed out after %ds (attempt %d/%d)",
+                    _timeout_for_attempt,
+                    _attempt + 1,
+                    _LLM_MAX_RETRIES,
+                )
+            except Exception as _exc:
+                if _is_retryable_error(_exc) and _attempt < _LLM_MAX_RETRIES - 1:
+                    last_exc = _exc
+                    _delay = _LLM_RETRY_BASE_DELAY * (2**_attempt)
+                    _graph_log.warning(
+                        "LLM call failed with retryable error (attempt %d/%d, "
+                        "retrying in %.0fs): %s",
+                        _attempt + 1,
+                        _LLM_MAX_RETRIES,
+                        _delay,
+                        _exc,
+                    )
+                    time.sleep(_delay)
+                    continue
+                raise
+            if _attempt < _LLM_MAX_RETRIES - 1:
+                _delay = _LLM_RETRY_BASE_DELAY * (2**_attempt)
+                time.sleep(_delay)
+        raise last_exc or RuntimeError("LLM invocation failed after all retries")
+
+    # ── Tool output quality gate helpers ──────────────────────────────
+    _SUBSTANCELESS_PREFIXES = ("error:", "no results", "0 results")
+
+    def _is_substanceless(content: Any) -> bool:
+        """Return True if a tool result lacks actionable substance."""
+        if content is None:
+            return True
+        if not isinstance(content, str):
+            return False
+        stripped = content.strip()
+        if not stripped:
+            return True
+        # An empty JSON array/object is valid "nothing found" data, not no-data.
+        # list_pull_requests returning [] means "no open PRs" — the quality gate
+        # must not fire when prior turns already returned valid results.
+        if stripped in ("[]", "{}", "[ ]", "{ }"):
+            return False
+        if len(stripped) < 20:
+            return True
+        lower = stripped.lower()
+        if lower.startswith(_SUBSTANCELESS_PREFIXES):
+            return True
+        return False
+
+    def _all_tool_results_substanceless(messages: list[Any]) -> bool:
+        """Return True only when EVERY ToolMessage produced in the CURRENT TURN
+        (since the last genuine user message) is substanceless.
+
+        #2360: the previous implementation inspected only the most recent
+        contiguous ToolMessage block (the last round), so a turn that did real
+        work and then ended with an empty verification command (e.g. a trailing
+        ``\\n[exit code: 1]``) was falsely reported as "all tools returned no
+        data this turn" — a false-failure on a successful task. #382's own
+        acceptance criterion is turn-scoped ("every ToolMessage in the current
+        turn batch is substanceless"), so scope to the whole turn: if ANY tool
+        result this turn had substance, the gate must not fire. Turn boundary is
+        the last genuine user message (``_last_human_msg_idx`` skips
+        recovery-injected nudges).
+        """
+        start = _last_human_msg_idx(messages) + 1  # 0 when there is no user msg yet
+        tool_msgs = [m for m in messages[start:] if isinstance(m, ToolMessage)]
+        if not tool_msgs:
+            return False
+        return all(_is_substanceless(getattr(m, "content", None)) for m in tool_msgs)
+
+    from cogtrix_core.orchestration.nodes.call_model import CallModelContext, build_call_model_node
+    from cogtrix_core.orchestration.search_quality import SearchQualityThresholds
+
+    # Build search quality thresholds from Config (#1593, Option B).
+    # Defaults are defined in SearchQualityThresholds; config.yaml overrides apply.
+    try:
+        from cogtrix_core.config import Config
+
+        _cfg = Config()
+        _search_sq_thresholds = SearchQualityThresholds(
+            min_url_count=_cfg.search_quality_min_url_count,
+            min_content_chars=_cfg.search_quality_min_chars,
+        )
+        # Wire curl/wget URL domain allowlisting (Caleb Varden arch review, PR #1607).
+        # Without this call, _set_curl_wget_allowed_domains() is never invoked at
+        # runtime and the feature is a dead letter even when users configure
+        # shell_curl_wget_allowed_domains in cogtrix.yaml.
+        try:
+            from cogtrix_core.tools.shell import (
+                _set_allow_patterns,
+                _set_curl_wget_allowed_domains,
+                _set_extra_safe_commands,
+            )
+
+            _set_curl_wget_allowed_domains(_cfg.shell_curl_wget_allowed_domains)
+            # Operator-controlled, opt-in shell-policy extensions (#2392). Default
+            # empty → no relaxation; only applied when the operator configures them.
+            _set_extra_safe_commands(_cfg.shell_extra_safe_commands)
+            _set_allow_patterns(_cfg.shell_allow_patterns)
+        except (
+            Exception
+        ):  # noqa: BLE001 — must never crash graph build; shell policy extensions silently disabled
+            pass
+    except Exception:  # noqa: BLE001 — config loading must never crash graph build
+        _search_sq_thresholds = SearchQualityThresholds()
+
+    call_model = build_call_model_node(
+        CallModelContext(
+            llm=llm,
+            tools_ready=tools_ready,
+            active_tools_list=active_tools_list,
+            active_names=_per_run_state[0].active_names,
+            budget_stopped_tools=_per_run_state[0].budget_stopped_tools,
+            bound_cache=_per_run_state[0].bound_cache,
+            bound_cache_lock=_bound_cache_lock,
+            cached_fingerprint=_cached_fingerprint,
+            compression_cache=_per_run_state[0].compression_cache,
+            tool_version=_per_run_state[0].tool_version,
+            last_tool_version=_per_run_state[0].last_tool_version,
+            call_count=_per_run_state[0].call_count,
+            last_input_tokens=_per_run_state[0].last_input_tokens,
+            max_context_tokens=max_context_tokens,
+            context_max_messages=_context_max_messages,
+            context_max_tokens=_context_max_tokens,
+            model_max_tokens=getattr(llm, "max_tokens", None),
+            # #2447: the model's real INPUT window, stamped onto the llm at
+            # provider-creation time (``create_chat_model_from_configs``).
+            model_context_window=getattr(llm, "_cogtrix_context_window", None),
+            compression_llm=compression_llm,
+            memory_manager=memory_manager,
+            checkpoint_store=_checkpoint_store,
+            calls_since_last_checkpoint=_per_run_state[0].calls_since_last_checkpoint,
+            last_checkpoint_count=_per_run_state[0].last_checkpoint_count,
+            rounds_since_checkpoint=_per_run_state[0].rounds_since_checkpoint,
+            force_thinking_break=_per_run_state[0].force_thinking_break,
+            consecutive_errors=_per_run_state[0].consecutive_errors,
+            last_identical_error_signature=_per_run_state[0].last_identical_error_signature,
+            consecutive_identical_error_count=_per_run_state[0].consecutive_identical_error_count,
+            last_reflection_at=_per_run_state[0].last_reflection_at,
+            tool_health_check_interval=_TOOL_HEALTH_CHECK_INTERVAL,
+            last_tool_health_check_at=_per_run_state[0].last_tool_health_check_at,
+            tool_quality_gate_enabled=_TOOL_QUALITY_GATE_ENABLED,
+            topic_switch_detection_enabled=_TOPIC_SWITCH_DETECTION_ENABLED,
+            stuck_threshold=_STUCK_THRESHOLD,
+            stuck_no_checkpoint_threshold=_per_run_state[0].stuck_no_checkpoint_threshold,
+            stuck_threshold_calibrated=_per_run_state[0].stuck_threshold_calibrated,
+            checkpoint_nudge_interval=_CHECKPOINT_NUDGE_INTERVAL,
+            reflection_interval=_REFLECTION_INTERVAL,
+            max_request_tools_noops=_MAX_REQUEST_TOOLS_NOOPS,
+            sys_msg=_sys_msg,
+            model_timeout=_model_timeout,
+            tool_context_limit_pct=tool_context_limit_pct,
+            da_enabled=_da_enabled,
+            da_report_uncertainty=_da_report_uncertainty,
+            da_min_confidence=_da_min_confidence,
+            apply_context_message_cap=_apply_context_message_cap,
+            maybe_compress=_maybe_compress,
+            invoke_with_timeout=_invoke_with_timeout,
+            all_tool_results_substanceless=_all_tool_results_substanceless,
+            search_quality_thresholds=_search_sq_thresholds,
+        )
+    )
+
+    handle_phantom = build_handle_phantom_node(
+        phantom_count=_per_run_state[0].phantom_count,
+        max_retries=_MAX_PHANTOM_RETRIES,
+    )
+    handle_action_intent = build_handle_action_intent_node(
+        action_intent_count=_per_run_state[0].action_intent_count,
+        max_retries=_MAX_ACTION_INTENT_RETRIES,
+        incompleteness_check=_has_incompleteness_signal,
+    )
+    handle_unverified_claim = build_handle_unverified_claim_node(
+        unverified_claim_count=_per_run_state[0].unverified_claim_count,
+        max_retries=_MAX_UNVERIFIED_CLAIM_RETRIES,
+    )
+    handle_unverified_entity = build_handle_unverified_entity_node(
+        unverified_entity_count=_per_run_state[0].unverified_entity_count,
+        max_retries=_MAX_UNVERIFIED_ENTITY_RETRIES,
+    )
+    handle_unsupported_quote = build_handle_unsupported_quote_node(
+        unsupported_quote_count=_per_run_state[0].unsupported_quote_count,
+        max_retries=_MAX_UNSUPPORTED_QUOTE_RETRIES,
+    )
+    handle_version_scope = build_handle_version_scope_node(
+        version_scope_count=_per_run_state[0].version_scope_count,
+        max_retries=_MAX_VERSION_SCOPE_RETRIES,
+    )
+    handle_unsupported_attribution = build_handle_unsupported_attribution_node(
+        unsupported_attribution_count=_per_run_state[0].unsupported_attribution_count,
+        max_retries=_MAX_UNSUPPORTED_ATTRIBUTION_RETRIES,
+    )
+    handle_entity_owner_mismatch = build_handle_entity_owner_mismatch_node(
+        entity_owner_mismatch_count=_per_run_state[0].entity_owner_mismatch_count,
+        max_retries=_MAX_ENTITY_OWNER_MISMATCH_RETRIES,
+    )
+    # #2015 — only instantiated when a caller-supplied corpus
+    # attribution detector was provided.  Stays ``None`` for every
+    # production / Gate 2 caller; the PM harness sets it via the
+    # ``corpus_attribution_detector`` parameter.  Routing logic below
+    # checks ``corpus_attribution_detector is not None`` before
+    # consulting it, so the recovery node only ever runs in PM-like
+    # deployments.
+    handle_corpus_attribution_mismatch: Any = None
+    if corpus_attribution_detector is not None:
+        handle_corpus_attribution_mismatch = build_handle_corpus_attribution_mismatch_node(
+            corpus_attribution_mismatch_count=(_per_run_state[0].corpus_attribution_mismatch_count),
+            max_retries=_MAX_CORPUS_ATTRIBUTION_MISMATCH_RETRIES,
+            corpus_attribution_detector=corpus_attribution_detector,
+        )
+    handle_topic_substitution = build_handle_topic_substitution_node(
+        topic_substitution_count=_per_run_state[0].topic_substitution_count,
+        max_retries=_MAX_TOPIC_SUBSTITUTION_RETRIES,
+    )
+    handle_sycophancy = build_handle_sycophancy_node(
+        sycophancy_count=_per_run_state[0].sycophancy_count,
+        max_retries=_MAX_SYCOPHANCY_RETRIES,
+    )
+    handle_fabricated_action = build_handle_fabricated_action_node(
+        fabricated_action_count=_per_run_state[0].fabricated_action_count,
+        max_retries=_MAX_FABRICATED_ACTION_RETRIES,
+    )
+    handle_fabricated_quote = build_handle_fabricated_quote_node(
+        fabricated_quote_count=_per_run_state[0].fabricated_quote_count,
+        max_retries=_MAX_FABRICATED_QUOTE_RETRIES,
+    )
+    handle_noncanonical_fork = build_handle_noncanonical_fork_node(
+        noncanonical_fork_count=_per_run_state[0].noncanonical_fork_count,
+        max_retries=_MAX_NONCANONICAL_FORK_RETRIES,
+    )
+    handle_synthesis_after_eviction = build_handle_synthesis_after_eviction_node(
+        synthesis_after_eviction_count=_per_run_state[0].synthesis_after_eviction_count,
+        max_retries=_MAX_SYNTHESIS_AFTER_EVICTION_RETRIES,
+    )
+
+    def handle_fabrication(state: CogtrixState) -> dict:
+        _per_run_state[0].fabrication_count[0] += 1
+        last = state["messages"][-1]
+        log = get_logger()
+        log.warning(
+            "Fabricated success-after-error detected, attempt %d/%d. Injecting correction.",
+            _per_run_state[0].fabrication_count[0],
+            _MAX_FABRICATION_RETRIES,
+        )
+        if _per_run_state[0].fabrication_count[0] > _MAX_FABRICATION_RETRIES:
+            return {
+                "messages": [
+                    RemoveMessage(id=last.id),
+                    AIMessage(
+                        content=(
+                            "I reported success incorrectly after tool errors and could not "
+                            "recover safely. Please retry your request."
+                        )
+                    ),
+                ]
+            }
+        return {
+            "messages": [
+                RemoveMessage(id=last.id),
+                HumanMessage(
+                    content=(
+                        "Some of the tools you called returned errors, but your response claims "
+                        "success. Report honestly what the tools returned. Do not fabricate "
+                        "success messages."
+                    )
+                ),
+            ]
+        }
+
+    def handle_incompleteness(state: CogtrixState) -> dict:
+        """Inject a strongly-worded final nudge when the model signalled
+        incomplete multi-step work but exhausted standard action-intent retries.
+        """
+        log = get_logger()
+        log.warning(
+            "Incompleteness signal detected after action-intent retries exhausted. "
+            "Injecting critical completion nudge."
+        )
+        return {
+            "messages": [
+                HumanMessage(
+                    content=(
+                        "CRITICAL: The task is incomplete. "
+                        "You used language like 'first' or 'to start', "
+                        "which implies there are more steps to complete. "
+                        "Do not explain what comes next — call the remaining "
+                        "tool(s) NOW."
+                    )
+                )
+            ]
+        }
+
+    def _tool_call_key(call: dict) -> str | None:
+        """Compute the deduplication key for a tool call, or None if not serializable.
+
+        Normalizes to the canonical tool name via ``_per_run_state[0].tool_lookup`` so that an
+        alias and its resolved canonical name share the same cache key.  When the
+        alias is not in ``_per_run_state[0].tool_lookup`` (e.g. during the auto-expansion serial
+        path) the raw call name is used instead (BUG-234).
+        """
+        tool_name = call["name"]
+        if tool_name in _DUPLICATE_EXEMPT:
+            return None
+        # Prefer the canonical name stored on the live tool object.
+        tool_obj = _per_run_state[0].tool_lookup.get(tool_name)
+        if tool_obj is not None:
+            tool_name = getattr(tool_obj, "name", tool_name) or tool_name
+        args_json = _json.dumps(_stable_tool_call_value(call.get("args", {})), sort_keys=True)
+        return tool_name + ":" + args_json
+
+    def _identical_error_signature(call: dict) -> str | None:
+        """Return a stable signature for repeated identical-error detection.
+
+        Uses the tool name plus the first meaningful argument so that retry
+        loops on the same action are grouped together without requiring the
+        full argument payload to match byte-for-byte.
+        """
+        tool_name = call.get("name", "")
+        if not tool_name:
+            return None
+        args = call.get("args", {})
+        if not isinstance(args, dict):
+            return None
+        primary_keys = (
+            "pull_number",
+            "path",
+            "url",
+            "query",
+            "command",
+            "name",
+            "text",
+            "repo",
+            "email",
+            "username",
+            "branch",
+        )
+        primary_key = next(
+            (
+                key
+                for key in primary_keys
+                if key in args and args.get(key) not in (None, "", [], {})
+            ),
+            None,
+        )
+        if primary_key is None:
+            if not args:
+                return None
+            primary_key = next(iter(sorted(args.keys())))
+        try:
+            primary_value = _json.dumps(args.get(primary_key), sort_keys=True, default=str)
+        except (TypeError, ValueError):
+            primary_value = str(args.get(primary_key))
+        return f"{tool_name}:{primary_key}={primary_value}"
+
+    def _tool_error_class(content: str) -> str | None:
+        """Normalize an error ToolMessage into a coarse error class."""
+        normalized = content.strip()
+        if normalized.lower().startswith("[duplicate call"):
+            normalized = normalized.split("\n\n", 1)[-1]
+        content_lower = _stuck_detection_headline(normalized).lower()
+        if "repository rule violations" in content_lower:
+            return "repository_rule_violations"
+        if "permission denied" in content_lower or "forbidden" in content_lower:
+            return "permission_denied"
+        if "timed out" in content_lower or "timeout" in content_lower:
+            return "timeout"
+        if (
+            "not found" in content_lower
+            or "404" in content_lower
+            or "no such file" in content_lower
+            or "cannot open" in content_lower
+        ):
+            return "not_found"
+        if (
+            content_lower.startswith("error")
+            or "error executing" in content_lower
+            or "traceback" in content_lower
+            or "failed" in content_lower
+        ):
+            return "generic_error"
+        return None
+
+    def _tool_error_guidance(error_class: str, tool_name: str) -> str:
+        """Return short guidance tailored to the repeated error class."""
+        if error_class == "repository_rule_violations":
+            return (
+                f"'{_safe_tool_name(tool_name)}' hit repository rule violations. "
+                "Stop retrying and verify CI/branch protections or ask a maintainer to merge."
+            )
+        if error_class == "permission_denied":
+            return (
+                f"'{_safe_tool_name(tool_name)}' was denied. Stop retrying and verify "
+                "authentication or permissions before trying again."
+            )
+        if error_class == "timeout":
+            return (
+                f"'{_safe_tool_name(tool_name)}' timed out repeatedly. Stop retrying and "
+                "switch to a different approach or inspect the service health."
+            )
+        if error_class == "not_found":
+            return (
+                f"'{_safe_tool_name(tool_name)}' cannot find the target repeatedly. "
+                "Verify the identifier or path before trying again."
+            )
+        return (
+            f"'{_safe_tool_name(tool_name)}' has returned the same error repeatedly. "
+            "Stop retrying and inspect the last failure before continuing."
+        )
+
+    def _check_duplicate(call: dict, key: str | None = None) -> ToolMessage | None:
+        """Return a cached ToolMessage if this exact call was seen before."""
+        tool_name = call["name"]
+        if key is None:
+            key = _tool_call_key(call)
+        if key is None:
+            return None
+        _dup_hits = 0
+        with _history_lock:
+            cached = _per_run_state[0].tool_call_history.get(key)
+            if cached is not None:
+                _per_run_state[0].tool_call_history.move_to_end(key)
+                _per_run_state[0].duplicate_hit_count[0] += 1
+                _dup_hits = _per_run_state[0].duplicate_hit_count[0]
+        if cached is None:
+            return None
+        log = get_logger()
+        log.warning("Duplicate tool call detected: %s (returning cached result)", tool_name)
+        # #2319: escalate from a soft "do not repeat" to a forced strategy change
+        # once the model keeps re-issuing identical calls (a loop the
+        # consecutive-error stuck-break misses when successful re-reads interleave).
+        return ToolMessage(
+            content=(duplicate_call_banner(_dup_hits) + cached),
+            tool_call_id=call["id"],
+            name=tool_name,
+        )
+
+    def _store_call_result(call: dict, result_text: str, key: str | None = None) -> None:
+        """Store a tool call result for duplicate detection."""
+        if key is None:
+            key = _tool_call_key(call)
+        if key is None:
+            return
+        with _history_lock:
+            _per_run_state[0].tool_call_history[key] = result_text[:500]
+            _per_run_state[0].tool_call_history.move_to_end(key)
+            if len(_per_run_state[0].tool_call_history) > _MAX_TOOL_CALL_HISTORY:
+                _per_run_state[0].tool_call_history.popitem(last=False)
+
+    # _invoke_one + its _cap_history_tool_content helper were extracted to
+    # ``src.orchestration.deduped_tool_invoker.DedupedToolInvoker`` in the
+    # /forge A4 refactor (2026-05-24).  We instantiate the class here and
+    # expose ``_invoker.invoke_one`` under the original symbol name so the
+    # downstream contract (``build_process_tools_node(_invoke_one=…)``) is
+    # byte-for-byte unchanged.  Constructor injection of locks, helpers,
+    # and budget constants keeps the per-graph state model intact.
+    # #2213: fold trusted per-tool category declarations (MCP manifest /
+    # annotation-derived) into the budget sets. Behaviour-preserving when no
+    # active tool declares a category (i.e. all built-ins).
+    (
+        _budget_retrieval_tools,
+        _budget_action_tools,
+        _budget_soft_exempt,
+        _budget_hard_exempt,
+    ) = _resolve_budget_category_sets(active_tools_list)
+    _invoker = DedupedToolInvoker(
+        per_run_state=_per_run_state,
+        history_lock=_history_lock,
+        tool_budget_lock=_tool_budget_lock,
+        bound_cache_lock=_bound_cache_lock,
+        pending_events=_pending_events,
+        active_tools_list=active_tools_list,
+        session_state=session_state,
+        tool_call_guard=tool_call_guard,
+        tool_call_key=_tool_call_key,
+        check_duplicate=_check_duplicate,
+        correct_tool_args=_correct_tool_args,
+        safe_tool_name=_safe_tool_name,
+        max_tool_call_history=_MAX_TOOL_CALL_HISTORY,
+        tool_budget_hard=_TOOL_BUDGET_HARD,
+        tool_budget_soft=_TOOL_BUDGET_SOFT,
+        tool_budget_hard_exempt=_budget_hard_exempt,
+        tool_budget_soft_exempt=_budget_soft_exempt,
+        tool_budget_retrieval_tools=_budget_retrieval_tools,
+        tool_budget_retrieval_ceiling_divisor=_TOOL_BUDGET_RETRIEVAL_CEILING_DIVISOR,
+        tool_budget_action_tools=_budget_action_tools,
+        tool_budget_action_ceiling_divisor=_TOOL_BUDGET_ACTION_CEILING_DIVISOR,
+        # #2443: resolver for tools activated after graph build (mid-turn MCP
+        # tools) so they get their declared retrieval/action ceiling, not STANDARD.
+        resolve_tool_category=resolve_tool_category,
+    )
+    _invoke_one = _invoker.invoke_one
+
+    # #1851: tools the system prompt explicitly forbids. Blocked at
+    # dispatch unless explicitly approved — structural safety, not
+    # prompt-trust. Computed once from the static system prompt; no
+    # intersection with the catalog so a dynamically-loaded forbidden
+    # tool is still gated (only real calls are ever blocked).
+    _prohibited_tools = extract_prohibited_tools(system_prompt)
+    process_tools = build_process_tools_node(
+        _invoke_one=_invoke_one,
+        _tool_lookup=_per_run_state[0].tool_lookup,
+        _active_names=_per_run_state[0].active_names,
+        _available_tools_ref=_per_run_state[0].available_tools_ref,
+        session_state=session_state,
+        parallel_tool_execution=parallel_tool_execution,
+        _identical_error_signature=_identical_error_signature,
+        _tool_error_class=_tool_error_class,
+        _tool_error_guidance=_tool_error_guidance,
+        _last_identical_error_signature=_per_run_state[0].last_identical_error_signature,
+        _consecutive_identical_error_count=_per_run_state[0].consecutive_identical_error_count,
+        _force_thinking_break=_per_run_state[0].force_thinking_break,
+        _graph_log=_graph_log,
+        protected=protected,
+        tool_catalog=_per_run_state[0].tool_catalog,
+        registry=registry,
+        approvals=approvals,
+        prohibited_tools=_prohibited_tools,
+        confirmation_ui=confirmation_ui,
+        git_native=git_native,
+        on_tool_expansion=on_tool_expansion,
+        output_cap=output_cap,
+        expansion_count=_per_run_state[0].expansion_count,
+        auto_expansion_count=_per_run_state[0].auto_expansion_count,
+        request_tools_noop_count=_per_run_state[0].request_tools_noop_count,
+        _MAX_REQUEST_TOOLS_NOOPS=_MAX_REQUEST_TOOLS_NOOPS,
+        active_tools_list=active_tools_list,
+        _tool_version=_per_run_state[0].tool_version,
+        _calls_since_last_checkpoint=_per_run_state[0].calls_since_last_checkpoint,
+        _same_file_writes=_per_run_state[0].same_file_writes,
+        _same_file_writes_lock=_same_file_writes_lock,
+        _REWRITE_SEARCH_THRESHOLD=_REWRITE_SEARCH_THRESHOLD,
+        _action_tier_consecutive_calls=_per_run_state[0].action_tier_consecutive_calls,
+        _last_action_tier_tool=_per_run_state[0].last_action_tier_tool,
+        _consecutive_errors=_per_run_state[0].consecutive_errors,
+        _STUCK_THRESHOLD=_STUCK_THRESHOLD,
+        _stuck_detection_headline=_stuck_detection_headline,
+        _get_tool_executor=lambda: _get_tool_executor(),
+        _detect_tool_request=_detect_tool_request,
+        _safe_tool_name=_safe_tool_name,
+        _tool_budget_lock=_tool_budget_lock,
+        # #2269: the per-run pin set (same object the invoker reads + that
+        # _reset_for_new_run clears in-place) and its bound.
+        _pinned_tools=_per_run_state[0].pinned_tools,
+        _max_pinned_tools=_MAX_PINNED_TOOLS,
+        tool_trust=config.tool_trust if config is not None else None,
+        # #2213: same per-run set the invoker adds budget-stopped tools to +
+        # _reset_for_new_run clears; lets a pin lift a within-turn budget-stop.
+        budget_stopped_tools=_per_run_state[0].budget_stopped_tools,
+    )
+
+    # _last_human_msg_idx is defined at module scope (testable); the call in
+    # route_after_model below resolves to it via normal name lookup.
+
+    def _route_after_model_decision(state: CogtrixState) -> str:
+        msgs = state["messages"]
+        if not msgs:
+            return END
+
+        last = msgs[-1]
+        if isinstance(last, AIMessage):
+            content = getattr(last, "content", "")
+            has_content = isinstance(content, str) and bool(content.strip())
+            tool_calls = getattr(last, "tool_calls", None)
+            meta = getattr(last, "response_metadata", None)
+
+            if not has_content and not tool_calls:
+                if meta and isinstance(meta, dict):
+                    if meta.get("finish_reason") == "tool_calls":
+                        return "handle_phantom"
+                return END
+
+            if meta and isinstance(meta, dict) and meta.get("budget_guard"):
+                return END
+
+            if tool_calls:
+                return "process_tools"
+
+            if _looks_like_phantom_tool_markup(last):
+                return "handle_phantom"
+
+            if _looks_like_markdown_phantom_report(last):
+                return "handle_phantom"
+
+            if _looks_like_fabricated_success_after_tool_errors(msgs, last):
+                return "handle_fabrication"
+
+            # #1869: sibling fabrication detector — fires when the model
+            # claimed a side-effect but invoked NO tool at all this turn.
+            # Bounded by a per-run retry budget; once exhausted, the
+            # response ships and the warning log retains visibility.
+            if _per_run_state[0].fabricated_action_count[
+                0
+            ] <= _MAX_FABRICATED_ACTION_RETRIES and _looks_like_fabricated_action_success_without_tool_call(
+                msgs, last
+            ):
+                return "handle_fabricated_action"
+
+            # #1871: polarity sibling of #1869 — the model attributed a
+            # verbatim quoted error string to a tool whose output does
+            # not contain it. Routed right after #1869 so the two
+            # mutually-exclusive fabrication modes (success vs error)
+            # are dispatched together.
+            if _per_run_state[0].fabricated_quote_count[
+                0
+            ] <= _MAX_FABRICATED_QUOTE_RETRIES and _looks_like_fabricated_tool_error_quote(
+                msgs, last
+            ):
+                return "handle_fabricated_quote"
+
+            # #1713: sycophantic-prefix recovery. Routed early so we don't
+            # waste fidelity-check work on a response we're about to
+            # regenerate. The earlier in-place-strip attempt (PR #1731)
+            # broke Gate 2 by mutating the AIMessage body; this recovery
+            # node replaces the response wholesale instead — same pattern
+            # as every other recovery node, none of which has regressed
+            # Gate 2.
+            if _is_sycophantic_prefix(last):
+                if _per_run_state[0].sycophancy_count[0] <= _MAX_SYCOPHANCY_RETRIES:
+                    return "handle_sycophancy"
+
+            # Has content but no tool calls — check for intention-without-action.
+            # Suppress the nudge when the agent is responding to an access-denied
+            # tool failure: the model is offering alternatives, not planning to act.
+            # Nudging it again causes a counterproductive retry of the same blocked path.
+            if _is_action_intent(last):
+                msgs = state.get("messages", [])
+                recent_tool_errors = [
+                    getattr(m, "content", "") or "" for m in msgs[-6:] if hasattr(m, "tool_call_id")
+                ]
+                if any(
+                    "Access denied" in err or "path outside allowed" in err
+                    for err in recent_tool_errors
+                ):
+                    pass  # skip nudge — agent handled the error gracefully
+                elif _is_refusal(last):
+                    # #1851: a deliberate refusal is a considered non-action,
+                    # not a forgotten one. Never nudge "proceed, call the
+                    # tool(s)" on top of a refusal — that can convert an honest
+                    # decline (e.g. of a forbidden / unauthorized action) into
+                    # the action itself. Let the refusal stand.
+                    pass
+                else:
+                    return "handle_action_intent"
+
+            # Hallucinated completion: model wrote a past-tense summary
+            # ("Notified the VP...") claiming it called a tool that it never
+            # actually invoked. Route through the same retry/synthesis path
+            # so the model gets a chance to execute the missing step.
+            _available_names = [getattr(t, "name", "") for t in (active_tools_list or [])]
+            if _is_hallucinated_completion(last, msgs, _available_names):
+                return "handle_action_intent"
+
+            # Bug L: unverified categorical claim about external state
+            # (today's date, latest version, etc.) without calling the
+            # matching verification tool. Route to a recovery node that
+            # nudges the model to verify-then-revise. See
+            # cogtrix_core/orchestration/verification.py for the rule registry.
+            if has_content and isinstance(content, str):
+                from cogtrix_core.orchestration.verification import (
+                    collect_grounded_sources,
+                    collect_tool_message_contents,
+                    collect_tool_names_this_turn,
+                    detect_noncanonical_fork_recommendation,
+                    detect_unsupported_attribution,
+                    detect_unsupported_quote,
+                    detect_unverified_claim,
+                    detect_unverified_entities,
+                    detect_version_scope_mismatch,
+                )
+
+                # Single nudge-aware turn boundary (forge audit L5): reuse
+                # _last_human_msg_idx (skips recovery-injected nudges, unlike the
+                # old inline loop which stopped at one). Clamp to 0 when there is no
+                # genuine user message yet, preserving the prior scan-from-start.
+                _turn_start = max(_last_human_msg_idx(list(msgs)), 0)
+                _tools_called = collect_tool_names_this_turn(msgs, _turn_start)
+                # #2342: the grounding/hallucination guards below target RAG / Q&A
+                # answers grounded in tool RESULTS. On action/ops tasks the reply is a
+                # hand-off about work the agent DID (over execute_shell_command / file
+                # edits): the named subjects live in tool-call ARGS, and verification IS
+                # a shell command (systemctl is-active, curl). That made
+                # topic-substitution + unverified-claim false-positive on 33% / 15% of
+                # role_sysadmin runs. Gate them precisely (not a blanket disable):
+                #   * a claim is "shell-verified" if the agent actually ran commands —
+                #     a claim with NO execution at all still fires (genuine signal);
+                #   * topic-substitution is a corpus-answer concept with no meaning once
+                #     the turn executed real actions.
+                _shell_verified = "execute_shell_command" in _tools_called
+                _action_turn = any(t in _ACTION_EXEC_TOOLS for t in _tools_called)
+                if (
+                    not _shell_verified
+                    and detect_unverified_claim(content, _tools_called) is not None
+                ):
+                    if _per_run_state[0].unverified_claim_count[0] <= _MAX_UNVERIFIED_CLAIM_RETRIES:
+                        return "handle_unverified_claim"
+
+                # #1964 Item C: bundle the grounding sources — tool results,
+                # user prompt, AND system prompt — into one value object the
+                # detectors can consume uniformly.  Threading the system
+                # prompt in is the structural fix for the #1960 class of
+                # false fires (refusals quoting the persona's own policy).
+                _sources = collect_grounded_sources(msgs, _turn_start)
+
+                # cogtrix47 Issues 5+6: user-supplied specific
+                # identifiers (SKUs, store names, multi-word product
+                # names) the agent echoed without any tool result
+                # confirming them. Route to the entity-recovery node
+                # that nudges the model to cite evidence, hedge, or
+                # substitute the verified alternative.
+                if detect_unverified_entities(content, sources=_sources):
+                    if (
+                        _per_run_state[0].unverified_entity_count[0]
+                        <= _MAX_UNVERIFIED_ENTITY_RETRIES
+                    ):
+                        return "handle_unverified_entity"
+
+                # #1841: output-fidelity guard. A verbatim quote or explicit
+                # attribution in the response that appears in no grounding
+                # source (tool results, user prompt, system prompt) is a
+                # fabricated quote / fabricated citation.
+                if detect_unsupported_quote(content, sources=_sources):
+                    if (
+                        _per_run_state[0].unsupported_quote_count[0]
+                        <= _MAX_UNSUPPORTED_QUOTE_RETRIES
+                    ):
+                        return "handle_unsupported_quote"
+
+                # #1843: version-scope-collapse guard. A lifecycle status the
+                # model attaches to a specific model-ID that the evidence
+                # scopes only to a prefix-parent (series→version confusion).
+                # Checked against the WHOLE conversation's tool output, not
+                # just this turn: the misattribution often surfaces on a
+                # correction turn that did no fresh research, so the only
+                # ground truth is research from an earlier turn.
+                _all_tool_contents = collect_tool_message_contents(msgs, 0)
+                if detect_version_scope_mismatch(content, _all_tool_contents):
+                    if _per_run_state[0].version_scope_count[0] <= _MAX_VERSION_SCOPE_RETRIES:
+                        return "handle_version_scope"
+
+                # #1860: attributed-prose-claim guard. A paragraph that
+                # credits a source/authority ("as confirmed by …",
+                # "according to …", "officially …") for content whose
+                # distinctive tokens are absent from the grounded blob is
+                # fabricating the citation itself.
+                if detect_unsupported_attribution(content, sources=_sources):
+                    if (
+                        _per_run_state[0].unsupported_attribution_count[0]
+                        <= _MAX_UNSUPPORTED_ATTRIBUTION_RETRIES
+                    ):
+                        return "handle_unsupported_attribution"
+
+                # #1988 (post-mortem #1987 Cluster A): entity-owner
+                # mismatch guard.  Catches a (entity-ID, stakeholder-name)
+                # co-mention in the response that is NOT present in any
+                # tool result or system prompt this turn — the
+                # plausibility-substitution failure mode where the agent
+                # labels R-13's owner "Migration Squad" because the
+                # entity topic is migration.  Sister to
+                # ``unsupported_attribution`` but specialised for
+                # structured-identifier corpora.
+                from cogtrix_core.orchestration.verification import (
+                    detect_entity_owner_mismatch,
+                )
+
+                # #2015 — corpus-aware attribution mismatch guard.
+                # Runs BEFORE the grounding-based sibling because it's
+                # the stricter, higher-signal check: it consults a
+                # caller-supplied curated owner index and catches the
+                # cases where the wrongly-attached name DOES co-occur
+                # in retrieved chunks (which fools the grounding check
+                # below).  Only fires when the caller passed a
+                # ``corpus_attribution_detector`` to build_agent_graph;
+                # for every other deployment the closure is None and
+                # this branch short-circuits.
+                #
+                # #2006 cycle-8 post-mortem: this check was briefly
+                # moved to the TOP of the cascade by PR #2019 to give
+                # it full retry budget on every response.  Cycles 7+8
+                # against qwen3-coder showed that reorder cost ~8
+                # genuine Cluster A mismatches and 3 clean iterations
+                # vs the cycle-6 peak — running attribution FIRST
+                # robbed the upstream grounding / entity / quote
+                # detectors of their retry windows, and many would-be-
+                # clean responses regressed.  Position restored here.
+                if corpus_attribution_detector is not None:
+                    try:
+                        _corpus_mismatches = corpus_attribution_detector(content)
+                    except Exception:  # noqa: BLE001 — detector must not crash routing
+                        _corpus_mismatches = []
+                    if _corpus_mismatches:
+                        if (
+                            _per_run_state[0].corpus_attribution_mismatch_count[0]
+                            <= _MAX_CORPUS_ATTRIBUTION_MISMATCH_RETRIES
+                        ):
+                            return "handle_corpus_attribution_mismatch"
+
+                if detect_entity_owner_mismatch(content, sources=_sources):
+                    if (
+                        _per_run_state[0].entity_owner_mismatch_count[0]
+                        <= _MAX_ENTITY_OWNER_MISMATCH_RETRIES
+                    ):
+                        return "handle_entity_owner_mismatch"
+
+                # #1989 (post-mortem #1987 Cluster C): topic-substitution
+                # guard.  When the user's distinctive subject terms are
+                # absent from the response, every tool result this turn,
+                # and the system prompt — yet the response is
+                # substantive — the agent silently switched topic.
+                from cogtrix_core.orchestration.verification import (
+                    detect_topic_substitution,
+                )
+
+                if not _action_turn and detect_topic_substitution(content, sources=_sources):
+                    if (
+                        _per_run_state[0].topic_substitution_count[0]
+                        <= _MAX_TOPIC_SUBSTITUTION_RETRIES
+                    ):
+                        return "handle_topic_substitution"
+
+                # #1868: non-canonical GitHub-fork-recommendation guard.
+                # The agent surfaces a non-canonical fork URL and presents
+                # it with the canonical project's description + recommen-
+                # dation framing (Q5 reproducer: DharitriOne/wasmer,
+                # wasm-wasi-rs/runtimes__wasmtime). Independent of the
+                # tool-result grounding — the failure can fire even when
+                # the agent did do a web_search, because search results
+                # surface forks alongside canonical homes.
+                if _per_run_state[0].noncanonical_fork_count[
+                    0
+                ] <= _MAX_NONCANONICAL_FORK_RETRIES and detect_noncanonical_fork_recommendation(
+                    content, user_prompt=_sources.user_prompt
+                ):
+                    return "handle_noncanonical_fork"
+
+                # #1943 PR #4: synthesis-after-eviction guard.  Routed
+                # LAST among the response-content detectors because it
+                # uses the broadest signal set (eviction marker present,
+                # substantive final answer, zero fresh tool calls this
+                # turn, no compliant acknowledgement) — every
+                # more-specific guard above gets first pick.  This
+                # ordering means a fabricated quote AFTER eviction is
+                # routed to ``handle_unsupported_quote`` (more
+                # actionable nudge), and only "fabricated everything
+                # else" trips this guard.
+                from cogtrix_core.orchestration.verification import (
+                    detect_synthesis_after_eviction,
+                )
+
+                if _per_run_state[0].synthesis_after_eviction_count[
+                    0
+                ] <= _MAX_SYNTHESIS_AFTER_EVICTION_RETRIES and detect_synthesis_after_eviction(
+                    content, list(msgs), _turn_start
+                ):
+                    return "handle_synthesis_after_eviction"
+
+        return END
+
+    def route_after_model(state: CogtrixState) -> str:
+        """Routing wrapper that enforces the per-turn recovery-firing budget.
+
+        Delegates to :func:`_route_after_model_decision` for the actual
+        routing logic.  Adds an independent safety net at the router:
+
+        * Detects a new turn by tracking the index of the most recent
+          ``HumanMessage`` (``recovery_firings_turn_marker``); resets
+          the budget counter when the index advances.
+        * If the count is already at the cap on entry, short-circuits
+          to END without calling the inner router — every detector
+          already had its budget within this turn.
+        * If the inner router decides on a ``handle_*`` destination,
+          increments the counter for the next call.
+
+        Closes the runaway-cascade failure mode #1960 documents.
+        Works as a kill switch regardless of which detector misfires;
+        also works if a future detector lands without its own
+        refusal-awareness guard (the same architectural blunder).
+        """
+        msgs = state["messages"]
+        if not msgs:
+            return END
+
+        runtime = _per_run_state[0]
+        current_turn_idx = _last_human_msg_idx(list(msgs))
+
+        # New turn → reset the per-turn budget + the firing history.
+        if runtime.recovery_firings_turn_marker[0] != current_turn_idx:
+            runtime.recovery_firings_turn_marker[0] = current_turn_idx
+            runtime.recovery_firings_this_turn[0] = 0
+            runtime.recovery_firings_history[0] = []
+
+        # Already past the cap → emergency exit BEFORE running the
+        # detector chain again.  Saves the wall-clock cost of the
+        # detector regex sweep on a response we've already decided
+        # not to recover from.  Carries the firing history in the log
+        # payload so an operator can see WHICH detectors fired and in
+        # what order — #1964 Item D.
+        if runtime.recovery_firings_this_turn[0] >= _MAX_RECOVERY_FIRINGS_PER_TURN:
+            get_logger().warning(
+                "Recovery cascade budget exceeded (%d firings this turn ≥ cap %d) — "
+                "short-circuiting to END to ship the agent's response rather than "
+                "spin further.  This is the #1960 kill switch.  "
+                "firing_history=%s",
+                runtime.recovery_firings_this_turn[0],
+                _MAX_RECOVERY_FIRINGS_PER_TURN,
+                runtime.recovery_firings_history[0],
+            )
+            return END
+
+        decision = _route_after_model_decision(state)
+
+        if decision.startswith("handle_"):
+            runtime.recovery_firings_this_turn[0] += 1
+            # Strip the ``handle_`` prefix for readability in the log
+            # payload — the detector's natural name is the suffix.
+            runtime.recovery_firings_history[0].append(decision[len("handle_") :])
+            if runtime.recovery_firings_this_turn[0] > _MAX_RECOVERY_FIRINGS_PER_TURN:
+                get_logger().warning(
+                    "Recovery cascade budget exceeded on routing decision "
+                    "(%d → cap %d, attempted destination=%s) — overriding to END.  "
+                    "firing_history=%s",
+                    runtime.recovery_firings_this_turn[0],
+                    _MAX_RECOVERY_FIRINGS_PER_TURN,
+                    decision,
+                    runtime.recovery_firings_history[0],
+                )
+                return END
+
+        return decision
+
+    def route_after_phantom(state: CogtrixState) -> str:
+        if _per_run_state[0].phantom_count[0] > _MAX_PHANTOM_RETRIES:
+            return END
+        return "call_model"
+
+    def route_after_action_intent(state: CogtrixState) -> str:  # noqa: ARG001
+        if _per_run_state[0].action_intent_count[0] > _MAX_ACTION_INTENT_RETRIES:
+            # Standard retries exhausted.  Before ending, check whether
+            # the model used incompleteness language ("first", "to start")
+            # — a strong signal that it planned more steps but stopped.
+            # Give exactly one more chance with a targeted nudge.
+            if _per_run_state[0].incompleteness_nudge_given[0] < _MAX_INCOMPLETENESS_NUDGES:
+                msgs = state.get("messages") or []
+                last = msgs[-1] if msgs else None
+                content = getattr(last, "content", "") if last is not None else ""
+                if isinstance(content, str) and _has_incompleteness_signal(content):
+                    _per_run_state[0].incompleteness_nudge_given[0] += 1
+                    return "handle_incompleteness"
+            return END
+        return "call_model"
+
+    def route_after_fabrication(state: CogtrixState) -> str:  # noqa: ARG001
+        if _per_run_state[0].fabrication_count[0] > _MAX_FABRICATION_RETRIES:
+            return END
+        return "call_model"
+
+    def route_after_unverified_claim(state: CogtrixState) -> str:  # noqa: ARG001
+        # Recovery node has already incremented the counter and either
+        # injected a nudge or short-circuited with an empty update.
+        # Loop back to call_model so the agent can revise; once the
+        # counter exceeds the budget we send to END so the (possibly
+        # unverified) answer ships rather than spinning forever.
+        if _per_run_state[0].unverified_claim_count[0] > _MAX_UNVERIFIED_CLAIM_RETRIES:
+            return END
+        return "call_model"
+
+    def route_after_unverified_entity(state: CogtrixState) -> str:  # noqa: ARG001
+        # Same shape as route_after_unverified_claim: one revision
+        # attempt, then accept-and-ship so the model can't loop on
+        # a stubborn refusal to drop the unverified identifier.
+        if _per_run_state[0].unverified_entity_count[0] > _MAX_UNVERIFIED_ENTITY_RETRIES:
+            return END
+        return "call_model"
+
+    def route_after_unsupported_quote(state: CogtrixState) -> str:  # noqa: ARG001
+        # Same shape as the other verification guards: one revision
+        # attempt, then accept-and-ship rather than loop on a model
+        # that keeps re-emitting the unsupported quote.
+        if _per_run_state[0].unsupported_quote_count[0] > _MAX_UNSUPPORTED_QUOTE_RETRIES:
+            return END
+        return "call_model"
+
+    def route_after_version_scope(state: CogtrixState) -> str:  # noqa: ARG001
+        # Same shape as the other verification guards: one revision
+        # attempt, then accept-and-ship rather than loop on a model
+        # that keeps collapsing the version scope.
+        if _per_run_state[0].version_scope_count[0] > _MAX_VERSION_SCOPE_RETRIES:
+            return END
+        return "call_model"
+
+    def route_after_unsupported_attribution(state: CogtrixState) -> str:  # noqa: ARG001
+        # Same shape as the other verification guards: one revision
+        # attempt, then accept-and-ship rather than loop on a model
+        # that keeps fabricating attributions.
+        if (
+            _per_run_state[0].unsupported_attribution_count[0]
+            > _MAX_UNSUPPORTED_ATTRIBUTION_RETRIES
+        ):
+            return END
+        return "call_model"
+
+    def route_after_entity_owner_mismatch(state: CogtrixState) -> str:  # noqa: ARG001
+        # #1988 (post-mortem #1987): same shape as the other fidelity
+        # guards.  One revision attempt; accept-and-ship after
+        # exhaustion (warning log retains visibility for triage).
+        if _per_run_state[0].entity_owner_mismatch_count[0] > _MAX_ENTITY_OWNER_MISMATCH_RETRIES:
+            return END
+        return "call_model"
+
+    def route_after_corpus_attribution_mismatch(state: CogtrixState) -> str:  # noqa: ARG001
+        # #2015: corpus-aware sibling of the entity_owner_mismatch
+        # route.  Same shape — accept-and-ship after the budget so the
+        # model produces SOMETHING rather than spinning forever on
+        # mismatches it can't seem to fix even with the structurally
+        # specific nudge.
+        if (
+            _per_run_state[0].corpus_attribution_mismatch_count[0]
+            > _MAX_CORPUS_ATTRIBUTION_MISMATCH_RETRIES
+        ):
+            return END
+        return "call_model"
+
+    def route_after_topic_substitution(state: CogtrixState) -> str:  # noqa: ARG001
+        # #1989: same shape as the other fidelity guards.  One revision
+        # attempt; accept-and-ship after exhaustion so the agent ships
+        # SOMETHING rather than spinning forever on a model that keeps
+        # substituting topic.
+        if _per_run_state[0].topic_substitution_count[0] > _MAX_TOPIC_SUBSTITUTION_RETRIES:
+            return END
+        return "call_model"
+
+    def route_after_sycophancy(state: CogtrixState) -> str:  # noqa: ARG001
+        # Same shape as the other recovery guards: one revision attempt,
+        # then accept-and-ship rather than loop on a model that keeps
+        # opening with a validation prefix.
+        if _per_run_state[0].sycophancy_count[0] > _MAX_SYCOPHANCY_RETRIES:
+            return END
+        return "call_model"
+
+    def route_after_fabricated_action(state: CogtrixState) -> str:  # noqa: ARG001
+        # #1869: sibling to route_after_fabrication. One revision attempt;
+        # if the model keeps fabricating after the nudge, accept-and-ship
+        # rather than spin — the warning log retains visibility.
+        if _per_run_state[0].fabricated_action_count[0] > _MAX_FABRICATED_ACTION_RETRIES:
+            return END
+        return "call_model"
+
+    def route_after_fabricated_quote(state: CogtrixState) -> str:  # noqa: ARG001
+        # #1871: polarity sibling of route_after_fabricated_action.
+        # One revision attempt; accept-and-ship after exhaustion.
+        if _per_run_state[0].fabricated_quote_count[0] > _MAX_FABRICATED_QUOTE_RETRIES:
+            return END
+        return "call_model"
+
+    def route_after_noncanonical_fork(state: CogtrixState) -> str:  # noqa: ARG001
+        # #1868: same shape as the other fidelity guards. One revision
+        # attempt; accept-and-ship after exhaustion (the warning log
+        # retains visibility).
+        if _per_run_state[0].noncanonical_fork_count[0] > _MAX_NONCANONICAL_FORK_RETRIES:
+            return END
+        return "call_model"
+
+    def route_after_synthesis_after_eviction(state: CogtrixState) -> str:  # noqa: ARG001
+        # #1943 PR #4: same shape as the other fidelity guards. One
+        # revision attempt; accept-and-ship after exhaustion so the
+        # operator-facing warning log retains visibility but the agent
+        # cannot loop on a stubborn model that keeps re-emitting the
+        # post-eviction synthesis.
+        if (
+            _per_run_state[0].synthesis_after_eviction_count[0]
+            > _MAX_SYNTHESIS_AFTER_EVICTION_RETRIES
+        ):
+            return END
+        return "call_model"
+
+    def _reset_for_new_run(
+        new_available_tools: dict,
+        new_bound_cache: "OrderedDict",
+        new_compression_cache: dict,
+        extend_run_state: Any = None,
+    ) -> None:
+        """Reset all per-run mutable state so the compiled graph can be reused.
+
+        Called by ``run_agent()`` when the graph fingerprint matches the
+        cached graph.  A fresh ``PerRunState`` instance is built and its
+        values are copied in-place into the existing instance so that
+        closures holding direct references to mutable fields still see
+        the reset values.  Any new field added to ``PerRunState`` is
+        automatically handled — no manual reset line required.
+        """
+        _fresh_tool_lookup = {
+            getattr(t, "name", ""): t for t in active_tools_list if getattr(t, "name", "")
+        }
+        fresh = PerRunState(
+            tool_lookup=_fresh_tool_lookup,
+            active_names=set(_fresh_tool_lookup.keys()),
+            tool_catalog=build_tool_catalog(new_available_tools),
+            available_tools_ref=[new_available_tools],
+            bound_cache=(new_bound_cache if new_bound_cache is not None else OrderedDict()),
+            compression_cache=(new_compression_cache if new_compression_cache is not None else {}),
+            tool_version=[_per_run_state[0].tool_version[0] + 1],
+            last_tool_version=[-1],
+        )
+
+        # Copy fresh values into the existing PerRunState instance in-place.
+        # This preserves object identity so closures that captured direct
+        # references to mutable fields (e.g. call_count, bound_cache) still
+        # see the reset values.
+        for _f in fields(PerRunState):
+            _current = getattr(_per_run_state[0], _f.name)
+            _new = getattr(fresh, _f.name)
+            if isinstance(_current, list):
+                _current[:] = _new
+            elif isinstance(_current, (dict, OrderedDict, set)):
+                _current.clear()
+                if _new:
+                    _current.update(_new)
+            else:
+                setattr(_per_run_state[0], _f.name, _new)
+
+        with _history_lock:
+            _pending_events.clear()
+
+        with _checkpoint_store_lock:
+            _checkpoint_store.clear()
+
+        if extend_run_state is not None:
+            extend_run_state_ref[0] = extend_run_state
+
+    graph: Any = StateGraph(CogtrixState)
+    graph.add_node("call_model", call_model)
+    graph.add_node("handle_phantom", handle_phantom)
+    graph.add_node("handle_fabrication", handle_fabrication)
+    graph.add_node("handle_action_intent", handle_action_intent)
+    graph.add_node("handle_incompleteness", handle_incompleteness)
+    graph.add_node("handle_unverified_claim", handle_unverified_claim)
+    graph.add_node("handle_unverified_entity", handle_unverified_entity)
+    graph.add_node("handle_unsupported_quote", handle_unsupported_quote)
+    graph.add_node("handle_version_scope", handle_version_scope)
+    graph.add_node("handle_unsupported_attribution", handle_unsupported_attribution)
+    graph.add_node("handle_entity_owner_mismatch", handle_entity_owner_mismatch)
+    # #2015 — only registered when a corpus attribution detector was
+    # supplied.  If absent, the routing check above also short-circuits
+    # so the node label never appears in the conditional-edges map.
+    if handle_corpus_attribution_mismatch is not None:
+        graph.add_node(
+            "handle_corpus_attribution_mismatch",
+            handle_corpus_attribution_mismatch,
+        )
+    graph.add_node("handle_topic_substitution", handle_topic_substitution)
+    graph.add_node("handle_sycophancy", handle_sycophancy)
+    graph.add_node("handle_fabricated_action", handle_fabricated_action)
+    graph.add_node("handle_fabricated_quote", handle_fabricated_quote)
+    graph.add_node("handle_noncanonical_fork", handle_noncanonical_fork)
+    graph.add_node("handle_synthesis_after_eviction", handle_synthesis_after_eviction)
+    graph.add_node("process_tools", process_tools)
+    graph.set_entry_point("call_model")
+    # #2015 — include the corpus-aware mismatch destination only when
+    # the node was registered above; otherwise langgraph's compile
+    # step rejects a destination label whose target node does not
+    # exist.  ``route_after_model`` only returns this label when the
+    # detector closure is non-None (gated by the same condition).
+    _call_model_destinations: dict = {
+        "process_tools": "process_tools",
+        "handle_phantom": "handle_phantom",
+        "handle_fabrication": "handle_fabrication",
+        "handle_action_intent": "handle_action_intent",
+        "handle_incompleteness": "handle_incompleteness",
+        "handle_unverified_claim": "handle_unverified_claim",
+        "handle_unverified_entity": "handle_unverified_entity",
+        "handle_unsupported_quote": "handle_unsupported_quote",
+        "handle_version_scope": "handle_version_scope",
+        "handle_unsupported_attribution": "handle_unsupported_attribution",
+        "handle_entity_owner_mismatch": "handle_entity_owner_mismatch",
+        "handle_topic_substitution": "handle_topic_substitution",
+        "handle_sycophancy": "handle_sycophancy",
+        "handle_fabricated_action": "handle_fabricated_action",
+        "handle_fabricated_quote": "handle_fabricated_quote",
+        "handle_noncanonical_fork": "handle_noncanonical_fork",
+        "handle_synthesis_after_eviction": "handle_synthesis_after_eviction",
+        END: END,
+    }
+    if handle_corpus_attribution_mismatch is not None:
+        _call_model_destinations["handle_corpus_attribution_mismatch"] = (
+            "handle_corpus_attribution_mismatch"
+        )
+    graph.add_conditional_edges(
+        "call_model",
+        route_after_model,
+        _call_model_destinations,
+    )
+    graph.add_edge("process_tools", "call_model")
+    graph.add_conditional_edges(
+        "handle_phantom",
+        route_after_phantom,
+        {"call_model": "call_model", END: END},
+    )
+    graph.add_conditional_edges(
+        "handle_action_intent",
+        route_after_action_intent,
+        {"call_model": "call_model", END: END},
+    )
+    graph.add_conditional_edges(
+        "handle_fabrication",
+        route_after_fabrication,
+        {"call_model": "call_model", END: END},
+    )
+    # handle_incompleteness always routes back to call_model — exactly
+    # one chance to finish the task after a stronger nudge.
+    graph.add_edge("handle_incompleteness", "call_model")
+    graph.add_conditional_edges(
+        "handle_unverified_claim",
+        route_after_unverified_claim,
+        {"call_model": "call_model", END: END},
+    )
+    graph.add_conditional_edges(
+        "handle_unverified_entity",
+        route_after_unverified_entity,
+        {"call_model": "call_model", END: END},
+    )
+    graph.add_conditional_edges(
+        "handle_unsupported_quote",
+        route_after_unsupported_quote,
+        {"call_model": "call_model", END: END},
+    )
+    graph.add_conditional_edges(
+        "handle_version_scope",
+        route_after_version_scope,
+        {"call_model": "call_model", END: END},
+    )
+    graph.add_conditional_edges(
+        "handle_unsupported_attribution",
+        route_after_unsupported_attribution,
+        {"call_model": "call_model", END: END},
+    )
+    graph.add_conditional_edges(
+        "handle_entity_owner_mismatch",
+        route_after_entity_owner_mismatch,
+        {"call_model": "call_model", END: END},
+    )
+    if handle_corpus_attribution_mismatch is not None:
+        graph.add_conditional_edges(
+            "handle_corpus_attribution_mismatch",
+            route_after_corpus_attribution_mismatch,
+            {"call_model": "call_model", END: END},
+        )
+    graph.add_conditional_edges(
+        "handle_topic_substitution",
+        route_after_topic_substitution,
+        {"call_model": "call_model", END: END},
+    )
+    graph.add_conditional_edges(
+        "handle_sycophancy",
+        route_after_sycophancy,
+        {"call_model": "call_model", END: END},
+    )
+    graph.add_conditional_edges(
+        "handle_fabricated_action",
+        route_after_fabricated_action,
+        {"call_model": "call_model", END: END},
+    )
+    graph.add_conditional_edges(
+        "handle_fabricated_quote",
+        route_after_fabricated_quote,
+        {"call_model": "call_model", END: END},
+    )
+    graph.add_conditional_edges(
+        "handle_noncanonical_fork",
+        route_after_noncanonical_fork,
+        {"call_model": "call_model", END: END},
+    )
+    graph.add_conditional_edges(
+        "handle_synthesis_after_eviction",
+        route_after_synthesis_after_eviction,
+        {"call_model": "call_model", END: END},
+    )
+    compiled = graph.compile()
+    compiled._reset_for_new_run = _reset_for_new_run  # type: ignore[attr-defined]
+    compiled._per_run_state = _per_run_state  # type: ignore[attr-defined]
+    return compiled

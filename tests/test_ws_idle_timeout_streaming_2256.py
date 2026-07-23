@@ -7,12 +7,12 @@ inbound activity), not merely *inbound* idleness — otherwise a turn longer tha
 ``COGTRIX_WS_IDLE_TIMEOUT`` (default 300s) was torn down mid-stream.
 
 These tests pin the decision core (``_ws_idle_should_reap``) extracted from the
-receive loop in ``src/api/routes/messages.py``.
+receive loop in ``cogtrix_core/api/routes/messages.py``.
 """
 
 from __future__ import annotations
 
-from src.api.routes.messages import _WS_IDLE_POLL_INTERVAL, _ws_idle_should_reap
+from cogtrix_core.api.routes.messages import _WS_IDLE_POLL_INTERVAL, _ws_idle_should_reap
 
 
 class TestIdleReapDecision:

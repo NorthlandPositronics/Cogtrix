@@ -28,6 +28,7 @@ import argparse
 import json
 import logging
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -320,8 +321,8 @@ def _build_llm_and_graph(
     """
     from langchain_core.tools import StructuredTool
 
-    from src.orchestration.graph import build_agent_graph
-    from src.tools.rag import KnowledgeQueryInput, query_knowledge_base
+    from cogtrix_core.orchestration.graph import build_agent_graph
+    from cogtrix_core.tools.rag import KnowledgeQueryInput, query_knowledge_base
     from tests.evaluation.runner import _build_llm, resolve_active_key
 
     # Build the live LLM.  Mirror the Gate 2 runner pattern (runner.py:831)
@@ -405,6 +406,62 @@ def _extract_tool_calls(messages: list[Any]) -> list[str]:
     return names
 
 
+# #2218: cap on the query_knowledge_base result snippet captured into the report —
+# enough to see which chunks/sources came back (for model-vs-retrieval triage)
+# without bloating the JSON with full chunk text (each chunk is already capped at
+# 500 chars by the tool, so ~800 covers a couple of leading hits + their sources).
+_KB_DIGEST_SNIPPET_CHARS = 800
+# Matches the tool's per-result header line: "[1] Source: 07_budget.md (page 3)".
+_KB_SOURCE_RE = re.compile(r"^\[\d+\] Source: (.+?)\s*$", re.MULTILINE)
+
+
+def _extract_kb_retrievals(messages: list[Any]) -> list[dict[str, Any]]:
+    """Pair each ``query_knowledge_base`` call with its result and return a compact
+    digest — the query, ``k``, the source filenames returned, and a truncated
+    snippet of the chunks (#2218).
+
+    Recorded in the per-turn report so a content-criterion miss is classifiable
+    from the artifact alone: did retrieval SURFACE the right chunk (→ the MODEL
+    omitted the fact) or FAIL to surface it (→ CODE/CONFIG — embedding, chunking,
+    index path)? Without it the report holds only tool-call *names* and triage
+    needs a manual out-of-band probe every cycle.
+    """
+    from langchain_core.messages import ToolMessage
+
+    # tool_call_id -> result content, for query_knowledge_base ToolMessages only.
+    results_by_id: dict[str, str] = {}
+    for msg in messages:
+        if isinstance(msg, ToolMessage) and getattr(msg, "name", "") == "query_knowledge_base":
+            cid = getattr(msg, "tool_call_id", "") or ""
+            content = getattr(msg, "content", "")
+            if cid and isinstance(content, str):
+                results_by_id[cid] = content
+
+    retrievals: list[dict[str, Any]] = []
+    for msg in messages:
+        for call in getattr(msg, "tool_calls", None) or []:
+            name = call.get("name") if isinstance(call, dict) else getattr(call, "name", None)
+            if name != "query_knowledge_base":
+                continue
+            args = (
+                call.get("args") if isinstance(call, dict) else getattr(call, "args", None)
+            ) or {}
+            cid = call.get("id") if isinstance(call, dict) else getattr(call, "id", None)
+            result = results_by_id.get(cid or "", "")
+            snippet = result[:_KB_DIGEST_SNIPPET_CHARS]
+            if len(result) > _KB_DIGEST_SNIPPET_CHARS:
+                snippet += " …[truncated]"
+            retrievals.append(
+                {
+                    "question": args.get("question") or args.get("query"),
+                    "k": args.get("k"),
+                    "sources": _KB_SOURCE_RE.findall(result),
+                    "result_snippet": snippet,
+                }
+            )
+    return retrievals
+
+
 def _extract_invalid_tool_names(messages: list[Any]) -> list[str]:
     """Return the names of tool calls that the dispatcher REJECTED at
     name resolution time (#2023 Track B).
@@ -421,7 +478,7 @@ def _extract_invalid_tool_names(messages: list[Any]) -> list[str]:
     """
     from langchain_core.messages import ToolMessage
 
-    from src.orchestration.tool_message_kinds import is_resolution_failure_message
+    from cogtrix_core.orchestration.tool_message_kinds import is_resolution_failure_message
 
     rejected_ids: set[str] = set()
     for msg in messages:
@@ -498,6 +555,7 @@ def _run_one_scenario(
         turn_window = accumulated_messages[len(accumulated_messages) - len(new_messages) :]
         turn_tool_calls = _extract_tool_calls(turn_window)
         turn_invalid_tool_names = _extract_invalid_tool_names(turn_window)
+        turn_kb_retrievals = _extract_kb_retrievals(turn_window)
 
         criteria = turn.get("success_criteria") or []
         passed, failed, failed_desc = _evaluate_criteria(criteria, turn_response, turn_tool_calls)
@@ -508,6 +566,7 @@ def _run_one_scenario(
                 "user_prompt": user_prompt,
                 "final_response": turn_response,
                 "tool_calls_made": turn_tool_calls,
+                "kb_retrievals": turn_kb_retrievals,
                 "invalid_tool_names": turn_invalid_tool_names,
                 "criteria_passed": passed,
                 "criteria_failed": failed,
@@ -1027,7 +1086,7 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     # #2015 — build the closure the orchestration layer consumes.  The
-    # closure captures ``attribution_index`` so ``src/orchestration/``
+    # closure captures ``attribution_index`` so ``cogtrix_core/orchestration/``
     # can call it as a simple ``response_text → list[str]`` predicate
     # without ever importing tests/role_pm/attribution_index.py.  The
     # detector returns the structured ``describe()`` strings the
@@ -1040,7 +1099,7 @@ def main(argv: list[str] | None = None) -> int:
     # Configure the rag tool to read from our isolated FAISS index
     # only — we do NOT want the test consulting the user's global
     # ~/.cogtrix vectordb.
-    from src.tools.rag import configure_rag
+    from cogtrix_core.tools.rag import configure_rag
 
     configure_rag(
         {
@@ -1066,9 +1125,18 @@ def main(argv: list[str] | None = None) -> int:
             #   ``uv sync --extra rag --extra rag-rerank``
             # When the extra is missing, the re-rank stage degrades
             # gracefully (returns the un-re-ranked pool) — retrieval is
-            # never *worse* than the baseline, see src/rag/reranker.py
+            # never *worse* than the baseline, see cogtrix_core/rag/reranker.py
             # for the per-failure-mode contract.
             "use_cross_encoder_rerank": True,
+            # #2008: hybrid BM25 + vector retrieval. qwen3-embedding buries exact
+            # tokens (numbers/IDs/proper nouns) — e.g. the $1,106,500 budget chunk
+            # sits at embedding rank ~165/296, far below the CE re-rank pool (24),
+            # so the re-ranker alone never surfaces it. BM25 ranks it ~#8, RRF
+            # fuses it into the pool, and the CE promotes it into the top-k. This
+            # is the actual fix for the regime-B numeric misses; the re-ranker
+            # (above) was necessary but not sufficient. Needs the bm25.pkl sidecar
+            # (built by corpus_ingest); falls back to pure-vector if it's missing.
+            "use_bm25_hybrid": True,
         }
     )
 

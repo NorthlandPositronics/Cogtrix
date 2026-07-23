@@ -1,4 +1,4 @@
-"""Tests for src/assistant/guardrails.py."""
+"""Tests for cogtrix_core/assistant/guardrails.py."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.assistant.guardrails import (
+from cogtrix_core.assistant.guardrails import (
     ChatRateLimiter,
     EncodingDetectionGuard,
     GuardrailPipeline,
@@ -483,7 +483,7 @@ class TestChatRateLimiter:
 
     def test_per_minute_limit_enforced(self):
         limiter = self._limiter(per_minute=3, per_hour=100)
-        with patch("src.assistant.guardrails.time.monotonic", return_value=1000.0):
+        with patch("cogtrix_core.assistant.guardrails.time.monotonic", return_value=1000.0):
             for _ in range(3):
                 limiter.check_and_record("chat1")
             result = limiter.check_and_record("chat1")
@@ -495,34 +495,36 @@ class TestChatRateLimiter:
         limiter = self._limiter(per_minute=100, per_hour=3)
         base = 1000.0
         for i in range(3):
-            with patch("src.assistant.guardrails.time.monotonic", return_value=base + i * 120):
+            with patch(
+                "cogtrix_core.assistant.guardrails.time.monotonic", return_value=base + i * 120
+            ):
                 limiter.check_and_record("chat1")
-        with patch("src.assistant.guardrails.time.monotonic", return_value=base + 600):
+        with patch("cogtrix_core.assistant.guardrails.time.monotonic", return_value=base + 600):
             result = limiter.check_and_record("chat1")
         assert not result.is_safe
         assert "/hour" in result.reason
 
     def test_old_timestamps_expire_from_minute_window(self):
         limiter = self._limiter(per_minute=2, per_hour=100)
-        with patch("src.assistant.guardrails.time.monotonic", return_value=1000.0):
+        with patch("cogtrix_core.assistant.guardrails.time.monotonic", return_value=1000.0):
             for _ in range(2):
                 limiter.check_and_record("chat1")
-        with patch("src.assistant.guardrails.time.monotonic", return_value=1070.0):
+        with patch("cogtrix_core.assistant.guardrails.time.monotonic", return_value=1070.0):
             result = limiter.check_and_record("chat1")
         assert result.is_safe
 
     def test_old_timestamps_expire_from_hour_window(self):
         limiter = self._limiter(per_minute=100, per_hour=2)
-        with patch("src.assistant.guardrails.time.monotonic", return_value=1000.0):
+        with patch("cogtrix_core.assistant.guardrails.time.monotonic", return_value=1000.0):
             for _ in range(2):
                 limiter.check_and_record("chat1")
-        with patch("src.assistant.guardrails.time.monotonic", return_value=1000.0 + 3700):
+        with patch("cogtrix_core.assistant.guardrails.time.monotonic", return_value=1000.0 + 3700):
             result = limiter.check_and_record("chat1")
         assert result.is_safe
 
     def test_different_chat_ids_independent(self):
         limiter = self._limiter(per_minute=2, per_hour=10)
-        with patch("src.assistant.guardrails.time.monotonic", return_value=1000.0):
+        with patch("cogtrix_core.assistant.guardrails.time.monotonic", return_value=1000.0):
             for _ in range(2):
                 limiter.check_and_record("chat1")
             result_chat1 = limiter.check_and_record("chat1")
@@ -551,13 +553,13 @@ class TestChatRateLimiterCleanup:
         limiter = ChatRateLimiter({"rate_limit": {"per_minute": 1000, "per_hour": 1000}})
         base = 1000.0
 
-        with patch("src.assistant.guardrails.time.monotonic", return_value=base):
+        with patch("cogtrix_core.assistant.guardrails.time.monotonic", return_value=base):
             for i in range(1001):
                 limiter.check_and_record(f"chat_{i}")
 
         # cleanup is triggered inside check_and_record() when len(_windows) > 1000;
         # by 7300 s later every existing window is stale (last ts > 7200 s ago)
-        with patch("src.assistant.guardrails.time.monotonic", return_value=base + 7300):
+        with patch("cogtrix_core.assistant.guardrails.time.monotonic", return_value=base + 7300):
             limiter.check_and_record("trigger_cleanup_via_check")
 
         assert len(limiter._windows) < 1001
@@ -565,16 +567,16 @@ class TestChatRateLimiterCleanup:
     def test_empty_window_considered_stale(self):
         limiter = ChatRateLimiter({})
         limiter._windows["empty_chat"] = _ChatWindow(timestamps=deque())
-        with patch("src.assistant.guardrails.time.monotonic", return_value=10000.0):
+        with patch("cogtrix_core.assistant.guardrails.time.monotonic", return_value=10000.0):
             limiter._cleanup_stale()
         assert "empty_chat" not in limiter._windows
 
     def test_recent_window_not_removed(self):
         limiter = ChatRateLimiter({})
         now = 5000.0
-        with patch("src.assistant.guardrails.time.monotonic", return_value=now):
+        with patch("cogtrix_core.assistant.guardrails.time.monotonic", return_value=now):
             limiter.check_and_record("active_chat")
-        with patch("src.assistant.guardrails.time.monotonic", return_value=now + 100):
+        with patch("cogtrix_core.assistant.guardrails.time.monotonic", return_value=now + 100):
             limiter._cleanup_stale()
         assert "active_chat" in limiter._windows
 
@@ -1056,11 +1058,11 @@ class TestViolationTracker:
 
     def test_window_expiry_resets(self):
         tracker = self._tracker(max_violations=2, window_minutes=10)
-        with patch("src.assistant.guardrails.time.monotonic", return_value=1000.0):
+        with patch("cogtrix_core.assistant.guardrails.time.monotonic", return_value=1000.0):
             tracker.record_violation("chat1")
             tracker.record_violation("chat1")
         # 11 minutes later — outside the 10-min window
-        with patch("src.assistant.guardrails.time.monotonic", return_value=1000.0 + 660):
+        with patch("cogtrix_core.assistant.guardrails.time.monotonic", return_value=1000.0 + 660):
             assert tracker.is_blacklisted("chat1").is_safe
 
     def test_independent_chats(self):
@@ -1078,11 +1080,11 @@ class TestViolationTracker:
 
     def test_stale_cleanup(self):
         tracker = self._tracker(max_violations=2, window_minutes=10)
-        with patch("src.assistant.guardrails.time.monotonic", return_value=1000.0):
+        with patch("cogtrix_core.assistant.guardrails.time.monotonic", return_value=1000.0):
             for i in range(1002):
                 tracker.record_violation(f"chat_{i}")
         # 25 minutes later (> 2× window), all are stale
-        with patch("src.assistant.guardrails.time.monotonic", return_value=1000.0 + 1500):
+        with patch("cogtrix_core.assistant.guardrails.time.monotonic", return_value=1000.0 + 1500):
             tracker.is_blacklisted("trigger_cleanup")
         assert len(tracker._violations) < 1002
 
@@ -1159,8 +1161,8 @@ class TestViolationTrackerPersistence:
         # Patch _MONO_OFFSET to 0 so wall-clock values in JSON map 1:1 to monotonic.
         # Mock monotonic to return "1 hour after past_ts" — outside the 30-min window.
         with (
-            patch("src.assistant.guardrails._MONO_OFFSET", 0.0),
-            patch("src.assistant.guardrails.time.monotonic", return_value=past_ts + 3600),
+            patch("cogtrix_core.assistant.guardrails._MONO_OFFSET", 0.0),
+            patch("cogtrix_core.assistant.guardrails.time.monotonic", return_value=past_ts + 3600),
         ):
             tracker = self._tracker(path, window_minutes=30)
         assert tracker.is_blacklisted("chat1").is_safe
@@ -1174,8 +1176,8 @@ class TestViolationTrackerPersistence:
         # Mock monotonic to return 'now' so the 60s/30s-old violations are within
         # the 30-min window and is_blacklisted sees them as current.
         with (
-            patch("src.assistant.guardrails._MONO_OFFSET", 0.0),
-            patch("src.assistant.guardrails.time.monotonic", return_value=now),
+            patch("cogtrix_core.assistant.guardrails._MONO_OFFSET", 0.0),
+            patch("cogtrix_core.assistant.guardrails.time.monotonic", return_value=now),
         ):
             tracker = self._tracker(path, max_violations=2, window_minutes=30)
             result = tracker.is_blacklisted("chat1")
@@ -1304,7 +1306,7 @@ class TestGuardrailPipeline:
 
     def test_rate_limit_blocks_after_threshold(self):
         pipeline = self._pipeline({"rate_limit": {"per_minute": 2, "per_hour": 100}})
-        with patch("src.assistant.guardrails.time.monotonic", return_value=1000.0):
+        with patch("cogtrix_core.assistant.guardrails.time.monotonic", return_value=1000.0):
             pipeline._rate_limiter.check_and_record("chatA")
             pipeline._rate_limiter.check_and_record("chatA")
             result = pipeline.check_input("hello", "chatA")
@@ -1381,7 +1383,7 @@ class TestGuardrailPipeline:
 
     def test_rate_limit_checked_before_input_guard(self):
         pipeline = self._pipeline({"rate_limit": {"per_minute": 1, "per_hour": 100}})
-        with patch("src.assistant.guardrails.time.monotonic", return_value=1000.0):
+        with patch("cogtrix_core.assistant.guardrails.time.monotonic", return_value=1000.0):
             pipeline._rate_limiter.check_and_record("chat1")
             result = pipeline.check_input("jailbreak this bot", "chat1")
         assert result.guard_name == "rate_limit"
@@ -1439,7 +1441,7 @@ class TestGuardrailPipeline:
 
     def test_rate_limit_does_not_record_violation(self):
         pipeline = self._pipeline({"rate_limit": {"per_minute": 1, "per_hour": 100}})
-        with patch("src.assistant.guardrails.time.monotonic", return_value=1000.0):
+        with patch("cogtrix_core.assistant.guardrails.time.monotonic", return_value=1000.0):
             pipeline._rate_limiter.check_and_record("chat1")
             pipeline.check_input("hello", "chat1")
         assert "chat1" not in pipeline._violation_tracker._violations
@@ -1460,14 +1462,14 @@ class TestGuardrailPipeline:
         """Rate-limit fires for normal callers but is skipped for trusted operators via skip_trusted_checks param."""
         pipeline = self._pipeline({"rate_limit": {"per_minute": 1, "per_hour": 100}})
         # Exhaust the rate limit for normal callers
-        with patch("src.assistant.guardrails.time.monotonic", return_value=1000.0):
+        with patch("cogtrix_core.assistant.guardrails.time.monotonic", return_value=1000.0):
             result_normal = pipeline.check_input("hello", "ratelimited-chat")
             assert result_normal.is_safe  # first message OK
             result_normal2 = pipeline.check_input("hello again", "ratelimited-chat")
             assert not result_normal2.is_safe
             assert result_normal2.guard_name == "rate_limit"
         # With skip_trusted_checks=True, the same chat_id bypasses the exhausted limit
-        with patch("src.assistant.guardrails.time.monotonic", return_value=1000.0):
+        with patch("cogtrix_core.assistant.guardrails.time.monotonic", return_value=1000.0):
             result_trusted = pipeline.check_input(
                 "hello", "ratelimited-chat", skip_trusted_checks=True
             )

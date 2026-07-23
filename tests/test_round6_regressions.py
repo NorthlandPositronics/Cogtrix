@@ -30,18 +30,18 @@ class TestScheduledMessageAdminAuth:
     @pytest.fixture(autouse=True)
     def _set_jwt_secret(self, monkeypatch):
         monkeypatch.setenv("COGTRIX_JWT_SECRET", "a" * 64)
-        from src.api.auth import configure_jwt_secret
+        from cogtrix_core.api.auth import configure_jwt_secret
 
         configure_jwt_secret("a" * 64)
 
     def _admin_headers(self) -> dict[str, str]:
-        from src.api.auth import create_access_token
+        from cogtrix_core.api.auth import create_access_token
 
         token = create_access_token(user_id=str(uuid.uuid4()), role="admin")
         return {"Authorization": f"Bearer {token}"}
 
     def _user_headers(self) -> dict[str, str]:
-        from src.api.auth import create_access_token
+        from cogtrix_core.api.auth import create_access_token
 
         token = create_access_token(user_id=str(uuid.uuid4()), role="user")
         return {"Authorization": f"Bearer {token}"}
@@ -49,7 +49,7 @@ class TestScheduledMessageAdminAuth:
     def test_non_admin_cannot_edit_scheduled_message(self):
         from starlette.testclient import TestClient
 
-        from src.api.app import app
+        from cogtrix_core.api.app import app
 
         with TestClient(app) as c:
             resp = c.patch(
@@ -63,7 +63,7 @@ class TestScheduledMessageAdminAuth:
     def test_non_admin_cannot_cancel_scheduled_message(self):
         from starlette.testclient import TestClient
 
-        from src.api.app import app
+        from cogtrix_core.api.app import app
 
         with TestClient(app) as c:
             resp = c.delete(
@@ -77,7 +77,7 @@ class TestScheduledMessageAdminAuth:
         """Admin auth passes the auth gate (409 = service not running, not 403)."""
         from starlette.testclient import TestClient
 
-        from src.api.app import app
+        from cogtrix_core.api.app import app
 
         with TestClient(app) as c:
             resp = c.patch(
@@ -93,7 +93,7 @@ class TestScheduledMessageAdminAuth:
         """Admin auth passes the auth gate (409 = service not running, not 403)."""
         from starlette.testclient import TestClient
 
-        from src.api.app import app
+        from cogtrix_core.api.app import app
 
         with TestClient(app) as c:
             resp = c.delete(
@@ -113,7 +113,7 @@ class TestDeepThinkSemaphoreLeak:
 
     def test_call_llm_parallel_releases_semaphore_on_success(self):
         """All semaphore slots released after successful parallel calls."""
-        from src.tools.deep_think import _call_llm_parallel, _deep_think_sem
+        from cogtrix_core.tools.deep_think import _call_llm_parallel, _deep_think_sem
 
         initial = _deep_think_sem._value  # type: ignore[attr-defined]
 
@@ -128,7 +128,7 @@ class TestDeepThinkSemaphoreLeak:
 
     def test_call_llm_parallel_releases_semaphore_on_exception(self):
         """All semaphore slots released when LLM calls raise exceptions."""
-        from src.tools.deep_think import _call_llm_parallel, _deep_think_sem
+        from cogtrix_core.tools.deep_think import _call_llm_parallel, _deep_think_sem
 
         initial = _deep_think_sem._value  # type: ignore[attr-defined]
 
@@ -141,7 +141,7 @@ class TestDeepThinkSemaphoreLeak:
 
     def test_call_llm_parallel_releases_semaphore_on_timeout(self):
         """All semaphore slots released when LLM calls exceed timeout."""
-        from src.tools.deep_think import _call_llm_parallel, _deep_think_sem
+        from cogtrix_core.tools.deep_think import _call_llm_parallel, _deep_think_sem
 
         initial = _deep_think_sem._value  # type: ignore[attr-defined]
 
@@ -164,7 +164,7 @@ class TestDeepThinkSemaphoreLeak:
 
     def test_call_llm_single_releases_semaphore_on_timeout(self):
         """Single-call path releases semaphore on timeout."""
-        from src.tools.deep_think import _call_llm, _deep_think_sem
+        from cogtrix_core.tools.deep_think import _call_llm, _deep_think_sem
 
         initial = _deep_think_sem._value  # type: ignore[attr-defined]
 
@@ -185,7 +185,7 @@ class TestDeepThinkSemaphoreLeak:
 
     def test_semaphore_not_over_released(self):
         """Semaphore value must not exceed initial capacity after calls."""
-        from src.tools.deep_think import (
+        from cogtrix_core.tools.deep_think import (
             _DEEP_THINK_MAX_CONCURRENT,
             _call_llm_parallel,
             _deep_think_sem,
@@ -202,7 +202,7 @@ class TestDeepThinkSemaphoreLeak:
 
     def test_more_prompts_than_capacity_no_deadlock(self):
         """When len(prompts) > semaphore capacity, must not deadlock."""
-        from src.tools.deep_think import (
+        from cogtrix_core.tools.deep_think import (
             _DEEP_THINK_MAX_CONCURRENT,
             _call_llm_parallel,
             _deep_think_sem,
@@ -232,7 +232,7 @@ class TestRagUploadsDir:
     """_get_uploads_dir() must read COGTRIX_DATA_DIR env var."""
 
     def test_default_uses_data_prefix(self):
-        from src.api.routes.rag import _get_uploads_dir
+        from cogtrix_core.api.routes.rag import _get_uploads_dir
 
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("COGTRIX_DATA_DIR", None)
@@ -240,14 +240,14 @@ class TestRagUploadsDir:
         assert result == Path("data", "api", "uploads").resolve()
 
     def test_custom_data_dir_from_env(self, tmp_path):
-        from src.api.routes.rag import _get_uploads_dir
+        from cogtrix_core.api.routes.rag import _get_uploads_dir
 
         with patch.dict(os.environ, {"COGTRIX_DATA_DIR": str(tmp_path)}):
             result = _get_uploads_dir()
         assert result == (tmp_path / "api" / "uploads").resolve()
 
     def test_tasks_rag_uses_same_pattern(self, tmp_path):
-        from src.api.tasks.rag import _get_uploads_dir
+        from cogtrix_core.api.tasks.rag import _get_uploads_dir
 
         with patch.dict(os.environ, {"COGTRIX_DATA_DIR": str(tmp_path)}):
             result = _get_uploads_dir()
@@ -255,7 +255,7 @@ class TestRagUploadsDir:
 
     def test_each_call_reads_fresh_env(self, tmp_path):
         """Not cached — changing env var changes the result."""
-        from src.api.routes.rag import _get_uploads_dir
+        from cogtrix_core.api.routes.rag import _get_uploads_dir
 
         with patch.dict(os.environ, {"COGTRIX_DATA_DIR": str(tmp_path / "a")}):
             r1 = _get_uploads_dir()
@@ -273,7 +273,7 @@ class TestWhatsAppMessageFetchLimit:
     """message_fetch_limit must be read from config and passed to the API call."""
 
     def _make_channel(self, config_overrides: dict | None = None):
-        from src.assistant.channels.whatsapp import WhatsAppChannel
+        from cogtrix_core.assistant.channels.whatsapp import WhatsAppChannel
 
         base_config = {
             "waha_url": "http://localhost:3000",
@@ -284,7 +284,7 @@ class TestWhatsAppMessageFetchLimit:
         if config_overrides:
             base_config.update(config_overrides)
 
-        with patch("src.tools._whatsapp_client.WahaClient.__init__", return_value=None):
+        with patch("cogtrix_core.tools._whatsapp_client.WahaClient.__init__", return_value=None):
             ch = WhatsAppChannel.__new__(WhatsAppChannel)
             ch._config = base_config
             ch._client = MagicMock()
@@ -324,7 +324,7 @@ class TestWhatsAppMessageFetchLimit:
         assert ch._message_fetch_limit == 100
 
     def test_fetch_passes_limit_to_client(self):
-        from src.assistant.channels.whatsapp import ChatOverview
+        from cogtrix_core.assistant.channels.whatsapp import ChatOverview
 
         ch = self._make_channel({"message_fetch_limit": 75})
         ch._client.get_chat_messages.return_value = []
@@ -341,14 +341,14 @@ class TestWhatsAppMessageFetchLimit:
 
     def test_limit_read_from_real_init(self):
         """WhatsAppChannel.__init__ reads message_fetch_limit from config."""
-        from src.assistant.channels.whatsapp import WhatsAppChannel
+        from cogtrix_core.assistant.channels.whatsapp import WhatsAppChannel
 
         config = {
             "waha_url": "http://localhost:3000",
             "session": "default",
             "message_fetch_limit": 200,
         }
-        with patch("src.tools._whatsapp_client.WahaClient.__init__", return_value=None):
+        with patch("cogtrix_core.tools._whatsapp_client.WahaClient.__init__", return_value=None):
             ch = WhatsAppChannel(config)
         assert ch._message_fetch_limit == 200
 
@@ -364,7 +364,7 @@ class TestReloadConfigUsesLoadConfig:
     @pytest.fixture(autouse=True)
     def _set_jwt_secret(self, monkeypatch):
         monkeypatch.setenv("COGTRIX_JWT_SECRET", "a" * 64)
-        from src.api.auth import configure_jwt_secret
+        from cogtrix_core.api.auth import configure_jwt_secret
 
         configure_jwt_secret("a" * 64)
 
@@ -372,7 +372,7 @@ class TestReloadConfigUsesLoadConfig:
         """After reload, app.state.config.models must contain parsed aliases."""
         from starlette.testclient import TestClient
 
-        from src.api.app import app
+        from cogtrix_core.api.app import app
 
         # Create a minimal config file for load_config to find
         config_file = tmp_path / ".cogtrix.yml"
@@ -413,7 +413,7 @@ class TestReloadConfigUsesLoadConfig:
             assert cfg.models["oss"].provider == "spark"
 
     def _admin_headers(self) -> dict[str, str]:
-        from src.api.auth import create_access_token
+        from cogtrix_core.api.auth import create_access_token
 
         token = create_access_token(user_id=str(uuid.uuid4()), role="admin")
         return {"Authorization": f"Bearer {token}"}
@@ -429,7 +429,7 @@ class TestBuildLlmNoSharedMutation:
 
     def test_build_llm_does_not_mutate_provider_config(self):
         """Switching session to a different model must not corrupt the provider registry."""
-        from src.config import Config, ModelConfig, ProviderConfig
+        from cogtrix_core.config import Config, ModelConfig, ProviderConfig
 
         cfg = Config(
             providers={
@@ -453,9 +453,9 @@ class TestBuildLlmNoSharedMutation:
         class FakeState:
             config = cfg
 
-        with patch("src.providers.create_chat_model_from_configs") as mock_create:
+        with patch("cogtrix_core.providers.create_chat_model_from_configs") as mock_create:
             mock_create.return_value = MagicMock()
-            from src.api.session_bridge import _build_llm
+            from cogtrix_core.api.session_bridge import _build_llm
 
             _build_llm({"model": "oss"}, FakeState())
 
@@ -471,7 +471,7 @@ class TestDeepThinkContextPollutionGuard:
 
     def test_clean_research_context_passes_through(self):
         """Focused web research with few unique artifacts is not stripped."""
-        from src.tools.deep_think import configure_deep_think, deep_think
+        from cogtrix_core.tools.deep_think import configure_deep_think, deep_think
 
         mock_llm = MagicMock()
         mock_llm.invoke.return_value = MagicMock(content="analysis result")
@@ -495,7 +495,7 @@ class TestDeepThinkContextPollutionGuard:
         """Session history with many unique artifacts is stripped regardless of task domain."""
         from unittest.mock import patch
 
-        from src.tools.deep_think import configure_deep_think, deep_think
+        from cogtrix_core.tools.deep_think import configure_deep_think, deep_think
 
         mock_llm = MagicMock()
         mock_llm.invoke.return_value = MagicMock(content="analysis result")
@@ -516,7 +516,7 @@ class TestDeepThinkContextPollutionGuard:
             "Debug the CI failure on the cross-org isolation branch",
             "Analyse Q1 procurement spend by supplier category",
         ]:
-            with patch("src.tools.deep_think.log") as mock_log:
+            with patch("cogtrix_core.tools.deep_think.log") as mock_log:
                 deep_think(
                     task=task,
                     context=session_dump,
@@ -533,7 +533,7 @@ class TestDeepThinkContextPollutionGuard:
         """Focused context with only a few unique references is not stripped."""
         from unittest.mock import patch
 
-        from src.tools.deep_think import configure_deep_think, deep_think
+        from cogtrix_core.tools.deep_think import configure_deep_think, deep_think
 
         mock_llm = MagicMock()
         mock_llm.invoke.return_value = MagicMock(content="analysis result")
@@ -546,7 +546,7 @@ class TestDeepThinkContextPollutionGuard:
             "Revert candidate: def5678. PR #246 also affects the JIT path."
         )
 
-        with patch("src.tools.deep_think.log") as mock_log:
+        with patch("cogtrix_core.tools.deep_think.log") as mock_log:
             deep_think(
                 task="Find the root cause of the cross-org auth regression",
                 context=focused_context,

@@ -1,4 +1,4 @@
-"""Tests for src/tools/github_tools.py."""
+"""Tests for cogtrix_core/tools/github_tools.py."""
 
 from __future__ import annotations
 
@@ -35,15 +35,15 @@ def _b64(text: str) -> str:
 
 class TestIsConfigured:
     def test_returns_false_when_gh_not_in_path(self):
-        from src.tools.github_tools import is_configured
+        from cogtrix_core.tools.github_tools import is_configured
 
-        with patch("src.tools.github_tools.shutil.which", return_value=None):
+        with patch("cogtrix_core.tools.github_tools.shutil.which", return_value=None):
             assert is_configured() is False
 
     def test_returns_true_when_gh_available(self):
-        from src.tools.github_tools import is_configured
+        from cogtrix_core.tools.github_tools import is_configured
 
-        with patch("src.tools.github_tools.shutil.which", return_value="/usr/bin/gh"):
+        with patch("cogtrix_core.tools.github_tools.shutil.which", return_value="/usr/bin/gh"):
             assert is_configured() is True
 
 
@@ -54,8 +54,8 @@ class TestIsConfigured:
 
 class TestToolSetup:
     def test_tool_setup_sets_default_repo(self):
-        import src.tools.github_tools as mod
-        from src.tools.github_tools import TOOL_SETUP
+        import cogtrix_core.tools.github_tools as mod
+        from cogtrix_core.tools.github_tools import TOOL_SETUP
 
         config = MagicMock()
         config.services = {"github": {"default_repo": "myorg/myrepo"}}
@@ -64,8 +64,8 @@ class TestToolSetup:
         assert mod._default_repo == "myorg/myrepo"
 
     def test_tool_setup_empty_services(self):
-        import src.tools.github_tools as mod
-        from src.tools.github_tools import TOOL_SETUP
+        import cogtrix_core.tools.github_tools as mod
+        from cogtrix_core.tools.github_tools import TOOL_SETUP
 
         config = MagicMock()
         config.services = {}
@@ -81,36 +81,36 @@ class TestToolSetup:
 
 class TestToolConfigs:
     def test_tool_configs_has_four_entries(self):
-        from src.tools.github_tools import TOOL_CONFIGS
+        from cogtrix_core.tools.github_tools import TOOL_CONFIGS
 
         assert len(TOOL_CONFIGS) == 4
 
     def test_tool_configs_names(self):
-        from src.tools.github_tools import TOOL_CONFIGS
+        from cogtrix_core.tools.github_tools import TOOL_CONFIGS
 
         names = {t["name"] for t in TOOL_CONFIGS}
         assert names == {"gh_create_issue", "gh_comment_issue", "gh_list_prs", "gh_get_file"}
 
     def test_create_issue_requires_confirmation(self):
-        from src.tools.github_tools import TOOL_CONFIGS
+        from cogtrix_core.tools.github_tools import TOOL_CONFIGS
 
         cfg = next(t for t in TOOL_CONFIGS if t["name"] == "gh_create_issue")
         assert cfg["requires_confirmation"] is True
 
     def test_comment_issue_requires_confirmation(self):
-        from src.tools.github_tools import TOOL_CONFIGS
+        from cogtrix_core.tools.github_tools import TOOL_CONFIGS
 
         cfg = next(t for t in TOOL_CONFIGS if t["name"] == "gh_comment_issue")
         assert cfg["requires_confirmation"] is True
 
     def test_list_prs_no_confirmation(self):
-        from src.tools.github_tools import TOOL_CONFIGS
+        from cogtrix_core.tools.github_tools import TOOL_CONFIGS
 
         cfg = next(t for t in TOOL_CONFIGS if t["name"] == "gh_list_prs")
         assert cfg["requires_confirmation"] is False
 
     def test_get_file_no_confirmation(self):
-        from src.tools.github_tools import TOOL_CONFIGS
+        from cogtrix_core.tools.github_tools import TOOL_CONFIGS
 
         cfg = next(t for t in TOOL_CONFIGS if t["name"] == "gh_get_file")
         assert cfg["requires_confirmation"] is False
@@ -123,11 +123,11 @@ class TestToolConfigs:
 
 class TestGhCreateIssue:
     def test_create_issue_success(self):
-        from src.tools.github_tools import gh_create_issue
+        from cogtrix_core.tools.github_tools import gh_create_issue
 
         payload = json.dumps({"number": 42, "url": "https://github.com/o/r/issues/42"})
         with patch(
-            "src.tools.github_tools.subprocess.run",
+            "cogtrix_core.tools.github_tools.subprocess.run",
             return_value=_make_completed(stdout=payload),
         ):
             result = gh_create_issue(title="My issue", body="Description", repo="owner/repo")
@@ -136,8 +136,8 @@ class TestGhCreateIssue:
         assert "https://github.com/o/r/issues/42" in result
 
     def test_create_issue_empty_repo_no_default(self):
-        import src.tools.github_tools as mod
-        from src.tools.github_tools import gh_create_issue
+        import cogtrix_core.tools.github_tools as mod
+        from cogtrix_core.tools.github_tools import gh_create_issue
 
         original = mod._default_repo
         mod._default_repo = ""
@@ -150,14 +150,14 @@ class TestGhCreateIssue:
         assert "repo not specified" in result
 
     def test_create_issue_invalid_repo(self):
-        from src.tools.github_tools import gh_create_issue
+        from cogtrix_core.tools.github_tools import gh_create_issue
 
         result = gh_create_issue(title="T", repo="../../evil")
         assert "Error" in result
         assert "invalid repo format" in result
 
     def test_create_issue_with_labels(self):
-        from src.tools.github_tools import gh_create_issue
+        from cogtrix_core.tools.github_tools import gh_create_issue
 
         payload = json.dumps({"number": 7, "url": "https://github.com/o/r/issues/7"})
         captured: list[list[str]] = []
@@ -166,7 +166,7 @@ class TestGhCreateIssue:
             captured.append(cmd)
             return _make_completed(stdout=payload)
 
-        with patch("src.tools.github_tools.subprocess.run", side_effect=_capture):
+        with patch("cogtrix_core.tools.github_tools.subprocess.run", side_effect=_capture):
             gh_create_issue(title="T", repo="owner/repo", labels="bug,enhancement")
 
         assert "--label" in captured[0]
@@ -176,10 +176,10 @@ class TestGhCreateIssue:
     def test_create_issue_gh_error(self):
         # Regression test for issue #1453: gh errors now include category hints
         # so the LLM can iterate remediation efficiently. Raw stderr is not leaked.
-        from src.tools.github_tools import gh_create_issue
+        from cogtrix_core.tools.github_tools import gh_create_issue
 
         with patch(
-            "src.tools.github_tools.subprocess.run",
+            "cogtrix_core.tools.github_tools.subprocess.run",
             return_value=_make_completed(stderr="authentication required", returncode=1),
         ):
             result = gh_create_issue(title="T", repo="owner/repo")
@@ -190,7 +190,7 @@ class TestGhCreateIssue:
         assert "authentication required" not in result
 
     def test_create_issue_strips_null_bytes(self):
-        from src.tools.github_tools import gh_create_issue
+        from cogtrix_core.tools.github_tools import gh_create_issue
 
         payload = json.dumps({"number": 1, "url": "https://github.com/o/r/issues/1"})
         captured: list[list[str]] = []
@@ -199,7 +199,7 @@ class TestGhCreateIssue:
             captured.append(cmd)
             return _make_completed(stdout=payload)
 
-        with patch("src.tools.github_tools.subprocess.run", side_effect=_capture):
+        with patch("cogtrix_core.tools.github_tools.subprocess.run", side_effect=_capture):
             gh_create_issue(title="T\x00itle", body="bo\x00dy", repo="owner/repo")
 
         title_idx = captured[0].index("--title")
@@ -215,18 +215,18 @@ class TestGhCreateIssue:
 
 class TestGhCommentIssue:
     def test_comment_success(self):
-        from src.tools.github_tools import gh_comment_issue
+        from cogtrix_core.tools.github_tools import gh_comment_issue
 
         with patch(
-            "src.tools.github_tools.subprocess.run",
+            "cogtrix_core.tools.github_tools.subprocess.run",
             return_value=_make_completed(stdout=""),
         ):
             result = gh_comment_issue(issue_number=5, body="LGTM!", repo="owner/repo")
         assert "Comment added to #5" in result
 
     def test_comment_empty_repo_no_default(self):
-        import src.tools.github_tools as mod
-        from src.tools.github_tools import gh_comment_issue
+        import cogtrix_core.tools.github_tools as mod
+        from cogtrix_core.tools.github_tools import gh_comment_issue
 
         original = mod._default_repo
         mod._default_repo = ""
@@ -239,10 +239,10 @@ class TestGhCommentIssue:
 
     def test_comment_gh_error(self):
         # Regression test for issue #1453: gh errors now include category hints.
-        from src.tools.github_tools import gh_comment_issue
+        from cogtrix_core.tools.github_tools import gh_comment_issue
 
         with patch(
-            "src.tools.github_tools.subprocess.run",
+            "cogtrix_core.tools.github_tools.subprocess.run",
             return_value=_make_completed(stderr="not found", returncode=1),
         ):
             result = gh_comment_issue(issue_number=99, body="x", repo="owner/repo")
@@ -260,7 +260,7 @@ class TestGhCommentIssue:
 
 class TestGhListPrs:
     def test_list_prs_formatted(self):
-        from src.tools.github_tools import gh_list_prs
+        from cogtrix_core.tools.github_tools import gh_list_prs
 
         prs = [
             {"number": 10, "title": "Fix bug", "author": {"login": "alice"}, "state": "OPEN"},
@@ -272,7 +272,7 @@ class TestGhListPrs:
             },
         ]
         with patch(
-            "src.tools.github_tools.subprocess.run",
+            "cogtrix_core.tools.github_tools.subprocess.run",
             return_value=_make_completed(stdout=json.dumps(prs)),
         ):
             result = gh_list_prs(repo="owner/repo")
@@ -281,10 +281,10 @@ class TestGhListPrs:
         assert "#11 | Add feature | bob | open" in result
 
     def test_list_prs_empty(self):
-        from src.tools.github_tools import gh_list_prs
+        from cogtrix_core.tools.github_tools import gh_list_prs
 
         with patch(
-            "src.tools.github_tools.subprocess.run",
+            "cogtrix_core.tools.github_tools.subprocess.run",
             return_value=_make_completed(stdout=json.dumps([])),
         ):
             result = gh_list_prs(repo="owner/repo")
@@ -293,10 +293,10 @@ class TestGhListPrs:
 
     def test_list_prs_gh_error(self):
         # Regression test for issue #1453: gh errors now include category hints.
-        from src.tools.github_tools import gh_list_prs
+        from cogtrix_core.tools.github_tools import gh_list_prs
 
         with patch(
-            "src.tools.github_tools.subprocess.run",
+            "cogtrix_core.tools.github_tools.subprocess.run",
             return_value=_make_completed(stderr="rate limit exceeded", returncode=1),
         ):
             result = gh_list_prs(repo="owner/repo")
@@ -308,7 +308,7 @@ class TestGhListPrs:
         assert "rate limit exceeded" not in result
 
     def test_list_prs_passes_state_and_limit(self):
-        from src.tools.github_tools import gh_list_prs
+        from cogtrix_core.tools.github_tools import gh_list_prs
 
         captured: list[list[str]] = []
 
@@ -316,7 +316,7 @@ class TestGhListPrs:
             captured.append(cmd)
             return _make_completed(stdout=json.dumps([]))
 
-        with patch("src.tools.github_tools.subprocess.run", side_effect=_capture):
+        with patch("cogtrix_core.tools.github_tools.subprocess.run", side_effect=_capture):
             gh_list_prs(repo="owner/repo", state="merged", limit=5)
 
         cmd = captured[0]
@@ -343,21 +343,21 @@ class TestGhGetFile:
         )
 
     def test_get_file_success(self):
-        from src.tools.github_tools import gh_get_file
+        from cogtrix_core.tools.github_tools import gh_get_file
 
         with patch(
-            "src.tools.github_tools.subprocess.run",
+            "cogtrix_core.tools.github_tools.subprocess.run",
             return_value=_make_completed(stdout=self._file_response("hello world")),
         ):
             result = gh_get_file(path="README.md", repo="owner/repo")
         assert result == "hello world"
 
     def test_get_file_truncation(self):
-        from src.tools.github_tools import gh_get_file
+        from cogtrix_core.tools.github_tools import gh_get_file
 
         long_content = "x" * 15_000
         with patch(
-            "src.tools.github_tools.subprocess.run",
+            "cogtrix_core.tools.github_tools.subprocess.run",
             return_value=_make_completed(stdout=self._file_response(long_content)),
         ):
             result = gh_get_file(path="big.txt", repo="owner/repo")
@@ -367,10 +367,10 @@ class TestGhGetFile:
         assert "5000 chars omitted" in result
 
     def test_get_file_404(self):
-        from src.tools.github_tools import gh_get_file
+        from cogtrix_core.tools.github_tools import gh_get_file
 
         with patch(
-            "src.tools.github_tools.subprocess.run",
+            "cogtrix_core.tools.github_tools.subprocess.run",
             return_value=_make_completed(stderr="HTTP 404: Not Found", returncode=1),
         ):
             result = gh_get_file(path="missing.py", repo="owner/repo")
@@ -379,7 +379,7 @@ class TestGhGetFile:
         assert "missing.py" in result
 
     def test_get_file_with_ref(self):
-        from src.tools.github_tools import gh_get_file
+        from cogtrix_core.tools.github_tools import gh_get_file
 
         captured: list[list[str]] = []
 
@@ -387,8 +387,8 @@ class TestGhGetFile:
             captured.append(cmd)
             return _make_completed(stdout=self._file_response("content"))
 
-        with patch("src.tools.github_tools.subprocess.run", side_effect=_capture):
-            gh_get_file(path="src/main.py", repo="owner/repo", ref="feature-branch")
+        with patch("cogtrix_core.tools.github_tools.subprocess.run", side_effect=_capture):
+            gh_get_file(path="cogtrix_core/main.py", repo="owner/repo", ref="feature-branch")
 
         cmd = captured[0]
         assert "--raw-field" in cmd
@@ -396,21 +396,21 @@ class TestGhGetFile:
         assert cmd[rf_idx + 1] == "ref=feature-branch"
 
     def test_path_validation_rejects_dotdot(self):
-        from src.tools.github_tools import gh_get_file
+        from cogtrix_core.tools.github_tools import gh_get_file
 
         result = gh_get_file(path="../etc/passwd", repo="owner/repo")
         assert "Error" in result
         assert ".." in result
 
     def test_path_validation_rejects_leading_slash(self):
-        from src.tools.github_tools import gh_get_file
+        from cogtrix_core.tools.github_tools import gh_get_file
 
         result = gh_get_file(path="/etc/passwd", repo="owner/repo")
         assert "Error" in result
 
     def test_get_file_repo_not_configured(self):
-        import src.tools.github_tools as mod
-        from src.tools.github_tools import gh_get_file
+        import cogtrix_core.tools.github_tools as mod
+        from cogtrix_core.tools.github_tools import gh_get_file
 
         original = mod._default_repo
         mod._default_repo = ""
@@ -422,7 +422,7 @@ class TestGhGetFile:
         assert "Error" in result
 
     def test_invalid_ref_rejected(self):
-        from src.tools.github_tools import gh_get_file
+        from cogtrix_core.tools.github_tools import gh_get_file
 
         result = gh_get_file(path="README.md", repo="owner/repo", ref="bad ref!")
         assert "Error" in result
@@ -436,38 +436,38 @@ class TestGhGetFile:
 
 class TestRepoValidation:
     def test_rejects_traversal_repo(self):
-        from src.tools.github_tools import gh_create_issue
+        from cogtrix_core.tools.github_tools import gh_create_issue
 
         result = gh_create_issue(title="T", repo="../../evil")
         assert "Error" in result
         assert "invalid repo format" in result
 
     def test_accepts_valid_repo(self):
-        from src.tools.github_tools import gh_create_issue
+        from cogtrix_core.tools.github_tools import gh_create_issue
 
         payload = json.dumps({"number": 1, "url": "https://github.com/o/r/issues/1"})
         with patch(
-            "src.tools.github_tools.subprocess.run",
+            "cogtrix_core.tools.github_tools.subprocess.run",
             return_value=_make_completed(stdout=payload),
         ):
             result = gh_create_issue(title="T", repo="my-org/my.repo_name")
         assert "Error" not in result
 
     def test_rejects_single_component(self):
-        from src.tools.github_tools import gh_create_issue
+        from cogtrix_core.tools.github_tools import gh_create_issue
 
         result = gh_create_issue(title="T", repo="noslash")
         assert "Error" in result
 
     def test_rejects_spaces_in_repo(self):
-        from src.tools.github_tools import gh_create_issue
+        from cogtrix_core.tools.github_tools import gh_create_issue
 
         result = gh_create_issue(title="T", repo="owner/ repo")
         assert "Error" in result
 
     def test_uses_default_repo_when_empty(self):
-        import src.tools.github_tools as mod
-        from src.tools.github_tools import gh_list_prs
+        import cogtrix_core.tools.github_tools as mod
+        from cogtrix_core.tools.github_tools import gh_list_prs
 
         original = mod._default_repo
         mod._default_repo = "default-org/default-repo"
@@ -478,7 +478,7 @@ class TestRepoValidation:
             return _make_completed(stdout=json.dumps([]))
 
         try:
-            with patch("src.tools.github_tools.subprocess.run", side_effect=_capture):
+            with patch("cogtrix_core.tools.github_tools.subprocess.run", side_effect=_capture):
                 gh_list_prs(repo="")
         finally:
             mod._default_repo = original
@@ -495,10 +495,10 @@ class TestRepoValidation:
 
 class TestGhCreateIssueTimeout:
     def test_create_issue_timeout_returns_error(self):
-        from src.tools.github_tools import gh_create_issue
+        from cogtrix_core.tools.github_tools import gh_create_issue
 
         with patch(
-            "src.tools.github_tools.subprocess.run",
+            "cogtrix_core.tools.github_tools.subprocess.run",
             side_effect=subprocess.TimeoutExpired(cmd=["gh"], timeout=60),
         ):
             result = gh_create_issue(title="T", repo="owner/repo")
@@ -508,10 +508,10 @@ class TestGhCreateIssueTimeout:
 
 class TestGhCommentIssueTimeout:
     def test_comment_timeout_returns_error(self):
-        from src.tools.github_tools import gh_comment_issue
+        from cogtrix_core.tools.github_tools import gh_comment_issue
 
         with patch(
-            "src.tools.github_tools.subprocess.run",
+            "cogtrix_core.tools.github_tools.subprocess.run",
             side_effect=subprocess.TimeoutExpired(cmd=["gh"], timeout=60),
         ):
             result = gh_comment_issue(issue_number=1, body="hi", repo="owner/repo")
@@ -521,10 +521,10 @@ class TestGhCommentIssueTimeout:
 
 class TestGhListPrsTimeout:
     def test_list_prs_timeout_returns_error(self):
-        from src.tools.github_tools import gh_list_prs
+        from cogtrix_core.tools.github_tools import gh_list_prs
 
         with patch(
-            "src.tools.github_tools.subprocess.run",
+            "cogtrix_core.tools.github_tools.subprocess.run",
             side_effect=subprocess.TimeoutExpired(cmd=["gh"], timeout=30),
         ):
             result = gh_list_prs(repo="owner/repo")
@@ -534,10 +534,10 @@ class TestGhListPrsTimeout:
 
 class TestGhGetFileTimeout:
     def test_get_file_timeout_returns_error(self):
-        from src.tools.github_tools import gh_get_file
+        from cogtrix_core.tools.github_tools import gh_get_file
 
         with patch(
-            "src.tools.github_tools.subprocess.run",
+            "cogtrix_core.tools.github_tools.subprocess.run",
             side_effect=subprocess.TimeoutExpired(cmd=["gh"], timeout=30),
         ):
             result = gh_get_file(path="README.md", repo="owner/repo")
@@ -571,40 +571,40 @@ class TestGhErrorDiagnosticCategories:
     # ── gh_create_issue ────────────────────────────────────────────────────────
 
     def test_create_issue_authentication_error(self):
-        from src.tools.github_tools import gh_create_issue
+        from cogtrix_core.tools.github_tools import gh_create_issue
 
         with patch(
-            "src.tools.github_tools.subprocess.run",
+            "cogtrix_core.tools.github_tools.subprocess.run",
             return_value=_make_completed(stderr="Error: Http 403: Bad credentials", returncode=1),
         ):
             result = gh_create_issue(title="T", repo="owner/repo")
         self._assert_category_hint(result, "authentication", "Bad credentials")
 
     def test_create_issue_rate_limit_error(self):
-        from src.tools.github_tools import gh_create_issue
+        from cogtrix_core.tools.github_tools import gh_create_issue
 
         with patch(
-            "src.tools.github_tools.subprocess.run",
+            "cogtrix_core.tools.github_tools.subprocess.run",
             return_value=_make_completed(stderr="rate limit exceeded", returncode=1),
         ):
             result = gh_create_issue(title="T", repo="owner/repo")
         self._assert_category_hint(result, "rate-limit", "rate limit exceeded")
 
     def test_create_issue_network_error(self):
-        from src.tools.github_tools import gh_create_issue
+        from cogtrix_core.tools.github_tools import gh_create_issue
 
         with patch(
-            "src.tools.github_tools.subprocess.run",
+            "cogtrix_core.tools.github_tools.subprocess.run",
             return_value=_make_completed(stderr="could not resolve host", returncode=1),
         ):
             result = gh_create_issue(title="T", repo="owner/repo")
         self._assert_category_hint(result, "network", "could not resolve host")
 
     def test_create_issue_unknown_error(self):
-        from src.tools.github_tools import gh_create_issue
+        from cogtrix_core.tools.github_tools import gh_create_issue
 
         with patch(
-            "src.tools.github_tools.subprocess.run",
+            "cogtrix_core.tools.github_tools.subprocess.run",
             return_value=_make_completed(stderr="Something unexpected happened", returncode=1),
         ):
             result = gh_create_issue(title="T", repo="owner/repo")
@@ -614,20 +614,20 @@ class TestGhErrorDiagnosticCategories:
     # ── gh_comment_issue ───────────────────────────────────────────────────────
 
     def test_comment_issue_authentication_error(self):
-        from src.tools.github_tools import gh_comment_issue
+        from cogtrix_core.tools.github_tools import gh_comment_issue
 
         with patch(
-            "src.tools.github_tools.subprocess.run",
+            "cogtrix_core.tools.github_tools.subprocess.run",
             return_value=_make_completed(stderr="gh auth login", returncode=1),
         ):
             result = gh_comment_issue(issue_number=1, body="x", repo="owner/repo")
         self._assert_category_hint(result, "authentication", "gh auth login")
 
     def test_comment_issue_rate_limit_error(self):
-        from src.tools.github_tools import gh_comment_issue
+        from cogtrix_core.tools.github_tools import gh_comment_issue
 
         with patch(
-            "src.tools.github_tools.subprocess.run",
+            "cogtrix_core.tools.github_tools.subprocess.run",
             return_value=_make_completed(stderr="abuse rate limit", returncode=1),
         ):
             result = gh_comment_issue(issue_number=1, body="x", repo="owner/repo")
@@ -636,20 +636,20 @@ class TestGhErrorDiagnosticCategories:
     # ── gh_list_prs ────────────────────────────────────────────────────────────
 
     def test_list_prs_authentication_error(self):
-        from src.tools.github_tools import gh_list_prs
+        from cogtrix_core.tools.github_tools import gh_list_prs
 
         with patch(
-            "src.tools.github_tools.subprocess.run",
+            "cogtrix_core.tools.github_tools.subprocess.run",
             return_value=_make_completed(stderr="requires authentication", returncode=1),
         ):
             result = gh_list_prs(repo="owner/repo")
         self._assert_category_hint(result, "authentication", "requires authentication")
 
     def test_list_prs_network_error(self):
-        from src.tools.github_tools import gh_list_prs
+        from cogtrix_core.tools.github_tools import gh_list_prs
 
         with patch(
-            "src.tools.github_tools.subprocess.run",
+            "cogtrix_core.tools.github_tools.subprocess.run",
             return_value=_make_completed(stderr="connection refused", returncode=1),
         ):
             result = gh_list_prs(repo="owner/repo")
@@ -658,20 +658,20 @@ class TestGhErrorDiagnosticCategories:
     # ── gh_get_file ────────────────────────────────────────────────────────────
 
     def test_get_file_network_error(self):
-        from src.tools.github_tools import gh_get_file
+        from cogtrix_core.tools.github_tools import gh_get_file
 
         with patch(
-            "src.tools.github_tools.subprocess.run",
+            "cogtrix_core.tools.github_tools.subprocess.run",
             return_value=_make_completed(stderr="Timeout performing GET", returncode=1),
         ):
             result = gh_get_file(path="README.md", repo="owner/repo")
         self._assert_category_hint(result, "network", "Timeout performing GET")
 
     def test_get_file_authentication_error(self):
-        from src.tools.github_tools import gh_get_file
+        from cogtrix_core.tools.github_tools import gh_get_file
 
         with patch(
-            "src.tools.github_tools.subprocess.run",
+            "cogtrix_core.tools.github_tools.subprocess.run",
             return_value=_make_completed(stderr="authentication required", returncode=1),
         ):
             result = gh_get_file(path="README.md", repo="owner/repo")
@@ -679,10 +679,10 @@ class TestGhErrorDiagnosticCategories:
 
     def test_get_file_404_still_returns_specific_message(self):
         # gh_get_file has a special 404 handler — it should take precedence
-        from src.tools.github_tools import gh_get_file
+        from cogtrix_core.tools.github_tools import gh_get_file
 
         with patch(
-            "src.tools.github_tools.subprocess.run",
+            "cogtrix_core.tools.github_tools.subprocess.run",
             return_value=_make_completed(stderr="HTTP 404: Not Found", returncode=1),
         ):
             result = gh_get_file(path="missing.py", repo="owner/repo")
@@ -702,61 +702,61 @@ class TestClassifyGhError:
     """Unit tests for the _classify_gh_error helper function."""
 
     def test_authentication_bad_credentials(self):
-        from src.tools.github_tools import _classify_gh_error
+        from cogtrix_core.tools.github_tools import _classify_gh_error
 
         assert _classify_gh_error("gh auth login\nError: Bad credentials") == "authentication"
 
     def test_authentication_requires_auth(self):
-        from src.tools.github_tools import _classify_gh_error
+        from cogtrix_core.tools.github_tools import _classify_gh_error
 
         assert _classify_gh_error("This command requires authentication") == "authentication"
 
     def test_rate_limit_403(self):
-        from src.tools.github_tools import _classify_gh_error
+        from cogtrix_core.tools.github_tools import _classify_gh_error
 
         assert _classify_gh_error("HTTP 403 Forbidden") == "rate-limit"
 
     def test_rate_limit_explicit(self):
-        from src.tools.github_tools import _classify_gh_error
+        from cogtrix_core.tools.github_tools import _classify_gh_error
 
         assert _classify_gh_error("API rate limit exceeded") == "rate-limit"
 
     def test_rate_limit_abuse(self):
-        from src.tools.github_tools import _classify_gh_error
+        from cogtrix_core.tools.github_tools import _classify_gh_error
 
         assert _classify_gh_error("abuse detection triggered") == "rate-limit"
 
     def test_not_found_404(self):
-        from src.tools.github_tools import _classify_gh_error
+        from cogtrix_core.tools.github_tools import _classify_gh_error
 
         assert _classify_gh_error("HTTP 404: repository not found") == "not-found"
 
     def test_not_found_explicit(self):
-        from src.tools.github_tools import _classify_gh_error
+        from cogtrix_core.tools.github_tools import _classify_gh_error
 
         assert _classify_gh_error("not found in repository") == "not-found"
 
     def test_network_connection(self):
-        from src.tools.github_tools import _classify_gh_error
+        from cogtrix_core.tools.github_tools import _classify_gh_error
 
         assert _classify_gh_error("Failed to connect: connection refused") == "network"
 
     def test_network_timeout(self):
-        from src.tools.github_tools import _classify_gh_error
+        from cogtrix_core.tools.github_tools import _classify_gh_error
 
         assert _classify_gh_error("Request timeout after 30s") == "network"
 
     def test_network_could_not_resolve(self):
-        from src.tools.github_tools import _classify_gh_error
+        from cogtrix_core.tools.github_tools import _classify_gh_error
 
         assert _classify_gh_error("Could not resolve host: api.github.com") == "network"
 
     def test_unknown_unrecognized_stderr(self):
-        from src.tools.github_tools import _classify_gh_error
+        from cogtrix_core.tools.github_tools import _classify_gh_error
 
         assert _classify_gh_error("Something went wrong in the server") == "unknown"
 
     def test_unknown_empty_stderr(self):
-        from src.tools.github_tools import _classify_gh_error
+        from cogtrix_core.tools.github_tools import _classify_gh_error
 
         assert _classify_gh_error("") == "unknown"

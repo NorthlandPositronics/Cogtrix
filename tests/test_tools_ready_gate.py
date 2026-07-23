@@ -26,8 +26,8 @@ class RecordingEvent:
 
 
 def test_call_model_waits_for_tools_ready_before_binding():
-    from src.orchestration.graph import build_agent_graph
-    from src.orchestration.run_config import AgentRunConfig
+    from cogtrix_core.orchestration.graph import build_agent_graph
+    from cogtrix_core.orchestration.run_config import AgentRunConfig
 
     event = RecordingEvent(ready=False, wait_result=True)
     llm = MagicMock()
@@ -49,8 +49,8 @@ def test_call_model_waits_for_tools_ready_before_binding():
 
 
 def test_call_model_returns_retry_message_when_tools_still_not_ready():
-    from src.orchestration.graph import build_agent_graph
-    from src.orchestration.run_config import AgentRunConfig
+    from cogtrix_core.orchestration.graph import build_agent_graph
+    from cogtrix_core.orchestration.run_config import AgentRunConfig
 
     event = RecordingEvent(ready=False, wait_result=False)
     llm = MagicMock()

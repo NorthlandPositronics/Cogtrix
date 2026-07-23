@@ -22,7 +22,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from src.config import (
+from cogtrix_core.config import (
     _SECRETS_UNSET_AFTER_READ,
     _keep_env_secrets,
     load_config,

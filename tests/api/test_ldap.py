@@ -24,15 +24,15 @@ import pytest
 pytest.importorskip("fastapi")
 pytest.importorskip("ldap3")
 
-from src.api.db.repositories.organization import OrganizationRepository  # noqa: E402
-from src.api.db.repositories.users import UserRepository  # noqa: E402
-from src.api.ldap.config import (  # noqa: E402
+from cogtrix_core.api.db.repositories.organization import OrganizationRepository  # noqa: E402
+from cogtrix_core.api.db.repositories.users import UserRepository  # noqa: E402
+from cogtrix_core.api.ldap.config import (  # noqa: E402
     _ALLOWED_GROUP_OBJECT_CLASSES,
     _ALLOWED_USER_OBJECT_CLASSES,
     LDAPConfig,
     _validate_ldap_filter,
 )
-from src.api.ldap.sync import LDAPSyncResult, _fetch_ldap_users, sync_users  # noqa: E402
+from cogtrix_core.api.ldap.sync import LDAPSyncResult, _fetch_ldap_users, sync_users  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Infrastructure helpers
@@ -121,7 +121,7 @@ def _patch_fetch(entries: list[dict]):
     fake_pool.borrow.return_value.__exit__ = MagicMock(return_value=False)
 
     stack = ExitStack()
-    stack.enter_context(patch("src.api.ldap.pool.get_pool", return_value=fake_pool))
+    stack.enter_context(patch("cogtrix_core.api.ldap.pool.get_pool", return_value=fake_pool))
     stack.enter_context(patch("asyncio.to_thread", AsyncMock(return_value=entries)))
     return stack
 
@@ -208,7 +208,7 @@ class TestSyncUsersExisting:
                 await org_repo.create(org_id=org_id, name="LDAP Update", slug="ldap-update")
                 await session.commit()
 
-                from src.api.auth import hash_password
+                from cogtrix_core.api.auth import hash_password
 
                 await user_repo.create(
                     user_id=_uid(),
@@ -247,7 +247,7 @@ class TestSyncUsersExisting:
                 await org_repo.create(org_id=org_id, name="LDAP NoOp", slug="ldap-noop")
                 await session.commit()
 
-                from src.api.auth import hash_password
+                from cogtrix_core.api.auth import hash_password
 
                 await user_repo.create(
                     user_id=_uid(),
@@ -285,7 +285,7 @@ class TestSyncUsersExisting:
                 await org_repo.create(org_id=org_b_id, name="LDAP OrgB", slug="ldap-org-b")
                 await session.commit()
 
-                from src.api.auth import hash_password
+                from cogtrix_core.api.auth import hash_password
 
                 await user_repo.create(
                     user_id=_uid(),
@@ -368,7 +368,7 @@ class TestSyncUsersGroupRoleMapping:
 
                 with _patch_fetch(entries):
                     with patch(
-                        "src.api.ldap.sync.search_groups_async",
+                        "cogtrix_core.api.ldap.sync.search_groups_async",
                         AsyncMock(
                             return_value=[
                                 {
@@ -413,7 +413,7 @@ class TestSyncUsersGroupRoleMapping:
 
                 with _patch_fetch(entries):
                     with patch(
-                        "src.api.ldap.sync.search_groups_async",
+                        "cogtrix_core.api.ldap.sync.search_groups_async",
                         AsyncMock(
                             return_value=[
                                 {
@@ -463,7 +463,7 @@ class TestSyncUsersGroupRoleMapping:
 
                 with _patch_fetch(entries):
                     with patch(
-                        "src.api.ldap.sync.search_groups_async",
+                        "cogtrix_core.api.ldap.sync.search_groups_async",
                         AsyncMock(return_value=[]),
                     ):
                         result = await sync_users(config, session)
@@ -485,7 +485,7 @@ class TestSyncUsersGroupRoleMapping:
                 await org_repo.create(org_id=org_id, name="LDAP NoMap", slug="ldap-nomap")
                 await session.commit()
 
-                from src.api.auth import hash_password
+                from cogtrix_core.api.auth import hash_password
 
                 await user_repo.create(
                     user_id=_uid(),
@@ -508,7 +508,7 @@ class TestSyncUsersGroupRoleMapping:
                 # group_role_map is empty by default
 
                 with _patch_fetch(entries):
-                    with patch("src.api.ldap.sync.search_groups_async") as mock_search:
+                    with patch("cogtrix_core.api.ldap.sync.search_groups_async") as mock_search:
                         result = await sync_users(config, session)
 
                 assert result.updated == 1
@@ -602,7 +602,7 @@ class TestConfigureLdapValidatesFilter:
     """configure_ldap rejects configs with unsafe search_filter values."""
 
     def test_rejects_broad_filter_at_configure_time(self):
-        from src.api.ldap.config import configure_ldap
+        from cogtrix_core.api.ldap.config import configure_ldap
 
         bad_config = LDAPConfig(
             server_url="ldap://example.com:389",
@@ -616,7 +616,7 @@ class TestConfigureLdapValidatesFilter:
             configure_ldap(bad_config)
 
     def test_accepts_safe_filter_at_configure_time(self):
-        from src.api.ldap.config import configure_ldap, get_ldap_config
+        from cogtrix_core.api.ldap.config import configure_ldap, get_ldap_config
 
         good_config = LDAPConfig(
             server_url="ldap://example.com:389",

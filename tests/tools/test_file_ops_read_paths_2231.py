@@ -16,8 +16,8 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
-import src.tools.file_ops as fo
-from src.tools.configure import configure_file_read_dirs
+import cogtrix_core.tools.file_ops as fo
+from cogtrix_core.tools.configure import configure_file_read_dirs
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -32,7 +32,7 @@ def test_env_read_paths_wired_at_import(tmp_path: Path) -> None:
     readable.mkdir()
     code = (
         "from pathlib import Path\n"
-        "from src.tools import file_ops\n"
+        "from cogtrix_core.tools import file_ops\n"
         f"assert Path({str(readable)!r}).resolve() in file_ops._extra_read_dirs, "
         "file_ops._extra_read_dirs\n"
         "print('OK')\n"

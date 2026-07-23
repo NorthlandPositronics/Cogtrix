@@ -12,8 +12,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from src.assistant.channel import IncomingMessage
-from src.assistant.session import (
+from cogtrix_core.assistant.channel import IncomingMessage
+from cogtrix_core.assistant.session import (
     _MAX_SESSION_OVERFLOW_MULTIPLIER,
     ChatSession,
     ChatSessionManager,

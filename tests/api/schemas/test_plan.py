@@ -1,4 +1,4 @@
-"""Tests for src/api/schemas/plan.py — subscription plans."""
+"""Tests for cogtrix_core/api/schemas/plan.py — subscription plans."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 import pytest
 from pydantic import ValidationError
 
-from src.api.schemas.plan import PlanCreate, PlanLimits, PlanOut, PlanUpdate
+from cogtrix_core.api.schemas.plan import PlanCreate, PlanLimits, PlanOut, PlanUpdate
 
 # ---------------------------------------------------------------------------
 # PlanLimits — quantitative limits, 0 == unlimited

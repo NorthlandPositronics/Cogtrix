@@ -19,10 +19,10 @@ pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient  # noqa: E402
 from sqlalchemy.ext.asyncio import async_sessionmaker  # noqa: E402
 
-from src.api.app import app  # noqa: E402
-from src.api.auth import create_access_token  # noqa: E402
-from src.api.db.engine import get_db  # noqa: E402
-from src.api.db.models import (  # noqa: E402
+from cogtrix_core.api.app import app  # noqa: E402
+from cogtrix_core.api.auth import create_access_token  # noqa: E402
+from cogtrix_core.api.db.engine import get_db  # noqa: E402
+from cogtrix_core.api.db.models import (  # noqa: E402
     ApiSessionRecord,
     Organization,
     User,
@@ -164,7 +164,7 @@ def seeded_client(engine):
         from unittest.mock import MagicMock
         from unittest.mock import patch as _patch
 
-        with _patch("src.api.session_bridge._build_llm", return_value=MagicMock()):
+        with _patch("cogtrix_core.api.session_bridge._build_llm", return_value=MagicMock()):
             with TestClient(app, raise_server_exceptions=False) as client:
                 yield (
                     client,

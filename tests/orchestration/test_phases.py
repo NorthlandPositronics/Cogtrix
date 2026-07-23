@@ -1,10 +1,10 @@
-"""Tests for src/orchestration/phases.py."""
+"""Tests for cogtrix_core/orchestration/phases.py."""
 
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.orchestration.phases import build_llm_for_decomposition
+from cogtrix_core.orchestration.phases import build_llm_for_decomposition
 
 
 class TestBuildLlmForDecomposition:
@@ -27,7 +27,7 @@ class TestBuildLlmForDecomposition:
         config = self._make_config("openai")
         fake_llm = MagicMock()
 
-        with patch("src.providers.create_chat_model", return_value=fake_llm):
+        with patch("cogtrix_core.providers.create_chat_model", return_value=fake_llm):
             result = build_llm_for_decomposition(config)
 
         assert result is fake_llm
@@ -36,7 +36,7 @@ class TestBuildLlmForDecomposition:
         config = self._make_config("ollama")
         fake_llm = MagicMock()
 
-        with patch("src.providers.create_chat_model", return_value=fake_llm) as mock_ccm:
+        with patch("cogtrix_core.providers.create_chat_model", return_value=fake_llm) as mock_ccm:
             build_llm_for_decomposition(config)
             _, kwargs = mock_ccm.call_args
             assert kwargs.get("temperature") == pytest.approx(0.3)
@@ -51,7 +51,7 @@ class TestBuildLlmForDecomposition:
     def test_returns_none_on_import_error(self):
         config = self._make_config("anthropic")
 
-        with patch("src.providers.create_chat_model", side_effect=ImportError("no pkg")):
+        with patch("cogtrix_core.providers.create_chat_model", side_effect=ImportError("no pkg")):
             result = build_llm_for_decomposition(config)
 
         assert result is None
@@ -61,7 +61,7 @@ class TestBuildLlmForDecomposition:
         config = self._make_config(provider_type)
         fake_llm = MagicMock()
 
-        with patch("src.providers.create_chat_model", return_value=fake_llm) as mock_ccm:
+        with patch("cogtrix_core.providers.create_chat_model", return_value=fake_llm) as mock_ccm:
             result = build_llm_for_decomposition(config)
 
         assert result is fake_llm
@@ -73,12 +73,12 @@ class TestExtractTurnMessages:
     """Tests for extract_turn_messages."""
 
     def test_returns_empty_for_no_messages(self):
-        from src.orchestration.phases import extract_turn_messages
+        from cogtrix_core.orchestration.phases import extract_turn_messages
 
         assert extract_turn_messages([]) == []
 
     def test_returns_messages_after_last_human(self):
-        from src.orchestration.phases import extract_turn_messages
+        from cogtrix_core.orchestration.phases import extract_turn_messages
 
         try:
             from langchain_core.messages import AIMessage, HumanMessage
@@ -93,7 +93,7 @@ class TestExtractTurnMessages:
         assert result == [a2]
 
     def test_boundary_anchors_to_specific_message(self):
-        from src.orchestration.phases import extract_turn_messages
+        from cogtrix_core.orchestration.phases import extract_turn_messages
 
         try:
             from langchain_core.messages import AIMessage, HumanMessage
@@ -109,7 +109,7 @@ class TestExtractTurnMessages:
 
     def test_boundary_identity_not_equality(self):
         """Two HumanMessages with identical content are distinguished by identity."""
-        from src.orchestration.phases import extract_turn_messages
+        from cogtrix_core.orchestration.phases import extract_turn_messages
 
         try:
             from langchain_core.messages import AIMessage, HumanMessage
@@ -125,7 +125,7 @@ class TestExtractTurnMessages:
         assert extract_turn_messages(msgs, boundary=h2) == [a2]
 
     def test_no_human_message_returns_empty(self):
-        from src.orchestration.phases import extract_turn_messages
+        from cogtrix_core.orchestration.phases import extract_turn_messages
 
         try:
             from langchain_core.messages import AIMessage
@@ -135,7 +135,7 @@ class TestExtractTurnMessages:
         assert extract_turn_messages(msgs) == []
 
     def test_boundary_not_found_returns_empty(self):
-        from src.orchestration.phases import extract_turn_messages
+        from cogtrix_core.orchestration.phases import extract_turn_messages
 
         try:
             from langchain_core.messages import AIMessage, HumanMessage
@@ -155,7 +155,7 @@ class TestExtractTurnMessages:
 
 class TestNormalizeUrl:
     def _norm(self, url: str):
-        from src.orchestration.phases import _normalize_url
+        from cogtrix_core.orchestration.phases import _normalize_url
 
         return _normalize_url(url)
 
@@ -214,7 +214,7 @@ class TestExtractFetchedUrlsNormalization:
     """extract_fetched_urls() must normalize before deduplication."""
 
     def test_extract_urls_skips_malformed(self):
-        from src.orchestration.phases import extract_fetched_urls
+        from cogtrix_core.orchestration.phases import extract_fetched_urls
 
         try:
             from langchain_core.messages import AIMessage
@@ -230,7 +230,7 @@ class TestExtractFetchedUrlsNormalization:
             assert "\x00" not in url
 
     def test_extract_urls_deduplicates_after_normalization(self):
-        from src.orchestration.phases import extract_fetched_urls
+        from cogtrix_core.orchestration.phases import extract_fetched_urls
 
         try:
             from langchain_core.messages import AIMessage
@@ -257,11 +257,11 @@ class TestRunResearchDelegateURLWarning:
         import logging
         from unittest.mock import patch
 
-        from src.orchestration.phases import run_research_delegate
+        from cogtrix_core.orchestration.phases import run_research_delegate
 
         urls = [f"https://example.com/{i}" for i in range(10)]
         with caplog.at_level(logging.WARNING, logger="cogtrix.orchestration.phases"):
-            with patch("src.tools.delegate.get_delegate_tools", return_value=[]):
+            with patch("cogtrix_core.tools.delegate.get_delegate_tools", return_value=[]):
                 run_research_delegate(urls, task="test")
         assert not any("dropped" in r.message for r in caplog.records)
 
@@ -269,11 +269,11 @@ class TestRunResearchDelegateURLWarning:
         import logging
         from unittest.mock import patch
 
-        from src.orchestration.phases import run_research_delegate
+        from cogtrix_core.orchestration.phases import run_research_delegate
 
         urls = [f"https://example.com/{i}" for i in range(15)]
         with caplog.at_level(logging.WARNING, logger="cogtrix.orchestration.phases"):
-            with patch("src.tools.delegate.get_delegate_tools", return_value=[]):
+            with patch("cogtrix_core.tools.delegate.get_delegate_tools", return_value=[]):
                 run_research_delegate(urls, task="test")
         # Warning fires before the delegate-tool check, so it always fires on >10 URLs
         drop_warnings = [r for r in caplog.records if "dropped" in r.message]
@@ -292,12 +292,14 @@ class TestForceDeepThinkUserCancelledRun:
         """UserCancelledRun raised by deep_think must not be caught by the broad except Exception."""
         from unittest.mock import patch
 
-        from src.agent.safety import UserCancelledRun
-        from src.orchestration.phases import force_deep_think
+        from cogtrix_core.agent.safety import UserCancelledRun
+        from cogtrix_core.orchestration.phases import force_deep_think
 
         log_mock = MagicMock()
 
-        with patch("src.tools.deep_think.deep_think", side_effect=UserCancelledRun("stop")):
+        with patch(
+            "cogtrix_core.tools.deep_think.deep_think", side_effect=UserCancelledRun("stop")
+        ):
             with pytest.raises(UserCancelledRun):
                 force_deep_think(
                     user_input="think deep about this",
@@ -310,11 +312,11 @@ class TestForceDeepThinkUserCancelledRun:
         """Non-cancellation exceptions must still be caught and logged."""
         from unittest.mock import patch
 
-        from src.orchestration.phases import force_deep_think
+        from cogtrix_core.orchestration.phases import force_deep_think
 
         log_mock = MagicMock()
 
-        with patch("src.tools.deep_think.deep_think", side_effect=RuntimeError("boom")):
+        with patch("cogtrix_core.tools.deep_think.deep_think", side_effect=RuntimeError("boom")):
             result = force_deep_think(
                 user_input="think deep about this",
                 agent_response="fallback response",
@@ -351,7 +353,7 @@ class TestForceDelegationUserCancelledRun:
         """UserCancelledRun raised inside force_delegation must not be swallowed by except Exception."""
         from unittest.mock import patch
 
-        from src.agent.safety import UserCancelledRun
+        from cogtrix_core.agent.safety import UserCancelledRun
 
         log_mock = MagicMock()
         config_mock = self._make_config()
@@ -364,13 +366,16 @@ class TestForceDelegationUserCancelledRun:
         # Mock _delegate_config so available_aliases is non-empty (force_delegation reaches delegate_parallel).
         # Both patches must be active BEFORE force_delegation is imported so that its local import
         # of delegate_parallel picks up the patched version.
-        with patch("src.orchestration.phases.build_llm_for_decomposition", return_value=fake_llm):
-            with patch("src.tools.delegate._delegate_config") as mock_cfg:
+        with patch(
+            "cogtrix_core.orchestration.phases.build_llm_for_decomposition", return_value=fake_llm
+        ):
+            with patch("cogtrix_core.tools.delegate._delegate_config") as mock_cfg:
                 mock_cfg.get.return_value = {"default": {"model": "gpt-4o", "provider": "openai"}}
                 with patch(
-                    "src.tools.delegate.delegate_parallel", side_effect=UserCancelledRun("stop")
+                    "cogtrix_core.tools.delegate.delegate_parallel",
+                    side_effect=UserCancelledRun("stop"),
                 ):
-                    from src.orchestration.phases import force_delegation
+                    from cogtrix_core.orchestration.phases import force_delegation
 
                     with pytest.raises(UserCancelledRun):
                         force_delegation(
@@ -393,13 +398,16 @@ class TestForceDelegationUserCancelledRun:
         fake_response.content = '{"task":"do sub-task","model":"default"}'
         fake_llm.invoke.return_value = fake_response
 
-        with patch("src.orchestration.phases.build_llm_for_decomposition", return_value=fake_llm):
-            with patch("src.tools.delegate._delegate_config") as mock_cfg:
+        with patch(
+            "cogtrix_core.orchestration.phases.build_llm_for_decomposition", return_value=fake_llm
+        ):
+            with patch("cogtrix_core.tools.delegate._delegate_config") as mock_cfg:
                 mock_cfg.get.return_value = {"default": {"model": "gpt-4o", "provider": "openai"}}
                 with patch(
-                    "src.tools.delegate.delegate_parallel", side_effect=RuntimeError("boom")
+                    "cogtrix_core.tools.delegate.delegate_parallel",
+                    side_effect=RuntimeError("boom"),
                 ):
-                    from src.orchestration.phases import force_delegation
+                    from cogtrix_core.orchestration.phases import force_delegation
 
                     result = force_delegation(
                         user_input="do this task",
@@ -447,14 +455,16 @@ class TestForceDelegationTimeout:
 
         fake_llm = MagicMock()
 
-        with patch("src.orchestration.phases.build_llm_for_decomposition", return_value=fake_llm):
-            with patch("src.tools.delegate._delegate_config") as mock_cfg:
+        with patch(
+            "cogtrix_core.orchestration.phases.build_llm_for_decomposition", return_value=fake_llm
+        ):
+            with patch("cogtrix_core.tools.delegate._delegate_config") as mock_cfg:
                 mock_cfg.get.return_value = {"default": {"model": "gpt-4o", "provider": "openai"}}
                 with patch(
-                    "src.orchestration.phases.invoke_with_timeout",
+                    "cogtrix_core.orchestration.phases.invoke_with_timeout",
                     side_effect=TimeoutError("timed out"),
                 ):
-                    from src.orchestration.phases import force_delegation
+                    from cogtrix_core.orchestration.phases import force_delegation
 
                     result = force_delegation(
                         user_input="do this task",
@@ -479,7 +489,7 @@ class TestRunResearchDelegateUserCancelledRun:
         """UserCancelledRun raised inside run_research_delegate must not be swallowed by except Exception."""
         from unittest.mock import patch
 
-        from src.agent.safety import UserCancelledRun
+        from cogtrix_core.agent.safety import UserCancelledRun
 
         fake_tool = MagicMock()
         fake_tool.name = "http_get"
@@ -489,12 +499,13 @@ class TestRunResearchDelegateUserCancelledRun:
         # Mock get_delegate_tools (otherwise function returns early) and create_delegate_llm
         # (otherwise raises ValueError about missing provider). Patch run_delegate_agent at source.
         # Import inside patch context so local import picks up the patch.
-        with patch("src.tools.delegate.get_delegate_tools", return_value=[fake_tool]):
-            with patch("src.tools.delegate.create_delegate_llm", return_value=fake_llm):
+        with patch("cogtrix_core.tools.delegate.get_delegate_tools", return_value=[fake_tool]):
+            with patch("cogtrix_core.tools.delegate.create_delegate_llm", return_value=fake_llm):
                 with patch(
-                    "src.tools.delegate.run_delegate_agent", side_effect=UserCancelledRun("stop")
+                    "cogtrix_core.tools.delegate.run_delegate_agent",
+                    side_effect=UserCancelledRun("stop"),
                 ):
-                    from src.orchestration.phases import run_research_delegate
+                    from cogtrix_core.orchestration.phases import run_research_delegate
 
                     with pytest.raises(UserCancelledRun):
                         run_research_delegate(
@@ -512,12 +523,13 @@ class TestRunResearchDelegateUserCancelledRun:
         fake_tool.description = "Fetch URL"
         fake_llm = MagicMock()
 
-        with patch("src.tools.delegate.get_delegate_tools", return_value=[fake_tool]):
-            with patch("src.tools.delegate.create_delegate_llm", return_value=fake_llm):
+        with patch("cogtrix_core.tools.delegate.get_delegate_tools", return_value=[fake_tool]):
+            with patch("cogtrix_core.tools.delegate.create_delegate_llm", return_value=fake_llm):
                 with patch(
-                    "src.tools.delegate.run_delegate_agent", side_effect=RuntimeError("boom")
+                    "cogtrix_core.tools.delegate.run_delegate_agent",
+                    side_effect=RuntimeError("boom"),
                 ):
-                    from src.orchestration.phases import run_research_delegate
+                    from cogtrix_core.orchestration.phases import run_research_delegate
 
                     result = run_research_delegate(
                         urls=["https://example.com"],

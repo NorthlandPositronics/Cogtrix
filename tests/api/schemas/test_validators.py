@@ -1,10 +1,10 @@
-"""Tests for src/api/schemas/validators.py:validate_password_complexity()."""
+"""Tests for cogtrix_core/api/schemas/validators.py:validate_password_complexity()."""
 
 from __future__ import annotations
 
 import pytest
 
-from src.api.schemas.validators import validate_password_complexity
+from cogtrix_core.api.schemas.validators import validate_password_complexity
 
 
 class TestPasswordComplexityValid:

@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
-from src.orchestration.verification import (
+from cogtrix_core.orchestration.verification import (
     GroundedSources,
     collect_grounded_sources,
     detect_unsupported_attribution,

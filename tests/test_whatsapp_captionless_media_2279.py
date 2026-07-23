@@ -12,12 +12,12 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
-from src.assistant.channel import IncomingMessage
-from src.tools._whatsapp_client import ChatOverview, Message, WahaClient
+from cogtrix_core.assistant.channel import IncomingMessage
+from cogtrix_core.tools._whatsapp_client import ChatOverview, Message, WahaClient
 
 
 def _make_channel(config: dict | None = None):
-    from src.assistant.channels.whatsapp import WhatsAppChannel
+    from cogtrix_core.assistant.channels.whatsapp import WhatsAppChannel
 
     cfg: dict = {"waha_url": "http://localhost:3000", "session": "default"}
     if config:

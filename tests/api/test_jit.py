@@ -22,10 +22,10 @@ pytest.importorskip("fastapi")
 
 from fastapi import HTTPException  # noqa: E402
 
-from src.api.db.repositories.organization import OrganizationRepository  # noqa: E402
-from src.api.db.repositories.users import UserRepository  # noqa: E402
-from src.api.jit.config import JITConfig  # noqa: E402
-from src.api.jit.provisioning import provision_jit_user  # noqa: E402
+from cogtrix_core.api.db.repositories.organization import OrganizationRepository  # noqa: E402
+from cogtrix_core.api.db.repositories.users import UserRepository  # noqa: E402
+from cogtrix_core.api.jit.config import JITConfig  # noqa: E402
+from cogtrix_core.api.jit.provisioning import provision_jit_user  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Infrastructure helpers
@@ -125,7 +125,7 @@ class TestProvisionJITUserExisting:
                 await org_repo.create(org_id=org_id, name="JIT Same", slug="jit-same")
                 await session.commit()
 
-                from src.api.auth import hash_password
+                from cogtrix_core.api.auth import hash_password
 
                 await user_repo.create(
                     user_id=_uid(),
@@ -166,7 +166,7 @@ class TestProvisionJITUserExisting:
                 await org_repo.create(org_id=org_b_id, name="JIT Org B", slug="jit-org-b")
                 await session.commit()
 
-                from src.api.auth import hash_password
+                from cogtrix_core.api.auth import hash_password
 
                 await user_repo.create(
                     user_id=_uid(),
@@ -255,7 +255,7 @@ class TestProvisionJITUserPolicies:
                 await session.commit()
 
                 # Fill the org to max_users=1.
-                from src.api.auth import hash_password
+                from cogtrix_core.api.auth import hash_password
 
                 await user_repo.create(
                     user_id=_uid(),

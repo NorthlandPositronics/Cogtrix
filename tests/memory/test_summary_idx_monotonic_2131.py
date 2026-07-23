@@ -12,8 +12,8 @@ from __future__ import annotations
 
 import pytest
 
-from src.memory import modes  # noqa: F401 — triggers mode registration
-from src.memory.modes.conversation import ConversationMemoryManager
+from cogtrix_core.memory import modes  # noqa: F401 — triggers mode registration
+from cogtrix_core.memory.modes.conversation import ConversationMemoryManager
 
 
 class _MockStore:
@@ -33,7 +33,7 @@ def _make_manager(monkeypatch: pytest.MonkeyPatch, summary_text: str) -> Convers
     mgr._ensure_embeddings_initialized = lambda: None  # type: ignore[method-assign]
     mgr._save_hybrid_meta = lambda *a, **k: None  # type: ignore[method-assign]
     monkeypatch.setattr(
-        "src.memory.summarizer.generate_summary",
+        "cogtrix_core.memory.summarizer.generate_summary",
         lambda llm, batch, before: summary_text,
     )
     return mgr

@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.orchestration.compression import apply_message_compression
+from cogtrix_core.orchestration.compression import apply_message_compression
 
 try:
     from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
@@ -244,7 +244,7 @@ class TestToolMessagesUnaffectedByAIPass:
 
         # For ToolMessage compression the llm is called differently (compress_tool_message)
         with patch(
-            "src.orchestration.compression.compress_tool_message",
+            "cogtrix_core.orchestration.compression.compress_tool_message",
             return_value="compressed tool",
         ):
             result = _apply(msgs, llm, min_age=1)
@@ -284,7 +284,9 @@ class TestCompactReportsAICompression:
         reg.memory_manager = mm
         reg.max_context_tokens = 16_384
 
-        with patch("src.cli.commands.apply_message_compression", return_value=[compressed_msg]):
+        with patch(
+            "cogtrix_core.cli.commands.apply_message_compression", return_value=[compressed_msg]
+        ):
             reg.dispatch("/compact")
 
         out, _ = capsys.readouterr()
@@ -310,7 +312,9 @@ class TestCompactReportsAICompression:
         reg.memory_manager = mm
         reg.max_context_tokens = 16_384
 
-        with patch("src.cli.commands.apply_message_compression", return_value=[comp_tool, comp_ai]):
+        with patch(
+            "cogtrix_core.cli.commands.apply_message_compression", return_value=[comp_tool, comp_ai]
+        ):
             reg.dispatch("/compact")
 
         out, _ = capsys.readouterr()
@@ -338,7 +342,7 @@ class TestCompactNothingWhenTrulyEmpty:
         reg.memory_manager = mm
         reg.max_context_tokens = 16_384
 
-        with patch("src.cli.commands.apply_message_compression", return_value=[msg]):
+        with patch("cogtrix_core.cli.commands.apply_message_compression", return_value=[msg]):
             reg.dispatch("/compact")
 
         out, _ = capsys.readouterr()
@@ -362,3 +366,85 @@ class TestCompactNothingWhenTrulyEmpty:
 
         out, _ = capsys.readouterr()
         assert "Nothing to compress" in out or "no messages" in out.lower()
+
+
+class TestToolCallsPreservedOnCompression:
+    """#2365: compressing an AIMessage that carries tool_calls must keep the
+    tool-call declarations, so the ToolMessages answering them are not orphaned
+    (the upstream of the provider-400 tool-pair corruption under heavy
+    compression)."""
+
+    def test_tool_calls_survive_ai_compression(self):
+        # An OLD, large AIMessage that ALSO declares a tool call, with its answer.
+        # Enough large AIMessages follow it that the context exceeds the trigger
+        # threshold and it is old enough to be eligible (not one of the last two).
+        msgs = [
+            HumanMessage(content="do the task"),
+            AIMessage(
+                content=_LARGE_AI_CONTENT,
+                tool_calls=[{"id": "tc1", "name": "execute_shell_command", "args": {}}],
+            ),
+            ToolMessage(content="result", tool_call_id="tc1", name="execute_shell_command"),
+            HumanMessage(content="q1"),
+            AIMessage(content=_LARGE_AI_CONTENT),
+            HumanMessage(content="q2"),
+            AIMessage(content=_LARGE_AI_CONTENT),
+            HumanMessage(content="q3"),
+            AIMessage(content=_LARGE_AI_CONTENT),
+            HumanMessage(content="last"),
+            AIMessage(content="recent reply"),  # protected (one of the last two)
+        ]
+
+        result = _apply(msgs, _make_llm("summary text"), min_age=1)
+
+        # The tool-call AIMessage was summarised (content replaced) ...
+        target = next(
+            m
+            for m in result
+            if isinstance(m, AIMessage)
+            and any(tc.get("id") == "tc1" for tc in (getattr(m, "tool_calls", None) or []))
+        )
+        assert str(target.content).startswith("[Summary"), "content should be summarised"
+        # ... but the tool_call declaration survived, so tc1 is still declared.
+        assert [tc["id"] for tc in target.tool_calls] == ["tc1"]
+        # And the answering ToolMessage is still present (not orphaned/stripped).
+        tool_ids = [getattr(m, "tool_call_id", None) for m in result if isinstance(m, ToolMessage)]
+        assert "tc1" in tool_ids
+
+    def test_additional_kwargs_preserved_but_raw_tool_calls_dropped(self):
+        # additional_kwargs (e.g. provider cache metadata) survive compression, but
+        # any RAW tool_calls copy inside it is dropped — .tool_calls is the source of
+        # truth, and a stale/divergent raw copy could re-orphan a ToolMessage via the
+        # repair (forge audit; matches message_repair/phases convention).
+        msgs = [
+            HumanMessage(content="do the task"),
+            AIMessage(
+                content=_LARGE_AI_CONTENT,
+                tool_calls=[{"id": "tc1", "name": "execute_shell_command", "args": {}}],
+                additional_kwargs={
+                    "cache_control": {"type": "ephemeral"},
+                    "tool_calls": [{"id": "STALE", "type": "function"}],
+                },
+            ),
+            ToolMessage(content="ok", tool_call_id="tc1", name="execute_shell_command"),
+            HumanMessage(content="q1"),
+            AIMessage(content=_LARGE_AI_CONTENT),
+            HumanMessage(content="q2"),
+            AIMessage(content=_LARGE_AI_CONTENT),
+            HumanMessage(content="q3"),
+            AIMessage(content=_LARGE_AI_CONTENT),
+            HumanMessage(content="last"),
+            AIMessage(content="recent reply"),
+        ]
+        result = _apply(msgs, _make_llm("summary text"), min_age=1)
+
+        target = next(
+            m
+            for m in result
+            if isinstance(m, AIMessage)
+            and any(tc.get("id") == "tc1" for tc in (getattr(m, "tool_calls", None) or []))
+        )
+        # non-tool_calls metadata kept ...
+        assert target.additional_kwargs.get("cache_control") == {"type": "ephemeral"}
+        # ... but the stale raw tool_calls copy is gone (no divergent declaration).
+        assert "tool_calls" not in target.additional_kwargs

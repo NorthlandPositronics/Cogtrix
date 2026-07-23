@@ -42,16 +42,16 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from src.tools._http_fetch import FetchResult
-from src.tools._web_search_aggregator import (
+from cogtrix_core.tools._http_fetch import FetchResult
+from cogtrix_core.tools._web_search_aggregator import (
     CoverageInfo,
     RankedResult,
 )
-from src.tools._web_search_domain_class import DomainClass
-from src.tools._web_search_extractor import ExtractedSource
-from src.tools._web_search_fetcher import FetchOutcome
-from src.tools._web_search_synthesiser import SynthesisResult
-from src.tools.web_search import web_search
+from cogtrix_core.tools._web_search_domain_class import DomainClass
+from cogtrix_core.tools._web_search_extractor import ExtractedSource
+from cogtrix_core.tools._web_search_fetcher import FetchOutcome
+from cogtrix_core.tools._web_search_synthesiser import SynthesisResult
+from cogtrix_core.tools.web_search import web_search
 
 # ── Metrics dataclass ────────────────────────────────────────────────
 
@@ -228,15 +228,15 @@ async def _run_scenario(
 
     t0 = time.monotonic()
     with (
-        patch("src.tools.web_search._resolve_providers", return_value=providers),
-        patch("src.tools._web_search_aggregator.aggregate", new=aggregate_mock),
-        patch("src.tools._web_search_fetcher.fetch_top_k", new=fetch_mock),
-        patch("src.tools._web_search_extractor.extract", new=extract_mock),
-        patch("src.tools._web_search_synthesiser.synthesise", new=synth_mock),
+        patch("cogtrix_core.tools.web_search._resolve_providers", return_value=providers),
+        patch("cogtrix_core.tools._web_search_aggregator.aggregate", new=aggregate_mock),
+        patch("cogtrix_core.tools._web_search_fetcher.fetch_top_k", new=fetch_mock),
+        patch("cogtrix_core.tools._web_search_extractor.extract", new=extract_mock),
+        patch("cogtrix_core.tools._web_search_synthesiser.synthesise", new=synth_mock),
         # Inject a fake synthesis LLM so stage 5 actually invokes
         # ``synthesise`` instead of skipping. The mock above controls
         # the return value.
-        patch("src.tools.web_search._synthesis_llm_var") as llm_var,
+        patch("cogtrix_core.tools.web_search._synthesis_llm_var") as llm_var,
     ):
         llm_var.get.return_value = object()  # truthy
         output = await web_search(query=query)
@@ -543,7 +543,7 @@ class TestCacheShortCircuit:
 
     @pytest.mark.asyncio
     async def test_repeat_query_short_circuits(self) -> None:
-        from src.tools._web_search_cache import cache_clear
+        from cogtrix_core.tools._web_search_cache import cache_clear
 
         cache_clear()
         scenario = _happy_path_scenario()
@@ -554,12 +554,15 @@ class TestCacheShortCircuit:
         synth_mock = AsyncMock(return_value=scenario.synthesis)
 
         with (
-            patch("src.tools.web_search._resolve_providers", return_value={"ddg": AsyncMock()}),
-            patch("src.tools._web_search_aggregator.aggregate", new=aggregate_mock),
-            patch("src.tools._web_search_fetcher.fetch_top_k", new=fetch_mock),
-            patch("src.tools._web_search_extractor.extract", new=extract_mock),
-            patch("src.tools._web_search_synthesiser.synthesise", new=synth_mock),
-            patch("src.tools.web_search._synthesis_llm_var") as llm_var,
+            patch(
+                "cogtrix_core.tools.web_search._resolve_providers",
+                return_value={"ddg": AsyncMock()},
+            ),
+            patch("cogtrix_core.tools._web_search_aggregator.aggregate", new=aggregate_mock),
+            patch("cogtrix_core.tools._web_search_fetcher.fetch_top_k", new=fetch_mock),
+            patch("cogtrix_core.tools._web_search_extractor.extract", new=extract_mock),
+            patch("cogtrix_core.tools._web_search_synthesiser.synthesise", new=synth_mock),
+            patch("cogtrix_core.tools.web_search._synthesis_llm_var") as llm_var,
         ):
             llm_var.get.return_value = object()
             first = await web_search("cache-hit-key", depth=3)
@@ -786,7 +789,7 @@ class TestMetricsParser:
 @pytest.fixture(autouse=True)
 def _reset_cache():
     """Every efficiency test starts with an empty query cache."""
-    from src.tools._web_search_cache import cache_clear
+    from cogtrix_core.tools._web_search_cache import cache_clear
 
     cache_clear()
     yield

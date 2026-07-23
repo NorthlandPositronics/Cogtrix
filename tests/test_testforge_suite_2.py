@@ -59,7 +59,7 @@ def _make_mock_session(*, agent_state: str = "idle") -> MagicMock:
 
 def _make_callback_handler():
     """Build a WebSocketCallbackHandler with its own event loop and queue."""
-    from src.api.callbacks import WebSocketCallbackHandler
+    from cogtrix_core.api.callbacks import WebSocketCallbackHandler
 
     loop = asyncio.new_event_loop()
 
@@ -90,7 +90,7 @@ class TestRunThinkPipelineCancelClassify:
 
     @pytest.mark.asyncio
     async def test_cancel_at_classify_resets_state(self):
-        from src.api.turn_runner import _run_think_pipeline
+        from cogtrix_core.api.turn_runner import _run_think_pipeline
 
         session = _make_mock_session()
         run_config = MagicMock()
@@ -99,9 +99,9 @@ class TestRunThinkPipelineCancelClassify:
         async def _fake_enqueue(s, state):
             s.agent_state = state
 
-        with patch("src.api.turn_runner._enqueue_agent_state", side_effect=_fake_enqueue):
+        with patch("cogtrix_core.api.turn_runner._enqueue_agent_state", side_effect=_fake_enqueue):
             with patch(
-                "src.api.turn_runner.asyncio.to_thread",
+                "cogtrix_core.api.turn_runner.asyncio.to_thread",
                 side_effect=asyncio.CancelledError("classify cancelled"),
             ):
                 with pytest.raises(asyncio.CancelledError):
@@ -110,7 +110,7 @@ class TestRunThinkPipelineCancelClassify:
     @pytest.mark.asyncio
     async def test_cancel_at_classify_does_not_suppress_error(self):
         """CancelledError propagates — never swallowed."""
-        from src.api.turn_runner import _run_think_pipeline
+        from cogtrix_core.api.turn_runner import _run_think_pipeline
 
         session = _make_mock_session()
         run_config = MagicMock()
@@ -119,7 +119,7 @@ class TestRunThinkPipelineCancelClassify:
         # With llm=None, classify is skipped; next step is cancel check
         session.cancel_event.set()  # signal cancel
 
-        with patch("src.api.turn_runner._enqueue_agent_state", new_callable=AsyncMock):
+        with patch("cogtrix_core.api.turn_runner._enqueue_agent_state", new_callable=AsyncMock):
             with pytest.raises(asyncio.CancelledError):
                 await _run_think_pipeline(session, "task", "response", [], run_config)
 
@@ -135,7 +135,7 @@ class TestRunThinkPipelineCancelResearch:
     @pytest.mark.asyncio
     async def test_second_cancel_check_fires_after_research(self):
         """The cancel_event check between research and deep_think phases works."""
-        from src.api.turn_runner import _run_think_pipeline
+        from cogtrix_core.api.turn_runner import _run_think_pipeline
 
         session = _make_mock_session()
         run_config = MagicMock()
@@ -150,14 +150,20 @@ class TestRunThinkPipelineCancelResearch:
         # No web tools → skips research; cancel_event set between research and deep_think
         session.cancel_event.set()  # fires at second check (post-research)
 
-        with patch("src.api.turn_runner._enqueue_agent_state", side_effect=_fake_enqueue):
-            with patch("src.orchestration.phases.was_deep_think_called", return_value=False):
+        with patch("cogtrix_core.api.turn_runner._enqueue_agent_state", side_effect=_fake_enqueue):
+            with patch(
+                "cogtrix_core.orchestration.phases.was_deep_think_called", return_value=False
+            ):
                 with patch(
-                    "src.orchestration.phases.deep_think_had_good_context", return_value=False
+                    "cogtrix_core.orchestration.phases.deep_think_had_good_context",
+                    return_value=False,
                 ):
-                    with patch("src.orchestration.phases.collect_tool_outputs", return_value=""):
+                    with patch(
+                        "cogtrix_core.orchestration.phases.collect_tool_outputs", return_value=""
+                    ):
                         with patch(
-                            "src.orchestration.phases.agent_used_web_tools", return_value=False
+                            "cogtrix_core.orchestration.phases.agent_used_web_tools",
+                            return_value=False,
                         ):
                             with pytest.raises(asyncio.CancelledError):
                                 await _run_think_pipeline(
@@ -176,7 +182,7 @@ class TestRunThinkPipelineCancelDeepThink:
     @pytest.mark.asyncio
     async def test_cancel_event_after_deep_think_raises(self):
         """After deep_think completes, if cancel_event is set, CancelledError is raised."""
-        from src.api.turn_runner import _run_think_pipeline
+        from cogtrix_core.api.turn_runner import _run_think_pipeline
 
         session = _make_mock_session()
         run_config = MagicMock()
@@ -187,17 +193,23 @@ class TestRunThinkPipelineCancelDeepThink:
             session.cancel_event.set()
             return "deep think result"
 
-        with patch("src.api.turn_runner._enqueue_agent_state", new_callable=AsyncMock):
-            with patch("src.orchestration.phases.was_deep_think_called", return_value=False):
+        with patch("cogtrix_core.api.turn_runner._enqueue_agent_state", new_callable=AsyncMock):
+            with patch(
+                "cogtrix_core.orchestration.phases.was_deep_think_called", return_value=False
+            ):
                 with patch(
-                    "src.orchestration.phases.deep_think_had_good_context", return_value=False
+                    "cogtrix_core.orchestration.phases.deep_think_had_good_context",
+                    return_value=False,
                 ):
-                    with patch("src.orchestration.phases.collect_tool_outputs", return_value=""):
+                    with patch(
+                        "cogtrix_core.orchestration.phases.collect_tool_outputs", return_value=""
+                    ):
                         with patch(
-                            "src.orchestration.phases.agent_used_web_tools", return_value=False
+                            "cogtrix_core.orchestration.phases.agent_used_web_tools",
+                            return_value=False,
                         ):
                             with patch(
-                                "src.api.turn_runner.asyncio.to_thread",
+                                "cogtrix_core.api.turn_runner.asyncio.to_thread",
                                 side_effect=_fake_to_thread,
                             ):
                                 with pytest.raises(asyncio.CancelledError):
@@ -217,7 +229,7 @@ class TestRunThinkPipelineEarlyExits:
     @pytest.mark.asyncio
     async def test_tool_intensive_task_returns_response_unchanged(self):
         """Tool-intensive classification causes early return with original text."""
-        from src.api.turn_runner import _run_think_pipeline
+        from cogtrix_core.api.turn_runner import _run_think_pipeline
 
         session = _make_mock_session()
         run_config = MagicMock()
@@ -233,8 +245,10 @@ class TestRunThinkPipelineEarlyExits:
         async def _fake_to_thread(fn, *args, **kwargs):
             return task_cat
 
-        with patch("src.api.turn_runner._enqueue_agent_state", side_effect=_fake_enqueue):
-            with patch("src.api.turn_runner.asyncio.to_thread", side_effect=_fake_to_thread):
+        with patch("cogtrix_core.api.turn_runner._enqueue_agent_state", side_effect=_fake_enqueue):
+            with patch(
+                "cogtrix_core.api.turn_runner.asyncio.to_thread", side_effect=_fake_to_thread
+            ):
                 result = await _run_think_pipeline(
                     session, "task", "original response", [], run_config
                 )
@@ -244,16 +258,19 @@ class TestRunThinkPipelineEarlyExits:
     @pytest.mark.asyncio
     async def test_deep_think_already_called_with_good_context_returns_original(self):
         """deep_think already called with good context → skip re-running."""
-        from src.api.turn_runner import _run_think_pipeline
+        from cogtrix_core.api.turn_runner import _run_think_pipeline
 
         session = _make_mock_session()
         run_config = MagicMock()
         run_config.llm = None  # skip classify
 
-        with patch("src.api.turn_runner._enqueue_agent_state", new_callable=AsyncMock):
-            with patch("src.orchestration.phases.was_deep_think_called", return_value=True):
+        with patch("cogtrix_core.api.turn_runner._enqueue_agent_state", new_callable=AsyncMock):
+            with patch(
+                "cogtrix_core.orchestration.phases.was_deep_think_called", return_value=True
+            ):
                 with patch(
-                    "src.orchestration.phases.deep_think_had_good_context", return_value=True
+                    "cogtrix_core.orchestration.phases.deep_think_had_good_context",
+                    return_value=True,
                 ):
                     result = await _run_think_pipeline(
                         session, "task", "original response", [], run_config
@@ -273,14 +290,16 @@ class TestRunDelegatePipelineCancel:
     @pytest.mark.asyncio
     async def test_cancel_at_start_raises(self):
         """Cancel event set before delegation begins → CancelledError."""
-        from src.api.turn_runner import _run_delegate_pipeline
+        from cogtrix_core.api.turn_runner import _run_delegate_pipeline
 
         session = _make_mock_session()
         session.cancel_event.set()
         run_config = MagicMock()
 
-        with patch("src.api.turn_runner._enqueue_agent_state", new_callable=AsyncMock):
-            with patch("src.orchestration.phases.was_delegation_called", return_value=False):
+        with patch("cogtrix_core.api.turn_runner._enqueue_agent_state", new_callable=AsyncMock):
+            with patch(
+                "cogtrix_core.orchestration.phases.was_delegation_called", return_value=False
+            ):
                 with pytest.raises(asyncio.CancelledError):
                     await _run_delegate_pipeline(
                         session, "task", "original response", [], run_config
@@ -289,12 +308,12 @@ class TestRunDelegatePipelineCancel:
     @pytest.mark.asyncio
     async def test_skip_when_delegation_already_called(self):
         """If delegation was already called, return response unchanged."""
-        from src.api.turn_runner import _run_delegate_pipeline
+        from cogtrix_core.api.turn_runner import _run_delegate_pipeline
 
         session = _make_mock_session()
         run_config = MagicMock()
 
-        with patch("src.orchestration.phases.was_delegation_called", return_value=True):
+        with patch("cogtrix_core.orchestration.phases.was_delegation_called", return_value=True):
             result = await _run_delegate_pipeline(
                 session, "task", "original response", [], run_config
             )
@@ -304,7 +323,7 @@ class TestRunDelegatePipelineCancel:
     @pytest.mark.asyncio
     async def test_normal_path_returns_forced_result(self):
         """Normal delegation path returns the force_delegation result."""
-        from src.api.turn_runner import _run_delegate_pipeline
+        from cogtrix_core.api.turn_runner import _run_delegate_pipeline
 
         session = _make_mock_session()
         run_config = MagicMock()
@@ -316,11 +335,16 @@ class TestRunDelegatePipelineCancel:
         async def _fake_to_thread(fn, *args, **kwargs):
             return "delegated result"
 
-        with patch("src.api.turn_runner._enqueue_agent_state", side_effect=_fake_enqueue):
-            with patch("src.orchestration.phases.was_delegation_called", return_value=False):
-                with patch("src.orchestration.phases.collect_tool_outputs", return_value=""):
+        with patch("cogtrix_core.api.turn_runner._enqueue_agent_state", side_effect=_fake_enqueue):
+            with patch(
+                "cogtrix_core.orchestration.phases.was_delegation_called", return_value=False
+            ):
+                with patch(
+                    "cogtrix_core.orchestration.phases.collect_tool_outputs", return_value=""
+                ):
                     with patch(
-                        "src.api.turn_runner.asyncio.to_thread", side_effect=_fake_to_thread
+                        "cogtrix_core.api.turn_runner.asyncio.to_thread",
+                        side_effect=_fake_to_thread,
                     ):
                         result = await _run_delegate_pipeline(
                             session, "task", "original response", [], run_config
@@ -331,7 +355,7 @@ class TestRunDelegatePipelineCancel:
     @pytest.mark.asyncio
     async def test_force_delegation_exception_returns_original(self):
         """Exception in force_delegation returns original response text."""
-        from src.api.turn_runner import _run_delegate_pipeline
+        from cogtrix_core.api.turn_runner import _run_delegate_pipeline
 
         session = _make_mock_session()
         run_config = MagicMock()
@@ -340,11 +364,16 @@ class TestRunDelegatePipelineCancel:
         async def _fake_to_thread(fn, *args, **kwargs):
             raise RuntimeError("delegation failed")
 
-        with patch("src.api.turn_runner._enqueue_agent_state", new_callable=AsyncMock):
-            with patch("src.orchestration.phases.was_delegation_called", return_value=False):
-                with patch("src.orchestration.phases.collect_tool_outputs", return_value=""):
+        with patch("cogtrix_core.api.turn_runner._enqueue_agent_state", new_callable=AsyncMock):
+            with patch(
+                "cogtrix_core.orchestration.phases.was_delegation_called", return_value=False
+            ):
+                with patch(
+                    "cogtrix_core.orchestration.phases.collect_tool_outputs", return_value=""
+                ):
                     with patch(
-                        "src.api.turn_runner.asyncio.to_thread", side_effect=_fake_to_thread
+                        "cogtrix_core.api.turn_runner.asyncio.to_thread",
+                        side_effect=_fake_to_thread,
                     ):
                         result = await _run_delegate_pipeline(
                             session, "task", "original response", [], run_config
@@ -375,7 +404,7 @@ class TestPipelineCancelResetsAgentState:
     @pytest.mark.asyncio
     async def test_think_pipeline_cancel_resets_state(self):
         """Regression: think pipeline cancel must reset agent_state to 'idle'."""
-        from src.api.turn_runner import _run_message_turn_inner
+        from cogtrix_core.api.turn_runner import _run_message_turn_inner
 
         session = _make_mock_session()
         session.agent_state = "idle"
@@ -385,18 +414,23 @@ class TestPipelineCancelResetsAgentState:
         mock_ws_cb.output_tokens = 0
         mock_ws_cb.tool_call_count = 0
 
-        with patch("src.orchestration.runner.run_agent", side_effect=self._make_run_agent_mock()):
+        with patch(
+            "cogtrix_core.orchestration.runner.run_agent", side_effect=self._make_run_agent_mock()
+        ):
             with patch(
-                "src.api.callbacks.WebSocketCallbackHandler",
+                "cogtrix_core.api.callbacks.WebSocketCallbackHandler",
                 return_value=mock_ws_cb,
             ):
-                with patch("src.api.confirmation.ApiConfirmationUI", return_value=MagicMock()):
+                with patch(
+                    "cogtrix_core.api.confirmation.ApiConfirmationUI", return_value=MagicMock()
+                ):
 
                     async def _cancel_think(*args, **kwargs):
                         raise asyncio.CancelledError("think pipeline cancel")
 
                     with patch(
-                        "src.api.turn_runner._run_think_pipeline", side_effect=_cancel_think
+                        "cogtrix_core.api.turn_runner._run_think_pipeline",
+                        side_effect=_cancel_think,
                     ):
                         with pytest.raises(asyncio.CancelledError):
                             await _run_message_turn_inner(session, "hello", "think", None, None)
@@ -408,7 +442,7 @@ class TestPipelineCancelResetsAgentState:
     @pytest.mark.asyncio
     async def test_delegate_pipeline_cancel_resets_state(self):
         """Regression: delegate pipeline cancel must reset agent_state to 'idle'."""
-        from src.api.turn_runner import _run_message_turn_inner
+        from cogtrix_core.api.turn_runner import _run_message_turn_inner
 
         session = _make_mock_session()
         session.agent_state = "idle"
@@ -418,18 +452,22 @@ class TestPipelineCancelResetsAgentState:
         mock_ws_cb.output_tokens = 0
         mock_ws_cb.tool_call_count = 0
 
-        with patch("src.orchestration.runner.run_agent", side_effect=self._make_run_agent_mock()):
+        with patch(
+            "cogtrix_core.orchestration.runner.run_agent", side_effect=self._make_run_agent_mock()
+        ):
             with patch(
-                "src.api.callbacks.WebSocketCallbackHandler",
+                "cogtrix_core.api.callbacks.WebSocketCallbackHandler",
                 return_value=mock_ws_cb,
             ):
-                with patch("src.api.confirmation.ApiConfirmationUI", return_value=MagicMock()):
+                with patch(
+                    "cogtrix_core.api.confirmation.ApiConfirmationUI", return_value=MagicMock()
+                ):
 
                     async def _cancel_delegate(*args, **kwargs):
                         raise asyncio.CancelledError("delegate pipeline cancel")
 
                     with patch(
-                        "src.api.turn_runner._run_delegate_pipeline",
+                        "cogtrix_core.api.turn_runner._run_delegate_pipeline",
                         side_effect=_cancel_delegate,
                     ):
                         with pytest.raises(asyncio.CancelledError):
@@ -530,7 +568,7 @@ class TestApiSessionRegistryDedup:
     @pytest.mark.asyncio
     async def test_cached_session_returned_without_db_lookup(self):
         """If session already in cache, get_or_warm returns it without DB access."""
-        from src.api.session_bridge import ApiSession, ApiSessionRegistry
+        from cogtrix_core.api.session_bridge import ApiSession, ApiSessionRegistry
 
         app_state = MagicMock()
         registry = ApiSessionRegistry(app_state)
@@ -549,7 +587,7 @@ class TestApiSessionRegistryDedup:
     @pytest.mark.asyncio
     async def test_nonexistent_session_returns_none(self):
         """get_or_warm returns None if session not in DB."""
-        from src.api.session_bridge import ApiSessionRegistry
+        from cogtrix_core.api.session_bridge import ApiSessionRegistry
 
         app_state = MagicMock()
         registry = ApiSessionRegistry(app_state)
@@ -557,7 +595,7 @@ class TestApiSessionRegistryDedup:
         db = MagicMock()
 
         # SessionRepository is imported lazily inside get_or_warm — patch at source.
-        with patch("src.api.db.repositories.sessions.SessionRepository") as MockRepoClass:
+        with patch("cogtrix_core.api.db.repositories.sessions.SessionRepository") as MockRepoClass:
             mock_repo_instance = MagicMock()
             mock_repo_instance.get_by_id = AsyncMock(return_value=None)
             MockRepoClass.return_value = mock_repo_instance
@@ -569,7 +607,7 @@ class TestApiSessionRegistryDedup:
     @pytest.mark.asyncio
     async def test_concurrent_warmers_only_call_warm_session_once(self):
         """Two concurrent get_or_warm calls for the same session warm exactly once."""
-        from src.api.session_bridge import ApiSession, ApiSessionRegistry
+        from cogtrix_core.api.session_bridge import ApiSession, ApiSessionRegistry
 
         app_state = MagicMock()
         registry = ApiSessionRegistry(app_state)
@@ -593,8 +631,10 @@ class TestApiSessionRegistryDedup:
 
         # Patch warm_session (module-level in session_bridge) and SessionRepository
         # (imported lazily inside get_or_warm — patch at source module).
-        with patch("src.api.session_bridge.warm_session", side_effect=_mock_warm_session):
-            with patch("src.api.db.repositories.sessions.SessionRepository") as MockRepoClass:
+        with patch("cogtrix_core.api.session_bridge.warm_session", side_effect=_mock_warm_session):
+            with patch(
+                "cogtrix_core.api.db.repositories.sessions.SessionRepository"
+            ) as MockRepoClass:
                 mock_repo_instance = MagicMock()
                 mock_repo_instance.get_by_id = AsyncMock(return_value=original_record)
                 MockRepoClass.return_value = mock_repo_instance
@@ -617,7 +657,7 @@ class TestApiSessionRegistryDedup:
     @pytest.mark.asyncio
     async def test_evict_idle_skips_active_turn(self):
         """Sessions with an in-progress agent turn are skipped during eviction."""
-        from src.api.session_bridge import ApiSession, ApiSessionRegistry
+        from cogtrix_core.api.session_bridge import ApiSession, ApiSessionRegistry
 
         app_state = MagicMock()
         registry = ApiSessionRegistry(app_state)
@@ -641,7 +681,7 @@ class TestApiSessionRegistryDedup:
     @pytest.mark.asyncio
     async def test_evict_idle_removes_stale_session(self):
         """Sessions older than max_age_seconds with no active turn are evicted."""
-        from src.api.session_bridge import ApiSession, ApiSessionRegistry
+        from cogtrix_core.api.session_bridge import ApiSession, ApiSessionRegistry
 
         app_state = MagicMock()
         registry = ApiSessionRegistry(app_state)
@@ -653,7 +693,7 @@ class TestApiSessionRegistryDedup:
 
         await registry.put(stale_session)
 
-        with patch("src.api.session_bridge._save_memory", new_callable=AsyncMock):
+        with patch("cogtrix_core.api.session_bridge._save_memory", new_callable=AsyncMock):
             evicted = await registry.evict_idle(max_age_seconds=0)
 
         assert evicted == 1
@@ -663,7 +703,7 @@ class TestApiSessionRegistryDedup:
     @pytest.mark.asyncio
     async def test_save_all_persists_all_sessions(self):
         """save_all calls _save_memory for every session in the registry."""
-        from src.api.session_bridge import ApiSession, ApiSessionRegistry
+        from cogtrix_core.api.session_bridge import ApiSession, ApiSessionRegistry
 
         app_state = MagicMock()
         registry = ApiSessionRegistry(app_state)
@@ -678,7 +718,7 @@ class TestApiSessionRegistryDedup:
         async def _track_save(sess):
             saved_ids.append(sess.id)
 
-        with patch("src.api.session_bridge._save_memory", side_effect=_track_save):
+        with patch("cogtrix_core.api.session_bridge._save_memory", side_effect=_track_save):
             await registry.save_all()
 
         assert sorted(saved_ids) == ["sess-0", "sess-1", "sess-2"]
@@ -695,7 +735,7 @@ class TestApiSessionDataclass:
     @pytest.mark.asyncio
     async def test_ws_queue_bounded_by_default(self):
         """ws_queue has maxsize=10_000 to prevent unbounded growth (BUG-FORGE-004)."""
-        from src.api.session_bridge import ApiSession
+        from cogtrix_core.api.session_bridge import ApiSession
 
         sess = ApiSession(id="s", user_id="u", name="n")
         assert sess.ws_queue.maxsize == 10_000
@@ -703,7 +743,7 @@ class TestApiSessionDataclass:
     @pytest.mark.asyncio
     async def test_cancel_event_created_automatically(self):
         """cancel_event is an asyncio.Event created in __post_init__."""
-        from src.api.session_bridge import ApiSession
+        from cogtrix_core.api.session_bridge import ApiSession
 
         sess = ApiSession(id="s", user_id="u", name="n")
         assert sess.cancel_event is not None
@@ -712,21 +752,21 @@ class TestApiSessionDataclass:
     @pytest.mark.asyncio
     async def test_turn_lock_created_automatically(self):
         """turn_lock is an asyncio.Lock created in __post_init__."""
-        from src.api.session_bridge import ApiSession
+        from cogtrix_core.api.session_bridge import ApiSession
 
         sess = ApiSession(id="s", user_id="u", name="n")
         assert sess.turn_lock is not None
 
     @pytest.mark.asyncio
     async def test_agent_state_defaults_to_idle(self):
-        from src.api.session_bridge import ApiSession
+        from cogtrix_core.api.session_bridge import ApiSession
 
         sess = ApiSession(id="s", user_id="u", name="n")
         assert sess.agent_state == "idle"
 
     @pytest.mark.asyncio
     async def test_token_counts_defaults(self):
-        from src.api.session_bridge import ApiSession
+        from cogtrix_core.api.session_bridge import ApiSession
 
         sess = ApiSession(id="s", user_id="u", name="n")
         assert sess.token_counts["input_tokens"] == 0
@@ -735,7 +775,7 @@ class TestApiSessionDataclass:
 
     @pytest.mark.asyncio
     async def test_active_confirmation_ui_defaults_to_none(self):
-        from src.api.session_bridge import ApiSession
+        from cogtrix_core.api.session_bridge import ApiSession
 
         sess = ApiSession(id="s", user_id="u", name="n")
         assert sess.active_confirmation_ui is None
@@ -750,13 +790,13 @@ class TestBuildHistory:
     """_build_history handles None, exceptions, and empty contexts."""
 
     def test_none_memory_manager_returns_empty_list(self):
-        from src.api.turn_runner import _build_history
+        from cogtrix_core.api.turn_runner import _build_history
 
         assert _build_history(None) == []
         assert _build_history(None, user_input="hello") == []
 
     def test_exception_returns_empty_list(self):
-        from src.api.turn_runner import _build_history
+        from cogtrix_core.api.turn_runner import _build_history
 
         mm = MagicMock()
         mm.prepare_context.side_effect = RuntimeError("memory corrupted")
@@ -765,7 +805,7 @@ class TestBuildHistory:
         assert result == []
 
     def test_returns_messages_from_context(self):
-        from src.api.turn_runner import _build_history
+        from cogtrix_core.api.turn_runner import _build_history
 
         mm = MagicMock()
         mock_ctx = MagicMock()
@@ -776,7 +816,7 @@ class TestBuildHistory:
         assert result == ["msg1", "msg2", "msg3"]
 
     def test_passes_user_input_to_prepare_context(self):
-        from src.api.turn_runner import _build_history
+        from cogtrix_core.api.turn_runner import _build_history
 
         mm = MagicMock()
         mock_ctx = MagicMock()
@@ -787,7 +827,7 @@ class TestBuildHistory:
         mm.prepare_context.assert_called_once_with("find me something")
 
     def test_empty_messages_is_valid(self):
-        from src.api.turn_runner import _build_history
+        from cogtrix_core.api.turn_runner import _build_history
 
         mm = MagicMock()
         mock_ctx = MagicMock()
@@ -798,7 +838,7 @@ class TestBuildHistory:
 
     def test_returns_list_copy_not_reference(self):
         """Returns a new list, not a reference to ctx.messages."""
-        from src.api.turn_runner import _build_history
+        from cogtrix_core.api.turn_runner import _build_history
 
         mm = MagicMock()
         original = ["msg1", "msg2"]
@@ -820,7 +860,7 @@ class TestExtractTokenCounts:
     """_extract_token_counts handles missing attributes gracefully."""
 
     def test_normal_callback_extracted_correctly(self):
-        from src.api.turn_runner import _extract_token_counts
+        from cogtrix_core.api.turn_runner import _extract_token_counts
 
         cb = MagicMock()
         cb.input_tokens = 100
@@ -833,7 +873,7 @@ class TestExtractTokenCounts:
         assert result["tool_call_count"] == 3
 
     def test_missing_attrs_default_to_zero(self):
-        from src.api.turn_runner import _extract_token_counts
+        from cogtrix_core.api.turn_runner import _extract_token_counts
 
         cb = object()  # no attributes
 
@@ -843,7 +883,7 @@ class TestExtractTokenCounts:
         assert result["tool_call_count"] == 0
 
     def test_zero_values_allowed(self):
-        from src.api.turn_runner import _extract_token_counts
+        from cogtrix_core.api.turn_runner import _extract_token_counts
 
         cb = MagicMock()
         cb.input_tokens = 0
@@ -986,8 +1026,8 @@ class TestWizardStep0ProviderUnreachable:
     def _make_admin_client(self):
         from fastapi.testclient import TestClient
 
-        from src.api.app import create_app
-        from src.api.auth import create_access_token
+        from cogtrix_core.api.app import create_app
+        from cogtrix_core.api.auth import create_access_token
 
         app = create_app()
         admin_token = create_access_token(user_id=str(uuid.uuid4()), role="admin")
@@ -1012,7 +1052,7 @@ class TestWizardStep0ProviderUnreachable:
 
             # Advance step 0 with a failing provider
             with patch(
-                "src.api.routes.config._wizard_test_connection",
+                "cogtrix_core.api.routes.config._wizard_test_connection",
                 side_effect=ConnectionError("Connection refused"),
             ):
                 step_resp = client.post(
@@ -1049,7 +1089,7 @@ class TestWizardStep0ProviderUnreachable:
             wizard_id = start_resp.json()["data"]["wizard_id"]
 
             with patch(
-                "src.api.routes.config._wizard_test_connection",
+                "cogtrix_core.api.routes.config._wizard_test_connection",
                 side_effect=TimeoutError("connection timed out"),
             ):
                 step_resp = client.post(
@@ -1085,8 +1125,8 @@ class TestWizardStep0ProviderUnreachable:
         """POST /config/wizard requires admin role."""
         from fastapi.testclient import TestClient
 
-        from src.api.app import create_app
-        from src.api.auth import create_access_token
+        from cogtrix_core.api.app import create_app
+        from cogtrix_core.api.auth import create_access_token
 
         app = create_app()
         user_token = create_access_token(user_id=str(uuid.uuid4()), role="user")
@@ -1105,7 +1145,7 @@ class TestWizardStep0ProviderUnreachable:
         client, admin_token = self._make_admin_client()
 
         with client:
-            with patch("src.api.routes.config._wizard_detect_env", return_value={}):
+            with patch("cogtrix_core.api.routes.config._wizard_detect_env", return_value={}):
                 resp = client.post(
                     "/api/v1/config/wizard",
                     json={"edit_existing": False},
@@ -1132,14 +1172,14 @@ class TestWizardStepOutStep0:
     def test_step_0_response_has_requires_acceptance_false(self):
         from fastapi.testclient import TestClient
 
-        from src.api.app import create_app
-        from src.api.auth import create_access_token
+        from cogtrix_core.api.app import create_app
+        from cogtrix_core.api.auth import create_access_token
 
         app = create_app()
         admin_token = create_access_token(user_id=str(uuid.uuid4()), role="admin")
 
         with TestClient(app, raise_server_exceptions=False) as client:
-            with patch("src.api.routes.config._wizard_detect_env", return_value={}):
+            with patch("cogtrix_core.api.routes.config._wizard_detect_env", return_value={}):
                 resp = client.post(
                     "/api/v1/config/wizard",
                     json={"edit_existing": False},
@@ -1165,8 +1205,8 @@ class TestWizardStep1ProviderError:
     def _make_admin_client(self):
         from fastapi.testclient import TestClient
 
-        from src.api.app import create_app
-        from src.api.auth import create_access_token
+        from cogtrix_core.api.app import create_app
+        from cogtrix_core.api.auth import create_access_token
 
         app = create_app()
         admin_token = create_access_token(user_id=str(uuid.uuid4()), role="admin")
@@ -1188,14 +1228,14 @@ class TestWizardStep1ProviderError:
             wizard_id = start_resp.json()["data"]["wizard_id"]
 
             # Patch the wizard session directly to be at step 1 with a fake LLM
-            from src.api.routes.config import _wizard_sessions
+            from cogtrix_core.api.routes.config import _wizard_sessions
 
             _wizard_sessions[wizard_id]["step"] = 1
             _wizard_sessions[wizard_id]["messages"] = []
 
             # The LLM invocation at step 1 raises a provider error
             with patch(
-                "src.api.routes.config._wizard_invoke_llm",
+                "cogtrix_core.api.routes.config._wizard_invoke_llm",
                 side_effect=RuntimeError(
                     "Error code: 400 - {'error': {'message': 'No connected db.', 'type': 'no_db_connection'}}"
                 ),
@@ -1224,7 +1264,7 @@ class TestEnqueueAgentState:
 
     @pytest.mark.asyncio
     async def test_sets_session_agent_state(self):
-        from src.api.turn_runner import _enqueue_agent_state
+        from cogtrix_core.api.turn_runner import _enqueue_agent_state
 
         session = _make_mock_session()
         await _enqueue_agent_state(session, "thinking")
@@ -1232,7 +1272,7 @@ class TestEnqueueAgentState:
 
     @pytest.mark.asyncio
     async def test_enqueues_agent_state_message(self):
-        from src.api.turn_runner import _enqueue_agent_state
+        from cogtrix_core.api.turn_runner import _enqueue_agent_state
 
         session = _make_mock_session()
         await _enqueue_agent_state(session, "deep_thinking")
@@ -1244,7 +1284,7 @@ class TestEnqueueAgentState:
     @pytest.mark.asyncio
     async def test_full_queue_does_not_block(self):
         """When queue is full, _enqueue_agent_state drops the message silently."""
-        from src.api.turn_runner import _enqueue_agent_state
+        from cogtrix_core.api.turn_runner import _enqueue_agent_state
 
         session = _make_mock_session()
         # Fill the queue to capacity
@@ -1261,7 +1301,7 @@ class TestEnqueueAgentState:
     @pytest.mark.asyncio
     async def test_valid_states_are_enqueued(self):
         """All standard agent states are handled without error."""
-        from src.api.turn_runner import _enqueue_agent_state
+        from cogtrix_core.api.turn_runner import _enqueue_agent_state
 
         states = ["idle", "thinking", "analyzing", "researching", "deep_thinking", "delegating"]
         for state in states:
@@ -1280,7 +1320,7 @@ class TestSaveMemory:
 
     @pytest.mark.asyncio
     async def test_none_memory_manager_is_safe(self):
-        from src.api.session_bridge import ApiSession, _save_memory
+        from cogtrix_core.api.session_bridge import ApiSession, _save_memory
 
         sess = ApiSession(id="s", user_id="u", name="n")
         sess.memory_manager = None
@@ -1289,7 +1329,7 @@ class TestSaveMemory:
 
     @pytest.mark.asyncio
     async def test_save_called_on_memory_manager(self):
-        from src.api.session_bridge import ApiSession, _save_memory
+        from cogtrix_core.api.session_bridge import ApiSession, _save_memory
 
         sess = ApiSession(id="s", user_id="u", name="n")
         mm = MagicMock()
@@ -1302,7 +1342,7 @@ class TestSaveMemory:
     @pytest.mark.asyncio
     async def test_exception_in_save_is_caught(self):
         """_save_memory must not propagate exceptions from mm.save()."""
-        from src.api.session_bridge import ApiSession, _save_memory
+        from cogtrix_core.api.session_bridge import ApiSession, _save_memory
 
         sess = ApiSession(id="s", user_id="u", name="n")
         mm = MagicMock()

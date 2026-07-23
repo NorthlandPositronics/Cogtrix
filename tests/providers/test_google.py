@@ -19,10 +19,10 @@ class TestCreateChatModel:
 
     def test_default_model_from_chat_models_registry(self) -> None:
         """Default model is pulled from CHAT_MODELS (gemini-2.5-flash)."""
-        from src.providers.google import create_chat_model
+        from cogtrix_core.providers.google import create_chat_model
 
         mock_cls = MagicMock()
-        with patch("src.providers.google.ChatGoogleGenerativeAI", mock_cls):
+        with patch("cogtrix_core.providers.google.ChatGoogleGenerativeAI", mock_cls):
             create_chat_model()
 
         mock_cls.assert_called_once()
@@ -30,60 +30,60 @@ class TestCreateChatModel:
 
     def test_custom_model_name_forwarded(self) -> None:
         """Custom model name is forwarded to ChatGoogleGenerativeAI."""
-        from src.providers.google import create_chat_model
+        from cogtrix_core.providers.google import create_chat_model
 
         mock_cls = MagicMock()
-        with patch("src.providers.google.ChatGoogleGenerativeAI", mock_cls):
+        with patch("cogtrix_core.providers.google.ChatGoogleGenerativeAI", mock_cls):
             create_chat_model(model="gemini-2.0-flash")
 
         assert mock_cls.call_args.kwargs["model"] == "gemini-2.0-flash"
 
     def test_api_key_forwarded_as_google_api_key(self) -> None:
         """api_key kwarg is forwarded as 'google_api_key' to ChatGoogleGenerativeAI."""
-        from src.providers.google import create_chat_model
+        from cogtrix_core.providers.google import create_chat_model
 
         mock_cls = MagicMock()
-        with patch("src.providers.google.ChatGoogleGenerativeAI", mock_cls):
+        with patch("cogtrix_core.providers.google.ChatGoogleGenerativeAI", mock_cls):
             create_chat_model(api_key="AIza...")
 
         assert mock_cls.call_args.kwargs["google_api_key"] == "AIza..."
 
     def test_api_key_omitted_when_none(self) -> None:
         """google_api_key is not passed when None — SDK falls back to env var."""
-        from src.providers.google import create_chat_model
+        from cogtrix_core.providers.google import create_chat_model
 
         mock_cls = MagicMock()
-        with patch("src.providers.google.ChatGoogleGenerativeAI", mock_cls):
+        with patch("cogtrix_core.providers.google.ChatGoogleGenerativeAI", mock_cls):
             create_chat_model(api_key=None)
 
         assert "google_api_key" not in mock_cls.call_args.kwargs
 
     def test_temperature_default_is_zero(self) -> None:
         """Default temperature is 0."""
-        from src.providers.google import create_chat_model
+        from cogtrix_core.providers.google import create_chat_model
 
         mock_cls = MagicMock()
-        with patch("src.providers.google.ChatGoogleGenerativeAI", mock_cls):
+        with patch("cogtrix_core.providers.google.ChatGoogleGenerativeAI", mock_cls):
             create_chat_model()
 
         assert mock_cls.call_args.kwargs["temperature"] == 0
 
     def test_temperature_forwarded(self) -> None:
         """Custom temperature is forwarded to ChatGoogleGenerativeAI."""
-        from src.providers.google import create_chat_model
+        from cogtrix_core.providers.google import create_chat_model
 
         mock_cls = MagicMock()
-        with patch("src.providers.google.ChatGoogleGenerativeAI", mock_cls):
+        with patch("cogtrix_core.providers.google.ChatGoogleGenerativeAI", mock_cls):
             create_chat_model(temperature=0.7)
 
         assert mock_cls.call_args.kwargs["temperature"] == 0.7
 
     def test_extra_kwargs_forwarded(self) -> None:
         """Extra kwargs are forwarded to ChatGoogleGenerativeAI."""
-        from src.providers.google import create_chat_model
+        from cogtrix_core.providers.google import create_chat_model
 
         mock_cls = MagicMock()
-        with patch("src.providers.google.ChatGoogleGenerativeAI", mock_cls):
+        with patch("cogtrix_core.providers.google.ChatGoogleGenerativeAI", mock_cls):
             create_chat_model(top_p=0.9, max_output_tokens=4096)
 
         kwargs = mock_cls.call_args.kwargs
@@ -92,10 +92,10 @@ class TestCreateChatModel:
 
     def test_all_kwargs_combined(self) -> None:
         """All parameters are correctly combined and forwarded."""
-        from src.providers.google import create_chat_model
+        from cogtrix_core.providers.google import create_chat_model
 
         mock_cls = MagicMock()
-        with patch("src.providers.google.ChatGoogleGenerativeAI", mock_cls):
+        with patch("cogtrix_core.providers.google.ChatGoogleGenerativeAI", mock_cls):
             create_chat_model(
                 model="gemini-1.5-pro",
                 api_key="AIza...",
@@ -113,17 +113,17 @@ class TestCreateChatModel:
 
     def test_max_retries_default_is_three(self) -> None:
         """max_retries defaults to 3 when not overridden."""
-        from src.providers.google import create_chat_model
+        from cogtrix_core.providers.google import create_chat_model
 
         mock_cls = MagicMock()
-        with patch("src.providers.google.ChatGoogleGenerativeAI", mock_cls):
+        with patch("cogtrix_core.providers.google.ChatGoogleGenerativeAI", mock_cls):
             create_chat_model()
 
         assert mock_cls.call_args.kwargs["max_retries"] == 3
 
     def test_import_error_raised_when_library_not_installed(self) -> None:
         """ImportError is raised when langchain-google-genai is not installed."""
-        from src.providers import google as google_mod
+        from cogtrix_core.providers import google as google_mod
 
         original = google_mod.CHAT_AVAILABLE
         try:
@@ -135,7 +135,7 @@ class TestCreateChatModel:
 
     def test_base_url_rejected_with_value_error(self) -> None:
         """Google provider does not support custom base_url."""
-        from src.providers.google import create_chat_model
+        from cogtrix_core.providers.google import create_chat_model
 
         with pytest.raises(ValueError, match="does not support custom base_url"):
             create_chat_model(base_url="http://proxy.example.com:8080")
@@ -146,10 +146,10 @@ class TestCreateEmbeddings:
 
     def test_default_model_from_embedding_models_registry(self) -> None:
         """Default embedding model is pulled from EMBEDDING_MODELS (text-embedding-004)."""
-        from src.providers.google import create_embeddings
+        from cogtrix_core.providers.google import create_embeddings
 
         mock_cls = MagicMock()
-        with patch("src.providers.google.GoogleGenerativeAIEmbeddings", mock_cls):
+        with patch("cogtrix_core.providers.google.GoogleGenerativeAIEmbeddings", mock_cls):
             result = create_embeddings()
 
         mock_cls.assert_called_once()
@@ -159,64 +159,64 @@ class TestCreateEmbeddings:
 
     def test_custom_model_without_models_prefix_gets_prefix_added(self) -> None:
         """Model names without 'models/' prefix are prefixed with 'models/'."""
-        from src.providers.google import create_embeddings
+        from cogtrix_core.providers.google import create_embeddings
 
         mock_cls = MagicMock()
-        with patch("src.providers.google.GoogleGenerativeAIEmbeddings", mock_cls):
+        with patch("cogtrix_core.providers.google.GoogleGenerativeAIEmbeddings", mock_cls):
             create_embeddings(model="text-embedding-005")
 
         assert mock_cls.call_args.kwargs["model"] == "models/text-embedding-005"
 
     def test_custom_model_with_models_prefix_passthrough(self) -> None:
         """Model names already prefixed with 'models/' are passed through unchanged."""
-        from src.providers.google import create_embeddings
+        from cogtrix_core.providers.google import create_embeddings
 
         mock_cls = MagicMock()
-        with patch("src.providers.google.GoogleGenerativeAIEmbeddings", mock_cls):
+        with patch("cogtrix_core.providers.google.GoogleGenerativeAIEmbeddings", mock_cls):
             create_embeddings(model="models/text-embedding-004")
 
         assert mock_cls.call_args.kwargs["model"] == "models/text-embedding-004"
 
     def test_api_key_forwarded_as_google_api_key(self) -> None:
         """api_key kwarg is forwarded as 'google_api_key' to GoogleGenerativeAIEmbeddings."""
-        from src.providers.google import create_embeddings
+        from cogtrix_core.providers.google import create_embeddings
 
         mock_cls = MagicMock()
-        with patch("src.providers.google.GoogleGenerativeAIEmbeddings", mock_cls):
+        with patch("cogtrix_core.providers.google.GoogleGenerativeAIEmbeddings", mock_cls):
             create_embeddings(api_key="AIza...")
 
         assert mock_cls.call_args.kwargs["google_api_key"] == "AIza..."
 
     def test_api_key_omitted_when_none(self) -> None:
         """google_api_key is not passed when None — SDK falls back to env var."""
-        from src.providers.google import create_embeddings
+        from cogtrix_core.providers.google import create_embeddings
 
         mock_cls = MagicMock()
-        with patch("src.providers.google.GoogleGenerativeAIEmbeddings", mock_cls):
+        with patch("cogtrix_core.providers.google.GoogleGenerativeAIEmbeddings", mock_cls):
             create_embeddings(api_key=None)
 
         assert "google_api_key" not in mock_cls.call_args.kwargs
 
     def test_extra_kwargs_forwarded(self) -> None:
         """Extra kwargs are forwarded to GoogleGenerativeAIEmbeddings."""
-        from src.providers.google import create_embeddings
+        from cogtrix_core.providers.google import create_embeddings
 
         mock_cls = MagicMock()
-        with patch("src.providers.google.GoogleGenerativeAIEmbeddings", mock_cls):
+        with patch("cogtrix_core.providers.google.GoogleGenerativeAIEmbeddings", mock_cls):
             create_embeddings(batch_size=256)
 
         assert mock_cls.call_args.kwargs["batch_size"] == 256
 
     def test_base_url_rejected_with_value_error(self) -> None:
         """Google embeddings does not support custom base_url."""
-        from src.providers.google import create_embeddings
+        from cogtrix_core.providers.google import create_embeddings
 
         with pytest.raises(ValueError, match="does not support custom base_url"):
             create_embeddings(base_url="http://proxy.example.com:8080")
 
     def test_import_error_raised_when_library_not_installed(self) -> None:
         """ImportError is raised when langchain-google-genai is not installed."""
-        from src.providers import google as google_mod
+        from cogtrix_core.providers import google as google_mod
 
         original = google_mod.EMBEDDINGS_AVAILABLE
         try:

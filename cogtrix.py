@@ -16,25 +16,25 @@ import warnings
 from pathlib import Path
 from typing import Any
 
-import src.cli.commands as commands
-import src.ui.confirmation as confirmation
-from src._version import __copyright__, __version__  # noqa: F401
-from src.agent.core import (
+import cogtrix_core.cli.commands as commands
+import cogtrix_core.ui.confirmation as confirmation
+from cogtrix_core._version import __copyright__, __version__  # noqa: F401
+from cogtrix_core.agent.core import (
     build_system_prompt,
     format_milestone_instructions,
 )
-from src.agent.safety import AgentExecutionError, UserCancelledRun
-from src.analysis.session_metrics import write_session_metrics
-from src.cli.args import color_enabled, parse_arguments
-from src.cli.banner import print_startup
+from cogtrix_core.agent.safety import AgentExecutionError, UserCancelledRun
+from cogtrix_core.analysis.session_metrics import write_session_metrics
+from cogtrix_core.cli.args import color_enabled, parse_arguments
+from cogtrix_core.cli.banner import print_startup
 
-# Slash command system - extracted to src/cli/commands.py
-from src.cli.commands import (  # noqa: F401
+# Slash command system - extracted to cogtrix_core/cli/commands.py
+from cogtrix_core.cli.commands import (  # noqa: F401
     SlashCommand,
     SlashCommandRegistry,
     configure,
 )
-from src.cli.input import (
+from cogtrix_core.cli.input import (
     load_input_history,
     prefill_next_input,
     read_multiline,
@@ -43,8 +43,8 @@ from src.cli.input import (
     set_slash_commands,
     setup_readline_completion,
 )
-from src.config import Config, ConfigError, _resolve_model, load_config
-from src.logging_config import (
+from cogtrix_core.config import Config, ConfigError, _resolve_model, load_config
+from cogtrix_core.logging_config import (
     create_observability_handler,
     get_logger,
     log_agent_response,
@@ -54,21 +54,21 @@ from src.logging_config import (
     new_request_id,
     setup_logging,
 )
-from src.memory import JsonFileMemoryStore, MemoryFactory
-from src.memory.context import MemoryContext
-from src.memory.mode_selector import classify_memory_mode, should_switch_mode
-from src.orchestration.compression import (
+from cogtrix_core.memory import JsonFileMemoryStore, MemoryFactory
+from cogtrix_core.memory.context import MemoryContext
+from cogtrix_core.memory.mode_selector import classify_memory_mode, should_switch_mode
+from cogtrix_core.orchestration.compression import (
     apply_message_compression,
     compress_tool_message,
     create_compression_llm,
     truncate_tool_output,
 )
-from src.orchestration.graph import (  # noqa: F401
+from cogtrix_core.orchestration.graph import (  # noqa: F401
     DEFAULT_RECURSION_LIMIT,
     EMPTY_RESPONSE_MSG,
     build_agent_graph,
 )
-from src.orchestration.intent import (  # noqa: F401
+from cogtrix_core.orchestration.intent import (  # noqa: F401
     _COMPLEX_QUERY_MARKERS,
     _SIMPLE_QUERY_KEYWORDS,
     ACTION_TARGETS,
@@ -85,7 +85,7 @@ from src.orchestration.intent import (  # noqa: F401
     user_wants_deep_think,
     user_wants_delegation,
 )
-from src.orchestration.phases import (  # noqa: F401
+from cogtrix_core.orchestration.phases import (  # noqa: F401
     ACTION_TOOL_NAMES,
     MIN_GOOD_CONTEXT_LEN,
     RESEARCH_CAP_RATIO,
@@ -111,12 +111,12 @@ from src.orchestration.phases import (  # noqa: F401
     was_deep_think_called,
     was_delegation_called,
 )
-from src.orchestration.reflection_delegate import (
+from cogtrix_core.orchestration.reflection_delegate import (
     ACCOUNTABILITY_PROMPT,
     PRE_ACTION_CONFIRMATION_PROMPT,
 )
-from src.orchestration.run_config import AgentRunConfig
-from src.orchestration.runner import (  # noqa: F401
+from cogtrix_core.orchestration.run_config import AgentRunConfig
+from cogtrix_core.orchestration.runner import (  # noqa: F401
     ToolCallLogger,
     build_tool_results_response,
     extract_ai_content,
@@ -127,18 +127,18 @@ from src.orchestration.runner import (  # noqa: F401
     log_tool_calls_from_result,
     run_agent,
 )
-from src.orchestration.session_orchestrator import SessionOrchestrator
-from src.orchestration.session_state import SessionState
-from src.prompt.optimizer import (
+from cogtrix_core.orchestration.session_orchestrator import SessionOrchestrator
+from cogtrix_core.orchestration.session_state import SessionState
+from cogtrix_core.prompt.optimizer import (
     PromptPlan,
     optimize_prompt,
 )
-from src.prompt.optimizer import (
+from cogtrix_core.prompt.optimizer import (
     set_progress_callback as set_optimizer_callback,
 )
-from src.providers import create_chat_model_from_configs
-from src.registry import ToolRegistry
-from src.tools.configure import (
+from cogtrix_core.providers import create_chat_model_from_configs
+from cogtrix_core.registry import ToolRegistry
+from cogtrix_core.tools.configure import (
     TOOL_OUTPUT_CAP_MIN_CHARS,
     TOOL_PRESETS,
     _update_rag_tool_description,
@@ -166,18 +166,18 @@ from src.tools.configure import (
     load_tools,
     rag_should_auto_activate,
 )
-from src.tools.report_progress import (
+from cogtrix_core.tools.report_progress import (
     create_report_progress_tool,
 )
-from src.tools.report_progress import (
+from cogtrix_core.tools.report_progress import (
     set_progress_callback as set_milestone_callback,
 )
-from src.ui.confirmation import _RichConfirmationUI, _TokenAccumulator
-from src.ui.input_session import create_session as _create_input_session
-from src.ui.spinner import _spinner
+from cogtrix_core.ui.confirmation import _RichConfirmationUI, _TokenAccumulator
+from cogtrix_core.ui.input_session import create_session as _create_input_session
+from cogtrix_core.ui.spinner import _spinner
 
 try:
-    from src.cli.escape_monitor import EscapeMonitor
+    from cogtrix_core.cli.escape_monitor import EscapeMonitor
 
     _escape_monitor = EscapeMonitor()
     if _escape_monitor.available:
@@ -206,7 +206,7 @@ except ImportError:
     Text = None  # type: ignore[misc, assignment]
 
 try:
-    from src.mcp_client import MCP_AVAILABLE, MCPManager, MCPServerConfig
+    from cogtrix_core.mcp_client import MCP_AVAILABLE, MCPManager, MCPServerConfig
 except ImportError:
     MCP_AVAILABLE = False
     MCPManager = None  # type: ignore[misc, assignment]
@@ -1097,7 +1097,7 @@ def _try_configure_embeddings(
         _log.debug("Embedding config stored for lazy init (provider: %s)", emb_type)
     else:
         try:
-            from src.providers import create_embeddings_from_config
+            from cogtrix_core.providers import create_embeddings_from_config
 
             fn, tag = create_embeddings_from_config(
                 emb_type, model=emb_model, base_url=emb_base_url, api_key=emb_api_key
@@ -1968,7 +1968,7 @@ def _build_slash_commands() -> SlashCommandRegistry:
                 "The task runs asynchronously; track progress with /tasks.\n\n"
                 "Examples:\n"
                 "  /spawn researcher Summarise the latest arXiv ML papers\n"
-                "  /spawn coder Refactor src/tools/shell.py for better error handling"
+                "  /spawn coder Refactor cogtrix_core/tools/shell.py for better error handling"
             ),
         )
     )
@@ -2429,7 +2429,7 @@ def run_ingest(args, config: Config) -> int:
     Returns:
         Exit code (0 for success, non-zero for failure)
     """
-    from src.rag import IngestConfig, ingest_documents
+    from cogtrix_core.rag import IngestConfig, ingest_documents
 
     # Build ingest configuration from args and config
     docs_dir = Path(args.docs_dir if args.docs_dir else config.rag.docs_dir)
@@ -2530,7 +2530,7 @@ def run_ingest(args, config: Config) -> int:
 
 
 # ── Tool output capping ──────────────────────────────────────────────
-# Backward-compat aliases: tool output cap moved to src/tools/configure.py
+# Backward-compat aliases: tool output cap moved to cogtrix_core/tools/configure.py
 _TOOL_OUTPUT_CAP_RATIO = 0.10
 _TOOL_OUTPUT_CAP_MIN_CHARS = TOOL_OUTPUT_CAP_MIN_CHARS
 _compute_tool_output_cap = compute_tool_output_cap
@@ -2546,7 +2546,7 @@ def create_safe_tool_wrapper(
     tool_trust: dict | None = None,
 ):
     """Wrap a tool with confirmation gate. Delegates to src.agent.safety."""
-    from src.agent.safety import create_safe_tool_wrapper as _safety_wrapper
+    from cogtrix_core.agent.safety import create_safe_tool_wrapper as _safety_wrapper
 
     return _safety_wrapper(
         tool,
@@ -2583,7 +2583,7 @@ def _maybe_skip_force_deep_think_for_tool_intensive_task(
     return wants_deep
 
 
-# Backward-compat aliases: graph builder and constants moved to src/orchestration/graph.py
+# Backward-compat aliases: graph builder and constants moved to cogtrix_core/orchestration/graph.py
 _build_agent_graph = build_agent_graph
 _EMPTY_RESPONSE_MSG = EMPTY_RESPONSE_MSG
 _MCP_TOOLS_READY_EVENT: Any | None = None
@@ -2711,7 +2711,7 @@ def run_single_prompt(
                 _ctx_est = getattr(context, "token_estimate", 0) or 0
                 _session_ratio = _ctx_est / max_context_tokens
                 if _session_ratio >= _rd_threshold and _looks_like_research_query(original_input):
-                    from src.tools.delegate import delegate_task, get_delegate_tools
+                    from cogtrix_core.tools.delegate import delegate_task, get_delegate_tools
 
                     if get_delegate_tools():
                         log.info(
@@ -2957,7 +2957,7 @@ def run_single_prompt(
                 _session_tokens.output_tokens += _acc.output_tokens
                 # print_stats_footer emits the progress bar and context warnings
                 # (replaces _format_stats_line + _context_advisory)
-                from src.ui.stats import print_stats_footer as _print_stats_footer
+                from cogtrix_core.ui.stats import print_stats_footer as _print_stats_footer
 
                 _print_stats_footer(
                     console=console,
@@ -3104,7 +3104,7 @@ def main():
     if getattr(args, "setup", False):
         from pathlib import Path as _Path
 
-        from src.setup_wizard import run_setup_wizard
+        from cogtrix_core.setup_wizard import run_setup_wizard
 
         _setup_output = _Path(args.setup_output) if args.setup_output else None
         run_setup_wizard(
@@ -3134,7 +3134,7 @@ def main():
         and hasattr(sys.stdout, "isatty")
         and sys.stdout.isatty()
     ):
-        from src.setup_wizard import run_setup_wizard
+        from cogtrix_core.setup_wizard import run_setup_wizard
 
         if console is not None:
             console.print("\n  [bold]No configuration found.[/bold] Starting setup wizard...\n")
@@ -3215,7 +3215,7 @@ def main():
 
     # Apply theme
     if config:
-        from src.ui.theme import set_theme
+        from cogtrix_core.ui.theme import set_theme
 
         try:
             set_theme(config.theme)
@@ -3339,8 +3339,8 @@ def main():
     configure_email_tool(config)
 
     # Load named agent definitions from AGENTS.md (cwd or home dir)
-    from src.agent import registry as _agent_registry
-    from src.agent.agents_md import load_default_agents as _load_agents_md
+    from cogtrix_core.agent import registry as _agent_registry
+    from cogtrix_core.agent.agents_md import load_default_agents as _load_agents_md
 
     _agents_md = _load_agents_md()
     _agent_registry.load_from_config(config)
@@ -3348,7 +3348,7 @@ def main():
 
     # Initialise background task queue for /spawn and /tasks commands
     try:
-        from src.tasks.queue import init_task_queue
+        from cogtrix_core.tasks.queue import init_task_queue
 
         _data_dir = Path(getattr(config, "data_dir", "data"))
         _tasks_db = _data_dir / "tasks" / "tasks.db"
@@ -3379,7 +3379,7 @@ def main():
             apply_output_cap(t, cap)
 
     try:
-        from src.tools.deep_think import set_progress_callback
+        from cogtrix_core.tools.deep_think import set_progress_callback
 
         def _deep_think_progress(msg: str) -> None:
             """Spinner-aware progress callback for deep think."""
@@ -3434,7 +3434,7 @@ def main():
         # not consume programmatically. Accepting them silently avoids
         # false-positive "ignoring unknown config keys" warnings while
         # still surfacing genuine typos.
-        from src.mcp_client import DOC_ONLY_MCP_FIELDS, KNOWN_MCP_FIELDS
+        from cogtrix_core.mcp_client import DOC_ONLY_MCP_FIELDS, KNOWN_MCP_FIELDS
 
         _RECOGNISED_MCP_FIELDS = KNOWN_MCP_FIELDS | DOC_ONLY_MCP_FIELDS
         _mcp_configs = []
@@ -3479,7 +3479,7 @@ def main():
     _session.all_tool_originals = dict(registry.tools)
 
     # Create and register checkpoint tool (must be done before wrapping with safety)
-    from src.tools.checkpoint import CheckpointStore, create_checkpoint_tool
+    from cogtrix_core.tools.checkpoint import CheckpointStore, create_checkpoint_tool
 
     _checkpoint_store = CheckpointStore()
     _checkpoint_tool = create_checkpoint_tool(_checkpoint_store)
@@ -3804,9 +3804,9 @@ def main():
                 _tq_system_prompt = system_prompt
 
                 def _task_runner(record: Any) -> str:
-                    from src.agent import registry as _ar
-                    from src.agent.registry import filter_tools_for_agent
-                    from src.orchestration.session_state import SessionState
+                    from cogtrix_core.agent import registry as _ar
+                    from cogtrix_core.agent.registry import filter_tools_for_agent
+                    from cogtrix_core.orchestration.session_state import SessionState
 
                     agent_cfg = _ar.get(record.agent_name)
                     _sp = (
@@ -3917,7 +3917,7 @@ def main():
 
     # Handle --assistant mode (headless messaging daemon)
     if getattr(args, "assistant", False):
-        from src.assistant.service import AssistantService
+        from cogtrix_core.assistant.service import AssistantService
 
         _asst_compression_llm = None
         if config.context_compression_model:
@@ -4063,7 +4063,7 @@ def main():
     _all_cmds = [f"/{name}" for name in slash_cmds._commands]
     set_slash_commands(_all_cmds)
     try:
-        from src.ui.input_session import set_slash_commands as _pt_set_cmds
+        from cogtrix_core.ui.input_session import set_slash_commands as _pt_set_cmds
 
         _pt_set_cmds(_all_cmds)
     except Exception:
@@ -4218,7 +4218,7 @@ def main():
                     # Erase separator + stats + ❯ lines from scrollback immediately
                     # after Enter so the Rich "you" panel is the only echo visible.
                     if sys.stdout.isatty() and console is not None:
-                        from src.ui.input_session import _toolbar_stats as _ts
+                        from cogtrix_core.ui.input_session import _toolbar_stats as _ts
 
                         sys.stdout.write("\033[1A\033[2K\r")  # erase ❯ input line
                         if _ts.strip():
@@ -4589,7 +4589,7 @@ def main():
                         # commands hit `continue` before that path — so we must
                         # echo explicitly here.
                         if console is not None:
-                            from src.ui.turns import print_user_turn
+                            from cogtrix_core.ui.turns import print_user_turn
 
                             print_user_turn(console, user_input)
                         try:
@@ -4670,7 +4670,7 @@ def main():
                             else:
                                 print("Stage 2/2: Deep analysis…")
 
-                            from src.tools.deep_think import deep_think
+                            from cogtrix_core.tools.deep_think import deep_think
 
                             tool_data = collect_tool_outputs(gather_msgs)
                             analysis_preamble = think_cat.analysis_preamble.replace(
@@ -4825,7 +4825,7 @@ def main():
                                 traceback.print_exc()
 
                     elif result == "run_setup":
-                        from src.setup_wizard import run_setup_wizard
+                        from cogtrix_core.setup_wizard import run_setup_wizard
 
                         try:
                             run_setup_wizard()
@@ -5020,7 +5020,7 @@ def main():
             slash_cmds.last_input = original_input
 
             if console is not None:
-                from src.ui.turns import print_user_turn
+                from cogtrix_core.ui.turns import print_user_turn
 
                 print_user_turn(console, original_input)
 
@@ -5138,7 +5138,10 @@ def main():
                         if _i_session_ratio >= _i_rd_threshold and _looks_like_research_query(
                             original_input
                         ):
-                            from src.tools.delegate import delegate_task, get_delegate_tools
+                            from cogtrix_core.tools.delegate import (
+                                delegate_task,
+                                get_delegate_tools,
+                            )
 
                             if get_delegate_tools():
                                 log.info(
@@ -5352,7 +5355,7 @@ def main():
                     else:
                         _patch_ctx = None
                     try:
-                        from src.ui.turns import print_assistant_turn_header
+                        from cogtrix_core.ui.turns import print_assistant_turn_header
 
                         print_assistant_turn_header(console)
                         console.print(
@@ -5365,7 +5368,7 @@ def main():
                         _session_tokens.output_tokens += _acc.output_tokens
                         slash_cmds.last_input_tokens = _acc.last_input_tokens or _acc.input_tokens
                         # print_stats_footer stores stats for the toolbar display
-                        from src.ui.stats import print_stats_footer as _print_stats_footer
+                        from cogtrix_core.ui.stats import print_stats_footer as _print_stats_footer
 
                         _print_stats_footer(
                             console=console,

@@ -1,4 +1,4 @@
-"""Tests for src/tools/_http_safety.py — the shared SSRF / URL-safety
+"""Tests for cogtrix_core/tools/_http_safety.py — the shared SSRF / URL-safety
 helpers used by both the sync ``http_get`` tool and the async
 ``_http_fetch`` primitive (ADR-0056 PR-A2).
 
@@ -15,7 +15,7 @@ from unittest.mock import patch
 
 import pytest
 
-from src.tools._http_safety import (
+from cogtrix_core.tools._http_safety import (
     _BLOCKED_HEADERS,
     _is_blocked_ip,
     _parse_headers,
@@ -89,7 +89,7 @@ class TestIsBlockedIp:
 class TestValidateUrl:
     def test_valid_https_url_returns_resolved_ip(self) -> None:
         """Mock DNS so the test doesn't actually hit the network."""
-        with patch("src.tools._http_safety.socket.getaddrinfo") as mock_dns:
+        with patch("cogtrix_core.tools._http_safety.socket.getaddrinfo") as mock_dns:
             mock_dns.return_value = [
                 (None, None, None, "", ("93.184.216.34", 0)),
             ]
@@ -166,7 +166,7 @@ class TestValidateUrl:
 
     def test_dns_returning_private_address_blocked(self) -> None:
         """DNS rebinding attempt: hostname resolves to a private IP → blocked."""
-        with patch("src.tools._http_safety.socket.getaddrinfo") as mock_dns:
+        with patch("cogtrix_core.tools._http_safety.socket.getaddrinfo") as mock_dns:
             mock_dns.return_value = [
                 (None, None, None, "", ("10.0.0.5", 0)),
             ]
@@ -176,7 +176,7 @@ class TestValidateUrl:
 
     def test_dns_with_mixed_public_and_private_blocked(self) -> None:
         """Even one private IP in the resolution set blocks the request."""
-        with patch("src.tools._http_safety.socket.getaddrinfo") as mock_dns:
+        with patch("cogtrix_core.tools._http_safety.socket.getaddrinfo") as mock_dns:
             mock_dns.return_value = [
                 (None, None, None, "", ("8.8.8.8", 0)),
                 (None, None, None, "", ("10.0.0.5", 0)),
@@ -187,7 +187,7 @@ class TestValidateUrl:
     def test_dns_failure_blocks_request(self) -> None:
         import socket as _socket
 
-        with patch("src.tools._http_safety.socket.getaddrinfo") as mock_dns:
+        with patch("cogtrix_core.tools._http_safety.socket.getaddrinfo") as mock_dns:
             mock_dns.side_effect = _socket.gaierror("no such host")
             ok, err, _ = _validate_url("https://nx.example.com/")
         assert ok is False

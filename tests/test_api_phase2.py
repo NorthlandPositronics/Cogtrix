@@ -38,12 +38,12 @@ os.environ.setdefault("COGTRIX_DB_URL", "sqlite+aiosqlite:///:memory:")
 # Imports after env setup
 # ---------------------------------------------------------------------------
 
-from src.api.auth import create_access_token  # noqa: E402
-from src.api.db import models as _models  # noqa: E402, F401
-from src.api.db.engine import Base  # noqa: E402
-from src.api.db.repositories.messages import MessageRepository  # noqa: E402
-from src.api.db.repositories.sessions import SessionRepository  # noqa: E402
-from src.api.db.repositories.users import UserRepository  # noqa: E402
+from cogtrix_core.api.auth import create_access_token  # noqa: E402
+from cogtrix_core.api.db import models as _models  # noqa: E402, F401
+from cogtrix_core.api.db.engine import Base  # noqa: E402
+from cogtrix_core.api.db.repositories.messages import MessageRepository  # noqa: E402
+from cogtrix_core.api.db.repositories.sessions import SessionRepository  # noqa: E402
+from cogtrix_core.api.db.repositories.users import UserRepository  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # In-memory DB fixtures
@@ -336,8 +336,8 @@ async def http_db_engine():
 @pytest_asyncio.fixture()
 async def http_client(http_db_engine):
     """Return a TestClient wired to the in-memory DB and mocked session_bridge."""
-    from src.api.app import create_app
-    from src.api.db.engine import get_db
+    from cogtrix_core.api.app import create_app
+    from cogtrix_core.api.db.engine import get_db
 
     session_factory = async_sessionmaker(http_db_engine, expire_on_commit=False)
 
@@ -360,10 +360,12 @@ async def http_client(http_db_engine):
     app.state.tool_registry = None
 
     # Patch warm_session at the route module level so the top-level import is intercepted
-    with patch("src.api.routes.sessions.warm_session", new_callable=AsyncMock) as mock_warm:
+    with patch(
+        "cogtrix_core.api.routes.sessions.warm_session", new_callable=AsyncMock
+    ) as mock_warm:
 
         async def _fake_warm(record, app_state):
-            from src.api.session_bridge import ApiSession
+            from cogtrix_core.api.session_bridge import ApiSession
 
             return ApiSession(
                 id=record.id,
@@ -858,7 +860,7 @@ async def test_delete_session_not_found(http_client) -> None:
 @pytest.mark.asyncio
 async def test_session_bridge_warm(db_session: AsyncSession, user_id: str) -> None:
     """warm_session builds a minimal ApiSession from a DB record."""
-    from src.api.session_bridge import ApiSession, warm_session
+    from cogtrix_core.api.session_bridge import ApiSession, warm_session
 
     repo = SessionRepository(db_session)
     record = await repo.create(
@@ -874,7 +876,7 @@ async def test_session_bridge_warm(db_session: AsyncSession, user_id: str) -> No
     app_state.tool_registry = None
 
     mock_llm = MagicMock()
-    with patch("src.api.session_bridge._build_llm", return_value=mock_llm):
+    with patch("cogtrix_core.api.session_bridge._build_llm", return_value=mock_llm):
         session = await warm_session(record, app_state)
 
     assert isinstance(session, ApiSession)
@@ -890,7 +892,7 @@ async def test_session_bridge_warm(db_session: AsyncSession, user_id: str) -> No
 @pytest.mark.asyncio
 async def test_session_registry_get_or_warm(db_session: AsyncSession, user_id: str) -> None:
     """ApiSessionRegistry.get_or_warm loads from DB and caches the result."""
-    from src.api.session_bridge import ApiSessionRegistry
+    from cogtrix_core.api.session_bridge import ApiSessionRegistry
 
     repo = SessionRepository(db_session)
     record = await repo.create(user_id=user_id, name="Reg test")
@@ -903,7 +905,7 @@ async def test_session_registry_get_or_warm(db_session: AsyncSession, user_id: s
     registry = ApiSessionRegistry(app_state)
 
     mock_llm = MagicMock()
-    with patch("src.api.session_bridge._build_llm", return_value=mock_llm):
+    with patch("cogtrix_core.api.session_bridge._build_llm", return_value=mock_llm):
         sess1 = await registry.get_or_warm(record.id, db_session)
         sess2 = await registry.get_or_warm(record.id, db_session)
 
@@ -914,7 +916,7 @@ async def test_session_registry_get_or_warm(db_session: AsyncSession, user_id: s
 @pytest.mark.asyncio
 async def test_session_registry_get_or_warm_missing(db_session: AsyncSession) -> None:
     """get_or_warm returns None for a non-existent session ID."""
-    from src.api.session_bridge import ApiSessionRegistry
+    from cogtrix_core.api.session_bridge import ApiSessionRegistry
 
     app_state = MagicMock()
     registry = ApiSessionRegistry(app_state)
@@ -928,7 +930,7 @@ async def test_session_registry_evict_idle(db_session: AsyncSession, user_id: st
     """evict_idle removes sessions that have been idle longer than max_age."""
     import time
 
-    from src.api.session_bridge import ApiSession, ApiSessionRegistry
+    from cogtrix_core.api.session_bridge import ApiSession, ApiSessionRegistry
 
     app_state = MagicMock()
     registry = ApiSessionRegistry(app_state)
@@ -960,7 +962,7 @@ async def test_session_registry_evict_idle(db_session: AsyncSession, user_id: st
 @pytest.mark.asyncio
 async def test_session_registry_remove(db_session: AsyncSession, user_id: str) -> None:
     """remove() saves memory and evicts from registry."""
-    from src.api.session_bridge import ApiSession, ApiSessionRegistry
+    from cogtrix_core.api.session_bridge import ApiSession, ApiSessionRegistry
 
     app_state = MagicMock()
     registry = ApiSessionRegistry(app_state)

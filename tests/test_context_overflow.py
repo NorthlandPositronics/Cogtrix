@@ -20,7 +20,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, Tool
 
 class TestIsContextOverflowError:
     def test_known_patterns(self):
-        from src.orchestration.graph import _is_context_overflow_error
+        from cogtrix_core.orchestration.graph import _is_context_overflow_error
 
         assert _is_context_overflow_error(Exception("context_length_exceeded"))
         assert _is_context_overflow_error(
@@ -31,7 +31,7 @@ class TestIsContextOverflowError:
         assert _is_context_overflow_error(Exception("context window exceeded"))
 
     def test_non_overflow_errors(self):
-        from src.orchestration.graph import _is_context_overflow_error
+        from cogtrix_core.orchestration.graph import _is_context_overflow_error
 
         assert not _is_context_overflow_error(Exception("ConnectionError: timeout"))
         assert not _is_context_overflow_error(Exception("401 Unauthorized"))
@@ -39,16 +39,48 @@ class TestIsContextOverflowError:
         assert not _is_context_overflow_error(ValueError("bad input"))
 
     def test_case_insensitive(self):
-        from src.orchestration.graph import _is_context_overflow_error
+        from cogtrix_core.orchestration.graph import _is_context_overflow_error
 
         assert _is_context_overflow_error(Exception("CONTEXT_LENGTH_EXCEEDED"))
         assert _is_context_overflow_error(Exception("Context Window Full"))
 
     def test_non_overflow_not_misclassified(self):
-        from src.orchestration.graph import _is_context_overflow_error
+        from cogtrix_core.orchestration.graph import _is_context_overflow_error
 
         assert not _is_context_overflow_error(RuntimeError("internal server error"))
         assert not _is_context_overflow_error(Exception(""))
+
+
+class TestIsModelRepetitionError:
+    """#2122: detect a mid-stream model-repetition abort narrowly, so a generic
+    provider 500 is not misclassified (those stay retryable / re-raised)."""
+
+    def test_matches_repetition_message(self):
+        from cogtrix_core.orchestration.graph import _is_model_repetition_error
+
+        assert _is_model_repetition_error(Exception("The model is repeating the same chunk"))
+        assert _is_model_repetition_error(
+            Exception("litellm.InternalServerError: The model is repeating the same chunk")
+        )
+
+    def test_matches_midstream_fallback_type(self):
+        from cogtrix_core.orchestration.graph import _is_model_repetition_error
+
+        class MidStreamFallbackError(Exception):
+            pass
+
+        assert _is_model_repetition_error(MidStreamFallbackError("stream aborted"))
+
+    def test_does_not_match_generic_errors(self):
+        from cogtrix_core.orchestration.graph import _is_model_repetition_error
+
+        # A bare 500 / InternalServerError (no repetition message) must NOT match —
+        # those stay retryable / re-raised as before.
+        assert not _is_model_repetition_error(Exception("500 Internal Server Error"))
+        assert not _is_model_repetition_error(RuntimeError("internal server error"))
+        assert not _is_model_repetition_error(ConnectionError("network unreachable"))
+        assert not _is_model_repetition_error(Exception("context_length_exceeded"))
+        assert not _is_model_repetition_error(Exception(""))
 
 
 # ---------------------------------------------------------------------------
@@ -75,7 +107,7 @@ def _make_fake_invoke():
 
 def _build_graph_with_fake_llm(fake_invoke_fn, max_context_tokens: int = 16_384):
     """Build a graph with a mock LLM whose .invoke uses *fake_invoke_fn*."""
-    from src.orchestration.graph import build_agent_graph
+    from cogtrix_core.orchestration.graph import build_agent_graph
 
     mock_llm = MagicMock()
     mock_llm.bind_tools.return_value = mock_llm
@@ -114,7 +146,7 @@ class TestOverflowRetryLogic:
         def always_overflow(messages, config=None, **kwargs):
             raise Exception("context_length_exceeded")
 
-        from src.orchestration.graph import build_agent_graph
+        from cogtrix_core.orchestration.graph import build_agent_graph
 
         mock_llm = MagicMock()
         mock_llm.bind_tools.return_value = mock_llm
@@ -140,7 +172,7 @@ class TestOverflowRetryLogic:
         def connection_error(messages, config=None, **kwargs):
             raise ConnectionError("network unreachable")
 
-        from src.orchestration.graph import build_agent_graph
+        from cogtrix_core.orchestration.graph import build_agent_graph
 
         mock_llm = MagicMock()
         mock_llm.bind_tools.return_value = mock_llm
@@ -158,9 +190,42 @@ class TestOverflowRetryLogic:
             graph.invoke({"messages": [HumanMessage(content="hi")]})
 
 
+class TestModelRepetitionGracefulEnd:
+    """#2122: a mid-stream model-repetition abort ends the turn gracefully with a
+    user-facing message instead of failing the turn with an unhandled error."""
+
+    def test_repetition_abort_ends_turn_gracefully(self):
+        def repetition_error(messages, config=None, **kwargs):
+            raise Exception("litellm.InternalServerError: The model is repeating the same chunk")
+
+        from cogtrix_core.orchestration.graph import build_agent_graph
+
+        mock_llm = MagicMock()
+        mock_llm.bind_tools.return_value = mock_llm
+        mock_llm.invoke.side_effect = repetition_error
+
+        graph = build_agent_graph(
+            llm=mock_llm,
+            system_prompt="",
+            active_tools_list=[],
+            available_tools={},
+            max_context_tokens=16_384,
+        )
+
+        # Must NOT raise — the turn ends with a graceful AIMessage.
+        result = graph.invoke({"messages": [HumanMessage(content="hi")]})
+        ai_texts = [
+            m.content
+            for m in result.get("messages", [])
+            if isinstance(m, AIMessage) and isinstance(m.content, str) and m.content
+        ]
+        assert ai_texts, "expected a graceful AIMessage, got none"
+        assert any("rephrase" in t.lower() or "problem generating" in t.lower() for t in ai_texts)
+
+
 class TestContextMessageCapInvocation:
     def test_cap_runs_before_model_call_and_keeps_tool_pair_intact(self):
-        from src.orchestration.graph import build_agent_graph
+        from cogtrix_core.orchestration.graph import build_agent_graph
 
         seen_messages = []
 
@@ -208,8 +273,8 @@ class TestContextMessageCapInvocation:
         assert content[2].content == "latest"
 
     def test_cap_uses_configured_token_budget(self):
-        from src.orchestration.graph import build_agent_graph
-        from src.orchestration.run_config import AgentRunConfig
+        from cogtrix_core.orchestration.graph import build_agent_graph
+        from cogtrix_core.orchestration.run_config import AgentRunConfig
 
         seen_messages = []
 
@@ -304,7 +369,7 @@ class TestTinyContextLLM:
         TinyContextLLM rejects calls with total > 50000 chars.
         After compression, ToolMessages become "[compressed summary]" so total << 50000.
         """
-        from src.orchestration.graph import build_agent_graph
+        from cogtrix_core.orchestration.graph import build_agent_graph
 
         # max_chars=50_000: original 54000-char history overflows, compressed doesn't
         tiny_llm = TinyContextLLM(max_chars=50_000)
@@ -348,7 +413,7 @@ class TestTinyContextLLM:
 
     def test_unrecoverable_overflow_raises_clean_error(self):
         """If even a single message exceeds context, clean RuntimeError is raised."""
-        from src.orchestration.graph import build_agent_graph
+        from cogtrix_core.orchestration.graph import build_agent_graph
 
         tiny_llm = TinyContextLLM(max_chars=10)
         graph = build_agent_graph(
@@ -375,7 +440,7 @@ class TestTinyContextLLM:
 class TestCompressionZeroFloors:
     def test_min_age_cycles_zero_compresses_all_eligible(self):
         """With min_age_cycles=0, all ToolMessages regardless of age are eligible."""
-        from src.orchestration.compression import apply_message_compression
+        from cogtrix_core.orchestration.compression import apply_message_compression
 
         # compress_tool_message requires result > 20 chars to avoid fallback truncation
         compressed_summary = "[compressed summary: key findings preserved]"
@@ -423,7 +488,7 @@ class TestMidTurnCompressionThreshold:
         REGRESSION: ensures the mid-turn guard fires sooner than the old
         turn-start token-based threshold.
         """
-        from src.orchestration.compression import (
+        from cogtrix_core.orchestration.compression import (
             _COMPRESSION_THRESHOLD_RATIO,
             _MID_TURN_COMPRESSION_THRESHOLD,
         )
@@ -437,22 +502,24 @@ class TestMidTurnCompressionThreshold:
         the PREVIOUS turn's token count (stale). With the fix, _maybe_compress
         fires based on CURRENT message chars before every model.invoke().
         """
-        from src.orchestration.compression import (
+        from cogtrix_core.orchestration.compression import (
             _CHARS_PER_TOKEN,
             COMPRESSION_MIN_AGE_CYCLES,
         )
-        from src.orchestration.graph import build_agent_graph
+        from cogtrix_core.orchestration.graph import build_agent_graph
 
         compression_calls: list[dict] = []
         original_apply = __import__(
-            "src.orchestration.compression", fromlist=["apply_message_compression"]
+            "cogtrix_core.orchestration.compression", fromlist=["apply_message_compression"]
         ).apply_message_compression
 
         def tracking_apply(msgs, **kw):
             compression_calls.append(kw)
             return original_apply(msgs, **kw)
 
-        monkeypatch.setattr("src.orchestration.graph.apply_message_compression", tracking_apply)
+        monkeypatch.setattr(
+            "cogtrix_core.orchestration.graph.apply_message_compression", tracking_apply
+        )
 
         max_context = 16_384
         # 65% by char estimate → above 60% threshold, below 72% old threshold
@@ -498,8 +565,8 @@ class TestMidTurnCompressionThreshold:
         REGRESSION: emergency mode must compress ALL eligible ToolMessages
         regardless of age to prevent overflow during a long tool loop.
         """
-        from src.orchestration.compression import _CHARS_PER_TOKEN
-        from src.orchestration.graph import build_agent_graph
+        from cogtrix_core.orchestration.compression import _CHARS_PER_TOKEN
+        from cogtrix_core.orchestration.graph import build_agent_graph
 
         captured_kwargs: dict = {}
 
@@ -507,7 +574,9 @@ class TestMidTurnCompressionThreshold:
             captured_kwargs.update(kw)
             return msgs  # return unchanged — we only care about the kwargs
 
-        monkeypatch.setattr("src.orchestration.graph.apply_message_compression", tracking_apply)
+        monkeypatch.setattr(
+            "cogtrix_core.orchestration.graph.apply_message_compression", tracking_apply
+        )
 
         max_context = 16_384
         # 87% by char estimate → above 85% emergency threshold
@@ -543,8 +612,8 @@ class TestMidTurnCompressionThreshold:
         REGRESSION: _maybe_compress must not loop when apply_message_compression
         returns the same message list (e.g. no messages are old enough to compress).
         """
-        from src.orchestration.compression import _CHARS_PER_TOKEN
-        from src.orchestration.graph import build_agent_graph
+        from cogtrix_core.orchestration.compression import _CHARS_PER_TOKEN
+        from cogtrix_core.orchestration.graph import build_agent_graph
 
         call_count_tracker = [0]
 
@@ -552,7 +621,9 @@ class TestMidTurnCompressionThreshold:
             call_count_tracker[0] += 1
             return msgs  # always unchanged
 
-        monkeypatch.setattr("src.orchestration.graph.apply_message_compression", no_op_apply)
+        monkeypatch.setattr(
+            "cogtrix_core.orchestration.graph.apply_message_compression", no_op_apply
+        )
 
         max_context = 16_384
         target_chars = int(max_context * _CHARS_PER_TOKEN * 0.70)
@@ -592,7 +663,7 @@ class TestMidTurnCompressionThreshold:
         must run even when the char/token pressure is between 60-72%
         (below the internal 0.72 threshold but above the mid-turn 0.60 threshold).
         """
-        from src.orchestration.compression import (
+        from cogtrix_core.orchestration.compression import (
             _CHARS_PER_TOKEN,
             _COMPRESSION_THRESHOLD_RATIO,
             _MID_TURN_COMPRESSION_THRESHOLD,
@@ -664,7 +735,7 @@ class SilentTruncationLLM:
 
     def _is_compression_call(self, messages) -> bool:
         # Matches the prompt produced by ``compress_tool_message`` in
-        # src/orchestration/compression.py — it self-identifies as a
+        # cogtrix_core/orchestration/compression.py — it self-identifies as a
         # "context compressor" and asks to condense tool output.
         markers = ("context compressor", "summarized", "summarise", "condense")
         if isinstance(messages, str):
@@ -708,7 +779,7 @@ class TestPreFlightTokenGuard:
         the threshold is 13107 tokens (~52428 chars).  A history
         well over that should force pre-flight compression — the
         silent-truncation provider never sees the over-budget input."""
-        from src.orchestration.graph import build_agent_graph
+        from cogtrix_core.orchestration.graph import build_agent_graph
 
         # Provider that silently drops calls > 30000 chars.  Below the
         # pre-flight threshold (52428 chars), so the guard fires first
@@ -766,7 +837,7 @@ class TestPreFlightTokenGuard:
         """When the message list fits comfortably under the pre-flight
         threshold, no compression fires and the provider sees the
         original messages verbatim."""
-        from src.orchestration.graph import build_agent_graph
+        from cogtrix_core.orchestration.graph import build_agent_graph
 
         silent_llm = SilentTruncationLLM(max_chars=100_000)  # generous
 
@@ -805,7 +876,7 @@ class TestPreFlightTokenGuard:
         is set, the guard short-circuits (no window to reason about)
         rather than guessing.  Falls back to the existing post-invoke
         overflow-error path."""
-        from src.orchestration.graph import build_agent_graph
+        from cogtrix_core.orchestration.graph import build_agent_graph
 
         # Provider that DOES raise on overflow — verifies fallback
         # works when pre-flight is disabled.

@@ -27,7 +27,7 @@ class _DummyEmbeddings(Embeddings):
 def test_raw_faiss_round_trip(tmp_path: Path) -> None:
     from unittest.mock import MagicMock, patch
 
-    from src.api.rag_index import load_faiss_store, save_faiss_store
+    from cogtrix_core.api.rag_index import load_faiss_store, save_faiss_store
 
     persist_dir = tmp_path / "faiss_index"
     fake_index = object()
@@ -51,7 +51,7 @@ def test_raw_faiss_round_trip(tmp_path: Path) -> None:
 
     embeddings = _DummyEmbeddings()
 
-    with patch("src.api.rag_index.dependable_faiss_import", return_value=fake_faiss):
+    with patch("cogtrix_core.api.rag_index.dependable_faiss_import", return_value=fake_faiss):
         save_faiss_store(store, persist_dir)
 
     assert (persist_dir / "index.faiss").exists()
@@ -60,8 +60,8 @@ def test_raw_faiss_round_trip(tmp_path: Path) -> None:
 
     fake_loaded_store = MagicMock()
     with (
-        patch("src.api.rag_index.dependable_faiss_import", return_value=fake_faiss),
-        patch("src.api.rag_index.FAISS", return_value=fake_loaded_store) as mock_faiss_cls,
+        patch("cogtrix_core.api.rag_index.dependable_faiss_import", return_value=fake_faiss),
+        patch("cogtrix_core.api.rag_index.FAISS", return_value=fake_loaded_store) as mock_faiss_cls,
     ):
         loaded = load_faiss_store(persist_dir, embeddings)
 
@@ -81,7 +81,7 @@ def test_load_faiss_store_safe_rejects_malicious_pickle(tmp_path: Path) -> None:
     This test verifies the fail-closed behavior: a planted malicious index.pkl
     must NOT be deserialized under any circumstances.
     """
-    from src.api.rag_index import load_faiss_store_safe
+    from cogtrix_core.api.rag_index import load_faiss_store_safe
 
     persist_dir = tmp_path / "malicious_index"
     persist_dir.mkdir()
@@ -101,7 +101,7 @@ def test_load_faiss_store_safe_returns_none_when_no_index(tmp_path: Path) -> Non
 
     Ensures fail-closed behavior: no files → None (not an exception).
     """
-    from src.api.rag_index import load_faiss_store_safe
+    from cogtrix_core.api.rag_index import load_faiss_store_safe
 
     persist_dir = tmp_path / "empty_index"
     persist_dir.mkdir()

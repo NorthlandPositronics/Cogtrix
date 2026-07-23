@@ -20,7 +20,7 @@ from unittest.mock import MagicMock, patch
 class TestSilentArgParsing:
     def _parse(self, argv: list[str]):
 
-        import src.cli.args as args_mod
+        import cogtrix_core.cli.args as args_mod
 
         with patch.object(sys, "argv", ["cogtrix.py"] + argv):
             return args_mod.parse_arguments()
@@ -78,13 +78,13 @@ class TestSilentArgParsing:
 
 class TestSpinnerNoColor:
     def test_tty_output_disabled_when_no_color_set(self):
-        from src.ui.spinner import ActivityIndicator
+        from cogtrix_core.ui.spinner import ActivityIndicator
 
         with patch.dict(os.environ, {"NO_COLOR": "1"}, clear=False):
             assert ActivityIndicator._tty_output_enabled() is False
 
     def test_tty_output_enabled_without_no_color_on_tty(self):
-        from src.ui.spinner import ActivityIndicator
+        from cogtrix_core.ui.spinner import ActivityIndicator
 
         env = {k: v for k, v in os.environ.items() if k not in ("NO_COLOR", "FORCE_COLOR")}
         with patch.dict(os.environ, env, clear=True):
@@ -93,13 +93,13 @@ class TestSpinnerNoColor:
 
     def test_no_color_overrides_force_color(self):
         """NO_COLOR must win even if FORCE_COLOR is also set."""
-        from src.ui.spinner import ActivityIndicator
+        from cogtrix_core.ui.spinner import ActivityIndicator
 
         with patch.dict(os.environ, {"NO_COLOR": "1", "FORCE_COLOR": "1"}, clear=False):
             assert ActivityIndicator._tty_output_enabled() is False
 
     def test_force_color_enables_on_non_tty(self):
-        from src.ui.spinner import ActivityIndicator
+        from cogtrix_core.ui.spinner import ActivityIndicator
 
         env = {k: v for k, v in os.environ.items() if k not in ("NO_COLOR", "FORCE_COLOR")}
         env["FORCE_COLOR"] = "1"
@@ -262,7 +262,7 @@ class TestSilentModeSourceInvariants:
         def fake_load_config(args):
             from pathlib import Path
 
-            from src.config import Config, ModelConfig, ProviderConfig
+            from cogtrix_core.config import Config, ModelConfig, ProviderConfig
 
             return Config(
                 data_dir=str(Path("/tmp/test_data_dir")),
@@ -325,7 +325,7 @@ class TestSilentModeSourceInvariants:
         def fake_load_config(args):
             from pathlib import Path
 
-            from src.config import Config, ModelConfig, ProviderConfig
+            from cogtrix_core.config import Config, ModelConfig, ProviderConfig
 
             return Config(
                 data_dir=str(Path("/tmp/test_data_dir")),

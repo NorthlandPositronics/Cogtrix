@@ -19,9 +19,12 @@ import pytest
 
 pytest.importorskip("fastapi")
 
-from src.api import session_bridge  # noqa: E402
-from src.api.session_bridge import confirmation_required_tool_names, warm_session  # noqa: E402
-from src.config import Config  # noqa: E402
+from cogtrix_core.api import session_bridge  # noqa: E402
+from cogtrix_core.api.session_bridge import (  # noqa: E402
+    confirmation_required_tool_names,
+    warm_session,
+)
+from cogtrix_core.config import Config  # noqa: E402
 
 
 class _Registry:

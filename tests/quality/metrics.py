@@ -9,11 +9,11 @@ from dataclasses import dataclass, field
 
 from langchain_core.messages import AIMessage, ToolMessage
 
-from src.orchestration.graph import _looks_like_phantom_tool_markup
+from cogtrix_core.orchestration.graph import _looks_like_phantom_tool_markup
 from tests.quality.harness import HarnessResult
 
 # Substring that identifies a per-tool budget cutoff ToolMessage
-# Source: src/orchestration/graph.py:1693
+# Source: cogtrix_core/orchestration/graph.py:1693
 _TOOL_DISABLED_MARKER = "has been disabled after"
 
 # Prefix that identifies a tool error ToolMessage

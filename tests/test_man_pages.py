@@ -47,7 +47,7 @@ def test_man8_api_has_required_sections():
 
 def test_build_parser_importable_from_cli_args():
     """argparse-manpage requires build_parser() to be importable."""
-    from src.cli.args import build_parser
+    from cogtrix_core.cli.args import build_parser
 
     parser = build_parser()
     assert parser is not None
@@ -58,7 +58,7 @@ def test_build_parser_importable_from_cli_args():
 
 def test_build_parser_importable_from_api_main():
     """argparse-manpage requires build_parser() to be importable."""
-    from src.api.__main__ import build_parser
+    from cogtrix_core.api.__main__ import build_parser
 
     parser = build_parser()
     assert parser is not None
@@ -91,7 +91,7 @@ def test_argparse_manpage_generates_cogtrix1(tmp_path):
         _argparse_manpage_cmd()
         + [
             "--pyfile",
-            "src/cli/args.py",
+            "cogtrix_core/cli/args.py",
             "--function",
             "build_parser",
             "--project-name",
@@ -118,7 +118,7 @@ def test_argparse_manpage_generates_cogtrix_api1(tmp_path):
         _argparse_manpage_cmd()
         + [
             "--pyfile",
-            "src/api/__main__.py",
+            "cogtrix_core/api/__main__.py",
             "--function",
             "build_parser",
             "--project-name",

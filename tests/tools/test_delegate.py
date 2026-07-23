@@ -6,12 +6,12 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.agent.safety import UserCancelledRun  # noqa: E402
+from cogtrix_core.agent.safety import UserCancelledRun  # noqa: E402
 
 # Import tool modules to trigger their category registrations.
 # Categories are registered at module load time via register_tool_categories()
 # so that set_delegate_tools() can filter by category.
-from src.tools import (
+from cogtrix_core.tools import (
     agent_messaging,  # noqa: E402,F401
     agent_tools,  # noqa: E402,F401
     calendar_tools,  # noqa: E402,F401
@@ -23,7 +23,7 @@ from src.tools import (
     shell,  # noqa: E402,F401
     slack_tools,  # noqa: E402,F401
 )
-from src.tools.delegate import (
+from cogtrix_core.tools.delegate import (
     _MAX_CIRCUIT_BREAKERS,
     _TOOL_CATEGORIES,
     TOOL_CONFIGS,
@@ -46,10 +46,10 @@ from src.tools.delegate import (
     reset_model_status,
     set_delegate_tools,
 )
-from src.tools.delegate import (
+from cogtrix_core.tools.delegate import (
     resolve_delegate_defaults as _resolve_defaults,
 )
-from src.tools.delegate import (
+from cogtrix_core.tools.delegate import (
     resolve_model_alias as _resolve_model_alias,
 )
 
@@ -296,13 +296,15 @@ class TestDelegateTaskWithMock:
         set_delegate_tools([], {})
         # Also patch get_delegate_tools at the module level: if tools somehow
         # leak via thread-local from prior tests, the agent path is bypassed.
-        self._tools_patcher = mock.patch("src.tools.delegate.get_delegate_tools", return_value=[])
+        self._tools_patcher = mock.patch(
+            "cogtrix_core.tools.delegate.get_delegate_tools", return_value=[]
+        )
         self._tools_patcher.start()
 
     def teardown_method(self, _method=None):
         self._tools_patcher.stop()
 
-    @patch("src.tools.delegate.create_delegate_llm")
+    @patch("cogtrix_core.tools.delegate.create_delegate_llm")
     def test_delegate_task_success(self, mock_create_llm):
         """Test successful task delegation."""
         # Mock LLM
@@ -325,7 +327,7 @@ class TestDelegateTaskWithMock:
         assert "Response:" in result
         assert "This is the summary." in result
 
-    @patch("src.tools.delegate.create_delegate_llm")
+    @patch("cogtrix_core.tools.delegate.create_delegate_llm")
     def test_delegate_task_json_valid(self, mock_create_llm):
         """Test delegation with valid JSON response."""
         mock_llm = MagicMock()
@@ -344,7 +346,7 @@ class TestDelegateTaskWithMock:
 
         assert "JSON Valid:** ✓" in result
 
-    @patch("src.tools.delegate.create_delegate_llm")
+    @patch("cogtrix_core.tools.delegate.create_delegate_llm")
     def test_delegate_task_json_invalid(self, mock_create_llm):
         """Test delegation with invalid JSON response."""
         mock_llm = MagicMock()
@@ -381,7 +383,7 @@ class TestDelegateTaskWithMock:
         result = delegate_task(task="Summarize", use_tools=False, context="   \n  ")
         assert "rejected" in result.lower()
 
-    @patch("src.tools.delegate.create_delegate_llm")
+    @patch("cogtrix_core.tools.delegate.create_delegate_llm")
     def test_delegate_task_allows_empty_context_with_tools(self, mock_create_llm):
         """Test that tool-capable delegation with empty context is allowed."""
         mock_llm = MagicMock()
@@ -400,7 +402,7 @@ class TestDelegateTaskWithMock:
         assert "rejected" not in result.lower()
         assert "Found results" in result
 
-    @patch("src.tools.delegate.create_delegate_llm")
+    @patch("cogtrix_core.tools.delegate.create_delegate_llm")
     def test_delegate_task_error_handling(self, mock_create_llm):
         """Test error handling in delegation."""
         mock_create_llm.side_effect = Exception("Connection failed")
@@ -408,7 +410,7 @@ class TestDelegateTaskWithMock:
         result = delegate_task(task="Test", provider="ollama")
         assert "failed" in result.lower()
 
-    @patch("src.tools.delegate.create_delegate_llm")
+    @patch("cogtrix_core.tools.delegate.create_delegate_llm")
     def test_delegate_task_user_cancelled_propagates(self, mock_create_llm):
         """UserCancelledRun raised during delegation must propagate to caller."""
         mock_create_llm.side_effect = UserCancelledRun("User cancelled")
@@ -430,7 +432,7 @@ class TestDelegateParallelWithMock:
             }
         )
 
-    @patch("src.tools.delegate.create_delegate_llm")
+    @patch("cogtrix_core.tools.delegate.create_delegate_llm")
     def test_parallel_delegation(self, mock_create_llm):
         """Test parallel task delegation."""
         mock_llm = MagicMock()
@@ -454,10 +456,10 @@ class TestDelegateParallelWithMock:
         assert "Task 2" in result
         assert "Task 3" in result
 
-    @patch("src.tools.delegate._emit_status")
+    @patch("cogtrix_core.tools.delegate._emit_status")
     def test_parallel_honors_per_task_timeouts(self, mock_emit_status):
         """Test that each task uses its own timeout instead of the batch timeout."""
-        from src.tools import delegate as delegate_mod
+        from cogtrix_core.tools import delegate as delegate_mod
 
         recorded_timeouts: list[float | None] = []
 
@@ -534,7 +536,7 @@ class TestDelegateParallelWithMock:
         result = delegate_parallel(tasks=[{"task": "Test"}])
         assert "Delegation disabled" in result
 
-    @patch("src.tools.delegate._execute_single_task")
+    @patch("cogtrix_core.tools.delegate._execute_single_task")
     def test_parallel_user_cancelled_propagates(self, mock_execute):
         """UserCancelledRun raised during parallel delegation must propagate."""
         mock_execute.side_effect = UserCancelledRun("User cancelled")
@@ -562,7 +564,9 @@ class TestCircuitBreaker:
             }
         )
         set_delegate_tools([], {})
-        self._tools_patcher = mock.patch("src.tools.delegate.get_delegate_tools", return_value=[])
+        self._tools_patcher = mock.patch(
+            "cogtrix_core.tools.delegate.get_delegate_tools", return_value=[]
+        )
         self._tools_patcher.start()
 
     def teardown_method(self, _method=None):
@@ -633,7 +637,7 @@ class TestCircuitBreaker:
         status = get_model_status()
         assert status == {}
 
-    @patch("src.tools.delegate.create_delegate_llm")
+    @patch("cogtrix_core.tools.delegate.create_delegate_llm")
     def test_delegate_records_failure_in_circuit_breaker(self, mock_create_llm):
         """Test that delegate_task records failures."""
         reset_model_status()
@@ -649,7 +653,7 @@ class TestCircuitBreaker:
         assert status["ollama/test-model"]["available"] is False
         assert status["ollama/test-model"]["consecutive_failures"] == 5
 
-    @patch("src.tools.delegate.create_delegate_llm")
+    @patch("cogtrix_core.tools.delegate.create_delegate_llm")
     def test_delegate_blocked_when_unavailable(self, mock_create_llm):
         """Test that delegate_task is blocked when model is unavailable."""
         reset_model_status()
@@ -673,7 +677,7 @@ class TestCircuitBreaker:
         assert "unavailable" in result.lower()
         assert "consecutive failures" in result.lower()
 
-    @patch("src.tools.delegate.create_delegate_llm")
+    @patch("cogtrix_core.tools.delegate.create_delegate_llm")
     def test_delegate_success_resets_circuit_breaker(self, mock_create_llm):
         """Test that successful delegation resets circuit breaker."""
         reset_model_status()
@@ -715,7 +719,7 @@ class TestCircuitBreakerEviction:
 
     def test_eviction_trims_dict_when_over_cap(self):
         """Creating more than _MAX_CIRCUIT_BREAKERS entries should trigger eviction."""
-        import src.tools.delegate as mod
+        import cogtrix_core.tools.delegate as mod
 
         reset_model_status()
         for i in range(_MAX_CIRCUIT_BREAKERS + 5):
@@ -727,7 +731,7 @@ class TestCircuitBreakerEviction:
         """Entries with zero failures and old last_used should be evicted first."""
         import time
 
-        import src.tools.delegate as mod
+        import cogtrix_core.tools.delegate as mod
 
         reset_model_status()
         old_ts = time.time() - 7200.0  # 2 hours ago — beyond the idle window
@@ -750,7 +754,7 @@ class TestCircuitBreakerEviction:
         """Entries with non-zero consecutive failures must not be evicted by idle pass."""
         import time
 
-        import src.tools.delegate as mod
+        import cogtrix_core.tools.delegate as mod
 
         reset_model_status()
         old_ts = time.time() - 7200.0
@@ -768,7 +772,7 @@ class TestCircuitBreakerEviction:
         """Accessing an existing breaker should update its last_used timestamp."""
         import time
 
-        import src.tools.delegate as mod
+        import cogtrix_core.tools.delegate as mod
 
         reset_model_status()
         breaker = _get_circuit_breaker("p", "m")
@@ -884,7 +888,7 @@ class TestSetDelegateTools:
 
         set_delegate_tools(tools)
 
-        import src.tools.delegate as mod
+        import cogtrix_core.tools.delegate as mod
 
         names = [t.name for t in mod._delegate_tools]
         # Safe research tool passes through
@@ -904,7 +908,7 @@ class TestSetDelegateTools:
         tool.name = "read_file"
         set_delegate_tools([tool])
 
-        import src.tools.delegate as mod
+        import cogtrix_core.tools.delegate as mod
 
         assert len(mod._delegate_tools) == 1
 
@@ -916,7 +920,7 @@ class TestSetDelegateTools:
         tool = MagicMock(spec=[])  # no attributes
         set_delegate_tools([tool])
 
-        import src.tools.delegate as mod
+        import cogtrix_core.tools.delegate as mod
 
         assert len(mod._delegate_tools) == 1
 
@@ -937,7 +941,7 @@ class TestSetDelegateTools:
             },
         )
 
-        import src.tools.delegate as mod
+        import cogtrix_core.tools.delegate as mod
 
         names = {t.name for t in mod._delegate_tools}
         assert names == {"read_file", "search_web", "calculate"}
@@ -951,7 +955,7 @@ class TestSetDelegateTools:
 
         set_delegate_tools([tool_a], available_tools={"read_file": tool_b})
 
-        import src.tools.delegate as mod
+        import cogtrix_core.tools.delegate as mod
 
         assert len(mod._delegate_tools) == 1
         assert mod._delegate_tools[0] is tool_a
@@ -965,7 +969,7 @@ class TestSetDelegateTools:
 
         set_delegate_tools([active], available_tools={"deep_think": deep})
 
-        import src.tools.delegate as mod
+        import cogtrix_core.tools.delegate as mod
 
         names = {t.name for t in mod._delegate_tools}
         assert "deep_think" not in names
@@ -991,7 +995,7 @@ class TestSetDelegateTools:
 
         set_delegate_tools(tools)
 
-        import src.tools.delegate as mod
+        import cogtrix_core.tools.delegate as mod
 
         names = {t.name for t in mod._delegate_tools}
         assert "read_file" in names
@@ -1021,7 +1025,7 @@ class TestSetDelegateTools:
             },
         )
 
-        import src.tools.delegate as mod
+        import cogtrix_core.tools.delegate as mod
 
         names = {t.name for t in mod._delegate_tools}
         assert names == {"read_file"}
@@ -1047,7 +1051,7 @@ class TestSetDelegateTools:
 
         set_delegate_tools(safe_tools)
 
-        import src.tools.delegate as mod
+        import cogtrix_core.tools.delegate as mod
 
         names = {t.name for t in mod._delegate_tools}
         assert names == {
@@ -1096,7 +1100,7 @@ class TestCategoryBasedExclusion:
         tool = MagicMock()
         tool.name = "read_file"
         set_delegate_tools([tool])
-        import src.tools.delegate as mod
+        import cogtrix_core.tools.delegate as mod
 
         names = [t.name for t in mod._delegate_tools]
         assert "read_file" in names
@@ -1106,7 +1110,7 @@ class TestCategoryBasedExclusion:
         tool = MagicMock()
         tool.name = "execute_shell_command"
         set_delegate_tools([tool])
-        import src.tools.delegate as mod
+        import cogtrix_core.tools.delegate as mod
 
         names = [t.name for t in mod._delegate_tools]
         assert "execute_shell_command" not in names
@@ -1116,7 +1120,7 @@ class TestCategoryBasedExclusion:
         tool = MagicMock()
         tool.name = "delegate_task"
         set_delegate_tools([tool])
-        import src.tools.delegate as mod
+        import cogtrix_core.tools.delegate as mod
 
         names = [t.name for t in mod._delegate_tools]
         assert "delegate_task" not in names
@@ -1126,7 +1130,7 @@ class TestCategoryBasedExclusion:
         tool = MagicMock()
         tool.name = "spawn_agent"
         set_delegate_tools([tool])
-        import src.tools.delegate as mod
+        import cogtrix_core.tools.delegate as mod
 
         names = [t.name for t in mod._delegate_tools]
         assert "spawn_agent" not in names
@@ -1136,7 +1140,7 @@ class TestCategoryBasedExclusion:
         tool = MagicMock()
         tool.name = "whatsapp_send"
         set_delegate_tools([tool])
-        import src.tools.delegate as mod
+        import cogtrix_core.tools.delegate as mod
 
         names = [t.name for t in mod._delegate_tools]
         assert "whatsapp_send" not in names
@@ -1146,7 +1150,7 @@ class TestCategoryBasedExclusion:
         tool = MagicMock()
         tool.name = "read_email"
         set_delegate_tools([tool])
-        import src.tools.delegate as mod
+        import cogtrix_core.tools.delegate as mod
 
         names = [t.name for t in mod._delegate_tools]
         assert "read_email" not in names
@@ -1156,7 +1160,7 @@ class TestCategoryBasedExclusion:
         tool = MagicMock()
         tool.name = "cron_add"
         set_delegate_tools([tool])
-        import src.tools.delegate as mod
+        import cogtrix_core.tools.delegate as mod
 
         names = [t.name for t in mod._delegate_tools]
         assert "cron_add" not in names
@@ -1167,7 +1171,7 @@ class TestCategoryBasedExclusion:
         tool.name = "test_tool_override"
         tool.delegate_exclude_override = True
         set_delegate_tools([tool])
-        import src.tools.delegate as mod
+        import cogtrix_core.tools.delegate as mod
 
         names = [t.name for t in mod._delegate_tools]
         assert "test_tool_override" in names
@@ -1178,7 +1182,7 @@ class TestCategoryBasedExclusion:
         tool.name = "test_tool_override"
         # delegate_exclude_override not set (False by default)
         set_delegate_tools([tool])
-        import src.tools.delegate as mod
+        import cogtrix_core.tools.delegate as mod
 
         names = [t.name for t in mod._delegate_tools]
         assert "test_tool_override" not in names
@@ -1189,7 +1193,7 @@ class TestCategoryBasedExclusion:
         tool = MagicMock()
         tool.name = "deep_think"
         set_delegate_tools([tool])
-        import src.tools.delegate as mod
+        import cogtrix_core.tools.delegate as mod
 
         names = [t.name for t in mod._delegate_tools]
         assert "deep_think" not in names
@@ -1203,7 +1207,7 @@ class TestCategoryBasedExclusion:
             self._make_tool("whatsapp_send", "messaging"),
         ]
         set_delegate_tools(tools)
-        import src.tools.delegate as mod
+        import cogtrix_core.tools.delegate as mod
 
         names = [t.name for t in mod._delegate_tools]
         assert "read_file" in names
@@ -1218,7 +1222,7 @@ class TestCategoryBasedExclusion:
         tool = MagicMock()
         tool.name = "calculate"  # Not in exclude list, no category registered
         set_delegate_tools([tool])
-        import src.tools.delegate as mod
+        import cogtrix_core.tools.delegate as mod
 
         names = [t.name for t in mod._delegate_tools]
         assert "calculate" in names

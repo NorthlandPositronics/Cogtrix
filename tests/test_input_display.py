@@ -24,10 +24,10 @@ def _simulate_turn_start(has_stats: bool = False) -> list[str]:
 
     # Stub _toolbar_stats
     stats_value = "1.2s ↑100 ↓50" if has_stats else ""
-    fake_input_session = types.ModuleType("src.ui.input_session")
+    fake_input_session = types.ModuleType("cogtrix_core.ui.input_session")
     fake_input_session._toolbar_stats = stats_value  # type: ignore[attr-defined]
 
-    with mock.patch.dict("sys.modules", {"src.ui.input_session": fake_input_session}):
+    with mock.patch.dict("sys.modules", {"cogtrix_core.ui.input_session": fake_input_session}):
         # Replay the erase block exactly as it appears in cogtrix.py
         # (this mirrors the code moved to immediately after prompt() returns)
         def capturing_write(s: str) -> int:
@@ -36,7 +36,7 @@ def _simulate_turn_start(has_stats: bool = False) -> list[str]:
 
         with mock.patch.object(sys.stdout, "write", side_effect=capturing_write):
             with mock.patch.object(sys.stdout, "flush"):
-                from src.ui.input_session import _toolbar_stats as _ts
+                from cogtrix_core.ui.input_session import _toolbar_stats as _ts
 
                 sys.stdout.write("\033[1A\033[2K\r")  # erase ❯ input line
                 if _ts.strip():
@@ -119,7 +119,7 @@ def test_long_user_message_stays_inside_panel():
 
     from rich.console import Console
 
-    from src.ui.turns import print_user_turn
+    from cogtrix_core.ui.turns import print_user_turn
 
     buf = StringIO()
     console = Console(file=buf, highlight=False, markup=False, width=80, no_color=True)
@@ -164,7 +164,7 @@ def test_short_user_message_unchanged():
 
     from rich.console import Console
 
-    from src.ui.turns import print_user_turn
+    from cogtrix_core.ui.turns import print_user_turn
 
     buf = StringIO()
     console = Console(file=buf, highlight=False, markup=False, width=80, no_color=True)

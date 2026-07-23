@@ -19,7 +19,7 @@ import pytest
 
 @pytest.mark.asyncio
 async def test_run_message_turn_sanitizes_runner_exception(monkeypatch: pytest.MonkeyPatch) -> None:
-    from src.api.turn_runner import run_message_turn
+    from cogtrix_core.api.turn_runner import run_message_turn
 
     session = SimpleNamespace(
         id="sess-leak",
@@ -50,7 +50,7 @@ async def test_run_message_turn_sanitizes_runner_exception(monkeypatch: pytest.M
         raise _ProviderBoom(secret)
 
     # _run_message_turn_inner imports run_agent from this module at call time.
-    monkeypatch.setattr("src.orchestration.runner.run_agent", _raising_run_agent)
+    monkeypatch.setattr("cogtrix_core.orchestration.runner.run_agent", _raising_run_agent)
 
     await run_message_turn(session, "hello")
 
@@ -89,8 +89,8 @@ async def test_run_message_turn_agent_execution_error_is_error_frame_and_sanitiz
     proper error frame (not a normal done(text=...) with the error as the reply),
     and the curated message must still be sanitized — the model id and other
     internals must not leak to API clients (preserves the #2114 guarantee)."""
-    from src.agent.safety import AgentExecutionError
-    from src.api.turn_runner import run_message_turn
+    from cogtrix_core.agent.safety import AgentExecutionError
+    from cogtrix_core.api.turn_runner import run_message_turn
 
     session = SimpleNamespace(
         id="sess-agenterr",
@@ -113,7 +113,7 @@ async def test_run_message_turn_agent_execution_error_is_error_frame_and_sanitiz
     def _raising_run_agent(*args: object, **kwargs: object) -> str:
         raise AgentExecutionError(curated)
 
-    monkeypatch.setattr("src.orchestration.runner.run_agent", _raising_run_agent)
+    monkeypatch.setattr("cogtrix_core.orchestration.runner.run_agent", _raising_run_agent)
 
     await run_message_turn(session, "hello")
 

@@ -44,7 +44,7 @@ def _patched_run(mode: str, session: MagicMock | None = None) -> tuple[MagicMock
     captured_warnings: list[str] = []
 
     # Capture the log instance that turn_runner uses.
-    import src.api.turn_runner as _tr_mod
+    import cogtrix_core.api.turn_runner as _tr_mod
 
     def _capture(msg: str, *args: object, **kwargs: object) -> None:
         captured_warnings.append(msg % args if args else msg)
@@ -54,14 +54,14 @@ def _patched_run(mode: str, session: MagicMock | None = None) -> tuple[MagicMock
     async def _run_inner() -> None:
         with (
             # Patch classes imported inside the function body
-            patch("src.api.callbacks.WebSocketCallbackHandler", return_value=fake_ws_cb),
-            patch("src.api.confirmation.ApiConfirmationUI", return_value=MagicMock()),
+            patch("cogtrix_core.api.callbacks.WebSocketCallbackHandler", return_value=fake_ws_cb),
+            patch("cogtrix_core.api.confirmation.ApiConfirmationUI", return_value=MagicMock()),
             # Patch run_agent at its definition site so the import inside
             # run_message_turn gets the patched version.
-            patch("src.orchestration.runner.run_agent", return_value="ok"),
+            patch("cogtrix_core.orchestration.runner.run_agent", return_value="ok"),
             patch.object(_tr_mod.log, "warning", side_effect=_capture),
         ):
-            from src.api.turn_runner import run_message_turn
+            from cogtrix_core.api.turn_runner import run_message_turn
 
             await run_message_turn(session=session, text="hello", mode=mode)
 
@@ -94,7 +94,7 @@ def test_last_activity_updated_after_successful_turn() -> None:
 
 def test_run_agent_no_dead_code_comment() -> None:
     """The dead-code comment 'BUG-NEW' must not appear in handler.py."""
-    src_text = pathlib.Path("src/assistant/handler.py").read_text()
+    src_text = pathlib.Path("cogtrix_core/assistant/handler.py").read_text()
     assert "BUG-NEW" not in src_text, (
         "The dead-code comment 'BUG-NEW' must not appear in handler.py "
         "after the fix was applied."
@@ -108,7 +108,7 @@ def test_run_agent_has_exactly_three_returns() -> None:
     The AgentExecutionError branch was added in #2124 so the assistant surfaces
     run_agent's actionable failure message instead of the generic prefix; it is a
     legitimate path, not dead code."""
-    src_text = pathlib.Path("src/assistant/handler.py").read_text()
+    src_text = pathlib.Path("cogtrix_core/assistant/handler.py").read_text()
     tree = ast.parse(src_text)
 
     method_body: list[ast.stmt] | None = None
@@ -154,7 +154,7 @@ def test_unknown_mode_logs_warning() -> None:
 
 def test_think_mode_invokes_pipeline() -> None:
     """run_message_turn() mode='think' must invoke the deep-think pipeline."""
-    import src.api.turn_runner as _tr_mod
+    import cogtrix_core.api.turn_runner as _tr_mod
 
     with patch.object(_tr_mod, "_run_think_pipeline", return_value="deep result") as mock_think:
         _patched_run("think")
@@ -163,7 +163,7 @@ def test_think_mode_invokes_pipeline() -> None:
 
 def test_delegate_mode_invokes_pipeline() -> None:
     """run_message_turn() mode='delegate' must invoke the delegation pipeline."""
-    import src.api.turn_runner as _tr_mod
+    import cogtrix_core.api.turn_runner as _tr_mod
 
     with patch.object(
         _tr_mod, "_run_delegate_pipeline", return_value="delegated result"

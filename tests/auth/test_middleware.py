@@ -5,9 +5,9 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, FastAPI  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
-from src.api.auth import TokenData, get_current_user  # noqa: E402
-from src.auth.middleware import require  # noqa: E402
-from src.auth.permissions import Permission  # noqa: E402
+from cogtrix_core.api.auth import TokenData, get_current_user  # noqa: E402
+from cogtrix_core.auth.middleware import require  # noqa: E402
+from cogtrix_core.auth.permissions import Permission  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -176,7 +176,7 @@ class TestRequirePerformance:
     def test_permission_check_is_fast(self):
         import time
 
-        from src.auth.permissions import has_permission
+        from cogtrix_core.auth.permissions import has_permission
 
         start = time.perf_counter()
         for _ in range(100_000):

@@ -34,8 +34,8 @@ class TestFlushAllCancelsPostSnapshotTimers:
     """
 
     def _make_buffer(self, handler=None, executor=None):
-        from src.assistant.channel import IncomingMessage
-        from src.assistant.poller import MessageBuffer
+        from cogtrix_core.assistant.channel import IncomingMessage
+        from cogtrix_core.assistant.poller import MessageBuffer
 
         h = handler or MagicMock()
         ex = executor or MagicMock()
@@ -62,8 +62,8 @@ class TestFlushAllCancelsPostSnapshotTimers:
 
         The correct behaviour: new timers survive flush_all() and fire normally.
         """
-        from src.assistant.channel import Channel
-        from src.assistant.poller import MessageBuffer
+        from cogtrix_core.assistant.channel import Channel
+        from cogtrix_core.assistant.poller import MessageBuffer
 
         handler = MagicMock()
         executor = MagicMock()
@@ -71,7 +71,7 @@ class TestFlushAllCancelsPostSnapshotTimers:
 
         channel_mock = MagicMock(spec=Channel)
 
-        from src.assistant.channel import IncomingMessage
+        from cogtrix_core.assistant.channel import IncomingMessage
 
         msg1 = self._make_msg(IncomingMessage, chat_id="100")
         msg2 = self._make_msg(IncomingMessage, chat_id="200")
@@ -99,15 +99,15 @@ class TestFlushAllCancelsPostSnapshotTimers:
 
     def test_flush_all_no_new_timer_leaves_state_clean(self):
         """When no new messages arrive during flush, state is clean afterwards."""
-        from src.assistant.channel import Channel
-        from src.assistant.poller import MessageBuffer
+        from cogtrix_core.assistant.channel import Channel
+        from cogtrix_core.assistant.poller import MessageBuffer
 
         handler = MagicMock()
         executor = MagicMock()
         buf = MessageBuffer(handler, executor, debounce_seconds=60.0)
 
         channel_mock = MagicMock(spec=Channel)
-        from src.assistant.channel import IncomingMessage
+        from cogtrix_core.assistant.channel import IncomingMessage
 
         msg = self._make_msg(IncomingMessage, chat_id="42")
         buf.add(msg, channel_mock)
@@ -128,7 +128,7 @@ class TestCompressionPoolReuse:
     """_get_compression_pool must return a module-level ThreadPoolExecutor."""
 
     def test_pool_is_thread_pool_executor(self):
-        from src.orchestration.compression import _get_compression_pool
+        from cogtrix_core.orchestration.compression import _get_compression_pool
 
         assert isinstance(_get_compression_pool(), concurrent.futures.ThreadPoolExecutor)
 
@@ -139,7 +139,7 @@ class TestCompressionPoolReuse:
         except ImportError:
             pytest.skip("langchain_core not installed")
 
-        from src.orchestration.compression import apply_message_compression
+        from cogtrix_core.orchestration.compression import apply_message_compression
 
         old_ais = [AIMessage(content="step") for _ in range(5)]
         long_content = "x" * 50_000
@@ -179,7 +179,7 @@ class TestCompressionPoolReuse:
         except ImportError:
             pytest.skip("langchain_core not installed")
 
-        from src.orchestration.compression import apply_message_compression
+        from cogtrix_core.orchestration.compression import apply_message_compression
 
         old_ais = [AIMessage(content="step") for _ in range(5)]
         long_content = "y" * 50_000
@@ -227,22 +227,22 @@ class TestToolExecutorReuse:
     """_get_tool_executor must return the same instance across calls."""
 
     def test_same_instance_returned(self):
-        from src.orchestration.graph import _get_tool_executor
+        from cogtrix_core.orchestration.graph import _get_tool_executor
 
         ex1 = _get_tool_executor()
         ex2 = _get_tool_executor()
         assert ex1 is ex2, "_get_tool_executor should return the same instance"
 
     def test_executor_is_thread_pool(self):
-        from src.orchestration.graph import _get_tool_executor
+        from cogtrix_core.orchestration.graph import _get_tool_executor
 
         ex = _get_tool_executor()
         assert isinstance(ex, concurrent.futures.ThreadPoolExecutor)
 
     def test_user_cancelled_run_propagates(self):
         """UserCancelledRun raised in a task submitted to the module-level executor propagates."""
-        from src.agent.safety import UserCancelledRun
-        from src.orchestration.graph import _get_tool_executor
+        from cogtrix_core.agent.safety import UserCancelledRun
+        from cogtrix_core.orchestration.graph import _get_tool_executor
 
         def _cancelling():
             raise UserCancelledRun()
@@ -255,8 +255,8 @@ class TestToolExecutorReuse:
     def test_user_cancelled_run_raised_after_all_futures(self):
         """When the first future raises UserCancelledRun, remaining futures still
         complete and the exception is detected on result() inspection."""
-        from src.agent.safety import UserCancelledRun
-        from src.orchestration.graph import _get_tool_executor
+        from cogtrix_core.agent.safety import UserCancelledRun
+        from cogtrix_core.orchestration.graph import _get_tool_executor
 
         def fast_cancel():
             raise UserCancelledRun()

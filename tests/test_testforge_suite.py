@@ -36,7 +36,7 @@ class TestWizardStepOutSchema:
     """WizardStepOut must expose a requires_acceptance bool field."""
 
     def test_requires_acceptance_defaults_to_false(self):
-        from src.api.schemas.config import WizardStepOut
+        from cogtrix_core.api.schemas.config import WizardStepOut
 
         step = WizardStepOut(
             wizard_id="wiz-001",
@@ -48,7 +48,7 @@ class TestWizardStepOutSchema:
         assert step.requires_acceptance is False
 
     def test_requires_acceptance_can_be_set_true(self):
-        from src.api.schemas.config import WizardStepOut
+        from cogtrix_core.api.schemas.config import WizardStepOut
 
         step = WizardStepOut(
             wizard_id="wiz-002",
@@ -61,7 +61,7 @@ class TestWizardStepOutSchema:
         assert step.requires_acceptance is True
 
     def test_requires_acceptance_serialises_in_json(self):
-        from src.api.schemas.config import WizardStepOut
+        from cogtrix_core.api.schemas.config import WizardStepOut
 
         step = WizardStepOut(
             wizard_id="wiz-003",
@@ -76,7 +76,7 @@ class TestWizardStepOutSchema:
         assert data["requires_acceptance"] is True
 
     def test_requires_acceptance_false_in_json(self):
-        from src.api.schemas.config import WizardStepOut
+        from cogtrix_core.api.schemas.config import WizardStepOut
 
         step = WizardStepOut(
             wizard_id="wiz-004",
@@ -89,7 +89,7 @@ class TestWizardStepOutSchema:
         assert data["requires_acceptance"] is False
 
     def test_wizard_step_out_has_all_required_fields(self):
-        from src.api.schemas.config import WizardStepOut
+        from cogtrix_core.api.schemas.config import WizardStepOut
 
         step = WizardStepOut(
             wizard_id="x",
@@ -113,7 +113,7 @@ class TestWizardStepOutSchema:
             assert field in data, f"missing field: {field}"
 
     def test_wizard_step_out_complete_true_with_acceptance(self):
-        from src.api.schemas.config import WizardStepOut
+        from cogtrix_core.api.schemas.config import WizardStepOut
 
         step = WizardStepOut(
             wizard_id="final-wiz",
@@ -138,7 +138,7 @@ class TestWorkflowDocumentOutSchema:
     """WorkflowDocumentOut must expose doc_id, filename, size_bytes, content_type, status."""
 
     def test_basic_construction(self):
-        from src.api.schemas.workflow import WorkflowDocumentOut
+        from cogtrix_core.api.schemas.workflow import WorkflowDocumentOut
 
         doc = WorkflowDocumentOut(
             doc_id=str(uuid.uuid4()),
@@ -151,7 +151,7 @@ class TestWorkflowDocumentOutSchema:
         assert doc.status is None
 
     def test_with_content_type_and_status(self):
-        from src.api.schemas.workflow import WorkflowDocumentOut
+        from cogtrix_core.api.schemas.workflow import WorkflowDocumentOut
 
         doc_id = str(uuid.uuid4())
         doc = WorkflowDocumentOut(
@@ -166,7 +166,7 @@ class TestWorkflowDocumentOutSchema:
         assert doc.status == "saved"
 
     def test_serialises_all_fields(self):
-        from src.api.schemas.workflow import WorkflowDocumentOut
+        from cogtrix_core.api.schemas.workflow import WorkflowDocumentOut
 
         doc = WorkflowDocumentOut(
             doc_id="abc-123",
@@ -183,7 +183,7 @@ class TestWorkflowDocumentOutSchema:
         assert data["status"] == "saved"
 
     def test_null_fields_allowed(self):
-        from src.api.schemas.workflow import WorkflowDocumentOut
+        from cogtrix_core.api.schemas.workflow import WorkflowDocumentOut
 
         doc = WorkflowDocumentOut(doc_id="x", filename="f.txt", size_bytes=0)
         data = doc.model_dump()
@@ -191,13 +191,13 @@ class TestWorkflowDocumentOutSchema:
         assert data["status"] is None
 
     def test_size_bytes_zero_is_valid(self):
-        from src.api.schemas.workflow import WorkflowDocumentOut
+        from cogtrix_core.api.schemas.workflow import WorkflowDocumentOut
 
         doc = WorkflowDocumentOut(doc_id="z", filename="empty.txt", size_bytes=0)
         assert doc.size_bytes == 0
 
     def test_large_size_bytes(self):
-        from src.api.schemas.workflow import WorkflowDocumentOut
+        from cogtrix_core.api.schemas.workflow import WorkflowDocumentOut
 
         large = 50 * 1024 * 1024  # 50 MB cap
         doc = WorkflowDocumentOut(doc_id="big", filename="big.pdf", size_bytes=large)
@@ -223,7 +223,7 @@ class TestCallbacksOnLlmStart:
 
     def test_on_llm_start_does_not_raise_with_full_serialized(self):
         pytest.importorskip("fastapi")
-        from src.api.callbacks import WebSocketCallbackHandler
+        from cogtrix_core.api.callbacks import WebSocketCallbackHandler
 
         q, loop = self._make_queue_and_loop()
         handler = WebSocketCallbackHandler(ws_queue=q, loop=loop)
@@ -236,7 +236,7 @@ class TestCallbacksOnLlmStart:
 
     def test_on_llm_start_handles_none_serialized(self):
         pytest.importorskip("fastapi")
-        from src.api.callbacks import WebSocketCallbackHandler
+        from cogtrix_core.api.callbacks import WebSocketCallbackHandler
 
         q, loop = self._make_queue_and_loop()
         handler = WebSocketCallbackHandler(ws_queue=q, loop=loop)
@@ -245,7 +245,7 @@ class TestCallbacksOnLlmStart:
 
     def test_on_llm_start_handles_empty_serialized(self):
         pytest.importorskip("fastapi")
-        from src.api.callbacks import WebSocketCallbackHandler
+        from cogtrix_core.api.callbacks import WebSocketCallbackHandler
 
         q, loop = self._make_queue_and_loop()
         handler = WebSocketCallbackHandler(ws_queue=q, loop=loop)
@@ -254,7 +254,7 @@ class TestCallbacksOnLlmStart:
 
     def test_on_llm_start_handles_serialized_with_only_id(self):
         pytest.importorskip("fastapi")
-        from src.api.callbacks import WebSocketCallbackHandler
+        from cogtrix_core.api.callbacks import WebSocketCallbackHandler
 
         q, loop = self._make_queue_and_loop()
         handler = WebSocketCallbackHandler(ws_queue=q, loop=loop)
@@ -267,7 +267,7 @@ class TestCallbacksOnLlmStart:
 
     def test_on_llm_start_handles_empty_prompts(self):
         pytest.importorskip("fastapi")
-        from src.api.callbacks import WebSocketCallbackHandler
+        from cogtrix_core.api.callbacks import WebSocketCallbackHandler
 
         q, loop = self._make_queue_and_loop()
         handler = WebSocketCallbackHandler(ws_queue=q, loop=loop)
@@ -276,7 +276,7 @@ class TestCallbacksOnLlmStart:
 
     def test_on_llm_start_large_prompt_does_not_raise(self):
         pytest.importorskip("fastapi")
-        from src.api.callbacks import WebSocketCallbackHandler
+        from cogtrix_core.api.callbacks import WebSocketCallbackHandler
 
         q, loop = self._make_queue_and_loop()
         handler = WebSocketCallbackHandler(ws_queue=q, loop=loop)
@@ -287,7 +287,7 @@ class TestCallbacksOnLlmStart:
     def test_on_llm_start_does_not_enqueue_message(self):
         """on_llm_start should only log — it must NOT enqueue a WS message."""
         pytest.importorskip("fastapi")
-        from src.api.callbacks import WebSocketCallbackHandler
+        from cogtrix_core.api.callbacks import WebSocketCallbackHandler
 
         q, loop = self._make_queue_and_loop()
         handler = WebSocketCallbackHandler(ws_queue=q, loop=loop)
@@ -307,7 +307,7 @@ class TestConfigOutSchema:
     """ConfigOut must expose system_prompt and guardrails."""
 
     def test_system_prompt_field_defaults_to_none(self):
-        from src.api.schemas.config import ConfigOut
+        from cogtrix_core.api.schemas.config import ConfigOut
 
         cfg = ConfigOut(
             memory_mode="conversation",
@@ -320,7 +320,7 @@ class TestConfigOutSchema:
         assert cfg.system_prompt is None
 
     def test_guardrails_field_defaults_to_none(self):
-        from src.api.schemas.config import ConfigOut
+        from cogtrix_core.api.schemas.config import ConfigOut
 
         cfg = ConfigOut(
             memory_mode="conversation",
@@ -333,7 +333,7 @@ class TestConfigOutSchema:
         assert cfg.guardrails is None
 
     def test_system_prompt_can_be_set(self):
-        from src.api.schemas.config import ConfigOut
+        from cogtrix_core.api.schemas.config import ConfigOut
 
         cfg = ConfigOut(
             memory_mode="conversation",
@@ -347,7 +347,7 @@ class TestConfigOutSchema:
         assert cfg.system_prompt == "You are a helpful assistant."
 
     def test_guardrails_can_be_set_as_dict(self):
-        from src.api.schemas.config import ConfigOut
+        from cogtrix_core.api.schemas.config import ConfigOut
 
         guardrail_cfg = {"enabled": True, "rate_limit": {"per_minute": 10}}
         cfg = ConfigOut(
@@ -362,7 +362,7 @@ class TestConfigOutSchema:
         assert cfg.guardrails == guardrail_cfg
 
     def test_config_out_serialises_new_fields(self):
-        from src.api.schemas.config import ConfigOut
+        from cogtrix_core.api.schemas.config import ConfigOut
 
         cfg = ConfigOut(
             memory_mode="reasoning",
@@ -391,7 +391,7 @@ class TestCallbacksOnLlmEnd:
 
     def _make_handler(self):
         pytest.importorskip("fastapi")
-        from src.api.callbacks import WebSocketCallbackHandler
+        from cogtrix_core.api.callbacks import WebSocketCallbackHandler
 
         loop = asyncio.new_event_loop()
 
@@ -497,7 +497,7 @@ class TestCallbacksTokenFinalFlag:
 
     def _make_handler(self):
         pytest.importorskip("fastapi")
-        from src.api.callbacks import WebSocketCallbackHandler
+        from cogtrix_core.api.callbacks import WebSocketCallbackHandler
 
         loop = asyncio.new_event_loop()
 
@@ -566,8 +566,8 @@ class TestWorkflowDocumentEndpointShape:
         pytest.importorskip("fastapi")
         from fastapi.testclient import TestClient
 
-        from src.api.app import create_app
-        from src.api.auth import create_access_token
+        from cogtrix_core.api.app import create_app
+        from cogtrix_core.api.auth import create_access_token
 
         app = create_app()
         admin_token = create_access_token(user_id=str(uuid.uuid4()), role="admin")
@@ -618,8 +618,8 @@ class TestWorkflowDocumentEndpointShape:
         pytest.importorskip("fastapi")
         from fastapi.testclient import TestClient
 
-        from src.api.app import create_app
-        from src.api.auth import create_access_token
+        from cogtrix_core.api.app import create_app
+        from cogtrix_core.api.auth import create_access_token
 
         app = create_app()
         admin_token = create_access_token(user_id=str(uuid.uuid4()), role="admin")
@@ -671,14 +671,14 @@ class TestWhatsAppConfigDefaults:
     """WhatsAppConfig.require_confirmation defaults to True (the class default)."""
 
     def test_dataclass_default_require_confirmation_is_true(self):
-        from src.tools.whatsapp import WhatsAppConfig
+        from cogtrix_core.tools.whatsapp import WhatsAppConfig
 
         cfg = WhatsAppConfig()
         assert cfg.require_confirmation is True
 
     def test_build_tool_configs_respects_require_confirmation_true(self):
         """_build_tool_configs() uses _cfg.require_confirmation for send tools."""
-        import src.tools.whatsapp as _wa
+        import cogtrix_core.tools.whatsapp as _wa
 
         with patch.object(_wa._cfg, "require_confirmation", True):
             with patch.object(_wa._cfg, "allow_send", True):
@@ -691,7 +691,7 @@ class TestWhatsAppConfigDefaults:
 
     def test_build_tool_configs_respects_require_confirmation_false(self):
         """When require_confirmation=False in config, send tools reflect that."""
-        import src.tools.whatsapp as _wa
+        import cogtrix_core.tools.whatsapp as _wa
 
         with patch.object(_wa._cfg, "require_confirmation", False):
             with patch.object(_wa._cfg, "allow_send", True):
@@ -703,7 +703,7 @@ class TestWhatsAppConfigDefaults:
             assert tool["requires_confirmation"] is False
 
     def test_check_and_contacts_tools_never_require_confirmation(self):
-        import src.tools.whatsapp as _wa
+        import cogtrix_core.tools.whatsapp as _wa
 
         with patch.object(_wa._cfg, "allow_send", True):
             with patch.object(_wa._cfg, "allow_receive", True):
@@ -723,20 +723,20 @@ class TestWorkflowDocumentOutImport:
     """WorkflowDocumentOut should be importable from the public schemas package."""
 
     def test_importable_from_workflow_module(self):
-        from src.api.schemas.workflow import WorkflowDocumentOut
+        from cogtrix_core.api.schemas.workflow import WorkflowDocumentOut
 
         assert WorkflowDocumentOut is not None
 
     def test_workflow_schemas_init_exports(self):
         """The workflow schemas module must expose WorkflowDocumentOut."""
-        import src.api.schemas.workflow as wf_schemas
+        import cogtrix_core.api.schemas.workflow as wf_schemas
 
         assert hasattr(wf_schemas, "WorkflowDocumentOut")
 
     def test_workflow_document_out_is_pydantic_model(self):
         from pydantic import BaseModel
 
-        from src.api.schemas.workflow import WorkflowDocumentOut
+        from cogtrix_core.api.schemas.workflow import WorkflowDocumentOut
 
         assert issubclass(WorkflowDocumentOut, BaseModel)
 
@@ -750,7 +750,7 @@ class TestConfigOutRawYaml:
     """ConfigOut.raw_yaml field must be present (null for non-admin)."""
 
     def test_raw_yaml_defaults_to_none(self):
-        from src.api.schemas.config import ConfigOut
+        from cogtrix_core.api.schemas.config import ConfigOut
 
         cfg = ConfigOut(
             memory_mode="conversation",
@@ -763,7 +763,7 @@ class TestConfigOutRawYaml:
         assert cfg.raw_yaml is None
 
     def test_raw_yaml_can_carry_yaml_string(self):
-        from src.api.schemas.config import ConfigOut
+        from cogtrix_core.api.schemas.config import ConfigOut
 
         yaml_str = "providers:\n  default:\n    type: ollama\n"
         cfg = ConfigOut(

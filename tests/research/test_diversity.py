@@ -1,6 +1,6 @@
 """Tests for source diversity tracking and contradiction detection."""
 
-from src.orchestration.research_delegate import (
+from cogtrix_core.orchestration.research_delegate import (
     ContradictionDetector,
     SourceSnapshot,
     SourceTracker,
@@ -376,7 +376,7 @@ class TestIntegration:
 
     def test_domain_extraction_from_urls(self):
         """Test that domains are correctly extracted from URLs."""
-        from src.tools.web_search import extract_domain
+        from cogtrix_core.tools.web_search import extract_domain
 
         assert extract_domain("https://github.com/user/repo") == "github.com"
         assert extract_domain("https://www.wikipedia.org/wiki/Article") == "wikipedia.org"

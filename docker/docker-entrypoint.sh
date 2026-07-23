@@ -28,7 +28,7 @@ WORK_DIR="${COGTRIX_WORKDIR:-$DATA_DIR/work}"
 mkdir -p "$WORK_DIR"
 cd "$WORK_DIR"
 # NOTE: after this cd the cwd is no longer /app, so every subsequent exec must
-# use absolute paths / module form (``python -m src.api`` via PYTHONPATH=/app,
+# use absolute paths / module form (``python -m cogtrix_core.api`` via PYTHONPATH=/app,
 # ``/app/cogtrix.py``, ``alembic -c /app/alembic.ini``) — a relative
 # ``python cogtrix.py`` would resolve against $WORK_DIR and fail (#2068).
 
@@ -74,7 +74,7 @@ if [ "${1}" = "api" ] || [ "${1}" = "--api" ]; then
     mkdir -p /run/cogtrix
     touch /run/cogtrix/api-mode
 
-    exec python -m src.api "$@"
+    exec python -m cogtrix_core.api "$@"
 fi
 
 # ── Interactive CLI mode ─────────────────────────────────────
@@ -88,9 +88,9 @@ fi
 # Tip: to reach an Ollama instance running on the Docker host, add
 # --network host so the wizard can auto-detect it at 127.0.0.1:11434.
 
-# Check all paths the Python config resolver searches (src/config.py:find_config_file).
+# Check all paths the Python config resolver searches (cogtrix_core/config.py:find_config_file).
 # Missing any of these would wrongly trigger the setup wizard even when a config exists.
-# XDG config files match what ``src/config.py:find_config_file`` searches
+# XDG config files match what ``cogtrix_core/config.py:find_config_file`` searches
 # for: ``cogtrix.json``/``cogtrix.yml``/``cogtrix.yaml`` with no leading
 # dot.  An earlier version of this script used ``.cogtrix.yaml`` here,
 # which silently disagreed with the Python resolver — anyone mounting an

@@ -55,7 +55,7 @@ class TestBug956CacheRace:
         These per-session caches need lock protection to prevent data races
         when concurrent API requests update them from different threads.
         """
-        from src.common.types import AgentRunConfig
+        from cogtrix_core.common.types import AgentRunConfig
 
         cfg = AgentRunConfig(
             llm=MagicMock(),
@@ -72,7 +72,7 @@ class TestBug956CacheRace:
         cache merges must hold a lock.  The per-session path must follow
         the same contract (see PR #995).
         """
-        from src.orchestration.runner import _cache_lock
+        from cogtrix_core.orchestration.runner import _cache_lock
 
         assert isinstance(_cache_lock, threading.Lock), "_cache_lock must be a threading.Lock"
 
@@ -83,7 +83,7 @@ class TestBug956CacheRace:
         type, concurrent cache merges from parallel API requests can corrupt
         bound_cache and compression_cache state.
         """
-        from src.orchestration.runner import _cache_lock
+        from cogtrix_core.orchestration.runner import _cache_lock
 
         # Acquire and release to verify it's a working lock.
         acquired = _cache_lock.acquire(blocking=False)
@@ -111,7 +111,7 @@ class TestBug957ExecutorLeak:
         This is the established singleton pattern.  The LLM executor
         (_get_llm_executor from PR #992) follows the same contract.
         """
-        from src.orchestration.graph import _get_tool_executor
+        from cogtrix_core.orchestration.graph import _get_tool_executor
 
         pool1 = _get_tool_executor()
         pool2 = _get_tool_executor()
@@ -119,7 +119,7 @@ class TestBug957ExecutorLeak:
 
     def test_tool_executor_is_thread_pool(self):
         """_get_tool_executor must return a ThreadPoolExecutor."""
-        from src.orchestration.graph import _get_tool_executor
+        from cogtrix_core.orchestration.graph import _get_tool_executor
 
         pool = _get_tool_executor()
         assert isinstance(
@@ -131,7 +131,7 @@ class TestBug957ExecutorLeak:
 
         An unbounded pool would leak threads the same way per-call pools do.
         """
-        from src.orchestration.graph import _get_tool_executor
+        from cogtrix_core.orchestration.graph import _get_tool_executor
 
         pool = _get_tool_executor()
         assert (
@@ -149,7 +149,7 @@ class TestBug957ExecutorLeak:
         """
         # The executor is created lazily; calling _get_tool_executor ensures
         # it exists and atexit is registered.  We verify it doesn't crash.
-        from src.orchestration.graph import _get_tool_executor
+        from cogtrix_core.orchestration.graph import _get_tool_executor
 
         pool = _get_tool_executor()
         # Verify the pool is alive and can accept work.
@@ -172,7 +172,7 @@ class TestBug958HitCountersEviction:
 
     def test_reset_rate_limits_clears_counters(self):
         """reset_rate_limits() must clear all hit counters."""
-        import src.api.rate_limit as rl
+        import cogtrix_core.api.rate_limit as rl
 
         with rl._counters_lock:
             key = ("127.0.0.1", "/test/reset")
@@ -186,7 +186,7 @@ class TestBug958HitCountersEviction:
 
     def test_per_route_rate_limit_enforces_window(self):
         """per_route_rate_limit must reject requests exceeding the window limit."""
-        import src.api.rate_limit as rl
+        import cogtrix_core.api.rate_limit as rl
 
         rl.reset_rate_limits()
 
@@ -213,7 +213,7 @@ class TestBug958HitCountersEviction:
         The rate-limit counters are accessed from multiple request-handling
         threads simultaneously.  Without a lock, counter updates are racy.
         """
-        import src.api.rate_limit as rl
+        import cogtrix_core.api.rate_limit as rl
 
         assert isinstance(
             rl._counters_lock, threading.Lock
@@ -225,7 +225,7 @@ class TestBug958HitCountersEviction:
         Regression guard: if keys collide (e.g. due to IP normalization bug),
         one client's rate limit would affect another client.
         """
-        import src.api.rate_limit as rl
+        import cogtrix_core.api.rate_limit as rl
 
         rl.reset_rate_limits()
 
@@ -262,7 +262,7 @@ class TestBug959PlanEnforcement:
 
     def test_require_api_call_capacity_exists(self):
         """The plan enforcement guard for org members must be importable."""
-        from src.api.plan_enforcement import require_api_call_capacity
+        from cogtrix_core.api.plan_enforcement import require_api_call_capacity
 
         assert callable(
             require_api_call_capacity
@@ -276,7 +276,7 @@ class TestBug959PlanEnforcement:
         PR #997 imports ``get_org_context`` into plan_enforcement for the
         ``maybe_require_api_call_capacity`` guard.
         """
-        from src.api.org_context import get_org_context, require_org_context
+        from cogtrix_core.api.org_context import get_org_context, require_org_context
 
         assert callable(get_org_context), "get_org_context must be callable"
         assert callable(require_org_context), "require_org_context must be callable"
@@ -291,7 +291,7 @@ class TestBug959PlanEnforcement:
         # The function is async — verify it's a coroutine function.
         import asyncio
 
-        from src.api.plan_enforcement import get_plan_limit_snapshot
+        from cogtrix_core.api.plan_enforcement import get_plan_limit_snapshot
 
         assert asyncio.iscoroutinefunction(
             get_plan_limit_snapshot
@@ -319,7 +319,7 @@ class TestBug961ToolLookupRace:
         The _tool_budget_lock (closure in build_agent_graph) must provide the
         same mutual-exclusion guarantee for _tool_lookup reads.
         """
-        from src.orchestration.graph import _TOOL_EXECUTOR_LOCK
+        from cogtrix_core.orchestration.graph import _TOOL_EXECUTOR_LOCK
 
         assert isinstance(
             _TOOL_EXECUTOR_LOCK, threading.Lock
@@ -331,7 +331,7 @@ class TestBug961ToolLookupRace:
         A lock held at import time indicates a deadlock or failure to release
         in a previous test/teardown cycle.
         """
-        from src.orchestration.graph import _TOOL_EXECUTOR_LOCK
+        from cogtrix_core.orchestration.graph import _TOOL_EXECUTOR_LOCK
 
         acquired = _TOOL_EXECUTOR_LOCK.acquire(blocking=False)
         if acquired:
@@ -345,7 +345,7 @@ class TestBug961ToolLookupRace:
         lock pattern used for executor singleton) can be acquired and that
         a second acquire-without-block fails, proving mutual exclusion.
         """
-        from src.orchestration.graph import _TOOL_EXECUTOR_LOCK
+        from cogtrix_core.orchestration.graph import _TOOL_EXECUTOR_LOCK
 
         acquired = _TOOL_EXECUTOR_LOCK.acquire(blocking=False)
         assert acquired, "First acquire must succeed"
@@ -368,7 +368,7 @@ class TestBug961ToolLookupRace:
         re-exported name in graph.py's module dict, not the actual global
         the function reads from.
         """
-        import src.orchestration.graph_runtime as graph_runtime
+        import cogtrix_core.orchestration.graph_runtime as graph_runtime
 
         pool1 = graph_runtime._get_tool_executor()
 
@@ -401,7 +401,7 @@ class TestBug906SubprocessTimeout:
 
     def test_pr_reference_is_valid_exists(self):
         """_pr_reference_is_valid must be a callable method."""
-        from src.assistant.handler import MessageHandler
+        from cogtrix_core.assistant.handler import MessageHandler
 
         assert callable(
             MessageHandler._pr_reference_is_valid
@@ -411,7 +411,7 @@ class TestBug906SubprocessTimeout:
         """When gh CLI is not available, validation returns True without error."""
         import shutil as shutil_mod
 
-        from src.assistant.handler import MessageHandler
+        from cogtrix_core.assistant.handler import MessageHandler
 
         # Simulate a handler with no gh CLI available
         handler = MessageHandler.__new__(MessageHandler)
@@ -430,7 +430,7 @@ class TestBug906SubprocessTimeout:
         """
         import inspect
 
-        from src.assistant.handler import MessageHandler
+        from cogtrix_core.assistant.handler import MessageHandler
 
         source = inspect.getsource(MessageHandler._pr_reference_is_valid)
         # Verify subprocess.run is called; the source should contain the
@@ -461,7 +461,7 @@ class TestBug908ExecutorInitCleanup:
         """AssistantService.__init__ must set self._executor before risky init."""
         import inspect
 
-        from src.assistant.service import AssistantService
+        from cogtrix_core.assistant.service import AssistantService
 
         source = inspect.getsource(AssistantService.__init__)
         # After the fix, executor creation happens early and is assigned to
@@ -475,7 +475,7 @@ class TestBug908ExecutorInitCleanup:
         """__init__ must have a cleanup path (finally/try/except) for executor."""
         import inspect
 
-        from src.assistant.service import AssistantService
+        from cogtrix_core.assistant.service import AssistantService
 
         source = inspect.getsource(AssistantService.__init__)
         # The fix (e074672) wraps init in try/finally to shut down the
@@ -505,7 +505,7 @@ class TestBug963SummaryStateLost:
         """save() must call _save_hybrid_meta in the common path."""
         import inspect
 
-        from src.memory.manager import BaseMemoryManager
+        from cogtrix_core.memory.manager import BaseMemoryManager
 
         source = inspect.getsource(BaseMemoryManager.save)
         assert (
@@ -521,7 +521,7 @@ class TestBug963SummaryStateLost:
         """
         import inspect
 
-        from src.memory.manager import BaseMemoryManager
+        from cogtrix_core.memory.manager import BaseMemoryManager
 
         source = inspect.getsource(BaseMemoryManager._run_slow_path)
         assert (
@@ -539,7 +539,7 @@ class TestBug963SummaryStateLost:
         # attribute. Verify it exists in the __init__ source.
         import inspect
 
-        from src.memory.manager import BaseMemoryManager
+        from cogtrix_core.memory.manager import BaseMemoryManager
 
         init_source = inspect.getsource(BaseMemoryManager.__init__)
         assert "_hybrid_lock" in init_source, "BaseMemoryManager.__init__ must create _hybrid_lock"
@@ -567,7 +567,7 @@ class TestBug964StaleFailureCount:
         """
         import inspect
 
-        from src.memory.manager import BaseMemoryManager
+        from cogtrix_core.memory.manager import BaseMemoryManager
 
         source = inspect.getsource(BaseMemoryManager._schedule_slow_path)
         lock_refs = source.count("_hybrid_lock")
@@ -580,7 +580,7 @@ class TestBug964StaleFailureCount:
         """_schedule_slow_path must reference _slow_path_failures."""
         import inspect
 
-        from src.memory.manager import BaseMemoryManager
+        from cogtrix_core.memory.manager import BaseMemoryManager
 
         source = inspect.getsource(BaseMemoryManager._schedule_slow_path)
         assert (
@@ -612,7 +612,7 @@ class TestBug965ShellNewlineInjection:
         """
         from unittest.mock import patch
 
-        from src.tools.shell import execute_shell_command
+        from cogtrix_core.tools.shell import execute_shell_command
 
         # The | metacharacter should already trigger shell=True, but the
         # newline preceding it is the injection vector — verify that the
@@ -638,7 +638,7 @@ class TestBug965ShellNewlineInjection:
         """
         import inspect
 
-        from src.tools.shell import execute_shell_command
+        from cogtrix_core.tools.shell import execute_shell_command
 
         source = inspect.getsource(execute_shell_command)
         # The fix must add '\\n' to _shell_meta.  Check for the pattern.
@@ -671,7 +671,7 @@ class TestBug966OrphanedGrandchildren:
         """The shell timeout handler must attempt os.killpg first."""
         import inspect
 
-        from src.tools.shell import execute_shell_command
+        from cogtrix_core.tools.shell import execute_shell_command
 
         source = inspect.getsource(execute_shell_command)
         assert "os.killpg" in source, "execute_shell_command timeout handler must call os.killpg"
@@ -680,7 +680,7 @@ class TestBug966OrphanedGrandchildren:
         """The timeout handler must have a fallback when os.killpg fails."""
         import inspect
 
-        from src.tools.shell import execute_shell_command
+        from cogtrix_core.tools.shell import execute_shell_command
 
         source = inspect.getsource(execute_shell_command)
         assert (
@@ -691,7 +691,7 @@ class TestBug966OrphanedGrandchildren:
         """subprocess.Popen must use start_new_session=True for process groups."""
         import inspect
 
-        from src.tools.shell import execute_shell_command
+        from cogtrix_core.tools.shell import execute_shell_command
 
         source = inspect.getsource(execute_shell_command)
         assert (
@@ -716,7 +716,7 @@ class TestBug967PatchFileOOM:
         """patch_file must call read_text (the OOM source)."""
         import inspect
 
-        from src.tools.file_ops import patch_file
+        from cogtrix_core.tools.file_ops import patch_file
 
         source = inspect.getsource(patch_file)
         assert "read_text" in source, "patch_file must read file content (the OOM risk point)"
@@ -730,7 +730,7 @@ class TestBug967PatchFileOOM:
         """
         import inspect
 
-        from src.tools.file_ops import read_file
+        from cogtrix_core.tools.file_ops import read_file
 
         source = inspect.getsource(read_file)
         assert (
@@ -741,7 +741,7 @@ class TestBug967PatchFileOOM:
         """read_file must have _MAX_READ_BYTES protection (existing pattern)."""
         import inspect
 
-        from src.tools.file_ops import read_file
+        from cogtrix_core.tools.file_ops import read_file
 
         source = inspect.getsource(read_file)
         assert (
@@ -765,7 +765,7 @@ class TestBug968And1072DelegateSandbox:
 
     def test_delegate_excluded_tools_is_frozenset(self):
         """_DELEGATE_EXCLUDED_TOOLS must be a frozenset."""
-        from src.tools.delegate import _DELEGATE_EXCLUDED_TOOLS
+        from cogtrix_core.tools.delegate import _DELEGATE_EXCLUDED_TOOLS
 
         assert isinstance(
             _DELEGATE_EXCLUDED_TOOLS, frozenset
@@ -773,7 +773,7 @@ class TestBug968And1072DelegateSandbox:
 
     def test_delegate_excluded_tools_not_empty(self):
         """_DELEGATE_EXCLUDED_TOOLS must not be empty."""
-        from src.tools.delegate import _DELEGATE_EXCLUDED_TOOLS
+        from cogtrix_core.tools.delegate import _DELEGATE_EXCLUDED_TOOLS
 
         assert (
             len(_DELEGATE_EXCLUDED_TOOLS) > 0
@@ -781,7 +781,7 @@ class TestBug968And1072DelegateSandbox:
 
     def test_delegate_excluded_tools_blocks_shell(self):
         """Delegate tools must exclude execute_shell_command."""
-        from src.tools.delegate import _DELEGATE_EXCLUDED_TOOLS
+        from cogtrix_core.tools.delegate import _DELEGATE_EXCLUDED_TOOLS
 
         assert (
             "execute_shell_command" in _DELEGATE_EXCLUDED_TOOLS
@@ -789,7 +789,7 @@ class TestBug968And1072DelegateSandbox:
 
     def test_delegate_excluded_tools_blocks_file_mutation(self):
         """Delegate tools must exclude file mutation tools."""
-        from src.tools.delegate import _DELEGATE_EXCLUDED_TOOLS
+        from cogtrix_core.tools.delegate import _DELEGATE_EXCLUDED_TOOLS
 
         for tool in ("write_file", "patch_file", "append_file"):
             assert tool in _DELEGATE_EXCLUDED_TOOLS, f"{tool} must be excluded from delegate tools"
@@ -800,7 +800,7 @@ class TestBug968And1072DelegateSandbox:
         Adding git_add, git_commit, git_create_branch, and git_checkout to
         the excluded set closes the delegate git bypass (bug #968).
         """
-        from src.tools.delegate import _DELEGATE_EXCLUDED_TOOLS
+        from cogtrix_core.tools.delegate import _DELEGATE_EXCLUDED_TOOLS
 
         required_git_exclusions = {
             "git_add",
@@ -819,7 +819,7 @@ class TestBug968And1072DelegateSandbox:
 
         Delegates must not be able to schedule recurring LLM prompt jobs.
         """
-        from src.tools.delegate import _DELEGATE_EXCLUDED_TOOLS
+        from cogtrix_core.tools.delegate import _DELEGATE_EXCLUDED_TOOLS
 
         for tool in ("cron_add", "cron_remove"):
             assert tool in _DELEGATE_EXCLUDED_TOOLS, f"{tool} must be excluded from delegate tools"
@@ -829,7 +829,7 @@ class TestBug968And1072DelegateSandbox:
 
         Delegates must not be able to generate and write test files to disk.
         """
-        from src.tools.delegate import _DELEGATE_EXCLUDED_TOOLS
+        from cogtrix_core.tools.delegate import _DELEGATE_EXCLUDED_TOOLS
 
         assert (
             "generate_tests" in _DELEGATE_EXCLUDED_TOOLS
@@ -840,7 +840,7 @@ class TestBug968And1072DelegateSandbox:
 
         Delegates must not be able to create issues or post comments on GitHub.
         """
-        from src.tools.delegate import _DELEGATE_EXCLUDED_TOOLS
+        from cogtrix_core.tools.delegate import _DELEGATE_EXCLUDED_TOOLS
 
         for tool in ("gh_create_issue", "gh_comment_issue"):
             assert tool in _DELEGATE_EXCLUDED_TOOLS, f"{tool} must be excluded from delegate tools"
@@ -850,7 +850,7 @@ class TestBug968And1072DelegateSandbox:
 
         Delegates must not be able to modify the RAG knowledge base.
         """
-        from src.tools.delegate import _DELEGATE_EXCLUDED_TOOLS
+        from cogtrix_core.tools.delegate import _DELEGATE_EXCLUDED_TOOLS
 
         for tool in ("save_to_knowledge_base", "rag_ingest"):
             assert tool in _DELEGATE_EXCLUDED_TOOLS, f"{tool} must be excluded from delegate tools"
@@ -860,7 +860,7 @@ class TestBug968And1072DelegateSandbox:
 
         Delegates must not be able to create Google Calendar events.
         """
-        from src.tools.delegate import _DELEGATE_EXCLUDED_TOOLS
+        from cogtrix_core.tools.delegate import _DELEGATE_EXCLUDED_TOOLS
 
         assert (
             "calendar_create_event" in _DELEGATE_EXCLUDED_TOOLS
@@ -871,7 +871,7 @@ class TestBug968And1072DelegateSandbox:
 
         Delegates must not be able to read or search user email — privacy-sensitive.
         """
-        from src.tools.delegate import _DELEGATE_EXCLUDED_TOOLS
+        from cogtrix_core.tools.delegate import _DELEGATE_EXCLUDED_TOOLS
 
         for tool in ("read_email", "search_email"):
             assert tool in _DELEGATE_EXCLUDED_TOOLS, f"{tool} must be excluded from delegate tools"
@@ -882,7 +882,7 @@ class TestBug968And1072DelegateSandbox:
         Delegates must not be able to check incoming WhatsApp or Telegram messages —
         privacy-sensitive.
         """
-        from src.tools.delegate import _DELEGATE_EXCLUDED_TOOLS
+        from cogtrix_core.tools.delegate import _DELEGATE_EXCLUDED_TOOLS
 
         for tool in ("whatsapp_check", "telegram_check"):
             assert tool in _DELEGATE_EXCLUDED_TOOLS, f"{tool} must be excluded from delegate tools"
@@ -891,7 +891,7 @@ class TestBug968And1072DelegateSandbox:
         """set_delegate_tools must filter out excluded tools."""
         from unittest.mock import MagicMock
 
-        from src.tools.delegate import set_delegate_tools
+        from cogtrix_core.tools.delegate import set_delegate_tools
 
         mock_tool = MagicMock()
         mock_tool.name = "git_commit"
@@ -928,7 +928,7 @@ class TestBug1524ToolClassification:
 
     def test_excluded_categories_frozenset_defined(self):
         """_DELEGATE_EXCLUDED_CATEGORIES must be a frozenset with all 6 categories."""
-        from src.tools.delegate import _DELEGATE_EXCLUDED_CATEGORIES
+        from cogtrix_core.tools.delegate import _DELEGATE_EXCLUDED_CATEGORIES
 
         assert isinstance(
             _DELEGATE_EXCLUDED_CATEGORIES, frozenset
@@ -940,7 +940,7 @@ class TestBug1524ToolClassification:
 
     def test_tool_categories_registry_populated(self):
         """_TOOL_CATEGORIES must be populated by register_tool_categories() calls."""
-        from src.tools.delegate import _TOOL_CATEGORIES
+        from cogtrix_core.tools.delegate import _TOOL_CATEGORIES
 
         assert (
             len(_TOOL_CATEGORIES) > 0
@@ -956,7 +956,7 @@ class TestBug1524ToolClassification:
 
     def test_category_readonly_not_excluded(self):
         """Tools with category='readonly' must NOT be excluded from delegates."""
-        from src.tools.delegate import _is_tool_excluded
+        from cogtrix_core.tools.delegate import _is_tool_excluded
 
         class FakeReadonlyTool:
             name = "fake_readonly_tool"
@@ -964,7 +964,7 @@ class TestBug1524ToolClassification:
 
         tool = FakeReadonlyTool()
         # Manually register it as readonly for this test
-        from src.tools.delegate import _TOOL_CATEGORIES
+        from cogtrix_core.tools.delegate import _TOOL_CATEGORIES
 
         _TOOL_CATEGORIES["fake_readonly_tool"] = "readonly"
 
@@ -977,14 +977,14 @@ class TestBug1524ToolClassification:
 
     def test_category_mutation_excluded(self):
         """Tools with category='mutation' must be excluded from delegates."""
-        from src.tools.delegate import _is_tool_excluded
+        from cogtrix_core.tools.delegate import _is_tool_excluded
 
         class FakeMutationTool:
             name = "fake_mutation_tool"
             delegate_exclude_override = False
 
         tool = FakeMutationTool()
-        from src.tools.delegate import _TOOL_CATEGORIES
+        from cogtrix_core.tools.delegate import _TOOL_CATEGORIES
 
         _TOOL_CATEGORIES["fake_mutation_tool"] = "mutation"
 
@@ -995,14 +995,14 @@ class TestBug1524ToolClassification:
 
     def test_category_privacy_excluded(self):
         """Tools with category='privacy' must be excluded from delegates."""
-        from src.tools.delegate import _is_tool_excluded
+        from cogtrix_core.tools.delegate import _is_tool_excluded
 
         class FakePrivacyTool:
             name = "fake_privacy_tool"
             delegate_exclude_override = False
 
         tool = FakePrivacyTool()
-        from src.tools.delegate import _TOOL_CATEGORIES
+        from cogtrix_core.tools.delegate import _TOOL_CATEGORIES
 
         _TOOL_CATEGORIES["fake_privacy_tool"] = "privacy"
 
@@ -1013,14 +1013,14 @@ class TestBug1524ToolClassification:
 
     def test_category_recursive_excluded(self):
         """Tools with category='recursive' must be excluded from delegates."""
-        from src.tools.delegate import _is_tool_excluded
+        from cogtrix_core.tools.delegate import _is_tool_excluded
 
         class FakeRecursiveTool:
             name = "fake_recursive_tool"
             delegate_exclude_override = False
 
         tool = FakeRecursiveTool()
-        from src.tools.delegate import _TOOL_CATEGORIES
+        from cogtrix_core.tools.delegate import _TOOL_CATEGORIES
 
         _TOOL_CATEGORIES["fake_recursive_tool"] = "recursive"
 
@@ -1031,14 +1031,14 @@ class TestBug1524ToolClassification:
 
     def test_category_messaging_excluded(self):
         """Tools with category='messaging' must be excluded from delegates."""
-        from src.tools.delegate import _is_tool_excluded
+        from cogtrix_core.tools.delegate import _is_tool_excluded
 
         class FakeMessagingTool:
             name = "fake_messaging_tool"
             delegate_exclude_override = False
 
         tool = FakeMessagingTool()
-        from src.tools.delegate import _TOOL_CATEGORIES
+        from cogtrix_core.tools.delegate import _TOOL_CATEGORIES
 
         _TOOL_CATEGORIES["fake_messaging_tool"] = "messaging"
 
@@ -1049,14 +1049,14 @@ class TestBug1524ToolClassification:
 
     def test_category_scheduling_excluded(self):
         """Tools with category='scheduling' must be excluded from delegates."""
-        from src.tools.delegate import _is_tool_excluded
+        from cogtrix_core.tools.delegate import _is_tool_excluded
 
         class FakeSchedulingTool:
             name = "fake_scheduling_tool"
             delegate_exclude_override = False
 
         tool = FakeSchedulingTool()
-        from src.tools.delegate import _TOOL_CATEGORIES
+        from cogtrix_core.tools.delegate import _TOOL_CATEGORIES
 
         _TOOL_CATEGORIES["fake_scheduling_tool"] = "scheduling"
 
@@ -1069,14 +1069,14 @@ class TestBug1524ToolClassification:
 
     def test_category_confirmation_excluded(self):
         """Tools with category='confirmation' must be excluded from delegates."""
-        from src.tools.delegate import _is_tool_excluded
+        from cogtrix_core.tools.delegate import _is_tool_excluded
 
         class FakeConfirmationTool:
             name = "fake_confirmation_tool"
             delegate_exclude_override = False
 
         tool = FakeConfirmationTool()
-        from src.tools.delegate import _TOOL_CATEGORIES
+        from cogtrix_core.tools.delegate import _TOOL_CATEGORIES
 
         _TOOL_CATEGORIES["fake_confirmation_tool"] = "confirmation"
 
@@ -1089,14 +1089,14 @@ class TestBug1524ToolClassification:
 
     def test_delegate_exclude_override_allows_opt_out(self):
         """Tools with delegate_exclude_override=True must NOT be excluded even if in excluded category."""
-        from src.tools.delegate import _is_tool_excluded
+        from cogtrix_core.tools.delegate import _is_tool_excluded
 
         class FakeOverrideTool:
             name = "fake_override_tool"
             delegate_exclude_override = True
 
         tool = FakeOverrideTool()
-        from src.tools.delegate import _TOOL_CATEGORIES
+        from cogtrix_core.tools.delegate import _TOOL_CATEGORIES
 
         _TOOL_CATEGORIES["fake_override_tool"] = "mutation"
 
@@ -1109,7 +1109,7 @@ class TestBug1524ToolClassification:
 
     def test_legacy_name_based_exclusion_still_works(self):
         """Tools in _DELEGATE_EXCLUDED_TOOLS must still be excluded (backward compat)."""
-        from src.tools.delegate import _DELEGATE_EXCLUDED_TOOLS, _is_tool_excluded
+        from cogtrix_core.tools.delegate import _DELEGATE_EXCLUDED_TOOLS, _is_tool_excluded
 
         class FakeLegacyTool:
             name = "execute_shell_command"
@@ -1130,7 +1130,11 @@ class TestBug1524ToolClassification:
         """set_delegate_tools must filter out tools in excluded categories."""
         from unittest.mock import MagicMock
 
-        from src.tools.delegate import _TOOL_CATEGORIES, get_delegate_tools, set_delegate_tools
+        from cogtrix_core.tools.delegate import (
+            _TOOL_CATEGORIES,
+            get_delegate_tools,
+            set_delegate_tools,
+        )
 
         # Create mock tools in each category
         readonly_tool = MagicMock()
@@ -1176,7 +1180,7 @@ class TestBug1524ToolClassification:
             "confirmation",
         }
 
-        tool_dir = os.path.join(os.path.dirname(__file__), "..", "src", "tools")
+        tool_dir = os.path.join(os.path.dirname(__file__), "..", "cogtrix_core", "tools")
         failures = []
 
         for filename in sorted(os.listdir(tool_dir)):
@@ -1259,33 +1263,33 @@ class TestBug1524ToolClassification:
         # This ensures the registry is fully populated regardless of import order.
         # noqa: F401 — imports are for side-effect (module load → category registration)
         # noqa: I001 — block must stay as-is; isort would break side-effect grouping
-        import src.tools.agent_messaging  # noqa: F401, I001
-        import src.tools.agent_tools  # noqa: F401
-        import src.tools.calendar_tools  # noqa: F401
-        import src.tools.cron_tools  # noqa: F401
-        import src.tools.datetime_tool  # noqa: F401
-        import src.tools.email_tools  # noqa: F401
-        import src.tools.exa_search  # noqa: F401
-        import src.tools.file_ops  # noqa: F401
-        import src.tools.generate_tests  # noqa: F401
-        import src.tools.github_tools  # noqa: F401
-        import src.tools.goal_tools  # noqa: F401
-        import src.tools.git_tools  # noqa: F401
-        import src.tools.http_request  # noqa: F401
-        import src.tools.json_tool  # noqa: F401
-        import src.tools.nlp_tools  # noqa: F401
-        import src.tools.rag  # noqa: F401
-        import src.tools.searxng_search  # noqa: F401
-        import src.tools.self_improve  # noqa: F401
-        import src.tools.shell  # noqa: F401
-        import src.tools.slack_tools  # noqa: F401
-        import src.tools.tavily_search  # noqa: F401
-        import src.tools.text_tools  # noqa: F401
-        import src.tools.web_search  # noqa: F401
-        import src.tools.whatsapp  # noqa: F401
-        import src.tools.telegram  # noqa: F401
+        import cogtrix_core.tools.agent_messaging  # noqa: F401, I001
+        import cogtrix_core.tools.agent_tools  # noqa: F401
+        import cogtrix_core.tools.calendar_tools  # noqa: F401
+        import cogtrix_core.tools.cron_tools  # noqa: F401
+        import cogtrix_core.tools.datetime_tool  # noqa: F401
+        import cogtrix_core.tools.email_tools  # noqa: F401
+        import cogtrix_core.tools.exa_search  # noqa: F401
+        import cogtrix_core.tools.file_ops  # noqa: F401
+        import cogtrix_core.tools.generate_tests  # noqa: F401
+        import cogtrix_core.tools.github_tools  # noqa: F401
+        import cogtrix_core.tools.goal_tools  # noqa: F401
+        import cogtrix_core.tools.git_tools  # noqa: F401
+        import cogtrix_core.tools.http_request  # noqa: F401
+        import cogtrix_core.tools.json_tool  # noqa: F401
+        import cogtrix_core.tools.nlp_tools  # noqa: F401
+        import cogtrix_core.tools.rag  # noqa: F401
+        import cogtrix_core.tools.searxng_search  # noqa: F401
+        import cogtrix_core.tools.self_improve  # noqa: F401
+        import cogtrix_core.tools.shell  # noqa: F401
+        import cogtrix_core.tools.slack_tools  # noqa: F401
+        import cogtrix_core.tools.tavily_search  # noqa: F401
+        import cogtrix_core.tools.text_tools  # noqa: F401
+        import cogtrix_core.tools.web_search  # noqa: F401
+        import cogtrix_core.tools.whatsapp  # noqa: F401
+        import cogtrix_core.tools.telegram  # noqa: F401
 
-        from src.tools.delegate import _TOOL_CATEGORIES
+        from cogtrix_core.tools.delegate import _TOOL_CATEGORIES
 
         # Verify no tool has None as its category value (would indicate malformed registration)
         null_categories = [name for name, cat in _TOOL_CATEGORIES.items() if cat is None]
@@ -1318,7 +1322,7 @@ class TestBug969BanditReturnCode:
 
     def test_run_function_returns_returncode(self):
         """_run must return the subprocess returncode as first element."""
-        from src.tools.self_improve import _run
+        from cogtrix_core.tools.self_improve import _run
 
         rc, stdout, stderr = _run(["echo", "hello"])
         assert isinstance(rc, int), "_run must return an integer return code as first element"
@@ -1326,7 +1330,7 @@ class TestBug969BanditReturnCode:
 
     def test_run_function_handles_missing_command(self):
         """_run must handle missing command gracefully."""
-        from src.tools.self_improve import _run
+        from cogtrix_core.tools.self_improve import _run
 
         rc, stdout, stderr = _run(["nonexistent_command_xyz_123"])
         assert isinstance(rc, int), "_run must return an integer even for missing commands"
@@ -1339,7 +1343,7 @@ class TestBug969BanditReturnCode:
         """
         import inspect
 
-        from src.tools.self_improve import self_improve
+        from cogtrix_core.tools.self_improve import self_improve
 
         source = inspect.getsource(self_improve)
         assert (
@@ -1350,14 +1354,14 @@ class TestBug969BanditReturnCode:
         """self_improve must capture _ruff_rc from _run."""
         import inspect
 
-        from src.tools.self_improve import self_improve
+        from cogtrix_core.tools.self_improve import self_improve
 
         source = inspect.getsource(self_improve)
         assert "_ruff_rc" in source, "self_improve must capture _ruff_rc from the ruff subprocess"
 
     def test_parse_ruff_handles_empty_stdout(self):
         """_parse_ruff must handle empty stdout gracefully."""
-        from src.tools.self_improve import _parse_ruff
+        from cogtrix_core.tools.self_improve import _parse_ruff
 
         result = _parse_ruff("", cap=10)
         assert isinstance(result, list), "_parse_ruff must return a list"
@@ -1365,7 +1369,7 @@ class TestBug969BanditReturnCode:
 
     def test_parse_bandit_handles_empty_stdout(self):
         """_parse_bandit must handle empty stdout gracefully."""
-        from src.tools.self_improve import _parse_bandit
+        from cogtrix_core.tools.self_improve import _parse_bandit
 
         result = _parse_bandit("", cap=10)
         assert isinstance(result, list), "_parse_bandit must return a list"
@@ -1389,7 +1393,7 @@ class TestBug972GithubToolsTimeout:
         """github_tools module must use subprocess.run for gh CLI calls."""
         import inspect
 
-        from src.tools import github_tools
+        from cogtrix_core.tools import github_tools
 
         source = inspect.getsource(github_tools)
         assert (
@@ -1405,7 +1409,7 @@ class TestBug972GithubToolsTimeout:
         """
         import inspect
 
-        from src.tools import github_tools
+        from cogtrix_core.tools import github_tools
 
         source = inspect.getsource(github_tools)
         # Count subprocess.run calls
@@ -1440,7 +1444,7 @@ class TestBug973AgentMessagingRace:
         """Both send and read must use atomic_write_json for writes."""
         import inspect
 
-        from src.tools.agent_messaging import (
+        from cogtrix_core.tools.agent_messaging import (
             _locked_read_modify_write,
             read_agent_inbox,
             send_to_agent,
@@ -1463,19 +1467,19 @@ class TestBug973AgentMessagingRace:
 
     def test_send_to_agent_is_callable(self):
         """send_to_agent must be callable."""
-        from src.tools.agent_messaging import send_to_agent
+        from cogtrix_core.tools.agent_messaging import send_to_agent
 
         assert callable(send_to_agent), "send_to_agent must be callable"
 
     def test_read_agent_inbox_is_callable(self):
         """read_agent_inbox must be callable."""
-        from src.tools.agent_messaging import read_agent_inbox
+        from cogtrix_core.tools.agent_messaging import read_agent_inbox
 
         assert callable(read_agent_inbox), "read_agent_inbox must be callable"
 
     def test_inbox_path_is_per_agent(self):
         """Each agent must have its own inbox file (isolation)."""
-        from src.tools.agent_messaging import _inbox_path
+        from cogtrix_core.tools.agent_messaging import _inbox_path
 
         path_a = _inbox_path("agent-alpha")
         path_b = _inbox_path("agent-beta")
@@ -1483,7 +1487,7 @@ class TestBug973AgentMessagingRace:
 
     def test_validate_agent_name_rejects_empty(self):
         """_validate_agent_name must reject empty agent names."""
-        from src.tools.agent_messaging import _validate_agent_name
+        from cogtrix_core.tools.agent_messaging import _validate_agent_name
 
         err = _validate_agent_name("")
         assert err, "empty agent name must produce an error"
@@ -1493,7 +1497,7 @@ class TestBug973AgentMessagingRace:
 
         Returns ``None`` for valid names (no error), a string for errors.
         """
-        from src.tools.agent_messaging import _validate_agent_name
+        from cogtrix_core.tools.agent_messaging import _validate_agent_name
 
         err = _validate_agent_name("test-agent-42")
         assert err is None, f"valid agent name must not produce error, got: {err!r}"
@@ -1514,7 +1518,7 @@ class TestBug960WorkspaceIsolation:
 
     def test_get_workspace_context_exists(self):
         """get_workspace_context must be importable and callable."""
-        from src.api.workspace_context import get_workspace_context
+        from cogtrix_core.api.workspace_context import get_workspace_context
 
         assert callable(
             get_workspace_context
@@ -1522,7 +1526,7 @@ class TestBug960WorkspaceIsolation:
 
     def test_workspace_context_has_get_function(self):
         """workspace_context module must expose get_workspace_context."""
-        from src.api.workspace_context import get_workspace_context
+        from cogtrix_core.api.workspace_context import get_workspace_context
 
         assert callable(
             get_workspace_context
@@ -1531,14 +1535,14 @@ class TestBug960WorkspaceIsolation:
     def test_session_routes_importable(self):
         """Session routes module must be importable."""
         try:
-            import src.api.routes.sessions  # noqa: F401
+            import cogtrix_core.api.routes.sessions  # noqa: F401
         except ImportError as exc:
             raise AssertionError(f"Session routes module not importable: {exc}") from exc
 
     def test_message_routes_importable(self):
         """Message routes module must be importable."""
         try:
-            import src.api.routes.messages  # noqa: F401
+            import cogtrix_core.api.routes.messages  # noqa: F401
         except ImportError as exc:
             raise AssertionError(f"Message routes module not importable: {exc}") from exc
 
@@ -1558,21 +1562,21 @@ class TestBug962CredentialRedaction:
     def test_providers_init_is_importable(self):
         """providers __init__ module must be importable."""
         try:
-            import src.providers  # noqa: F401
+            import cogtrix_core.providers  # noqa: F401
         except ImportError as exc:
             raise AssertionError(f"providers module not importable: {exc}") from exc
 
     def test_google_provider_importable(self):
         """Google provider must be importable."""
         try:
-            import src.providers.google  # noqa: F401
+            import cogtrix_core.providers.google  # noqa: F401
         except ImportError as exc:
             raise AssertionError(f"Google provider not importable: {exc}") from exc
 
     def test_openai_provider_importable(self):
         """OpenAI provider must be importable."""
         try:
-            import src.providers.openai  # noqa: F401
+            import cogtrix_core.providers.openai  # noqa: F401
         except ImportError as exc:
             raise AssertionError(f"OpenAI provider not importable: {exc}") from exc
 
@@ -1581,7 +1585,7 @@ class TestBug962CredentialRedaction:
         import inspect
 
         try:
-            import src.providers as prov
+            import cogtrix_core.providers as prov
         except ImportError:
             return  # providers module not importable in test env
 
@@ -1590,7 +1594,7 @@ class TestBug962CredentialRedaction:
             return  # fix applied
 
         # The fix may also live in individual provider files
-        for mod_name in ("src.providers.google", "src.providers.openai"):
+        for mod_name in ("cogtrix_core.providers.google", "cogtrix_core.providers.openai"):
             try:
                 mod = __import__(mod_name, fromlist=["_redact_url"])
                 if hasattr(mod, "_redact_url"):

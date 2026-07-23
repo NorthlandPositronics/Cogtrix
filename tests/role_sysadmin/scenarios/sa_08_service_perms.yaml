@@ -1,0 +1,24 @@
+id: role_sa_08_service_perms
+area: breakfix
+title: Diagnose and fix a systemd service that fails on a permission fault
+
+description: |
+  Break-fix competency on a permissions problem: the box is seeded with a custom
+  systemd service whose ExecStart script is not executable, so the unit fails with
+  status=203/EXEC. The agent must read the failure, identify the permission root
+  cause (not "just reinstall"), fix it, and get the service running. The judge
+  grades whether the report names the executable-permission root cause.
+
+assignment: |
+  The "widget.service" on this server won't start — it's enabled but fails every
+  time. Please investigate why it's failing, fix the underlying problem, and get
+  the service running. Tell me what the root cause was.
+
+acceptance:
+  check: checks/sa_08_check.sh
+  seed: seeds/sa_08/setup.sh
+  requires_rootcause: true
+
+personas:
+  lead:
+    default_scope_answer: "Just get widget.service running; don't change what it does."

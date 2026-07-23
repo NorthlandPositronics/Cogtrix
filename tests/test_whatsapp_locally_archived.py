@@ -12,10 +12,10 @@ import collections
 import time
 from unittest.mock import MagicMock, patch
 
-from src.assistant.channels.whatsapp import WhatsAppChannel
+from cogtrix_core.assistant.channels.whatsapp import WhatsAppChannel
 
 try:
-    from src.tools._whatsapp_client import ChatOverview, Message
+    from cogtrix_core.tools._whatsapp_client import ChatOverview, Message
 except ImportError:
     import pytest
 
@@ -24,7 +24,7 @@ except ImportError:
 
 def _make_channel(filter_mode: str = "blacklist", contacts: list[str] | None = None):
     """Create a WhatsAppChannel with minimal attributes for unit testing."""
-    with patch("src.tools._whatsapp_client.WahaClient.__init__", return_value=None):
+    with patch("cogtrix_core.tools._whatsapp_client.WahaClient.__init__", return_value=None):
         ch = WhatsAppChannel.__new__(WhatsAppChannel)
         ch._chat_watermarks = {}
         ch._watermark_timestamps = {}

@@ -23,12 +23,14 @@ from tests.evaluation.runner import EvalScenario, ModelConfig, run_scenario
 
 def test_run_scenario_timeout_does_not_hang_at_exit(monkeypatch) -> None:
     class _HangingGraph:
-        def invoke(self, *_args: object, **_kwargs: object) -> dict:
+        # #2212: run_scenario now drives the graph via ``stream`` (production
+        # parity for step-limit recovery), so the hang must live there.
+        def stream(self, *_args: object, **_kwargs: object):
             time.sleep(60)
-            return {"messages": []}
+            yield {"messages": []}
 
     monkeypatch.setattr(
-        "src.orchestration.graph.build_agent_graph",
+        "cogtrix_core.orchestration.graph.build_agent_graph",
         lambda **_kw: _HangingGraph(),
     )
     monkeypatch.setattr(
@@ -87,7 +89,7 @@ def test_build_llm_deepseek_returns_deepseek_model(monkeypatch) -> None:
     the behavioural contract so a future revert will fail loudly.
     """
     monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key-for-regression-check")
-    from src.providers.openai import _DeepSeekChatModel
+    from cogtrix_core.providers.openai import _DeepSeekChatModel
     from tests.evaluation.runner import ModelConfig, _build_llm
 
     model = ModelConfig(

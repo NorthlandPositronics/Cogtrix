@@ -1,4 +1,4 @@
-"""Tests for src/cli/input.py — REPL input handling, history, and inline shell."""
+"""Tests for cogtrix_core/cli/input.py — REPL input handling, history, and inline shell."""
 
 from __future__ import annotations
 
@@ -13,14 +13,14 @@ from unittest.mock import MagicMock, patch
 
 class TestRunInlineShell:
     def test_empty_command_prints_usage(self, capsys):
-        from src.cli.input import run_inline_shell
+        from cogtrix_core.cli.input import run_inline_shell
 
         run_inline_shell("")
         captured = capsys.readouterr()
         assert "Usage:" in captured.out
 
     def test_simple_command_without_metacharacters(self):
-        from src.cli.input import run_inline_shell
+        from cogtrix_core.cli.input import run_inline_shell
 
         mock_proc = MagicMock()
         mock_proc.communicate.return_value = ("hello\n", "")
@@ -35,7 +35,7 @@ class TestRunInlineShell:
         assert args[0] == ["echo", "hello"]
 
     def test_metacharacter_command_uses_shell_true(self):
-        from src.cli.input import run_inline_shell
+        from cogtrix_core.cli.input import run_inline_shell
 
         mock_proc = MagicMock()
         mock_proc.communicate.return_value = ("out\n", "")
@@ -50,7 +50,7 @@ class TestRunInlineShell:
         assert args[0] == "ls | grep foo"
 
     def test_nonexistent_command_file_not_found(self, capsys):
-        from src.cli.input import run_inline_shell
+        from cogtrix_core.cli.input import run_inline_shell
 
         with patch(
             "subprocess.Popen",
@@ -63,7 +63,7 @@ class TestRunInlineShell:
         assert "nonexistent_command_xyz" in captured.out
 
     def test_command_timeout(self, capsys):
-        from src.cli.input import run_inline_shell
+        from cogtrix_core.cli.input import run_inline_shell
 
         mock_proc = MagicMock()
         mock_proc.communicate.side_effect = subprocess.TimeoutExpired("cmd", 30)
@@ -75,7 +75,7 @@ class TestRunInlineShell:
         assert "timed out" in captured.out.lower() or "timeout" in captured.out.lower()
 
     def test_output_truncation_when_too_large(self):
-        from src.cli.input import run_inline_shell
+        from cogtrix_core.cli.input import run_inline_shell
 
         large_output = "x" * 600_000
         mock_proc = MagicMock()
@@ -86,7 +86,7 @@ class TestRunInlineShell:
             run_inline_shell("cat bigfile")
 
     def test_stderr_appended_to_stdout(self):
-        from src.cli.input import run_inline_shell
+        from cogtrix_core.cli.input import run_inline_shell
 
         mock_proc = MagicMock()
         mock_proc.communicate.return_value = ("stdout\n", "stderr\n")
@@ -96,7 +96,7 @@ class TestRunInlineShell:
             run_inline_shell("cmd")
 
     def test_nonzero_exit_code_prints_code(self, capsys):
-        from src.cli.input import run_inline_shell
+        from cogtrix_core.cli.input import run_inline_shell
 
         mock_proc = MagicMock()
         mock_proc.communicate.return_value = ("", "")
@@ -109,7 +109,7 @@ class TestRunInlineShell:
         assert "exit code: 1" in captured.out
 
     def test_crlf_stripped_from_command(self):
-        from src.cli.input import run_inline_shell
+        from cogtrix_core.cli.input import run_inline_shell
 
         mock_proc = MagicMock()
         mock_proc.communicate.return_value = ("", "")
@@ -129,7 +129,7 @@ class TestRunInlineShell:
 
 class TestLoadInputHistory:
     def test_no_history_file_does_not_crash(self):
-        from src.cli import input as input_mod
+        from cogtrix_core.cli import input as input_mod
 
         mock_rl = MagicMock()
         mock_rl.read_history_file.side_effect = FileNotFoundError("no file")
@@ -138,7 +138,7 @@ class TestLoadInputHistory:
             input_mod.load_input_history()
 
     def test_existing_history_file_loaded(self, tmp_path):
-        from src.cli import input as input_mod
+        from cogtrix_core.cli import input as input_mod
 
         history_file = tmp_path / ".input_history"
         history_file.write_text("line1\nline2\n")
@@ -154,7 +154,7 @@ class TestLoadInputHistory:
         mock_rl.set_history_length.assert_called_once()
 
     def test_oserror_disables_history(self, capsys):
-        from src.cli import input as input_mod
+        from cogtrix_core.cli import input as input_mod
 
         input_mod._history_disabled = False
         mock_rl = MagicMock()
@@ -174,7 +174,7 @@ class TestLoadInputHistory:
 
 class TestSaveInputHistory:
     def test_creates_directory_and_writes_file(self, tmp_path):
-        from src.cli import input as input_mod
+        from cogtrix_core.cli import input as input_mod
 
         history_dir = tmp_path / "history"
         history_file = history_dir / ".input_history"
@@ -191,7 +191,7 @@ class TestSaveInputHistory:
         mock_rl.write_history_file.assert_called_once_with(str(history_file))
 
     def test_oserror_disables_history(self, capsys):
-        from src.cli import input as input_mod
+        from cogtrix_core.cli import input as input_mod
 
         mock_rl = MagicMock()
         mock_rl.write_history_file.side_effect = OSError("disk full")
@@ -205,7 +205,7 @@ class TestSaveInputHistory:
         assert "Could not save" in captured.out
 
     def test_skips_when_history_disabled(self):
-        from src.cli import input as input_mod
+        from cogtrix_core.cli import input as input_mod
 
         mock_rl = MagicMock()
 
@@ -216,7 +216,7 @@ class TestSaveInputHistory:
         mock_rl.write_history_file.assert_not_called()
 
     def test_skips_when_readline_unavailable(self):
-        from src.cli import input as input_mod
+        from cogtrix_core.cli import input as input_mod
 
         with patch.object(input_mod, "readline", None):
             input_mod._history_disabled = False
@@ -230,7 +230,7 @@ class TestSaveInputHistory:
 
 class TestReadMultiline:
     def test_normal_input_terminated_by_triple_quote(self):
-        from src.cli.input import read_multiline
+        from cogtrix_core.cli.input import read_multiline
 
         inputs = ["line1", "line2", '"""']
         with patch("builtins.input", side_effect=inputs):
@@ -239,7 +239,7 @@ class TestReadMultiline:
         assert result == "line1\nline2"
 
     def test_ctrl_c_returns_empty_string(self):
-        from src.cli.input import read_multiline
+        from cogtrix_core.cli.input import read_multiline
 
         with patch("builtins.input", side_effect=KeyboardInterrupt):
             result = read_multiline()
@@ -247,7 +247,7 @@ class TestReadMultiline:
         assert result == ""
 
     def test_eof_finishes_input(self):
-        from src.cli.input import read_multiline
+        from cogtrix_core.cli.input import read_multiline
 
         inputs = ["line1", EOFError]
         with patch("builtins.input", side_effect=inputs):
@@ -256,7 +256,7 @@ class TestReadMultiline:
         assert result == "line1"
 
     def test_first_line_included(self):
-        from src.cli.input import read_multiline
+        from cogtrix_core.cli.input import read_multiline
 
         inputs = ['"""']
         with patch("builtins.input", side_effect=inputs):
@@ -265,7 +265,7 @@ class TestReadMultiline:
         assert result == "prefill"
 
     def test_empty_input_with_just_delimiter(self):
-        from src.cli.input import read_multiline
+        from cogtrix_core.cli.input import read_multiline
 
         with patch("builtins.input", return_value='"""'):
             result = read_multiline()
@@ -280,7 +280,7 @@ class TestReadMultiline:
 
 class TestPrefillNextInput:
     def test_sets_startup_hook(self):
-        from src.cli import input as input_mod
+        from cogtrix_core.cli import input as input_mod
 
         mock_rl = MagicMock()
 
@@ -292,7 +292,7 @@ class TestPrefillNextInput:
         assert hook is not None
 
     def test_hook_inserts_text_and_clears(self):
-        from src.cli import input as input_mod
+        from cogtrix_core.cli import input as input_mod
 
         mock_rl = MagicMock()
 
@@ -305,7 +305,7 @@ class TestPrefillNextInput:
         mock_rl.set_startup_hook.assert_called_with(None)
 
     def test_noop_when_readline_unavailable(self):
-        from src.cli import input as input_mod
+        from cogtrix_core.cli import input as input_mod
 
         with patch.object(input_mod, "readline", None):
             input_mod.prefill_next_input("text")
@@ -318,7 +318,7 @@ class TestPrefillNextInput:
 
 class TestCompleter:
     def test_completes_slash_commands(self):
-        from src.cli import input as input_mod
+        from cogtrix_core.cli import input as input_mod
 
         mock_rl = MagicMock()
         mock_rl.get_line_buffer.return_value = "/com"
@@ -330,7 +330,7 @@ class TestCompleter:
         assert result == "/compact"
 
     def test_completes_second_slash_command(self):
-        from src.cli import input as input_mod
+        from cogtrix_core.cli import input as input_mod
 
         mock_rl = MagicMock()
         mock_rl.get_line_buffer.return_value = "/com"
@@ -344,7 +344,7 @@ class TestCompleter:
         assert result1 == "/compact-aggressive"
 
     def test_no_match_returns_none(self):
-        from src.cli import input as input_mod
+        from cogtrix_core.cli import input as input_mod
 
         mock_rl = MagicMock()
         mock_rl.get_line_buffer.return_value = "/zzz"
@@ -356,7 +356,7 @@ class TestCompleter:
         assert result is None
 
     def test_completes_at_file_paths(self, tmp_path, monkeypatch):
-        from src.cli import input as input_mod
+        from cogtrix_core.cli import input as input_mod
 
         monkeypatch.chdir(tmp_path)
         (tmp_path / "foo.txt").write_text("content")
@@ -370,7 +370,7 @@ class TestCompleter:
         assert result == "@foo.txt"
 
     def test_at_path_no_match_returns_none(self, tmp_path, monkeypatch):
-        from src.cli import input as input_mod
+        from cogtrix_core.cli import input as input_mod
 
         monkeypatch.chdir(tmp_path)
 
@@ -383,7 +383,7 @@ class TestCompleter:
         assert result is None
 
     def test_exception_swallowed_gracefully(self):
-        from src.cli import input as input_mod
+        from cogtrix_core.cli import input as input_mod
 
         mock_rl = MagicMock()
         mock_rl.get_line_buffer.side_effect = RuntimeError("boom")
@@ -394,7 +394,7 @@ class TestCompleter:
         assert result is None
 
     def test_noop_when_readline_unavailable(self):
-        from src.cli import input as input_mod
+        from cogtrix_core.cli import input as input_mod
 
         with patch.object(input_mod, "readline", None):
             result = input_mod._completer("", 0)
@@ -409,7 +409,7 @@ class TestCompleter:
 
 class TestSetupReadlineCompletion:
     def test_registers_completer(self):
-        from src.cli import input as input_mod
+        from cogtrix_core.cli import input as input_mod
 
         mock_rl = MagicMock()
 
@@ -420,7 +420,7 @@ class TestSetupReadlineCompletion:
         mock_rl.parse_and_bind.assert_called_once_with("tab: complete")
 
     def test_noop_when_readline_unavailable(self):
-        from src.cli import input as input_mod
+        from cogtrix_core.cli import input as input_mod
 
         with patch.object(input_mod, "readline", None):
             input_mod.setup_readline_completion()
@@ -433,21 +433,21 @@ class TestSetupReadlineCompletion:
 
 class TestHistoryPaths:
     def test_history_dir_uses_env_var(self, monkeypatch):
-        from src.cli import input as input_mod
+        from cogtrix_core.cli import input as input_mod
 
         monkeypatch.setenv("COGTRIX_DATA_DIR", "/tmp/cogtrix")
         result = input_mod._history_dir()
         assert result == Path("/tmp/cogtrix/history")
 
     def test_history_dir_fallback(self, monkeypatch):
-        from src.cli import input as input_mod
+        from cogtrix_core.cli import input as input_mod
 
         monkeypatch.delenv("COGTRIX_DATA_DIR", raising=False)
         result = input_mod._history_dir()
         assert result == Path("data/history")
 
     def test_history_file(self):
-        from src.cli import input as input_mod
+        from cogtrix_core.cli import input as input_mod
 
         with patch.object(input_mod, "_history_dir", return_value=Path("/tmp/history")):
             result = input_mod._history_file()
@@ -461,13 +461,13 @@ class TestHistoryPaths:
 
 class TestSetSlashCommands:
     def test_sets_commands(self):
-        from src.cli import input as input_mod
+        from cogtrix_core.cli import input as input_mod
 
         input_mod.set_slash_commands(["/foo", "/bar"])
         assert input_mod._slash_commands == ["/bar", "/foo"]
 
     def test_overwrites_existing(self):
-        from src.cli import input as input_mod
+        from cogtrix_core.cli import input as input_mod
 
         input_mod._slash_commands = ["/old"]
         input_mod.set_slash_commands(["/new"])

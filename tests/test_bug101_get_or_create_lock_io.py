@@ -17,8 +17,8 @@ import threading
 import time
 from unittest.mock import MagicMock, patch
 
-from src.assistant.channel import IncomingMessage
-from src.assistant.session import ChatSession, ChatSessionManager
+from cogtrix_core.assistant.channel import IncomingMessage
+from cogtrix_core.assistant.session import ChatSession, ChatSessionManager
 
 
 def _make_msg(channel: str = "telegram", chat_id: str = "42") -> IncomingMessage:

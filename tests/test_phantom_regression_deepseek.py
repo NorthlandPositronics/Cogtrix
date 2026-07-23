@@ -15,7 +15,7 @@ os.environ.setdefault("COGTRIX_DB_URL", "sqlite+aiosqlite:///:memory:")
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage  # noqa: E402
 
-from src.orchestration.graph import (  # noqa: E402
+from cogtrix_core.orchestration.graph import (  # noqa: E402
     _apply_context_message_cap,
     _looks_like_phantom_tool_markup,
     build_agent_graph,

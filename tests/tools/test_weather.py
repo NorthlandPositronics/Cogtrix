@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.tools.weather import (
+from cogtrix_core.tools.weather import (
     TOOL_CONFIG,
     WeatherQueryInput,
     _get_api_key,
@@ -30,7 +30,7 @@ class TestGetApiKey:
     def test_returns_none_when_not_set(self):
         """Returns None when no API key is configured."""
         with patch.dict("os.environ", {}, clear=True):
-            with patch("src.config.load_config", side_effect=ImportError):
+            with patch("cogtrix_core.config.load_config", side_effect=ImportError):
                 assert _get_api_key() is None
 
     def test_config_fallback(self):
@@ -39,34 +39,34 @@ class TestGetApiKey:
         mock_config.openweather_api_key = "config-key-456"
 
         with patch.dict("os.environ", {}, clear=True):
-            with patch("src.config.load_config", return_value=mock_config):
+            with patch("cogtrix_core.config.load_config", return_value=mock_config):
                 assert _get_api_key() == "config-key-456"
 
     def test_injected_config_takes_priority(self):
         """The TOOL_SETUP-injected key wins over the resolved config (#2101: the
         env-over-config-file precedence now lives in config resolution, not in a
         separate os.getenv step inside the tool)."""
-        from src.tools.weather import _weather_config
+        from cogtrix_core.tools.weather import _weather_config
 
         mock_config = MagicMock()
         mock_config.openweather_api_key = "cached-key"
 
         _weather_config["api_key"] = "injected-key"
         try:
-            with patch("src.config.get_cached_config", return_value=mock_config):
+            with patch("cogtrix_core.config.get_cached_config", return_value=mock_config):
                 assert _get_api_key() == "injected-key"
         finally:
             _weather_config.pop("api_key", None)
 
     def test_falls_back_to_cached_config(self):
         """With no injected key, the tool returns the cached config's value."""
-        from src.tools.weather import _weather_config
+        from cogtrix_core.tools.weather import _weather_config
 
         mock_config = MagicMock()
         mock_config.openweather_api_key = "cached-key"
 
         _weather_config.pop("api_key", None)
-        with patch("src.config.get_cached_config", return_value=mock_config):
+        with patch("cogtrix_core.config.get_cached_config", return_value=mock_config):
             assert _get_api_key() == "cached-key"
 
 
@@ -76,7 +76,7 @@ class TestGetWeatherNoKey:
     def test_returns_setup_instructions_when_no_key(self):
         """When no API key, returns helpful setup instructions."""
         with patch.dict("os.environ", {}, clear=True):
-            with patch("src.config.load_config", side_effect=ImportError):
+            with patch("cogtrix_core.config.load_config", side_effect=ImportError):
                 result = get_weather("London")
 
         assert "Weather API not configured" in result
@@ -126,7 +126,7 @@ class TestGetWeatherHappyPath:
         """Successful API call returns structured weather data (metric)."""
         with patch.dict("os.environ", {"OPENWEATHER_API_KEY": "test-key"}, clear=False):
             response = self._make_response(200, self._default_weather_json())
-            with patch("src.tools.weather.requests.get", return_value=response):
+            with patch("cogtrix_core.tools.weather.requests.get", return_value=response):
                 result = get_weather("London", units="metric")
 
         assert "Weather in London, GB:" in result
@@ -144,7 +144,7 @@ class TestGetWeatherHappyPath:
         data = self._default_weather_json()
         with patch.dict("os.environ", {"OPENWEATHER_API_KEY": "test-key"}, clear=False):
             response = self._make_response(200, data)
-            with patch("src.tools.weather.requests.get", return_value=response):
+            with patch("cogtrix_core.tools.weather.requests.get", return_value=response):
                 result = get_weather("New York", units="imperial")
 
         assert "°F" in result
@@ -155,7 +155,7 @@ class TestGetWeatherHappyPath:
         data = self._default_weather_json()
         with patch.dict("os.environ", {"OPENWEATHER_API_KEY": "test-key"}, clear=False):
             response = self._make_response(200, data)
-            with patch("src.tools.weather.requests.get", return_value=response):
+            with patch("cogtrix_core.tools.weather.requests.get", return_value=response):
                 result = get_weather("Tokyo", units="kelvin")
 
         assert "Temperature: 15.5K" in result
@@ -168,7 +168,7 @@ class TestGetWeatherHappyPath:
         data["sys"] = {}
         with patch.dict("os.environ", {"OPENWEATHER_API_KEY": "test-key"}, clear=False):
             response = self._make_response(200, data)
-            with patch("src.tools.weather.requests.get", return_value=response):
+            with patch("cogtrix_core.tools.weather.requests.get", return_value=response):
                 result = get_weather("London")
 
         assert "Weather in London:" in result
@@ -180,7 +180,7 @@ class TestGetWeatherHappyPath:
         del data["visibility"]
         with patch.dict("os.environ", {"OPENWEATHER_API_KEY": "test-key"}, clear=False):
             response = self._make_response(200, data)
-            with patch("src.tools.weather.requests.get", return_value=response):
+            with patch("cogtrix_core.tools.weather.requests.get", return_value=response):
                 result = get_weather("London")
 
         assert "Visibility:" not in result
@@ -191,7 +191,7 @@ class TestGetWeatherHappyPath:
         data["weather"] = [{}]
         with patch.dict("os.environ", {"OPENWEATHER_API_KEY": "test-key"}, clear=False):
             response = self._make_response(200, data)
-            with patch("src.tools.weather.requests.get", return_value=response):
+            with patch("cogtrix_core.tools.weather.requests.get", return_value=response):
                 result = get_weather("London")
 
         assert "Condition: Unknown" in result
@@ -210,7 +210,7 @@ class TestGetWeatherErrorResponses:
         """401 status returns invalid API key message."""
         with patch.dict("os.environ", {"OPENWEATHER_API_KEY": "bad-key"}, clear=False):
             response = self._make_response(401)
-            with patch("src.tools.weather.requests.get", return_value=response):
+            with patch("cogtrix_core.tools.weather.requests.get", return_value=response):
                 result = get_weather("London")
 
         assert "Invalid API key" in result
@@ -219,7 +219,7 @@ class TestGetWeatherErrorResponses:
         """404 status returns location not found message."""
         with patch.dict("os.environ", {"OPENWEATHER_API_KEY": "test-key"}, clear=False):
             response = self._make_response(404)
-            with patch("src.tools.weather.requests.get", return_value=response):
+            with patch("cogtrix_core.tools.weather.requests.get", return_value=response):
                 result = get_weather("NonExistentCity12345")
 
         assert "Location not found" in result
@@ -229,7 +229,7 @@ class TestGetWeatherErrorResponses:
         """429 status returns generic API error with status code."""
         with patch.dict("os.environ", {"OPENWEATHER_API_KEY": "test-key"}, clear=False):
             response = self._make_response(429)
-            with patch("src.tools.weather.requests.get", return_value=response):
+            with patch("cogtrix_core.tools.weather.requests.get", return_value=response):
                 result = get_weather("London")
 
         assert "API returned status 429" in result
@@ -238,7 +238,7 @@ class TestGetWeatherErrorResponses:
         """500 status returns generic API error."""
         with patch.dict("os.environ", {"OPENWEATHER_API_KEY": "test-key"}, clear=False):
             response = self._make_response(500)
-            with patch("src.tools.weather.requests.get", return_value=response):
+            with patch("cogtrix_core.tools.weather.requests.get", return_value=response):
                 result = get_weather("London")
 
         assert "API returned status 500" in result
@@ -253,7 +253,7 @@ class TestGetWeatherRequestExceptions:
 
         with patch.dict("os.environ", {"OPENWEATHER_API_KEY": "test-key"}, clear=False):
             with patch(
-                "src.tools.weather.requests.get",
+                "cogtrix_core.tools.weather.requests.get",
                 side_effect=requests.exceptions.Timeout,
             ):
                 result = get_weather("London")
@@ -266,7 +266,7 @@ class TestGetWeatherRequestExceptions:
 
         with patch.dict("os.environ", {"OPENWEATHER_API_KEY": "test-key"}, clear=False):
             with patch(
-                "src.tools.weather.requests.get",
+                "cogtrix_core.tools.weather.requests.get",
                 side_effect=requests.exceptions.ConnectionError,
             ):
                 result = get_weather("London")
@@ -279,7 +279,7 @@ class TestGetWeatherRequestExceptions:
 
         with patch.dict("os.environ", {"OPENWEATHER_API_KEY": "test-key"}, clear=False):
             with patch(
-                "src.tools.weather.requests.get",
+                "cogtrix_core.tools.weather.requests.get",
                 side_effect=requests.exceptions.RequestException("DNS failure"),
             ):
                 result = get_weather("London")
@@ -291,7 +291,7 @@ class TestGetWeatherRequestExceptions:
         """Unexpected exceptions are caught and returned as sanitized error string."""
         with patch.dict("os.environ", {"OPENWEATHER_API_KEY": "test-key"}, clear=False):
             with patch(
-                "src.tools.weather.requests.get",
+                "cogtrix_core.tools.weather.requests.get",
                 side_effect=RuntimeError("unexpected"),
             ):
                 result = get_weather("London")
@@ -317,7 +317,7 @@ class TestGetWeatherUnitNormalization:
         }
 
         with patch.dict("os.environ", {"OPENWEATHER_API_KEY": "test-key"}, clear=False):
-            with patch("src.tools.weather.requests.get", return_value=mock_response):
+            with patch("cogtrix_core.tools.weather.requests.get", return_value=mock_response):
                 result_c = get_weather("Paris", units="c")
                 result_celsius = get_weather("Paris", units="celsius")
 
@@ -338,7 +338,7 @@ class TestGetWeatherUnitNormalization:
         }
 
         with patch.dict("os.environ", {"OPENWEATHER_API_KEY": "test-key"}, clear=False):
-            with patch("src.tools.weather.requests.get", return_value=mock_response):
+            with patch("cogtrix_core.tools.weather.requests.get", return_value=mock_response):
                 result_f = get_weather("NYC", units="f")
                 result_fahrenheit = get_weather("NYC", units="fahrenheit")
 
@@ -359,7 +359,7 @@ class TestGetWeatherUnitNormalization:
         }
 
         with patch.dict("os.environ", {"OPENWEATHER_API_KEY": "test-key"}, clear=False):
-            with patch("src.tools.weather.requests.get", return_value=mock_response):
+            with patch("cogtrix_core.tools.weather.requests.get", return_value=mock_response):
                 result = get_weather("Berlin", units="invalid_unit")
 
         assert "°C" in result
@@ -371,7 +371,7 @@ class TestIsConfigured:
     def test_false_when_no_api_key(self):
         """is_configured() returns False when API key is missing."""
         with patch.dict("os.environ", {}, clear=True):
-            with patch("src.config.load_config", side_effect=ImportError):
+            with patch("cogtrix_core.config.load_config", side_effect=ImportError):
                 assert is_configured() is False
 
     def test_true_when_api_key_set(self):
@@ -381,7 +381,7 @@ class TestIsConfigured:
 
     def test_false_when_requests_not_available(self):
         """is_configured() returns False when requests library is missing."""
-        from src.tools import weather as weather_mod
+        from cogtrix_core.tools import weather as weather_mod
 
         original = weather_mod.REQUESTS_AVAILABLE
         try:

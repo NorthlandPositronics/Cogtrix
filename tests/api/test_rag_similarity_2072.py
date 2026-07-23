@@ -13,11 +13,11 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.rag.scoring import l2_to_similarity
+from cogtrix_core.rag.scoring import l2_to_similarity
 
 pytest.importorskip("fastapi")
 
-import src.api.routes.rag as rag_routes  # noqa: E402
+import cogtrix_core.api.routes.rag as rag_routes  # noqa: E402
 
 
 def test_l2_to_similarity_formula() -> None:
@@ -49,7 +49,7 @@ def test_search_faiss_uses_shared_similarity_and_threshold(tmp_path) -> None:
     with (
         patch.object(rag_routes, "_get_uploads_dir", return_value=tmp_path),
         patch.object(rag_routes, "load_faiss_store", return_value=store),
-        patch("src.tools.rag._get_embeddings", return_value=MagicMock()),
+        patch("cogtrix_core.tools.rag._get_embeddings", return_value=MagicMock()),
     ):
         # No threshold -> all three, scored via the shared helper.
         chunks, n = rag_routes._search_faiss("q", 5, [doc])

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 
-from src.config import Config, ModelConfig, ProviderConfig
+from cogtrix_core.config import Config, ModelConfig, ProviderConfig
 
 
 def _cfg(provider_type: str, rag_model: str | None) -> Config:

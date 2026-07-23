@@ -27,6 +27,7 @@ from tests.role_swe.personas import (
     Stage,
 )
 from tests.role_swe.run import (
+    _stream_capture,
     aggregate_scorecards,
     find_scenario,
     load_scenario,
@@ -853,3 +854,82 @@ class TestMessageTeammateTool:
             assert tool.name == "message_teammate"
             out = tool.invoke({"role": "manager", "message": "hi"})
             assert isinstance(out, str) and out
+
+
+class TestStreamCaptureRecovery:
+    """Mirror of role_sysadmin #2368: hitting the recursion cap finalizes via a
+    nudge re-invoke instead of being scored as a crash, flagged on the channel."""
+
+    class _FakeGraph:
+        """stream() yields value-states; models the two-call shape — main run, then
+        the step-limit recovery re-invoke (recovery_states / recovery_crash)."""
+
+        def __init__(self, states, *, crash=False, recovery_states=None, recovery_crash=False):
+            self._states = states
+            self._crash = crash
+            self._recovery_states = recovery_states or []
+            self._recovery_crash = recovery_crash
+            self.calls = 0
+
+        def stream(self, _inp, _config, *, stream_mode=None):
+            from langgraph.errors import GraphRecursionError
+
+            self.calls += 1
+            if self.calls == 1:
+                yield from self._states
+                if self._crash:
+                    raise GraphRecursionError("Recursion limit of 80 reached")
+            else:
+                yield from self._recovery_states
+                if self._recovery_crash:
+                    raise GraphRecursionError("Recursion limit of 4 reached")
+
+    def _channel(self):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(recovered_from_step_limit=False)
+
+    def test_recovers_instead_of_crashing(self) -> None:
+        from langchain_core.messages import AIMessage, HumanMessage
+
+        msgs = [HumanMessage(content="do X")]
+        final = [*msgs, AIMessage(content="done")]
+        g = self._FakeGraph([{"messages": msgs}], crash=True, recovery_states=[{"messages": final}])
+        ch = self._channel()
+
+        out = _stream_capture(g, msgs, ch)  # must NOT raise
+
+        assert ch.recovered_from_step_limit is True
+        assert g.calls == 2  # original run + one recovery re-invoke
+        assert out == final
+
+    def test_recovery_also_capped_still_no_crash(self) -> None:
+        from langchain_core.messages import HumanMessage
+
+        msgs = [HumanMessage(content="do X")]
+        g = self._FakeGraph(
+            [{"messages": msgs}],
+            crash=True,
+            recovery_states=[{"messages": msgs}],
+            recovery_crash=True,
+        )
+        ch = self._channel()
+
+        out = _stream_capture(g, msgs, ch)  # must NOT raise
+
+        assert ch.recovered_from_step_limit is True
+        assert out == msgs
+
+    def test_success_does_not_flag_recovery(self) -> None:
+        from langchain_core.messages import AIMessage, HumanMessage
+
+        msgs = [HumanMessage(content="do X")]
+        final = [*msgs, AIMessage(content="ok")]
+        g = self._FakeGraph([{"messages": final}])
+        ch = self._channel()
+
+        out = _stream_capture(g, msgs, ch)
+
+        assert ch.recovered_from_step_limit is False
+        assert g.calls == 1
+        assert out == final

@@ -29,19 +29,19 @@ from fastapi.testclient import TestClient  # noqa: E402
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine  # noqa: E402
 from sqlalchemy.pool import StaticPool  # noqa: E402
 
-from src.api.auth import create_access_token  # noqa: E402
-from src.api.db.engine import Base, get_db  # noqa: E402
-from src.api.db.models import RagDocument  # noqa: E402
-from src.api.db.repositories.organization import OrganizationRepository  # noqa: E402
-from src.api.db.repositories.users import UserRepository  # noqa: E402
-from src.api.pagination import encode_cursor  # noqa: E402
+from cogtrix_core.api.auth import create_access_token  # noqa: E402
+from cogtrix_core.api.db.engine import Base, get_db  # noqa: E402
+from cogtrix_core.api.db.models import RagDocument  # noqa: E402
+from cogtrix_core.api.db.repositories.organization import OrganizationRepository  # noqa: E402
+from cogtrix_core.api.db.repositories.users import UserRepository  # noqa: E402
+from cogtrix_core.api.pagination import encode_cursor  # noqa: E402
 
 _VALID_PASSWORD = "TestPass1!"
 
 
 @pytest.fixture()
 def app(tmp_path):
-    from src.api.app import create_app
+    from cogtrix_core.api.app import create_app
 
     engine = create_async_engine(
         "sqlite+aiosqlite:///:memory:",
@@ -67,7 +67,7 @@ def app(tmp_path):
             os.environ,
             {"COGTRIX_JWT_SECRET": _TEST_JWT_SECRET, "COGTRIX_DATA_DIR": str(tmp_path)},
         ),
-        patch("src.api.routes.rag.ingest_document_task", _noop_ingest),
+        patch("cogtrix_core.api.routes.rag.ingest_document_task", _noop_ingest),
     ):
         _app = create_app()
         _app.state.db_factory = factory
@@ -560,9 +560,11 @@ class TestSearchRAG:
 class TestRagOrgScoping:
     def test_rag_routes_are_scoped_to_org(self, app, client, tmp_path):
         with (
-            patch("src.api.routes.rag.ingest_document_task", new=AsyncMock(return_value=None)),
-            patch("src.api.routes.rag._get_uploads_dir", return_value=tmp_path),
-            patch("src.api.tasks.rag._get_uploads_dir", return_value=tmp_path),
+            patch(
+                "cogtrix_core.api.routes.rag.ingest_document_task", new=AsyncMock(return_value=None)
+            ),
+            patch("cogtrix_core.api.routes.rag._get_uploads_dir", return_value=tmp_path),
+            patch("cogtrix_core.api.tasks.rag._get_uploads_dir", return_value=tmp_path),
         ):
             org_a_headers = _seed_org_user(
                 app,

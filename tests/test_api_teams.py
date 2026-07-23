@@ -28,11 +28,11 @@ from unittest.mock import patch  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 from sqlalchemy.ext.asyncio import async_sessionmaker  # noqa: E402
 
-from src.api.auth import create_access_token  # noqa: E402
-from src.api.db.engine import get_db  # noqa: E402
-from src.api.db.repositories.organization import OrganizationRepository  # noqa: E402
-from src.api.db.repositories.teams import TeamRepository  # noqa: E402
-from src.api.db.repositories.users import UserRepository  # noqa: E402
+from cogtrix_core.api.auth import create_access_token  # noqa: E402
+from cogtrix_core.api.db.engine import get_db  # noqa: E402
+from cogtrix_core.api.db.repositories.organization import OrganizationRepository  # noqa: E402
+from cogtrix_core.api.db.repositories.teams import TeamRepository  # noqa: E402
+from cogtrix_core.api.db.repositories.users import UserRepository  # noqa: E402
 
 _PROJECT_ROOT = pathlib.Path(__file__).parent.parent
 
@@ -274,7 +274,7 @@ def team_setup(engine):
 
     asyncio.run(_seed())
 
-    from src.api.app import create_app
+    from cogtrix_core.api.app import create_app
 
     with patch.dict(os.environ, {"COGTRIX_JWT_SECRET": _TEST_JWT_SECRET}):
         app = create_app()
@@ -325,7 +325,9 @@ class TestTeamAPI:
         client, _, admin_id, __ = team_setup
         client.post("/api/v1/teams", json={"name": "DB Race"}, headers=_admin_header(admin_id))
 
-        with patch("src.api.routes.teams.TeamRepository.get_by_name_and_org", return_value=None):
+        with patch(
+            "cogtrix_core.api.routes.teams.TeamRepository.get_by_name_and_org", return_value=None
+        ):
             r = client.post(
                 "/api/v1/teams", json={"name": "DB Race"}, headers=_admin_header(admin_id)
             )

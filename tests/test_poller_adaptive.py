@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
-from src.assistant.channel import IncomingMessage
-from src.assistant.poller import ChannelPoller
+from cogtrix_core.assistant.channel import IncomingMessage
+from cogtrix_core.assistant.poller import ChannelPoller
 
 
 def _make_poller(

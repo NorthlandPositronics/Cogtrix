@@ -1,4 +1,4 @@
-"""Tests for src/api/schemas/memory.py."""
+"""Tests for cogtrix_core/api/schemas/memory.py."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 import pytest
 from pydantic import ValidationError
 
-from src.api.schemas.memory import MemoryModeSwitchRequest, MemoryStateOut
+from cogtrix_core.api.schemas.memory import MemoryModeSwitchRequest, MemoryStateOut
 
 
 class TestMemoryStateOut:

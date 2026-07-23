@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
-from src.memory.tier_cache import CompressedMessage, TierCacheSnapshot, roll_forward
+from cogtrix_core.memory.tier_cache import CompressedMessage, TierCacheSnapshot, roll_forward
 
 
 class TestS1TierCacheKeyedByTier:

@@ -47,10 +47,10 @@ os.environ.setdefault("COGTRIX_DB_URL", "sqlite+aiosqlite:///:memory:")
 # Imports after env setup
 # ---------------------------------------------------------------------------
 
-from src.api.auth import create_access_token  # noqa: E402
-from src.api.db import models as _models  # noqa: E402, F401
-from src.api.db.engine import Base  # noqa: E402
-from src.api.db.repositories.users import UserRepository  # noqa: E402
+from cogtrix_core.api.auth import create_access_token  # noqa: E402
+from cogtrix_core.api.db import models as _models  # noqa: E402, F401
+from cogtrix_core.api.db.engine import Base  # noqa: E402
+from cogtrix_core.api.db.repositories.users import UserRepository  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Shared fixtures
@@ -86,8 +86,8 @@ def _build_mock_registry() -> MagicMock:
 @pytest_asyncio.fixture()
 async def test_app(http_db_engine):
     """Yield a (TestClient, session_factory) pair wired to the in-memory DB."""
-    from src.api.app import create_app
-    from src.api.db.engine import get_db
+    from cogtrix_core.api.app import create_app
+    from cogtrix_core.api.db.engine import get_db
 
     session_factory = async_sessionmaker(http_db_engine, expire_on_commit=False)
 
@@ -104,19 +104,19 @@ async def test_app(http_db_engine):
     app.state.tool_registry = None
 
     with (
-        patch("src.api.routes.sessions.warm_session", new_callable=AsyncMock) as mock_warm,
-        patch("src.config.load_config", side_effect=Exception("no config in tests")),
+        patch("cogtrix_core.api.routes.sessions.warm_session", new_callable=AsyncMock) as mock_warm,
+        patch("cogtrix_core.config.load_config", side_effect=Exception("no config in tests")),
     ):
         # #2101: create_app() above seeded the process config cache (via the CORS
         # resolver) before the load_config patch took effect. Drop it so the
         # lifespan's get_cached_config() re-resolves under the patch and leaves
         # app.state.config = None (this fixture's "no config in tests" contract).
-        from src.config import reset_cached_config
+        from cogtrix_core.config import reset_cached_config
 
         reset_cached_config()
 
         async def _fake_warm(record, app_state):
-            from src.api.session_bridge import ApiSession
+            from cogtrix_core.api.session_bridge import ApiSession
 
             return ApiSession(
                 id=record.id,
@@ -616,7 +616,7 @@ class TestSessionUpdate:
         # Inject a mock config so alias validation is active; unknown aliases → 422.
         from unittest.mock import MagicMock
 
-        from src.config import ConfigError
+        from cogtrix_core.config import ConfigError
 
         client, sf = test_app
         mock_cfg = MagicMock()
@@ -814,10 +814,10 @@ class TestSessionDelete:
 @pytest_asyncio.fixture()
 async def message_app(http_db_engine):
     """TestClient fixture with a real session_registry mock supporting get_or_warm."""
-    from src.api.app import create_app
-    from src.api.db.engine import get_db
-    from src.api.session_bridge import ApiSession
-    from src.orchestration.session_state import SessionState
+    from cogtrix_core.api.app import create_app
+    from cogtrix_core.api.db.engine import get_db
+    from cogtrix_core.api.session_bridge import ApiSession
+    from cogtrix_core.orchestration.session_state import SessionState
 
     session_factory = async_sessionmaker(http_db_engine, expire_on_commit=False)
 
@@ -867,7 +867,7 @@ async def message_app(http_db_engine):
         _sessions[sess.id] = sess
         return sess
 
-    with patch("src.api.routes.sessions.warm_session", new_callable=AsyncMock) as mw:
+    with patch("cogtrix_core.api.routes.sessions.warm_session", new_callable=AsyncMock) as mw:
         mw.side_effect = _fake_warm
 
         with TestClient(app, raise_server_exceptions=False) as client:
@@ -957,7 +957,7 @@ class TestMessageSend:
         # Patch run_message_turn to prevent the background asyncio task from
         # spawning deep_think threads that outlive the test fixture.  This test
         # only verifies the 202 response; agent execution is covered by live_llm tests.
-        with patch("src.api.routes.messages.run_message_turn", new_callable=AsyncMock):
+        with patch("cogtrix_core.api.routes.messages.run_message_turn", new_callable=AsyncMock):
             resp = client.post(
                 f"/api/v1/sessions/{sid}/messages",
                 json={"content": "Think hard", "mode": "think"},
@@ -1070,7 +1070,7 @@ class TestMessageList:
             "data"
         ]["id"]
 
-        from src.api.db.repositories.messages import MessageRepository
+        from cogtrix_core.api.db.repositories.messages import MessageRepository
 
         async with sf() as db:
             repo = MessageRepository(db)
@@ -1099,7 +1099,7 @@ class TestMessageList:
             "data"
         ]["id"]
 
-        from src.api.db.repositories.messages import MessageRepository
+        from cogtrix_core.api.db.repositories.messages import MessageRepository
 
         async with sf() as db:
             repo = MessageRepository(db)
@@ -1215,7 +1215,7 @@ class TestMessageClear:
             "data"
         ]["id"]
 
-        from src.api.db.repositories.messages import MessageRepository
+        from cogtrix_core.api.db.repositories.messages import MessageRepository
 
         async with sf() as db:
             repo = MessageRepository(db)
@@ -1273,7 +1273,7 @@ class TestMessageClear:
             "data"
         ]["id"]
 
-        from src.api.db.repositories.messages import MessageRepository
+        from cogtrix_core.api.db.repositories.messages import MessageRepository
 
         async with sf() as db:
             repo = MessageRepository(db)

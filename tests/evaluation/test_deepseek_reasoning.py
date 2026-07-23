@@ -16,9 +16,9 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
-from src.memory.json_store import _dict_to_message, _message_to_dict
-from src.providers import create_chat_model
-from src.providers.openai import _DeepSeekChatModel, _is_deepseek_base_url
+from cogtrix_core.memory.json_store import _dict_to_message, _message_to_dict
+from cogtrix_core.providers import create_chat_model
+from cogtrix_core.providers.openai import _DeepSeekChatModel, _is_deepseek_base_url
 
 
 class TestDeepSeekReasoningChatModelSelection:
@@ -256,7 +256,7 @@ class TestDeepSeekBaseUrlRedaction:
 
     def test_redact_url_strips_userinfo(self):
         """_redact_url removes username:password from URL netloc."""
-        from src.providers import _redact_url
+        from cogtrix_core.providers import _redact_url
 
         redacted = _redact_url("https://user:pass@api.deepseek.com/v1")
         assert "user:pass@" not in redacted
@@ -264,7 +264,7 @@ class TestDeepSeekBaseUrlRedaction:
 
     def test_redact_url_strips_sensitive_query_params(self):
         """_redact_url replaces sensitive query params with [redacted]."""
-        from src.providers import _redact_url
+        from cogtrix_core.providers import _redact_url
 
         redacted = _redact_url("https://api.deepseek.com/v1?api_key=sk-secret123")
         assert "sk-secret123" not in redacted
@@ -281,7 +281,7 @@ class TestDeepSeekBaseUrlRedaction:
         """
         import logging
 
-        from src.providers.openai import _is_deepseek_base_url
+        from cogtrix_core.providers.openai import _is_deepseek_base_url
 
         with caplog.at_level(logging.WARNING, logger="cogtrix.providers.openai"):
             result = _is_deepseek_base_url("https://user:pass@/bad-url")
@@ -296,7 +296,7 @@ class TestDeepSeekBaseUrlRedaction:
         """No-hostname warning must not leak raw credentials (#1106)."""
         import logging
 
-        from src.providers.openai import _is_deepseek_base_url
+        from cogtrix_core.providers.openai import _is_deepseek_base_url
 
         with caplog.at_level(logging.WARNING, logger="cogtrix.providers.openai"):
             result = _is_deepseek_base_url("https://user:pass@/")
@@ -310,7 +310,7 @@ class TestDeepSeekBaseUrlRedaction:
         """Parse-failure warning path must not leak raw credentials (#1106)."""
         import logging
 
-        from src.providers import openai as _o
+        from cogtrix_core.providers import openai as _o
 
         def _boom(_url):
             raise ValueError("boom")
@@ -353,3 +353,144 @@ class TestRunnerDeepSeekRouting:
             "The runner must use src.providers.create_chat_model for deepseek, "
             "not a plain ChatOpenAI instantiation."
         )
+
+
+class TestRunnerModelTemperature:
+    """#2359: a per-model ``temperature`` must reach the chat model on every
+    route — native Moonshot Kimi K2.7 only accepts ``temperature: 1`` and the
+    API rejects any other value.  An explicit caller temperature still wins;
+    an unset (``None``) model temperature preserves the historical behaviour
+    of not pinning one (the chat model uses its own default)."""
+
+    def _kimi_native(self, **overrides):
+        from dataclasses import replace
+
+        from tests.evaluation.runner import ModelConfig
+
+        model = ModelConfig(
+            id="kimi-k2-7",
+            provider="openai_compatible",
+            display_name="Kimi K2.7 (native Moonshot)",
+            tier="B",
+            smoke=False,
+            env_key="MOONSHOT_API_KEY",
+            model_id="kimi-k2.7",
+            base_url="https://api.moonshot.ai/v1",
+        )
+        return replace(model, **overrides)
+
+    def test_model_temperature_forwarded_on_native_route(self):
+        """A pinned model.temperature reaches ChatOpenAI when the caller
+        passes none (the role-test harness path)."""
+        from tests.evaluation.runner import _build_llm
+
+        model = self._kimi_native(temperature=1)
+        with (
+            patch("langchain_openai.ChatOpenAI") as MockChatOpenAI,
+            patch.dict("os.environ", {"MOONSHOT_API_KEY": "sk-test"}),
+        ):
+            _build_llm(model, active_key=None)
+        assert MockChatOpenAI.call_args.kwargs.get("temperature") == 1
+
+    def test_caller_temperature_overrides_model_temperature(self):
+        from tests.evaluation.runner import _build_llm
+
+        model = self._kimi_native(temperature=1)
+        with (
+            patch("langchain_openai.ChatOpenAI") as MockChatOpenAI,
+            patch.dict("os.environ", {"MOONSHOT_API_KEY": "sk-test"}),
+        ):
+            _build_llm(model, temperature=0.3, active_key=None)
+        assert MockChatOpenAI.call_args.kwargs.get("temperature") == 0.3
+
+    def test_unset_model_temperature_is_not_pinned(self):
+        """When neither caller nor model pins a temperature, the runner must
+        NOT inject one (unchanged behaviour for every existing model)."""
+        from tests.evaluation.runner import _build_llm
+
+        model = self._kimi_native(temperature=None)
+        with (
+            patch("langchain_openai.ChatOpenAI") as MockChatOpenAI,
+            patch.dict("os.environ", {"MOONSHOT_API_KEY": "sk-test"}),
+        ):
+            _build_llm(model, active_key=None)
+        assert "temperature" not in MockChatOpenAI.call_args.kwargs
+
+    def test_model_temperature_forwarded_via_openrouter_route(self):
+        """The constraint is a property of the model, not the endpoint — a
+        pinned temperature must also reach the OpenRouter route."""
+        from tests.evaluation.runner import _build_llm
+
+        model = self._kimi_native(temperature=1)
+        with patch("langchain_openai.ChatOpenAI") as MockChatOpenAI:
+            _build_llm(model, active_key=("OPENROUTER_API_KEY", "sk-or-test"))
+        assert MockChatOpenAI.call_args.kwargs.get("temperature") == 1
+
+
+class TestRunnerPreferNative:
+    """#2359: ``prefer_native`` forces the model's NATIVE provider even when a
+    higher-priority routing key (OpenRouter, returned first by
+    resolve_active_key) is active — so native Moonshot Kimi runs against
+    api.moonshot.* with the operator's key, not via OpenRouter.  No-ops when
+    the native key is absent, so it never breaks the OpenRouter fallback."""
+
+    def _kimi(self, **overrides):
+        from dataclasses import replace
+
+        from tests.evaluation.runner import ModelConfig
+
+        model = ModelConfig(
+            id="kimi-k2-7",
+            provider="openai_compatible",
+            display_name="Kimi K2.7 (native Moonshot)",
+            tier="B",
+            smoke=False,
+            env_key="COGTRIX_PROVIDER_KIMI_API_KEY",
+            model_id="kimi-k2.7",
+            base_url="https://api.moonshot.ai/v1",
+            openrouter_model_id="moonshotai/kimi-k2.7",
+        )
+        return replace(model, **overrides)
+
+    def test_prefer_native_overrides_openrouter_active_key(self):
+        """With prefer_native + the native key present, an OpenRouter active
+        key is dropped and the native Moonshot endpoint/model is used."""
+        from tests.evaluation.runner import _build_llm
+
+        model = self._kimi(prefer_native=True)
+        with (
+            patch("langchain_openai.ChatOpenAI") as MockChatOpenAI,
+            patch.dict("os.environ", {"COGTRIX_PROVIDER_KIMI_API_KEY": "sk-moonshot"}),
+        ):
+            _build_llm(model, active_key=("OPENROUTER_API_KEY", "sk-or"))
+        kwargs = MockChatOpenAI.call_args.kwargs
+        assert kwargs.get("base_url") == "https://api.moonshot.ai/v1"
+        assert kwargs.get("model") == "kimi-k2.7"  # native id, NOT moonshotai/kimi-k2.7
+
+    def test_prefer_native_noops_without_native_key(self):
+        """No native key in the env → prefer_native must NOT hijack the run;
+        the OpenRouter route stands so the fallback still works."""
+        from tests.evaluation.runner import _build_llm
+
+        model = self._kimi(prefer_native=True)
+        with (
+            patch("langchain_openai.ChatOpenAI") as MockChatOpenAI,
+            patch.dict("os.environ", {}, clear=True),
+        ):
+            _build_llm(model, active_key=("OPENROUTER_API_KEY", "sk-or"))
+        kwargs = MockChatOpenAI.call_args.kwargs
+        assert kwargs.get("base_url") == "https://openrouter.ai/api/v1"
+        assert kwargs.get("model") == "moonshotai/kimi-k2.7"
+
+    def test_no_prefer_native_keeps_openrouter_route(self):
+        """Control: without prefer_native, an OpenRouter active key wins even
+        when the native key is also present (unchanged default behaviour)."""
+        from tests.evaluation.runner import _build_llm
+
+        model = self._kimi(prefer_native=False)
+        with (
+            patch("langchain_openai.ChatOpenAI") as MockChatOpenAI,
+            patch.dict("os.environ", {"COGTRIX_PROVIDER_KIMI_API_KEY": "sk-moonshot"}),
+        ):
+            _build_llm(model, active_key=("OPENROUTER_API_KEY", "sk-or"))
+        assert MockChatOpenAI.call_args.kwargs.get("base_url") == "https://openrouter.ai/api/v1"

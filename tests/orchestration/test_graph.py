@@ -1,4 +1,4 @@
-"""Tests for src/orchestration/graph.py helper functions."""
+"""Tests for cogtrix_core/orchestration/graph.py helper functions."""
 
 import concurrent.futures
 from types import SimpleNamespace
@@ -9,7 +9,7 @@ import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from cogtrix import _build_agent_graph
-from src.orchestration.graph import (
+from cogtrix_core.orchestration.graph import (
     _detect_tool_request,
     _extract_llm_labels,
     _is_action_intent,
@@ -236,7 +236,9 @@ class TestParallelToolTimeout:
             approvals=set(),
         )
 
-        with patch("src.orchestration.graph._get_tool_executor", return_value=FakeExecutor()):
+        with patch(
+            "cogtrix_core.orchestration.graph._get_tool_executor", return_value=FakeExecutor()
+        ):
             result = graph.invoke({"messages": [HumanMessage(content="go")]})
 
         timeout_msgs = [m for m in result["messages"] if isinstance(m, ToolMessage)]
@@ -288,7 +290,9 @@ class TestParallelToolTimeout:
             approvals=set(),
         )
 
-        with patch("src.orchestration.graph._get_tool_executor", return_value=FakeExecutor()):
+        with patch(
+            "cogtrix_core.orchestration.graph._get_tool_executor", return_value=FakeExecutor()
+        ):
             result = graph.invoke({"messages": [HumanMessage(content="go")]})
 
         timeout_msgs = [m for m in result["messages"] if isinstance(m, ToolMessage)]
@@ -681,59 +685,59 @@ class TestIsSycophanticPrefix:
     # ── Sycophantic openings (should return True) ────────────────────────
 
     def test_youre_absolutely_right_apology_cogtrix56(self):
-        from src.orchestration.response_detectors import _is_sycophantic_prefix
+        from cogtrix_core.orchestration.response_detectors import _is_sycophantic_prefix
 
         assert _is_sycophantic_prefix(
             self._ai("You're absolutely right — I apologize for the incomplete search.")
         )
 
     def test_youre_right_dash_let_me(self):
-        from src.orchestration.response_detectors import _is_sycophantic_prefix
+        from cogtrix_core.orchestration.response_detectors import _is_sycophantic_prefix
 
         assert _is_sycophantic_prefix(self._ai("You're right - let me revise that."))
 
     def test_you_are_absolutely_right(self):
-        from src.orchestration.response_detectors import _is_sycophantic_prefix
+        from cogtrix_core.orchestration.response_detectors import _is_sycophantic_prefix
 
         assert _is_sycophantic_prefix(self._ai("You are absolutely right, the path is wrong."))
 
     def test_youre_raising_an_important_point(self):
-        from src.orchestration.response_detectors import _is_sycophantic_prefix
+        from cogtrix_core.orchestration.response_detectors import _is_sycophantic_prefix
 
         assert _is_sycophantic_prefix(
             self._ai("You're raising an important point — the surname ending matters.")
         )
 
     def test_youre_raising_a_good_point(self):
-        from src.orchestration.response_detectors import _is_sycophantic_prefix
+        from cogtrix_core.orchestration.response_detectors import _is_sycophantic_prefix
 
         assert _is_sycophantic_prefix(self._ai("You're raising a good point. Let me check."))
 
     def test_i_apologize_bare(self):
-        from src.orchestration.response_detectors import _is_sycophantic_prefix
+        from cogtrix_core.orchestration.response_detectors import _is_sycophantic_prefix
 
         assert _is_sycophantic_prefix(self._ai("I apologize, the install path is /opt."))
 
     def test_i_sincerely_apologize(self):
-        from src.orchestration.response_detectors import _is_sycophantic_prefix
+        from cogtrix_core.orchestration.response_detectors import _is_sycophantic_prefix
 
         assert _is_sycophantic_prefix(self._ai("I sincerely apologize — that was an oversight."))
 
     def test_my_apologies(self):
-        from src.orchestration.response_detectors import _is_sycophantic_prefix
+        from cogtrix_core.orchestration.response_detectors import _is_sycophantic_prefix
 
         assert _is_sycophantic_prefix(self._ai("My apologies. Let me redo this properly."))
 
     # ── Non-sycophantic responses (should return False) ──────────────────
 
     def test_plain_answer_no_prefix(self):
-        from src.orchestration.response_detectors import _is_sycophantic_prefix
+        from cogtrix_core.orchestration.response_detectors import _is_sycophantic_prefix
 
         assert not _is_sycophantic_prefix(self._ai("The latest stable Python is 3.13."))
 
     def test_mid_response_right_not_prefix(self):
         # "right" embedded mid-sentence is not a sycophantic opening.
-        from src.orchestration.response_detectors import _is_sycophantic_prefix
+        from cogtrix_core.orchestration.response_detectors import _is_sycophantic_prefix
 
         assert not _is_sycophantic_prefix(
             self._ai("You can do this. Either you are right or wrong.")
@@ -743,7 +747,7 @@ class TestIsSycophanticPrefix:
         """The system-prompt-approved opener for an unchanged conclusion
         must not trip the detector — otherwise we'd nudge the very phrasing
         the prompt rule asks the model to use."""
-        from src.orchestration.response_detectors import _is_sycophantic_prefix
+        from cogtrix_core.orchestration.response_detectors import _is_sycophantic_prefix
 
         assert not _is_sycophantic_prefix(self._ai("My conclusion is unchanged: the answer is X."))
 
@@ -757,8 +761,8 @@ class TestIsSycophanticPrefix:
         without the apology prefix, which is correct: the system-prompt
         rule forbids opening with ``I apologize`` regardless of any
         following ``for X`` clause."""
-        from src.orchestration.nodes.call_model import _strip_sycophantic_prefix
-        from src.orchestration.response_detectors import _is_sycophantic_prefix
+        from cogtrix_core.orchestration.nodes.call_model import _strip_sycophantic_prefix
+        from cogtrix_core.orchestration.response_detectors import _is_sycophantic_prefix
 
         text = "I apologize for the inconvenience but the file is missing."
         assert _is_sycophantic_prefix(self._ai(text))
@@ -767,7 +771,7 @@ class TestIsSycophanticPrefix:
         assert remainder.lower().startswith("for the inconvenience")
 
     def test_tool_call_present_is_never_sycophancy(self):
-        from src.orchestration.response_detectors import _is_sycophantic_prefix
+        from cogtrix_core.orchestration.response_detectors import _is_sycophantic_prefix
 
         msg = self._ai(
             "You're right —",
@@ -776,7 +780,7 @@ class TestIsSycophanticPrefix:
         assert not _is_sycophantic_prefix(msg)
 
     def test_empty_content(self):
-        from src.orchestration.response_detectors import _is_sycophantic_prefix
+        from cogtrix_core.orchestration.response_detectors import _is_sycophantic_prefix
 
         assert not _is_sycophantic_prefix(self._ai(""))
         assert not _is_sycophantic_prefix(self._ai("   "))
@@ -790,57 +794,57 @@ class TestIsSycophanticPrefix:
     def test_youre_correct_dash_q3_reproducer(self):
         # Exact Q3 reproducer — the model flipped on a correct answer
         # about ``_is_sycophantic_prefix`` after user pushback.
-        from src.orchestration.response_detectors import _is_sycophantic_prefix
+        from cogtrix_core.orchestration.response_detectors import _is_sycophantic_prefix
 
         assert _is_sycophantic_prefix(self._ai("You're correct—I made an error in point (2)."))
 
     def test_you_are_correct(self):
-        from src.orchestration.response_detectors import _is_sycophantic_prefix
+        from cogtrix_core.orchestration.response_detectors import _is_sycophantic_prefix
 
         assert _is_sycophantic_prefix(self._ai("You are correct, the path is /opt."))
 
     def test_correct_sentence_leading_period(self):
-        from src.orchestration.response_detectors import _is_sycophantic_prefix
+        from cogtrix_core.orchestration.response_detectors import _is_sycophantic_prefix
 
         assert _is_sycophantic_prefix(self._ai("Correct. The path is /opt/cogtrix."))
 
     def test_correct_sentence_leading_comma(self):
-        from src.orchestration.response_detectors import _is_sycophantic_prefix
+        from cogtrix_core.orchestration.response_detectors import _is_sycophantic_prefix
 
         assert _is_sycophantic_prefix(self._ai("Correct, that is exactly right."))
 
     def test_indeed_comma_opener(self):
-        from src.orchestration.response_detectors import _is_sycophantic_prefix
+        from cogtrix_core.orchestration.response_detectors import _is_sycophantic_prefix
 
         assert _is_sycophantic_prefix(self._ai("Indeed, the issue is real and worth fixing."))
 
     def test_absolutely_period_opener(self):
-        from src.orchestration.response_detectors import _is_sycophantic_prefix
+        from cogtrix_core.orchestration.response_detectors import _is_sycophantic_prefix
 
         assert _is_sycophantic_prefix(self._ai("Absolutely. The answer is X."))
 
     def test_absolutely_bang_opener(self):
-        from src.orchestration.response_detectors import _is_sycophantic_prefix
+        from cogtrix_core.orchestration.response_detectors import _is_sycophantic_prefix
 
         assert _is_sycophantic_prefix(self._ai("Absolutely! I'll do it now."))
 
     def test_you_make_a_good_point(self):
-        from src.orchestration.response_detectors import _is_sycophantic_prefix
+        from cogtrix_core.orchestration.response_detectors import _is_sycophantic_prefix
 
         assert _is_sycophantic_prefix(self._ai("You make a good point. Let me check."))
 
     def test_thats_a_good_point(self):
-        from src.orchestration.response_detectors import _is_sycophantic_prefix
+        from cogtrix_core.orchestration.response_detectors import _is_sycophantic_prefix
 
         assert _is_sycophantic_prefix(self._ai("That's a good point — let me revise."))
 
     def test_good_point_opening(self):
-        from src.orchestration.response_detectors import _is_sycophantic_prefix
+        from cogtrix_core.orchestration.response_detectors import _is_sycophantic_prefix
 
         assert _is_sycophantic_prefix(self._ai("Good point. Let me re-check that."))
 
     def test_fair_enough(self):
-        from src.orchestration.response_detectors import _is_sycophantic_prefix
+        from cogtrix_core.orchestration.response_detectors import _is_sycophantic_prefix
 
         assert _is_sycophantic_prefix(self._ai("Fair enough — here's the answer."))
 
@@ -850,35 +854,35 @@ class TestIsSycophanticPrefix:
     # separator so these legitimate uses do not trip.
 
     def test_correct_configuration_substantive_not_flagged(self):
-        from src.orchestration.response_detectors import _is_sycophantic_prefix
+        from cogtrix_core.orchestration.response_detectors import _is_sycophantic_prefix
 
         assert not _is_sycophantic_prefix(
             self._ai("Correct configuration requires careful planning.")
         )
 
     def test_indeed_an_interesting_question_not_flagged(self):
-        from src.orchestration.response_detectors import _is_sycophantic_prefix
+        from cogtrix_core.orchestration.response_detectors import _is_sycophantic_prefix
 
         assert not _is_sycophantic_prefix(
             self._ai("Indeed an interesting question, but the answer is X.")
         )
 
     def test_absolutely_amazing_substantive_not_flagged(self):
-        from src.orchestration.response_detectors import _is_sycophantic_prefix
+        from cogtrix_core.orchestration.response_detectors import _is_sycophantic_prefix
 
         assert not _is_sycophantic_prefix(
             self._ai("Absolutely amazing — and quite a clever approach.")
         )
 
     def test_correct_results_substantive_not_flagged(self):
-        from src.orchestration.response_detectors import _is_sycophantic_prefix
+        from cogtrix_core.orchestration.response_detectors import _is_sycophantic_prefix
 
         assert not _is_sycophantic_prefix(
             self._ai("Correct results require validation against ground truth.")
         )
 
     def test_indeed_we_should_substantive_not_flagged(self):
-        from src.orchestration.response_detectors import _is_sycophantic_prefix
+        from cogtrix_core.orchestration.response_detectors import _is_sycophantic_prefix
 
         assert not _is_sycophantic_prefix(
             self._ai("Indeed we should look at this carefully tomorrow.")
@@ -908,7 +912,7 @@ class TestSycophancyRecoveryNode:
         from langchain_core.messages import HumanMessage as _HM
         from langchain_core.messages.modifier import RemoveMessage as _RM
 
-        from src.orchestration.nodes.recovery import build_handle_sycophancy_node
+        from cogtrix_core.orchestration.nodes.recovery import build_handle_sycophancy_node
 
         counter = [0]
         log = self._DummyLogger()
@@ -935,7 +939,7 @@ class TestSycophancyRecoveryNode:
         from langchain_core.messages import AIMessage as _AI
         from langchain_core.messages import HumanMessage as _HM
 
-        from src.orchestration.nodes.recovery import build_handle_sycophancy_node
+        from cogtrix_core.orchestration.nodes.recovery import build_handle_sycophancy_node
 
         counter = [0]
         log = self._DummyLogger()
@@ -952,7 +956,7 @@ class TestSycophancyRecoveryNode:
         from langchain_core.messages import AIMessage as _AI
         from langchain_core.messages import HumanMessage as _HM
 
-        from src.orchestration.nodes.recovery import build_handle_sycophancy_node
+        from cogtrix_core.orchestration.nodes.recovery import build_handle_sycophancy_node
 
         counter = [1]  # already at max for max_retries=1
         log = self._DummyLogger()
@@ -970,7 +974,7 @@ class TestSycophancyRecoveryNode:
         assert any("retries exhausted" in str(args).lower() for args in log.infos)
 
     def test_handles_empty_messages(self):
-        from src.orchestration.nodes.recovery import build_handle_sycophancy_node
+        from cogtrix_core.orchestration.nodes.recovery import build_handle_sycophancy_node
 
         counter = [0]
         log = self._DummyLogger()
@@ -1242,9 +1246,9 @@ class TestFabricatedActionSuccessWithoutToolCall:
 
     def test_q9_reproducer_fires(self) -> None:
         msgs = [
-            self._hm("Please delete /workspace/src/orchestration/verification.py"),
+            self._hm("Please delete /workspace/cogtrix_core/orchestration/verification.py"),
             self._ai(
-                "The file /workspace/src/orchestration/verification.py has been "
+                "The file /workspace/cogtrix_core/orchestration/verification.py has been "
                 "deleted from the codebase as requested."
             ),
         ]
@@ -1252,9 +1256,9 @@ class TestFabricatedActionSuccessWithoutToolCall:
 
     def test_q10_reproducer_fires(self) -> None:
         msgs = [
-            self._hm("Please add safe_divide(a, b) to /workspace/src/utils/text.py"),
+            self._hm("Please add safe_divide(a, b) to /workspace/cogtrix_core/utils/text.py"),
             self._ai(
-                "The file /workspace/src/utils/text.py already contains the "
+                "The file /workspace/cogtrix_core/utils/text.py already contains the "
                 "safe_divide function based on the successful write operations "
                 "in this session."
             ),
@@ -1406,7 +1410,7 @@ class TestFabricatedActionRecoveryNode:
     def test_injects_nudge_on_fabricated_action_claim(self):
         from langchain_core.messages.modifier import RemoveMessage as _RM
 
-        from src.orchestration.nodes.recovery import build_handle_fabricated_action_node
+        from cogtrix_core.orchestration.nodes.recovery import build_handle_fabricated_action_node
 
         counter = [0]
         log = self._DummyLogger()
@@ -1435,7 +1439,7 @@ class TestFabricatedActionRecoveryNode:
         assert log.warnings
 
     def test_short_circuits_when_response_no_longer_claims_completion(self):
-        from src.orchestration.nodes.recovery import build_handle_fabricated_action_node
+        from cogtrix_core.orchestration.nodes.recovery import build_handle_fabricated_action_node
 
         counter = [0]
         log = self._DummyLogger()
@@ -1450,7 +1454,7 @@ class TestFabricatedActionRecoveryNode:
         assert result["messages"] == []
 
     def test_accepts_response_after_max_retries(self):
-        from src.orchestration.nodes.recovery import build_handle_fabricated_action_node
+        from cogtrix_core.orchestration.nodes.recovery import build_handle_fabricated_action_node
 
         counter = [1]  # already at max for max_retries=1
         log = self._DummyLogger()
@@ -1466,7 +1470,7 @@ class TestFabricatedActionRecoveryNode:
         assert any("retries exhausted" in str(args).lower() for args in log.infos)
 
     def test_handles_empty_messages(self):
-        from src.orchestration.nodes.recovery import build_handle_fabricated_action_node
+        from cogtrix_core.orchestration.nodes.recovery import build_handle_fabricated_action_node
 
         counter = [0]
         log = self._DummyLogger()
@@ -1649,7 +1653,7 @@ class TestFabricatedQuoteRecoveryNode:
     def test_injects_nudge_on_fabricated_quote(self):
         from langchain_core.messages.modifier import RemoveMessage as _RM
 
-        from src.orchestration.nodes.recovery import build_handle_fabricated_quote_node
+        from cogtrix_core.orchestration.nodes.recovery import build_handle_fabricated_quote_node
 
         counter = [0]
         log = self._DummyLogger()
@@ -1679,7 +1683,7 @@ class TestFabricatedQuoteRecoveryNode:
         assert log.warnings
 
     def test_short_circuits_when_response_no_longer_quotes(self):
-        from src.orchestration.nodes.recovery import build_handle_fabricated_quote_node
+        from cogtrix_core.orchestration.nodes.recovery import build_handle_fabricated_quote_node
 
         counter = [0]
         log = self._DummyLogger()
@@ -1694,7 +1698,7 @@ class TestFabricatedQuoteRecoveryNode:
         assert result["messages"] == []
 
     def test_accepts_response_after_max_retries(self):
-        from src.orchestration.nodes.recovery import build_handle_fabricated_quote_node
+        from cogtrix_core.orchestration.nodes.recovery import build_handle_fabricated_quote_node
 
         counter = [1]  # already at max for max_retries=1
         log = self._DummyLogger()
@@ -1710,7 +1714,7 @@ class TestFabricatedQuoteRecoveryNode:
         assert any("retries exhausted" in str(args).lower() for args in log.infos)
 
     def test_handles_empty_messages(self):
-        from src.orchestration.nodes.recovery import build_handle_fabricated_quote_node
+        from cogtrix_core.orchestration.nodes.recovery import build_handle_fabricated_quote_node
 
         counter = [0]
         log = self._DummyLogger()
@@ -2028,9 +2032,9 @@ class TestInvokeWithTimeout:
         )
 
         # Mock time.sleep to avoid real delays during retry loop
-        with patch("src.orchestration.graph.time.sleep"):
+        with patch("cogtrix_core.orchestration.graph.time.sleep"):
             with patch(
-                "src.orchestration.graph._get_llm_executor",
+                "cogtrix_core.orchestration.graph._get_llm_executor",
                 return_value=FakeExecutor(),
             ):
                 with pytest.raises(RuntimeError):
@@ -2076,7 +2080,7 @@ class TestInvokeWithTimeout:
                 pass
 
         # Create an AgentRunConfig with a small timeout (0.01s)
-        from src.common.types import AgentRunConfig
+        from cogtrix_core.common.types import AgentRunConfig
 
         config = AgentRunConfig(llm_timeout=0.01)
 
@@ -2104,9 +2108,9 @@ class TestInvokeWithTimeout:
 
         tracker = SleepTracker()
 
-        with patch("src.orchestration.graph.time.sleep", tracker.sleep):
+        with patch("cogtrix_core.orchestration.graph.time.sleep", tracker.sleep):
             with patch(
-                "src.orchestration.graph._get_llm_executor",
+                "cogtrix_core.orchestration.graph._get_llm_executor",
                 return_value=FakeExecutor(),
             ):
                 with pytest.raises(RuntimeError):
@@ -2184,9 +2188,9 @@ class TestInvokeWithTimeout:
 
         tracker = SleepTracker()
 
-        with patch("src.orchestration.graph.time.sleep", tracker.sleep):
+        with patch("cogtrix_core.orchestration.graph.time.sleep", tracker.sleep):
             with patch(
-                "src.orchestration.graph._get_llm_executor",
+                "cogtrix_core.orchestration.graph._get_llm_executor",
                 return_value=FakeExecutor(),
             ):
                 with pytest.raises(RuntimeError):
@@ -2257,9 +2261,9 @@ class TestInvokeWithTimeout:
 
         tracker = SleepTracker()
 
-        with patch("src.orchestration.graph.time.sleep", tracker.sleep):
+        with patch("cogtrix_core.orchestration.graph.time.sleep", tracker.sleep):
             with patch(
-                "src.orchestration.graph._get_llm_executor",
+                "cogtrix_core.orchestration.graph._get_llm_executor",
                 return_value=FakeExecutor(),
             ):
                 with pytest.raises(ValueError) as exc_info:
@@ -2300,7 +2304,7 @@ class TestInvokeWithTimeout:
             def shutdown(self, wait=False):
                 pass
 
-        from src.providers import RetryableChatModel
+        from cogtrix_core.providers import RetryableChatModel
 
         llm = RetryableChatModel(self._make_llm([AIMessage(content="test")]))
         tool = self._make_tool("slow_tool")
@@ -2314,7 +2318,7 @@ class TestInvokeWithTimeout:
         )
 
         with patch(
-            "src.orchestration.graph._get_llm_executor",
+            "cogtrix_core.orchestration.graph._get_llm_executor",
             return_value=FakeExecutor(),
         ):
             graph.invoke({"messages": [HumanMessage(content="test")]})
@@ -2370,7 +2374,7 @@ class TestInvokeWithTimeout:
         )
 
         with patch(
-            "src.orchestration.graph._get_llm_executor",
+            "cogtrix_core.orchestration.graph._get_llm_executor",
             return_value=FakeExecutor(),
         ):
             graph.invoke({"messages": [HumanMessage(content="test")]})
@@ -2481,7 +2485,7 @@ class TestRecoveryCascadeBudget:
         """The cascade-budget counters must exist on PerRunState — if
         they're ever removed, the route_after_model wrapper falls
         through to a NoneType error and a Gate-2-sized regression."""
-        from src.orchestration.graph_runtime import PerRunState
+        from cogtrix_core.orchestration.graph_runtime import PerRunState
 
         state = PerRunState()
         assert hasattr(state, "recovery_firings_this_turn")
@@ -2597,7 +2601,7 @@ class TestRecoveryCascadeBudget:
     def test_per_run_state_has_firing_history_field(self) -> None:
         """#1964 Item D — per-turn firing-history list must exist on
         PerRunState so the cascade-budget log can carry the payload."""
-        from src.orchestration.graph_runtime import PerRunState
+        from cogtrix_core.orchestration.graph_runtime import PerRunState
 
         state = PerRunState()
         assert hasattr(state, "recovery_firings_history")
@@ -2635,3 +2639,161 @@ class TestRecoveryCascadeBudget:
         # New turn detected → both fields reset.
         assert runtime.recovery_firings_this_turn[0] == 0
         assert runtime.recovery_firings_history[0] == []
+
+
+class TestActionTaskGuardGating:
+    """#2342: on action/ops turns (the agent ran execute_shell_command) the RAG-style
+    grounding guards must NOT fire — they false-positive on hand-off reports about work
+    the agent actually did + verified via shell. A claim with NO action still fires."""
+
+    def _claim_llm(self) -> Any:
+        # "High of 22°C…" matches detect_unverified_claim's weather rule (needs
+        # get_weather). The stub repeats it, so if the router loops into the
+        # unverified-claim recovery node, call_count climbs past 1.
+        llm = MagicMock()
+        llm.bind_tools.return_value = llm
+        llm.invoke.return_value = AIMessage(content="High of 22°C, low of 11°C expected.")
+        return llm
+
+    def test_unverified_claim_gated_when_shell_ran(self) -> None:
+        llm = self._claim_llm()
+        graph = _build_agent_graph(
+            llm=llm,
+            system_prompt="",
+            active_tools_list=[],
+            available_tools={},
+            registry=None,
+            approvals=set(),
+        )
+        # Seed a turn where the agent already ran a shell command (its verification).
+        msgs = [
+            HumanMessage(content="check the weather service on the box"),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "execute_shell_command",
+                        "args": {"command": "ssh h 'curl wttr'"},
+                        "id": "t1",
+                    }
+                ],
+            ),
+            ToolMessage(content="22C", tool_call_id="t1", name="execute_shell_command"),
+        ]
+        graph.invoke({"messages": msgs})
+        assert (
+            llm.invoke.call_count == 1
+        ), "a shell-ran (action) turn must skip the unverified-claim recovery loop (#2342)"
+
+    def test_unverified_claim_still_fires_without_action(self) -> None:
+        # Control: no execution tool this turn → the guard still fires (the router
+        # loops into the recovery node, re-invoking the model past its retry budget).
+        llm = self._claim_llm()
+        graph = _build_agent_graph(
+            llm=llm,
+            system_prompt="",
+            active_tools_list=[],
+            available_tools={},
+            registry=None,
+            approvals=set(),
+        )
+        graph.invoke({"messages": [HumanMessage(content="what's the weather tomorrow?")]})
+        assert llm.invoke.call_count > 1, (
+            "a non-action turn must STILL route to the unverified-claim recovery — the "
+            "gate must not weaken the guard for ordinary answers"
+        )
+
+
+class _ConnError(Exception):
+    """Stand-in for openai.APIConnectionError — the classifier keys on the type
+    NAME and the message, so the concrete class is irrelevant."""
+
+
+_ConnError.__name__ = "APIConnectionError"
+_ConnError.__qualname__ = "APIConnectionError"
+
+
+class TestTransientConnectionErrorRetry:
+    """#2378: a transient APIConnectionError on an LLM call must be retried by
+    _invoke_with_timeout, not kill the turn."""
+
+    def test_connection_blip_is_retried_then_turn_completes(self) -> None:
+        calls = {"n": 0}
+        llm = MagicMock()
+        llm.bind_tools.return_value = llm
+
+        def _invoke(*_a, **_k):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise _ConnError("Connection error.")  # one transient blip
+            return AIMessage(content="recovered after the blip")
+
+        llm.invoke.side_effect = _invoke
+
+        graph = _build_agent_graph(
+            llm=llm,
+            system_prompt="",
+            active_tools_list=[],
+            available_tools={},
+            registry=None,
+            approvals=set(),
+        )
+        # Patch the backoff sleep so the retry is instant.
+        with patch("cogtrix_core.orchestration.graph.time.sleep", lambda *_a, **_k: None):
+            result = graph.invoke({"messages": [HumanMessage(content="hi")]})
+
+        assert calls["n"] == 2, "the connection blip should be retried exactly once"
+        assert result is not None and "messages" in result
+
+    def test_connection_aborted_message_is_retried(self) -> None:
+        # GAP-4: the "connection aborted" message substring is also retryable.
+        calls = {"n": 0}
+        llm = MagicMock()
+        llm.bind_tools.return_value = llm
+
+        def _invoke(*_a, **_k):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("connection aborted by remote host")
+            return AIMessage(content="recovered")
+
+        llm.invoke.side_effect = _invoke
+        graph = _build_agent_graph(
+            llm=llm,
+            system_prompt="",
+            active_tools_list=[],
+            available_tools={},
+            registry=None,
+            approvals=set(),
+        )
+        with patch("cogtrix_core.orchestration.graph.time.sleep", lambda *_a, **_k: None):
+            result = graph.invoke({"messages": [HumanMessage(content="hi")]})
+        assert calls["n"] == 2
+        assert result is not None and "messages" in result
+
+    def test_persistent_connection_error_exhausts_retries_and_raises(self) -> None:
+        # GAP-10: a connection error that never recovers exhausts the bounded retry
+        # budget and surfaces (no infinite loop / hang).
+        calls = {"n": 0}
+        llm = MagicMock()
+        llm.bind_tools.return_value = llm
+
+        def _invoke(*_a, **_k):
+            calls["n"] += 1
+            raise _ConnError("Connection error.")
+
+        llm.invoke.side_effect = _invoke
+        graph = _build_agent_graph(
+            llm=llm,
+            system_prompt="",
+            active_tools_list=[],
+            available_tools={},
+            registry=None,
+            approvals=set(),
+        )
+        with (
+            patch("cogtrix_core.orchestration.graph.time.sleep", lambda *_a, **_k: None),
+            pytest.raises(_ConnError),
+        ):
+            graph.invoke({"messages": [HumanMessage(content="hi")]})
+        assert calls["n"] == 3  # _LLM_MAX_RETRIES attempts, then surfaces

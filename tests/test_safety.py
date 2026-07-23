@@ -1,11 +1,11 @@
-"""Tests for src/agent/safety — unified tool confirmation logic."""
+"""Tests for cogtrix_core/agent/safety — unified tool confirmation logic."""
 
 import threading
 from unittest.mock import MagicMock
 
 import pytest
 
-from src.agent.safety import (
+from cogtrix_core.agent.safety import (
     ConfirmationResult,
     ConfirmationUI,
     UserCancelledRun,
@@ -13,7 +13,7 @@ from src.agent.safety import (
     create_safe_tool_wrapper,
     run_confirmation_prompt,
 )
-from src.orchestration.session_state import SessionState
+from cogtrix_core.orchestration.session_state import SessionState
 
 
 class _StubUI:
@@ -338,7 +338,8 @@ class TestCreateSafeToolWrapper:
         from unittest.mock import patch
 
         with patch(
-            "src.agent.safety.run_confirmation_prompt", side_effect=EOFError("stdin closed")
+            "cogtrix_core.agent.safety.run_confirmation_prompt",
+            side_effect=EOFError("stdin closed"),
         ):
             wrapped = create_safe_tool_wrapper(
                 tool, "test_tool", reg, set(), session_state=ss, ui=ui
@@ -358,7 +359,7 @@ class TestCreateSafeToolWrapper:
         from unittest.mock import patch
 
         with patch(
-            "src.agent.safety.run_confirmation_prompt",
+            "cogtrix_core.agent.safety.run_confirmation_prompt",
             side_effect=RuntimeError("unexpected failure"),
         ):
             wrapped = create_safe_tool_wrapper(
@@ -420,7 +421,7 @@ class TestErrorSanitization:
     def _make_tool(self):
         from pydantic import BaseModel
 
-        from src.tools.weather import get_weather
+        from cogtrix_core.tools.weather import get_weather
 
         tool = MagicMock()
         tool.name = "test_tool"
@@ -431,7 +432,7 @@ class TestErrorSanitization:
         return tool
 
     def _make_registry(self, confirms: bool = False):
-        from src.registry import ToolRegistry
+        from cogtrix_core.registry import ToolRegistry
 
         reg = ToolRegistry()
         return reg
@@ -502,7 +503,7 @@ class TestComputeDiff:
     """Tests for _compute_file_diff() — the diff preview helper."""
 
     def test_write_file_new_file_returns_diff(self, tmp_path, monkeypatch):
-        from src.agent.safety import _compute_file_diff
+        from cogtrix_core.agent.safety import _compute_file_diff
 
         monkeypatch.chdir(tmp_path)
         p = tmp_path / "new.txt"
@@ -513,7 +514,7 @@ class TestComputeDiff:
         assert any("+hello" in line for line in diff_lines)
 
     def test_write_file_no_change_returns_none(self, tmp_path, monkeypatch):
-        from src.agent.safety import _compute_file_diff
+        from cogtrix_core.agent.safety import _compute_file_diff
 
         monkeypatch.chdir(tmp_path)
         p = tmp_path / "existing.txt"
@@ -522,7 +523,7 @@ class TestComputeDiff:
         assert result is None
 
     def test_write_file_existing_file_returns_diff(self, tmp_path, monkeypatch):
-        from src.agent.safety import _compute_file_diff
+        from cogtrix_core.agent.safety import _compute_file_diff
 
         monkeypatch.chdir(tmp_path)
         p = tmp_path / "existing.txt"
@@ -534,13 +535,13 @@ class TestComputeDiff:
         assert any("+new content" in line for line in diff_lines)
 
     def test_write_file_missing_path_returns_none(self):
-        from src.agent.safety import _compute_file_diff
+        from cogtrix_core.agent.safety import _compute_file_diff
 
         result = _compute_file_diff("write_file", {"path": "", "content": "x"})
         assert result is None
 
     def test_patch_file_not_exists_returns_none(self, tmp_path, monkeypatch):
-        from src.agent.safety import _compute_file_diff
+        from cogtrix_core.agent.safety import _compute_file_diff
 
         monkeypatch.chdir(tmp_path)
         p = tmp_path / "missing.txt"
@@ -548,7 +549,7 @@ class TestComputeDiff:
         assert result is None
 
     def test_patch_file_ambiguous_returns_none(self, tmp_path, monkeypatch):
-        from src.agent.safety import _compute_file_diff
+        from cogtrix_core.agent.safety import _compute_file_diff
 
         monkeypatch.chdir(tmp_path)
         p = tmp_path / "f.txt"
@@ -557,7 +558,7 @@ class TestComputeDiff:
         assert result is None
 
     def test_patch_file_returns_diff(self, tmp_path, monkeypatch):
-        from src.agent.safety import _compute_file_diff
+        from cogtrix_core.agent.safety import _compute_file_diff
 
         monkeypatch.chdir(tmp_path)
         p = tmp_path / "f.txt"
@@ -570,25 +571,25 @@ class TestComputeDiff:
         assert any("-hello world" in line for line in diff_lines)
 
     def test_unknown_tool_returns_none(self):
-        from src.agent.safety import _compute_file_diff
+        from cogtrix_core.agent.safety import _compute_file_diff
 
         result = _compute_file_diff("read_file", {"path": "/tmp/x"})
         assert result is None
 
     def test_patch_file_missing_path_returns_none(self):
-        from src.agent.safety import _compute_file_diff
+        from cogtrix_core.agent.safety import _compute_file_diff
 
         result = _compute_file_diff("patch_file", {"path": "", "old_str": "x", "new_str": "y"})
         assert result is None
 
     def test_write_file_path_traversal_returns_none(self):
-        from src.agent.safety import _compute_file_diff
+        from cogtrix_core.agent.safety import _compute_file_diff
 
         result = _compute_file_diff("write_file", {"path": "/etc/passwd", "content": "pwned\n"})
         assert result is None
 
     def test_patch_file_path_traversal_returns_none(self):
-        from src.agent.safety import _compute_file_diff
+        from cogtrix_core.agent.safety import _compute_file_diff
 
         result = _compute_file_diff(
             "patch_file",
@@ -597,7 +598,7 @@ class TestComputeDiff:
         assert result is None
 
     def test_write_file_dotdot_traversal_returns_none(self, tmp_path):
-        from src.agent.safety import _compute_file_diff
+        from cogtrix_core.agent.safety import _compute_file_diff
 
         result = _compute_file_diff(
             "write_file",
@@ -606,7 +607,7 @@ class TestComputeDiff:
         assert result is None
 
     def test_patch_file_dotdot_traversal_returns_none(self, tmp_path):
-        from src.agent.safety import _compute_file_diff
+        from cogtrix_core.agent.safety import _compute_file_diff
 
         result = _compute_file_diff(
             "patch_file",
@@ -732,7 +733,7 @@ class TestConfirmationLockModel:
         """Same lock object is visible from all call sites."""
         assert isinstance(_confirmation_lock, type(threading.Lock()))
         # Read again — must be the same object (singleton)
-        from src.agent import safety as _safety_mod
+        from cogtrix_core.agent import safety as _safety_mod
 
         assert _safety_mod._confirmation_lock is _confirmation_lock
 
@@ -800,7 +801,7 @@ class TestConfirmationLockModel:
         )
 
         def _run():
-            with patch("src.agent.safety.run_confirmation_prompt", _counting_prompt):
+            with patch("cogtrix_core.agent.safety.run_confirmation_prompt", _counting_prompt):
                 wrapped.invoke({})
 
         # Thread A runs to completion

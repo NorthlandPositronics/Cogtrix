@@ -15,8 +15,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-import src.tools.file_ops as fo
-from src.tools.configure import configure_file_ops_tool
+import cogtrix_core.tools.file_ops as fo
+from cogtrix_core.tools.configure import configure_file_ops_tool
 
 
 def test_config_without_write_paths_preserves_env_wired_dirs() -> None:

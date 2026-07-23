@@ -5,13 +5,13 @@ from unittest.mock import MagicMock
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 
-from src.agent.core import CogtrixState
-from src.orchestration.graph import _safe_tool_name
-from src.orchestration.nodes.process_tools import (
+from cogtrix_core.agent.core import CogtrixState
+from cogtrix_core.orchestration.graph import _safe_tool_name
+from cogtrix_core.orchestration.nodes.process_tools import (
     build_process_tools_node,
     extract_prohibited_tools,
 )
-from src.orchestration.session_state import SessionState
+from cogtrix_core.orchestration.session_state import SessionState
 
 
 class _DummyLogger:
@@ -85,6 +85,8 @@ def _make_node(**overrides):
         "_tool_budget_lock": threading.Lock(),
         "_action_tier_consecutive_calls": {},
         "_last_action_tier_tool": [None],
+        "_pinned_tools": set(),
+        "_max_pinned_tools": 5,
     }
     defaults.update(overrides)
     return build_process_tools_node(**defaults)
@@ -867,7 +869,7 @@ class TestHarmonyTokenStripping:
     """
 
     def test_strip_helper_removes_channel_commentary_suffix(self) -> None:
-        from src.orchestration.nodes.process_tools import _strip_harmony_tokens
+        from cogtrix_core.orchestration.nodes.process_tools import _strip_harmony_tokens
 
         assert (
             _strip_harmony_tokens("query_risk_register<|channel|>commentary")
@@ -875,32 +877,32 @@ class TestHarmonyTokenStripping:
         )
 
     def test_strip_helper_removes_channel_final_suffix(self) -> None:
-        from src.orchestration.nodes.process_tools import _strip_harmony_tokens
+        from cogtrix_core.orchestration.nodes.process_tools import _strip_harmony_tokens
 
         assert (
             _strip_harmony_tokens("query_knowledge_base<|channel|>final") == "query_knowledge_base"
         )
 
     def test_strip_helper_handles_chained_markers(self) -> None:
-        from src.orchestration.nodes.process_tools import _strip_harmony_tokens
+        from cogtrix_core.orchestration.nodes.process_tools import _strip_harmony_tokens
 
         # Chained markers (planning channel + end token) — strip greedily.
         assert _strip_harmony_tokens("foo<|channel|>commentary<|end|>") == "foo"
         assert _strip_harmony_tokens("foo<|start|>blah<|end|>") == "foo"
 
     def test_strip_helper_passes_clean_name_through(self) -> None:
-        from src.orchestration.nodes.process_tools import _strip_harmony_tokens
+        from cogtrix_core.orchestration.nodes.process_tools import _strip_harmony_tokens
 
         assert _strip_harmony_tokens("query_knowledge_base") == "query_knowledge_base"
         assert _strip_harmony_tokens("checkpoint") == "checkpoint"
 
     def test_strip_helper_handles_empty_input(self) -> None:
-        from src.orchestration.nodes.process_tools import _strip_harmony_tokens
+        from cogtrix_core.orchestration.nodes.process_tools import _strip_harmony_tokens
 
         assert _strip_harmony_tokens("") == ""
 
     def test_sanitize_mutates_tool_call_dicts_in_place(self) -> None:
-        from src.orchestration.nodes.process_tools import _sanitize_tool_call_names
+        from cogtrix_core.orchestration.nodes.process_tools import _sanitize_tool_call_names
 
         calls = [
             {"name": "query_knowledge_base", "args": {}, "id": "tc1"},
@@ -1302,6 +1304,95 @@ class TestProcessToolsActionTierCap:
         assert "http_get" in cap_msg.content
 
 
+class TestProcessToolsDuplicateToolMessageGuard:
+    """#2278 — the execution node must emit exactly ONE ToolMessage per
+    declared ``tool_call_id``. A duplicate (e.g. the provider listed the same
+    id twice in ``last.tool_calls`` and each entry was dispatched) is a hard
+    OpenAI/Azure 400 (#2276) and a wasted execution. The node now dedups its
+    own output (keep-first) so no duplicate reaches state — independent of the
+    far-downstream repair layer that #2277/#2280 added.
+    """
+
+    def test_duplicate_id_serial_yields_single_tool_message(self):
+        """Two serial calls sharing one tool_call_id → one ToolMessage."""
+        invoke_one = MagicMock(
+            side_effect=[
+                ToolMessage(content="first", tool_call_id="dup", name="t1"),
+                ToolMessage(content="second", tool_call_id="dup", name="t1"),
+            ]
+        )
+        graph_log = _DummyLogger()
+        node = _make_node(_invoke_one=invoke_one, _graph_log=graph_log)
+        # Provider emitted the same id twice (malformed but observed in the wild).
+        ai_msg = _make_ai_msg(
+            [
+                {"name": "t1", "args": {}, "id": "dup"},
+                {"name": "t1", "args": {}, "id": "dup"},
+            ]
+        )
+
+        result = node(_make_state(ai_msg), RunnableConfig())
+
+        tool_msgs = [m for m in result["messages"] if isinstance(m, ToolMessage)]
+        assert len(tool_msgs) == 1, "exactly one ToolMessage must survive per tool_call_id"
+        # Keep-first: the first result wins (matches the repair layer).
+        assert tool_msgs[0].content == "first"
+        # The drop is logged.
+        assert any("Dropping duplicate ToolMessage" in str(a[0]) for a in graph_log.warnings)
+
+    def test_duplicate_id_parallel_yields_single_tool_message(self):
+        """Same guarantee on the parallel-execution path."""
+        import concurrent.futures
+
+        def fake_invoke(call, _config):
+            return ToolMessage(content="r", tool_call_id=call["id"], name=call["name"])
+
+        node = _make_node(
+            _invoke_one=fake_invoke,
+            _tool_lookup={"t1": MagicMock(name="t1")},
+            _active_names={"t1"},
+            parallel_tool_execution=True,
+            _get_tool_executor=lambda: concurrent.futures.ThreadPoolExecutor(max_workers=2),
+        )
+        ai_msg = _make_ai_msg(
+            [
+                {"name": "t1", "args": {"q": "x"}, "id": "dup"},
+                {"name": "t1", "args": {"q": "x"}, "id": "dup"},
+            ]
+        )
+
+        result = node(_make_state(ai_msg), RunnableConfig())
+
+        tool_msgs = [m for m in result["messages"] if isinstance(m, ToolMessage)]
+        assert len([m for m in tool_msgs if m.tool_call_id == "dup"]) == 1
+
+    def test_distinct_ids_all_preserved(self):
+        """The guard must NOT collapse legitimately-distinct ids."""
+        invoke_one = MagicMock(
+            side_effect=[
+                ToolMessage(content="r1", tool_call_id="tc1", name="t1"),
+                ToolMessage(content="r2", tool_call_id="tc2", name="t2"),
+            ]
+        )
+        node = _make_node(
+            _invoke_one=invoke_one,
+            _tool_lookup={"t1": MagicMock(), "t2": MagicMock()},
+            _active_names={"t1", "t2"},
+        )
+        ai_msg = _make_ai_msg(
+            [
+                {"name": "t1", "args": {}, "id": "tc1"},
+                {"name": "t2", "args": {}, "id": "tc2"},
+            ]
+        )
+
+        result = node(_make_state(ai_msg), RunnableConfig())
+
+        tool_msgs = [m for m in result["messages"] if isinstance(m, ToolMessage)]
+        assert {m.tool_call_id for m in tool_msgs} == {"tc1", "tc2"}
+        assert len(tool_msgs) == 2
+
+
 class TestExtractProhibitedTools:
     """#1851 — parse system-prompt tool prohibitions into a forbidden set."""
 
@@ -1371,7 +1462,7 @@ class TestExtractProhibitedTools:
         suppress_reply (BUG-243, so the LLM doesn't go silent on datamark
         tokens). The exemption must ensure that mention no longer parses as a
         prohibition that blocks suppress_reply."""
-        from src.assistant.datamarking import _DATAMARK_INSTRUCTION
+        from cogtrix_core.assistant.datamarking import _DATAMARK_INSTRUCTION
 
         rendered = _DATAMARK_INSTRUCTION.format(marker="abcd1234")
         # Sanity: the instruction really does contain the 'do not call' mention

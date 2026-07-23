@@ -1,4 +1,4 @@
-"""Tests for src/tools/_web_search_aggregator.py — stage 1+2 fan-out
+"""Tests for cogtrix_core/tools/_web_search_aggregator.py — stage 1+2 fan-out
 + consensus rank (ADR-0056 PR-C)."""
 
 from __future__ import annotations
@@ -8,14 +8,14 @@ from collections.abc import Awaitable, Callable, Sequence
 
 import pytest
 
-from src.tools._web_search_aggregator import (
+from cogtrix_core.tools._web_search_aggregator import (
     CoverageInfo,
     ProviderResult,
     RankedResult,
     aggregate,
     canonicalise_url,
 )
-from src.tools._web_search_domain_class import DomainClass
+from cogtrix_core.tools._web_search_domain_class import DomainClass
 
 # ── canonicalise_url ──────────────────────────────────────────────────
 

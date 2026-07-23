@@ -13,7 +13,7 @@ class TestCircuitBreakerLock:
     """BUG-076 + BUG-087 — circuit breaker lock refactor."""
 
     def test_check_availability_locked_returns_available_when_no_failures(self):
-        from src.tools.delegate import ModelCircuitBreaker, _circuit_breaker_lock
+        from cogtrix_core.tools.delegate import ModelCircuitBreaker, _circuit_breaker_lock
 
         breaker = ModelCircuitBreaker()
         with _circuit_breaker_lock:
@@ -24,7 +24,7 @@ class TestCircuitBreakerLock:
     def test_check_availability_locked_returns_unavailable_when_tripped(self):
         import time
 
-        from src.tools.delegate import ModelCircuitBreaker, _circuit_breaker_lock
+        from cogtrix_core.tools.delegate import ModelCircuitBreaker, _circuit_breaker_lock
 
         breaker = ModelCircuitBreaker(
             is_unavailable=True,
@@ -41,7 +41,7 @@ class TestCircuitBreakerLock:
     def test_check_availability_locked_resets_after_cooldown(self):
         import time
 
-        from src.tools.delegate import ModelCircuitBreaker, _circuit_breaker_lock
+        from cogtrix_core.tools.delegate import ModelCircuitBreaker, _circuit_breaker_lock
 
         # Set last_failure_time far in the past so cooldown has already elapsed
         breaker = ModelCircuitBreaker(
@@ -58,7 +58,7 @@ class TestCircuitBreakerLock:
         assert breaker.consecutive_failures == 0
 
     def test_check_availability_public_method_still_works(self):
-        from src.tools.delegate import ModelCircuitBreaker
+        from cogtrix_core.tools.delegate import ModelCircuitBreaker
 
         breaker = ModelCircuitBreaker()
         available, reason = breaker.check_availability()
@@ -67,7 +67,11 @@ class TestCircuitBreakerLock:
 
     def test_get_model_status_does_not_deadlock(self):
         """get_model_status must complete without deadlock."""
-        from src.tools.delegate import _circuit_breaker_lock, _circuit_breakers, get_model_status
+        from cogtrix_core.tools.delegate import (
+            _circuit_breaker_lock,
+            _circuit_breakers,
+            get_model_status,
+        )
 
         with _circuit_breaker_lock:
             _circuit_breakers.clear()
@@ -76,12 +80,16 @@ class TestCircuitBreakerLock:
 
     def test_get_model_status_uses_locked_helper(self):
         """Verify get_model_status acquires the lock and uses _check_availability_locked."""
-        from src.tools.delegate import ModelCircuitBreaker, _circuit_breaker_lock, get_model_status
+        from cogtrix_core.tools.delegate import (
+            ModelCircuitBreaker,
+            _circuit_breaker_lock,
+            get_model_status,
+        )
 
         # Pre-set a known breaker state
         _circuit_breaker_lock.acquire()
         try:
-            from src.tools.delegate import _circuit_breakers
+            from cogtrix_core.tools.delegate import _circuit_breakers
 
             _circuit_breakers.clear()
             breaker = ModelCircuitBreaker()
@@ -104,7 +112,7 @@ class TestEnsureLoopNoTOCTOU:
     """BUG-063/090 — _ensure_loop TOCTOU race eliminated."""
 
     def test_concurrent_ensure_loop_creates_exactly_one_loop(self):
-        from src.mcp_client import MCPManager
+        from cogtrix_core.mcp_client import MCPManager
 
         manager = MCPManager()
         loops_created: list = []
@@ -140,7 +148,7 @@ class TestMCPToolsReadyGate:
     """MCP reconnects must clear and restore the readiness gate."""
 
     def test_reconnect_clears_tools_ready_before_connecting_and_sets_after(self):
-        from src.mcp_client import MCPManager
+        from cogtrix_core.mcp_client import MCPManager
 
         manager = MCPManager()
 
@@ -164,7 +172,7 @@ class TestMCPToolsReadyGate:
             return asyncio.run(coro)
 
         with (
-            patch("src.mcp_client.MCPConnection", FakeConnection),
+            patch("cogtrix_core.mcp_client.MCPConnection", FakeConnection),
             patch.object(manager, "_run", side_effect=fake_run),
         ):
             manager._reconnect_server("srv")
@@ -173,7 +181,7 @@ class TestMCPToolsReadyGate:
         assert isinstance(manager._connections["srv"], FakeConnection)
 
     def test_close_all_clears_tools_ready(self):
-        from src.mcp_client import MCPManager
+        from cogtrix_core.mcp_client import MCPManager
 
         manager = MCPManager()
         manager.tools_ready.set()

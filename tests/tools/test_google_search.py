@@ -9,20 +9,20 @@ class TestGoogleSearch:
     """Unit tests for google_search()."""
 
     def test_google_search_missing_api_key(self):
-        from src.tools.google_search import google_search
+        from cogtrix_core.tools.google_search import google_search
 
-        with patch("src.tools.google_search._get_api_key", return_value=None):
+        with patch("cogtrix_core.tools.google_search._get_api_key", return_value=None):
             result = google_search("python")
 
         assert "Error" in result
         assert "Google API key" in result
 
     def test_google_search_missing_cse_id(self):
-        from src.tools.google_search import google_search
+        from cogtrix_core.tools.google_search import google_search
 
         with (
-            patch("src.tools.google_search._get_api_key", return_value="test-key"),
-            patch("src.tools.google_search._get_cse_id", return_value=None),
+            patch("cogtrix_core.tools.google_search._get_api_key", return_value="test-key"),
+            patch("cogtrix_core.tools.google_search._get_cse_id", return_value=None),
         ):
             result = google_search("python")
 
@@ -30,11 +30,11 @@ class TestGoogleSearch:
         assert "Custom Search Engine ID" in result
 
     def test_google_search_empty_query_returns_error(self):
-        from src.tools.google_search import google_search
+        from cogtrix_core.tools.google_search import google_search
 
         with (
-            patch("src.tools.google_search._get_api_key", return_value="test-key"),
-            patch("src.tools.google_search._get_cse_id", return_value="test-cx"),
+            patch("cogtrix_core.tools.google_search._get_api_key", return_value="test-key"),
+            patch("cogtrix_core.tools.google_search._get_cse_id", return_value="test-cx"),
         ):
             result = google_search("   ")
 
@@ -42,7 +42,7 @@ class TestGoogleSearch:
         assert "Empty" in result
 
     def test_google_search_returns_results(self):
-        from src.tools.google_search import google_search
+        from cogtrix_core.tools.google_search import google_search
 
         mock_response = MagicMock()
         mock_response.json.return_value = {
@@ -75,8 +75,8 @@ class TestGoogleSearch:
         mock_response.raise_for_status = MagicMock()
 
         with (
-            patch("src.tools.google_search._get_api_key", return_value="test-key"),
-            patch("src.tools.google_search._get_cse_id", return_value="test-cx"),
+            patch("cogtrix_core.tools.google_search._get_api_key", return_value="test-key"),
+            patch("cogtrix_core.tools.google_search._get_cse_id", return_value="test-cx"),
             patch("requests.get", return_value=mock_response),
         ):
             result = google_search("python", num_results=2)
@@ -90,7 +90,7 @@ class TestGoogleSearch:
         assert "2024-01-01" in result
 
     def test_google_search_spelling_suggestion(self):
-        from src.tools.google_search import google_search
+        from cogtrix_core.tools.google_search import google_search
 
         mock_response = MagicMock()
         mock_response.json.return_value = {
@@ -101,8 +101,8 @@ class TestGoogleSearch:
         mock_response.raise_for_status = MagicMock()
 
         with (
-            patch("src.tools.google_search._get_api_key", return_value="test-key"),
-            patch("src.tools.google_search._get_cse_id", return_value="test-cx"),
+            patch("cogtrix_core.tools.google_search._get_api_key", return_value="test-key"),
+            patch("cogtrix_core.tools.google_search._get_cse_id", return_value="test-cx"),
             patch("requests.get", return_value=mock_response),
         ):
             result = google_search("pthon")
@@ -110,7 +110,7 @@ class TestGoogleSearch:
         assert "Did you mean: python" in result
 
     def test_google_search_no_results(self):
-        from src.tools.google_search import google_search
+        from cogtrix_core.tools.google_search import google_search
 
         mock_response = MagicMock()
         mock_response.json.return_value = {
@@ -120,8 +120,8 @@ class TestGoogleSearch:
         mock_response.raise_for_status = MagicMock()
 
         with (
-            patch("src.tools.google_search._get_api_key", return_value="test-key"),
-            patch("src.tools.google_search._get_cse_id", return_value="test-cx"),
+            patch("cogtrix_core.tools.google_search._get_api_key", return_value="test-key"),
+            patch("cogtrix_core.tools.google_search._get_cse_id", return_value="test-cx"),
             patch("requests.get", return_value=mock_response),
         ):
             result = google_search("xyzzy_nothing_matches")
@@ -129,7 +129,7 @@ class TestGoogleSearch:
         assert "No results found" in result
 
     def test_google_search_http_error(self):
-        from src.tools.google_search import google_search
+        from cogtrix_core.tools.google_search import google_search
 
         mock_response = MagicMock()
         mock_response.status_code = 429
@@ -137,8 +137,8 @@ class TestGoogleSearch:
         http_error = requests.exceptions.HTTPError("429", response=mock_response)
 
         with (
-            patch("src.tools.google_search._get_api_key", return_value="test-key"),
-            patch("src.tools.google_search._get_cse_id", return_value="test-cx"),
+            patch("cogtrix_core.tools.google_search._get_api_key", return_value="test-key"),
+            patch("cogtrix_core.tools.google_search._get_cse_id", return_value="test-cx"),
             patch("requests.get", side_effect=http_error),
         ):
             result = google_search("test")
@@ -148,11 +148,11 @@ class TestGoogleSearch:
         assert "Quota exceeded" in result
 
     def test_google_search_connection_error(self):
-        from src.tools.google_search import google_search
+        from cogtrix_core.tools.google_search import google_search
 
         with (
-            patch("src.tools.google_search._get_api_key", return_value="test-key"),
-            patch("src.tools.google_search._get_cse_id", return_value="test-cx"),
+            patch("cogtrix_core.tools.google_search._get_api_key", return_value="test-key"),
+            patch("cogtrix_core.tools.google_search._get_cse_id", return_value="test-cx"),
             patch("requests.get", side_effect=requests.exceptions.ConnectionError("timeout")),
         ):
             result = google_search("test")
@@ -160,7 +160,7 @@ class TestGoogleSearch:
         assert "Error" in result
 
     def test_google_search_num_results_passed_to_api(self):
-        from src.tools.google_search import google_search
+        from cogtrix_core.tools.google_search import google_search
 
         mock_response = MagicMock()
         mock_response.json.return_value = {
@@ -170,8 +170,8 @@ class TestGoogleSearch:
         mock_response.raise_for_status = MagicMock()
 
         with (
-            patch("src.tools.google_search._get_api_key", return_value="test-key"),
-            patch("src.tools.google_search._get_cse_id", return_value="test-cx"),
+            patch("cogtrix_core.tools.google_search._get_api_key", return_value="test-key"),
+            patch("cogtrix_core.tools.google_search._get_cse_id", return_value="test-cx"),
             patch("requests.get", return_value=mock_response) as mock_get,
         ):
             google_search("test", num_results=50)
@@ -182,15 +182,15 @@ class TestGoogleSearch:
         assert call_kwargs["params"]["num"] == 10
 
     def test_google_search_invalid_safe_search_defaults(self):
-        from src.tools.google_search import google_search
+        from cogtrix_core.tools.google_search import google_search
 
         mock_response = MagicMock()
         mock_response.json.return_value = {"searchInformation": {}, "items": []}
         mock_response.raise_for_status = MagicMock()
 
         with (
-            patch("src.tools.google_search._get_api_key", return_value="test-key"),
-            patch("src.tools.google_search._get_cse_id", return_value="test-cx"),
+            patch("cogtrix_core.tools.google_search._get_api_key", return_value="test-key"),
+            patch("cogtrix_core.tools.google_search._get_cse_id", return_value="test-cx"),
             patch("requests.get", return_value=mock_response) as mock_get,
         ):
             google_search("test", safe_search="invalid")
@@ -205,34 +205,38 @@ class TestGoogleSearchConfigure:
     """Unit tests for configuration helpers."""
 
     def test_is_configured_false_when_no_key(self):
-        from src.tools.google_search import is_configured
+        from cogtrix_core.tools.google_search import is_configured
 
         with (
-            patch("src.tools.google_search._get_api_key", return_value=None),
-            patch("src.tools.google_search._get_cse_id", return_value="test-cx"),
+            patch("cogtrix_core.tools.google_search._get_api_key", return_value=None),
+            patch("cogtrix_core.tools.google_search._get_cse_id", return_value="test-cx"),
         ):
             assert is_configured() is False
 
     def test_is_configured_false_when_no_cse_id(self):
-        from src.tools.google_search import is_configured
+        from cogtrix_core.tools.google_search import is_configured
 
         with (
-            patch("src.tools.google_search._get_api_key", return_value="test-key"),
-            patch("src.tools.google_search._get_cse_id", return_value=None),
+            patch("cogtrix_core.tools.google_search._get_api_key", return_value="test-key"),
+            patch("cogtrix_core.tools.google_search._get_cse_id", return_value=None),
         ):
             assert is_configured() is False
 
     def test_is_configured_true_when_both_set(self):
-        from src.tools.google_search import is_configured
+        from cogtrix_core.tools.google_search import is_configured
 
         with (
-            patch("src.tools.google_search._get_api_key", return_value="test-key"),
-            patch("src.tools.google_search._get_cse_id", return_value="test-cx"),
+            patch("cogtrix_core.tools.google_search._get_api_key", return_value="test-key"),
+            patch("cogtrix_core.tools.google_search._get_cse_id", return_value="test-cx"),
         ):
             assert is_configured() is True
 
     def test_configure_google_search_sets_values(self):
-        from src.tools.google_search import _get_api_key, _get_cse_id, configure_google_search
+        from cogtrix_core.tools.google_search import (
+            _get_api_key,
+            _get_cse_id,
+            configure_google_search,
+        )
 
         configure_google_search({"api_key": "my-key", "cse_id": "my-cx"})
         assert _get_api_key() == "my-key"
@@ -245,7 +249,7 @@ class TestGoogleSearchInput:
     """Unit tests for the Pydantic input schema."""
 
     def test_google_search_input_defaults(self):
-        from src.tools.google_search import GoogleSearchInput
+        from cogtrix_core.tools.google_search import GoogleSearchInput
 
         schema = GoogleSearchInput(query="test")
         assert schema.query == "test"
@@ -255,7 +259,7 @@ class TestGoogleSearchInput:
         assert schema.safe_search == "off"
 
     def test_google_search_input_custom_values(self):
-        from src.tools.google_search import GoogleSearchInput
+        from cogtrix_core.tools.google_search import GoogleSearchInput
 
         schema = GoogleSearchInput(
             query="test",

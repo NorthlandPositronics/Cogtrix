@@ -17,7 +17,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from src.ui.confirmation import _TokenAccumulator
+from cogtrix_core.ui.confirmation import _TokenAccumulator
 
 
 @pytest.fixture
@@ -146,10 +146,12 @@ class TestConfirmationPanelFormatting:
     """Tests for visual formatting — no square brackets, no leading spaces."""
 
     def _read_source_lines(self):
-        """Read src/ui/confirmation.py and return its content."""
+        """Read cogtrix_core/ui/confirmation.py and return its content."""
         from pathlib import Path
 
-        confirmation_path = Path(__file__).resolve().parent.parent / "src/ui/confirmation.py"
+        confirmation_path = (
+            Path(__file__).resolve().parent.parent / "cogtrix_core/ui/confirmation.py"
+        )
         return confirmation_path.read_text(encoding="utf-8")
 
     def test_hint_msg_no_square_brackets(self):

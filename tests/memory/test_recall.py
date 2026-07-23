@@ -1,4 +1,4 @@
-"""Unit tests for src/memory/recall.py — SessionVectorStore."""
+"""Unit tests for cogtrix_core/memory/recall.py — SessionVectorStore."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.memory.recall import SessionVectorStore
+from cogtrix_core.memory.recall import SessionVectorStore
 
 
 class TestSessionVectorStoreLock:
@@ -72,7 +72,7 @@ class TestSessionVectorStorePathGuard:
             storage = Path(tmpdir) / "sessions"
             storage.mkdir()
             with patch(
-                "src.memory.recall._sanitize_session_id",
+                "cogtrix_core.memory.recall._sanitize_session_id",
                 return_value="..",
             ):
                 with pytest.raises(ValueError, match="Path traversal"):
@@ -175,7 +175,7 @@ class TestSessionVectorStoreLoadOrReset:
         meta_path = self.store._index_dir / "meta.json"
         meta_path.write_text(_json.dumps({"embedding_model": "test-model"}), encoding="utf-8")
         with patch(
-            "src.memory.recall.FAISS",
+            "cogtrix_core.memory.recall.FAISS",
             side_effect=Exception("FAISS unavailable"),
             create=True,
         ):
@@ -193,7 +193,9 @@ class TestSessionVectorStoreLoadOrReset:
         self.store._index_dir.mkdir(parents=True, exist_ok=True)
         (self.store._index_dir / "index.faiss").write_bytes(b"index")
         mock_store = MagicMock()
-        with patch("src.memory.recall.load_faiss_store_safe", return_value=mock_store) as mock_load:
+        with patch(
+            "cogtrix_core.memory.recall.load_faiss_store_safe", return_value=mock_store
+        ) as mock_load:
             self.store._load_or_reset()
         mock_load.assert_called_once()
         assert self.store._vectorstore is mock_store

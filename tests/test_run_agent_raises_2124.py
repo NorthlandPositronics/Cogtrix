@@ -12,9 +12,9 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from src.agent.safety import AgentExecutionError, UserCancelledRun
-from src.orchestration.run_config import AgentRunConfig
-from src.orchestration.runner import run_agent
+from cogtrix_core.agent.safety import AgentExecutionError, UserCancelledRun
+from cogtrix_core.orchestration.run_config import AgentRunConfig
+from cogtrix_core.orchestration.runner import run_agent
 
 
 class _ProviderBoom(Exception):

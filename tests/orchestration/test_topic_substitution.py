@@ -9,7 +9,7 @@ subject Y and answers Y instead of acknowledging out-of-scope.
 
 from __future__ import annotations
 
-from src.orchestration.verification import (
+from cogtrix_core.orchestration.verification import (
     GroundedSources,
     _extract_distinctive_subjects,
     detect_topic_substitution,
@@ -345,19 +345,19 @@ class TestNudgeRendering:
 
 class TestProtocolConformance:
     def test_registered(self) -> None:
-        from src.orchestration.verification import GROUNDED_DETECTORS
+        from cogtrix_core.orchestration.verification import GROUNDED_DETECTORS
 
         names = [spec.name for spec in GROUNDED_DETECTORS]
         assert "topic_substitution" in names
 
     def test_handler_node_convention(self) -> None:
-        from src.orchestration.verification import GROUNDED_DETECTORS
+        from cogtrix_core.orchestration.verification import GROUNDED_DETECTORS
 
         spec = next(s for s in GROUNDED_DETECTORS if s.name == "topic_substitution")
         assert spec.handler_node == "handle_topic_substitution"
 
     def test_protocol_runtime_check(self) -> None:
-        from src.orchestration.verification import GROUNDED_DETECTORS, GroundedDetector
+        from cogtrix_core.orchestration.verification import GROUNDED_DETECTORS, GroundedDetector
 
         spec = next(s for s in GROUNDED_DETECTORS if s.name == "topic_substitution")
         assert isinstance(spec.detect, GroundedDetector)
@@ -365,7 +365,7 @@ class TestProtocolConformance:
     def test_consumes_user_prompt_false(self) -> None:
         """Per the spec, user_prompt is the SOURCE of candidates, not
         verification grounding."""
-        from src.orchestration.verification import GROUNDED_DETECTORS
+        from cogtrix_core.orchestration.verification import GROUNDED_DETECTORS
 
         spec = next(s for s in GROUNDED_DETECTORS if s.name == "topic_substitution")
         assert spec.consumes_user_prompt is False

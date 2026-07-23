@@ -50,13 +50,13 @@ def _install_stubs(monkeypatch):
         monkeypatch.setitem(sys.modules, name, mod)
 
     # Build a minimal src.ui.input_session stub
-    uis_stub = types.ModuleType("src.ui.input_session")
+    uis_stub = types.ModuleType("cogtrix_core.ui.input_session")
     uis_stub._toolbar_stats = "1.2s ↑100 ↓50"  # type: ignore[attr-defined]
     uis_stub.update_toolbar_stats = lambda s: None  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "src.ui.input_session", uis_stub)
+    monkeypatch.setitem(sys.modules, "cogtrix_core.ui.input_session", uis_stub)
 
     # Remove cached real module if already imported
-    for cached in ("src.ui.input_session",):
+    for cached in ("cogtrix_core.ui.input_session",):
         if cached in sys.modules:
             pass  # monkeypatch.setitem already replaced it
 
@@ -89,7 +89,9 @@ def test_slash_command_erase_fires_before_output(monkeypatch):
 
     # Run the exact fixed code path
     if sys.stdout.isatty():
-        from src.ui.input_session import _toolbar_stats as _ts  # type: ignore[attr-defined]
+        from cogtrix_core.ui.input_session import (
+            _toolbar_stats as _ts,  # type: ignore[attr-defined]
+        )
 
         sys.stdout.write("\033[1A\033[2K\r")  # erase ❯ line
         if _ts.strip():
@@ -287,7 +289,9 @@ def test_compact_does_not_produce_duplicate_separator(monkeypatch):
     # The \n is required because PT leaves the cursor ON the ❯ line; without it
     # each \033[1A overshoots by one row and the last erase eats the panel border.
     if sys.stdout.isatty():
-        from src.ui.input_session import _toolbar_stats as _ts  # type: ignore[attr-defined]
+        from cogtrix_core.ui.input_session import (
+            _toolbar_stats as _ts,  # type: ignore[attr-defined]
+        )
 
         sys.stdout.write("\n")  # advance past ❯ (fix for #311)
         sys.stdout.write("\033[1A\033[2K\r")  # erase ❯

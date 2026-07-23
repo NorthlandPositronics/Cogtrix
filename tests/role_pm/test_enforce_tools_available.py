@@ -133,7 +133,7 @@ def _captured_system_prompt(*, enforce: bool) -> str:
     # imports at call time so the patch path must match the import path.
     with (
         patch("tests.evaluation.runner._build_llm", _fake_build_llm),
-        patch("src.orchestration.graph.build_agent_graph", _fake_build_agent_graph),
+        patch("cogtrix_core.orchestration.graph.build_agent_graph", _fake_build_agent_graph),
         # Stub the StructuredTool / query_knowledge_base imports to
         # avoid pulling rag deps.
         patch.dict(
@@ -144,7 +144,7 @@ def _captured_system_prompt(*, enforce: bool) -> str:
                         from_function=lambda **_kw: object(),
                     )
                 ),
-                "src.tools.rag": types.SimpleNamespace(
+                "cogtrix_core.tools.rag": types.SimpleNamespace(
                     KnowledgeQueryInput=object,
                     query_knowledge_base=lambda **_kw: "",
                 ),

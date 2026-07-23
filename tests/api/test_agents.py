@@ -17,7 +17,7 @@ import pytest
 
 pytest.importorskip("fastapi")
 
-from src.api.auth import create_access_token  # noqa: E402
+from cogtrix_core.api.auth import create_access_token  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -44,7 +44,7 @@ def _make_agent_config(
     temperature: float = -1.0,
 ):
     """Build a minimal AgentConfig-like object for mocking."""
-    from src.agent.registry import AgentConfig
+    from cogtrix_core.agent.registry import AgentConfig
 
     return AgentConfig(
         name=name,
@@ -82,7 +82,7 @@ class TestListAgentsAuth:
 class TestListAgentsData:
     def test_list_agents_returns_empty_list_when_no_agents(self, client):
         token = _user_token()
-        with patch("src.agent.registry.list_agents", return_value=[]):
+        with patch("cogtrix_core.agent.registry.list_agents", return_value=[]):
             response = client.get(
                 "/api/v1/agents",
                 headers={"Authorization": f"Bearer {token}"},
@@ -97,7 +97,7 @@ class TestListAgentsData:
             _make_agent_config(name="alpha", description="Alpha agent"),
             _make_agent_config(name="beta", description="Beta agent"),
         ]
-        with patch("src.agent.registry.list_agents", return_value=agents):
+        with patch("cogtrix_core.agent.registry.list_agents", return_value=agents):
             response = client.get(
                 "/api/v1/agents",
                 headers={"Authorization": f"Bearer {token}"},
@@ -128,7 +128,7 @@ class TestListAgentsData:
                 temperature=0.7,
             ),
         ]
-        with patch("src.agent.registry.list_agents", return_value=agents):
+        with patch("cogtrix_core.agent.registry.list_agents", return_value=agents):
             response = client.get(
                 "/api/v1/agents",
                 headers={"Authorization": f"Bearer {token}"},
@@ -159,7 +159,7 @@ class TestListAgentsData:
             _make_agent_config(name="apple"),
             _make_agent_config(name="mango"),
         ]
-        with patch("src.agent.registry.list_agents", return_value=agents):
+        with patch("cogtrix_core.agent.registry.list_agents", return_value=agents):
             response = client.get(
                 "/api/v1/agents",
                 headers={"Authorization": f"Bearer {token}"},
@@ -183,7 +183,7 @@ class TestGetAgentAuth:
     def test_get_agent_returns_200_with_valid_auth(self, client):
         token = _user_token()
         agent = _make_agent_config(name="valid-agent")
-        with patch("src.agent.registry.get", return_value=agent):
+        with patch("cogtrix_core.agent.registry.get", return_value=agent):
             response = client.get(
                 "/api/v1/agents/valid-agent",
                 headers={"Authorization": f"Bearer {token}"},
@@ -202,7 +202,7 @@ class TestGetAgentData:
             max_steps=25,
             temperature=0.5,
         )
-        with patch("src.agent.registry.get", return_value=agent):
+        with patch("cogtrix_core.agent.registry.get", return_value=agent):
             response = client.get(
                 "/api/v1/agents/my-agent",
                 headers={"Authorization": f"Bearer {token}"},
@@ -220,7 +220,7 @@ class TestGetAgentData:
 
     def test_get_agent_not_found(self, client):
         token = _user_token()
-        with patch("src.agent.registry.get", return_value=None):
+        with patch("cogtrix_core.agent.registry.get", return_value=None):
             response = client.get(
                 "/api/v1/agents/nonexistent-agent",
                 headers={"Authorization": f"Bearer {token}"},
@@ -245,7 +245,7 @@ class TestGetAgentData:
             max_steps=10,
             temperature=0.3,
         )
-        with patch("src.agent.registry.get", return_value=agent):
+        with patch("cogtrix_core.agent.registry.get", return_value=agent):
             response = client.get(
                 "/api/v1/agents/schema-agent",
                 headers={"Authorization": f"Bearer {token}"},
@@ -268,7 +268,7 @@ class TestGetAgentData:
         """AgentConfig with default values should serialize correctly."""
         token = _user_token()
         agent = _make_agent_config(name="defaults-agent")
-        with patch("src.agent.registry.get", return_value=agent):
+        with patch("cogtrix_core.agent.registry.get", return_value=agent):
             response = client.get(
                 "/api/v1/agents/defaults-agent",
                 headers={"Authorization": f"Bearer {token}"},
@@ -289,7 +289,7 @@ class TestGetAgentData:
         """Agent names with hyphens and underscores should work."""
         token = _user_token()
         agent = _make_agent_config(name="my-special_agent.v2")
-        with patch("src.agent.registry.get", return_value=agent):
+        with patch("cogtrix_core.agent.registry.get", return_value=agent):
             response = client.get(
                 "/api/v1/agents/my-special_agent.v2",
                 headers={"Authorization": f"Bearer {token}"},
@@ -301,7 +301,7 @@ class TestGetAgentData:
         """Agent names with spaces should work when URL-encoded."""
         token = _user_token()
         agent = _make_agent_config(name="My Agent")
-        with patch("src.agent.registry.get", return_value=agent):
+        with patch("cogtrix_core.agent.registry.get", return_value=agent):
             response = client.get(
                 "/api/v1/agents/My%20Agent",
                 headers={"Authorization": f"Bearer {token}"},

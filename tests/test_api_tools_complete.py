@@ -33,14 +33,14 @@ from fastapi.testclient import TestClient  # noqa: E402
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine  # noqa: E402
 from sqlalchemy.pool import StaticPool  # noqa: E402
 
-from src.api.db.engine import Base, get_db  # noqa: E402
+from cogtrix_core.api.db.engine import Base, get_db  # noqa: E402
 
 _VALID_PASSWORD = "TestPass1!"
 
 
 @pytest.fixture()
 def app():
-    from src.api.app import create_app
+    from cogtrix_core.api.app import create_app
 
     engine = create_async_engine(
         "sqlite+aiosqlite:///:memory:",
@@ -137,7 +137,7 @@ def _make_registry(
 
 
 def _make_live_session(tool_names=("web_search", "write_file", "shell", "mcp_browser")):
-    from src.orchestration.session_state import SessionState
+    from cogtrix_core.orchestration.session_state import SessionState
 
     # Use a real SessionState so is_denied() / deny_tool() / allow_tool() work correctly.
     ss = SessionState()

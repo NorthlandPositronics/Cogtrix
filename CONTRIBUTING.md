@@ -50,17 +50,21 @@ See the [LICENSE](LICENSE) file for full terms.
 1. Create a feature branch from `release/next` (the integration branch — not `production`):
    ```bash
    git checkout release/next
-   git checkout -b feat/my-feature
+   git checkout -b feature/1234-my-feature
    ```
-   Use the naming convention `feat/<short-description>` or `fix/<short-description>`.
+   Branch names are enforced by the repository ruleset and must follow
+   `[feature|bugfix|hotfix]/<github-issue-id>-short-description` (e.g.
+   `feature/1234-short-description`, `bugfix/1234-short-description`).
+   A `feat/`-style name is rejected on push. Docs/refactor/chore branches
+   use `hotfix/`. Open a GitHub issue first if one doesn't already exist.
 2. Make your changes following the code style guidelines below.
 3. Add or update tests as appropriate.
 4. Run all quality checks:
 
 ```bash
-uv run black cogtrix.py src/ tests/
-uv run ruff check cogtrix.py src/ tests/
-uv run pyright cogtrix.py src/
+uv run black cogtrix.py cogtrix_core/ tests/
+uv run ruff check cogtrix.py cogtrix_core/ tests/
+uv run pyright cogtrix.py cogtrix_core/
 uv run pytest tests/ -v
 ```
 
@@ -80,7 +84,7 @@ uv run pytest tests/ -v
 
 Good places to start:
 
-- **Add a new tool** — see [Development Guide: Adding Custom Tools](docs/DEVELOPMENT.md#adding-custom-tools). Drop a `.py` file in `src/tools/` with a `TOOL_CONFIG` dict, and it's auto-discovered.
+- **Add a new tool** — see [Development Guide: Adding Custom Tools](docs/DEVELOPMENT.md#adding-custom-tools). Drop a `.py` file in `cogtrix_core/tools/` with a `TOOL_CONFIG` dict, and it's auto-discovered.
 - **Improve test coverage** — pick a tool or memory mode and add edge-case tests.
 - **Fix a typo or clarify docs** — documentation improvements are always welcome.
 

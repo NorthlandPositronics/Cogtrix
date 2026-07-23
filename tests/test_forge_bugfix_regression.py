@@ -35,8 +35,8 @@ import pytest
 
 pytest.importorskip("fastapi")
 
-from src.api import confirmation as _confirmation_mod  # noqa: E402
-from src.api.confirmation import (  # noqa: E402
+from cogtrix_core.api import confirmation as _confirmation_mod  # noqa: E402
+from cogtrix_core.api.confirmation import (  # noqa: E402
     _ACTION_MAP,
     _POLL_INTERVAL,
     _TIMEOUT_SECONDS,
@@ -129,14 +129,16 @@ class TestDoneMsgBlockingPut:
     @pytest.mark.asyncio
     async def test_done_message_delivered_with_blocking_put(self) -> None:
         """Done message is enqueued via blocking put and turn completes normally."""
-        from src.api.turn_runner import _run_message_turn_inner
+        from cogtrix_core.api.turn_runner import _run_message_turn_inner
 
         queue = asyncio.Queue(maxsize=10)
         session = _make_turn_runner_session(queue)
         ws_callback = SimpleNamespace(input_tokens=0, output_tokens=0, tool_call_count=0)
 
-        with patch("src.orchestration.runner.run_agent", return_value="ok"):
-            with patch("src.api.callbacks.WebSocketCallbackHandler", return_value=ws_callback):
+        with patch("cogtrix_core.orchestration.runner.run_agent", return_value="ok"):
+            with patch(
+                "cogtrix_core.api.callbacks.WebSocketCallbackHandler", return_value=ws_callback
+            ):
                 await _run_message_turn_inner(session, "hello", "chat", None, None)
 
         assert session.agent_state == "idle"
@@ -147,7 +149,7 @@ class TestDoneMsgBlockingPut:
     @pytest.mark.asyncio
     async def test_done_message_blocks_until_space_available(self) -> None:
         """Blocking put waits until queue space is available, then delivers."""
-        from src.api.turn_runner import _run_message_turn_inner
+        from cogtrix_core.api.turn_runner import _run_message_turn_inner
 
         full_queue = asyncio.Queue(maxsize=1)
         full_queue.put_nowait({"sentinel": True})
@@ -159,8 +161,10 @@ class TestDoneMsgBlockingPut:
             await asyncio.sleep(0.05)
             full_queue.get_nowait()
 
-        with patch("src.orchestration.runner.run_agent", return_value="ok"):
-            with patch("src.api.callbacks.WebSocketCallbackHandler", return_value=ws_callback):
+        with patch("cogtrix_core.orchestration.runner.run_agent", return_value="ok"):
+            with patch(
+                "cogtrix_core.api.callbacks.WebSocketCallbackHandler", return_value=ws_callback
+            ):
                 await asyncio.gather(
                     consumer(),
                     _run_message_turn_inner(session, "hello", "chat", None, None),

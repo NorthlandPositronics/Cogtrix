@@ -6,9 +6,9 @@ import base64
 import time
 from unittest.mock import MagicMock, patch
 
-from src.assistant.channel import IncomingMessage
-from src.assistant.channels.whatsapp import WhatsAppChannel
-from src.tools._whatsapp_client import (
+from cogtrix_core.assistant.channel import IncomingMessage
+from cogtrix_core.assistant.channels.whatsapp import WhatsAppChannel
+from cogtrix_core.tools._whatsapp_client import (
     ChatOverview,
     Message,
     WahaClient,
@@ -46,7 +46,9 @@ class TestDownloadMedia:
         client = self._make_client()
         body = b"\xff\xd8\xff" * 5
         resp = self._mock_response(content_type="image/jpeg", body=body)
-        with patch("src.tools._whatsapp_client.requests.get", return_value=resp) as mock_get:
+        with patch(
+            "cogtrix_core.tools._whatsapp_client.requests.get", return_value=resp
+        ) as mock_get:
             result = client.download_media("http://waha/media/abc123")
 
         assert result is not None
@@ -63,7 +65,7 @@ class TestDownloadMedia:
         client = self._make_client()
         body = b"\x89PNG" + b"\x00" * 8
         resp = self._mock_response(content_type="image/png", body=body)
-        with patch("src.tools._whatsapp_client.requests.get", return_value=resp):
+        with patch("cogtrix_core.tools._whatsapp_client.requests.get", return_value=resp):
             result = client.download_media("http://waha/media/png")
 
         assert result is not None
@@ -73,7 +75,7 @@ class TestDownloadMedia:
     def test_non_image_content_type_returns_none(self):
         client = self._make_client()
         resp = self._mock_response(content_type="application/pdf", body=b"%PDF")
-        with patch("src.tools._whatsapp_client.requests.get", return_value=resp):
+        with patch("cogtrix_core.tools._whatsapp_client.requests.get", return_value=resp):
             result = client.download_media("http://waha/media/doc")
 
         assert result is None
@@ -81,7 +83,7 @@ class TestDownloadMedia:
     def test_video_content_type_returns_none(self):
         client = self._make_client()
         resp = self._mock_response(content_type="video/mp4", body=b"\x00\x00\x00\x00")
-        with patch("src.tools._whatsapp_client.requests.get", return_value=resp):
+        with patch("cogtrix_core.tools._whatsapp_client.requests.get", return_value=resp):
             result = client.download_media("http://waha/media/vid")
 
         assert result is None
@@ -89,7 +91,7 @@ class TestDownloadMedia:
     def test_http_error_returns_none(self):
         client = self._make_client()
         resp = self._mock_response(status_code=404, content_type="image/jpeg", body=b"Not Found")
-        with patch("src.tools._whatsapp_client.requests.get", return_value=resp):
+        with patch("cogtrix_core.tools._whatsapp_client.requests.get", return_value=resp):
             result = client.download_media("http://waha/media/missing")
 
         assert result is None
@@ -102,7 +104,7 @@ class TestDownloadMedia:
             content_length=str(big),
             body=b"\xff" * 100,
         )
-        with patch("src.tools._whatsapp_client.requests.get", return_value=resp):
+        with patch("cogtrix_core.tools._whatsapp_client.requests.get", return_value=resp):
             result = client.download_media("http://waha/media/big", max_bytes=8 * 1024 * 1024)
 
         assert result is None
@@ -112,7 +114,7 @@ class TestDownloadMedia:
         max_bytes = 100
         # read() returns more than max_bytes + 1
         resp = self._mock_response(content_type="image/jpeg", body=b"\xff" * 200)
-        with patch("src.tools._whatsapp_client.requests.get", return_value=resp):
+        with patch("cogtrix_core.tools._whatsapp_client.requests.get", return_value=resp):
             result = client.download_media("http://waha/media/big2", max_bytes=max_bytes)
 
         assert result is None
@@ -122,7 +124,7 @@ class TestDownloadMedia:
 
         client = self._make_client()
         with patch(
-            "src.tools._whatsapp_client.requests.get",
+            "cogtrix_core.tools._whatsapp_client.requests.get",
             side_effect=_requests.exceptions.ConnectionError("refused"),
         ):
             result = client.download_media("http://waha/media/noconn")
@@ -134,7 +136,7 @@ class TestDownloadMedia:
 
         client = self._make_client()
         with patch(
-            "src.tools._whatsapp_client.requests.get",
+            "cogtrix_core.tools._whatsapp_client.requests.get",
             side_effect=_requests.exceptions.Timeout("timed out"),
         ):
             result = client.download_media("http://waha/media/slow")
@@ -144,7 +146,7 @@ class TestDownloadMedia:
     def test_generic_exception_returns_none(self):
         client = self._make_client()
         with patch(
-            "src.tools._whatsapp_client.requests.get",
+            "cogtrix_core.tools._whatsapp_client.requests.get",
             side_effect=RuntimeError("unexpected"),
         ):
             result = client.download_media("http://waha/media/boom")
@@ -155,7 +157,9 @@ class TestDownloadMedia:
         client = WahaClient(base_url="http://localhost:3000", api_key=None)
         body = b"\xff\xd8\xff"
         resp = self._mock_response(content_type="image/jpeg", body=body)
-        with patch("src.tools._whatsapp_client.requests.get", return_value=resp) as mock_get:
+        with patch(
+            "cogtrix_core.tools._whatsapp_client.requests.get", return_value=resp
+        ) as mock_get:
             result = client.download_media("http://waha/media/noauth")
 
         assert result is not None
@@ -168,7 +172,7 @@ class TestDownloadMedia:
         client = self._make_client()
         body = b"\x89PNG" + b"\x00" * 4
         resp = self._mock_response(content_type="image/png; charset=utf-8", body=body)
-        with patch("src.tools._whatsapp_client.requests.get", return_value=resp):
+        with patch("cogtrix_core.tools._whatsapp_client.requests.get", return_value=resp):
             result = client.download_media("http://waha/media/charset")
 
         assert result is not None
@@ -320,7 +324,7 @@ class TestPrepareMessagesWithContext:
     """Tests for the user_images parameter of prepare_messages_with_context."""
 
     def test_without_images_returns_plain_string_content(self):
-        from src.agent.core import prepare_messages_with_context
+        from cogtrix_core.agent.core import prepare_messages_with_context
 
         msgs = prepare_messages_with_context(
             history_messages=[],
@@ -331,7 +335,7 @@ class TestPrepareMessagesWithContext:
         assert last.content == "hello"
 
     def test_with_images_returns_multimodal_list(self):
-        from src.agent.core import prepare_messages_with_context
+        from cogtrix_core.agent.core import prepare_messages_with_context
 
         uri = "data:image/png;base64,AAAA"
         msgs = prepare_messages_with_context(
@@ -345,7 +349,7 @@ class TestPrepareMessagesWithContext:
         assert last.content[1] == {"type": "image_url", "image_url": {"url": uri}}
 
     def test_multiple_images_all_included(self):
-        from src.agent.core import prepare_messages_with_context
+        from cogtrix_core.agent.core import prepare_messages_with_context
 
         uris = [
             "data:image/jpeg;base64,AAA=",
@@ -364,7 +368,7 @@ class TestPrepareMessagesWithContext:
         assert last.content[2]["image_url"]["url"] == uris[1]
 
     def test_empty_images_list_returns_plain_string(self):
-        from src.agent.core import prepare_messages_with_context
+        from cogtrix_core.agent.core import prepare_messages_with_context
 
         msgs = prepare_messages_with_context(
             history_messages=[],
@@ -375,7 +379,7 @@ class TestPrepareMessagesWithContext:
         assert last.content == "no images"
 
     def test_none_images_returns_plain_string(self):
-        from src.agent.core import prepare_messages_with_context
+        from cogtrix_core.agent.core import prepare_messages_with_context
 
         msgs = prepare_messages_with_context(
             history_messages=[],
@@ -386,7 +390,7 @@ class TestPrepareMessagesWithContext:
         assert last.content == "no images"
 
     def test_context_prefix_still_injected_with_images(self):
-        from src.agent.core import prepare_messages_with_context
+        from cogtrix_core.agent.core import prepare_messages_with_context
 
         uri = "data:image/png;base64,AAAA"
         msgs = prepare_messages_with_context(
@@ -410,7 +414,7 @@ class TestRunAgentThreadsUserImages:
     """Verify that run_agent passes user_images to prepare_messages_with_context."""
 
     def test_user_images_forwarded_to_prepare_messages(self):
-        from src.orchestration.runner import run_agent
+        from cogtrix_core.orchestration.runner import run_agent
 
         captured: dict = {}
 
@@ -446,18 +450,23 @@ class TestRunAgentThreadsUserImages:
         mock_config.memory_manager = None
 
         with patch(
-            "src.orchestration.runner.prepare_messages_with_context", side_effect=fake_prepare
+            "cogtrix_core.orchestration.runner.prepare_messages_with_context",
+            side_effect=fake_prepare,
         ) as mock_pmc:
-            with patch("src.orchestration.runner.build_agent_graph") as mock_graph_fn:
+            with patch("cogtrix_core.orchestration.runner.build_agent_graph") as mock_graph_fn:
                 mock_graph = MagicMock()
                 mock_graph.stream.return_value = iter(
                     [{"messages": [MagicMock(content="ok", type="ai")]}]
                 )
                 mock_graph_fn.return_value = mock_graph
-                with patch("src.orchestration.runner._drain_background_compression_jobs"):
-                    with patch("src.orchestration.runner.classify_task_complexity") as mock_cls:
+                with patch("cogtrix_core.orchestration.runner._drain_background_compression_jobs"):
+                    with patch(
+                        "cogtrix_core.orchestration.runner.classify_task_complexity"
+                    ) as mock_cls:
                         mock_cls.return_value = MagicMock()
-                        with patch("src.orchestration.runner.classify_task_ownership") as mock_own:
+                        with patch(
+                            "cogtrix_core.orchestration.runner.classify_task_ownership"
+                        ) as mock_own:
                             mock_own.return_value = MagicMock(
                                 mode=MagicMock(name="EXECUTE"),
                                 confidence=1.0,
@@ -489,7 +498,7 @@ class TestHandlerImageThreading:
     """Verify handler plumbing passes images through to the runner."""
 
     def _make_handler(self) -> MagicMock:
-        from src.assistant.handler import MessageHandler
+        from cogtrix_core.assistant.handler import MessageHandler
 
         handler = object.__new__(MessageHandler)
         handler._session_mgr = MagicMock()
@@ -571,9 +580,10 @@ class TestHandlerImageThreading:
 
         uri = "data:image/png;base64,BBBB"
         with patch(
-            "src.assistant.handler.SessionState", return_value=MagicMock(loaded_tools=set())
+            "cogtrix_core.assistant.handler.SessionState",
+            return_value=MagicMock(loaded_tools=set()),
         ):
-            with patch("src.orchestration.run_config.AgentRunConfig"):
+            with patch("cogtrix_core.orchestration.run_config.AgentRunConfig"):
                 handler._run_agent(
                     user_input="describe",
                     history_messages=[],
@@ -601,9 +611,10 @@ class TestHandlerImageThreading:
         handler._agent_runner = fake_runner
 
         with patch(
-            "src.assistant.handler.SessionState", return_value=MagicMock(loaded_tools=set())
+            "cogtrix_core.assistant.handler.SessionState",
+            return_value=MagicMock(loaded_tools=set()),
         ):
-            with patch("src.orchestration.run_config.AgentRunConfig"):
+            with patch("cogtrix_core.orchestration.run_config.AgentRunConfig"):
                 handler._run_agent(
                     user_input="text only",
                     history_messages=[],

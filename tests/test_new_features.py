@@ -33,9 +33,9 @@ from sqlalchemy.ext.asyncio import (  # noqa: E402
 )
 from sqlalchemy.pool import StaticPool  # noqa: E402
 
-from src.api.db import models as _models  # noqa: E402, F401
-from src.api.db.engine import Base  # noqa: E402
-from src.api.db.repositories.users import UserRepository  # noqa: E402
+from cogtrix_core.api.db import models as _models  # noqa: E402, F401
+from cogtrix_core.api.db.engine import Base  # noqa: E402
+from cogtrix_core.api.db.repositories.users import UserRepository  # noqa: E402
 
 
 @pytest_asyncio.fixture()
@@ -152,13 +152,13 @@ class TestUserRepository:
 
 class TestUserSchemas:
     def test_user_create_request_valid(self):
-        from src.api.schemas.user import UserCreateRequest
+        from cogtrix_core.api.schemas.user import UserCreateRequest
 
         req = UserCreateRequest(username="alice", email="alice@example.com", password="Password1!")
         assert req.role == "user"
 
     def test_user_create_request_admin_role(self):
-        from src.api.schemas.user import UserCreateRequest
+        from cogtrix_core.api.schemas.user import UserCreateRequest
 
         req = UserCreateRequest(
             username="admin_user",
@@ -171,7 +171,7 @@ class TestUserSchemas:
     def test_user_create_rejects_invalid_role(self):
         from pydantic import ValidationError
 
-        from src.api.schemas.user import UserCreateRequest
+        from cogtrix_core.api.schemas.user import UserCreateRequest
 
         with pytest.raises(ValidationError, match="role"):
             UserCreateRequest(
@@ -184,7 +184,7 @@ class TestUserSchemas:
     def test_user_create_rejects_short_password(self):
         from pydantic import ValidationError
 
-        from src.api.schemas.user import UserCreateRequest
+        from cogtrix_core.api.schemas.user import UserCreateRequest
 
         with pytest.raises(ValidationError, match="password"):
             UserCreateRequest(username="short", email="short@example.com", password="123")
@@ -192,7 +192,7 @@ class TestUserSchemas:
     def test_user_create_rejects_invalid_username(self):
         from pydantic import ValidationError
 
-        from src.api.schemas.user import UserCreateRequest
+        from cogtrix_core.api.schemas.user import UserCreateRequest
 
         with pytest.raises(ValidationError, match="username"):
             UserCreateRequest(username="has space", email="x@example.com", password="Password1!")
@@ -200,13 +200,13 @@ class TestUserSchemas:
     def test_user_create_rejects_short_username(self):
         from pydantic import ValidationError
 
-        from src.api.schemas.user import UserCreateRequest
+        from cogtrix_core.api.schemas.user import UserCreateRequest
 
         with pytest.raises(ValidationError, match="username"):
             UserCreateRequest(username="ab", email="x@example.com", password="Password1!")
 
     def test_user_update_request_optional(self):
-        from src.api.schemas.user import UserUpdateRequest
+        from cogtrix_core.api.schemas.user import UserUpdateRequest
 
         req = UserUpdateRequest()
         assert req.role is None
@@ -214,7 +214,7 @@ class TestUserSchemas:
     def test_user_update_rejects_invalid_role(self):
         from pydantic import ValidationError
 
-        from src.api.schemas.user import UserUpdateRequest
+        from cogtrix_core.api.schemas.user import UserUpdateRequest
 
         with pytest.raises(ValidationError, match="role"):
             UserUpdateRequest(role="invalid")
@@ -227,7 +227,7 @@ class TestUserSchemas:
 
 class TestUserRouteHelper:
     def test_user_to_out_with_all_fields(self):
-        from src.api.routes.users import _user_to_out
+        from cogtrix_core.api.routes.users import _user_to_out
 
         mock_user = MagicMock()
         mock_user.id = "test-id"
@@ -243,7 +243,7 @@ class TestUserRouteHelper:
 
     def test_user_to_out_uses_getattr_for_missing_attrs(self):
         """_user_to_out uses getattr so it works with objects missing some fields."""
-        from src.api.routes.users import _user_to_out
+        from cogtrix_core.api.routes.users import _user_to_out
 
         mock = MagicMock()
         mock.id = "id-1"
@@ -262,7 +262,7 @@ class TestUserRouteHelper:
 
 class TestTokenFinalField:
     def test_token_payload_has_final_field(self):
-        from src.api.ws import TokenPayload
+        from cogtrix_core.api.ws import TokenPayload
 
         payload = TokenPayload(text="hello")
         assert payload.final is False
@@ -273,7 +273,7 @@ class TestTokenFinalField:
         """#2251: non-final tokens stream live; post-tool final-answer tokens are
         buffered (suppressed) and flagged, not streamed — so a verification-recovery
         regeneration can't double-render."""
-        from src.api.callbacks import WebSocketCallbackHandler
+        from cogtrix_core.api.callbacks import WebSocketCallbackHandler
 
         loop = asyncio.new_event_loop()
         queue = asyncio.Queue()
@@ -308,7 +308,7 @@ class TestTokenFinalField:
 class TestModelAliasFormat:
     def test_auto_migrated_alias_prefers_model_name(self):
         """Auto-migrated models from provider section prefer model_name as alias."""
-        from src.config import Config, _parse_providers_section
+        from cogtrix_core.config import Config, _parse_providers_section
 
         cfg = Config(providers={}, models={})
         _parse_providers_section(cfg, {"prov": {"type": "openai", "model": "gpt-4o"}})
@@ -316,7 +316,7 @@ class TestModelAliasFormat:
 
     def test_auto_migrated_alias_falls_back_to_provider_slash_model_on_collision(self):
         """When model_name collides, alias falls back to provider/model format."""
-        from src.config import Config, ModelConfig, _parse_providers_section
+        from cogtrix_core.config import Config, ModelConfig, _parse_providers_section
 
         cfg = Config(providers={}, models={"gpt-4o": ModelConfig(provider="x", model="gpt-4o")})
         _parse_providers_section(cfg, {"prov": {"type": "openai", "model": "gpt-4o"}})
@@ -328,7 +328,7 @@ class TestModelAliasFormat:
         from pathlib import Path
         from unittest.mock import patch
 
-        from src.config import load_config
+        from cogtrix_core.config import load_config
 
         yaml_content = """
 providers:
@@ -341,8 +341,8 @@ providers:
             tmp_path = Path(f.name)
 
         try:
-            with patch("src.config.find_config_file", return_value=tmp_path):
-                with patch("src.providers.get_default_model", return_value="qwen3:8b"):
+            with patch("cogtrix_core.config.find_config_file", return_value=tmp_path):
+                with patch("cogtrix_core.providers.get_default_model", return_value="qwen3:8b"):
                     cfg = load_config()
             assert cfg.active_model_alias == "myprov/qwen3:8b"
             assert "myprov/qwen3:8b" in cfg.models
@@ -357,7 +357,7 @@ providers:
 
 class TestSessionAutoNaming:
     def test_default_session_name_format(self):
-        from src.api.schemas.session import _default_session_name
+        from cogtrix_core.api.schemas.session import _default_session_name
 
         name = _default_session_name()
         assert name.startswith("Session ")
@@ -365,13 +365,13 @@ class TestSessionAutoNaming:
         assert re.match(r"Session \d{4}-\d{2}-\d{2} \d{2}:\d{2}", name)
 
     def test_session_create_request_has_default_name(self):
-        from src.api.schemas.session import SessionCreateRequest
+        from cogtrix_core.api.schemas.session import SessionCreateRequest
 
         req = SessionCreateRequest()
         assert req.name.startswith("Session ")
 
     def test_session_create_request_custom_name(self):
-        from src.api.schemas.session import SessionCreateRequest
+        from cogtrix_core.api.schemas.session import SessionCreateRequest
 
         req = SessionCreateRequest(name="My Session")
         assert req.name == "My Session"
@@ -384,13 +384,13 @@ class TestSessionAutoNaming:
 
 class TestConfigOutNewFields:
     def test_config_out_has_system_prompt(self):
-        from src.api.schemas.config import ConfigOut
+        from cogtrix_core.api.schemas.config import ConfigOut
 
         fields = ConfigOut.model_fields
         assert "system_prompt" in fields
 
     def test_config_out_has_guardrails(self):
-        from src.api.schemas.config import ConfigOut
+        from cogtrix_core.api.schemas.config import ConfigOut
 
         fields = ConfigOut.model_fields
         assert "guardrails" in fields
@@ -407,14 +407,14 @@ class TestCancelEventChecks:
         """_run_think_pipeline raises CancelledError when session.cancel_event is set."""
         from unittest.mock import MagicMock, patch
 
-        from src.api.turn_runner import _run_think_pipeline
+        from cogtrix_core.api.turn_runner import _run_think_pipeline
 
         session = MagicMock()
         session.cancel_event = asyncio.Event()
         session.cancel_event.set()
         session.ws_queue = asyncio.Queue(maxsize=100)
 
-        with patch("src.api.turn_runner._enqueue_agent_state"):
+        with patch("cogtrix_core.api.turn_runner._enqueue_agent_state"):
             with pytest.raises(asyncio.CancelledError):
                 await _run_think_pipeline(session, "test", "", [], None)
 
@@ -428,7 +428,7 @@ class TestCancelEventChecks:
         """
         from unittest.mock import MagicMock, patch
 
-        from src.api.turn_runner import _run_message_turn_inner
+        from cogtrix_core.api.turn_runner import _run_message_turn_inner
 
         session = MagicMock()
         session.id = "test-session-pipeline-cancel"
@@ -444,12 +444,14 @@ class TestCancelEventChecks:
         session.token_counts = {"input_tokens": 0, "output_tokens": 0}
 
         # Patch run_agent at its source module (it is imported lazily inside the function)
-        with patch("src.orchestration.runner.run_agent", return_value="some response"):
+        with patch("cogtrix_core.orchestration.runner.run_agent", return_value="some response"):
             # Patch _run_think_pipeline to raise CancelledError
             async def _cancel_think(*args, **kwargs):
                 raise asyncio.CancelledError("test cancel from pipeline")
 
-            with patch("src.api.turn_runner._run_think_pipeline", side_effect=_cancel_think):
+            with patch(
+                "cogtrix_core.api.turn_runner._run_think_pipeline", side_effect=_cancel_think
+            ):
                 with pytest.raises(asyncio.CancelledError):
                     await _run_message_turn_inner(session, "test", "think", None, None)
 
@@ -467,14 +469,14 @@ class TestCancelEventChecks:
 
 class TestWorkflowSchemas:
     def test_workflow_create_schema(self):
-        from src.api.schemas.workflow import WorkflowCreate
+        from cogtrix_core.api.schemas.workflow import WorkflowCreate
 
         wf = WorkflowCreate(id="test", name="Test")
         assert wf.knowledge_base is False
         assert wf.tool_policy.excluded_tools == []
 
     def test_workflow_update_all_optional(self):
-        from src.api.schemas.workflow import WorkflowUpdate
+        from cogtrix_core.api.schemas.workflow import WorkflowUpdate
 
         upd = WorkflowUpdate()
         assert upd.name is None
@@ -482,13 +484,13 @@ class TestWorkflowSchemas:
         assert upd.knowledge_base is None
 
     def test_workflow_binding_out(self):
-        from src.api.schemas.workflow import WorkflowBindingOut
+        from cogtrix_core.api.schemas.workflow import WorkflowBindingOut
 
         binding = WorkflowBindingOut(session_key="wa::+123", workflow_id="bike-sales")
         assert binding.session_key == "wa::+123"
 
     def test_bind_workflow_request(self):
-        from src.api.schemas.workflow import BindWorkflowRequest
+        from cogtrix_core.api.schemas.workflow import BindWorkflowRequest
 
         req = BindWorkflowRequest(workflow_id="test-wf")
         assert req.workflow_id == "test-wf"
@@ -501,8 +503,8 @@ class TestWorkflowSchemas:
 
 class TestWorkflowRouteHelpers:
     def test_wf_to_out(self):
-        from src.api.routes.workflows import _wf_to_out
-        from src.assistant.workflows import (
+        from cogtrix_core.api.routes.workflows import _wf_to_out
+        from cogtrix_core.assistant.workflows import (
             WorkflowAutoDetect,
             WorkflowDefinition,
             WorkflowToolPolicy,
@@ -530,7 +532,7 @@ class TestWorkflowRouteHelpers:
     def test_get_registry_raises_503_when_none(self):
         from fastapi import HTTPException
 
-        from src.api.routes.workflows import _get_registry
+        from cogtrix_core.api.routes.workflows import _get_registry
 
         mock_request = MagicMock()
         mock_request.app.state = MagicMock(spec=[])  # no workflow_registry attr
@@ -546,7 +548,7 @@ class TestWorkflowRouteHelpers:
 
 class TestChatSessionWorkflowField:
     def test_chat_session_has_workflow_id(self):
-        from src.assistant.session import ChatSession
+        from cogtrix_core.assistant.session import ChatSession
 
         # Check that the class has workflow_id in its annotations or __init__
         assert hasattr(ChatSession, "__annotations__") or hasattr(ChatSession, "workflow_id")
@@ -570,7 +572,7 @@ class TestEnsureUtcValidator:
     def test_message_out_naive_gets_utc(self):
         from datetime import UTC, datetime
 
-        from src.api.schemas.message import MessageOut
+        from cogtrix_core.api.schemas.message import MessageOut
 
         naive = datetime(2026, 3, 8, 13, 34, 36, 841075)
         msg = MessageOut(
@@ -587,7 +589,7 @@ class TestEnsureUtcValidator:
     def test_message_out_aware_passes_through(self):
         from datetime import UTC, datetime
 
-        from src.api.schemas.message import MessageOut
+        from cogtrix_core.api.schemas.message import MessageOut
 
         aware = datetime(2026, 3, 8, 13, 34, 36, 841075, tzinfo=UTC)
         msg = MessageOut(
@@ -602,7 +604,7 @@ class TestEnsureUtcValidator:
     def test_session_out_naive_gets_utc(self):
         from datetime import UTC, datetime
 
-        from src.api.schemas.session import SessionOut
+        from cogtrix_core.api.schemas.session import SessionOut
 
         naive = datetime(2026, 3, 8, 12, 0, 0)
         sess = SessionOut(
@@ -627,7 +629,7 @@ class TestEnsureUtcValidator:
     def test_api_key_out_naive_gets_utc(self):
         from datetime import UTC, datetime
 
-        from src.api.schemas.auth import APIKeyOut
+        from cogtrix_core.api.schemas.auth import APIKeyOut
 
         naive = datetime(2026, 3, 8, 12, 0, 0)
         key = APIKeyOut(
@@ -643,7 +645,7 @@ class TestEnsureUtcValidator:
         assert key.last_used_at is None
 
     def test_ensure_utc_none_safe(self):
-        from src.api.schemas.common import ensure_utc
+        from cogtrix_core.api.schemas.common import ensure_utc
 
         assert ensure_utc(None) is None
 
@@ -658,7 +660,7 @@ class TestHandleOutbound:
 
     def _make_handler(self):
         """Build a MessageHandler with minimal mocks for outbound testing."""
-        handler_mod = pytest.importorskip("src.assistant.handler")
+        handler_mod = pytest.importorskip("cogtrix_core.assistant.handler")
         MessageHandler = handler_mod.MessageHandler
 
         session_mgr = MagicMock()
@@ -701,7 +703,7 @@ class TestHandleOutbound:
         handler, session, runner, mm = self._make_handler()
         channel = MagicMock()
         channel.name = "whatsapp"
-        from src.assistant.channel import SendResult
+        from cogtrix_core.assistant.channel import SendResult
 
         channel.send.return_value = SendResult(ok=True, message_id="msg-42")
 
@@ -720,7 +722,7 @@ class TestHandleOutbound:
         handler, session, runner, mm = self._make_handler()
         channel = MagicMock()
         channel.name = "whatsapp"
-        from src.assistant.channel import SendResult
+        from cogtrix_core.assistant.channel import SendResult
 
         channel.send.return_value = SendResult(ok=True, message_id="m1")
 
@@ -741,7 +743,7 @@ class TestHandleOutbound:
         handler, session, runner, mm = self._make_handler()
         channel = MagicMock()
         channel.name = "whatsapp"
-        from src.assistant.channel import SendResult
+        from cogtrix_core.assistant.channel import SendResult
 
         channel.send.return_value = SendResult(ok=True, message_id="m1")
 
@@ -761,7 +763,7 @@ class TestHandleOutbound:
         handler, session, runner, mm = self._make_handler()
         channel = MagicMock()
         channel.name = "whatsapp"
-        from src.assistant.channel import SendResult
+        from cogtrix_core.assistant.channel import SendResult
 
         channel.send.return_value = SendResult(ok=False, error="timeout")
 
@@ -786,7 +788,7 @@ class TestHandleOutbound:
         handler, session, runner, mm = self._make_handler()
         channel = MagicMock()
         channel.name = "whatsapp"
-        from src.assistant.channel import SendResult
+        from cogtrix_core.assistant.channel import SendResult
 
         channel.send.return_value = SendResult(ok=True, message_id="m1")
 
@@ -816,8 +818,8 @@ class TestPasswordComplexity:
     @pytest.mark.parametrize(
         "schema_path",
         [
-            "src.api.schemas.auth.RegisterRequest",
-            "src.api.schemas.user.UserCreateRequest",
+            "cogtrix_core.api.schemas.auth.RegisterRequest",
+            "cogtrix_core.api.schemas.user.UserCreateRequest",
         ],
     )
     def test_valid_password_accepted(self, schema_path: str) -> None:
@@ -845,7 +847,7 @@ class TestPasswordComplexity:
     def test_weak_password_rejected(self, password: str, missing: str) -> None:
         from pydantic import ValidationError
 
-        from src.api.schemas.auth import RegisterRequest
+        from cogtrix_core.api.schemas.auth import RegisterRequest
 
         with pytest.raises(ValidationError, match="password"):
             RegisterRequest(username="alice", email="alice@example.com", password=password)
@@ -853,7 +855,7 @@ class TestPasswordComplexity:
     def test_too_short_rejected_before_complexity(self) -> None:
         from pydantic import ValidationError
 
-        from src.api.schemas.auth import RegisterRequest
+        from cogtrix_core.api.schemas.auth import RegisterRequest
 
         with pytest.raises(ValidationError, match="password"):
             RegisterRequest(username="alice", email="alice@example.com", password="aB1!")
@@ -872,8 +874,8 @@ class TestAdminSelfGuards:
         os.environ.setdefault("COGTRIX_JWT_SECRET", "test-secret-key-for-testing-only-32ch")
         from fastapi.testclient import TestClient
 
-        from src.api.app import create_app
-        from src.api.auth import create_access_token
+        from cogtrix_core.api.app import create_app
+        from cogtrix_core.api.auth import create_access_token
 
         app = create_app()
         admin_id = str(uuid.uuid4())

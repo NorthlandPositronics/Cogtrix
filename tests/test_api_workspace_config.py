@@ -27,12 +27,12 @@ from unittest.mock import patch  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 from sqlalchemy.ext.asyncio import async_sessionmaker  # noqa: E402
 
-from src.api.auth import create_access_token  # noqa: E402
-from src.api.db.engine import get_db  # noqa: E402
-from src.api.db.repositories.organization import OrganizationRepository  # noqa: E402
-from src.api.db.repositories.users import UserRepository  # noqa: E402
-from src.api.db.repositories.workspaces import WorkspaceRepository  # noqa: E402
-from src.api.workspace_context import WorkspaceConfig, WorkspaceContext  # noqa: E402
+from cogtrix_core.api.auth import create_access_token  # noqa: E402
+from cogtrix_core.api.db.engine import get_db  # noqa: E402
+from cogtrix_core.api.db.repositories.organization import OrganizationRepository  # noqa: E402
+from cogtrix_core.api.db.repositories.users import UserRepository  # noqa: E402
+from cogtrix_core.api.db.repositories.workspaces import WorkspaceRepository  # noqa: E402
+from cogtrix_core.api.workspace_context import WorkspaceConfig, WorkspaceContext  # noqa: E402
 
 
 def _uid() -> str:
@@ -149,7 +149,7 @@ def config_setup(engine):
 
     asyncio.run(_seed())
 
-    from src.api.app import create_app
+    from cogtrix_core.api.app import create_app
 
     with patch.dict(os.environ, {"COGTRIX_JWT_SECRET": _TEST_JWT_SECRET}):
         app = create_app()

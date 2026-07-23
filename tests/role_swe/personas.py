@@ -113,6 +113,11 @@ class PersonaChannel:
         self.defect_filed = False
         self.defect_text = ""
         self.defect_response = ""
+        # True if the run hit the recursion cap and was finalized via the
+        # production-equivalent step-limit recovery (re-invoke with a nudge), not
+        # a crash (mirrors role_sysadmin / #2368). Reported, never gates
+        # clean_pass — distinguishes a looped-but-recovered run from a clean one.
+        self.recovered_from_step_limit = False
 
     def message(self, role: str, text: str) -> str:
         """Deliver a message to *role* and return the persona's reply.

@@ -44,7 +44,7 @@ _PROJECT_ROOT = Path(__file__).parent.parent.parent
 
 class TestSanitizeUrl:
     def test_redacts_password_from_postgresql_url(self):
-        from src.api.db.engine import _sanitize_url
+        from cogtrix_core.api.db.engine import _sanitize_url
 
         url = "postgresql+asyncpg://user:s3cr3t@db.example.com:5432/cogtrix"
         sanitized = _sanitize_url(url)
@@ -52,13 +52,13 @@ class TestSanitizeUrl:
         assert sanitized == "postgresql+asyncpg://user:***@db.example.com:5432/cogtrix"
 
     def test_leaves_sqlite_url_unchanged(self):
-        from src.api.db.engine import _sanitize_url
+        from cogtrix_core.api.db.engine import _sanitize_url
 
         url = "sqlite+aiosqlite:///./data/api/cogtrix.db"
         assert _sanitize_url(url) == url
 
     def test_handles_url_without_password(self):
-        from src.api.db.engine import _sanitize_url
+        from cogtrix_core.api.db.engine import _sanitize_url
 
         url = "postgresql+asyncpg://localhost/cogtrix"
         # No password → URL unchanged (no :***@ substitution needed)
@@ -67,7 +67,7 @@ class TestSanitizeUrl:
         assert "***" not in result
 
     def test_redacts_only_password_segment(self):
-        from src.api.db.engine import _sanitize_url
+        from cogtrix_core.api.db.engine import _sanitize_url
 
         url = "postgresql+asyncpg://admin:pa$$word@10.0.0.1:5432/db"
         result = _sanitize_url(url)
@@ -85,14 +85,14 @@ class TestValidateConnection:
     @pytest.mark.asyncio
     async def test_succeeds_on_healthy_connection(self):
         """validate_connection() completes without error when SELECT 1 works."""
-        from src.api.db.engine import validate_connection
+        from cogtrix_core.api.db.engine import validate_connection
 
         cm = _mock_connect_ok()
         mock_conn = cm.__aenter__.return_value
         mock_engine = MagicMock()
         mock_engine.connect.return_value = cm
 
-        with patch("src.api.db.engine._get_engine", return_value=mock_engine):
+        with patch("cogtrix_core.api.db.engine._get_engine", return_value=mock_engine):
             await validate_connection()
 
         mock_conn.execute.assert_called_once()
@@ -100,28 +100,28 @@ class TestValidateConnection:
     @pytest.mark.asyncio
     async def test_raises_runtime_error_on_failure(self):
         """validate_connection() converts any connection error to RuntimeError."""
-        from src.api.db.engine import validate_connection
+        from cogtrix_core.api.db.engine import validate_connection
 
         cm = _mock_connect_fail(OSError("connection refused"))
         mock_engine = MagicMock()
         mock_engine.connect.return_value = cm
 
-        with patch("src.api.db.engine._get_engine", return_value=mock_engine):
+        with patch("cogtrix_core.api.db.engine._get_engine", return_value=mock_engine):
             with pytest.raises(RuntimeError):
                 await validate_connection()
 
     @pytest.mark.asyncio
     async def test_postgresql_error_message_is_actionable(self):
         """PG connection failure message contains operator-useful hints."""
-        from src.api.db.engine import validate_connection
+        from cogtrix_core.api.db.engine import validate_connection
 
         cm = _mock_connect_fail(OSError("connection refused"))
         mock_engine = MagicMock()
         mock_engine.connect.return_value = cm
 
-        with patch("src.api.db.engine._get_engine", return_value=mock_engine):
+        with patch("cogtrix_core.api.db.engine._get_engine", return_value=mock_engine):
             with patch(
-                "src.api.db.engine._get_db_url",
+                "cogtrix_core.api.db.engine._get_db_url",
                 return_value="postgresql+asyncpg://user:secret@localhost/cogtrix",
             ):
                 with pytest.raises(RuntimeError) as exc_info:
@@ -135,15 +135,15 @@ class TestValidateConnection:
     @pytest.mark.asyncio
     async def test_sqlite_error_message_is_actionable(self):
         """SQLite connection failure message contains operator-useful hints."""
-        from src.api.db.engine import validate_connection
+        from cogtrix_core.api.db.engine import validate_connection
 
         cm = _mock_connect_fail(OSError("no such file or directory"))
         mock_engine = MagicMock()
         mock_engine.connect.return_value = cm
 
-        with patch("src.api.db.engine._get_engine", return_value=mock_engine):
+        with patch("cogtrix_core.api.db.engine._get_engine", return_value=mock_engine):
             with patch(
-                "src.api.db.engine._get_db_url",
+                "cogtrix_core.api.db.engine._get_db_url",
                 return_value="sqlite+aiosqlite:///./data/api/cogtrix.db",
             ):
                 with pytest.raises(RuntimeError) as exc_info:
@@ -156,14 +156,14 @@ class TestValidateConnection:
     @pytest.mark.asyncio
     async def test_original_exception_chained(self):
         """RuntimeError must chain the original exception (raise ... from exc)."""
-        from src.api.db.engine import validate_connection
+        from cogtrix_core.api.db.engine import validate_connection
 
         original = ConnectionRefusedError("port 5432 not open")
         cm = _mock_connect_fail(original)
         mock_engine = MagicMock()
         mock_engine.connect.return_value = cm
 
-        with patch("src.api.db.engine._get_engine", return_value=mock_engine):
+        with patch("cogtrix_core.api.db.engine._get_engine", return_value=mock_engine):
             with pytest.raises(RuntimeError) as exc_info:
                 await validate_connection()
 
@@ -177,14 +177,14 @@ class TestValidateConnection:
 
 class TestConnectArgs:
     def test_sqlite_url_sets_check_same_thread(self):
-        from src.api.db.engine import _connect_args_for
+        from cogtrix_core.api.db.engine import _connect_args_for
 
         assert _connect_args_for("sqlite+aiosqlite:///./data/api/cogtrix.db") == {
             "check_same_thread": False
         }
 
     def test_postgresql_url_has_empty_connect_args(self):
-        from src.api.db.engine import _connect_args_for
+        from cogtrix_core.api.db.engine import _connect_args_for
 
         assert _connect_args_for("postgresql+asyncpg://user:pw@localhost:5432/cogtrix") == {}
 

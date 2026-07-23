@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from src.orchestration.intent import TaskComplexity, classify_task_complexity
+from cogtrix_core.orchestration.intent import TaskComplexity, classify_task_complexity
 
 # ---------------------------------------------------------------------------
 # COMPLEX_ACTION

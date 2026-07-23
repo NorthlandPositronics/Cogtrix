@@ -1,4 +1,4 @@
-"""Tests for src/tasks/queue.py — SQLite-backed background task queue."""
+"""Tests for cogtrix_core/tasks/queue.py — SQLite-backed background task queue."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import time
 
 import pytest
 
-from src.tasks.queue import (
+from cogtrix_core.tasks.queue import (
     TaskQueue,
     TaskStatus,
     cancel_task,
@@ -38,7 +38,7 @@ def queue(tmp_path):
 @pytest.fixture(autouse=True)
 def _reset_singleton():
     """Reset the module-level singleton between tests."""
-    import src.tasks.queue as _mod
+    import cogtrix_core.tasks.queue as _mod
 
     original = _mod._queue
     yield
@@ -352,7 +352,7 @@ class TestAppendLog:
 
 class TestSingleton:
     def test_get_task_queue_raises_before_init(self):
-        import src.tasks.queue as _mod
+        import cogtrix_core.tasks.queue as _mod
 
         _mod._queue = None
         with pytest.raises(RuntimeError, match="not been initialised"):

@@ -67,9 +67,9 @@ Provider type values are case-insensitive (`"OpenAI"`, `"OLLAMA"`, etc. all work
    export OPENAI_API_KEY="sk-..."
    ```
 
-3. Run:
+3. Run (the API key auto-creates the provider; the first available provider is used by default):
    ```bash
-   uv run python cogtrix.py --model openai
+   uv run python cogtrix.py
    ```
 
 ### Configuration
@@ -77,7 +77,7 @@ Provider type values are case-insensitive (`"OpenAI"`, `"OLLAMA"`, etc. all work
 **Environment variable only:**
 ```bash
 export OPENAI_API_KEY="sk-..."
-uv run python cogtrix.py --model gpt4
+uv run python cogtrix.py
 ```
 
 **Config file:**

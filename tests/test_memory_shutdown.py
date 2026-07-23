@@ -7,12 +7,12 @@ import threading
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
-from src.memory.context import MemoryContext
-from src.memory.json_store import JsonFileMemoryStore
-from src.memory.manager import BaseMemoryManager
-from src.memory.modes.code import CodeDevelopmentMemoryManager
-from src.memory.modes.conversation import ConversationMemoryManager
-from src.memory.modes.reasoning import Goal, ReasoningMemoryManager
+from cogtrix_core.memory.context import MemoryContext
+from cogtrix_core.memory.json_store import JsonFileMemoryStore
+from cogtrix_core.memory.manager import BaseMemoryManager
+from cogtrix_core.memory.modes.code import CodeDevelopmentMemoryManager
+from cogtrix_core.memory.modes.conversation import ConversationMemoryManager
+from cogtrix_core.memory.modes.reasoning import Goal, ReasoningMemoryManager
 
 
 class _DummyMemoryManager(BaseMemoryManager):
@@ -247,7 +247,7 @@ def test_code_shutdown_persists_file_tracking():
             store=store,
             session_id="test-code-shutdown",
         )
-        manager.update("Look at `src/main.py`", "Okay")
+        manager.update("Look at `cogtrix_core/main.py`", "Okay")
 
         manager.shutdown()
 

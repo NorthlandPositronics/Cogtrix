@@ -1,4 +1,4 @@
-"""Tests for pure-logic functions in src/agent/core.py.
+"""Tests for pure-logic functions in cogtrix_core/agent/core.py.
 
 Tests only deterministic, side-effect-free functions that do not require
 a live LLM, FAISS, or any external service.
@@ -10,7 +10,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from src.agent.core import (
+from cogtrix_core.agent.core import (
     _estimate_msg_tokens,
     _format_model_detail,
     _format_models_table,
@@ -53,21 +53,21 @@ class TestFormatModelDetail:
         assert "?" in result
 
     def test_model_config_object(self):
-        from src.config import ModelConfig
+        from cogtrix_core.config import ModelConfig
 
         mc = ModelConfig(provider="anthropic", model="claude-sonnet-4-5")
         result = _format_model_detail(mc)
         assert "anthropic/claude-sonnet-4-5" in result
 
     def test_model_config_with_temperature(self):
-        from src.config import ModelConfig
+        from cogtrix_core.config import ModelConfig
 
         mc = ModelConfig(provider="openai", model="gpt-4", temperature=0.5)
         result = _format_model_detail(mc)
         assert "temp=0.5" in result
 
     def test_model_config_with_context_window(self):
-        from src.config import ModelConfig
+        from cogtrix_core.config import ModelConfig
 
         mc = ModelConfig(provider="openai", model="gpt-4", context_window=16384)
         result = _format_model_detail(mc)
@@ -164,7 +164,7 @@ class TestFormatMilestoneInstructions:
 
 class TestBuildSystemPrompt:
     def test_default_prompt_used_when_base_none(self):
-        from src.agent.core import DEFAULT_SYSTEM_PROMPT
+        from cogtrix_core.agent.core import DEFAULT_SYSTEM_PROMPT
 
         result = build_system_prompt()
         assert DEFAULT_SYSTEM_PROMPT in result
@@ -728,7 +728,7 @@ class TestPrepareMessagesWithContext:
     def test_fallback_without_langchain(self):
         from unittest.mock import patch
 
-        with patch("src.agent.core.HumanMessage", None):
+        with patch("cogtrix_core.agent.core.HumanMessage", None):
             result = prepare_messages_with_context(
                 [{"type": "human", "content": "history"}], "new input"
             )

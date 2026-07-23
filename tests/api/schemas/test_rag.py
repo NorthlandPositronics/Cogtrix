@@ -1,4 +1,4 @@
-"""Tests for src/api/schemas/rag.py."""
+"""Tests for cogtrix_core/api/schemas/rag.py."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 import pytest
 from pydantic import ValidationError
 
-from src.api.schemas.rag import (
+from cogtrix_core.api.schemas.rag import (
     DocumentOut,
     RAGChunkOut,
     RAGSearchRequest,

@@ -32,8 +32,8 @@ from fastapi.testclient import TestClient  # noqa: E402
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine  # noqa: E402
 from sqlalchemy.pool import StaticPool  # noqa: E402
 
-from src.api.db.engine import Base, get_db  # noqa: E402
-from src.api.quota import (  # noqa: E402
+from cogtrix_core.api.db.engine import Base, get_db  # noqa: E402
+from cogtrix_core.api.quota import (  # noqa: E402
     QuotaConfig,
     QuotaEnforcer,
     UsageTracker,
@@ -53,7 +53,7 @@ _VALID_PASSWORD = "TestPass1!"
 @pytest.fixture()
 def app():
     """FastAPI app with in-memory SQLite."""
-    from src.api.app import create_app
+    from cogtrix_core.api.app import create_app
 
     engine = create_async_engine(
         "sqlite+aiosqlite:///:memory:",
@@ -382,7 +382,7 @@ class TestGetUserQuotaStatus:
 class TestConfigQuotasParsing:
     def _load(self, yaml_text: str, tmp_path):
         """Write yaml_text to a temp file and load via _apply_config_file."""
-        from src.config import Config, _apply_config_file
+        from cogtrix_core.config import Config, _apply_config_file
 
         cfg_file = tmp_path / "test_config.yaml"
         cfg_file.write_text(yaml_text)

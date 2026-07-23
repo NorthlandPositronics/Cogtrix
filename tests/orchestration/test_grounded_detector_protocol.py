@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import inspect
 
-from src.orchestration.verification import (
+from cogtrix_core.orchestration.verification import (
     GROUNDED_DETECTORS,
     GroundedDetector,
     GroundedSources,

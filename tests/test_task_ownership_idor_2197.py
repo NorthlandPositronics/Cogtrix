@@ -23,9 +23,9 @@ pytest.importorskip("fastapi")
 
 from fastapi import HTTPException  # noqa: E402
 
-from src.api.auth import TokenData  # noqa: E402
-from src.api.org_context import OrgContext  # noqa: E402
-from src.api.routes.tasks import _assert_task_ownership  # noqa: E402
+from cogtrix_core.api.auth import TokenData  # noqa: E402
+from cogtrix_core.api.org_context import OrgContext  # noqa: E402
+from cogtrix_core.api.routes.tasks import _assert_task_ownership  # noqa: E402
 
 
 def _user(uid: str, role: str = "user") -> TokenData:

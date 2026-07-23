@@ -1,4 +1,4 @@
-"""Tests for the OIDC/SSO token validation module (src/api/oidc.py).
+"""Tests for the OIDC/SSO token validation module (cogtrix_core/api/oidc.py).
 
 Covers:
 - OIDCConfig dataclass construction
@@ -39,7 +39,12 @@ from cryptography.hazmat.backends import default_backend  # noqa: E402
 from cryptography.hazmat.primitives.asymmetric import rsa  # noqa: E402
 from jwt.algorithms import RSAAlgorithm  # noqa: E402
 
-from src.api.oidc import OIDCConfig, OIDCValidator, configure_oidc, get_validator  # noqa: E402
+from cogtrix_core.api.oidc import (  # noqa: E402
+    OIDCConfig,
+    OIDCValidator,
+    configure_oidc,
+    get_validator,
+)
 
 # ---------------------------------------------------------------------------
 # RSA key helpers (module-level, shared across tests)
@@ -95,7 +100,7 @@ def _make_token(
     return jwt.encode(claims, private_key, algorithm="RS256", headers={"kid": kid})
 
 
-_PATCH_URLOPEN = "src.api.oidc.urlopen"
+_PATCH_URLOPEN = "cogtrix_core.api.oidc.urlopen"
 
 
 def _urlopen_returning(body: bytes):
@@ -287,7 +292,7 @@ class TestJWKSCache:
 
     def test_cache_expired_triggers_refetch(self) -> None:
         """After TTL, the next validate() call re-fetches the JWKS."""
-        from src.api.oidc import _JWKS_TTL
+        from cogtrix_core.api.oidc import _JWKS_TTL
 
         token = _make_token(_RSA_KEY)
         validator = _make_validator()
@@ -362,7 +367,7 @@ class TestDiscovery:
             mock_resp.read = MagicMock(return_value=body)
             return mock_resp
 
-        from src.api.oidc import _JWKS_TTL
+        from cogtrix_core.api.oidc import _JWKS_TTL
 
         token = _make_token(_RSA_KEY)
         validator = OIDCValidator(OIDCConfig(issuer=_ISSUER, audience=_AUDIENCE))
@@ -389,7 +394,7 @@ class TestDiscovery:
             mock_resp.read = MagicMock(return_value=body)
             return mock_resp
 
-        from src.api.oidc import _DISCOVERY_TTL, _JWKS_TTL
+        from cogtrix_core.api.oidc import _DISCOVERY_TTL, _JWKS_TTL
 
         token = _make_token(_RSA_KEY)
         validator = OIDCValidator(OIDCConfig(issuer=_ISSUER, audience=_AUDIENCE))
@@ -458,7 +463,7 @@ class TestMapRole:
 class TestConfigOIDCParsing:
     @staticmethod
     def _load_from_yaml(tmp_path: Path, yaml_text: str):
-        from src.config import Config, _apply_config_file  # type: ignore[attr-defined]
+        from cogtrix_core.config import Config, _apply_config_file  # type: ignore[attr-defined]
 
         cfg_file = tmp_path / ".cogtrix.yaml"
         cfg_file.write_text(yaml_text)
@@ -529,7 +534,7 @@ class TestEventLoopBlocking:
     """Verify that OIDCValidator.validate() blocks the event loop when called
     directly from async code, and that asyncio.to_thread() prevents blocking.
 
-    Regression for PR #1024 — src/api/routes/messages.py called
+    Regression for PR #1024 — cogtrix_core/api/routes/messages.py called
     validator.validate(raw_token) directly inside an async handler, freezing
     the event loop for up to _HTTP_TIMEOUT seconds on every OIDC fallback.
     """
@@ -673,7 +678,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine  # noqa: E402
 from sqlalchemy.pool import StaticPool  # noqa: E402
 
-from src.api.db.engine import Base, get_db  # noqa: E402
+from cogtrix_core.api.db.engine import Base, get_db  # noqa: E402
 
 os.environ.setdefault("COGTRIX_JWT_SECRET", "testsecret_mustbe32chars_minimum00")
 os.environ.setdefault("COGTRIX_DB_URL", "sqlite+aiosqlite:///:memory:")
@@ -702,8 +707,8 @@ def _make_expired_local_jwt(user_id: str = "uid", role: str = "user") -> str:
 @pytest.fixture()
 def _app():
     """Minimal FastAPI app with in-memory SQLite; OIDC validator reset per test."""
-    from src.api import oidc as _oidc_mod
-    from src.api.app import create_app
+    from cogtrix_core.api import oidc as _oidc_mod
+    from cogtrix_core.api.app import create_app
 
     engine = create_async_engine(
         "sqlite+aiosqlite:///:memory:",
@@ -778,7 +783,7 @@ class TestGetCurrentUserOIDCFallback:
 
     def test_expired_local_jwt_not_retried_via_oidc(self, _client: Any) -> None:
         """An expired HS256 JWT must return TOKEN_EXPIRED — OIDC must not be called."""
-        from src.api import oidc as _oidc_mod
+        from cogtrix_core.api import oidc as _oidc_mod
 
         mock_validator = MagicMock()
         mock_validator.validate = MagicMock(return_value={"sub": "x"})
@@ -800,7 +805,7 @@ class TestGetCurrentUserOIDCFallback:
 
     def test_invalid_local_jwt_oidc_validator_is_called(self, _client: Any) -> None:
         """Bad local token: OIDC validator is invoked on the UNAUTHORIZED fallback path."""
-        from src.api import oidc as _oidc_mod
+        from cogtrix_core.api import oidc as _oidc_mod
 
         oidc_claims = {
             "sub": "oidc-user-99",
@@ -826,7 +831,7 @@ class TestGetCurrentUserOIDCFallback:
 
     def test_invalid_local_jwt_oidc_also_fails_returns_401(self, _client: Any) -> None:
         """Both local JWT and OIDC fail → 401 UNAUTHORIZED."""
-        from src.api import oidc as _oidc_mod
+        from cogtrix_core.api import oidc as _oidc_mod
 
         mock_validator = MagicMock()
         mock_validator.validate = MagicMock(side_effect=jwt.InvalidTokenError("bad token"))

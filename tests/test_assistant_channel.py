@@ -1,4 +1,4 @@
-"""Unit tests for src/assistant/channel.py — IncomingMessage and Channel ABC."""
+"""Unit tests for cogtrix_core/assistant/channel.py — IncomingMessage and Channel ABC."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from abc import ABC
 
 import pytest
 
-from src.assistant.channel import Channel, IncomingMessage, parse_duration
+from cogtrix_core.assistant.channel import Channel, IncomingMessage, parse_duration
 
 # ---------------------------------------------------------------------------
 # TestIncomingMessage

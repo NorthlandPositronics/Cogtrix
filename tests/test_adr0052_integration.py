@@ -17,14 +17,14 @@ import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
 from cogtrix import _build_agent_graph
-from src.agent.core import build_system_prompt
-from src.orchestration.graph import build_agent_graph
-from src.orchestration.reflection_delegate import (
+from cogtrix_core.agent.core import build_system_prompt
+from cogtrix_core.orchestration.graph import build_agent_graph
+from cogtrix_core.orchestration.reflection_delegate import (
     ACCOUNTABILITY_PROMPT,
     UNCERTAINTY_NOTE_PREFIX,
     extract_decision_justification,
 )
-from src.orchestration.run_config import AgentRunConfig
+from cogtrix_core.orchestration.run_config import AgentRunConfig
 
 # ── build_system_prompt injection ─────────────────────────────────────────────
 
@@ -42,7 +42,7 @@ class TestBuildSystemPromptInjection:
 
     def test_accountability_prompt_appended_last(self):
         """DA block must appear after all other prompt sections."""
-        from src.agent.core import DEFAULT_SYSTEM_PROMPT
+        from cogtrix_core.agent.core import DEFAULT_SYSTEM_PROMPT
 
         prompt = build_system_prompt(
             mode_additions="## Custom Mode\nsome addition",
@@ -70,7 +70,7 @@ class TestConfigYamlParsing:
 
         import yaml
 
-        from src.config import Config, _apply_config_file
+        from cogtrix_core.config import Config, _apply_config_file
 
         cfg = Config()
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
@@ -84,7 +84,7 @@ class TestConfigYamlParsing:
 
     def test_default_decision_accountability_disabled(self):
         """Feature must be off by default — opt-in only."""
-        from src.config import Config
+        from cogtrix_core.config import Config
 
         cfg = Config()
         assert cfg.decision_accountability_enabled is False
@@ -313,8 +313,8 @@ class TestGraphDaWiring:
 
     def test_post_response_parsing_present_in_call_model(self):
         """call_model node must call extract_decision_justification when _da_enabled."""
-        import src.orchestration.graph as graph_mod
-        import src.orchestration.nodes.call_model as call_model_mod
+        import cogtrix_core.orchestration.graph as graph_mod
+        import cogtrix_core.orchestration.nodes.call_model as call_model_mod
 
         graph_src = inspect.getsource(graph_mod.build_agent_graph)
         node_src = inspect.getsource(call_model_mod.build_call_model_node)
@@ -324,7 +324,7 @@ class TestGraphDaWiring:
 
     def test_uncertainty_note_injected_on_low_confidence(self):
         """Source must contain the uncertainty note pattern."""
-        import src.orchestration.nodes.call_model as call_model_mod
+        import cogtrix_core.orchestration.nodes.call_model as call_model_mod
 
         src = inspect.getsource(call_model_mod.build_call_model_node)
         assert "_uncertainty_note" in src

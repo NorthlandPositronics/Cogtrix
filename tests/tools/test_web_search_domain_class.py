@@ -1,10 +1,10 @@
-"""Tests for src/tools/_web_search_domain_class.py (ADR-0056)."""
+"""Tests for cogtrix_core/tools/_web_search_domain_class.py (ADR-0056)."""
 
 from __future__ import annotations
 
 import pytest
 
-from src.tools._web_search_domain_class import (
+from cogtrix_core.tools._web_search_domain_class import (
     DomainClass,
     authority_bonus,
     classify_domain,
@@ -241,7 +241,7 @@ class TestDetectAffiliationDisclaimer:
     can surface it."""
 
     def test_next67_kimi_guide_disclaimer(self) -> None:
-        from src.tools._web_search_domain_class import detect_affiliation_disclaimer
+        from cogtrix_core.tools._web_search_domain_class import detect_affiliation_disclaimer
 
         # The exact disclaimer from the next67 trial's fetched page.
         text = (
@@ -253,7 +253,7 @@ class TestDetectAffiliationDisclaimer:
         assert detect_affiliation_disclaimer(text) is not None
 
     def test_common_disclaimer_phrasings(self) -> None:
-        from src.tools._web_search_domain_class import detect_affiliation_disclaimer
+        from cogtrix_core.tools._web_search_domain_class import detect_affiliation_disclaimer
 
         for text in (
             "This is an unofficial fan site.",
@@ -266,7 +266,7 @@ class TestDetectAffiliationDisclaimer:
             assert detect_affiliation_disclaimer(text) is not None, text
 
     def test_neutral_content_not_flagged(self) -> None:
-        from src.tools._web_search_domain_class import detect_affiliation_disclaimer
+        from cogtrix_core.tools._web_search_domain_class import detect_affiliation_disclaimer
 
         for text in (
             "The official documentation describes the API endpoints.",
@@ -277,7 +277,7 @@ class TestDetectAffiliationDisclaimer:
             assert detect_affiliation_disclaimer(text) is None, text
 
     def test_returns_the_matched_phrase(self) -> None:
-        from src.tools._web_search_domain_class import detect_affiliation_disclaimer
+        from cogtrix_core.tools._web_search_domain_class import detect_affiliation_disclaimer
 
         got = detect_affiliation_disclaimer("Note: not affiliated with Moonshot AI.")
         assert got is not None

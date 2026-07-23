@@ -26,8 +26,8 @@ from unittest.mock import patch
 
 import pytest
 
-from src.api import rate_limit as rl
-from src.config import APIConfig
+from cogtrix_core.api import rate_limit as rl
+from cogtrix_core.config import APIConfig
 
 # ---------------------------------------------------------------------------
 # fixtures
@@ -259,7 +259,7 @@ class TestRedisUrlStartupPrecedence:
         assert APIConfig().redis_url is None
 
     def test_yaml_loader_reads_redis_url(self, tmp_path, monkeypatch) -> None:
-        from src.config import load_config
+        from cogtrix_core.config import load_config
 
         yaml_path = tmp_path / "cogtrix.yaml"
         yaml_path.write_text("api:\n  redis_url: 'redis://yaml.host:6379/2'\n")
@@ -269,7 +269,7 @@ class TestRedisUrlStartupPrecedence:
         assert cfg.api.redis_url == "redis://yaml.host:6379/2"
 
     def test_yaml_loader_treats_empty_string_as_none(self, tmp_path, monkeypatch) -> None:
-        from src.config import load_config
+        from cogtrix_core.config import load_config
 
         yaml_path = tmp_path / "cogtrix.yaml"
         yaml_path.write_text("api:\n  redis_url: ''\n")
@@ -279,7 +279,7 @@ class TestRedisUrlStartupPrecedence:
         assert cfg.api.redis_url is None
 
     def test_yaml_loader_warns_on_non_string(self, tmp_path, monkeypatch, caplog) -> None:
-        from src.config import load_config
+        from cogtrix_core.config import load_config
 
         yaml_path = tmp_path / "cogtrix.yaml"
         yaml_path.write_text("api:\n  redis_url: 12345\n")
@@ -379,7 +379,7 @@ class TestSlowAPIGlobalLimiterRebuild:
         assert isinstance(rl.limiter._storage, MemoryStorage)
 
     def test_app_state_limiter_picks_up_rebuilt_instance(self, fake_redis_client) -> None:
-        """``src/api/app.py`` startup must reassign ``app.state.limiter``
+        """``cogtrix_core/api/app.py`` startup must reassign ``app.state.limiter``
         via module-attribute access after ``configure_rate_limit_backend``
         runs — otherwise ``SlowAPIMiddleware.dispatch`` keeps reading
         the pre-startup in-memory limiter via the stale ``app.state``
@@ -390,15 +390,15 @@ class TestSlowAPIGlobalLimiterRebuild:
         """
         from pathlib import Path
 
-        app_py = Path(__file__).resolve().parent.parent / "src" / "api" / "app.py"
+        app_py = Path(__file__).resolve().parent.parent / "cogtrix_core" / "api" / "app.py"
         source = app_py.read_text(encoding="utf-8")
         # The fix line: import the rate_limit module and access .limiter
         # via attribute (so the rebuilt object is picked up).
         assert (
-            "from src.api import rate_limit as _rl_module" in source
+            "from cogtrix_core.api import rate_limit as _rl_module" in source
             and "app.state.limiter = _rl_module.limiter" in source
         ), (
-            "src/api/app.py must use module-attribute access on the "
+            "cogtrix_core/api/app.py must use module-attribute access on the "
             "rebuilt limiter after configure_rate_limit_backend; "
             "importing ``limiter`` as a symbol freezes the binding at "
             "module load and the SlowAPI global rebuild has no effect."

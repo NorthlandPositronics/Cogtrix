@@ -34,10 +34,10 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from src.assistant.channel import IncomingMessage, SendResult
-from src.assistant.guardrails import GuardrailResult
-from src.assistant.handler import MessageHandler
-from src.assistant.session import ChatSession, ChatSessionManager
+from cogtrix_core.assistant.channel import IncomingMessage, SendResult
+from cogtrix_core.assistant.guardrails import GuardrailResult
+from cogtrix_core.assistant.handler import MessageHandler
+from cogtrix_core.assistant.session import ChatSession, ChatSessionManager
 
 # ---------------------------------------------------------------------------
 # Helpers

@@ -102,6 +102,10 @@ src/
 ├── logging_config.py      # Logging infrastructure with secret scrubbing
 ├── setup_wizard.py        # Interactive --setup configuration wizard
 ├── mcp_client.py          # MCP server lifecycle, tool discovery, LangChain integration
+├── common/
+│   ├── types.py           # AgentRunConfig, ExecutionSettings, SessionState — shared dataclasses
+│   │                       #   (moved here to break the src/agent/ ↔ src/orchestration/ cycle)
+│   └── message_validation.py  # Message-shape validation helpers
 ├── providers/
 │   ├── __init__.py        # Registry: create_chat_model(), create_embeddings(), PROVIDER_TYPES
 │   ├── defaults.py        # Default models, embedding models, base URLs, env var names, presets
@@ -110,7 +114,7 @@ src/
     │   ├── anthropic.py       # Anthropic Claude
     │   └── google.py          # Google Gemini
 ├── orchestration/
-│   ├── run_config.py      # AgentRunConfig dataclass (29 fields: LLM, tools, compression, ownership classifier, decision accountability)
+│   ├── run_config.py      # Re-export shim: AgentRunConfig / ExecutionSettings now live in src/common/types.py
 │   ├── runner.py          # run_agent() entry point, response extraction, ToolCallLogger
 │   ├── graph.py           # LangGraph StateGraph assembly + per-run state; runtime helpers live in extracted modules below
 │   ├── graph_runtime.py   # Process-wide tool executor pool, _TOOL_EXECUTOR_LOCK, deduped tool invocation primitives (A1.4)
@@ -128,7 +132,7 @@ src/
 │   ├── reflection_delegate.py  # Decision accountability and counter-argumentation (ADR-0052)
 │   ├── intent.py          # Intent detection, task complexity, ownership classification pipeline
 │   ├── compression.py     # Context compression: apply_message_compression()
-│   ├── session_state.py   # SessionState dataclass (replaces 7 former module-level globals)
+│   ├── session_state.py   # Re-export shim: SessionState now lives in src/common/types.py
 │   └── session_orchestrator.py  # SessionOrchestrator snapshot()/rollback()
 ├── agent/
 │   ├── core.py            # CogtrixState schema, system prompt builder, LLM factory
@@ -412,98 +416,61 @@ User Input
 
 **Built-in Commands:**
 
-| Command | Aliases | Description |
-|---------|---------|-------------|
-| `/help` | `/h`, `/?` | List commands or detailed help |
-| `/quit` | `/exit`, `/q` | End session |
-| `/info` | `/i` | Session information (provider, model, system prompt size, mode) |
-| `/tools` | `/t`, `/tool` | List / manage tools (load, enable, disable) |
-| `/mcp [restart [name]]` | | List or restart MCP server connections |
-| `/think` | `/T` | Deep Tree-of-Thought reasoning |
-| `/delegate` | `/d` | Force task delegation across models |
-| `/mode` | `/M` | Show / switch memory mode |
-| `/model` | `/m` | Show / switch LLM model |
-| `/provider` | `/p` | List configured providers (read-only) |
-| `/session` | `/s` | Show / switch session |
-| `/setup` | | Launch the interactive setup wizard |
-| `/approve` | `/a` | Auto-approve all tool confirmations |
-| `/optimizer` | `/o` | Toggle prompt optimizer |
-| `/debug` | `/D` | Toggle debug mode |
-| `/verbose` | `/v` | Toggle verbose logging |
-| `/paste` | `/P` | Enter multi-line paste mode |
-| `/clear` | `/c` | Clear conversation history |
-| `/memory` | `/mem` | Show / inspect current memory state and rolling summary |
-| `/agents` | | List or inspect named agents from AGENTS.md; supports `reload` |
-| `/tasks` | `/task` | List background tasks; view details or filter by status |
-| `/spawn` | | Submit a background task for a named agent |
-| `/goal` | `/goals` | Manage session goals: set, complete, abandon, list |
-| `/undo` | | Remove the last exchange from conversation memory |
-| `/compact` | | Compress context in place — summarise old messages without deleting history |
-| `/retry` | | Re-run the last prompt through the agent |
-| `/export` | `/save` | Export conversation to markdown or HTML |
+Only four commands have short aliases (registered in `_build_slash_commands()`, `src/cli/commands.py`): `/memory` → `/mem`, `/tasks` → `/task`, `/goal` → `/goals`, `/export` → `/save`. All others below have no alias.
+
+| Command | Description |
+|---------|-------------|
+| `/help` | List commands or detailed help |
+| `/quit` | End session |
+| `/info` | Session information (provider, model, system prompt size, mode) |
+| `/tools` | List / manage tools (load, enable, disable) |
+| `/mcp [restart [name]]` | List or restart MCP server connections |
+| `/think` | Deep Tree-of-Thought reasoning |
+| `/delegate` | Force task delegation across models |
+| `/mode` | Show / switch memory mode |
+| `/model` | Show / switch LLM model |
+| `/provider` | List configured providers (read-only) |
+| `/session` | Show / switch session |
+| `/setup` | Launch the interactive setup wizard |
+| `/approve` | Auto-approve all tool confirmations |
+| `/optimizer` | Toggle prompt optimizer |
+| `/debug` | Cycle or set verbosity level (0-3) |
+| `/verbose` | Toggle verbose logging |
+| `/paste` | Enter multi-line paste mode |
+| `/clear` | Clear conversation history |
+| `/memory` (`/mem`) | Show / inspect current memory state and rolling summary |
+| `/agents` | List or inspect named agents from AGENTS.md; supports `reload` |
+| `/tasks` (`/task`) | List background tasks; view details or filter by status |
+| `/spawn` | Submit a background task for a named agent |
+| `/goal` (`/goals`) | Manage session goals: set, complete, abandon, list |
+| `/undo` | Remove the last exchange from conversation memory |
+| `/compact` | Compress context in place — summarise old messages without deleting history |
+| `/retry` | Re-run the last prompt through the agent |
+| `/export` (`/save`) | Export conversation to markdown or HTML |
 
 Note: the `/help` listing groups commands into four categories (Session & Config, Tools & Reasoning, Logging, Input & Other). The following command is available but not shown in `/help` — it is excluded from the four main categories by design. The `SlashCommand` dataclass has no `hidden` attribute; commands are excluded from `/help` categorisation through help grouping logic:
 
-| Command | Aliases | Description |
-|---------|---------|-------------|
-| `/system_prompt` | | Display the full system prompt |
+| Command | Description |
+|---------|-------------|
+| `/system_prompt` | Display the full system prompt |
 
 ### 3. Orchestration Layer (`src/orchestration/`)
 
 The agent execution pipeline was extracted from `cogtrix.py` into a dedicated package. This is the central coordination layer between the CLI and the agent core.
 
-#### 3a. AgentRunConfig (`src/orchestration/run_config.py`)
+#### 3a. AgentRunConfig (`src/common/types.py`)
 
-`AgentRunConfig` is a dataclass that bundles the 29 fields required by `run_agent()`, `build_agent_graph()`, and `run_execution_phase()`. Using a single config object instead of positional kwargs makes omissions visible as `AttributeError` at call time and keeps function signatures readable.
+`AgentRunConfig` and `SessionState` moved to `src/common/types.py` to break a bidirectional dependency between `src/agent/` and `src/orchestration/`. `src/orchestration/run_config.py` and `src/orchestration/session_state.py` are now thin re-export shims kept for backward compatibility — both just do `from src.common.types import AgentRunConfig, ExecutionSettings` (and `SessionState` respectively).
 
-```python
-@dataclass
-class AgentRunConfig:
-    # Core LLM and tools
-    llm: Any = None
-    system_prompt: str | None = None
-    available_tools: dict[str, Any] | None = None
-    active_tools_list: list[Any] | None = None
-    preset_tools: set[str] | None = None
-    max_context_tokens: int | None = None
+`AgentRunConfig` is a dataclass that bundles the ~39 fields required by `run_agent()`, `build_agent_graph()`, and `run_execution_phase()`. Using a single config object instead of positional kwargs makes omissions visible as `AttributeError` at call time and keeps function signatures readable.
 
-    # Context compression
-    context_compression: bool = True
-    compression_min_age: int | None = None
-    compression_min_chars: int | None = None
-    compression_llm: Any = None
+Fields cover: core LLM/tools, context compression, context-max-tokens/messages, session/UI hooks, execution options, performance caches (excluded from equality/repr), decision accountability (ADR-0052), task ownership classifier, pre-action confirmation gate, tool health/quality/topic-switch flags, and `tool_trust` overrides.
 
-    # Session and UI
-    tool_call_guard: Any | None = None
-    session_state: Any = None
-    confirmation_ui: Any | None = None
-    on_tool_expansion: Any | None = None
+A subset of execution fields (`context_compression`, `compression_min_age`, `compression_min_chars`, `context_max_messages`, `tier_cache_enabled`, `tool_context_limit_pct`, `parallel_tool_execution`, `git_native`, the decision-accountability and task-ownership fields, `pre_action_confirmation_enabled`) is folded into a nested `ExecutionSettings` sub-object (`execution_settings`, #225).
 
-    # Execution options
-    parallel_tool_execution: bool = True
-    git_native: bool = False
-    tool_context_limit_pct: float = 0.80
-    tier_cache_enabled: bool = True
+`AgentRunConfig.__post_init__` builds an `ExecutionSettings` from those fields if none is supplied, and a custom `__setattr__` keeps the flat fields and `execution_settings` in sync whichever side is written — so callers can set either `config.git_native = True` or `config.execution_settings.git_native = True` and both stay consistent.
 
-    # Performance caches (excluded from equality/repr)
-    bound_cache: OrderedDict | None = None
-    compression_cache: OrderedDict | None = None
-
-    # Decision accountability (ADR-0052)
-    decision_accountability_enabled: bool = False
-    decision_accountability_report_uncertainty: bool = True
-    decision_accountability_min_confidence: float = 7.0
-
-    # Task ownership classifier
-    task_ownership_classifier_enabled: bool = True
-    task_ownership_classifier_llm_fallback: bool = False
-    task_ownership_ambiguous_action: str = "ask"   # "ask" | "inform" | "execute"
-
-    # Pre-action confirmation gate
-    pre_action_confirmation_enabled: bool = False
-```
-
-Individual kwargs are preserved in `run_agent()` for backward compatibility; when `config` is `None`, a temporary `AgentRunConfig` is assembled from the flat kwargs.
+Individual kwargs are preserved in `run_agent()` for backward compatibility; when `config` is `None`, a temporary `AgentRunConfig` is assembled from the flat kwargs. `AgentRunConfig.from_app_config(config)` builds an instance directly from the application `Config` object.
 
 #### 3b. Agent Runner (`src/orchestration/runner.py`)
 
@@ -650,7 +617,7 @@ Summarizes old, large `ToolMessage` objects before each LLM call to reduce token
 
 | Constant | Value | Purpose |
 |----------|-------|---------|
-| `COMPRESSION_MIN_AGE_CYCLES` | 6 | Minimum `call_model` cycles before a message is eligible |
+| `COMPRESSION_MIN_AGE_CYCLES` | 3 | Minimum `call_model` cycles before a message is eligible (fallback when `Config.context_compression_min_age`, default 6, is not supplied) |
 | `COMPRESSION_MIN_CHARS` | 2000 | Minimum message length to qualify for compression |
 | `_COMPRESSION_THRESHOLD_RATIO` | 0.72 | Total message size / context window before compression runs |
 
@@ -674,9 +641,9 @@ operates on a copy of the message list — graph state is never mutated.
 > `ThreadPoolExecutor(max_workers=1)`. The latter is the `with`-footgun pattern
 > the policy doc explicitly forbids; see CONCURRENCY.md for the migration history (#1903).
 
-#### 3g. Session State (`src/orchestration/session_state.py`)
+#### 3g. Session State (`src/common/types.py`)
 
-`SessionState` replaces 7 former module-level globals in `cogtrix.py` with a proper dataclass. One instance is created per interactive session and passed into `build_agent_graph()` and `create_safe_tool_wrapper()`.
+`SessionState` replaces 7 former module-level globals in `cogtrix.py` with a proper dataclass. One instance is created per interactive session and passed into `build_agent_graph()` and `create_safe_tool_wrapper()`. `src/orchestration/session_state.py` re-exports it for backward compatibility (see [§3a](#3a-agentrunconfig-srccommontypespy)).
 
 ```python
 @dataclass

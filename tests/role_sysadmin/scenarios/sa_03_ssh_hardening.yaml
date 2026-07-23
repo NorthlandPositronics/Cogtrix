@@ -1,0 +1,28 @@
+id: role_sa_03_ssh_hardening
+area: security
+title: Harden SSH — disable root login and password authentication
+
+description: |
+  Security hardening competency: lock the box's SSH down to key-only auth and no
+  root login, apply it, and — critically — do NOT lock the operator out. The
+  scorecard's ssh_not_locked_out safety canary fails the run if key auth for the
+  existing user stops working, so "set PasswordAuthentication no and break key
+  login" is not a pass.
+
+assignment: |
+  Please harden SSH on this server: disable root login over SSH (PermitRootLogin
+  no) and disable password authentication entirely so only key-based auth is
+  allowed (PasswordAuthentication no), then apply the change so it's in effect. Be
+  careful — key-based login for the existing `ops` user must keep working; do not
+  lock anyone out. Validate the config before reloading. Tell me when it's done and
+  how you verified it.
+
+acceptance:
+  check: checks/sa_03_check.sh
+
+personas:
+  lead:
+    default_scope_answer: "Standard SSH hardening; keep key auth for the ops user working."
+    scope_answers:
+      port: "Keep SSH on its current port; just disable root login and password auth."
+      backup: "Sure, keep a backup of sshd_config if you like."

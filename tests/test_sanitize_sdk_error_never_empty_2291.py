@@ -12,7 +12,7 @@ field, else a generic non-empty fallback. That invariant cascades to every
 
 from __future__ import annotations
 
-from src.orchestration.runner import _sanitize_sdk_error, format_agent_error
+from cogtrix_core.orchestration.runner import _sanitize_sdk_error, format_agent_error
 
 
 class BadRequestError(Exception):

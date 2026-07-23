@@ -1,4 +1,4 @@
-"""Tests for src/api/schemas/message.py — chat messages, tool calls, sync turn."""
+"""Tests for cogtrix_core/api/schemas/message.py — chat messages, tool calls, sync turn."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 import pytest
 from pydantic import ValidationError
 
-from src.api.schemas.message import (
+from cogtrix_core.api.schemas.message import (
     ClearHistoryRequest,
     MessageOut,
     SendMessageRequest,

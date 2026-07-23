@@ -1,11 +1,11 @@
-"""Tests for src/api/schemas/workflow.py — workflow + KB document schemas."""
+"""Tests for cogtrix_core/api/schemas/workflow.py — workflow + KB document schemas."""
 
 from __future__ import annotations
 
 import pytest
 from pydantic import ValidationError
 
-from src.api.schemas.workflow import (
+from cogtrix_core.api.schemas.workflow import (
     BindWorkflowRequest,
     WorkflowAutoDetectOut,
     WorkflowBindingOut,

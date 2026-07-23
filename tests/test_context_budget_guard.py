@@ -25,7 +25,7 @@ def test_guard_not_triggered_when_under_threshold():
     """Tool calls proceed normally when context usage is below threshold."""
     from langchain_core.messages import HumanMessage, ToolMessage
 
-    from src.orchestration.graph import build_agent_graph
+    from cogtrix_core.orchestration.graph import build_agent_graph
 
     mock_tool = MagicMock()
     mock_tool.name = "search_web"
@@ -84,7 +84,7 @@ def test_guard_triggered_when_over_threshold():
     mock_llm.invoke.return_value = over_budget_response
     mock_llm.bind_tools.return_value.invoke.return_value = over_budget_response
 
-    from src.orchestration.graph import build_agent_graph
+    from cogtrix_core.orchestration.graph import build_agent_graph
 
     graph = build_agent_graph(
         llm=mock_llm,
@@ -110,7 +110,7 @@ def test_guard_triggered_when_over_threshold():
 )
 def test_apply_context_budget_guard_boundary_conditions(input_tokens, should_warn):
     """The helper should only warn when the turn input exceeds the configured budget."""
-    from src.orchestration.graph import _apply_context_budget_guard
+    from cogtrix_core.orchestration.graph import _apply_context_budget_guard
 
     response = _make_ai_message(
         tool_calls=[{"name": "search_web", "args": {}, "id": "c1", "type": "tool_call"}],
@@ -136,7 +136,7 @@ def test_guard_not_triggered_at_exact_threshold():
     """Tool calls proceed when context usage is exactly at the threshold."""
     from langchain_core.messages import HumanMessage, ToolMessage
 
-    from src.orchestration.graph import build_agent_graph
+    from cogtrix_core.orchestration.graph import build_agent_graph
 
     mock_tool = MagicMock()
     mock_tool.name = "search_web"
@@ -183,7 +183,7 @@ def test_guard_skipped_when_no_usage_metadata():
     """Guard is a no-op when usage_metadata is absent (graceful degradation)."""
     from langchain_core.messages import HumanMessage, ToolMessage
 
-    from src.orchestration.graph import build_agent_graph
+    from cogtrix_core.orchestration.graph import build_agent_graph
 
     mock_tool = MagicMock()
     mock_tool.name = "search_web"
@@ -233,7 +233,7 @@ def test_guard_skipped_when_no_max_context_tokens():
     """Guard is a no-op when max_context_tokens is not set."""
     from langchain_core.messages import HumanMessage, ToolMessage
 
-    from src.orchestration.graph import build_agent_graph
+    from cogtrix_core.orchestration.graph import build_agent_graph
 
     mock_tool = MagicMock()
     mock_tool.name = "search_web"
@@ -278,7 +278,7 @@ def test_guard_skipped_when_no_max_context_tokens():
 
 def test_config_default_pct():
     """Default tool_context_limit_pct is 0.80."""
-    from src.config import Config
+    from cogtrix_core.config import Config
 
     c = Config()
     assert c.tool_context_limit_pct == 0.80
@@ -286,7 +286,7 @@ def test_config_default_pct():
 
 def test_config_custom_pct():
     """tool_context_limit_pct can be set in config."""
-    from src.config import Config
+    from cogtrix_core.config import Config
 
     c = Config(tool_context_limit_pct=0.70)
     assert c.tool_context_limit_pct == 0.70
@@ -294,7 +294,7 @@ def test_config_custom_pct():
 
 def test_agent_run_config_default_pct():
     """AgentRunConfig has tool_context_limit_pct defaulting to 0.80."""
-    from src.orchestration.run_config import AgentRunConfig
+    from cogtrix_core.orchestration.run_config import AgentRunConfig
 
     cfg = AgentRunConfig()
     assert cfg.tool_context_limit_pct == 0.80
@@ -302,7 +302,7 @@ def test_agent_run_config_default_pct():
 
 def test_agent_run_config_custom_pct():
     """AgentRunConfig accepts a custom tool_context_limit_pct."""
-    from src.orchestration.run_config import AgentRunConfig
+    from cogtrix_core.orchestration.run_config import AgentRunConfig
 
     cfg = AgentRunConfig(tool_context_limit_pct=0.60)
     assert cfg.tool_context_limit_pct == 0.60
@@ -312,7 +312,7 @@ def test_guard_warning_message_format():
     """Warning message includes percentage and limit values."""
     from langchain_core.messages import HumanMessage
 
-    from src.orchestration.graph import build_agent_graph
+    from cogtrix_core.orchestration.graph import build_agent_graph
 
     mock_llm = MagicMock()
     over_budget = _make_ai_message(
@@ -340,7 +340,7 @@ def test_search_tools_are_not_hard_stopped_at_eight_calls():
     """Search tools should keep working past the hard cutoff for research."""
     from langchain_core.messages import HumanMessage, ToolMessage
 
-    from src.orchestration.graph import build_agent_graph
+    from cogtrix_core.orchestration.graph import build_agent_graph
 
     mock_tool = MagicMock()
     mock_tool.name = "search_web"
@@ -391,7 +391,7 @@ def test_non_search_tools_still_hit_the_hard_cutoff():
     """The hard budget should still disable ordinary tools after eight calls."""
     from langchain_core.messages import HumanMessage, ToolMessage
 
-    from src.orchestration.graph import build_agent_graph
+    from cogtrix_core.orchestration.graph import build_agent_graph
 
     mock_tool = MagicMock()
     mock_tool.name = "echo_tool"
@@ -434,6 +434,6 @@ def test_non_search_tools_still_hit_the_hard_cutoff():
     tool_messages = [m for m in result["messages"] if isinstance(m, ToolMessage)]
 
     assert mock_tool.invoke.call_count == 8
-    assert any("disabled after 8 calls" in (m.content or "").lower() for m in tool_messages)
+    assert any("per-turn call limit (8 calls)" in (m.content or "").lower() for m in tool_messages)
     assert any("synthesize your findings" in (m.content or "").lower() for m in tool_messages)
     assert any("result-t8" in (m.content or "") for m in tool_messages)

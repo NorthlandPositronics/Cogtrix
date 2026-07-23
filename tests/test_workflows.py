@@ -1,4 +1,4 @@
-"""Unit tests for the WorkflowRegistry (src/assistant/workflows.py).
+"""Unit tests for the WorkflowRegistry (cogtrix_core/assistant/workflows.py).
 
 Covers: CRUD operations, binding persistence, backward-compatible contact_prompts
 fallback, auto-detect binding on first message, path containment enforcement,
@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from src.assistant.workflows import (
+from cogtrix_core.assistant.workflows import (
     WorkflowDefinition,
     WorkflowRegistry,
     _load_workflow_yaml,

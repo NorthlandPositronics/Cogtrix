@@ -1,6 +1,6 @@
 """Behavioral coverage for the deep_think 3-phase engine.
 
-Issue #421 scopes Phase 1 coverage for src/tools/deep_think.py:
+Issue #421 scopes Phase 1 coverage for cogtrix_core/tools/deep_think.py:
 - single iteration through branch → develop → converge
 - high-confidence early convergence
 - max-iteration exhaustion
@@ -17,7 +17,7 @@ from typing import Any
 
 from langchain_core.messages import AIMessage
 
-from src.tools.deep_think import deep_think
+from cogtrix_core.tools.deep_think import deep_think
 
 
 @dataclass

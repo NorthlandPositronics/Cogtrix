@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from src.auth.permissions import (
+from cogtrix_core.auth.permissions import (
     ROLE_PERMISSIONS,
     Action,
     Permission,

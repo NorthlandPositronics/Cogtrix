@@ -11,7 +11,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.api.assistant_lifecycle import create_and_start_assistant, shutdown_assistant_sync
+from cogtrix_core.api.assistant_lifecycle import create_and_start_assistant, shutdown_assistant_sync
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -55,9 +55,11 @@ class TestCreateAndStartAssistant:
 
         with (
             patch(
-                "src.providers.create_chat_model_from_configs", return_value=mock_llm
+                "cogtrix_core.providers.create_chat_model_from_configs", return_value=mock_llm
             ) as mock_create_llm,
-            patch("src.assistant.service.AssistantService", return_value=mock_svc) as MockSvc,
+            patch(
+                "cogtrix_core.assistant.service.AssistantService", return_value=mock_svc
+            ) as MockSvc,
         ):
             result = await create_and_start_assistant(cfg, reg)
 
@@ -85,8 +87,10 @@ class TestCreateAndStartAssistant:
         mock_svc._deferral_mgr = MagicMock()
 
         with (
-            patch("src.providers.create_chat_model_from_configs", return_value=MagicMock()),
-            patch("src.assistant.service.AssistantService", return_value=mock_svc),
+            patch(
+                "cogtrix_core.providers.create_chat_model_from_configs", return_value=MagicMock()
+            ),
+            patch("cogtrix_core.assistant.service.AssistantService", return_value=mock_svc),
         ):
             await create_and_start_assistant(cfg, reg)
 
@@ -99,8 +103,10 @@ class TestCreateAndStartAssistant:
         mock_svc._deferral_mgr = None
 
         with (
-            patch("src.providers.create_chat_model_from_configs", return_value=MagicMock()),
-            patch("src.assistant.service.AssistantService", return_value=mock_svc),
+            patch(
+                "cogtrix_core.providers.create_chat_model_from_configs", return_value=MagicMock()
+            ),
+            patch("cogtrix_core.assistant.service.AssistantService", return_value=mock_svc),
         ):
             await create_and_start_assistant(cfg, reg)
 
@@ -112,10 +118,10 @@ class TestCreateAndStartAssistant:
 
         with (
             patch(
-                "src.providers.create_chat_model_from_configs",
+                "cogtrix_core.providers.create_chat_model_from_configs",
                 side_effect=RuntimeError("ollama unreachable"),
             ),
-            patch("src.assistant.service.AssistantService") as MockSvc,
+            patch("cogtrix_core.assistant.service.AssistantService") as MockSvc,
         ):
             with pytest.raises(RuntimeError, match="ollama unreachable"):
                 await create_and_start_assistant(cfg, reg)
@@ -127,9 +133,11 @@ class TestCreateAndStartAssistant:
         reg = _make_tool_registry()
 
         with (
-            patch("src.providers.create_chat_model_from_configs", return_value=MagicMock()),
             patch(
-                "src.assistant.service.AssistantService",
+                "cogtrix_core.providers.create_chat_model_from_configs", return_value=MagicMock()
+            ),
+            patch(
+                "cogtrix_core.assistant.service.AssistantService",
                 side_effect=ValueError("bad config"),
             ),
         ):

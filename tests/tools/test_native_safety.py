@@ -20,8 +20,8 @@ import types
 
 import pytest
 
-from src.tools import _native_safety
-from src.tools._native_safety import (
+from cogtrix_core.tools import _native_safety
+from cogtrix_core.tools._native_safety import (
     detect_curl_cffi_openssl_coexistence,
     warn_if_unsafe,
 )
@@ -241,7 +241,7 @@ class TestModuleHygiene:
         # Re-import the web_search module from scratch so module-level
         # side effects re-execute — fully isolated so we don't decouple
         # other tests' bound references (see _isolated_reimport).
-        with _isolated_reimport("src.tools.web_search"):
+        with _isolated_reimport("cogtrix_core.tools.web_search"):
             assert "curl_cffi" not in sys.modules, (
                 "Importing src.tools.web_search must NOT pull curl_cffi into the "
                 "parent process — Bug D / cogtrix46 heap corruption regression. "
@@ -257,7 +257,7 @@ class TestModuleHygiene:
         # before re-importing so a stale entry from another test in
         # the same xdist worker doesn't poison the assertion.
         _strip_native_modules(monkeypatch)
-        with _isolated_reimport("src.tools._ddg"):
+        with _isolated_reimport("cogtrix_core.tools._ddg"):
             assert "curl_cffi" not in sys.modules, (
                 "Importing src.tools._ddg must NOT pull curl_cffi into the parent "
                 "process — the import belongs strictly inside fetch_ddg_html."

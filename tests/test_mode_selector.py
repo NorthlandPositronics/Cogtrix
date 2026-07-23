@@ -5,7 +5,7 @@ No LLM calls — pure regex/heuristic logic.
 
 from __future__ import annotations
 
-from src.memory.mode_selector import classify_memory_mode, should_switch_mode
+from cogtrix_core.memory.mode_selector import classify_memory_mode, should_switch_mode
 
 # ---------------------------------------------------------------------------
 # classify_memory_mode
@@ -192,13 +192,13 @@ class TestShouldSwitchMode:
 
 class TestConfigAdaptiveMemory:
     def test_default_is_true(self) -> None:
-        from src.config import Config
+        from cogtrix_core.config import Config
 
         c = Config()
         assert c.adaptive_memory is True
 
     def test_can_be_set_false(self) -> None:
-        from src.config import Config
+        from cogtrix_core.config import Config
 
         c = Config()
         c.adaptive_memory = False
@@ -210,7 +210,7 @@ class TestConfigAdaptiveMemory:
         import tempfile
         from pathlib import Path
 
-        from src.config import Config, _apply_config_file
+        from cogtrix_core.config import Config, _apply_config_file
 
         yaml_content = "adaptive_memory: false\n"
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
@@ -229,7 +229,7 @@ class TestConfigAdaptiveMemory:
         import tempfile
         from pathlib import Path
 
-        from src.config import Config, _apply_config_file
+        from cogtrix_core.config import Config, _apply_config_file
 
         yaml_content = "adaptive_memory: true\n"
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:

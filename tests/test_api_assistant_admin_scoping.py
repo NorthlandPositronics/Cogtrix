@@ -26,8 +26,8 @@ from fastapi.testclient import TestClient  # noqa: E402
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine  # noqa: E402
 from sqlalchemy.pool import StaticPool  # noqa: E402
 
-from src.api.db.engine import Base  # noqa: E402
-from src.api.db.models import Organization, User  # noqa: E402
+from cogtrix_core.api.db.engine import Base  # noqa: E402
+from cogtrix_core.api.db.models import Organization, User  # noqa: E402
 
 
 def _uid() -> str:
@@ -63,9 +63,9 @@ class TestAssistantAdminOrgScoping:
     def _make_app(self, org_id: str | None, admin_id: str, role: str = "admin"):
         from fastapi import FastAPI
 
-        from src.api.auth import TokenData, get_admin_org, get_current_user
-        from src.api.db.engine import get_db
-        from src.api.routes import assistant as assistant_module
+        from cogtrix_core.api.auth import TokenData, get_admin_org, get_current_user
+        from cogtrix_core.api.db.engine import get_db
+        from cogtrix_core.api.routes import assistant as assistant_module
 
         app = FastAPI()
 
@@ -83,7 +83,7 @@ class TestAssistantAdminOrgScoping:
                 return None
             # Look up from DB
             async with self._sf() as session:
-                from src.api.db.repositories.users import UserRepository
+                from cogtrix_core.api.db.repositories.users import UserRepository
 
                 repo = UserRepository(session)
                 user = await repo.get_by_id(admin_id)
@@ -306,7 +306,7 @@ class TestGetAdminOrgReal:
 
     def test_superadmin_returns_none(self, sf):
         async def _run():
-            from src.api.auth import TokenData, get_admin_org
+            from cogtrix_core.api.auth import TokenData, get_admin_org
 
             async with sf() as session:
                 user_id = _uid()
@@ -322,7 +322,7 @@ class TestGetAdminOrgReal:
 
     def test_regular_admin_with_org_returns_org_id(self, sf):
         async def _run():
-            from src.api.auth import TokenData, get_admin_org
+            from cogtrix_core.api.auth import TokenData, get_admin_org
 
             async with sf() as session:
                 org_id = _uid()
@@ -352,7 +352,7 @@ class TestGetAdminOrgReal:
 
     def test_regular_admin_with_null_org_id_returns_403(self, sf):
         async def _run():
-            from src.api.auth import TokenData, get_admin_org
+            from cogtrix_core.api.auth import TokenData, get_admin_org
 
             async with sf() as session:
                 org_id = _uid()
@@ -386,7 +386,7 @@ class TestGetAdminOrgReal:
 
     def test_non_admin_returns_403(self, sf):
         async def _run():
-            from src.api.auth import TokenData, get_admin_org
+            from cogtrix_core.api.auth import TokenData, get_admin_org
 
             async with sf() as session:
                 user_id = _uid()

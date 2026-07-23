@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from src.tools.file_ops import (
+from cogtrix_core.tools.file_ops import (
     list_directory,
     read_file,
     set_allowed_write_dirs,
@@ -387,7 +387,7 @@ class TestValidatePathTOCTOURace:
         This is what tells us the boundary check ran on the post-
         symlink-follow target rather than the pre-follow one.
         """
-        from src.tools.file_ops import _validate_path
+        from cogtrix_core.tools.file_ops import _validate_path
 
         work_dir = tmp_path / "work"
         target_dir = tmp_path / "work" / "subdir"
@@ -424,7 +424,7 @@ class TestValidatePathTOCTOURace:
         """
         import inspect
 
-        from src.tools.file_ops import _validate_path
+        from cogtrix_core.tools.file_ops import _validate_path
 
         source = inspect.getsource(_validate_path)
         # The defective walk used these two patterns together.  Either
@@ -450,7 +450,7 @@ class TestValidatePathTOCTOURace:
         boundary check uses the *current* resolved target, not a
         cached or pre-swap value.
         """
-        from src.tools.file_ops import _validate_path
+        from cogtrix_core.tools.file_ops import _validate_path
 
         work_dir = tmp_path / "work"
         good_target = work_dir / "good"

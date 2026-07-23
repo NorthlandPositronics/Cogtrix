@@ -16,7 +16,7 @@ import pytest
 
 os.environ.setdefault("COGTRIX_DATA_DIR", str(Path("/tmp") / "cogtrix-tests"))
 
-from src.orchestration.session_state import SessionState
+from cogtrix_core.orchestration.session_state import SessionState
 
 # ── SEC-01: copy removed from SAFE_MODULES (python_exec.py) ─────────────
 
@@ -25,7 +25,7 @@ class TestCopyRemovedFromSafeModules:
     """copy module must NOT be in SAFE_MODULES to prevent deepcopy sandbox escape."""
 
     def test_copy_not_in_safe_modules(self):
-        from src.tools.python_exec import SAFE_MODULES
+        from cogtrix_core.tools.python_exec import SAFE_MODULES
 
         assert "copy" not in SAFE_MODULES, (
             "copy must not be in SAFE_MODULES — deepcopy calls __reduce_ex__ "
@@ -34,7 +34,7 @@ class TestCopyRemovedFromSafeModules:
 
     def test_other_safe_modules_still_present(self):
         """Ensure we didn't accidentally remove other modules."""
-        from src.tools.python_exec import SAFE_MODULES
+        from cogtrix_core.tools.python_exec import SAFE_MODULES
 
         for mod in ("math", "json", "re", "datetime", "collections"):
             assert mod in SAFE_MODULES
@@ -47,50 +47,50 @@ class TestSafePowGuard:
     """_safe_pow must reject large and negative exponents."""
 
     def test_large_exponent_rejected(self):
-        from src.tools.calculator import _safe_pow
+        from cogtrix_core.tools.calculator import _safe_pow
 
         with pytest.raises(ValueError, match="exponent magnitude too large"):
             _safe_pow(2, 1000)
 
     def test_boundary_exponent_exactly_1000_float(self):
-        from src.tools.calculator import _safe_pow
+        from cogtrix_core.tools.calculator import _safe_pow
 
         with pytest.raises(ValueError, match="exponent magnitude too large"):
             _safe_pow(2, 1000.0)
 
     def test_exponent_999_allowed(self):
-        from src.tools.calculator import _safe_pow
+        from cogtrix_core.tools.calculator import _safe_pow
 
         result = _safe_pow(2, 999)
         assert result == 2**999
 
     def test_exponent_1000_rejected(self):
-        from src.tools.calculator import _safe_pow
+        from cogtrix_core.tools.calculator import _safe_pow
 
         with pytest.raises(ValueError, match="exponent magnitude too large"):
             _safe_pow(2, 1000)
 
     def test_negative_exponent_rejected(self):
         """Negative exponents must also be capped (abs check)."""
-        from src.tools.calculator import _safe_pow
+        from cogtrix_core.tools.calculator import _safe_pow
 
         with pytest.raises(ValueError, match="exponent magnitude too large"):
             _safe_pow(2, -1000)
 
     def test_negative_exponent_large_rejected(self):
-        from src.tools.calculator import _safe_pow
+        from cogtrix_core.tools.calculator import _safe_pow
 
         with pytest.raises(ValueError, match="exponent magnitude too large"):
             _safe_pow(10, -9999)
 
     def test_small_negative_exponent_allowed(self):
-        from src.tools.calculator import _safe_pow
+        from cogtrix_core.tools.calculator import _safe_pow
 
         result = _safe_pow(2, -10)
         assert result == 2**-10
 
     def test_float_exponent_near_boundary(self):
-        from src.tools.calculator import _safe_pow
+        from cogtrix_core.tools.calculator import _safe_pow
 
         # 999.9 < 1000, should be allowed
         result = _safe_pow(1.001, 999.9)
@@ -98,7 +98,7 @@ class TestSafePowGuard:
 
     def test_old_threshold_would_have_allowed(self):
         """9999**9999 was allowed under old threshold (>= 10000). Must be blocked now."""
-        from src.tools.calculator import _safe_pow
+        from cogtrix_core.tools.calculator import _safe_pow
 
         with pytest.raises(ValueError, match="exponent magnitude too large"):
             _safe_pow(9999, 9999)
@@ -112,13 +112,15 @@ class TestShellProcessGroupKill:
 
     def test_popen_uses_start_new_session(self):
         """Verify that Popen is called with start_new_session=True."""
-        with patch("src.tools.shell.subprocess.Popen") as mock_popen:
+        with patch("cogtrix_core.tools.shell.subprocess.Popen") as mock_popen:
             mock_proc = MagicMock()
             mock_proc.returncode = 0
             mock_popen.return_value = mock_proc
 
-            with patch("src.tools.shell._communicate_with_cap", return_value=("output", "")):
-                from src.tools.shell import execute_shell_command
+            with patch(
+                "cogtrix_core.tools.shell._communicate_with_cap", return_value=("output", "")
+            ):
+                from cogtrix_core.tools.shell import execute_shell_command
 
                 execute_shell_command("echo hello")
                 mock_popen.assert_called_once()
@@ -127,13 +129,15 @@ class TestShellProcessGroupKill:
 
     def test_popen_shell_mode_uses_start_new_session(self):
         """Shell=True mode also uses start_new_session."""
-        with patch("src.tools.shell.subprocess.Popen") as mock_popen:
+        with patch("cogtrix_core.tools.shell.subprocess.Popen") as mock_popen:
             mock_proc = MagicMock()
             mock_proc.returncode = 0
             mock_popen.return_value = mock_proc
 
-            with patch("src.tools.shell._communicate_with_cap", return_value=("output", "")):
-                from src.tools.shell import execute_shell_command
+            with patch(
+                "cogtrix_core.tools.shell._communicate_with_cap", return_value=("output", "")
+            ):
+                from cogtrix_core.tools.shell import execute_shell_command
 
                 execute_shell_command("echo hello | cat")  # pipe triggers shell=True
                 mock_popen.assert_called_once()
@@ -143,17 +147,17 @@ class TestShellProcessGroupKill:
 
     def test_timeout_calls_killpg(self):
         """On timeout, os.killpg should be called to kill the process group."""
-        with patch("src.tools.shell.subprocess.Popen") as mock_popen:
+        with patch("cogtrix_core.tools.shell.subprocess.Popen") as mock_popen:
             mock_proc = MagicMock()
             mock_proc.pid = 12345
             mock_popen.return_value = mock_proc
 
             with patch(
-                "src.tools.shell._communicate_with_cap",
+                "cogtrix_core.tools.shell._communicate_with_cap",
                 side_effect=subprocess.TimeoutExpired("cmd", 1),
             ):
-                with patch("src.tools.shell.os.killpg") as mock_killpg:
-                    from src.tools.shell import execute_shell_command
+                with patch("cogtrix_core.tools.shell.os.killpg") as mock_killpg:
+                    from cogtrix_core.tools.shell import execute_shell_command
 
                     result = execute_shell_command("sleep 100", timeout=1)
                     # killpg is called once in execute_shell_command after catching
@@ -164,17 +168,19 @@ class TestShellProcessGroupKill:
 
     def test_timeout_falls_back_to_kill_on_oserror(self):
         """If killpg raises OSError, fall back to proc.kill()."""
-        with patch("src.tools.shell.subprocess.Popen") as mock_popen:
+        with patch("cogtrix_core.tools.shell.subprocess.Popen") as mock_popen:
             mock_proc = MagicMock()
             mock_proc.pid = 12345
             mock_popen.return_value = mock_proc
 
             with patch(
-                "src.tools.shell._communicate_with_cap",
+                "cogtrix_core.tools.shell._communicate_with_cap",
                 side_effect=subprocess.TimeoutExpired("cmd", 1),
             ):
-                with patch("src.tools.shell.os.killpg", side_effect=OSError("no such process")):
-                    from src.tools.shell import execute_shell_command
+                with patch(
+                    "cogtrix_core.tools.shell.os.killpg", side_effect=OSError("no such process")
+                ):
+                    from cogtrix_core.tools.shell import execute_shell_command
 
                     result = execute_shell_command("sleep 100", timeout=1)
                     # killpg fails once, proc.kill is called as fallback.
@@ -189,7 +195,7 @@ class TestValidateJsonResponseFenceStripping:
     """_validate_json_response must strip only the matching closing fence."""
 
     def test_json_fence_basic(self):
-        from src.tools.delegate import _validate_json_response
+        from cogtrix_core.tools.delegate import _validate_json_response
 
         response = '```json\n{"key": "value"}\n```'
         valid, parsed = _validate_json_response(response)
@@ -199,7 +205,7 @@ class TestValidateJsonResponseFenceStripping:
     def test_json_fence_with_trailing_code_block(self):
         """Response with JSON block followed by another code block.
         Old code would strip the last ``` unconditionally, corrupting the parse."""
-        from src.tools.delegate import _validate_json_response
+        from cogtrix_core.tools.delegate import _validate_json_response
 
         response = (
             '```json\n{"result": "success"}\n```\n\n'
@@ -211,7 +217,7 @@ class TestValidateJsonResponseFenceStripping:
 
     def test_json_fence_with_prose_before(self):
         """Prose before the JSON fence is tolerated."""
-        from src.tools.delegate import _validate_json_response
+        from cogtrix_core.tools.delegate import _validate_json_response
 
         response = 'Here is the result:\n```json\n{"a": 1}\n```'
         valid, parsed = _validate_json_response(response)
@@ -220,7 +226,7 @@ class TestValidateJsonResponseFenceStripping:
 
     def test_json_fence_with_multiple_trailing_blocks(self):
         """Multiple code blocks after JSON — only first closing fence matters."""
-        from src.tools.delegate import _validate_json_response
+        from cogtrix_core.tools.delegate import _validate_json_response
 
         response = "```json\n[1, 2, 3]\n```\n\n```bash\necho hello\n```\n\n```python\nx = 1\n```"
         valid, parsed = _validate_json_response(response)
@@ -228,7 +234,7 @@ class TestValidateJsonResponseFenceStripping:
         assert parsed == [1, 2, 3]
 
     def test_plain_fence_basic(self):
-        from src.tools.delegate import _validate_json_response
+        from cogtrix_core.tools.delegate import _validate_json_response
 
         response = '```\n{"data": 42}\n```'
         valid, parsed = _validate_json_response(response)
@@ -236,7 +242,7 @@ class TestValidateJsonResponseFenceStripping:
         assert parsed == {"data": 42}
 
     def test_no_fence(self):
-        from src.tools.delegate import _validate_json_response
+        from cogtrix_core.tools.delegate import _validate_json_response
 
         valid, parsed = _validate_json_response('{"simple": true}')
         assert valid is True
@@ -244,7 +250,7 @@ class TestValidateJsonResponseFenceStripping:
 
     def test_no_closing_fence(self):
         """Opening fence without closing fence — should still try to parse."""
-        from src.tools.delegate import _validate_json_response
+        from cogtrix_core.tools.delegate import _validate_json_response
 
         response = '```json\n{"key": "value"}'
         valid, parsed = _validate_json_response(response)
@@ -260,7 +266,7 @@ class TestCircuitBreakerLockDiscipline:
 
     def test_execute_single_task_uses_locked_availability_check(self):
         """_execute_single_task must consult the locked helper before delegating."""
-        from src.tools import delegate
+        from cogtrix_core.tools import delegate
 
         calls: list[float] = []
 
@@ -291,7 +297,7 @@ class TestCircuitBreakerLockDiscipline:
 
     def test_check_availability_is_wrapper(self):
         """Public check_availability() must route through _check_availability_locked()."""
-        from src.tools.delegate import ModelCircuitBreaker
+        from cogtrix_core.tools.delegate import ModelCircuitBreaker
 
         calls: list[float] = []
 
@@ -319,7 +325,7 @@ class TestResolveDataPathReturnsResolved:
     """resolve_data_path must return .resolve()'d path to prevent symlink TOCTOU."""
 
     def test_relative_data_dir_returns_absolute(self):
-        from src.config import Config
+        from cogtrix_core.config import Config
 
         config = Config()
         config.data_dir = "data"
@@ -327,7 +333,7 @@ class TestResolveDataPathReturnsResolved:
         assert result.is_absolute(), "resolve_data_path must return an absolute path"
 
     def test_returned_path_is_resolved(self):
-        from src.config import Config
+        from cogtrix_core.config import Config
 
         config = Config()
         config.data_dir = "data"
@@ -336,7 +342,7 @@ class TestResolveDataPathReturnsResolved:
         assert result == expected
 
     def test_absolute_data_dir_returns_resolved(self):
-        from src.config import Config
+        from cogtrix_core.config import Config
 
         config = Config()
         config.data_dir = "/tmp/test_data"
@@ -364,7 +370,7 @@ class TestReDoSResistance:
 
     def test_guardrails_drop_pattern_no_backtrack(self):
         """Pattern 'drop|clear...context|history...' must not backtrack on long input."""
-        from src.assistant._security_patterns import INJECTION_PATTERNS
+        from cogtrix_core.assistant._security_patterns import INJECTION_PATTERNS
 
         # Find the pattern with 'drop|clear' and 'context|history'
         pattern = None
@@ -380,7 +386,7 @@ class TestReDoSResistance:
 
     def test_guardrails_dan_pattern_no_backtrack(self):
         """Pattern 'DAN...mode' must not backtrack on long input."""
-        from src.assistant._security_patterns import INJECTION_PATTERNS
+        from cogtrix_core.assistant._security_patterns import INJECTION_PATTERNS
 
         pattern = None
         for p in INJECTION_PATTERNS:
@@ -394,7 +400,7 @@ class TestReDoSResistance:
 
     def test_deep_think_triggers_no_backtrack(self):
         """DEEP_THINK_TRIGGERS bounded patterns must not hang on adversarial input."""
-        from src.orchestration.intent import DEEP_THINK_TRIGGERS
+        from cogtrix_core.orchestration.intent import DEEP_THINK_TRIGGERS
 
         # Test "reason through...carefully" — old unbounded .*? would backtrack
         adversarial = "reason through " + "word " * 500 + "not_carefully"
@@ -410,7 +416,7 @@ class TestReDoSResistance:
 
     def test_delegation_triggers_no_backtrack(self):
         """DELEGATION_TRIGGERS bounded patterns must not hang on adversarial input."""
-        from src.orchestration.intent import DELEGATION_TRIGGERS
+        from cogtrix_core.orchestration.intent import DELEGATION_TRIGGERS
 
         # Test "compare...and"
         adversarial = "compare " + "item " * 500 + "not_and"
@@ -422,7 +428,7 @@ class TestReDoSResistance:
 
     def test_deep_think_still_matches_real_phrases(self):
         """Bounded patterns must still match legitimate trigger phrases."""
-        from src.orchestration.intent import user_wants_deep_think
+        from cogtrix_core.orchestration.intent import user_wants_deep_think
 
         assert user_wants_deep_think("reason through the problem carefully") is True
         assert user_wants_deep_think("analyze this code in depth") is True
@@ -430,7 +436,7 @@ class TestReDoSResistance:
 
     def test_delegation_still_matches_real_phrases(self):
         """Bounded patterns must still match legitimate delegation phrases."""
-        from src.orchestration.intent import user_wants_delegation
+        from cogtrix_core.orchestration.intent import user_wants_delegation
 
         assert user_wants_delegation("compare React and Vue") is True
         assert user_wants_delegation("translate README into French and Spanish") is True
@@ -444,13 +450,13 @@ class TestThinkCatByNameModuleLevel:
 
     def test_is_module_level(self):
         """The dict should exist at module level, not be created inside a function."""
-        from src.orchestration import intent
+        from cogtrix_core.orchestration import intent
 
         assert hasattr(intent, "_THINK_CAT_BY_NAME")
         assert isinstance(intent._THINK_CAT_BY_NAME, dict)
 
     def test_contains_all_categories(self):
-        from src.orchestration.intent import _THINK_CAT_BY_NAME, THINK_CATEGORIES
+        from cogtrix_core.orchestration.intent import _THINK_CAT_BY_NAME, THINK_CATEGORIES
 
         assert len(_THINK_CAT_BY_NAME) == len(THINK_CATEGORIES)
         for cat in THINK_CATEGORIES:
@@ -459,8 +465,8 @@ class TestThinkCatByNameModuleLevel:
 
     def test_classify_uses_module_level_dict(self):
         """classify_think_task should read the live module-level lookup table."""
-        from src.orchestration import intent
-        from src.orchestration.intent import ThinkCategory, classify_think_task
+        from cogtrix_core.orchestration import intent
+        from cogtrix_core.orchestration.intent import ThinkCategory, classify_think_task
 
         sentinel = ThinkCategory(
             name="sentinel",
@@ -492,7 +498,7 @@ class TestCompressionPoolLazy:
 
     def test_pool_is_none_before_first_call(self):
         """The module-level _COMPRESSION_POOL should be None until first use."""
-        import src.orchestration.compression as comp
+        import cogtrix_core.orchestration.compression as comp
 
         # The pool may already be initialized from a prior test. Check the getter.
         assert hasattr(comp, "_get_compression_pool")
@@ -501,13 +507,13 @@ class TestCompressionPoolLazy:
     def test_getter_returns_executor(self):
         import concurrent.futures
 
-        from src.orchestration.compression import _get_compression_pool
+        from cogtrix_core.orchestration.compression import _get_compression_pool
 
         pool = _get_compression_pool()
         assert isinstance(pool, concurrent.futures.ThreadPoolExecutor)
 
     def test_getter_returns_same_instance(self):
-        from src.orchestration.compression import _get_compression_pool
+        from cogtrix_core.orchestration.compression import _get_compression_pool
 
         pool1 = _get_compression_pool()
         pool2 = _get_compression_pool()
@@ -522,7 +528,7 @@ class TestEvictStaleTimingFix:
 
     def test_evict_stale_removes_only_expired_entries(self, monkeypatch):
         """Verify stale tool-call entries are evicted while fresh ones stay."""
-        from src.orchestration.runner import ToolCallLogger
+        from cogtrix_core.orchestration.runner import ToolCallLogger
 
         logger = ToolCallLogger()
         logger._tool_start_times = {
@@ -546,7 +552,7 @@ class TestEvictStaleTimingFix:
 @pytest.fixture(autouse=False)
 def _restore_rag_config():
     """Save and restore _rag_config around tests that call configure_rag."""
-    import src.tools.rag as _rag_mod
+    import cogtrix_core.tools.rag as _rag_mod
 
     original = dict(_rag_mod._rag_config)
     yield
@@ -558,7 +564,7 @@ class TestCollectFaissDirsSymlink:
 
     @pytest.mark.usefixtures("_restore_rag_config")
     def test_symlink_in_uploads_dir_is_skipped(self, tmp_path: Path) -> None:
-        from src.tools.rag import _collect_faiss_dirs, configure_rag
+        from cogtrix_core.tools.rag import _collect_faiss_dirs, configure_rag
 
         uploads = tmp_path / "uploads"
         uploads.mkdir()
@@ -603,7 +609,7 @@ class TestFaissDirsSorted:
 
     @pytest.mark.usefixtures("_restore_rag_config")
     def test_dirs_are_sorted(self, tmp_path: Path) -> None:
-        from src.tools.rag import _collect_faiss_dirs, configure_rag
+        from cogtrix_core.tools.rag import _collect_faiss_dirs, configure_rag
 
         for name in ["zebra", "alpha", "middle"]:
             idx = tmp_path / name / "vectordb" / "faiss_index"
@@ -678,7 +684,7 @@ class TestToolStatusPriority:
     """_classify_tool_status must return 'pinned' over 'auto_approved'."""
 
     def test_pinned_before_auto_approved(self) -> None:
-        from src.api.routes.tools import _classify_tool_status
+        from cogtrix_core.api.routes.tools import _classify_tool_status
 
         ss = SessionState(
             approvals={"web_search"},
@@ -688,7 +694,7 @@ class TestToolStatusPriority:
         assert _classify_tool_status("web_search", ss) == "pinned"
 
     def test_disabled_beats_pinned(self) -> None:
-        from src.api.routes.tools import _classify_tool_status
+        from cogtrix_core.api.routes.tools import _classify_tool_status
 
         ss = SessionState(
             denials={"web_search"},
@@ -742,7 +748,7 @@ class TestCompressionTimeoutWarning:
 
         from langchain_core.messages import AIMessage, ToolMessage
 
-        from src.orchestration.compression import apply_message_compression
+        from cogtrix_core.orchestration.compression import apply_message_compression
 
         long_content = "Z" * 90_000
         tool_msg = ToolMessage(content=long_content, tool_call_id="tc_warn", name="warn_tool")
@@ -757,7 +763,8 @@ class TestCompressionTimeoutWarning:
 
         with caplog.at_level(logging.WARNING, logger="cogtrix"):
             with patch(
-                "src.orchestration.compression._get_compression_pool", return_value=fake_pool
+                "cogtrix_core.orchestration.compression._get_compression_pool",
+                return_value=fake_pool,
             ):
                 with patch("concurrent.futures.as_completed", return_value=[fake_future]):
                     apply_message_compression(
@@ -785,7 +792,7 @@ class TestCompressionTimeoutWarning:
 
         from langchain_core.messages import AIMessage, ToolMessage
 
-        from src.orchestration.compression import apply_message_compression
+        from cogtrix_core.orchestration.compression import apply_message_compression
 
         long_content = "Y" * 80_000
         tool_msg = ToolMessage(content=long_content, tool_call_id="tc_warn2", name="warn_tool2")
@@ -800,7 +807,8 @@ class TestCompressionTimeoutWarning:
 
         with caplog.at_level(logging.WARNING, logger="cogtrix"):
             with patch(
-                "src.orchestration.compression._get_compression_pool", return_value=fake_pool
+                "cogtrix_core.orchestration.compression._get_compression_pool",
+                return_value=fake_pool,
             ):
                 with patch("concurrent.futures.as_completed", return_value=[fake_future]):
                     apply_message_compression(
@@ -850,9 +858,9 @@ class TestApiTurnResetsPromptState:
         import asyncio
         from unittest.mock import Mock, patch
 
-        from src.api import turn_runner
-        from src.api.session_bridge import ApiSession
-        from src.orchestration.run_config import AgentRunConfig
+        from cogtrix_core.api import turn_runner
+        from cogtrix_core.api.session_bridge import ApiSession
+        from cogtrix_core.orchestration.run_config import AgentRunConfig
 
         session_state = Mock()
         session_state.reset_for_new_prompt = Mock()
@@ -873,7 +881,7 @@ class TestApiTurnResetsPromptState:
             return "turn output"
 
         async def _run() -> None:
-            with patch("src.orchestration.runner.run_agent", side_effect=fake_run_agent):
+            with patch("cogtrix_core.orchestration.runner.run_agent", side_effect=fake_run_agent):
                 await turn_runner._run_message_turn_inner(
                     session=session,
                     text="hello",
@@ -912,7 +920,7 @@ class TestWarmSessionPopulatesOriginals:
         from types import SimpleNamespace
         from unittest.mock import patch
 
-        from src.api import session_bridge
+        from cogtrix_core.api import session_bridge
 
         record = SimpleNamespace(
             id="session-199",
@@ -973,7 +981,7 @@ class TestCompressionPoolTimeout:
 
         from langchain_core.messages import AIMessage, ToolMessage
 
-        from src.orchestration.compression import apply_message_compression
+        from cogtrix_core.orchestration.compression import apply_message_compression
 
         long_content = "Z" * 90_000
         tool_msg = ToolMessage(content=long_content, tool_call_id="tc_pool", name="pool_tool")
@@ -989,7 +997,7 @@ class TestCompressionPoolTimeout:
 
         with caplog.at_level(logging.WARNING, logger="cogtrix"):
             with patch(
-                "src.orchestration.compression._get_compression_pool",
+                "cogtrix_core.orchestration.compression._get_compression_pool",
                 return_value=fake_pool,
             ):
                 with patch("concurrent.futures.as_completed", side_effect=_raise_timeout):
@@ -1019,7 +1027,7 @@ class TestCompressionPoolTimeout:
         """as_completed must be called with a timeout= keyword argument."""
         from langchain_core.messages import AIMessage, ToolMessage
 
-        from src.orchestration.compression import apply_message_compression
+        from cogtrix_core.orchestration.compression import apply_message_compression
 
         long_content = "A" * 90_000
         tool_msg = ToolMessage(content=long_content, tool_call_id="tc_kw", name="kw_tool")
@@ -1062,9 +1070,9 @@ class TestTurnRunnerNonBlockingPuts:
         from types import SimpleNamespace
         from unittest.mock import Mock, patch
 
-        from src.api import turn_runner
-        from src.api.session_bridge import ApiSession
-        from src.orchestration.run_config import AgentRunConfig
+        from cogtrix_core.api import turn_runner
+        from cogtrix_core.api.session_bridge import ApiSession
+        from cogtrix_core.orchestration.run_config import AgentRunConfig
 
         class DummyQueue:
             def __init__(self) -> None:
@@ -1096,9 +1104,11 @@ class TestTurnRunnerNonBlockingPuts:
 
         async def _run() -> None:
             with (
-                patch("src.api.turn_runner.WebSocketCallbackHandler", autospec=True) as mock_ws,
-                patch("src.api.turn_runner.ApiConfirmationUI", autospec=True),
-                patch("src.orchestration.runner.run_agent", side_effect=fake_run_agent),
+                patch(
+                    "cogtrix_core.api.turn_runner.WebSocketCallbackHandler", autospec=True
+                ) as mock_ws,
+                patch("cogtrix_core.api.turn_runner.ApiConfirmationUI", autospec=True),
+                patch("cogtrix_core.orchestration.runner.run_agent", side_effect=fake_run_agent),
             ):
                 mock_ws.return_value.input_tokens = 0
                 mock_ws.return_value.output_tokens = 0
@@ -1122,9 +1132,9 @@ class TestTurnRunnerNonBlockingPuts:
         from types import SimpleNamespace
         from unittest.mock import Mock, patch
 
-        from src.api import turn_runner
-        from src.api.session_bridge import ApiSession
-        from src.orchestration.run_config import AgentRunConfig
+        from cogtrix_core.api import turn_runner
+        from cogtrix_core.api.session_bridge import ApiSession
+        from cogtrix_core.orchestration.run_config import AgentRunConfig
 
         class DummyQueue:
             def __init__(self) -> None:
@@ -1161,10 +1171,12 @@ class TestTurnRunnerNonBlockingPuts:
 
         async def _run() -> None:
             with (
-                patch("src.api.turn_runner.WebSocketCallbackHandler", autospec=True) as mock_ws,
-                patch("src.api.turn_runner.ApiConfirmationUI", autospec=True),
-                patch("src.orchestration.runner.run_agent", side_effect=fake_run_agent),
-                patch("src.api.turn_runner.asyncio.wait_for", side_effect=fake_wait_for),
+                patch(
+                    "cogtrix_core.api.turn_runner.WebSocketCallbackHandler", autospec=True
+                ) as mock_ws,
+                patch("cogtrix_core.api.turn_runner.ApiConfirmationUI", autospec=True),
+                patch("cogtrix_core.orchestration.runner.run_agent", side_effect=fake_run_agent),
+                patch("cogtrix_core.api.turn_runner.asyncio.wait_for", side_effect=fake_wait_for),
             ):
                 mock_ws.return_value.input_tokens = 0
                 mock_ws.return_value.output_tokens = 0
@@ -1187,9 +1199,9 @@ class TestTurnRunnerNonBlockingPuts:
         from types import SimpleNamespace
         from unittest.mock import Mock, patch
 
-        from src.api import turn_runner
-        from src.api.session_bridge import ApiSession
-        from src.orchestration.run_config import AgentRunConfig
+        from cogtrix_core.api import turn_runner
+        from cogtrix_core.api.session_bridge import ApiSession
+        from cogtrix_core.orchestration.run_config import AgentRunConfig
 
         class SlowQueue:
             def __init__(self) -> None:
@@ -1221,9 +1233,11 @@ class TestTurnRunnerNonBlockingPuts:
 
         async def _run() -> None:
             with (
-                patch("src.api.turn_runner.WebSocketCallbackHandler", autospec=True) as mock_ws,
-                patch("src.api.turn_runner.ApiConfirmationUI", autospec=True),
-                patch("src.orchestration.runner.run_agent", side_effect=fake_run_agent),
+                patch(
+                    "cogtrix_core.api.turn_runner.WebSocketCallbackHandler", autospec=True
+                ) as mock_ws,
+                patch("cogtrix_core.api.turn_runner.ApiConfirmationUI", autospec=True),
+                patch("cogtrix_core.orchestration.runner.run_agent", side_effect=fake_run_agent),
             ):
                 mock_ws.return_value.input_tokens = 0
                 mock_ws.return_value.output_tokens = 0
@@ -1249,9 +1263,9 @@ class TestTurnRunnerExports:
     """turn_runner must re-export callback helpers for test patching."""
 
     def test_callback_helpers_are_module_level_exports(self) -> None:
-        from src.api import turn_runner
-        from src.api.callbacks import WebSocketCallbackHandler
-        from src.api.confirmation import ApiConfirmationUI
+        from cogtrix_core.api import turn_runner
+        from cogtrix_core.api.callbacks import WebSocketCallbackHandler
+        from cogtrix_core.api.confirmation import ApiConfirmationUI
 
         assert turn_runner.WebSocketCallbackHandler is WebSocketCallbackHandler
         assert turn_runner.ApiConfirmationUI is ApiConfirmationUI
@@ -1265,7 +1279,7 @@ class TestRagOSErrorResilience:
 
     @pytest.fixture
     def _restore_rag_config(self):
-        import src.tools.rag as _rag_mod
+        import cogtrix_core.tools.rag as _rag_mod
 
         original = dict(_rag_mod._rag_config)
         yield
@@ -1274,7 +1288,7 @@ class TestRagOSErrorResilience:
     @pytest.mark.usefixtures("_restore_rag_config")
     def test_stats_survives_permission_error(self, tmp_path: Path) -> None:
         """knowledge_base_stats must not crash when iterdir() raises PermissionError."""
-        from src.tools.rag import configure_rag, knowledge_base_stats
+        from cogtrix_core.tools.rag import configure_rag, knowledge_base_stats
 
         idx = tmp_path / "faiss_index"
         idx.mkdir()
@@ -1290,7 +1304,7 @@ class TestRagOSErrorResilience:
 
     def test_stats_has_oserror_guard_on_stat(self, tmp_path: Path) -> None:
         """knowledge_base_stats must skip files whose stat() raises OSError."""
-        from src.tools.rag import configure_rag, knowledge_base_stats
+        from cogtrix_core.tools.rag import configure_rag, knowledge_base_stats
 
         idx = tmp_path / "faiss_index"
         idx.mkdir()
@@ -1316,7 +1330,7 @@ class TestRagOSErrorResilience:
     @pytest.mark.usefixtures("_restore_rag_config")
     def test_build_description_survives_permission_error(self, tmp_path: Path) -> None:
         """_build_description must not crash when iterdir() raises PermissionError."""
-        from src.tools.rag import _build_description, configure_rag
+        from cogtrix_core.tools.rag import _build_description, configure_rag
 
         idx = tmp_path / "faiss_index"
         idx.mkdir()
@@ -1332,7 +1346,7 @@ class TestRagOSErrorResilience:
 
     def test_configure_rag_tool_catches_oserror(self, tmp_path: Path) -> None:
         """configure_rag_tool must swallow OSError from RAG configuration."""
-        from src.tools.configure import configure_rag_tool
+        from cogtrix_core.tools.configure import configure_rag_tool
 
         config = MagicMock()
         config.data_dir = str(tmp_path)
@@ -1348,7 +1362,7 @@ class TestRagOSErrorResilience:
         config.resolve_data_path.return_value = tmp_path
 
         with patch(
-            "src.tools.rag.configure_rag", side_effect=OSError("boom")
+            "cogtrix_core.tools.rag.configure_rag", side_effect=OSError("boom")
         ) as mock_configure_rag:
             configure_rag_tool(config)
 
@@ -1365,7 +1379,7 @@ class TestWorkflowIdValidation:
     def test_validate_wf_id_rejects_traversal(self):
         from fastapi import HTTPException
 
-        from src.api.routes.workflows import _validate_wf_id
+        from cogtrix_core.api.routes.workflows import _validate_wf_id
 
         with pytest.raises(HTTPException) as exc_info:
             _validate_wf_id("../etc/passwd")
@@ -1374,13 +1388,13 @@ class TestWorkflowIdValidation:
     def test_validate_wf_id_rejects_slash(self):
         from fastapi import HTTPException
 
-        from src.api.routes.workflows import _validate_wf_id
+        from cogtrix_core.api.routes.workflows import _validate_wf_id
 
         with pytest.raises(HTTPException):
             _validate_wf_id("a/b")
 
     def test_validate_wf_id_accepts_valid(self):
-        from src.api.routes.workflows import _validate_wf_id
+        from cogtrix_core.api.routes.workflows import _validate_wf_id
 
         _validate_wf_id("bike-sales")
         _validate_wf_id("Support_v2")
@@ -1391,9 +1405,9 @@ class TestWorkflowIdValidation:
         import asyncio
         from types import SimpleNamespace
 
-        from src.api.auth import TokenData
-        from src.api.routes import workflows as mod
-        from src.api.schemas.workflow import WorkflowUpdate
+        from cogtrix_core.api.auth import TokenData
+        from cogtrix_core.api.routes import workflows as mod
+        from cogtrix_core.api.schemas.workflow import WorkflowUpdate
 
         class StopAfterValidate(RuntimeError):
             pass
@@ -1449,8 +1463,8 @@ class TestWorkflowIdValidation:
 
         from fastapi import HTTPException
 
-        from src.api.routes.workflows import upload_workflow_document
-        from src.assistant.workflows import WorkflowDefinition
+        from cogtrix_core.api.routes.workflows import upload_workflow_document
+        from cogtrix_core.assistant.workflows import WorkflowDefinition
 
         class FakeUploadFile:
             def __init__(self, filename: str, data: bytes) -> None:
@@ -1510,14 +1524,14 @@ class TestUpdateWorkflowCopy:
         import asyncio
         from types import SimpleNamespace
 
-        from src.api.auth import TokenData
-        from src.api.routes.workflows import update_workflow
-        from src.api.schemas.workflow import (
+        from cogtrix_core.api.auth import TokenData
+        from cogtrix_core.api.routes.workflows import update_workflow
+        from cogtrix_core.api.schemas.workflow import (
             WorkflowAutoDetectOut,
             WorkflowToolPolicyOut,
             WorkflowUpdate,
         )
-        from src.assistant.workflows import (
+        from cogtrix_core.assistant.workflows import (
             WorkflowAutoDetect,
             WorkflowDefinition,
             WorkflowToolPolicy,
@@ -1610,7 +1624,7 @@ class TestLoadPromptContainment:
     """BUG-214: relative paths must be resolved against data_dir and contained."""
 
     def test_relative_path_resolved_within_data_dir(self, tmp_path):
-        from src.assistant.workflows import _load_prompt_from_value
+        from cogtrix_core.assistant.workflows import _load_prompt_from_value
 
         prompt_dir = tmp_path / "prompts"
         prompt_dir.mkdir()
@@ -1619,19 +1633,19 @@ class TestLoadPromptContainment:
         assert result == "Hello!"
 
     def test_relative_traversal_rejected(self, tmp_path):
-        from src.assistant.workflows import _load_prompt_from_value
+        from cogtrix_core.assistant.workflows import _load_prompt_from_value
 
         result = _load_prompt_from_value("../../../etc/passwd", tmp_path)
         assert result == ""
 
     def test_absolute_path_outside_rejected(self, tmp_path):
-        from src.assistant.workflows import _load_prompt_from_value
+        from cogtrix_core.assistant.workflows import _load_prompt_from_value
 
         result = _load_prompt_from_value("/etc/passwd", tmp_path)
         assert result == ""
 
     def test_inline_text_still_works(self, tmp_path):
-        from src.assistant.workflows import _load_prompt_from_value
+        from cogtrix_core.assistant.workflows import _load_prompt_from_value
 
         result = _load_prompt_from_value("You are a helpful assistant.", tmp_path)
         assert result == "You are a helpful assistant."
@@ -1646,7 +1660,7 @@ class TestTokenFinalNotPremature:
     def test_final_false_while_tools_active(self):
         from unittest.mock import Mock
 
-        from src.api.callbacks import WebSocketCallbackHandler
+        from cogtrix_core.api.callbacks import WebSocketCallbackHandler
 
         handler = WebSocketCallbackHandler(Mock(), Mock())
         # Simulate a tool starting
@@ -1666,7 +1680,7 @@ class TestTokenFinalNotPremature:
         # streamed live, so a verification-recovery regeneration can't double-render.
         from unittest.mock import Mock
 
-        from src.api.callbacks import WebSocketCallbackHandler
+        from cogtrix_core.api.callbacks import WebSocketCallbackHandler
 
         handler = WebSocketCallbackHandler(Mock(), Mock())
         handler.on_tool_start({"name": "test"}, "", run_id="run1")
@@ -1692,7 +1706,7 @@ class TestCompressionPerFutureTimeout:
 
         from langchain_core.messages import ToolMessage
 
-        from src.orchestration import compression
+        from cogtrix_core.orchestration import compression
 
         timeout_calls: list[int | float | None] = []
 
@@ -1746,7 +1760,7 @@ class TestAutoDetectHighestScore:
     """BUG-220: _auto_detect should return the highest-scoring workflow."""
 
     def test_highest_score_wins(self, tmp_path):
-        from src.assistant.workflows import (
+        from cogtrix_core.assistant.workflows import (
             WorkflowAutoDetect,
             WorkflowDefinition,
             WorkflowRegistry,
@@ -1776,7 +1790,7 @@ class TestAutoDetectHighestScore:
 
     def test_tie_score_alphabetical(self, tmp_path):
         """When two workflows have the same score, alphabetical ID wins."""
-        from src.assistant.workflows import (
+        from cogtrix_core.assistant.workflows import (
             WorkflowAutoDetect,
             WorkflowDefinition,
             WorkflowRegistry,
@@ -1804,38 +1818,38 @@ class TestLoadPromptEdgeCases:
     """Additional edge cases for _load_prompt_from_value after BUG-214 fix."""
 
     def test_empty_value_returns_empty(self, tmp_path):
-        from src.assistant.workflows import _load_prompt_from_value
+        from cogtrix_core.assistant.workflows import _load_prompt_from_value
 
         assert _load_prompt_from_value("", tmp_path) == ""
         assert _load_prompt_from_value("   ", tmp_path) == ""
 
     def test_tilde_path_outside_data_dir_rejected(self, tmp_path):
-        from src.assistant.workflows import _load_prompt_from_value
+        from cogtrix_core.assistant.workflows import _load_prompt_from_value
 
         result = _load_prompt_from_value("~/../../etc/passwd", tmp_path)
         assert result == ""
 
     def test_dot_slash_file_inside_data_dir(self, tmp_path):
-        from src.assistant.workflows import _load_prompt_from_value
+        from cogtrix_core.assistant.workflows import _load_prompt_from_value
 
         (tmp_path / "prompt.txt").write_text("test prompt", encoding="utf-8")
         result = _load_prompt_from_value("./prompt.txt", tmp_path)
         assert result == "test prompt"
 
     def test_dot_dot_slash_rejected(self, tmp_path):
-        from src.assistant.workflows import _load_prompt_from_value
+        from cogtrix_core.assistant.workflows import _load_prompt_from_value
 
         result = _load_prompt_from_value("../outside.txt", tmp_path)
         assert result == ""
 
     def test_missing_file_returns_empty(self, tmp_path):
-        from src.assistant.workflows import _load_prompt_from_value
+        from cogtrix_core.assistant.workflows import _load_prompt_from_value
 
         result = _load_prompt_from_value("./nonexistent.txt", tmp_path)
         assert result == ""
 
     def test_multiword_text_treated_as_inline(self, tmp_path):
-        from src.assistant.workflows import _load_prompt_from_value
+        from cogtrix_core.assistant.workflows import _load_prompt_from_value
 
         result = _load_prompt_from_value("You are a helpful bike sales assistant.", tmp_path)
         assert result == "You are a helpful bike sales assistant."
@@ -1850,7 +1864,7 @@ class TestValidateWfIdBoundary:
     def test_rejects_leading_underscore(self):
         from fastapi import HTTPException
 
-        from src.api.routes.workflows import _validate_wf_id
+        from cogtrix_core.api.routes.workflows import _validate_wf_id
 
         with pytest.raises(HTTPException):
             _validate_wf_id("_bad")
@@ -1858,13 +1872,13 @@ class TestValidateWfIdBoundary:
     def test_rejects_empty_string(self):
         from fastapi import HTTPException
 
-        from src.api.routes.workflows import _validate_wf_id
+        from cogtrix_core.api.routes.workflows import _validate_wf_id
 
         with pytest.raises(HTTPException):
             _validate_wf_id("")
 
     def test_accepts_single_char(self):
-        from src.api.routes.workflows import _validate_wf_id
+        from cogtrix_core.api.routes.workflows import _validate_wf_id
 
         _validate_wf_id("a")
         _validate_wf_id("Z")
@@ -1873,7 +1887,7 @@ class TestValidateWfIdBoundary:
     def test_rejects_null_byte(self):
         from fastapi import HTTPException
 
-        from src.api.routes.workflows import _validate_wf_id
+        from cogtrix_core.api.routes.workflows import _validate_wf_id
 
         with pytest.raises(HTTPException):
             _validate_wf_id("test\x00evil")
@@ -1889,14 +1903,14 @@ class TestUpdateWorkflowReturnsUpdated:
         import asyncio
         from types import SimpleNamespace
 
-        from src.api.auth import TokenData
-        from src.api.routes.workflows import update_workflow
-        from src.api.schemas.workflow import (
+        from cogtrix_core.api.auth import TokenData
+        from cogtrix_core.api.routes.workflows import update_workflow
+        from cogtrix_core.api.schemas.workflow import (
             WorkflowAutoDetectOut,
             WorkflowToolPolicyOut,
             WorkflowUpdate,
         )
-        from src.assistant.workflows import (
+        from cogtrix_core.assistant.workflows import (
             WorkflowAutoDetect,
             WorkflowDefinition,
             WorkflowToolPolicy,
@@ -1985,7 +1999,7 @@ class TestContextPrefixIsHumanMessage:
         """context_prefix must appear in a HumanMessage, not a SystemMessage."""
         from langchain_core.messages import HumanMessage, SystemMessage
 
-        from src.agent.core import prepare_messages_with_context
+        from cogtrix_core.agent.core import prepare_messages_with_context
 
         msgs = prepare_messages_with_context(
             history_messages=[],
@@ -2011,7 +2025,7 @@ class TestContextPrefixIsHumanMessage:
         """With context_prefix provided, no SystemMessage should be injected."""
         from langchain_core.messages import SystemMessage
 
-        from src.agent.core import prepare_messages_with_context
+        from cogtrix_core.agent.core import prepare_messages_with_context
 
         msgs = prepare_messages_with_context(
             history_messages=[],

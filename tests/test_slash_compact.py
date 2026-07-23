@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.cli.commands import _build_slash_commands
+from cogtrix_core.cli.commands import _build_slash_commands
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -51,7 +51,7 @@ class TestCompactNothingToCompress:
         reg.memory_manager = _make_memory_manager(short_msgs)
         reg.max_context_tokens = 16_384
 
-        with patch("src.cli.commands.apply_message_compression", return_value=short_msgs):
+        with patch("cogtrix_core.cli.commands.apply_message_compression", return_value=short_msgs):
             result = _dispatch(reg, "/compact")
 
         assert result == "continue"
@@ -64,7 +64,7 @@ class TestCompactNothingToCompress:
         reg.memory_manager = _make_memory_manager(short_msgs)
         reg.max_context_tokens = 16_384
 
-        with patch("src.cli.commands.apply_message_compression", return_value=short_msgs):
+        with patch("cogtrix_core.cli.commands.apply_message_compression", return_value=short_msgs):
             _dispatch(reg, "/compact")
 
         out = _captured(capsys)
@@ -79,7 +79,7 @@ class TestCompactNothingToCompress:
         reg.memory_manager = mm
         reg.max_context_tokens = 16_384
 
-        with patch("src.cli.commands.apply_message_compression", return_value=short_msgs):
+        with patch("cogtrix_core.cli.commands.apply_message_compression", return_value=short_msgs):
             _dispatch(reg, "/compact")
 
         # save() should not be called since nothing changed
@@ -130,7 +130,9 @@ class TestCompactStandard:
         compressed_msg = MagicMock()
         compressed_msg.content = "summary"
 
-        with patch("src.cli.commands.apply_message_compression", return_value=[compressed_msg]):
+        with patch(
+            "cogtrix_core.cli.commands.apply_message_compression", return_value=[compressed_msg]
+        ):
             _dispatch(reg, "/compact")
 
         out = _captured(capsys)
@@ -150,7 +152,9 @@ class TestCompactStandard:
         compressed_msg = MagicMock()
         compressed_msg.content = "summary"
 
-        with patch("src.cli.commands.apply_message_compression", return_value=[compressed_msg]):
+        with patch(
+            "cogtrix_core.cli.commands.apply_message_compression", return_value=[compressed_msg]
+        ):
             _dispatch(reg, "/compact")
 
         assert mm._messages == [compressed_msg]
@@ -169,14 +173,19 @@ class TestCompactStandard:
         compressed_msg = MagicMock()
         compressed_msg.content = "summary"
 
-        with patch("src.cli.commands.apply_message_compression", return_value=[compressed_msg]):
+        with patch(
+            "cogtrix_core.cli.commands.apply_message_compression", return_value=[compressed_msg]
+        ):
             _dispatch(reg, "/compact")
 
         mm.save.assert_called_once()
 
     def test_standard_params_passed(self):
         """Standard /compact passes COMPRESSION_MIN_AGE_CYCLES and COMPRESSION_MIN_CHARS."""
-        from src.orchestration.compression import COMPRESSION_MIN_AGE_CYCLES, COMPRESSION_MIN_CHARS
+        from cogtrix_core.orchestration.compression import (
+            COMPRESSION_MIN_AGE_CYCLES,
+            COMPRESSION_MIN_CHARS,
+        )
 
         reg = _make_registry()
         orig_msg = MagicMock()
@@ -190,7 +199,7 @@ class TestCompactStandard:
         compressed_msg.content = "summary"
 
         with patch(
-            "src.cli.commands.apply_message_compression", return_value=[compressed_msg]
+            "cogtrix_core.cli.commands.apply_message_compression", return_value=[compressed_msg]
         ) as mock_compress:
             _dispatch_no_capsys(reg, "/compact")
 
@@ -210,7 +219,9 @@ class TestCompactStandard:
         compressed_msg = MagicMock()
         compressed_msg.content = "summary"
 
-        with patch("src.cli.commands.apply_message_compression", return_value=[compressed_msg]):
+        with patch(
+            "cogtrix_core.cli.commands.apply_message_compression", return_value=[compressed_msg]
+        ):
             result = _dispatch(reg, "/compact")
 
         assert result == "continue"
@@ -241,7 +252,9 @@ class TestCompactAggressive:
         compressed_msg = MagicMock()
         compressed_msg.content = "summary"
 
-        with patch("src.cli.commands.apply_message_compression", return_value=[compressed_msg]):
+        with patch(
+            "cogtrix_core.cli.commands.apply_message_compression", return_value=[compressed_msg]
+        ):
             _dispatch(reg, "/compact aggressive")
 
         out = _captured(capsys)
@@ -262,7 +275,7 @@ class TestCompactAggressive:
         compressed_msg.content = "summary"
 
         with patch(
-            "src.cli.commands.apply_message_compression", return_value=[compressed_msg]
+            "cogtrix_core.cli.commands.apply_message_compression", return_value=[compressed_msg]
         ) as mock_compress:
             _dispatch_no_capsys(reg, "/compact aggressive")
 
@@ -284,7 +297,9 @@ class TestCompactAggressive:
         compressed_msg = MagicMock()
         compressed_msg.content = "summary"
 
-        with patch("src.cli.commands.apply_message_compression", return_value=[compressed_msg]):
+        with patch(
+            "cogtrix_core.cli.commands.apply_message_compression", return_value=[compressed_msg]
+        ):
             _dispatch_no_capsys(reg, "/compact aggressive")
 
         assert mm._messages == [compressed_msg]
@@ -302,7 +317,9 @@ class TestCompactAggressive:
         compressed_msg = MagicMock()
         compressed_msg.content = "summary"
 
-        with patch("src.cli.commands.apply_message_compression", return_value=[compressed_msg]):
+        with patch(
+            "cogtrix_core.cli.commands.apply_message_compression", return_value=[compressed_msg]
+        ):
             _dispatch(reg, "/compact aggressive")
 
         out = _captured(capsys)
@@ -332,7 +349,7 @@ class TestCompactArgParsing:
         compressed_msg.content = "summary"
 
         with patch(
-            "src.cli.commands.apply_message_compression", return_value=[compressed_msg]
+            "cogtrix_core.cli.commands.apply_message_compression", return_value=[compressed_msg]
         ) as mock_compress:
             _dispatch_no_capsys(reg, cmd)
 
@@ -342,7 +359,10 @@ class TestCompactArgParsing:
 
     def test_unknown_arg_treated_as_standard(self):
         """Unrecognised argument falls through to standard compression params."""
-        from src.orchestration.compression import COMPRESSION_MIN_AGE_CYCLES, COMPRESSION_MIN_CHARS
+        from cogtrix_core.orchestration.compression import (
+            COMPRESSION_MIN_AGE_CYCLES,
+            COMPRESSION_MIN_CHARS,
+        )
 
         reg = _make_registry()
         orig_msg = MagicMock()
@@ -355,7 +375,7 @@ class TestCompactArgParsing:
         compressed_msg.content = "summary"
 
         with patch(
-            "src.cli.commands.apply_message_compression", return_value=[compressed_msg]
+            "cogtrix_core.cli.commands.apply_message_compression", return_value=[compressed_msg]
         ) as mock_compress:
             _dispatch_no_capsys(reg, "/compact whatever")
 
@@ -462,7 +482,7 @@ class TestCompactProgressCallback:
         REGRESSION: progress_callback(completed, total) fires once per compressed item.
         Without fix: parameter did not exist, callback never called.
         """
-        from src.orchestration.compression import apply_message_compression
+        from cogtrix_core.orchestration.compression import apply_message_compression
 
         calls = []
         messages = _make_eligible_messages()
@@ -491,7 +511,7 @@ class TestCompactProgressCallback:
     @_skip_no_langchain
     def test_progress_callback_optional(self):
         """apply_message_compression works without progress_callback (default None)."""
-        from src.orchestration.compression import apply_message_compression
+        from cogtrix_core.orchestration.compression import apply_message_compression
 
         messages = _make_eligible_messages()
         fake_llm = MagicMock()
@@ -521,7 +541,9 @@ class TestCompactProgressCallback:
         compressed_msg = MagicMock()
         compressed_msg.content = "short"
 
-        with patch("src.cli.commands.apply_message_compression", return_value=[compressed_msg]):
+        with patch(
+            "cogtrix_core.cli.commands.apply_message_compression", return_value=[compressed_msg]
+        ):
             _dispatch(reg, "/compact")
 
         out = _captured(capsys)
@@ -538,7 +560,7 @@ class TestCompactProgressCallback:
         reg.max_context_tokens = 16_384
         reg.last_input_tokens = 8192  # 50% context pressure
 
-        with patch("src.cli.commands.apply_message_compression", return_value=short_msgs):
+        with patch("cogtrix_core.cli.commands.apply_message_compression", return_value=short_msgs):
             _dispatch(reg, "/compact")
 
         out = _captured(capsys)
@@ -558,7 +580,7 @@ class TestCompactUpdatesStats:
         Without fix: last_input_tokens unchanged after /compact (stale 100%).
         With fix: last_input_tokens updated to estimated reduced token count.
         """
-        from src.orchestration.compression import _CHARS_PER_TOKEN
+        from cogtrix_core.orchestration.compression import _CHARS_PER_TOKEN
 
         reg = _make_registry()
 
@@ -580,7 +602,7 @@ class TestCompactUpdatesStats:
         compressed_msg.content = after_content
 
         monkeypatch.setattr(
-            "src.cli.commands.apply_message_compression", lambda *a, **kw: [compressed_msg]
+            "cogtrix_core.cli.commands.apply_message_compression", lambda *a, **kw: [compressed_msg]
         )
 
         _dispatch_no_capsys(reg, "/compact")
@@ -608,7 +630,9 @@ class TestCompactUpdatesStats:
         compressed_msg = MagicMock()
         compressed_msg.content = "short"
 
-        with patch("src.cli.commands.apply_message_compression", return_value=[compressed_msg]):
+        with patch(
+            "cogtrix_core.cli.commands.apply_message_compression", return_value=[compressed_msg]
+        ):
             _dispatch(reg, "/compact")
 
         out = _captured(capsys)
@@ -657,7 +681,7 @@ class TestCompactAlwaysProducesOutput:
                 raise RuntimeError("Progress update failed — non-TTY terminal")
             return [compressed_msg]
 
-        monkeypatch.setattr("src.cli.commands.apply_message_compression", _amc_side_effect)
+        monkeypatch.setattr("cogtrix_core.cli.commands.apply_message_compression", _amc_side_effect)
 
         exc_caught = None
         try:
@@ -692,7 +716,7 @@ class TestCompactAlwaysProducesOutput:
                 raise RuntimeError("Progress update failed — non-TTY terminal")
             return short_msgs  # unchanged → changed == 0
 
-        monkeypatch.setattr("src.cli.commands.apply_message_compression", _amc_side_effect)
+        monkeypatch.setattr("cogtrix_core.cli.commands.apply_message_compression", _amc_side_effect)
 
         exc_caught = None
         try:

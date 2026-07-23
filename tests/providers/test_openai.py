@@ -1,4 +1,4 @@
-"""Regression tests for ``src/providers/openai.create_embeddings`` (#2067).
+"""Regression tests for ``cogtrix_core/providers/openai.create_embeddings`` (#2067).
 
 OpenAI-compatible third-party embedding endpoints (e.g. OpenRouter, vLLM) reject
 langchain's default token-ID embedding input (``check_embedding_ctx_length=True``),
@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
-from src.providers import openai as openai_provider
+from cogtrix_core.providers import openai as openai_provider
 
 
 def _captured_kwargs(**call_kwargs):

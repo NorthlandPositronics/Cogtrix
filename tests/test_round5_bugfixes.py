@@ -29,7 +29,7 @@ class TestArch04701ForceDelegationLlmParam:
 
     def test_provided_llm_skips_build_llm_for_decomposition(self):
         """When llm is supplied, build_llm_for_decomposition must NOT be called."""
-        from src.orchestration.phases import force_delegation
+        from cogtrix_core.orchestration.phases import force_delegation
 
         mock_llm = MagicMock()
         # LLM response: a single JSON line so delegate_parallel is called
@@ -41,8 +41,11 @@ class TestArch04701ForceDelegationLlmParam:
         log = MagicMock()
 
         with (
-            patch("src.orchestration.phases.build_llm_for_decomposition") as mock_build,
-            patch("src.tools.delegate._delegate_config", {"models": {}, "allowed_models": None}),
+            patch("cogtrix_core.orchestration.phases.build_llm_for_decomposition") as mock_build,
+            patch(
+                "cogtrix_core.tools.delegate._delegate_config",
+                {"models": {}, "allowed_models": None},
+            ),
         ):
             force_delegation(
                 user_input="test task",
@@ -56,7 +59,7 @@ class TestArch04701ForceDelegationLlmParam:
 
     def test_none_llm_calls_build_llm_for_decomposition(self):
         """When llm=None, build_llm_for_decomposition IS called with config."""
-        from src.orchestration.phases import force_delegation
+        from cogtrix_core.orchestration.phases import force_delegation
 
         config = self._make_config()
         log = MagicMock()
@@ -68,11 +71,11 @@ class TestArch04701ForceDelegationLlmParam:
 
         with (
             patch(
-                "src.orchestration.phases.build_llm_for_decomposition",
+                "cogtrix_core.orchestration.phases.build_llm_for_decomposition",
                 return_value=built_llm,
             ) as mock_build,
             patch(
-                "src.tools.delegate._delegate_config",
+                "cogtrix_core.tools.delegate._delegate_config",
                 {"models": {"fast": {}}, "allowed_models": None},
             ),
         ):
@@ -88,7 +91,7 @@ class TestArch04701ForceDelegationLlmParam:
 
     def test_provided_llm_is_used_for_invoke(self):
         """The supplied llm object must be the one that receives the .invoke() call."""
-        from src.orchestration.phases import force_delegation
+        from cogtrix_core.orchestration.phases import force_delegation
 
         mock_llm = MagicMock()
         mock_response = MagicMock()
@@ -99,8 +102,8 @@ class TestArch04701ForceDelegationLlmParam:
         log = MagicMock()
 
         with (
-            patch("src.orchestration.phases.build_llm_for_decomposition"),
-            patch("src.tools.delegate._delegate_config", {"models": {"fast": {}}}),
+            patch("cogtrix_core.orchestration.phases.build_llm_for_decomposition"),
+            patch("cogtrix_core.tools.delegate._delegate_config", {"models": {"fast": {}}}),
         ):
             force_delegation(
                 user_input="do something",
@@ -123,7 +126,7 @@ class TestPerf5010EnqueueAgentStateNonBlocking:
 
     def test_full_queue_does_not_block(self):
         """With a maxsize=1 queue already full, _enqueue_agent_state returns immediately."""
-        from src.api.turn_runner import _enqueue_agent_state
+        from cogtrix_core.api.turn_runner import _enqueue_agent_state
 
         session = MagicMock()
         session.id = "sess-1"
@@ -144,7 +147,7 @@ class TestPerf5010EnqueueAgentStateNonBlocking:
 
     def test_agent_state_is_set_regardless_of_queue_full(self):
         """session.agent_state is always updated, even when the queue drops the message."""
-        from src.api.turn_runner import _enqueue_agent_state
+        from cogtrix_core.api.turn_runner import _enqueue_agent_state
 
         session = MagicMock()
         session.id = "sess-2"
@@ -159,7 +162,7 @@ class TestPerf5010EnqueueAgentStateNonBlocking:
 
     def test_message_enqueued_when_queue_has_space(self):
         """When the queue is not full, the agent_state message must be enqueued."""
-        from src.api.turn_runner import _enqueue_agent_state
+        from cogtrix_core.api.turn_runner import _enqueue_agent_state
 
         session = MagicMock()
         session.id = "sess-3"
@@ -186,7 +189,7 @@ class TestBug159LlmGenerationReadInsideLock:
     @pytest.fixture(autouse=True)
     def _save_runner_state(self):
         """Save and restore runner module state so mutations don't leak."""
-        from src.orchestration import runner as runner_mod
+        from cogtrix_core.orchestration import runner as runner_mod
 
         with runner_mod._cache_lock:
             orig_generation = runner_mod._llm_generation
@@ -202,7 +205,7 @@ class TestBug159LlmGenerationReadInsideLock:
         """After invalidate_llm_caches() from another thread, next run_agent sees
         a fresh generation so the cached LLM id changes.
         """
-        from src.orchestration import runner as runner_mod
+        from cogtrix_core.orchestration import runner as runner_mod
 
         # Record initial generation.
         with runner_mod._cache_lock:
@@ -227,7 +230,7 @@ class TestBug159LlmGenerationReadInsideLock:
 
     def test_advance_llm_generation_increments_under_lock(self):
         """advance_llm_generation must increment _llm_generation atomically."""
-        from src.orchestration import runner as runner_mod
+        from cogtrix_core.orchestration import runner as runner_mod
 
         with runner_mod._cache_lock:
             before = runner_mod._llm_generation
@@ -241,7 +244,7 @@ class TestBug159LlmGenerationReadInsideLock:
 
     def test_bound_cache_cleared_after_invalidation(self):
         """invalidate_llm_caches must clear _persistent_bound_cache."""
-        from src.orchestration import runner as runner_mod
+        from cogtrix_core.orchestration import runner as runner_mod
 
         # Populate the bound cache.
         with runner_mod._cache_lock:
@@ -269,7 +272,7 @@ class TestBug160CompressionTimeoutFallback:
         """A TimeoutError from future.result must fall back to truncate_tool_output."""
         from langchain_core.messages import AIMessage, ToolMessage
 
-        from src.orchestration.compression import (
+        from cogtrix_core.orchestration.compression import (
             _FALLBACK_MAX_CHARS,
             apply_message_compression,
         )
@@ -286,7 +289,9 @@ class TestBug160CompressionTimeoutFallback:
         fake_pool = MagicMock()
         fake_pool.submit.return_value = fake_future
 
-        with patch("src.orchestration.compression._get_compression_pool", return_value=fake_pool):
+        with patch(
+            "cogtrix_core.orchestration.compression._get_compression_pool", return_value=fake_pool
+        ):
             with patch("concurrent.futures.as_completed", return_value=[fake_future]):
                 result = apply_message_compression(
                     messages,
@@ -311,7 +316,7 @@ class TestBug160CompressionTimeoutFallback:
         """The plain TimeoutError (not only concurrent.futures.TimeoutError) is also caught."""
         from langchain_core.messages import AIMessage, ToolMessage
 
-        from src.orchestration.compression import apply_message_compression
+        from cogtrix_core.orchestration.compression import apply_message_compression
 
         long_content = "C" * 80_000
         tool_msg = ToolMessage(content=long_content, tool_call_id="tc_std", name="slow_tool2")
@@ -324,7 +329,9 @@ class TestBug160CompressionTimeoutFallback:
         fake_pool = MagicMock()
         fake_pool.submit.return_value = fake_future
 
-        with patch("src.orchestration.compression._get_compression_pool", return_value=fake_pool):
+        with patch(
+            "cogtrix_core.orchestration.compression._get_compression_pool", return_value=fake_pool
+        ):
             with patch("concurrent.futures.as_completed", return_value=[fake_future]):
                 # Must not raise.
                 result = apply_message_compression(
@@ -350,7 +357,7 @@ class TestBug161SchedulerQuietHoursPersist:
 
     def test_save_called_on_quiet_hours_deferral(self, tmp_path: Path):
         """_dispatch_due must call save() when a message is deferred due to quiet hours."""
-        from src.assistant.scheduler import MessageScheduler, ScheduledMessage
+        from cogtrix_core.assistant.scheduler import MessageScheduler, ScheduledMessage
 
         scheduler = MessageScheduler(
             channels={},
@@ -371,8 +378,8 @@ class TestBug161SchedulerQuietHoursPersist:
 
         with (
             patch.object(scheduler, "_get_quiet_policy", return_value=MagicMock()),
-            patch("src.assistant.scheduler._is_in_quiet_window", return_value=True),
-            patch("src.assistant.scheduler._next_quiet_end", return_value=now + 3600),
+            patch("cogtrix_core.assistant.scheduler._is_in_quiet_window", return_value=True),
+            patch("cogtrix_core.assistant.scheduler._next_quiet_end", return_value=now + 3600),
             patch.object(scheduler, "save") as mock_save,
         ):
             scheduler._dispatch_due()
@@ -382,7 +389,7 @@ class TestBug161SchedulerQuietHoursPersist:
 
     def test_save_called_before_continue_in_quiet_hours(self, tmp_path: Path):
         """save() must be called for each quiet-hours deferred message before the loop continues."""
-        from src.assistant.scheduler import MessageScheduler, ScheduledMessage
+        from cogtrix_core.assistant.scheduler import MessageScheduler, ScheduledMessage
 
         scheduler = MessageScheduler(
             channels={},
@@ -409,8 +416,8 @@ class TestBug161SchedulerQuietHoursPersist:
 
         with (
             patch.object(scheduler, "_get_quiet_policy", return_value=MagicMock()),
-            patch("src.assistant.scheduler._is_in_quiet_window", return_value=True),
-            patch("src.assistant.scheduler._next_quiet_end", return_value=now + 3600),
+            patch("cogtrix_core.assistant.scheduler._is_in_quiet_window", return_value=True),
+            patch("cogtrix_core.assistant.scheduler._next_quiet_end", return_value=now + 3600),
             patch.object(scheduler, "save", side_effect=recording_save),
         ):
             scheduler._dispatch_due()
@@ -429,8 +436,8 @@ class TestBug162MemoryManagerSlowPathWindowInsideLock:
 
     def _make_manager(self, tmp_path: Path):
         """Return a ConversationMemoryManager built with a store backend."""
-        from src.memory.json_store import JsonFileMemoryStore
-        from src.memory.modes.conversation import ConversationMemoryManager
+        from cogtrix_core.memory.json_store import JsonFileMemoryStore
+        from cogtrix_core.memory.modes.conversation import ConversationMemoryManager
 
         store = JsonFileMemoryStore(base_dir=str(tmp_path))
         return ConversationMemoryManager(store=store, session_id="test-session")
@@ -500,7 +507,7 @@ class TestPerf5004CallSoonThreadsafe:
 
     def test_enqueue_calls_call_soon_threadsafe(self):
         """_enqueue must delegate to loop.call_soon_threadsafe with _try_put_nowait."""
-        from src.api.callbacks import WebSocketCallbackHandler
+        from cogtrix_core.api.callbacks import WebSocketCallbackHandler
 
         mock_queue = asyncio.Queue(maxsize=100)
         mock_loop = MagicMock(spec=asyncio.AbstractEventLoop)
@@ -518,7 +525,7 @@ class TestPerf5004CallSoonThreadsafe:
 
     def test_try_put_nowait_drops_on_queue_full(self):
         """_try_put_nowait must silently discard items when the queue is full."""
-        from src.api.callbacks import WebSocketCallbackHandler
+        from cogtrix_core.api.callbacks import WebSocketCallbackHandler
 
         mock_queue = asyncio.Queue(maxsize=1)
         mock_queue.put_nowait({"type": "existing"})  # fill it
@@ -533,7 +540,7 @@ class TestPerf5004CallSoonThreadsafe:
 
     def test_enqueue_does_not_use_run_coroutine_threadsafe(self):
         """run_coroutine_threadsafe must NOT be called (PERF-5004 regression check)."""
-        from src.api.callbacks import WebSocketCallbackHandler
+        from cogtrix_core.api.callbacks import WebSocketCallbackHandler
 
         mock_queue = asyncio.Queue(maxsize=100)
         # Use an unspecced MagicMock so both call_soon_threadsafe and
@@ -548,7 +555,7 @@ class TestPerf5004CallSoonThreadsafe:
 
     def test_closed_event_loop_is_silently_swallowed(self):
         """A RuntimeError from call_soon_threadsafe (closed loop) must not propagate."""
-        from src.api.callbacks import WebSocketCallbackHandler
+        from cogtrix_core.api.callbacks import WebSocketCallbackHandler
 
         mock_queue = asyncio.Queue(maxsize=100)
         mock_loop = MagicMock(spec=asyncio.AbstractEventLoop)
@@ -569,7 +576,7 @@ class TestArch04704ToolCallLoggerMonotonic:
 
     def test_duration_computed_on_tool_end(self):
         """on_tool_end must compute a non-negative duration when start was recorded."""
-        from src.orchestration.runner import ToolCallLogger
+        from cogtrix_core.orchestration.runner import ToolCallLogger
 
         logger = ToolCallLogger()
         logger.on_tool_start("my_tool", {"arg": "val"}, call_id="call-1")
@@ -590,7 +597,7 @@ class TestArch04704ToolCallLoggerMonotonic:
 
     def test_on_tool_start_stores_monotonic_time(self):
         """on_tool_start must store a value close to time.monotonic()."""
-        from src.orchestration.runner import ToolCallLogger
+        from cogtrix_core.orchestration.runner import ToolCallLogger
 
         before = time.monotonic()
         logger = ToolCallLogger()
@@ -605,12 +612,15 @@ class TestArch04704ToolCallLoggerMonotonic:
 
     def test_monotonic_mock_controls_duration(self):
         """Mocking time.monotonic allows precise duration verification."""
-        from src.orchestration.runner import ToolCallLogger
+        from cogtrix_core.orchestration.runner import ToolCallLogger
 
         logger = ToolCallLogger()
         with (
-            patch("src.orchestration.runner.time.monotonic", side_effect=[100.0, 100.0, 102.5]),
-            patch("src.orchestration.runner.log_tool_call") as mock_log,
+            patch(
+                "cogtrix_core.orchestration.runner.time.monotonic",
+                side_effect=[100.0, 100.0, 102.5],
+            ),
+            patch("cogtrix_core.orchestration.runner.log_tool_call") as mock_log,
         ):
             logger.on_tool_start("timed_tool", {}, call_id="c-timed")
             logger.on_tool_end("timed_tool", "result", call_id="c-timed")
@@ -645,7 +655,7 @@ class TestBug163FloatEqualityInFuzzyArgMatch:
 
     def test_unambiguous_remap_applied(self):
         """An unambiguous fuzzy match must be remapped."""
-        from src.orchestration.graph import _correct_tool_args
+        from cogtrix_core.orchestration.graph import _correct_tool_args
 
         tool = self._make_tool_with_schema(["command"])
         # "commnd" is close to "command" — should be remapped.
@@ -656,7 +666,7 @@ class TestBug163FloatEqualityInFuzzyArgMatch:
     def test_tied_match_not_remapped(self):
         """When two expected fields have identical match ratios to an unknown arg,
         no remapping should occur (tied = ambiguous)."""
-        from src.orchestration.graph import _correct_tool_args
+        from cogtrix_core.orchestration.graph import _correct_tool_args
 
         # Two fields that are equidistant from "abc" — artificially construct
         # a case where SequenceMatcher gives the same ratio for both candidates.
@@ -668,7 +678,7 @@ class TestBug163FloatEqualityInFuzzyArgMatch:
 
     def test_exact_match_never_remapped(self):
         """An arg whose name already matches an expected field is left unchanged."""
-        from src.orchestration.graph import _correct_tool_args
+        from cogtrix_core.orchestration.graph import _correct_tool_args
 
         tool = self._make_tool_with_schema(["path", "content"])
         result = _correct_tool_args(tool, {"path": "/tmp/f", "content": "hello"})
@@ -677,7 +687,7 @@ class TestBug163FloatEqualityInFuzzyArgMatch:
 
     def test_float_epsilon_prevents_spurious_correction(self):
         """Two candidates with ratio diff < 1e-9 should be treated as tied."""
-        from src.orchestration.graph import _correct_tool_args
+        from cogtrix_core.orchestration.graph import _correct_tool_args
 
         # Use two very similar expected field names where the ratio diff is negligible.
         tool = self._make_tool_with_schema(["longfield_alpha", "longfield_aleph"])

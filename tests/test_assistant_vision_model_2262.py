@@ -10,9 +10,9 @@ import time
 from typing import Any
 from unittest.mock import MagicMock
 
-from src.assistant.channel import IncomingMessage
-from src.assistant.handler import MessageHandler
-from src.memory.context import MemoryContext
+from cogtrix_core.assistant.channel import IncomingMessage
+from cogtrix_core.assistant.handler import MessageHandler
+from cogtrix_core.memory.context import MemoryContext
 
 # ---------------------------------------------------------------------------
 # Helpers

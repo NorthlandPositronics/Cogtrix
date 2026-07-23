@@ -29,7 +29,7 @@ class TestCogtrixPromptPrepTimeout:
            + ``_pool.shutdown(wait=False)`` + both ``_ctx_future`` /
            ``_opt_future`` named-future timeouts on the prompt-prep paths.
            This is the original fix for #1158.
-        2. **Migrated to centralized helper** — ``from src.concurrency
+        2. **Migrated to centralized helper** — ``from cogtrix_core.concurrency
            import invoke_with_timeout`` (#1677 / PR #1904). The helper
            encapsulates the safe shutdown pattern in one place.
 
@@ -48,12 +48,14 @@ class TestCogtrixPromptPrepTimeout:
             and "_ctx_future.result(timeout=60)" in source
             and "_opt_future.result(timeout=60)" in source
         )
-        uses_centralized_helper = "from src.concurrency import invoke_with_timeout" in source
+        uses_centralized_helper = (
+            "from cogtrix_core.concurrency import invoke_with_timeout" in source
+        )
         assert uses_legacy_explicit_pool or uses_centralized_helper, (
             "cogtrix.py must use either the legacy explicit-pool + "
             "shutdown(wait=False) pattern with named-future timeouts on "
             "both prompt-prep paths OR the centralized "
-            "src.concurrency.invoke_with_timeout helper (#1677)"
+            "cogtrix_core.concurrency.invoke_with_timeout helper (#1677)"
         )
 
 
@@ -66,8 +68,8 @@ class TestServiceInitChannelsTimeout:
     @pytest.mark.timeout(10)
     def test_hung_channel_init_skipped(self):
         """If one channel init hangs, others still complete."""
-        from src.assistant import service as service_mod
-        from src.assistant.service import AssistantService
+        from cogtrix_core.assistant import service as service_mod
+        from cogtrix_core.assistant.service import AssistantService
 
         svc = AssistantService.__new__(AssistantService)
         stop_event = threading.Event()
@@ -111,7 +113,7 @@ class TestIngestFilesParallelTimeout:
     @pytest.mark.timeout(10)
     def test_hung_ingest_file_marked_failed(self, tmp_path: Path):
         """If _prepare_ingest_file hangs, the file is marked failed and loop continues."""
-        from src.rag.ingest import ingest_many
+        from cogtrix_core.rag.ingest import ingest_many
 
         stop_event = threading.Event()
 
@@ -127,9 +129,9 @@ class TestIngestFilesParallelTimeout:
         dummy_file.write_text("test content")
 
         # Patch the production timeout down so we don't wait the real 60 s.
-        with patch("src.rag.ingest._INGEST_PREPARE_TIMEOUT", 0.3):
+        with patch("cogtrix_core.rag.ingest._INGEST_PREPARE_TIMEOUT", 0.3):
             with patch(
-                "src.rag.ingest._prepare_ingest_file",
+                "cogtrix_core.rag.ingest._prepare_ingest_file",
                 side_effect=lambda *a, **k: stop_event.wait(timeout=3),
             ):
                 t0 = time.monotonic()
@@ -151,8 +153,8 @@ class TestWhatsAppPrefetchLidsTimeout:
     @pytest.mark.timeout(10)
     def test_hung_lid_resolution_skipped(self):
         """If one _resolve_lid hangs, others still complete."""
-        from src.assistant.channels import whatsapp as whatsapp_mod
-        from src.assistant.channels.whatsapp import WhatsAppChannel
+        from cogtrix_core.assistant.channels import whatsapp as whatsapp_mod
+        from cogtrix_core.assistant.channels.whatsapp import WhatsAppChannel
 
         ch = WhatsAppChannel.__new__(WhatsAppChannel)
         ch._snapshot = {}
@@ -203,7 +205,7 @@ class TestOptimizePromptTimeout:
         import time
         from concurrent.futures import TimeoutError as FuturesTimeoutError
 
-        from src.prompt.optimizer import PromptPlan, optimize_prompt
+        from cogtrix_core.prompt.optimizer import PromptPlan, optimize_prompt
 
         # Simulate a timeout by raising FuturesTimeoutError directly —
         # stop_event.wait() can't be interrupted by future.cancel(), so we
@@ -214,7 +216,7 @@ class TestOptimizePromptTimeout:
         original_input = "analyze the codebase and tell me about the architecture"
 
         # Patch the production timeout down so we don't wait the real 60 s.
-        with patch("src.prompt.optimizer._PROMPT_OPTIMIZER_TIMEOUT_SECONDS", 0.3):
+        with patch("cogtrix_core.prompt.optimizer._PROMPT_OPTIMIZER_TIMEOUT_SECONDS", 0.3):
             t0 = time.monotonic()
             result = optimize_prompt(original_input, hung_llm, force=True)
             elapsed = time.monotonic() - t0
@@ -230,7 +232,7 @@ class TestOptimizePromptTimeout:
     @pytest.mark.timeout(10)
     def test_successful_llm_returns_optimized_prompt(self):
         """If llm.invoke() completes within timeout, the optimized prompt is returned."""
-        from src.prompt.optimizer import PromptPlan, optimize_prompt
+        from cogtrix_core.prompt.optimizer import PromptPlan, optimize_prompt
 
         # Use force=True to bypass the action-verb skip and the length gate,
         # ensuring the LLM call is always made in this test.
@@ -253,7 +255,7 @@ class TestOptimizePromptTimeout:
         quick_llm = MagicMock()
         quick_llm.invoke.side_effect = quick_llm_invoke
 
-        with patch("src.prompt.optimizer._PROMPT_OPTIMIZER_TIMEOUT_SECONDS", 5):
+        with patch("cogtrix_core.prompt.optimizer._PROMPT_OPTIMIZER_TIMEOUT_SECONDS", 5):
             result = optimize_prompt(original, quick_llm, force=True)
         assert isinstance(result, PromptPlan)
         assert result.text != original
@@ -261,7 +263,7 @@ class TestOptimizePromptTimeout:
 
     def test_non_callable_llm_raises_typeerror(self):
         """optimize_prompt rejects a non-callable .invoke attribute with TypeError."""
-        from src.prompt.optimizer import PromptPlan, optimize_prompt
+        from cogtrix_core.prompt.optimizer import PromptPlan, optimize_prompt
 
         original = "analyze the codebase and document the architecture"
         bad_llm = type("BadLLM", (), {"invoke": None})()
@@ -273,7 +275,7 @@ class TestOptimizePromptTimeout:
 
     def test_missing_invoke_raises_typeerror(self):
         """optimize_prompt rejects an llm without .invoke with TypeError."""
-        from src.prompt.optimizer import PromptPlan, optimize_prompt
+        from cogtrix_core.prompt.optimizer import PromptPlan, optimize_prompt
 
         original = "analyze the codebase and document the architecture"
         bad_llm = type("BadLLM", (), {})()
@@ -284,7 +286,7 @@ class TestOptimizePromptTimeout:
 
     def test_response_content_none_falls_back_to_str_response(self):
         """If response.content is None, the response is stringified and used."""
-        from src.prompt.optimizer import PromptPlan, optimize_prompt
+        from cogtrix_core.prompt.optimizer import PromptPlan, optimize_prompt
 
         original = "analyze the codebase"
         assert len(original) < 400
@@ -301,7 +303,7 @@ class TestOptimizePromptTimeout:
         llm = MagicMock()
         llm.invoke.side_effect = quick_llm_invoke
 
-        with patch("src.prompt.optimizer._PROMPT_OPTIMIZER_TIMEOUT_SECONDS", 5):
+        with patch("cogtrix_core.prompt.optimizer._PROMPT_OPTIMIZER_TIMEOUT_SECONDS", 5):
             result = optimize_prompt(original, llm, force=True)
         assert isinstance(result, PromptPlan)
         # content=None → falls back to str(response) = "NoneContentResponse" (≥10 chars)
@@ -310,7 +312,7 @@ class TestOptimizePromptTimeout:
 
     def test_response_content_list_non_dict_items_joined(self):
         """If response.content is a list of non-dict items, they are joined as strings."""
-        from src.prompt.optimizer import PromptPlan, optimize_prompt
+        from cogtrix_core.prompt.optimizer import PromptPlan, optimize_prompt
 
         original = "analyze the codebase"
         assert len(original) < 400
@@ -324,7 +326,7 @@ class TestOptimizePromptTimeout:
         llm = MagicMock()
         llm.invoke.side_effect = quick_llm_invoke
 
-        with patch("src.prompt.optimizer._PROMPT_OPTIMIZER_TIMEOUT_SECONDS", 5):
+        with patch("cogtrix_core.prompt.optimizer._PROMPT_OPTIMIZER_TIMEOUT_SECONDS", 5):
             result = optimize_prompt(original, llm, force=True)
         assert isinstance(result, PromptPlan)
         assert "First part" in result.text
@@ -348,7 +350,7 @@ class TestSetupWizardTimeout:
            concurrent.futures.ThreadPoolExecutor(...)`` followed by
            ``pool.shutdown(wait=False)``.  This was the original fix for
            #1158.
-        2. **Migrated to centralized helper** — ``from src.concurrency
+        2. **Migrated to centralized helper** — ``from cogtrix_core.concurrency
            import invoke_with_timeout`` (#1677 / PR #1904).  The helper
            encapsulates the safe shutdown pattern in one place.
 
@@ -356,7 +358,7 @@ class TestSetupWizardTimeout:
         pool:`` shape MUST never appear regardless of which pattern is
         in use.
         """
-        import src.setup_wizard as sw
+        import cogtrix_core.setup_wizard as sw
 
         source = Path(sw.__file__).read_text()
         # The actual footgun: ``with ThreadPoolExecutor(...) as pool:``
@@ -367,11 +369,13 @@ class TestSetupWizardTimeout:
             "pool = concurrent.futures.ThreadPoolExecutor" in source
             and "pool.shutdown(wait=False)" in source
         )
-        uses_centralized_helper = "from src.concurrency import invoke_with_timeout" in source
+        uses_centralized_helper = (
+            "from cogtrix_core.concurrency import invoke_with_timeout" in source
+        )
         assert uses_legacy_explicit_pool or uses_centralized_helper, (
             "setup_wizard.py must use either the legacy explicit-pool + "
             "shutdown(wait=False) pattern OR the centralized "
-            "src.concurrency.invoke_with_timeout helper (#1677)"
+            "cogtrix_core.concurrency.invoke_with_timeout helper (#1677)"
         )
 
     @pytest.mark.timeout(10)
@@ -380,13 +384,13 @@ class TestSetupWizardTimeout:
         import time
         from concurrent.futures import TimeoutError as FuturesTimeoutError
 
-        from src.setup_wizard import _test_connection
+        from cogtrix_core.setup_wizard import _test_connection
 
         llm_mock = MagicMock()
         llm_mock.invoke.side_effect = FuturesTimeoutError("hung")
 
-        with patch("src.providers.create_chat_model", return_value=llm_mock):
-            with patch("src.setup_wizard._SETUP_WIZARD_LLM_TIMEOUT_SECONDS", 0.3):
+        with patch("cogtrix_core.providers.create_chat_model", return_value=llm_mock):
+            with patch("cogtrix_core.setup_wizard._SETUP_WIZARD_LLM_TIMEOUT_SECONDS", 0.3):
                 t0 = time.monotonic()
                 result = _test_connection("openai", "gpt-4", "sk-test", None)
                 elapsed = time.monotonic() - t0
@@ -400,13 +404,13 @@ class TestSetupWizardTimeout:
         import time
         from concurrent.futures import TimeoutError as FuturesTimeoutError
 
-        from src.setup_wizard import _run_conversation
+        from cogtrix_core.setup_wizard import _run_conversation
 
         llm = MagicMock()
         llm.invoke.side_effect = FuturesTimeoutError("hung")
 
         with patch("builtins.input", return_value="yes"):
-            with patch("src.setup_wizard._SETUP_WIZARD_LLM_TIMEOUT_SECONDS", 0.3):
+            with patch("cogtrix_core.setup_wizard._SETUP_WIZARD_LLM_TIMEOUT_SECONDS", 0.3):
                 t0 = time.monotonic()
                 with pytest.raises(SystemExit):
                     _run_conversation(llm, "system prompt")
@@ -433,7 +437,7 @@ class TestDelegateFallbackTimeout:
            executor.submit(llm.invoke, ...)``. This is the original fix
            for #1158.
         2. **Migrated to centralized helper** — ``invoke_with_timeout(...)``
-           call in the block, with ``from src.concurrency import
+           call in the block, with ``from cogtrix_core.concurrency import
            invoke_with_timeout`` imported at module top (#1677 / PR #1904).
 
         The buggy ``with ThreadPoolExecutor(...) as <var>:`` shape MUST
@@ -442,7 +446,7 @@ class TestDelegateFallbackTimeout:
         """
         import re
 
-        import src.tools.delegate as delegate_mod
+        import cogtrix_core.tools.delegate as delegate_mod
 
         source = Path(delegate_mod.__file__).read_text()
         # Locate the specific fallback block (in _execute_single_task,
@@ -475,12 +479,12 @@ class TestDelegateFallbackTimeout:
         )
         uses_centralized_fallback = (
             "invoke_with_timeout(" in fallback_block
-            and "from src.concurrency import invoke_with_timeout" in source
+            and "from cogtrix_core.concurrency import invoke_with_timeout" in source
         )
         assert uses_legacy_fallback or uses_centralized_fallback, (
             "delegate.py fallback block must use either the legacy "
             "explicit-pool + shutdown(wait=False) pattern OR the centralized "
-            "src.concurrency.invoke_with_timeout helper (#1677)"
+            "cogtrix_core.concurrency.invoke_with_timeout helper (#1677)"
         )
 
     @pytest.mark.timeout(10)
@@ -489,8 +493,8 @@ class TestDelegateFallbackTimeout:
         import time as time_mod
         from concurrent.futures import TimeoutError as FuturesTimeoutError
 
-        from src.tools import delegate as delegate_mod
-        from src.tools.delegate import (
+        from cogtrix_core.tools import delegate as delegate_mod
+        from cogtrix_core.tools.delegate import (
             _execute_single_task,
             configure_delegate,
         )
@@ -525,7 +529,7 @@ class TestDelegateFallbackTimeout:
                         elapsed < 1.5
                     ), f"Blocked for {elapsed:.1f}s — delegate fallback timeout not applied"
                     # Must return a failure result (fail-open), not raise
-                    from src.tools.delegate import DelegateResult
+                    from cogtrix_core.tools.delegate import DelegateResult
 
                     assert isinstance(result, DelegateResult)
                     assert result.success is False
@@ -548,8 +552,8 @@ class TestDelegateFallbackTimeout:
     @pytest.mark.timeout(10)
     def test_successful_llm_fallback_returns_response(self):
         """If the fallback llm.invoke() completes, DelegateResult(success=True) is returned."""
-        from src.tools import delegate as delegate_mod
-        from src.tools.delegate import (
+        from cogtrix_core.tools import delegate as delegate_mod
+        from cogtrix_core.tools.delegate import (
             _execute_single_task,
             configure_delegate,
         )
@@ -576,7 +580,7 @@ class TestDelegateFallbackTimeout:
                         use_tools=False,
                     )
 
-                    from src.tools.delegate import DelegateResult
+                    from cogtrix_core.tools.delegate import DelegateResult
 
                     assert isinstance(result, DelegateResult)
                     assert result.success is True

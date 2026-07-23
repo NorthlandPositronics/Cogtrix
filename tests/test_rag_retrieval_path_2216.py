@@ -33,7 +33,7 @@ import pytest
 @pytest.fixture(autouse=True)
 def _restore_rag_config():
     """Snapshot/restore the global ``_rag_config`` so tests don't leak state."""
-    import src.tools.rag as rag_mod
+    import cogtrix_core.tools.rag as rag_mod
 
     saved = dict(rag_mod._rag_config)
     try:
@@ -44,7 +44,7 @@ def _restore_rag_config():
 
 
 def _make_config(vectordb_dir: str, data_dir: str = "/tmp/cogtrix-data"):
-    from src.config import Config
+    from cogtrix_core.config import Config
 
     cfg = Config()
     cfg.data_dir = data_dir
@@ -88,8 +88,8 @@ class TestResolveRagIndexDir:
 
 class TestIngestQueryAgreement:
     def test_configure_rag_tool_targets_resolve_rag_index_dir(self):
-        import src.tools.rag as rag_mod
-        from src.tools.configure import configure_rag_tool
+        import cogtrix_core.tools.rag as rag_mod
+        from cogtrix_core.tools.configure import configure_rag_tool
 
         cfg = _make_config("/data/vectordb")
         with patch.object(type(cfg), "resolve_embedding_config", return_value=_EMB):
@@ -118,7 +118,7 @@ class TestIngestQueryAgreement:
             )
 
         with (
-            patch("src.rag.ingest_documents", side_effect=_capture),
+            patch("cogtrix_core.rag.ingest_documents", side_effect=_capture),
             patch.object(type(cfg), "resolve_embedding_config", return_value=_EMB),
             patch("cogtrix.console", None),
         ):
@@ -138,8 +138,8 @@ class TestIngestQueryRoundTrip:
         ``_collect_faiss_dirs`` searches ``<vectordb_dir>/faiss_index``.
         """
         import cogtrix
-        from src.tools.configure import configure_rag_tool
-        from src.tools.rag import _collect_faiss_dirs
+        from cogtrix_core.tools.configure import configure_rag_tool
+        from cogtrix_core.tools.rag import _collect_faiss_dirs
 
         cfg = _make_config(str(tmp_path / "vectordb"), data_dir=str(tmp_path))
         args = SimpleNamespace(
@@ -156,7 +156,7 @@ class TestIngestQueryRoundTrip:
             )
 
         with (
-            patch("src.rag.ingest_documents", side_effect=_fake_ingest),
+            patch("cogtrix_core.rag.ingest_documents", side_effect=_fake_ingest),
             patch.object(type(cfg), "resolve_embedding_config", return_value=_EMB),
             patch("cogtrix.console", None),
         ):
@@ -170,8 +170,8 @@ class TestIngestQueryRoundTrip:
         """An index at ``<vectordb_dir>`` (the pre-fix CLI write location, one
         level above ``faiss_index``) must NOT be silently picked up — proving
         the two sides genuinely have to agree (they now do via the helper)."""
-        from src.tools.configure import configure_rag_tool
-        from src.tools.rag import _collect_faiss_dirs
+        from cogtrix_core.tools.configure import configure_rag_tool
+        from cogtrix_core.tools.rag import _collect_faiss_dirs
 
         cfg = _make_config(str(tmp_path / "vectordb"), data_dir=str(tmp_path))
         old_loc = cfg.resolve_data_path(cfg.rag.vectordb_dir)  # no /faiss_index
@@ -189,8 +189,8 @@ class TestIngestQueryRoundTrip:
 
 class TestAgentNotesLayout:
     def test_agent_notes_is_sibling_of_faiss_index_dir(self, tmp_path: Path):
-        from src.tools.configure import configure_rag_tool
-        from src.tools.rag import _agent_notes_faiss_dir
+        from cogtrix_core.tools.configure import configure_rag_tool
+        from cogtrix_core.tools.rag import _agent_notes_faiss_dir
 
         cfg = _make_config(str(tmp_path / "vectordb"), data_dir=str(tmp_path))
         with patch.object(type(cfg), "resolve_embedding_config", return_value=_EMB):

@@ -1,4 +1,4 @@
-"""Tests for src/tools/datetime_tool.py — date/time utilities.
+"""Tests for cogtrix_core/tools/datetime_tool.py — date/time utilities.
 
 Covers: get_current_datetime, convert_timezone, parse_date, _get_timezone.
 Issue: #1228 (zero test coverage).
@@ -12,7 +12,7 @@ import re
 
 import pytest
 
-from src.tools import datetime_tool as dt_module
+from cogtrix_core.tools import datetime_tool as dt_module
 
 # ── get_current_datetime ───────────────────────────────────────────────────────
 

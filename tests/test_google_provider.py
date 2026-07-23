@@ -1,7 +1,7 @@
 """Regression tests for the Google Gemini provider.
 
 ROOT CAUSE: ``create_chat_model()`` and ``create_embeddings()`` in
-``src/providers/google.py`` accepted a ``base_url`` parameter but silently
+``cogtrix_core/providers/google.py`` accepted a ``base_url`` parameter but silently
 ignored it, logging only a warning.  Users configuring a proxy or custom
 endpoint believed traffic was routed through it while connections went
 directly to the default Google API endpoint.
@@ -20,7 +20,7 @@ class TestGoogleBaseUrlRejection:
 
     def test_chat_model_rejects_base_url(self) -> None:
         """create_chat_model must raise ValueError when base_url is set."""
-        from src.providers.google import create_chat_model
+        from cogtrix_core.providers.google import create_chat_model
 
         with pytest.raises(ValueError, match="does not support custom base_url"):
             create_chat_model(
@@ -30,7 +30,7 @@ class TestGoogleBaseUrlRejection:
 
     def test_embeddings_rejects_base_url(self) -> None:
         """create_embeddings must raise ValueError when base_url is set."""
-        from src.providers.google import create_embeddings
+        from cogtrix_core.providers.google import create_embeddings
 
         with pytest.raises(ValueError, match="does not support custom base_url"):
             create_embeddings(
@@ -42,9 +42,9 @@ class TestGoogleBaseUrlRejection:
         """create_chat_model must work normally when base_url is None."""
         from unittest.mock import MagicMock, patch
 
-        from src.providers.google import create_chat_model
+        from cogtrix_core.providers.google import create_chat_model
 
-        with patch("src.providers.google.ChatGoogleGenerativeAI") as mock_cls:
+        with patch("cogtrix_core.providers.google.ChatGoogleGenerativeAI") as mock_cls:
             mock_cls.return_value = MagicMock()
             result = create_chat_model(
                 model="gemini-2.5-flash",
@@ -57,9 +57,9 @@ class TestGoogleBaseUrlRejection:
         """create_embeddings must work normally when base_url is None."""
         from unittest.mock import MagicMock, patch
 
-        from src.providers.google import create_embeddings
+        from cogtrix_core.providers.google import create_embeddings
 
-        with patch("src.providers.google.GoogleGenerativeAIEmbeddings") as mock_cls:
+        with patch("cogtrix_core.providers.google.GoogleGenerativeAIEmbeddings") as mock_cls:
             mock_cls.return_value = MagicMock()
             result = create_embeddings(
                 model="text-embedding-004",

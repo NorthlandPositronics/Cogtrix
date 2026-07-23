@@ -9,7 +9,7 @@ entity per the corpus.
 
 from __future__ import annotations
 
-from src.orchestration.verification import (
+from cogtrix_core.orchestration.verification import (
     GroundedSources,
     detect_entity_owner_mismatch,
     format_entity_owner_mismatch_nudge,
@@ -220,19 +220,19 @@ class TestProtocolConformance:
     conform to the GroundedDetector protocol (PR #1980)."""
 
     def test_registered(self) -> None:
-        from src.orchestration.verification import GROUNDED_DETECTORS
+        from cogtrix_core.orchestration.verification import GROUNDED_DETECTORS
 
         names = [spec.name for spec in GROUNDED_DETECTORS]
         assert "entity_owner_mismatch" in names
 
     def test_handler_node_convention(self) -> None:
-        from src.orchestration.verification import GROUNDED_DETECTORS
+        from cogtrix_core.orchestration.verification import GROUNDED_DETECTORS
 
         spec = next(s for s in GROUNDED_DETECTORS if s.name == "entity_owner_mismatch")
         assert spec.handler_node == "handle_entity_owner_mismatch"
 
     def test_protocol_runtime_check(self) -> None:
-        from src.orchestration.verification import GROUNDED_DETECTORS, GroundedDetector
+        from cogtrix_core.orchestration.verification import GROUNDED_DETECTORS, GroundedDetector
 
         spec = next(s for s in GROUNDED_DETECTORS if s.name == "entity_owner_mismatch")
         assert isinstance(spec.detect, GroundedDetector)

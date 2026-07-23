@@ -35,7 +35,7 @@ from unittest.mock import MagicMock
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
-from src.orchestration.graph import _looks_like_markdown_phantom_report
+from cogtrix_core.orchestration.graph import _looks_like_markdown_phantom_report
 
 # ── Domain false-positives — must NOT be flagged as phantom ──────────
 

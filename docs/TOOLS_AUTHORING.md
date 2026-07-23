@@ -145,8 +145,16 @@ For tools you want to distribute as a Python package:
 
 ```python
 # my_cogtrix_plugin/tools.py
+import pluggy
 from pydantic import BaseModel, Field
-from cogtrix.plugins import hookimpl   # or: from src.plugins import hookimpl
+
+# Cogtrix registers its plugin hooks under the "cogtrix" pluggy project. Define
+# the marker yourself rather than importing it from Cogtrix: Cogtrix ships its
+# modules as top-level packages (``plugins``, ``agent``, …), not a stable public
+# import surface, so a self-defined marker keeps your plugin decoupled from
+# Cogtrix's internal layout. ``HookimplMarker("cogtrix")`` produces the exact
+# same marker Cogtrix uses internally.
+hookimpl = pluggy.HookimplMarker("cogtrix")
 
 
 class EchoInput(BaseModel):
@@ -172,8 +180,12 @@ class MyPlugin:
 ```
 
 > **Note:** `hookimpl` is the [pluggy](https://pluggy.readthedocs.io/) hook
-> implementation marker.  It is optional but recommended because it future-proofs
-> your plugin against hook signature changes.
+> implementation marker (`pluggy.HookimplMarker("cogtrix")`). It is optional but
+> recommended because it future-proofs your plugin against hook signature changes.
+> Define it locally as shown — don't import it from Cogtrix; the `cogtrix`
+> distribution exposes its modules as top-level packages, not a stable public API,
+> so importing from it (`from plugins import …` / `from cogtrix.plugins import …`)
+> is layout-dependent and may break. `pluggy` is a small, standalone dependency.
 
 ### Step 2 — Declare the entry-point
 

@@ -12,7 +12,7 @@ from typing import Any
 
 
 def _make_scheduler(tmp_path: Path) -> Any:
-    from src.assistant.scheduler import MessageScheduler
+    from cogtrix_core.assistant.scheduler import MessageScheduler
 
     return MessageScheduler(
         channels={},
@@ -27,7 +27,7 @@ class TestListScheduledAuth:
 
     def test_session_b_cannot_see_session_a_messages(self, tmp_path):
         """Session B must not see messages scheduled for session A."""
-        from src.assistant.scheduler import create_list_scheduled_tool
+        from cogtrix_core.assistant.scheduler import create_list_scheduled_tool
 
         scheduler = _make_scheduler(tmp_path)
         # Schedule a message for chat A
@@ -48,7 +48,7 @@ class TestListScheduledAuth:
 
     def test_session_a_can_see_its_own_messages(self, tmp_path):
         """Session A must see messages scheduled for its own chat."""
-        from src.assistant.scheduler import create_list_scheduled_tool
+        from cogtrix_core.assistant.scheduler import create_list_scheduled_tool
 
         scheduler = _make_scheduler(tmp_path)
         scheduler.schedule(
@@ -67,7 +67,7 @@ class TestListScheduledAuth:
 
     def test_explicit_chat_id_filter_overrides_caller_scope(self, tmp_path):
         """When the caller supplies an explicit chat_id filter, it takes precedence."""
-        from src.assistant.scheduler import create_list_scheduled_tool
+        from cogtrix_core.assistant.scheduler import create_list_scheduled_tool
 
         scheduler = _make_scheduler(tmp_path)
         scheduler.schedule(
@@ -86,7 +86,7 @@ class TestListScheduledAuth:
 
     def test_no_caller_chat_id_returns_all(self, tmp_path):
         """When caller_chat_id is empty (legacy/admin), all messages are returned."""
-        from src.assistant.scheduler import create_list_scheduled_tool
+        from cogtrix_core.assistant.scheduler import create_list_scheduled_tool
 
         scheduler = _make_scheduler(tmp_path)
         scheduler.schedule(
@@ -108,7 +108,7 @@ class TestCancelScheduledAuth:
 
     def test_session_b_cannot_cancel_session_a_message(self, tmp_path):
         """Session B must not be able to cancel a message scheduled by session A."""
-        from src.assistant.scheduler import create_cancel_scheduled_tool
+        from cogtrix_core.assistant.scheduler import create_cancel_scheduled_tool
 
         scheduler = _make_scheduler(tmp_path)
         msg_id = scheduler.schedule(
@@ -131,7 +131,7 @@ class TestCancelScheduledAuth:
 
     def test_session_a_can_cancel_its_own_message(self, tmp_path):
         """Session A must be able to cancel its own message."""
-        from src.assistant.scheduler import create_cancel_scheduled_tool
+        from cogtrix_core.assistant.scheduler import create_cancel_scheduled_tool
 
         scheduler = _make_scheduler(tmp_path)
         msg_id = scheduler.schedule(
@@ -155,7 +155,7 @@ class TestEditScheduledAuth:
 
     def test_session_b_cannot_edit_session_a_message(self, tmp_path):
         """Session B must not be able to edit a message scheduled by session A."""
-        from src.assistant.scheduler import create_edit_scheduled_tool
+        from cogtrix_core.assistant.scheduler import create_edit_scheduled_tool
 
         scheduler = _make_scheduler(tmp_path)
         msg_id = scheduler.schedule(
@@ -178,7 +178,7 @@ class TestEditScheduledAuth:
 
     def test_session_a_can_edit_its_own_message(self, tmp_path):
         """Session A must be able to edit its own message."""
-        from src.assistant.scheduler import create_edit_scheduled_tool
+        from cogtrix_core.assistant.scheduler import create_edit_scheduled_tool
 
         scheduler = _make_scheduler(tmp_path)
         msg_id = scheduler.schedule(

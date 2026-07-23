@@ -1,0 +1,28 @@
+id: role_sa_05_cron_logrotate
+area: ops
+title: Schedule a recurring job and rotate its log
+
+description: |
+  Routine operations competency: stand up a scheduled job and keep its log from
+  growing unbounded. The agent writes a small script, schedules it to run
+  regularly (cron or a systemd timer), and configures logrotate for its log. The
+  check confirms the script works, a schedule exists, and the logrotate config is
+  valid — not that it waited for a tick.
+
+assignment: |
+  We need a lightweight heartbeat job on this box:
+    - create an executable script at /usr/local/bin/heartbeat.sh that appends the
+      current date/time as one line to /var/log/heartbeat.log each time it runs;
+    - schedule it to run every minute (cron or a systemd timer — your choice);
+    - configure logrotate so /var/log/heartbeat.log is rotated daily, keeping 7
+      rotations and compressing old ones.
+  Let me know when it's set up and how you checked it.
+
+acceptance:
+  check: checks/sa_05_check.sh
+
+personas:
+  lead:
+    default_scope_answer: "Either cron or a systemd timer is fine; keep it simple."
+    scope_answers:
+      content: "Just one line per run with a timestamp is fine."

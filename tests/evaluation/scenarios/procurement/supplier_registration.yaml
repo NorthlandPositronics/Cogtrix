@@ -29,5 +29,13 @@ success_criteria:
   - "contains: Global Widgets Inc."
   - "contains: 12-3456789"
 max_turns: 20
+# Bumped 120 → 240 (#2402): kimi-k2-6 is slow (~40s/call) and intermittently
+# loops register_supplier here; the default 120s barely covers even the happy
+# path (register → validate → answer ≈ 3 calls), so any slowness or one loop
+# iteration times out and reds the shard-C cell on unrelated PRs. 240s gives the
+# duplicate-call backstop (#2390) + the improved duplicate-escalation guidance
+# room to break the loop and finalize. Same precedent as finance_invoice_approval
+# (PR #2013) and regression_deepseek (PR #1999).
+timeout_seconds: 240
 tags: []
 budget_usd_estimate: 0.05

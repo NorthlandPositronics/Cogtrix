@@ -32,17 +32,17 @@ _TEST_JWT_SECRET = "testsecret_mustbe32chars_minimum00"
 os.environ.setdefault("COGTRIX_JWT_SECRET", _TEST_JWT_SECRET)
 os.environ.setdefault("COGTRIX_DB_URL", "sqlite+aiosqlite:///:memory:")
 
-from src.api.auth import create_access_token  # noqa: E402
-from src.api.db.engine import Base, get_db  # noqa: E402
-from src.api.db.repositories.organization import OrganizationRepository  # noqa: E402
-from src.api.db.repositories.users import UserRepository  # noqa: E402
-from src.api.saml.config import (  # noqa: E402
+from cogtrix_core.api.auth import create_access_token  # noqa: E402
+from cogtrix_core.api.db.engine import Base, get_db  # noqa: E402
+from cogtrix_core.api.db.repositories.organization import OrganizationRepository  # noqa: E402
+from cogtrix_core.api.db.repositories.users import UserRepository  # noqa: E402
+from cogtrix_core.api.saml.config import (  # noqa: E402
     SAMLConfig,
     SAMLIdPConfig,
     configure_saml,
 )
-from src.api.scim.mapping import parse_scim_filter, user_to_scim  # noqa: E402
-from src.api.scim.schemas import SCIMListResponse, SCIMUser  # noqa: E402
+from cogtrix_core.api.scim.mapping import parse_scim_filter, user_to_scim  # noqa: E402
+from cogtrix_core.api.scim.schemas import SCIMListResponse, SCIMUser  # noqa: E402
 
 
 def _uid() -> str:
@@ -64,7 +64,7 @@ def _user_header(user_id: str) -> dict:
 @pytest.fixture(autouse=True)
 def reset_saml_config():
     """Reset global SAML config before and after each test."""
-    import src.api.saml.config as _cfg
+    import cogtrix_core.api.saml.config as _cfg
 
     _cfg._saml_config = None
     yield
@@ -161,7 +161,7 @@ class TestUserToSCIM:
     def test_basic_mapping(self, tmp_path):
         from datetime import UTC, datetime
 
-        from src.api.db.models import User
+        from cogtrix_core.api.db.models import User
 
         user = User()
         user.id = _uid()
@@ -219,7 +219,7 @@ def scim_setup():
 
     asyncio.run(_seed())
 
-    from src.api.app import create_app
+    from cogtrix_core.api.app import create_app
 
     with patch.dict(os.environ, {"COGTRIX_JWT_SECRET": _TEST_JWT_SECRET}):
         app = create_app()

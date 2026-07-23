@@ -15,8 +15,8 @@ from __future__ import annotations
 
 import threading
 
-from src.memory import modes  # noqa: F401 — triggers mode registration
-from src.memory.modes.conversation import ConversationMemoryManager
+from cogtrix_core.memory import modes  # noqa: F401 — triggers mode registration
+from cogtrix_core.memory.modes.conversation import ConversationMemoryManager
 
 
 class _MockStore:

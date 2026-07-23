@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 if TYPE_CHECKING:
-    from src.providers import (  # noqa: F401
+    from cogtrix_core.providers import (  # noqa: F401
         ProviderAuthError,
         RateLimitError,
         RetryableChatModel,
@@ -16,7 +16,7 @@ if TYPE_CHECKING:
     )
 else:
     try:
-        from src.providers import (  # noqa: F811
+        from cogtrix_core.providers import (  # noqa: F811
             ProviderAuthError,
             RateLimitError,
             RetryableChatModel,
@@ -331,7 +331,7 @@ class TestAuthErrorClassification2147:
 class TestCreateChatModelWrapping:
     """Tests that create_chat_model wraps models with RetryableChatModel."""
 
-    @patch("src.providers._load_provider")
+    @patch("cogtrix_core.providers._load_provider")
     def test_create_chat_model_returns_wrapped_model(self, mock_load):
         """create_chat_model wraps model with RetryableChatModel."""
         mock_module = MagicMock()
@@ -340,13 +340,13 @@ class TestCreateChatModelWrapping:
         mock_module.create_chat_model = MagicMock(return_value=mock_model)
         mock_load.return_value = mock_module
 
-        with patch("src.providers.CHAT_MODELS", {"openai": "gpt-4"}):
+        with patch("cogtrix_core.providers.CHAT_MODELS", {"openai": "gpt-4"}):
             result = create_chat_model("openai", model="gpt-4")
 
         assert isinstance(result, RetryableChatModel)
         assert result._model == mock_model
 
-    @patch("src.providers._load_provider")
+    @patch("cogtrix_core.providers._load_provider")
     def test_create_chat_model_respects_max_retries(self, mock_load):
         """create_chat_model passes max_retries to wrapper."""
         mock_module = MagicMock()
@@ -355,7 +355,7 @@ class TestCreateChatModelWrapping:
         mock_module.create_chat_model = MagicMock(return_value=mock_model)
         mock_load.return_value = mock_module
 
-        with patch("src.providers.CHAT_MODELS", {"openai": "gpt-4"}):
+        with patch("cogtrix_core.providers.CHAT_MODELS", {"openai": "gpt-4"}):
             result = create_chat_model("openai", model="gpt-4", max_retries=5)
 
         assert isinstance(result, RetryableChatModel)
@@ -480,7 +480,7 @@ class TestExtractRetryAfter:
 
     def test_extract_from_headers(self):
         """Extracts from response.headers."""
-        from src.providers import _extract_retry_after
+        from cogtrix_core.providers import _extract_retry_after
 
         response = MagicMock()
         response.headers = {"Retry-After": "5.5"}
@@ -490,13 +490,13 @@ class TestExtractRetryAfter:
 
     def test_extract_from_none_response(self):
         """Returns None for None response."""
-        from src.providers import _extract_retry_after
+        from cogtrix_core.providers import _extract_retry_after
 
         assert _extract_retry_after(None) is None
 
     def test_extract_falls_back_to_none(self):
         """Returns None if no Retry-After found."""
-        from src.providers import _extract_retry_after
+        from cogtrix_core.providers import _extract_retry_after
 
         response = MagicMock()
         response.headers = {}
@@ -506,7 +506,7 @@ class TestExtractRetryAfter:
 
     def test_extract_logs_debug_on_exception(self, caplog):
         """Logs debug message when response parsing raises an exception."""
-        from src.providers import _extract_retry_after
+        from cogtrix_core.providers import _extract_retry_after
 
         class BadResponse:
             headers = {}
@@ -545,7 +545,7 @@ class TestRetryableChatModelExponentialBackoff:
         def capture_sleep(duration):
             sleep_durations.append(duration)
 
-        with patch("src.providers.time.sleep", side_effect=capture_sleep):
+        with patch("cogtrix_core.providers.time.sleep", side_effect=capture_sleep):
             with pytest.raises(RateLimitError):
                 wrapper.invoke("test input")
 
@@ -587,7 +587,7 @@ class TestRetryableChatModelExponentialBackoff:
         def capture_sleep(duration):
             sleep_durations.append(duration)
 
-        with patch("src.providers.time.sleep", side_effect=capture_sleep):
+        with patch("cogtrix_core.providers.time.sleep", side_effect=capture_sleep):
             with pytest.raises(RateLimitError):
                 wrapper.invoke("test input")
 
@@ -621,7 +621,7 @@ class TestRetryableChatModelExponentialBackoff:
         def capture_sleep(duration):
             sleep_durations.append(duration)
 
-        with patch("src.providers.time.sleep", side_effect=capture_sleep):
+        with patch("cogtrix_core.providers.time.sleep", side_effect=capture_sleep):
             with pytest.raises(RateLimitError):
                 wrapper.invoke("test input")
 
@@ -638,7 +638,7 @@ class TestRedactUrl:
     """Regression tests for _redact_url — ensure credential query params are redacted."""
 
     def _call(self, url: str) -> str:
-        from src.providers import _redact_url
+        from cogtrix_core.providers import _redact_url
 
         return _redact_url(url)
 
@@ -737,7 +737,7 @@ class TestSanitizeAuthErrorMessage:
     """Regression tests for _sanitize_auth_error_message (issue #1105)."""
 
     def _call(self, message: str) -> str:
-        from src.providers import _sanitize_auth_error_message
+        from cogtrix_core.providers import _sanitize_auth_error_message
 
         return _sanitize_auth_error_message(message)
 
@@ -856,3 +856,84 @@ class TestRetryableChatModelAuthErrorSanitization:
 
         assert "Invalid credentials" in str(exc_info.value)
         assert "[redacted]" not in str(exc_info.value)
+
+
+class _APIConnectionError(Exception):
+    """Stand-in for openai.APIConnectionError — classification keys on the type
+    NAME ("APIConnectionError") and the message, not the concrete class."""
+
+
+# Rename so type(...).__name__ matches what the classifier checks.
+_APIConnectionError.__name__ = "APIConnectionError"
+_APIConnectionError.__qualname__ = "APIConnectionError"
+
+
+class TestConnectionErrorRetry:
+    """#2378: a transient connection/timeout blip must be retried, not kill the
+    turn. (openai.APIConnectionError has no status_code and str == "Connection
+    error.", so it previously fell through to non-retryable.)"""
+
+    def test_should_retry_connection_error_by_type_name(self):
+        wrapper = RetryableChatModel(MockLangChainModel())
+        should, _ = wrapper._should_retry(_APIConnectionError("Connection error."))
+        assert should is True
+
+    def test_should_retry_connection_error_by_message(self):
+        wrapper = RetryableChatModel(MockLangChainModel())
+        # A bare Exception whose message names a connection error (no type hint).
+        assert wrapper._should_retry(Exception("Connection error."))[0] is True
+        assert wrapper._should_retry(ConnectionError("connection reset by peer"))[0] is True
+
+    def test_genuine_error_still_not_retried(self):
+        wrapper = RetryableChatModel(MockLangChainModel())
+        assert wrapper._should_retry(ValueError("null deref in graph"))[0] is False
+
+    def test_invoke_retries_on_connection_error_then_succeeds(self):
+        mock_model = MockLangChainModel()
+        call_count = 0
+
+        def side_effect(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count <= 2:
+                raise _APIConnectionError("Connection error.")
+            return "recovered after a blip"
+
+        mock_model.invoke = MagicMock(side_effect=side_effect)
+        wrapper = RetryableChatModel(mock_model, max_retries=3, initial_delay=0.01)
+
+        assert wrapper.invoke("test input") == "recovered after a blip"
+        assert call_count == 3
+
+    def test_should_retry_internal_server_error_by_type_name(self):
+        # GAP-3: InternalServerError (no status_code, name-matched) is retryable.
+        ise = type("InternalServerError", (Exception,), {})("Internal server error.")
+        wrapper = RetryableChatModel(MockLangChainModel())
+        assert wrapper._should_retry(ise)[0] is True
+
+
+class TestIsTransientConnectionErrorPredicate:
+    """The shared predicate (#2378 / forge M2) that both retry classifiers call."""
+
+    def test_matches_by_type_name(self):
+        from cogtrix_core.providers import is_transient_connection_error
+
+        for name in ("APIConnectionError", "APITimeoutError", "InternalServerError"):
+            assert is_transient_connection_error(type(name, (Exception,), {})("x")) is True
+
+    def test_matches_by_base_class(self):
+        from cogtrix_core.providers import is_transient_connection_error
+
+        assert is_transient_connection_error(ConnectionError("reset")) is True
+        assert is_transient_connection_error(TimeoutError("slow")) is True
+
+    def test_matches_by_message_substring(self):
+        from cogtrix_core.providers import is_transient_connection_error
+
+        for msg in ("Connection error.", "connection reset by peer", "connection aborted"):
+            assert is_transient_connection_error(Exception(msg)) is True
+
+    def test_does_not_match_genuine_error(self):
+        from cogtrix_core.providers import is_transient_connection_error
+
+        assert is_transient_connection_error(ValueError("null deref in graph")) is False

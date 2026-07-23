@@ -15,7 +15,7 @@ import pytest
 
 @pytest.fixture()
 def _restore_rag_config():
-    import src.tools.rag as _rag_mod
+    import cogtrix_core.tools.rag as _rag_mod
 
     original = dict(_rag_mod._rag_config)
     yield
@@ -44,12 +44,12 @@ class TestSaveToKnowledgeBaseFallback:
 
     @pytest.mark.usefixtures("_restore_rag_config")
     def test_writes_jsonl_entry(self, tmp_path: Path) -> None:
-        from src.tools.rag import configure_rag, save_to_knowledge_base
+        from cogtrix_core.tools.rag import configure_rag, save_to_knowledge_base
 
         configure_rag({"vectordb_dir": str(tmp_path / "faiss_index")})
         jsonl_path = tmp_path / "agent_notes.jsonl"
 
-        with patch("src.tools.rag.FAISS_AVAILABLE", False):
+        with patch("cogtrix_core.tools.rag.FAISS_AVAILABLE", False):
             result = save_to_knowledge_base("The sky is blue.")
 
         assert result == "Saved to knowledge base."
@@ -62,11 +62,11 @@ class TestSaveToKnowledgeBaseFallback:
 
     @pytest.mark.usefixtures("_restore_rag_config")
     def test_appends_multiple_entries(self, tmp_path: Path) -> None:
-        from src.tools.rag import configure_rag, save_to_knowledge_base
+        from cogtrix_core.tools.rag import configure_rag, save_to_knowledge_base
 
         configure_rag({"vectordb_dir": str(tmp_path / "faiss_index")})
 
-        with patch("src.tools.rag.FAISS_AVAILABLE", False):
+        with patch("cogtrix_core.tools.rag.FAISS_AVAILABLE", False):
             save_to_knowledge_base("Fact A")
             save_to_knowledge_base("Fact B")
 
@@ -78,11 +78,11 @@ class TestSaveToKnowledgeBaseFallback:
 
     @pytest.mark.usefixtures("_restore_rag_config")
     def test_metadata_stored_correctly(self, tmp_path: Path) -> None:
-        from src.tools.rag import configure_rag, save_to_knowledge_base
+        from cogtrix_core.tools.rag import configure_rag, save_to_knowledge_base
 
         configure_rag({"vectordb_dir": str(tmp_path / "faiss_index")})
 
-        with patch("src.tools.rag.FAISS_AVAILABLE", False):
+        with patch("cogtrix_core.tools.rag.FAISS_AVAILABLE", False):
             save_to_knowledge_base("Important finding.", source="research", tags=["ai", "nlp"])
 
         jsonl_path = tmp_path / "agent_notes.jsonl"
@@ -93,11 +93,11 @@ class TestSaveToKnowledgeBaseFallback:
 
     @pytest.mark.usefixtures("_restore_rag_config")
     def test_default_source_is_agent(self, tmp_path: Path) -> None:
-        from src.tools.rag import configure_rag, save_to_knowledge_base
+        from cogtrix_core.tools.rag import configure_rag, save_to_knowledge_base
 
         configure_rag({"vectordb_dir": str(tmp_path / "faiss_index")})
 
-        with patch("src.tools.rag.FAISS_AVAILABLE", False):
+        with patch("cogtrix_core.tools.rag.FAISS_AVAILABLE", False):
             save_to_knowledge_base("Some note.")
 
         entry = json.loads((tmp_path / "agent_notes.jsonl").read_text().strip())
@@ -105,22 +105,22 @@ class TestSaveToKnowledgeBaseFallback:
 
     @pytest.mark.usefixtures("_restore_rag_config")
     def test_empty_content_returns_error(self, tmp_path: Path) -> None:
-        from src.tools.rag import configure_rag, save_to_knowledge_base
+        from cogtrix_core.tools.rag import configure_rag, save_to_knowledge_base
 
         configure_rag({"vectordb_dir": str(tmp_path / "faiss_index")})
 
-        with patch("src.tools.rag.FAISS_AVAILABLE", False):
+        with patch("cogtrix_core.tools.rag.FAISS_AVAILABLE", False):
             result = save_to_knowledge_base("")
 
         assert "Error" in result
 
     @pytest.mark.usefixtures("_restore_rag_config")
     def test_whitespace_only_content_returns_error(self, tmp_path: Path) -> None:
-        from src.tools.rag import configure_rag, save_to_knowledge_base
+        from cogtrix_core.tools.rag import configure_rag, save_to_knowledge_base
 
         configure_rag({"vectordb_dir": str(tmp_path / "faiss_index")})
 
-        with patch("src.tools.rag.FAISS_AVAILABLE", False):
+        with patch("cogtrix_core.tools.rag.FAISS_AVAILABLE", False):
             result = save_to_knowledge_base("   \n  ")
 
         assert "Error" in result
@@ -136,7 +136,7 @@ class TestSaveToKnowledgeBaseFaiss:
 
     @pytest.mark.usefixtures("_restore_rag_config")
     def test_creates_new_index(self, tmp_path: Path) -> None:
-        from src.tools.rag import configure_rag, save_to_knowledge_base
+        from cogtrix_core.tools.rag import configure_rag, save_to_knowledge_base
 
         configure_rag({"vectordb_dir": str(tmp_path / "faiss_index")})
 
@@ -144,10 +144,10 @@ class TestSaveToKnowledgeBaseFaiss:
         mock_embeddings = MagicMock()
 
         with (
-            patch("src.tools.rag.FAISS_AVAILABLE", True),
-            patch("src.tools.rag._get_embeddings", return_value=mock_embeddings),
-            patch("src.tools.rag.FAISS") as mock_faiss_cls,
-            patch("src.tools.rag.save_faiss_store") as mock_save,
+            patch("cogtrix_core.tools.rag.FAISS_AVAILABLE", True),
+            patch("cogtrix_core.tools.rag._get_embeddings", return_value=mock_embeddings),
+            patch("cogtrix_core.tools.rag.FAISS") as mock_faiss_cls,
+            patch("cogtrix_core.tools.rag.save_faiss_store") as mock_save,
         ):
             mock_faiss_cls.from_documents.return_value = mock_store
 
@@ -159,7 +159,11 @@ class TestSaveToKnowledgeBaseFaiss:
 
     @pytest.mark.usefixtures("_restore_rag_config")
     def test_appends_to_existing_index(self, tmp_path: Path) -> None:
-        from src.tools.rag import _AGENT_NOTES_SUBDIR, configure_rag, save_to_knowledge_base
+        from cogtrix_core.tools.rag import (
+            _AGENT_NOTES_SUBDIR,
+            configure_rag,
+            save_to_knowledge_base,
+        )
 
         vectordb_dir = tmp_path / "faiss_index"
         configure_rag({"vectordb_dir": str(vectordb_dir)})
@@ -172,10 +176,12 @@ class TestSaveToKnowledgeBaseFaiss:
         mock_embeddings = MagicMock()
 
         with (
-            patch("src.tools.rag.FAISS_AVAILABLE", True),
-            patch("src.tools.rag._get_embeddings", return_value=mock_embeddings),
-            patch("src.tools.rag.load_faiss_store_safe", return_value=mock_store) as mock_load,
-            patch("src.tools.rag.save_faiss_store") as mock_save,
+            patch("cogtrix_core.tools.rag.FAISS_AVAILABLE", True),
+            patch("cogtrix_core.tools.rag._get_embeddings", return_value=mock_embeddings),
+            patch(
+                "cogtrix_core.tools.rag.load_faiss_store_safe", return_value=mock_store
+            ) as mock_load,
+            patch("cogtrix_core.tools.rag.save_faiss_store") as mock_save,
         ):
             result = save_to_knowledge_base("Appended fact.")
 
@@ -186,13 +192,13 @@ class TestSaveToKnowledgeBaseFaiss:
 
     @pytest.mark.usefixtures("_restore_rag_config")
     def test_exception_returns_error_string(self, tmp_path: Path) -> None:
-        from src.tools.rag import configure_rag, save_to_knowledge_base
+        from cogtrix_core.tools.rag import configure_rag, save_to_knowledge_base
 
         configure_rag({"vectordb_dir": str(tmp_path / "faiss_index")})
 
         with (
-            patch("src.tools.rag.FAISS_AVAILABLE", True),
-            patch("src.tools.rag._get_embeddings", side_effect=RuntimeError("embed fail")),
+            patch("cogtrix_core.tools.rag.FAISS_AVAILABLE", True),
+            patch("cogtrix_core.tools.rag._get_embeddings", side_effect=RuntimeError("embed fail")),
         ):
             result = save_to_knowledge_base("Some fact.")
 
@@ -203,7 +209,7 @@ class TestSaveToKnowledgeBaseFaiss:
     def test_metadata_passed_to_document(self, tmp_path: Path) -> None:
         from langchain_core.documents import Document
 
-        from src.tools.rag import configure_rag, save_to_knowledge_base
+        from cogtrix_core.tools.rag import configure_rag, save_to_knowledge_base
 
         configure_rag({"vectordb_dir": str(tmp_path / "faiss_index")})
 
@@ -215,9 +221,9 @@ class TestSaveToKnowledgeBaseFaiss:
             return mock_store
 
         with (
-            patch("src.tools.rag.FAISS_AVAILABLE", True),
-            patch("src.tools.rag._get_embeddings", return_value=MagicMock()),
-            patch("src.tools.rag.FAISS") as mock_faiss_cls,
+            patch("cogtrix_core.tools.rag.FAISS_AVAILABLE", True),
+            patch("cogtrix_core.tools.rag._get_embeddings", return_value=MagicMock()),
+            patch("cogtrix_core.tools.rag.FAISS") as mock_faiss_cls,
             # save_faiss_store dives into the real faiss C extension via
             # dependable_faiss_import() and calls write_index() on the
             # store's index attribute.  When the store is a MagicMock, the
@@ -226,7 +232,7 @@ class TestSaveToKnowledgeBaseFaiss:
             # hang.  Skipping the persistence step here is consistent with
             # the sibling tests (test_creates_new_index,
             # test_appends_to_existing_index) which already patch it.
-            patch("src.tools.rag.save_faiss_store"),
+            patch("cogtrix_core.tools.rag.save_faiss_store"),
         ):
             mock_faiss_cls.from_documents.side_effect = _capture_from_documents
 
@@ -250,7 +256,7 @@ class TestCollectFaissDirsAgentNotes:
 
     @pytest.mark.usefixtures("_restore_rag_config")
     def test_agent_notes_included_when_present(self, tmp_path: Path) -> None:
-        from src.tools.rag import _AGENT_NOTES_SUBDIR, _collect_faiss_dirs, configure_rag
+        from cogtrix_core.tools.rag import _AGENT_NOTES_SUBDIR, _collect_faiss_dirs, configure_rag
 
         vectordb_dir = tmp_path / "faiss_index"
         notes_dir = tmp_path / _AGENT_NOTES_SUBDIR
@@ -268,7 +274,7 @@ class TestCollectFaissDirsAgentNotes:
 
     @pytest.mark.usefixtures("_restore_rag_config")
     def test_agent_notes_excluded_when_absent(self, tmp_path: Path) -> None:
-        from src.tools.rag import _AGENT_NOTES_SUBDIR, _collect_faiss_dirs, configure_rag
+        from cogtrix_core.tools.rag import _AGENT_NOTES_SUBDIR, _collect_faiss_dirs, configure_rag
 
         vectordb_dir = tmp_path / "faiss_index"
         configure_rag(
@@ -284,7 +290,7 @@ class TestCollectFaissDirsAgentNotes:
 
     @pytest.mark.usefixtures("_restore_rag_config")
     def test_agent_notes_alongside_global_index(self, tmp_path: Path) -> None:
-        from src.tools.rag import _AGENT_NOTES_SUBDIR, _collect_faiss_dirs, configure_rag
+        from cogtrix_core.tools.rag import _AGENT_NOTES_SUBDIR, _collect_faiss_dirs, configure_rag
 
         global_idx = tmp_path / "faiss_index"
         _make_faiss_index(global_idx)
@@ -313,19 +319,19 @@ class TestToolConfigs:
     """TOOL_CONFIGS exports both tools; TOOL_CONFIG remains backward-compatible."""
 
     def test_tool_configs_has_two_entries(self) -> None:
-        from src.tools.rag import TOOL_CONFIGS
+        from cogtrix_core.tools.rag import TOOL_CONFIGS
 
         names = [c["name"] for c in TOOL_CONFIGS]
         assert "query_knowledge_base" in names
         assert "save_to_knowledge_base" in names
 
     def test_tool_config_is_query_tool(self) -> None:
-        from src.tools.rag import TOOL_CONFIG
+        from cogtrix_core.tools.rag import TOOL_CONFIG
 
         assert TOOL_CONFIG["name"] == "query_knowledge_base"
 
     def test_save_tool_requires_no_confirmation(self) -> None:
-        from src.tools.rag import TOOL_CONFIGS
+        from cogtrix_core.tools.rag import TOOL_CONFIGS
 
         save_cfg = next(c for c in TOOL_CONFIGS if c["name"] == "save_to_knowledge_base")
         assert save_cfg["requires_confirmation"] is False
@@ -333,14 +339,14 @@ class TestToolConfigs:
     def test_save_tool_has_input_schema(self) -> None:
         from pydantic import BaseModel
 
-        from src.tools.rag import TOOL_CONFIGS
+        from cogtrix_core.tools.rag import TOOL_CONFIGS
 
         save_cfg = next(c for c in TOOL_CONFIGS if c["name"] == "save_to_knowledge_base")
         schema = save_cfg["input_schema"]
         assert issubclass(schema, BaseModel)
 
     def test_save_tool_function_is_callable(self) -> None:
-        from src.tools.rag import TOOL_CONFIGS, save_to_knowledge_base
+        from cogtrix_core.tools.rag import TOOL_CONFIGS, save_to_knowledge_base
 
         save_cfg = next(c for c in TOOL_CONFIGS if c["name"] == "save_to_knowledge_base")
         assert save_cfg["function"] is save_to_knowledge_base

@@ -1,4 +1,4 @@
-"""Unit and integration tests for src/assistant/deferral.py."""
+"""Unit and integration tests for cogtrix_core/assistant/deferral.py."""
 
 from __future__ import annotations
 
@@ -10,8 +10,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from src.assistant.channel import IncomingMessage, SendResult
-from src.assistant.deferral import (
+from cogtrix_core.assistant.channel import IncomingMessage, SendResult
+from cogtrix_core.assistant.deferral import (
     DeferralManager,
     DeferredRecord,
     DeferReplyState,
@@ -20,7 +20,7 @@ from src.assistant.deferral import (
     create_suppress_reply_tool,
     format_elapsed,
 )
-from src.assistant.scheduler import ScheduleReplyState
+from cogtrix_core.assistant.scheduler import ScheduleReplyState
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -574,7 +574,7 @@ def _make_handler(
     scheduler: Any = None,
 ):
     """Build a minimal MessageHandler with mocked dependencies."""
-    from src.assistant.handler import MessageHandler
+    from cogtrix_core.assistant.handler import MessageHandler
 
     session_mgr = MagicMock()
     session = _make_session()
@@ -609,7 +609,7 @@ class TestHandlerDeferralIntegration:
                 injected_tools.append(getattr(tool, "name", ""))
             return "Reply"
 
-        from src.assistant.handler import MessageHandler
+        from cogtrix_core.assistant.handler import MessageHandler
 
         session_mgr = MagicMock()
         session = _make_session()
@@ -651,7 +651,7 @@ class TestHandlerDeferralIntegration:
                 injected_tools.append(getattr(tool, "name", ""))
             return "Reply"
 
-        from src.assistant.handler import MessageHandler
+        from cogtrix_core.assistant.handler import MessageHandler
 
         session_mgr = MagicMock()
         session = _make_session()
@@ -686,7 +686,7 @@ class TestHandlerDeferralIntegration:
                 injected_tools.append(getattr(tool, "name", ""))
             return "Reply"
 
-        from src.assistant.handler import MessageHandler
+        from cogtrix_core.assistant.handler import MessageHandler
 
         session_mgr = MagicMock()
         session = _make_session()
@@ -722,7 +722,7 @@ class TestHandlerDeferralIntegration:
                 injected_tools.append(getattr(tool, "name", ""))
             return "Reply"
 
-        from src.assistant.handler import MessageHandler
+        from cogtrix_core.assistant.handler import MessageHandler
 
         session_mgr = MagicMock()
         session = _make_session()
@@ -746,7 +746,7 @@ class TestHandlerDeferralIntegration:
 
     def test_defer_skips_delivery_and_memory(self, tmp_path):
         """When defer_processing is called, channel.send and memory.update should NOT be called."""
-        from src.assistant.handler import MessageHandler
+        from cogtrix_core.assistant.handler import MessageHandler
 
         session_mgr = MagicMock()
         session = _make_session()
@@ -786,7 +786,7 @@ class TestHandlerDeferralIntegration:
 
     def test_suppress_skips_delivery_and_memory(self, tmp_path):
         """When suppress_reply is called, channel.send and memory.update should NOT be called."""
-        from src.assistant.handler import MessageHandler
+        from cogtrix_core.assistant.handler import MessageHandler
 
         session_mgr = MagicMock()
         session = _make_session()
@@ -820,7 +820,7 @@ class TestHandlerDeferralIntegration:
     def test_outbound_suppress_skips_send_and_updates_memory(self):
         """handle_outbound: when agent calls suppress_reply, channel.send is skipped
         and memory records '[Outbound suppressed by agent]'."""
-        from src.assistant.handler import MessageHandler
+        from cogtrix_core.assistant.handler import MessageHandler
 
         session_mgr = MagicMock()
         session = _make_session()
@@ -864,7 +864,7 @@ class TestHandlerDeferralIntegration:
 
     def test_handle_batch_coalesces_into_deferred_record(self, tmp_path):
         """Messages arriving during a pending deferral should be absorbed, not processed."""
-        from src.assistant.handler import MessageHandler
+        from cogtrix_core.assistant.handler import MessageHandler
 
         session_mgr = MagicMock()
         session = _make_session()
@@ -905,7 +905,7 @@ class TestHandlerDeferralIntegration:
 
     def test_handle_batch_passes_through_when_no_deferral(self, tmp_path):
         """Messages with no pending deferral should be processed normally."""
-        from src.assistant.handler import MessageHandler
+        from cogtrix_core.assistant.handler import MessageHandler
 
         session_mgr = MagicMock()
         session = _make_session()
@@ -939,7 +939,7 @@ class TestHandlerDeferralIntegration:
 
     def test_handle_batch_forwards_is_reprocessing(self, tmp_path):
         """is_reprocessing=True should reach handle() via handle_batch()."""
-        from src.assistant.handler import MessageHandler
+        from cogtrix_core.assistant.handler import MessageHandler
 
         session_mgr = MagicMock()
         session = _make_session()
@@ -984,7 +984,7 @@ class TestBug091DepthPropagation:
 
     def test_handle_batch_forwards_deferral_depth_to_handle(self, tmp_path):
         """handle_batch must forward deferral_depth to handle() so the depth check uses it."""
-        from src.assistant.handler import MessageHandler
+        from cogtrix_core.assistant.handler import MessageHandler
 
         session_mgr = MagicMock()
         session = _make_session()
@@ -1019,7 +1019,7 @@ class TestBug091DepthPropagation:
 
     def test_handle_batch_forwards_deferral_depth_below_max(self, tmp_path):
         """At depth < max_depth, defer_processing should still be injected."""
-        from src.assistant.handler import MessageHandler
+        from cogtrix_core.assistant.handler import MessageHandler
 
         session_mgr = MagicMock()
         session = _make_session()
@@ -1053,7 +1053,7 @@ class TestBug091DepthPropagation:
 
     def test_defer_registers_with_propagated_depth(self, tmp_path):
         """When the agent calls defer_processing, the recorded depth must be deferral_depth."""
-        from src.assistant.handler import MessageHandler
+        from cogtrix_core.assistant.handler import MessageHandler
 
         session_mgr = MagicMock()
         session = _make_session()
@@ -1217,7 +1217,7 @@ class TestBug094EagerAbsorption:
 
     def test_handle_batch_all_absorbed_returns_early(self, tmp_path):
         """When all messages are absorbed, handle() must not be called."""
-        from src.assistant.handler import MessageHandler
+        from cogtrix_core.assistant.handler import MessageHandler
 
         session_mgr = MagicMock()
         session = _make_session()
@@ -1254,7 +1254,7 @@ class TestBug094EagerAbsorption:
 
     def test_handle_batch_partial_absorption_cancels_record(self, tmp_path):
         """Partial absorption must cancel the deferred record to prevent duplicate processing."""
-        from src.assistant.handler import MessageHandler
+        from cogtrix_core.assistant.handler import MessageHandler
 
         session_mgr = MagicMock()
         session = _make_session()
@@ -1321,7 +1321,7 @@ class TestBug095ViolationTrackerSnapshotUnderLock:
         """After record_violation, the violation must be written to the persist path."""
         import json
 
-        from src.assistant.guardrails import ViolationTracker
+        from cogtrix_core.assistant.guardrails import ViolationTracker
 
         persist_path = tmp_path / "violations.json"
         tracker = ViolationTracker(config={}, persist_path=persist_path)
@@ -1335,7 +1335,7 @@ class TestBug095ViolationTrackerSnapshotUnderLock:
         """Both concurrent violations must appear in the persisted file (no lost write)."""
         import json
 
-        from src.assistant.guardrails import ViolationTracker
+        from cogtrix_core.assistant.guardrails import ViolationTracker
 
         persist_path = tmp_path / "violations.json"
         tracker = ViolationTracker(config={}, persist_path=persist_path)
@@ -1372,12 +1372,12 @@ class TestBug096LoadPromptValueContainment:
     """Verify _load_prompt_value rejects paths outside allowed_roots."""
 
     def test_inline_value_returned_unchanged(self):
-        from src.assistant.handler import _load_prompt_value
+        from cogtrix_core.assistant.handler import _load_prompt_value
 
         assert _load_prompt_value("You are helpful.") == "You are helpful."
 
     def test_file_within_allowed_root_is_read(self, tmp_path):
-        from src.assistant.handler import _load_prompt_value
+        from cogtrix_core.assistant.handler import _load_prompt_value
 
         prompt_file = tmp_path / "prompt.txt"
         prompt_file.write_text("Custom prompt", encoding="utf-8")
@@ -1385,7 +1385,7 @@ class TestBug096LoadPromptValueContainment:
         assert result == "Custom prompt"
 
     def test_file_outside_allowed_root_is_rejected(self, tmp_path):
-        from src.assistant.handler import _load_prompt_value
+        from cogtrix_core.assistant.handler import _load_prompt_value
 
         allowed_root = tmp_path / "allowed"
         allowed_root.mkdir()
@@ -1396,7 +1396,7 @@ class TestBug096LoadPromptValueContainment:
         assert result == ""
 
     def test_symlink_outside_allowed_root_is_rejected(self, tmp_path):
-        from src.assistant.handler import _load_prompt_value
+        from cogtrix_core.assistant.handler import _load_prompt_value
 
         allowed_root = tmp_path / "allowed"
         allowed_root.mkdir()
@@ -1410,7 +1410,7 @@ class TestBug096LoadPromptValueContainment:
 
     def test_no_allowed_roots_allows_any_path(self, tmp_path):
         """With no allowed_roots constraint, any readable path is accepted (backward compat)."""
-        from src.assistant.handler import _load_prompt_value
+        from cogtrix_core.assistant.handler import _load_prompt_value
 
         prompt_file = tmp_path / "prompt.txt"
         prompt_file.write_text("Any path ok", encoding="utf-8")
@@ -1418,7 +1418,7 @@ class TestBug096LoadPromptValueContainment:
         assert result == "Any path ok"
 
     def test_nonexistent_file_returns_empty(self, tmp_path):
-        from src.assistant.handler import _load_prompt_value
+        from cogtrix_core.assistant.handler import _load_prompt_value
 
         result = _load_prompt_value(str(tmp_path / "nonexistent.txt"), allowed_roots=[tmp_path])
         assert result == ""
@@ -1440,7 +1440,9 @@ class TestBug098PersistenceLogLevel:
         mgr = _make_deferral_mgr(tmp_path)
 
         # The import is local inside _atomic_write, so patch at the source module.
-        with patch("src.utils.atomic_write.atomic_write_json", side_effect=OSError("disk full")):
+        with patch(
+            "cogtrix_core.utils.atomic_write.atomic_write_json", side_effect=OSError("disk full")
+        ):
             with caplog.at_level(logging.WARNING, logger="cogtrix"):
                 mgr._atomic_write({})
 
@@ -1454,11 +1456,13 @@ class TestBug098PersistenceLogLevel:
         import logging
         from unittest.mock import patch
 
-        from src.assistant.scheduler import MessageScheduler
+        from cogtrix_core.assistant.scheduler import MessageScheduler
 
         scheduler = MessageScheduler(channels={}, persist_path=tmp_path / "schedule.json")
 
-        with patch("src.utils.atomic_write.atomic_write_json", side_effect=OSError("disk full")):
+        with patch(
+            "cogtrix_core.utils.atomic_write.atomic_write_json", side_effect=OSError("disk full")
+        ):
             with caplog.at_level(logging.WARNING, logger="cogtrix"):
                 scheduler._atomic_write({})
 
@@ -1593,7 +1597,7 @@ class TestBug105ReprocessCallback:
         import time
         from unittest.mock import MagicMock
 
-        from src.assistant.deferral import DeferralManager
+        from cogtrix_core.assistant.deferral import DeferralManager
 
         tmp_path = Path("/tmp")
         channel = MagicMock()
@@ -1810,7 +1814,7 @@ class TestFireRecordAssertGuard:
 
     def test_fire_record_raises_runtime_error_when_no_callback(self, tmp_path: Path) -> None:
         """_fire_record must produce a RuntimeError log when callback is None."""
-        import src.assistant.deferral as deferral_mod
+        import cogtrix_core.assistant.deferral as deferral_mod
 
         channel = MagicMock()
         channel.name = "telegram"

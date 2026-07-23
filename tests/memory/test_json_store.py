@@ -1,4 +1,4 @@
-"""Tests for src/memory/json_store.py — JsonFileMemoryStore and helpers."""
+"""Tests for cogtrix_core/memory/json_store.py — JsonFileMemoryStore and helpers."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 import pytest
 
-from src.memory.json_store import (
+from cogtrix_core.memory.json_store import (
     JsonFileMemoryStore,
     _dict_to_message,
     _message_to_dict,
@@ -191,9 +191,9 @@ class TestDictToMessage:
         assert msg.tool_call_id == "tc1"
 
     def test_fallback_without_langchain(self):
-        with patch("src.memory.json_store.HumanMessage", None):
-            with patch("src.memory.json_store.AIMessage", None):
-                with patch("src.memory.json_store.ToolMessage", None):
+        with patch("cogtrix_core.memory.json_store.HumanMessage", None):
+            with patch("cogtrix_core.memory.json_store.AIMessage", None):
+                with patch("cogtrix_core.memory.json_store.ToolMessage", None):
                     result = _dict_to_message({"type": "human", "content": "hello"})
                     assert isinstance(result, dict)
                     assert result["content"] == "hello"

@@ -1,4 +1,4 @@
-"""Tests for src/tools/shell.py"""
+"""Tests for cogtrix_core/tools/shell.py"""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from src.tools import shell
+from cogtrix_core.tools import shell
 
 
 class TestShellCommandInput:
@@ -256,7 +256,7 @@ class TestExecuteShellCommand:
         """Shell should accept working_directory within the application directory."""
         from pathlib import Path
 
-        app_src = Path(__file__).resolve().parent.parent.parent / "src"
+        app_src = Path(__file__).resolve().parent.parent.parent / "cogtrix_core"
         result = shell.execute_shell_command("pwd", working_directory=str(app_src))
         assert str(app_src) in result
         assert "Error:" not in result
@@ -497,7 +497,7 @@ class TestShellCommandTimeoutKillpg:
             raise OSError(errno.ESRCH, "No such process")
 
         # Patch at the module level
-        import src.tools.shell as shell_module
+        import cogtrix_core.tools.shell as shell_module
 
         # Temporarily replace os.killpg in the shell module
         shell_module.os.killpg = mock_killpg
@@ -522,7 +522,7 @@ class TestShellCommandTimeoutKillpg:
         def mock_killpg(pid: int, sig: int) -> None:
             raise OSError(errno.EPERM, "Permission denied")
 
-        import src.tools.shell as shell_module
+        import cogtrix_core.tools.shell as shell_module
 
         shell_module.os.killpg = mock_killpg
 
@@ -604,6 +604,32 @@ class TestShellCommandAllowlisting:
         """parted with semicolon (triggers shell=True) must be rejected — partition table."""
         result = shell.execute_shell_command("parted /dev/sda mklabel gpt ; true")
         assert "not allowed" in result.lower()
+
+    # ── #2372: the block message names the matched rule (no confabulation) ──
+
+    def test_blocked_message_names_the_matched_rule(self) -> None:
+        """A blocked command must name WHICH rule fired, not just say 'dangerous
+        pattern' — otherwise the model guesses the trigger and gets it wrong."""
+        result = shell.execute_shell_command("rm -rf /tmp/test ; true")
+        assert "not allowed" in result.lower()
+        # The matched rule is named so the model needn't guess.
+        assert "rm -rf" in result.lower()
+
+    def test_block_message_names_rule_not_an_innocent_token(self) -> None:
+        """The #2372 scenario: a command mixing an exotic-but-allowed token with a
+        real `rm -rf` must name `rm -rf`, never the innocent token the model would
+        otherwise blame (it returns on the first matching rule)."""
+        result = shell.execute_shell_command("rm -rf /tmp/initrd-check ; lsinitrd /boot/img")
+        assert "rm -rf" in result.lower()
+        # The block was NOT about lsinitrd — its name must not appear.
+        assert "lsinitrd" not in result.lower()
+
+    def test_non_dangerous_command_not_blamed_on_dangerous_pattern(self) -> None:
+        """A command with no dangerous pattern (lsinitrd, here non-allowlisted) is
+        rejected by the allowlist, NOT reported as a 'dangerous pattern' — so the
+        model isn't told an innocent command is dangerous."""
+        result = shell.execute_shell_command("lsinitrd /boot/img | cat")
+        assert "dangerous pattern" not in result.lower()
 
     # ── allowlist: safe commands permitted ─────────────────────────────
 
@@ -759,7 +785,7 @@ class TestShellProcWaitDStateGuard:
         """
         import subprocess  # noqa: I001
         import unittest.mock as mock  # noqa: I001
-        import src.tools.shell as shell_module  # noqa: I001
+        import cogtrix_core.tools.shell as shell_module  # noqa: I001
 
         fake_proc = mock.MagicMock(spec=subprocess.Popen)
         fake_proc.pid = 99999
@@ -807,7 +833,7 @@ class TestShellProcWaitDStateGuard:
         import subprocess
         import unittest.mock as mock
 
-        import src.tools.shell as shell_module
+        import cogtrix_core.tools.shell as shell_module
 
         fake_proc = mock.MagicMock(spec=subprocess.Popen)
         fake_proc.pid = 99998
@@ -1366,7 +1392,7 @@ class TestShellSecurityRegexAnchoring:
         import ast
         import inspect
 
-        from src.tools import shell
+        from cogtrix_core.tools import shell
 
         func = shell._check_curl_wget_url_allowed
         source = inspect.getsource(func)
@@ -1521,7 +1547,7 @@ class TestDownloadThenExecuteBypassCorpus:
     )
     def test_detect_download_then_execute_blocks(self, command, label):
         """Every shape in the table MUST be detected as a download-then-execute chain."""
-        from src.tools.shell import _detect_download_then_execute
+        from cogtrix_core.tools.shell import _detect_download_then_execute
 
         assert _detect_download_then_execute(
             command
@@ -1544,8 +1570,77 @@ class TestDownloadThenExecuteBypassCorpus:
     )
     def test_detect_download_then_execute_allows(self, command, label):
         """Legitimate uses must NOT trip the detector."""
-        from src.tools.shell import _detect_download_then_execute
+        from cogtrix_core.tools.shell import _detect_download_then_execute
 
         assert not _detect_download_then_execute(
             command
         ), f"{label}: false positive — legitimate command rejected: {command!r}"
+
+
+class TestShellOperatorPolicyOverride:
+    """#2392 — operator-controlled, opt-in shell-policy extensions.
+
+    Default (no config) behaviour is unchanged: the built-in blocklist and
+    allowlist are enforced exactly as before. The operator can opt in via
+    ``shell.extra_safe_commands`` (widen the allowlist) and
+    ``shell.allow_patterns`` (regex full-bypass for matching commands), defaulting
+    to today's locked-down behaviour. ``extra_safe_commands`` must NOT override the
+    blocklist; only ``allow_patterns`` bypasses it.
+    """
+
+    def teardown_method(self) -> None:
+        # Reset module state after each test so ordering can't leak (#2247 lesson).
+        shell._set_extra_safe_commands([])
+        shell._set_allow_patterns([])
+
+    # ── default: nothing relaxes ───────────────────────────────────────
+
+    def test_default_blocks_dangerous_and_unlisted(self) -> None:
+        assert shell._check_command_allowed("parted /dev/sda mklabel gpt", True) is not None
+        # 'sync' is harmless but not in the built-in allowlist → blocked by default.
+        assert shell._check_command_allowed("sync ; true", True) is not None
+
+    # ── extra_safe_commands: widen the allowlist ───────────────────────
+
+    def test_extra_safe_command_allows_unlisted_command(self) -> None:
+        before = shell._check_command_allowed("sync ; true", True)
+        assert before is not None  # blocked before opt-in
+        shell._set_extra_safe_commands(["sync"])
+        assert shell._check_command_allowed("sync ; true", True) is None
+
+    def test_extra_safe_does_not_override_blocklist(self) -> None:
+        """Security property: widening the allowlist must NOT unblock a
+        blocklisted command. dd stays blocked even if added to extra_safe."""
+        shell._set_extra_safe_commands(["dd"])
+        result = shell._check_command_allowed("dd if=/dev/zero of=/dev/null ; true", True)
+        assert result is not None
+        assert "dd" in result
+
+    # ── allow_patterns: explicit full-bypass for matching commands ─────
+
+    def test_allow_pattern_bypasses_blocklist(self) -> None:
+        cmd = "ssh root@host 'parted /dev/sda mklabel gpt'"
+        assert shell._check_command_allowed(cmd, True) is not None  # blocked before opt-in
+        shell._set_allow_patterns([r"^ssh root@host "])
+        assert shell._check_command_allowed(cmd, True) is None
+
+    def test_allow_pattern_non_match_still_blocked(self) -> None:
+        shell._set_allow_patterns([r"^ssh root@host "])
+        # A local parted (no ssh prefix) does NOT match → still blocked.
+        assert shell._check_command_allowed("parted /dev/sda mklabel gpt", True) is not None
+
+    def test_invalid_allow_pattern_is_skipped_not_fatal(self) -> None:
+        # A bad regex must not crash config load; it is simply ignored, so a
+        # command that an operator might have hoped to allow stays blocked.
+        shell._set_allow_patterns(["(unclosed", r"^ssh good@host "])
+        assert shell._check_command_allowed("parted /dev/sda mklabel gpt", True) is not None
+        # The valid sibling pattern still works.
+        assert shell._check_command_allowed("ssh good@host 'dd if=/dev/zero'", True) is None
+
+    def test_reset_restores_locked_down_default(self) -> None:
+        shell._set_extra_safe_commands(["sync"])
+        shell._set_allow_patterns([r"^ssh root@host "])
+        shell._set_extra_safe_commands([])
+        shell._set_allow_patterns([])
+        assert shell._check_command_allowed("sync ; true", True) is not None
+        assert shell._check_command_allowed("ssh root@host 'parted /dev/sda'", True) is not None

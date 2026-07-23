@@ -4,7 +4,7 @@ import pytest
 
 
 def test_default_theme_loads():
-    from src.ui.theme import get_theme
+    from cogtrix_core.ui.theme import get_theme
 
     theme = get_theme()
     assert theme is not None
@@ -12,7 +12,7 @@ def test_default_theme_loads():
 
 
 def test_all_builtin_themes_present():
-    from src.ui.theme import THEMES
+    from cogtrix_core.ui.theme import THEMES
 
     assert "default" in THEMES
     assert "minimal" in THEMES
@@ -20,7 +20,7 @@ def test_all_builtin_themes_present():
 
 
 def test_set_theme_returns_config():
-    from src.ui.theme import get_theme, set_theme
+    from cogtrix_core.ui.theme import get_theme, set_theme
 
     t = set_theme("dracula")
     assert t.accent == "#bd93f9"
@@ -29,14 +29,14 @@ def test_set_theme_returns_config():
 
 
 def test_set_theme_unknown_raises():
-    from src.ui.theme import set_theme
+    from cogtrix_core.ui.theme import set_theme
 
     with pytest.raises(ValueError, match="Unknown theme"):
         set_theme("nonexistent")
 
 
 def test_minimal_theme_monochrome():
-    from src.ui.theme import THEMES
+    from cogtrix_core.ui.theme import THEMES
 
     t = THEMES["minimal"]
     assert t.accent == "white"
@@ -44,7 +44,7 @@ def test_minimal_theme_monochrome():
 
 
 def test_dracula_theme_hex_colors():
-    from src.ui.theme import THEMES
+    from cogtrix_core.ui.theme import THEMES
 
     t = THEMES["dracula"]
     assert t.accent.startswith("#")
@@ -52,21 +52,21 @@ def test_dracula_theme_hex_colors():
 
 
 def test_config_default_theme():
-    from src.config import Config
+    from cogtrix_core.config import Config
 
     c = Config()
     assert c.theme == "default"
 
 
 def test_config_custom_theme():
-    from src.config import Config
+    from cogtrix_core.config import Config
 
     c = Config(theme="dracula")
     assert c.theme == "dracula"
 
 
 def test_theme_config_has_required_roles():
-    from src.ui.theme import ThemeConfig
+    from cogtrix_core.ui.theme import ThemeConfig
 
     t = ThemeConfig()
     required = [
@@ -88,7 +88,7 @@ def test_theme_config_has_required_roles():
 
 
 def test_get_theme_after_set():
-    from src.ui.theme import get_theme, set_theme
+    from cogtrix_core.ui.theme import get_theme, set_theme
 
     set_theme("minimal")
     assert get_theme().accent == "white"
@@ -98,6 +98,6 @@ def test_get_theme_after_set():
 def test_theme_config_is_dataclass():
     import dataclasses
 
-    from src.ui.theme import ThemeConfig
+    from cogtrix_core.ui.theme import ThemeConfig
 
     assert dataclasses.is_dataclass(ThemeConfig)

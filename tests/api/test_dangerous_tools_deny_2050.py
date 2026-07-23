@@ -26,9 +26,9 @@ import pytest
 
 pytest.importorskip("fastapi")
 
-from src.api import session_bridge  # noqa: E402
-from src.api.session_bridge import _API_DENIED_DANGEROUS_TOOLS, warm_session  # noqa: E402
-from src.config import Config  # noqa: E402
+from cogtrix_core.api import session_bridge  # noqa: E402
+from cogtrix_core.api.session_bridge import _API_DENIED_DANGEROUS_TOOLS, warm_session  # noqa: E402
+from cogtrix_core.config import Config  # noqa: E402
 
 _EXEC_TOOL_NAMES = ("execute_shell_command", "execute_python")
 
@@ -95,7 +95,7 @@ class TestApiDangerousToolsDeny:
     def test_session_tools_endpoint_reports_disabled(self) -> None:
         """GET /sessions/{id}/tools must classify denied exec tools as 'disabled'
         (the symptom in the #2050 repro: they showed as 'on_demand')."""
-        from src.api.routes.tools import _classify_tool_status
+        from cogtrix_core.api.routes.tools import _classify_tool_status
 
         session = _warm(None)
         ss = session.session_state

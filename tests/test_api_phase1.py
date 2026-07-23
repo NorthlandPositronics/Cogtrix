@@ -40,15 +40,15 @@ os.environ.setdefault("COGTRIX_DB_URL", "sqlite+aiosqlite:///:memory:")
 # Imports after env is set
 # ---------------------------------------------------------------------------
 
-from src.api.auth import (  # noqa: E402
+from cogtrix_core.api.auth import (  # noqa: E402
     _decode_jwt,
     create_access_token,
 )
-from src.api.db import models as _models  # noqa: E402, F401
-from src.api.db.engine import Base  # noqa: E402
-from src.api.db.repositories.api_keys import ApiKeyRepository  # noqa: E402
-from src.api.db.repositories.tokens import RefreshTokenRepository  # noqa: E402
-from src.api.db.repositories.users import UserRepository  # noqa: E402
+from cogtrix_core.api.db import models as _models  # noqa: E402, F401
+from cogtrix_core.api.db.engine import Base  # noqa: E402
+from cogtrix_core.api.db.repositories.api_keys import ApiKeyRepository  # noqa: E402
+from cogtrix_core.api.db.repositories.tokens import RefreshTokenRepository  # noqa: E402
+from cogtrix_core.api.db.repositories.users import UserRepository  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # In-memory DB fixtures
@@ -233,7 +233,7 @@ def test_app():
     """Return the FastAPI app with DB patched to use in-memory SQLite."""
     import asyncio
 
-    from src.api.db.engine import Base as _Base
+    from cogtrix_core.api.db.engine import Base as _Base
 
     # Build a dedicated in-memory engine for the test app
     test_engine = create_async_engine(
@@ -255,8 +255,8 @@ def test_app():
 
     # Import after env vars are set
     with patch.dict(os.environ, {"COGTRIX_JWT_SECRET": _TEST_JWT_SECRET}):
-        from src.api.app import create_app
-        from src.api.db.engine import get_db
+        from cogtrix_core.api.app import create_app
+        from cogtrix_core.api.db.engine import get_db
 
         app = create_app()
 
@@ -557,7 +557,7 @@ def test_revoke_nonexistent_key_404(client: TestClient) -> None:
 def test_app_factory_creates_app() -> None:
     """create_app() returns a FastAPI app with correct metadata."""
     with patch.dict(os.environ, {"COGTRIX_JWT_SECRET": _TEST_JWT_SECRET}):
-        from src.api.app import create_app
+        from cogtrix_core.api.app import create_app
 
         app = create_app()
     assert app.title == "Cogtrix API"
@@ -567,7 +567,7 @@ def test_app_factory_creates_app() -> None:
 def test_openapi_schema_available() -> None:
     """OpenAPI schema endpoint is accessible."""
     with patch.dict(os.environ, {"COGTRIX_JWT_SECRET": _TEST_JWT_SECRET}):
-        from src.api.app import create_app
+        from cogtrix_core.api.app import create_app
 
         app = create_app()
     with TestClient(app, raise_server_exceptions=False) as c:

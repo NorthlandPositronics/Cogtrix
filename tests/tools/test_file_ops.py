@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 import pytest
 
-from src.tools.file_ops import (
+from cogtrix_core.tools.file_ops import (
     _APPEND_LOCK_MAX,
     _append_lock_guard,
     _append_locks,
@@ -503,7 +503,7 @@ class TestPatchFileLocking:
         """patch_file must acquire the per-file lock to prevent lost updates."""
         (tmp_cwd / "target.txt").write_text("hello old world")
 
-        with patch("src.tools.file_ops._get_append_lock") as mock_get_lock:
+        with patch("cogtrix_core.tools.file_ops._get_append_lock") as mock_get_lock:
             mock_lock = mock_get_lock.return_value
             mock_lock.__enter__ = lambda self: self  # type: ignore[no-untyped-def]
             mock_lock.__exit__ = lambda *args: None  # type: ignore[no-untyped-def]
@@ -557,7 +557,7 @@ class TestPatchFileLocking:
 
 from langchain_core.tools import StructuredTool  # noqa: E402
 
-from src.tools.file_ops import (  # noqa: E402
+from cogtrix_core.tools.file_ops import (  # noqa: E402
     AppendFileInput,
     FileInfoInput,
     ListDirectoryInput,

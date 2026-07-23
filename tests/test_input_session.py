@@ -2,8 +2,8 @@
 
 
 def test_update_toolbar_stats():
-    import src.ui.input_session as m
-    from src.ui.input_session import update_toolbar_stats
+    import cogtrix_core.ui.input_session as m
+    from cogtrix_core.ui.input_session import update_toolbar_stats
 
     update_toolbar_stats("session 4,812 tok   ████░░░░░░  2%")
     assert m._toolbar_stats != ""
@@ -12,7 +12,7 @@ def test_update_toolbar_stats():
 def test_get_prompt_contains_stats_when_set():
     import re
 
-    from src.ui.input_session import _get_prompt, update_toolbar_stats
+    from cogtrix_core.ui.input_session import _get_prompt, update_toolbar_stats
 
     update_toolbar_stats("session 1,000 tok")
     result = _get_prompt()
@@ -22,7 +22,7 @@ def test_get_prompt_contains_stats_when_set():
 
 
 def test_get_prompt_contains_prompt_glyph():
-    from src.ui.input_session import _get_prompt, update_toolbar_stats
+    from cogtrix_core.ui.input_session import _get_prompt, update_toolbar_stats
 
     update_toolbar_stats("")
     result = _get_prompt()
@@ -32,7 +32,7 @@ def test_get_prompt_contains_prompt_glyph():
 
 def test_prompt_glyph_is_last_line():
     """❯ must appear after the separator and stats (last line of prompt)."""
-    from src.ui.input_session import _get_prompt, update_toolbar_stats
+    from cogtrix_core.ui.input_session import _get_prompt, update_toolbar_stats
 
     update_toolbar_stats("session 999 tok   ████░░░░░░░  5%")
     result = _get_prompt()
@@ -48,14 +48,14 @@ def test_prompt_glyph_is_last_line():
 def test_create_session_returns_session():
     from prompt_toolkit import PromptSession
 
-    from src.ui.input_session import create_session
+    from cogtrix_core.ui.input_session import create_session
 
     s = create_session()
     assert isinstance(s, PromptSession)
 
 
 def test_create_output_disables_cpr(monkeypatch):
-    import src.ui.input_session as m
+    import cogtrix_core.ui.input_session as m
 
     class FakeOutput:
         def __init__(self) -> None:
@@ -72,7 +72,7 @@ def test_create_output_disables_cpr(monkeypatch):
 def test_create_session_uses_output_helper(monkeypatch):
     from prompt_toolkit.output.base import DummyOutput
 
-    import src.ui.input_session as m
+    import cogtrix_core.ui.input_session as m
 
     sentinel = DummyOutput()
     calls: list[object] = []
@@ -88,7 +88,7 @@ def test_create_session_uses_output_helper(monkeypatch):
 def test_create_session_with_history():
     from prompt_toolkit.history import InMemoryHistory
 
-    from src.ui.input_session import create_session
+    from cogtrix_core.ui.input_session import create_session
 
     history = InMemoryHistory()
     s = create_session(history=history)
@@ -96,7 +96,7 @@ def test_create_session_with_history():
 
 
 def test_get_prompt_contains_separator():
-    from src.ui.input_session import _get_prompt, update_toolbar_stats
+    from cogtrix_core.ui.input_session import _get_prompt, update_toolbar_stats
 
     update_toolbar_stats("")
     result = _get_prompt()
@@ -105,7 +105,7 @@ def test_get_prompt_contains_separator():
 
 
 def test_update_toolbar_module_state():
-    import src.ui.input_session as m
+    import cogtrix_core.ui.input_session as m
 
     m.update_toolbar_stats("test value 42")
     assert m._toolbar_stats == "test value 42"
@@ -117,7 +117,7 @@ def test_get_prompt_stats_right_aligned():
     import re
     import shutil
 
-    from src.ui.input_session import _get_prompt, update_toolbar_stats
+    from cogtrix_core.ui.input_session import _get_prompt, update_toolbar_stats
 
     # Use plain text (no ANSI) to test alignment logic cleanly
     update_toolbar_stats("session 4,812 tok   \u2588\u2588\u2588\u2588\u2591\u2591\u2591\u2591  2%")
@@ -133,7 +133,7 @@ def test_get_prompt_stats_right_aligned():
 
 
 def test_get_prompt_glyph_is_teal():
-    from src.ui.input_session import _get_prompt, update_toolbar_stats
+    from cogtrix_core.ui.input_session import _get_prompt, update_toolbar_stats
 
     update_toolbar_stats("")
     result = _get_prompt()
@@ -143,7 +143,7 @@ def test_get_prompt_glyph_is_teal():
 
 
 def test_get_prompt_separator_is_colored():
-    from src.ui.input_session import _get_prompt, update_toolbar_stats
+    from cogtrix_core.ui.input_session import _get_prompt, update_toolbar_stats
 
     update_toolbar_stats("")
     result = _get_prompt()
@@ -157,7 +157,7 @@ def test_file_history_used_in_prompt_session(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
     import importlib
 
-    import src.ui.input_session as m
+    import cogtrix_core.ui.input_session as m
 
     importlib.reload(m)
     from prompt_toolkit.history import FileHistory
@@ -171,7 +171,7 @@ def test_file_history_path_is_persistent(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
     import importlib
 
-    import src.ui.input_session as m
+    import cogtrix_core.ui.input_session as m
 
     importlib.reload(m)
     assert "cogtrix" in m._HISTORY_PATH
@@ -183,7 +183,7 @@ def test_fallback_to_in_memory_on_error(monkeypatch, tmp_path):
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
     import importlib
 
-    import src.ui.input_session as m
+    import cogtrix_core.ui.input_session as m
 
     importlib.reload(m)
     from prompt_toolkit.history import FileHistory, InMemoryHistory
@@ -214,7 +214,7 @@ class TestSlashCompleter:
     def test_slash_completer_returns_matches(self):
         from prompt_toolkit.document import Document
 
-        from src.ui.input_session import SlashCompleter, set_slash_commands
+        from cogtrix_core.ui.input_session import SlashCompleter, set_slash_commands
 
         set_slash_commands(["/compact", "/clear", "/help", "/quit"])
         c = SlashCompleter()
@@ -226,7 +226,7 @@ class TestSlashCompleter:
     def test_slash_completer_no_match_for_non_slash(self):
         from prompt_toolkit.document import Document
 
-        from src.ui.input_session import SlashCompleter, set_slash_commands
+        from cogtrix_core.ui.input_session import SlashCompleter, set_slash_commands
 
         set_slash_commands(["/compact", "/help"])
         c = SlashCompleter()
@@ -237,7 +237,7 @@ class TestSlashCompleter:
     def test_slash_completer_multiple_matches(self):
         from prompt_toolkit.document import Document
 
-        from src.ui.input_session import SlashCompleter, set_slash_commands
+        from cogtrix_core.ui.input_session import SlashCompleter, set_slash_commands
 
         set_slash_commands(["/compact", "/clear", "/c"])
         c = SlashCompleter()
@@ -249,7 +249,7 @@ class TestSlashCompleter:
         assert "/c" in texts
 
     def test_create_session_uses_slash_completer_by_default(self):
-        import src.ui.input_session as m
+        import cogtrix_core.ui.input_session as m
 
         s = m.create_session()
         assert isinstance(s.completer, m.SlashCompleter)

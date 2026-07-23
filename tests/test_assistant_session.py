@@ -1,4 +1,4 @@
-"""Unit tests for src/assistant/session.py — ChatSession and ChatSessionManager."""
+"""Unit tests for cogtrix_core/assistant/session.py — ChatSession and ChatSessionManager."""
 
 from __future__ import annotations
 
@@ -6,9 +6,9 @@ import threading
 import time
 from unittest.mock import MagicMock, patch
 
-from src.assistant.channel import IncomingMessage
-from src.assistant.session import ChatSession, ChatSessionManager
-from src.memory.context import MemoryContext
+from cogtrix_core.assistant.channel import IncomingMessage
+from cogtrix_core.assistant.session import ChatSession, ChatSessionManager
+from cogtrix_core.memory.context import MemoryContext
 
 # ---------------------------------------------------------------------------
 # Helpers

@@ -14,7 +14,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import MagicMock, patch
 
-from src.assistant.campaign import Campaign, CampaignManager, CampaignTarget
+from cogtrix_core.assistant.campaign import Campaign, CampaignManager, CampaignTarget
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -112,7 +112,9 @@ class TestCampaignManagerExecutor:
             mock_executor = MagicMock(spec=ThreadPoolExecutor)
             mock_executor.submit.return_value = MagicMock()  # dummy future
 
-            with patch("src.assistant.campaign.ThreadPoolExecutor", return_value=mock_executor):
+            with patch(
+                "cogtrix_core.assistant.campaign.ThreadPoolExecutor", return_value=mock_executor
+            ):
                 mgr.start()
                 try:
                     # Wait for the follow-up loop to process one iteration
@@ -159,7 +161,9 @@ class TestCampaignManagerExecutor:
             mock_executor = MagicMock(spec=ThreadPoolExecutor)
             mock_executor.submit.return_value = MagicMock()
 
-            with patch("src.assistant.campaign.ThreadPoolExecutor", return_value=mock_executor):
+            with patch(
+                "cogtrix_core.assistant.campaign.ThreadPoolExecutor", return_value=mock_executor
+            ):
                 mgr.start()
                 try:
                     time.sleep(0.5)

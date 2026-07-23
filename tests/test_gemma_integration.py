@@ -84,7 +84,7 @@ def require_gemma_container() -> None:
 @pytest.fixture(scope="module")
 def gemma_provider():
     """Return (ProviderConfig, ModelConfig) pointing at the local Gemma container."""
-    from src.config import ModelConfig, ProviderConfig
+    from cogtrix_core.config import ModelConfig, ProviderConfig
 
     pc = ProviderConfig(
         name="gemma-local",
@@ -104,7 +104,7 @@ def gemma_provider():
 @pytest.fixture(scope="module")
 def gemma_llm(gemma_provider):
     """LangChain ChatOpenAI instance backed by the Gemma container."""
-    from src.agent.core import create_llm_from_provider_config
+    from cogtrix_core.agent.core import create_llm_from_provider_config
 
     pc, mc = gemma_provider
     return create_llm_from_provider_config(pc, mc)
@@ -113,10 +113,10 @@ def gemma_llm(gemma_provider):
 @pytest.fixture(scope="module")
 def safe_tools_dict() -> dict[str, Any]:
     """Minimal set of deterministic tools that require no external services."""
-    from src.registry import ToolRegistry
+    from cogtrix_core.registry import ToolRegistry
 
     registry = ToolRegistry()
-    from src.registry import LazyToolProxy
+    from cogtrix_core.registry import LazyToolProxy
 
     all_tools = registry.load_all_tools()
     keep = {"calculate", "get_current_datetime", "word_count", "find_replace"}
@@ -133,7 +133,7 @@ def safe_tools_dict() -> dict[str, Any]:
 @pytest.fixture(scope="module")
 def tool_registry() -> Any:
     """A ToolRegistry instance for passing to run_agent."""
-    from src.registry import ToolRegistry
+    from cogtrix_core.registry import ToolRegistry
 
     registry = ToolRegistry()
     registry.load_all_tools()
@@ -143,7 +143,7 @@ def tool_registry() -> Any:
 @pytest.fixture
 def session_state():
     """Fresh no-confirm SessionState for each test."""
-    from src.orchestration.session_state import SessionState
+    from cogtrix_core.orchestration.session_state import SessionState
 
     return SessionState(no_confirm=True)
 
@@ -151,7 +151,7 @@ def session_state():
 @pytest.fixture
 def run_config(gemma_llm, safe_tools_dict, session_state):
     """AgentRunConfig suitable for single-turn integration tests."""
-    from src.orchestration.run_config import AgentRunConfig
+    from cogtrix_core.orchestration.run_config import AgentRunConfig
 
     return AgentRunConfig(
         llm=gemma_llm,
@@ -293,7 +293,7 @@ class TestGemmaRunAgent:
 
     def test_no_tools_simple_question(self, run_config, tool_registry):
         """Agent with no active tools answers a simple question."""
-        from src.orchestration.runner import run_agent
+        from cogtrix_core.orchestration.runner import run_agent
 
         response = run_agent(
             user_input="What is the capital of France?",
@@ -308,7 +308,7 @@ class TestGemmaRunAgent:
 
     def test_response_is_string(self, run_config, tool_registry):
         """run_agent always returns a plain string regardless of model output."""
-        from src.orchestration.runner import run_agent
+        from cogtrix_core.orchestration.runner import run_agent
 
         response = run_agent(
             user_input="Say the word hello.",
@@ -322,7 +322,7 @@ class TestGemmaRunAgent:
 
     def test_history_passed_to_agent(self, run_config, tool_registry):
         """Prior conversation history is included in the prompt context."""
-        from src.orchestration.runner import run_agent
+        from cogtrix_core.orchestration.runner import run_agent
 
         history = [
             HumanMessage(content="My favourite number is 42."),
@@ -346,7 +346,7 @@ class TestGemmaRunAgent:
         with plain text.  The pipeline must handle this gracefully — no
         assertion on tool usage is made.
         """
-        from src.orchestration.runner import run_agent
+        from cogtrix_core.orchestration.runner import run_agent
 
         response = run_agent(
             user_input="What is 15 * 8?",
@@ -363,9 +363,9 @@ class TestGemmaRunAgent:
 
     def test_multi_turn_pipeline(self, gemma_llm, tool_registry):
         """Two sequential run_agent calls with accumulated history."""
-        from src.orchestration.run_config import AgentRunConfig
-        from src.orchestration.runner import run_agent
-        from src.orchestration.session_state import SessionState
+        from cogtrix_core.orchestration.run_config import AgentRunConfig
+        from cogtrix_core.orchestration.runner import run_agent
+        from cogtrix_core.orchestration.session_state import SessionState
 
         cfg = AgentRunConfig(
             llm=gemma_llm,
@@ -416,8 +416,8 @@ class TestGemmaMemory:
 
     def test_memory_update_and_retrieve(self, gemma_llm):
         """ConversationMemoryManager stores and retrieves a Gemma-generated response."""
-        from src.memory.json_store import JsonFileMemoryStore
-        from src.memory.modes.conversation import ConversationMemoryManager
+        from cogtrix_core.memory.json_store import JsonFileMemoryStore
+        from cogtrix_core.memory.modes.conversation import ConversationMemoryManager
 
         sid = _make_session_id()
         store = JsonFileMemoryStore(base_dir=f"/tmp/cogtrix_test_{sid}")
@@ -437,8 +437,8 @@ class TestGemmaMemory:
 
     def test_memory_prepare_context_returns_messages(self, gemma_llm):
         """Memory context exposes LangChain messages the agent can consume."""
-        from src.memory.json_store import JsonFileMemoryStore
-        from src.memory.modes.conversation import ConversationMemoryManager
+        from cogtrix_core.memory.json_store import JsonFileMemoryStore
+        from cogtrix_core.memory.modes.conversation import ConversationMemoryManager
 
         sid = _make_session_id()
         store = JsonFileMemoryStore(base_dir=f"/tmp/cogtrix_test_{sid}")
@@ -464,7 +464,7 @@ class TestGemmaOptimizer:
 
     def test_short_prompt_skips_llm(self, gemma_llm):
         """Prompts below the length gate return a PromptPlan without LLM call."""
-        from src.prompt.optimizer import optimize_prompt
+        from cogtrix_core.prompt.optimizer import optimize_prompt
 
         plan = optimize_prompt("What is the weather?", gemma_llm)
         assert plan.text == "What is the weather?", "Short prompt should be returned unchanged"
@@ -472,7 +472,7 @@ class TestGemmaOptimizer:
 
     def test_force_invokes_llm(self, gemma_llm):
         """force=True bypasses the length gate and runs the LLM."""
-        from src.prompt.optimizer import PromptPlan, optimize_prompt
+        from cogtrix_core.prompt.optimizer import PromptPlan, optimize_prompt
 
         result = optimize_prompt(
             "Write a Python function to reverse a string.",
@@ -486,7 +486,7 @@ class TestGemmaOptimizer:
 
     def test_optimizer_fails_open(self):
         """If the LLM produces unusable output, the original prompt is returned."""
-        from src.prompt.optimizer import optimize_prompt
+        from cogtrix_core.prompt.optimizer import optimize_prompt
 
         # Simulate the LLM returning garbage
         bad_llm = MagicMock()
@@ -516,7 +516,7 @@ class TestGemmaWizard:
         internal wizard helper that creates and smoke-tests an LLM.  This
         exercises the full provider→LangChain initialization path.
         """
-        from src.setup_wizard import _test_connection  # type: ignore[attr-defined]
+        from cogtrix_core.setup_wizard import _test_connection  # type: ignore[attr-defined]
 
         llm = _test_connection(
             "openai",
@@ -562,7 +562,7 @@ class TestActionIntentRecovery:
 
     def test_is_action_intent_detects_intent_phrases(self):
         """_is_action_intent returns True for typical model intent-only messages."""
-        from src.orchestration.graph import _is_action_intent
+        from cogtrix_core.orchestration.graph import _is_action_intent
 
         # Positive cases: intent phrase + tool-action verb, no tool_calls
         positive = [
@@ -580,7 +580,7 @@ class TestActionIntentRecovery:
 
     def test_is_action_intent_ignores_tool_calls(self):
         """_is_action_intent returns False when tool_calls are present."""
-        from src.orchestration.graph import _is_action_intent
+        from cogtrix_core.orchestration.graph import _is_action_intent
 
         msg = AIMessage(
             content="I'll create the file.",
@@ -590,7 +590,7 @@ class TestActionIntentRecovery:
 
     def test_is_action_intent_ignores_plain_response(self):
         """_is_action_intent returns False for normal factual answers."""
-        from src.orchestration.graph import _is_action_intent
+        from cogtrix_core.orchestration.graph import _is_action_intent
 
         negative = [
             AIMessage(content="Paris is the capital of France."),
@@ -611,7 +611,7 @@ class TestActionIntentRecovery:
         and injects a nudge.  The pipeline must terminate within the retry budget
         and return a non-empty string — it must NOT loop indefinitely.
         """
-        from src.orchestration.runner import run_agent
+        from cogtrix_core.orchestration.runner import run_agent
 
         # This prompt is likely to elicit "I'll calculate..." from Gemma
         response = run_agent(
@@ -631,9 +631,9 @@ class TestActionIntentRecovery:
         A shared counter would allow intent retries from a previous turn to
         bleed into the next, incorrectly exhausting the retry budget.
         """
-        from src.orchestration.run_config import AgentRunConfig
-        from src.orchestration.runner import run_agent
-        from src.orchestration.session_state import SessionState
+        from cogtrix_core.orchestration.run_config import AgentRunConfig
+        from cogtrix_core.orchestration.runner import run_agent
+        from cogtrix_core.orchestration.session_state import SessionState
 
         cfg = AgentRunConfig(
             llm=gemma_llm,
@@ -668,7 +668,7 @@ class TestGemmaConfigRoundTrip:
 
     def test_provider_config_resolves_to_working_llm(self, gemma_provider):
         """ProviderConfig + ModelConfig → create_chat_model_from_configs → working LLM."""
-        from src.providers import create_chat_model_from_configs
+        from cogtrix_core.providers import create_chat_model_from_configs
 
         pc, mc = gemma_provider
         llm = create_chat_model_from_configs(pc, mc)
@@ -683,7 +683,7 @@ class TestGemmaConfigRoundTrip:
     )
     def test_model_config_temperature_zero_deterministic(self, gemma_provider):
         """temperature=0 produces consistent responses for the same simple prompt."""
-        from src.providers import create_chat_model_from_configs
+        from cogtrix_core.providers import create_chat_model_from_configs
 
         pc, mc = gemma_provider
         # mc already has temperature=0.0

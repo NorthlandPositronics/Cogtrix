@@ -5,7 +5,7 @@ from io import StringIO
 
 from rich.console import Console
 
-import src.ui.input_session as _input_session
+import cogtrix_core.ui.input_session as _input_session
 
 
 def _console() -> tuple[Console, StringIO]:
@@ -22,7 +22,7 @@ def _strip_ansi(s: str) -> str:
 
 
 def test_stats_footer_contains_session_total():
-    from src.ui.stats import print_stats_footer
+    from cogtrix_core.ui.stats import print_stats_footer
 
     console, _ = _console()
     print_stats_footer(console, 4_812, 200_000)
@@ -31,7 +31,7 @@ def test_stats_footer_contains_session_total():
 
 
 def test_stats_footer_contains_session_label():
-    from src.ui.stats import print_stats_footer
+    from cogtrix_core.ui.stats import print_stats_footer
 
     console, _ = _console()
     print_stats_footer(console, 2_000, 200_000)
@@ -39,7 +39,7 @@ def test_stats_footer_contains_session_label():
 
 
 def test_stats_footer_progress_bar_present():
-    from src.ui.stats import print_stats_footer
+    from cogtrix_core.ui.stats import print_stats_footer
 
     console, _ = _console()
     print_stats_footer(console, 50_000, 200_000)
@@ -48,7 +48,7 @@ def test_stats_footer_progress_bar_present():
 
 
 def test_stats_footer_no_context_no_bar():
-    from src.ui.stats import print_stats_footer
+    from cogtrix_core.ui.stats import print_stats_footer
 
     console, _ = _console()
     print_stats_footer(console, 50_000, None)
@@ -58,7 +58,7 @@ def test_stats_footer_no_context_no_bar():
 
 
 def test_stats_footer_contains_input_tokens():
-    from src.ui.stats import print_stats_footer
+    from cogtrix_core.ui.stats import print_stats_footer
 
     console, _ = _console()
     print_stats_footer(console, 4_812, 200_000, input_tokens=1_203, output_tokens=247)
@@ -68,7 +68,7 @@ def test_stats_footer_contains_input_tokens():
 
 
 def test_stats_footer_contains_output_tokens():
-    from src.ui.stats import print_stats_footer
+    from cogtrix_core.ui.stats import print_stats_footer
 
     console, _ = _console()
     print_stats_footer(console, 4_812, 200_000, input_tokens=1_203, output_tokens=247)
@@ -79,7 +79,7 @@ def test_stats_footer_contains_output_tokens():
 
 def test_stats_footer_zero_tokens_omitted():
     """When input_tokens=0, ↑ arrow is omitted."""
-    from src.ui.stats import print_stats_footer
+    from cogtrix_core.ui.stats import print_stats_footer
 
     console, _ = _console()
     print_stats_footer(console, 4_812, 200_000)
@@ -90,7 +90,7 @@ def test_stats_footer_zero_tokens_omitted():
 
 def test_stats_footer_no_elapsed():
     """Elapsed time field (e.g. '1.4s') must NOT appear in the toolbar."""
-    from src.ui.stats import print_stats_footer
+    from cogtrix_core.ui.stats import print_stats_footer
 
     console, _ = _console()
     print_stats_footer(console, 1_000, 200_000, input_tokens=500, output_tokens=100)
@@ -99,21 +99,21 @@ def test_stats_footer_no_elapsed():
 
 
 def test_build_bar_full():
-    from src.ui.stats import _build_bar
+    from cogtrix_core.ui.stats import _build_bar
 
     bar, _ = _build_bar(1.0, 16)
     assert bar == "█" * 16
 
 
 def test_build_bar_empty():
-    from src.ui.stats import _build_bar
+    from cogtrix_core.ui.stats import _build_bar
 
     bar, _ = _build_bar(0.0, 16)
     assert bar == "░" * 16
 
 
 def test_build_bar_half():
-    from src.ui.stats import _build_bar
+    from cogtrix_core.ui.stats import _build_bar
 
     bar, _ = _build_bar(0.5, 16)
     assert bar.count("█") == 8
@@ -121,7 +121,7 @@ def test_build_bar_half():
 
 
 def test_critical_panel_shown_at_90pct():
-    from src.ui.stats import print_stats_footer
+    from cogtrix_core.ui.stats import print_stats_footer
 
     console, _ = _console()
     print_stats_footer(console, 180_000, 200_000)
@@ -129,7 +129,7 @@ def test_critical_panel_shown_at_90pct():
 
 
 def test_warning_rule_shown_at_75pct():
-    from src.ui.stats import print_stats_footer
+    from cogtrix_core.ui.stats import print_stats_footer
 
     console, _ = _console()
     print_stats_footer(console, 150_000, 200_000)
@@ -137,13 +137,13 @@ def test_warning_rule_shown_at_75pct():
 
 
 def test_stats_importable_from_src_ui():
-    from src.ui import print_stats_footer
+    from cogtrix_core.ui import print_stats_footer
 
     assert callable(print_stats_footer)
 
 
 def test_stats_footer_input_tokens_green():
-    from src.ui.stats import print_stats_footer
+    from cogtrix_core.ui.stats import print_stats_footer
 
     console, _ = _console()
     print_stats_footer(console, 4_812, 200_000, input_tokens=1_203, output_tokens=0)
@@ -153,7 +153,7 @@ def test_stats_footer_input_tokens_green():
 
 
 def test_stats_footer_output_tokens_red():
-    from src.ui.stats import print_stats_footer
+    from cogtrix_core.ui.stats import print_stats_footer
 
     console, _ = _console()
     print_stats_footer(console, 4_812, 200_000, input_tokens=0, output_tokens=247)
@@ -164,7 +164,7 @@ def test_stats_footer_output_tokens_red():
 
 def test_stats_footer_session_color_matches_bar():
     """session tok and bar use the same color code."""
-    from src.ui.stats import print_stats_footer
+    from cogtrix_core.ui.stats import print_stats_footer
 
     console, _ = _console()
     # Low usage → green for both session and bar

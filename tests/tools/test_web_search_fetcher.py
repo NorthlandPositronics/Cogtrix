@@ -1,4 +1,4 @@
-"""Tests for src/tools/_web_search_fetcher.py — stage 3 fetch fan-out
+"""Tests for cogtrix_core/tools/_web_search_fetcher.py — stage 3 fetch fan-out
 (ADR-0056 PR-C)."""
 
 from __future__ import annotations
@@ -10,10 +10,10 @@ from unittest.mock import AsyncMock, patch
 import httpx
 import pytest
 
-from src.tools._http_fetch import FetchResult
-from src.tools._web_search_aggregator import RankedResult
-from src.tools._web_search_domain_class import DomainClass
-from src.tools._web_search_fetcher import fetch_top_k
+from cogtrix_core.tools._http_fetch import FetchResult
+from cogtrix_core.tools._web_search_aggregator import RankedResult
+from cogtrix_core.tools._web_search_domain_class import DomainClass
+from cogtrix_core.tools._web_search_fetcher import fetch_top_k
 
 
 def _rank(url: str) -> RankedResult:
@@ -64,7 +64,7 @@ class TestFetchTopK:
     async def test_single_success(self) -> None:
         rank = _rank("https://example.com/a")
         with patch(
-            "src.tools._web_search_fetcher.fetch_async",
+            "cogtrix_core.tools._web_search_fetcher.fetch_async",
             AsyncMock(return_value=_ok_result("https://example.com/a")),
         ):
             outcomes = await fetch_top_k([rank])
@@ -87,7 +87,9 @@ class TestFetchTopK:
             truncated=True,
             error=None,
         )
-        with patch("src.tools._web_search_fetcher.fetch_async", AsyncMock(return_value=big)):
+        with patch(
+            "cogtrix_core.tools._web_search_fetcher.fetch_async", AsyncMock(return_value=big)
+        ):
             outcomes = await fetch_top_k([rank])
         assert outcomes[0].status == "fetched-with-warning"
 
@@ -104,7 +106,9 @@ class TestFetchTopK:
             truncated=False,
             error=None,
         )
-        with patch("src.tools._web_search_fetcher.fetch_async", AsyncMock(return_value=empty)):
+        with patch(
+            "cogtrix_core.tools._web_search_fetcher.fetch_async", AsyncMock(return_value=empty)
+        ):
             outcomes = await fetch_top_k([rank])
         assert outcomes[0].status == "fetched-with-warning"
         assert outcomes[0].error == "empty-body"
@@ -113,7 +117,7 @@ class TestFetchTopK:
     async def test_robots_blocked_becomes_snippet_only(self) -> None:
         rank = _rank("https://example.com/a")
         with patch(
-            "src.tools._web_search_fetcher.fetch_async",
+            "cogtrix_core.tools._web_search_fetcher.fetch_async",
             AsyncMock(return_value=_err_result("https://example.com/a", "blocked-robots")),
         ):
             outcomes = await fetch_top_k([rank])
@@ -125,7 +129,7 @@ class TestFetchTopK:
     async def test_ssl_error_becomes_snippet_only(self) -> None:
         rank = _rank("https://example.com/a")
         with patch(
-            "src.tools._web_search_fetcher.fetch_async",
+            "cogtrix_core.tools._web_search_fetcher.fetch_async",
             AsyncMock(return_value=_err_result("https://example.com/a", "ssl-error")),
         ):
             outcomes = await fetch_top_k([rank])
@@ -146,7 +150,7 @@ class TestFetchTopK:
             error="http-status",
         )
         with patch(
-            "src.tools._web_search_fetcher.fetch_async",
+            "cogtrix_core.tools._web_search_fetcher.fetch_async",
             AsyncMock(return_value=not_found),
         ):
             outcomes = await fetch_top_k([rank])
@@ -167,7 +171,7 @@ class TestFetchTopK:
                 return _err_result(url, "blocked-robots")
             return _ok_result(url, b"<html>" + url.encode() + b"</html>")
 
-        with patch("src.tools._web_search_fetcher.fetch_async", new=fake_fetch):
+        with patch("cogtrix_core.tools._web_search_fetcher.fetch_async", new=fake_fetch):
             outcomes = await fetch_top_k(ranks)
         # Order preserved positionally.
         assert outcomes[0].ranked.canonical_url == "https://example.com/a"
@@ -182,7 +186,7 @@ class TestFetchTopK:
         """An exception bubbling out of fetch_async is caught per-URL."""
         rank = _rank("https://example.com/a")
         with patch(
-            "src.tools._web_search_fetcher.fetch_async",
+            "cogtrix_core.tools._web_search_fetcher.fetch_async",
             AsyncMock(side_effect=RuntimeError("kaboom")),
         ):
             outcomes = await fetch_top_k([rank])
@@ -203,9 +207,11 @@ class TestFetchTopK:
             return c
 
         with (
-            patch("src.tools._web_search_fetcher.httpx.AsyncClient", new=fake_async_client),
             patch(
-                "src.tools._web_search_fetcher.fetch_async",
+                "cogtrix_core.tools._web_search_fetcher.httpx.AsyncClient", new=fake_async_client
+            ),
+            patch(
+                "cogtrix_core.tools._web_search_fetcher.fetch_async",
                 AsyncMock(return_value=_ok_result("https://example.com/a")),
             ),
         ):
@@ -246,7 +252,7 @@ class TestParallelDnsAtFetcherLayer:
             _time.sleep(0.5)
             return [(None, None, None, "", ("93.184.216.34", 0))]
 
-        monkeypatch.setattr("src.tools._http_safety.socket.getaddrinfo", slow_getaddrinfo)
+        monkeypatch.setattr("cogtrix_core.tools._http_safety.socket.getaddrinfo", slow_getaddrinfo)
 
         # We patch fetch_async to a fast no-op so the assertion is
         # purely about the DNS-stage parallelism inside fetch_top_k's
@@ -257,7 +263,7 @@ class TestParallelDnsAtFetcherLayer:
         # the real one with a mock httpx client that completes
         # instantly. That way the only blocking work is the DNS
         # lookup inside fetch_async's _validate_url call.
-        from src.tools._web_search_fetcher import fetch_top_k as _fetch_top_k
+        from cogtrix_core.tools._web_search_fetcher import fetch_top_k as _fetch_top_k
 
         ranks = [_rank(f"https://host{i}.example.com/path") for i in range(6)]
 
@@ -268,7 +274,7 @@ class TestParallelDnsAtFetcherLayer:
                 200, content=b"<html>ok</html>", headers={"Content-Type": "text/html"}
             )
 
-        from src.tools._http_fetch import USER_AGENT
+        from cogtrix_core.tools._http_fetch import USER_AGENT
 
         client = httpx.AsyncClient(
             transport=httpx.MockTransport(handler),
@@ -320,7 +326,7 @@ class TestSlowUrlDoesNotPoisonBatch:
                 return _ok_result(url)
             return _ok_result(url, b"<html>" + url.encode() + b"</html>")
 
-        with patch("src.tools._web_search_fetcher.fetch_async", new=fake_fetch):
+        with patch("cogtrix_core.tools._web_search_fetcher.fetch_async", new=fake_fetch):
             # deadline_s=1.0 → per-task hard deadline=2.0s. The slow
             # sibling's 3s sleep blows that, fast siblings finish at ~0s.
             outcomes = await fetch_top_k(ranks, deadline_s=1.0)
@@ -347,7 +353,7 @@ class TestSlowUrlDoesNotPoisonBatch:
             await asyncio.sleep(3.0)
             return _ok_result(url)
 
-        with patch("src.tools._web_search_fetcher.fetch_async", new=fake_fetch):
+        with patch("cogtrix_core.tools._web_search_fetcher.fetch_async", new=fake_fetch):
             outcomes = await fetch_top_k(ranks, deadline_s=0.5)
 
         assert len(outcomes) == 3

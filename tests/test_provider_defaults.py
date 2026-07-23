@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from src.providers.defaults import (
+from cogtrix_core.providers.defaults import (
     BASE_URLS,
     CHAT_MODELS,
     EMBEDDING_MODELS,

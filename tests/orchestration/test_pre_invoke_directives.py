@@ -43,8 +43,8 @@ from langchain_core.messages import (
     ToolMessage,
 )
 
-from src.orchestration.nodes.call_model import CallModelContext
-from src.orchestration.nodes.pre_invoke_directives import (
+from cogtrix_core.orchestration.nodes.call_model import CallModelContext
+from cogtrix_core.orchestration.nodes.pre_invoke_directives import (
     apply_late_directives,
     apply_pre_invoke_directives,
 )
@@ -80,6 +80,7 @@ def _make_context(**overrides: Any) -> CallModelContext:
         "tools_ready": None,
         "active_tools_list": [],
         "active_names": set(),
+        "budget_stopped_tools": set(),
         "bound_cache": OrderedDict(),
         "bound_cache_lock": MagicMock(),
         "cached_fingerprint": [()],
@@ -213,7 +214,7 @@ class TestDirectiveOrdering:
         state_messages = list(repaired)
 
         with patch(
-            "src.orchestration.nodes.call_model._should_reset_summary_for_topic_switch",
+            "cogtrix_core.orchestration.nodes.call_model._should_reset_summary_for_topic_switch",
             return_value=True,
         ):
             msgs = apply_pre_invoke_directives(context, state_messages, repaired, msgs, log)

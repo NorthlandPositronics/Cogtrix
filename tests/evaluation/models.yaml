@@ -132,6 +132,13 @@ models:
     env_key: VLLM_LOCAL_API_KEY
     model_id: qwen3-coder
     base_url: http://192.168.70.254:8080/v1
+    # #2481: force the NATIVE local Spark route. Without this, an ambient
+    # OPENROUTER_API_KEY makes resolve_active_key() return OpenRouter first and
+    # _build_llm routes qwen3-coder (which has no openrouter_model_id and isn't
+    # hosted on OpenRouter) there → auth/routing errors, invalidating the whole
+    # qwen column. prefer_native drops the routing key when VLLM_LOCAL_API_KEY is
+    # present, so qwen runs against the Spark cluster it's actually served from.
+    prefer_native: true
 
   # Local-test entries for the #2006 cycle-12-18 cross-model PM run.
   # All routed via OpenRouter (so env_key=OPENROUTER_API_KEY satisfies
@@ -148,6 +155,10 @@ models:
     model_id: deepseek/deepseek-v4-pro
     base_url: https://openrouter.ai/api/v1
     openrouter_model_id: deepseek/deepseek-v4-pro
+    # #2484: declare the real input window so the pre-flight compression guard
+    # sizes to it. Without this, ModelConfig.context_window defaults to 32768 and
+    # big-window models get force-compressed to a flat 40k every turn.
+    context_window: 131072
 
   - id: qwen3-8b
     provider: openai_compatible
@@ -187,6 +198,7 @@ models:
     base_url: https://openrouter.ai/api/v1
     openrouter_model_id: moonshotai/kimi-k2.6
     retry_backoff_seconds: 60
+    context_window: 262144  # #2484: Kimi K2 256k input window (see deepseek note)
 
   # Kimi K2.5 — parked from the Gate-2 smoke set (smoke=false, #2176).  The
   # direct Moonshot API (api.moonshot.cn) regularly hit capacity-exhaustion
@@ -203,6 +215,39 @@ models:
     model_id: kimi-k2.5
     base_url: https://api.moonshot.cn/v1
     openrouter_model_id: moonshotai/kimi-k2.5
+    input_price_per_1m: 0.40
+    output_price_per_1m: 1.98
+    retry_backoff_seconds: 60
+
+  # Kimi K2.7 — NATIVE Moonshot API (#2359).  Top performer in the cycle-1
+  # role-test matrix (90%); the native key avoids the OpenRouter credit/402
+  # failure mode (#2358).  K2.7 REQUIRES temperature=1 — the Moonshot API
+  # rejects any other sampling temperature — so it is pinned below and the
+  # runner forwards a per-model temperature on every route (#2359).
+  #   * env_key COGTRIX_PROVIDER_KIMI_API_KEY: the key the operator already
+  #     exports (#2222); the role harnesses read env_key directly (no Config
+  #     scrub applies), so no second export is needed.
+  #   * prefer_native: true — OpenRouter is first in _KEY_PRIORITY, so without
+  #     this the run would route via OpenRouter.  This forces the NATIVE
+  #     Moonshot endpoint + key whenever that key is present.
+  # smoke=false so this native cell does NOT reintroduce the api.moonshot
+  # capacity flake (#1994/#2000) into Gate-2 smoke; kimi-k2-6 via OpenRouter
+  # stays the smoke canary + fallback.
+  # Native model_id + endpoint CONFIRMED against the account via
+  # GET api.moonshot.ai/v1/models (2026-06-29): it exposes kimi-k2.7-code and
+  # kimi-k2.7-code-highspeed (NOT a bare "kimi-k2.7"); kimi-k2.7-code is the
+  # full-quality coding model used here.  base_url api.moonshot.ai (international).
+  - id: kimi-k2-7
+    provider: openai_compatible
+    display_name: "Kimi K2.7 Code (native Moonshot)"
+    tier: B
+    smoke: false
+    env_key: COGTRIX_PROVIDER_KIMI_API_KEY
+    model_id: kimi-k2.7-code
+    base_url: https://api.moonshot.ai/v1
+    openrouter_model_id: moonshotai/kimi-k2.7
+    temperature: 1
+    prefer_native: true
     input_price_per_1m: 0.40
     output_price_per_1m: 1.98
     retry_backoff_seconds: 60

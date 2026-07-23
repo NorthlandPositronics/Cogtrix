@@ -3,7 +3,7 @@
 Starlette aligned its status constants with RFC 9110.  The old names are
 still present as int aliases (so existing imports do not break), but they
 emit ``DeprecationWarning`` on access.  This module fails CI if any
-production code under ``src/`` references the deprecated spellings.
+production code under ``cogtrix_core/`` references the deprecated spellings.
 """
 
 from __future__ import annotations
@@ -19,12 +19,12 @@ _RENAMES: tuple[tuple[str, str], ...] = (
     ("HTTP_413_REQUEST_ENTITY_TOO_LARGE", "HTTP_413_CONTENT_TOO_LARGE"),
 )
 
-_SRC_ROOT = Path(__file__).resolve().parent.parent / "src"
+_SRC_ROOT = Path(__file__).resolve().parent.parent / "cogtrix_core"
 
 
 @pytest.mark.parametrize("deprecated,replacement", _RENAMES)
 def test_no_deprecated_starlette_constants(deprecated: str, replacement: str) -> None:
-    """No file under ``src/`` may reference the deprecated constant name."""
+    """No file under ``cogtrix_core/`` may reference the deprecated constant name."""
     pattern = re.compile(rf"\b{re.escape(deprecated)}\b")
     offenders: list[str] = []
     for py_file in _SRC_ROOT.rglob("*.py"):

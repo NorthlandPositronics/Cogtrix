@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 import pytest
 
-from src.api.saml.nonce_cache import SAMLNonceCache
+from cogtrix_core.api.saml.nonce_cache import SAMLNonceCache
 
 
 class TestSAMLNonceCache:
@@ -35,7 +35,7 @@ class TestSAMLNonceCache:
         assert cache.contains("assertion-123")
 
         # Force expiry by patching time.time
-        with patch("src.api.saml.nonce_cache.time.time", return_value=time.time() + 2):
+        with patch("cogtrix_core.api.saml.nonce_cache.time.time", return_value=time.time() + 2):
             assert not cache.contains("assertion-123")
 
     def test_remove_assertion(self) -> None:
@@ -59,7 +59,7 @@ class TestSAMLNonceCache:
         cache.add("assertion-2")
         cache.add("assertion-3")
 
-        with patch("src.api.saml.nonce_cache.time.time", return_value=time.time() + 2):
+        with patch("cogtrix_core.api.saml.nonce_cache.time.time", return_value=time.time() + 2):
             removed = cache.cleanup_expired()
             assert removed == 3
             assert cache.size() == 0
@@ -87,7 +87,7 @@ class TestSAMLNonceCache:
         cache.add("assertion-1", ttl_seconds=1)
         assert cache.contains("assertion-1")
 
-        with patch("src.api.saml.nonce_cache.time.time", return_value=time.time() + 2):
+        with patch("cogtrix_core.api.saml.nonce_cache.time.time", return_value=time.time() + 2):
             assert not cache.contains("assertion-1")
 
 
@@ -97,7 +97,7 @@ class TestSAMLReplayProtectionIntegration:
     @pytest.mark.asyncio
     async def test_acs_rejects_replayed_assertion(self) -> None:
         """ACS should reject a SAMLResponse with a previously used assertion ID."""
-        from src.api.routes import saml
+        from cogtrix_core.api.routes import saml
 
         # Reset cache for test
         saml._nonce_cache.clear()

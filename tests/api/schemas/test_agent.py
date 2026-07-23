@@ -1,11 +1,11 @@
-"""Tests for src/api/schemas/agent.py."""
+"""Tests for cogtrix_core/api/schemas/agent.py."""
 
 from __future__ import annotations
 
 import pytest
 from pydantic import ValidationError
 
-from src.api.schemas.agent import AgentOut
+from cogtrix_core.api.schemas.agent import AgentOut
 
 
 class TestAgentOut:

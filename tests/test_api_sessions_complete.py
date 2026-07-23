@@ -42,7 +42,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine  # noqa: E402
 from sqlalchemy.pool import StaticPool  # noqa: E402
 
-from src.api.db.engine import Base, get_db  # noqa: E402
+from cogtrix_core.api.db.engine import Base, get_db  # noqa: E402
 
 _VALID_PASSWORD = "TestPass1!"
 
@@ -54,7 +54,7 @@ _VALID_PASSWORD = "TestPass1!"
 
 @pytest.fixture()
 def app():
-    from src.api.app import create_app
+    from cogtrix_core.api.app import create_app
 
     # Single explicit event loop kept alive across setup, test, and dispose.
     # Using _asyncio.run() twice would close and recreate the loop, leaving
@@ -306,7 +306,7 @@ class TestPatchSessionEdgeCases:
         sid = r1.json()["data"]["id"]
 
         with patch(
-            "src.api.db.repositories.sessions.SessionRepository.name_exists_for_user",
+            "cogtrix_core.api.db.repositories.sessions.SessionRepository.name_exists_for_user",
             new_callable=AsyncMock,
             return_value=True,
         ):
@@ -952,13 +952,13 @@ class TestHardDeleteRowcount:
         """SessionRepository.hard_delete must return False when no row is deleted (BUG-246)."""
         import asyncio
 
-        from src.api.db.repositories.sessions import SessionRepository
+        from cogtrix_core.api.db.repositories.sessions import SessionRepository
 
         async def _run():
             from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
             from sqlalchemy.orm import sessionmaker
 
-            from src.api.db.models import Base
+            from cogtrix_core.api.db.models import Base
 
             engine = create_async_engine(
                 "sqlite+aiosqlite:///:memory:",
@@ -989,14 +989,14 @@ class TestHardDeleteRowcount:
         """SessionRepository.hard_delete must return True when a row was actually deleted."""
         import asyncio
 
-        from src.api.db.repositories.sessions import SessionRepository
+        from cogtrix_core.api.db.repositories.sessions import SessionRepository
 
         async def _run():
             from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
             from sqlalchemy.orm import sessionmaker
             from sqlalchemy.pool import StaticPool
 
-            from src.api.db.models import Base
+            from cogtrix_core.api.db.models import Base
 
             engine = create_async_engine(
                 "sqlite+aiosqlite:///:memory:",
@@ -1034,7 +1034,7 @@ class TestDeleteSessionOrderOfOperations:
         from types import SimpleNamespace
         from unittest.mock import AsyncMock, MagicMock, patch
 
-        from src.api.routes import sessions as _mod
+        from cogtrix_core.api.routes import sessions as _mod
 
         call_order: list[str] = []
 
@@ -1054,7 +1054,7 @@ class TestDeleteSessionOrderOfOperations:
             patch.object(_mod, "_get_registry", return_value=None),
             patch.object(_mod, "SessionRepository", return_value=fake_repo),
             patch(
-                "src.api.ws.manager.disconnect",
+                "cogtrix_core.api.ws.manager.disconnect",
                 new=AsyncMock(side_effect=lambda _sid: call_order.append("disconnect")),
             ),
         ):
@@ -1186,8 +1186,8 @@ class TestAgentToolRestrictions:
         """When agent has tools_include, only those tools appear in available_tools."""
         from unittest.mock import MagicMock
 
-        from src.agent.registry import AgentConfig, clear, register
-        from src.api.session_bridge import _build_run_config
+        from cogtrix_core.agent.registry import AgentConfig, clear, register
+        from cogtrix_core.api.session_bridge import _build_run_config
 
         clear()
         register(
@@ -1226,8 +1226,8 @@ class TestAgentToolRestrictions:
         """When agent has tools_exclude, those tools are removed from available_tools."""
         from unittest.mock import MagicMock
 
-        from src.agent.registry import AgentConfig, clear, register
-        from src.api.session_bridge import _build_run_config
+        from cogtrix_core.agent.registry import AgentConfig, clear, register
+        from cogtrix_core.api.session_bridge import _build_run_config
 
         clear()
         register(
@@ -1257,8 +1257,8 @@ class TestAgentToolRestrictions:
         """Without agent_name, all tools are available (backward compatible)."""
         from unittest.mock import MagicMock
 
-        from src.agent.registry import clear
-        from src.api.session_bridge import _build_run_config
+        from cogtrix_core.agent.registry import clear
+        from cogtrix_core.api.session_bridge import _build_run_config
 
         clear()
 
@@ -1280,8 +1280,8 @@ class TestAgentToolRestrictions:
         """When agent_name references unknown agent, all tools are available."""
         from unittest.mock import MagicMock
 
-        from src.agent.registry import clear
-        from src.api.session_bridge import _build_run_config
+        from cogtrix_core.agent.registry import clear
+        from cogtrix_core.api.session_bridge import _build_run_config
 
         clear()
 
@@ -1303,8 +1303,8 @@ class TestAgentToolRestrictions:
         """When tool registry has no tools, filtering is a no-op."""
         from unittest.mock import MagicMock
 
-        from src.agent.registry import AgentConfig, clear, register
-        from src.api.session_bridge import _build_run_config
+        from cogtrix_core.agent.registry import AgentConfig, clear, register
+        from cogtrix_core.api.session_bridge import _build_run_config
 
         clear()
         register(
@@ -1329,8 +1329,8 @@ class TestAgentToolRestrictions:
         """When app_state has no tool_registry, available_tools is empty."""
         from unittest.mock import MagicMock
 
-        from src.agent.registry import AgentConfig, clear, register
-        from src.api.session_bridge import _build_run_config
+        from cogtrix_core.agent.registry import AgentConfig, clear, register
+        from cogtrix_core.api.session_bridge import _build_run_config
 
         clear()
         register(

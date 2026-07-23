@@ -1,4 +1,4 @@
-"""Tests for src/tools/cron_tools.py."""
+"""Tests for cogtrix_core/tools/cron_tools.py."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ def data_dir(tmp_path: pathlib.Path) -> pathlib.Path:
 @pytest.fixture(autouse=True)
 def reset_cron_module():
     """Reset module-level singletons between tests."""
-    import src.tools.cron_tools as _mod
+    import cogtrix_core.tools.cron_tools as _mod
 
     orig_scheduler = _mod._scheduler
     orig_factory = _mod._llm_factory
@@ -42,7 +42,7 @@ def reset_cron_module():
 
 class TestCronJob:
     def test_to_dict_roundtrip(self):
-        from src.tools.cron_tools import CronJob
+        from cogtrix_core.tools.cron_tools import CronJob
 
         job = CronJob(
             id="abc12345",
@@ -64,7 +64,7 @@ class TestCronJob:
         assert job2.context == "inherit"
 
     def test_from_dict_defaults(self):
-        from src.tools.cron_tools import CronJob
+        from cogtrix_core.tools.cron_tools import CronJob
 
         job = CronJob.from_dict({"id": "x1", "schedule": "0 * * * *", "prompt": "hi"})
         assert job.run_count == 0
@@ -73,13 +73,13 @@ class TestCronJob:
         assert job.context == "fresh"
 
     def test_next_run_human_none(self):
-        from src.tools.cron_tools import CronJob
+        from cogtrix_core.tools.cron_tools import CronJob
 
         job = CronJob(id="z", name="z", schedule="*", prompt="p", created_at=0.0)
         assert job.next_run_human() == "unknown"
 
     def test_next_run_human_timestamp(self):
-        from src.tools.cron_tools import CronJob
+        from cogtrix_core.tools.cron_tools import CronJob
 
         job = CronJob(id="z", name="z", schedule="*", prompt="p", created_at=0.0, next_run=0.0)
         label = job.next_run_human()
@@ -92,7 +92,7 @@ class TestCronJob:
 
 class TestCronScheduler:
     def test_add_valid_schedule(self, data_dir):
-        from src.tools.cron_tools import CronScheduler
+        from cogtrix_core.tools.cron_tools import CronScheduler
 
         s = CronScheduler(data_dir)
         job, _ = s.add("*/5 * * * *", "ping", name="my-job", context="inherit")
@@ -103,14 +103,14 @@ class TestCronScheduler:
         assert job.context == "inherit"
 
     def test_add_invalid_schedule_raises(self, data_dir):
-        from src.tools.cron_tools import CronScheduler
+        from cogtrix_core.tools.cron_tools import CronScheduler
 
         s = CronScheduler(data_dir)
         with pytest.raises(ValueError, match="Invalid cron expression"):
             s.add("not-a-cron", "ping")
 
     def test_add_persists_to_json(self, data_dir):
-        from src.tools.cron_tools import CronScheduler
+        from cogtrix_core.tools.cron_tools import CronScheduler
 
         s = CronScheduler(data_dir)
         s.add("0 9 * * *", "morning check")
@@ -120,7 +120,7 @@ class TestCronScheduler:
         assert len(data["jobs"]) == 1
 
     def test_remove_existing_job(self, data_dir):
-        from src.tools.cron_tools import CronScheduler
+        from cogtrix_core.tools.cron_tools import CronScheduler
 
         s = CronScheduler(data_dir)
         job, _ = s.add("0 * * * *", "hourly")
@@ -128,14 +128,14 @@ class TestCronScheduler:
         assert not s.list_jobs()
 
     def test_remove_unknown_job_raises(self, data_dir):
-        from src.tools.cron_tools import CronScheduler
+        from cogtrix_core.tools.cron_tools import CronScheduler
 
         s = CronScheduler(data_dir)
         with pytest.raises(KeyError, match="no-such-id"):
             s.remove("no-such-id")
 
     def test_list_includes_next_run_human(self, data_dir):
-        from src.tools.cron_tools import CronScheduler
+        from cogtrix_core.tools.cron_tools import CronScheduler
 
         s = CronScheduler(data_dir)
         s.add("0 9 * * *", "check", name="daily")
@@ -145,7 +145,7 @@ class TestCronScheduler:
         assert "UTC" in jobs[0]["next_run_human"]
 
     def test_persistence_survives_reload(self, data_dir):
-        from src.tools.cron_tools import CronScheduler
+        from cogtrix_core.tools.cron_tools import CronScheduler
 
         s1 = CronScheduler(data_dir)
         job, _ = s1.add("*/10 * * * *", "reload-test")
@@ -154,7 +154,7 @@ class TestCronScheduler:
         assert any(j["id"] == job.id for j in loaded)
 
     def test_fire_calls_llm_factory(self, data_dir):
-        from src.tools.cron_tools import CronScheduler
+        from cogtrix_core.tools.cron_tools import CronScheduler
 
         called = []
 
@@ -167,7 +167,7 @@ class TestCronScheduler:
 
                 return R()
 
-        import src.tools.cron_tools as _mod
+        import cogtrix_core.tools.cron_tools as _mod
 
         _mod._llm_factory = lambda: FakeLLM()
 
@@ -178,11 +178,11 @@ class TestCronScheduler:
         assert called == ["test-prompt"]
 
     def test_fire_inherit_uses_runner(self, data_dir):
-        from src.tools.cron_tools import CronScheduler
+        from cogtrix_core.tools.cron_tools import CronScheduler
 
         called: list[str] = []
 
-        import src.tools.cron_tools as _mod
+        import cogtrix_core.tools.cron_tools as _mod
 
         _mod._llm_factory = None
         _mod._job_runner = lambda job: called.append(job.prompt) or "inherited-ok"
@@ -195,8 +195,8 @@ class TestCronScheduler:
     def test_fire_no_factory_logs_warning(self, data_dir, caplog):
         import logging
 
-        import src.tools.cron_tools as _mod
-        from src.tools.cron_tools import CronScheduler
+        import cogtrix_core.tools.cron_tools as _mod
+        from cogtrix_core.tools.cron_tools import CronScheduler
 
         _mod._llm_factory = None
         s = CronScheduler(data_dir)
@@ -210,8 +210,8 @@ class TestCronScheduler:
         rather than raising AssertionError swallowed by the except clause."""
         import logging
 
-        import src.tools.cron_tools as _mod
-        from src.tools.cron_tools import CronScheduler
+        import cogtrix_core.tools.cron_tools as _mod
+        from cogtrix_core.tools.cron_tools import CronScheduler
 
         _mod._llm_factory = lambda: object()  # factory is set
         original = _mod._HumanMessage
@@ -226,8 +226,8 @@ class TestCronScheduler:
         assert any("langchain_core" in r.message for r in caplog.records)
 
     def test_fire_updates_run_count(self, data_dir):
-        import src.tools.cron_tools as _mod
-        from src.tools.cron_tools import CronScheduler
+        import cogtrix_core.tools.cron_tools as _mod
+        from cogtrix_core.tools.cron_tools import CronScheduler
 
         class FakeLLM:
             def invoke(self, *_):
@@ -246,8 +246,8 @@ class TestCronScheduler:
     def test_fire_logs_without_printing_to_stdout(self, data_dir, caplog, capsys):
         import logging
 
-        import src.tools.cron_tools as _mod
-        from src.tools.cron_tools import CronScheduler
+        import cogtrix_core.tools.cron_tools as _mod
+        from cogtrix_core.tools.cron_tools import CronScheduler
 
         class FakeLLM:
             def invoke(self, *_):
@@ -269,8 +269,8 @@ class TestCronScheduler:
         assert "cron-result" in caplog.text
 
     def test_fire_updates_next_run(self, data_dir):
-        import src.tools.cron_tools as _mod
-        from src.tools.cron_tools import CronScheduler
+        import cogtrix_core.tools.cron_tools as _mod
+        from cogtrix_core.tools.cron_tools import CronScheduler
 
         _mod._llm_factory = None  # no LLM needed for this check
         s = CronScheduler(data_dir)
@@ -282,8 +282,8 @@ class TestCronScheduler:
         assert job.next_run > first_next  # type: ignore[operator]
 
     def test_tick_fires_due_jobs(self, data_dir):
-        import src.tools.cron_tools as _mod
-        from src.tools.cron_tools import CronScheduler
+        import cogtrix_core.tools.cron_tools as _mod
+        from cogtrix_core.tools.cron_tools import CronScheduler
 
         fired: list[str] = []
 
@@ -306,8 +306,8 @@ class TestCronScheduler:
         assert fired == ["tick-test"]
 
     def test_tick_skips_future_jobs(self, data_dir):
-        import src.tools.cron_tools as _mod
-        from src.tools.cron_tools import CronScheduler
+        import cogtrix_core.tools.cron_tools as _mod
+        from cogtrix_core.tools.cron_tools import CronScheduler
 
         fired: list[str] = []
 
@@ -327,7 +327,7 @@ class TestCronScheduler:
         assert not fired
 
     def test_start_stop(self, data_dir):
-        from src.tools.cron_tools import CronScheduler
+        from cogtrix_core.tools.cron_tools import CronScheduler
 
         s = CronScheduler(data_dir)
         s.start()
@@ -336,7 +336,7 @@ class TestCronScheduler:
         s.stop()
 
     def test_start_is_idempotent(self, data_dir):
-        from src.tools.cron_tools import CronScheduler
+        from cogtrix_core.tools.cron_tools import CronScheduler
 
         s = CronScheduler(data_dir)
         s.start()
@@ -346,7 +346,7 @@ class TestCronScheduler:
         s.stop()
 
     def test_malformed_json_is_skipped_on_load(self, data_dir):
-        from src.tools.cron_tools import CronScheduler
+        from cogtrix_core.tools.cron_tools import CronScheduler
 
         data_dir.mkdir(parents=True, exist_ok=True)
         (data_dir / "jobs.json").write_text(
@@ -360,7 +360,7 @@ class TestCronScheduler:
         assert len(s.list_jobs()) == 1
 
     def test_missing_json_file_does_not_crash(self, data_dir):
-        from src.tools.cron_tools import CronScheduler
+        from cogtrix_core.tools.cron_tools import CronScheduler
 
         # data_dir doesn't exist yet — should not raise
         s = CronScheduler(data_dir)
@@ -375,7 +375,7 @@ class TestCronScheduler:
         the file could be empty or truncated; this at minimum confirms the happy path
         round-trips through a real write call.
         """
-        from src.tools.cron_tools import CronScheduler
+        from cogtrix_core.tools.cron_tools import CronScheduler
 
         s = CronScheduler(data_dir)
         s.add("0 9 * * *", "atomic-test")
@@ -393,8 +393,8 @@ class TestCronScheduler:
         """A hung LLM call must time out so the scheduler can fire other jobs."""
         import logging
 
-        import src.tools.cron_tools as _mod
-        from src.tools.cron_tools import CronScheduler
+        import cogtrix_core.tools.cron_tools as _mod
+        from cogtrix_core.tools.cron_tools import CronScheduler
 
         release = threading.Event()
         outputs: list[str] = []
@@ -451,8 +451,8 @@ class TestCronScheduler:
         """An LLM that raises RuntimeError must be caught so the scheduler can fire other jobs."""
         import logging
 
-        import src.tools.cron_tools as _mod
-        from src.tools.cron_tools import CronScheduler
+        import cogtrix_core.tools.cron_tools as _mod
+        from cogtrix_core.tools.cron_tools import CronScheduler
 
         outputs: list[str] = []
 
@@ -511,7 +511,7 @@ class TestCronToolFunctions:
         ``reset_cron_module`` fixture saves state and *before* that fixture
         restores it, preventing stale state from leaking between test classes.
         """
-        import src.tools.cron_tools as _mod
+        import cogtrix_core.tools.cron_tools as _mod
 
         self._tmp = tmp_path / "cron"
         self._tmp.mkdir()
@@ -520,7 +520,7 @@ class TestCronToolFunctions:
         # Module-level reset_cron_module fixture handles state restoration.
 
     def test_cron_add_returns_id_and_next_run(self):
-        from src.tools.cron_tools import cron_add
+        from cogtrix_core.tools.cron_tools import cron_add
 
         result = cron_add("*/5 * * * *", "test prompt", name="my-job", context="inherit")
         assert "ID:" in result
@@ -529,25 +529,25 @@ class TestCronToolFunctions:
         assert "Next run:" in result
 
     def test_cron_add_default_name_is_schedule(self):
-        from src.tools.cron_tools import cron_add
+        from cogtrix_core.tools.cron_tools import cron_add
 
         result = cron_add("0 9 * * *", "morning")
         assert "0 9 * * *" in result  # used as name
 
     def test_cron_add_invalid_schedule_returns_error(self):
-        from src.tools.cron_tools import cron_add
+        from cogtrix_core.tools.cron_tools import cron_add
 
         result = cron_add("bad-schedule", "test")
         assert result.startswith("Error:")
 
     def test_cron_list_empty(self):
-        from src.tools.cron_tools import cron_list
+        from cogtrix_core.tools.cron_tools import cron_list
 
         result = cron_list()
         assert "No cron jobs" in result
 
     def test_cron_list_shows_added_job(self):
-        from src.tools.cron_tools import cron_add, cron_list
+        from cogtrix_core.tools.cron_tools import cron_add, cron_list
 
         cron_add("0 * * * *", "hourly prompt", name="hourly", context="inherit")
         result = cron_list()
@@ -557,7 +557,7 @@ class TestCronToolFunctions:
         assert "inherit" in result
 
     def test_cron_remove_existing(self):
-        from src.tools.cron_tools import cron_add, cron_list, cron_remove
+        from cogtrix_core.tools.cron_tools import cron_add, cron_list, cron_remove
 
         result = cron_add("*/30 * * * *", "half-hourly")
         job_id = result.split("ID:")[1].split()[0].strip()
@@ -566,13 +566,13 @@ class TestCronToolFunctions:
         assert "No cron jobs" in cron_list()
 
     def test_cron_remove_unknown_returns_error(self):
-        from src.tools.cron_tools import cron_remove
+        from cogtrix_core.tools.cron_tools import cron_remove
 
         result = cron_remove("nonexistent")
         assert "No cron job found" in result
 
     def test_cron_list_truncates_long_prompt(self):
-        from src.tools.cron_tools import cron_add, cron_list
+        from cogtrix_core.tools.cron_tools import cron_add, cron_list
 
         long_prompt = "x" * 200
         cron_add("0 * * * *", long_prompt)
@@ -581,13 +581,13 @@ class TestCronToolFunctions:
 
     def test_six_field_cron_expression(self):
         """6-field (seconds) cron should be accepted by croniter."""
-        from src.tools.cron_tools import cron_add
+        from cogtrix_core.tools.cron_tools import cron_add
 
         result = cron_add("0 */5 * * * *", "every 5 min by seconds")
         assert "Error:" not in result
 
     def test_cron_add_multiple_jobs(self):
-        from src.tools.cron_tools import cron_add, cron_list
+        from cogtrix_core.tools.cron_tools import cron_add, cron_list
 
         cron_add("0 9 * * *", "morning", name="morning")
         cron_add("0 18 * * *", "evening", name="evening", context="inherit")
@@ -601,7 +601,7 @@ class TestCronToolFunctions:
 
 class TestConfigureCron:
     def test_configure_cron_sets_factory(self, tmp_path):
-        import src.tools.cron_tools as _mod
+        import cogtrix_core.tools.cron_tools as _mod
 
         _mod._scheduler = None
         _mod._llm_factory = None
@@ -611,7 +611,7 @@ class TestConfigureCron:
         def my_factory():
             factory_called.append(True)
 
-        from src.tools.cron_tools import configure_cron
+        from cogtrix_core.tools.cron_tools import configure_cron
 
         configure_cron(data_dir=str(tmp_path / "cron"), llm_factory=my_factory)
         assert _mod._llm_factory is my_factory
@@ -619,13 +619,13 @@ class TestConfigureCron:
         _mod._scheduler.stop()
 
     def test_configure_cron_seeds_initial_jobs(self, tmp_path):
-        import src.tools.cron_tools as _mod
+        import cogtrix_core.tools.cron_tools as _mod
 
         _mod._scheduler = None
         _mod._llm_factory = None
         _mod._job_runner = None
 
-        from src.tools.cron_tools import configure_cron
+        from cogtrix_core.tools.cron_tools import configure_cron
 
         configure_cron(
             data_dir=str(tmp_path / "cron"),
@@ -645,10 +645,10 @@ class TestConfigureCron:
         _mod._scheduler.stop()
 
     def test_configure_cron_twice_reuses_scheduler(self, tmp_path):
-        import src.tools.cron_tools as _mod
+        import cogtrix_core.tools.cron_tools as _mod
 
         _mod._scheduler = None
-        from src.tools.cron_tools import configure_cron
+        from cogtrix_core.tools.cron_tools import configure_cron
 
         configure_cron(data_dir=str(tmp_path / "cron"))
         first = _mod._scheduler
@@ -665,7 +665,7 @@ class TestCronTenantIsolation:
     """Regression tests for #424 — cron operations must be scoped to owner_id."""
 
     def _sched(self, tmp_path: pathlib.Path):
-        from src.tools.cron_tools import CronScheduler
+        from cogtrix_core.tools.cron_tools import CronScheduler
 
         s = CronScheduler(tmp_path)
         s.start()
@@ -698,8 +698,8 @@ class TestCronTenantIsolation:
         assert job.id not in {j["id"] for j in s.list_jobs(owner_id="session-A")}
 
     def test_session_id_context_var_scopes_tool_functions(self, tmp_path: pathlib.Path) -> None:
-        import src.tools.cron_tools as _mod
-        from src.tools.cron_tools import cron_add, cron_list, set_cron_session_id
+        import cogtrix_core.tools.cron_tools as _mod
+        from cogtrix_core.tools.cron_tools import cron_add, cron_list, set_cron_session_id
 
         orig = _mod._scheduler
         _mod._scheduler = self._sched(tmp_path)
@@ -719,7 +719,7 @@ class TestCronTenantIsolation:
             set_cron_session_id("")
 
     def test_owner_id_persisted_and_restored(self, tmp_path: pathlib.Path) -> None:
-        from src.tools.cron_tools import CronScheduler
+        from cogtrix_core.tools.cron_tools import CronScheduler
 
         s1 = CronScheduler(tmp_path)
         s1.start()

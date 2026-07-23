@@ -1,11 +1,11 @@
-"""Tests for src/api/schemas/task.py."""
+"""Tests for cogtrix_core/api/schemas/task.py."""
 
 from __future__ import annotations
 
 import pytest
 from pydantic import ValidationError
 
-from src.api.schemas.task import TaskCreateRequest, TaskOut
+from cogtrix_core.api.schemas.task import TaskCreateRequest, TaskOut
 
 
 class TestTaskCreateRequest:

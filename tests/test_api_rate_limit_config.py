@@ -18,8 +18,8 @@ from __future__ import annotations
 
 import pytest
 
-from src.api import rate_limit as rl
-from src.config import APIConfig, ConfigError
+from cogtrix_core.api import rate_limit as rl
+from cogtrix_core.config import APIConfig, ConfigError
 
 # ---------------------------------------------------------------------------
 # parse_rate_limit_spec
@@ -233,7 +233,7 @@ class TestLoadConfigAPIBlock:
         """
         import os as _os
 
-        from src.config import load_config
+        from cogtrix_core.config import load_config
 
         monkeypatch.setenv("COGTRIX_CONFIG_FILE", str(yaml_path))
         for var in list(_os.environ):

@@ -15,10 +15,10 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from src.agent.safety import AgentExecutionError
-from src.orchestration import runner as _runner
-from src.orchestration.intent import OwnershipMode, OwnershipResult
-from src.orchestration.run_config import AgentRunConfig
+from cogtrix_core.agent.safety import AgentExecutionError
+from cogtrix_core.orchestration import runner as _runner
+from cogtrix_core.orchestration.intent import OwnershipMode, OwnershipResult
+from cogtrix_core.orchestration.run_config import AgentRunConfig
 
 
 class _ProviderBoom(Exception):

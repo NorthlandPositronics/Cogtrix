@@ -8,9 +8,9 @@ ARGPARSE_MANPAGE ?= argparse-manpage
 
 all: man1/cogtrix.1 man1/cogtrix-api.1
 
-man1/cogtrix.1: ../src/cli/args.py
+man1/cogtrix.1: ../cogtrix_core/cli/args.py
 	$(ARGPARSE_MANPAGE) \
-	  --pyfile ../src/cli/args.py \
+	  --pyfile ../cogtrix_core/cli/args.py \
 	  --function build_parser \
 	  --project-name cogtrix \
 	  --prog cogtrix \
@@ -20,9 +20,9 @@ man1/cogtrix.1: ../src/cli/args.py
 	  --description "AI-powered conversational agent and tool-execution platform" \
 	  > man1/cogtrix.1
 
-man1/cogtrix-api.1: ../src/api/__main__.py
+man1/cogtrix-api.1: ../cogtrix_core/api/__main__.py
 	$(ARGPARSE_MANPAGE) \
-	  --pyfile ../src/api/__main__.py \
+	  --pyfile ../cogtrix_core/api/__main__.py \
 	  --function build_parser \
 	  --project-name cogtrix \
 	  --prog cogtrix-api \

@@ -17,7 +17,7 @@ import pytest
 
 pytest.importorskip("fastapi")
 
-from src.api.callbacks import WebSocketCallbackHandler  # noqa: E402
+from cogtrix_core.api.callbacks import WebSocketCallbackHandler  # noqa: E402
 
 
 def _handler_and_loop() -> (

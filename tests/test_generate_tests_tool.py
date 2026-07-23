@@ -1,4 +1,4 @@
-"""Tests for src/tools/generate_tests.py"""
+"""Tests for cogtrix_core/tools/generate_tests.py"""
 
 from __future__ import annotations
 
@@ -33,7 +33,7 @@ def _patch_llm(response_text: str):
     mock_llm = MagicMock()
     mock_llm.invoke.return_value = _llm_response(response_text)
     return patch(
-        "src.tools.generate_tests.create_chat_model_from_configs",
+        "cogtrix_core.tools.generate_tests.create_chat_model_from_configs",
         return_value=mock_llm,
     )
 
@@ -46,7 +46,7 @@ def _patch_llm(response_text: str):
 @pytest.fixture(autouse=True)
 def reset_module():
     """Reset module-level _config to None before each test."""
-    import src.tools.generate_tests as mod
+    import cogtrix_core.tools.generate_tests as mod
 
     original = mod._config
     mod._config = None
@@ -57,7 +57,7 @@ def reset_module():
 @pytest.fixture()
 def configured(tmp_path: Path):
     """Wire a mock Config into the module."""
-    import src.tools.generate_tests as mod
+    import cogtrix_core.tools.generate_tests as mod
 
     cfg = _make_config()
     mod.TOOL_SETUP(cfg)
@@ -96,8 +96,10 @@ def test_llm_receives_source_content(configured, source_file, tmp_path, monkeypa
 
     mock_llm.invoke.side_effect = capture_invoke
 
-    with patch("src.tools.generate_tests.create_chat_model_from_configs", return_value=mock_llm):
-        from src.tools.generate_tests import generate_tests
+    with patch(
+        "cogtrix_core.tools.generate_tests.create_chat_model_from_configs", return_value=mock_llm
+    ):
+        from cogtrix_core.tools.generate_tests import generate_tests
 
         generate_tests(str(source_file), str(out))
 
@@ -127,7 +129,7 @@ def test_strips_markdown_fences(
     out.parent.mkdir(parents=True, exist_ok=True)
 
     with _patch_llm(raw):
-        from src.tools.generate_tests import generate_tests
+        from cogtrix_core.tools.generate_tests import generate_tests
 
         generate_tests(str(source_file), str(out))
 
@@ -143,13 +145,13 @@ def test_strips_markdown_fences(
 @pytest.mark.parametrize(
     "src_name,expected_out",
     [
-        ("src/tools/email_tools.py", "tests/test_email_tools.py"),
-        ("src/foo/bar.py", "tests/test_bar.py"),
+        ("cogtrix_core/tools/email_tools.py", "tests/test_email_tools.py"),
+        ("cogtrix_core/foo/bar.py", "tests/test_bar.py"),
         ("mymodule.py", "tests/test_mymodule.py"),
     ],
 )
 def test_output_file_derivation(src_name, expected_out):
-    from src.tools.generate_tests import _derive_output_file
+    from cogtrix_core.tools.generate_tests import _derive_output_file
 
     assert _derive_output_file(src_name) == expected_out
 
@@ -164,7 +166,7 @@ def test_writes_to_derived_path(configured, source_file, tmp_path, monkeypatch):
     (tmp_path / "tests").mkdir(parents=True, exist_ok=True)
 
     with _patch_llm("def test_placeholder(): pass"):
-        from src.tools.generate_tests import generate_tests
+        from cogtrix_core.tools.generate_tests import generate_tests
 
         result = generate_tests(str(source_file))
 
@@ -185,7 +187,7 @@ def test_error_if_output_exists(configured, source_file, tmp_path, monkeypatch):
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text("# existing", encoding="utf-8")
 
-    from src.tools.generate_tests import generate_tests
+    from cogtrix_core.tools.generate_tests import generate_tests
 
     result = generate_tests(str(source_file), str(out))
 
@@ -201,7 +203,7 @@ def test_error_if_output_exists(configured, source_file, tmp_path, monkeypatch):
 def test_rejects_traversal_in_source_file(configured, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
 
-    from src.tools.generate_tests import generate_tests
+    from cogtrix_core.tools.generate_tests import generate_tests
 
     result = generate_tests("../etc/passwd")
 
@@ -217,7 +219,7 @@ def test_rejects_traversal_in_source_file(configured, tmp_path, monkeypatch):
 def test_rejects_traversal_in_output_file(configured, source_file, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
 
-    from src.tools.generate_tests import generate_tests
+    from cogtrix_core.tools.generate_tests import generate_tests
 
     result = generate_tests(str(source_file), "../evil.py")
 
@@ -243,8 +245,10 @@ def test_focus_included_in_prompt(configured, source_file, tmp_path, monkeypatch
 
     mock_llm.invoke.side_effect = capture
 
-    with patch("src.tools.generate_tests.create_chat_model_from_configs", return_value=mock_llm):
-        from src.tools.generate_tests import generate_tests
+    with patch(
+        "cogtrix_core.tools.generate_tests.create_chat_model_from_configs", return_value=mock_llm
+    ):
+        from cogtrix_core.tools.generate_tests import generate_tests
 
         generate_tests(str(source_file), focus="error paths")
 
@@ -263,8 +267,10 @@ def test_llm_error_returns_descriptive_string(configured, source_file, tmp_path,
     mock_llm = MagicMock()
     mock_llm.invoke.side_effect = RuntimeError("connection refused")
 
-    with patch("src.tools.generate_tests.create_chat_model_from_configs", return_value=mock_llm):
-        from src.tools.generate_tests import generate_tests
+    with patch(
+        "cogtrix_core.tools.generate_tests.create_chat_model_from_configs", return_value=mock_llm
+    ):
+        from cogtrix_core.tools.generate_tests import generate_tests
 
         result = generate_tests(str(source_file))
 
@@ -281,7 +287,7 @@ def test_llm_error_returns_descriptive_string(configured, source_file, tmp_path,
 
 
 def test_tool_configs_structure():
-    from src.tools.generate_tests import TOOL_CONFIGS
+    from cogtrix_core.tools.generate_tests import TOOL_CONFIGS
 
     assert len(TOOL_CONFIGS) == 1
     entry = TOOL_CONFIGS[0]
@@ -297,7 +303,7 @@ def test_tool_configs_structure():
 
 
 def test_tool_setup_sets_config(tmp_path):
-    import src.tools.generate_tests as mod
+    import cogtrix_core.tools.generate_tests as mod
 
     assert mod._config is None  # reset_module fixture ensures this
 
@@ -318,7 +324,7 @@ def test_result_message_includes_line_count(configured, source_file, tmp_path, m
     code = "def test_a(): pass\ndef test_b(): pass\n"
 
     with _patch_llm(code):
-        from src.tools.generate_tests import generate_tests
+        from cogtrix_core.tools.generate_tests import generate_tests
 
         result = generate_tests(str(source_file))
 
@@ -336,7 +342,7 @@ def test_returns_error_when_not_configured(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     # _config is None due to reset_module fixture
 
-    from src.tools.generate_tests import generate_tests
+    from cogtrix_core.tools.generate_tests import generate_tests
 
     result = generate_tests("some_file.py")
     assert result.startswith("Error:")
@@ -351,7 +357,7 @@ def test_returns_error_when_not_configured(tmp_path, monkeypatch):
 def test_unsupported_style_returns_error(configured, source_file, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
 
-    from src.tools.generate_tests import generate_tests
+    from cogtrix_core.tools.generate_tests import generate_tests
 
     result = generate_tests(str(source_file), style="unittest")
     assert result.startswith("Error:")
@@ -367,7 +373,7 @@ def test_llm_invoke_timeout_returns_error(configured, source_file, tmp_path, mon
     import threading
     import time
 
-    import src.tools.generate_tests as mod
+    import cogtrix_core.tools.generate_tests as mod
 
     monkeypatch.chdir(tmp_path)
     (tmp_path / "tests").mkdir(parents=True, exist_ok=True)
@@ -381,10 +387,13 @@ def test_llm_invoke_timeout_returns_error(configured, source_file, tmp_path, mon
     mock_llm.invoke.side_effect = _never_return
 
     with (
-        patch("src.tools.generate_tests.create_chat_model_from_configs", return_value=mock_llm),
+        patch(
+            "cogtrix_core.tools.generate_tests.create_chat_model_from_configs",
+            return_value=mock_llm,
+        ),
         patch.object(mod, "_GENERATE_TESTS_LLM_TIMEOUT_SECONDS", 0.1),
     ):
-        from src.tools.generate_tests import generate_tests
+        from cogtrix_core.tools.generate_tests import generate_tests
 
         start = time.monotonic()
         result = generate_tests(str(source_file))
@@ -403,7 +412,7 @@ def test_llm_invoke_timeout_returns_error(configured, source_file, tmp_path, mon
 
 
 def test_user_cancelled_run_is_raised(configured, source_file, tmp_path, monkeypatch):
-    from src.agent.safety import UserCancelledRun
+    from cogtrix_core.agent.safety import UserCancelledRun
 
     monkeypatch.chdir(tmp_path)
     (tmp_path / "tests").mkdir(parents=True, exist_ok=True)
@@ -411,8 +420,10 @@ def test_user_cancelled_run_is_raised(configured, source_file, tmp_path, monkeyp
     mock_llm = MagicMock()
     mock_llm.invoke.side_effect = UserCancelledRun("user cancelled")
 
-    with patch("src.tools.generate_tests.create_chat_model_from_configs", return_value=mock_llm):
-        from src.tools.generate_tests import generate_tests
+    with patch(
+        "cogtrix_core.tools.generate_tests.create_chat_model_from_configs", return_value=mock_llm
+    ):
+        from cogtrix_core.tools.generate_tests import generate_tests
 
         with pytest.raises(UserCancelledRun):
             generate_tests(str(source_file))
@@ -448,8 +459,10 @@ def test_secrets_redacted_in_llm_prompt(configured, tmp_path, monkeypatch):
 
     mock_llm.invoke.side_effect = capture
 
-    with patch("src.tools.generate_tests.create_chat_model_from_configs", return_value=mock_llm):
-        from src.tools.generate_tests import generate_tests
+    with patch(
+        "cogtrix_core.tools.generate_tests.create_chat_model_from_configs", return_value=mock_llm
+    ):
+        from cogtrix_core.tools.generate_tests import generate_tests
 
         generate_tests(str(src))
 

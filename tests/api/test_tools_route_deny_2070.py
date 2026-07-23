@@ -17,9 +17,9 @@ pytest.importorskip("fastapi")
 
 from fastapi import HTTPException  # noqa: E402
 
-import src.api.routes.tools as tools_mod  # noqa: E402
-from src.api.schemas.tool import ToolActionRequest  # noqa: E402
-from src.orchestration.session_state import SessionState  # noqa: E402
+import cogtrix_core.api.routes.tools as tools_mod  # noqa: E402
+from cogtrix_core.api.schemas.tool import ToolActionRequest  # noqa: E402
+from cogtrix_core.orchestration.session_state import SessionState  # noqa: E402
 
 
 def _request(api_dangerous_tools: bool):

@@ -28,7 +28,7 @@ _JWT_SECRET_FOR_SIGNING = (
 class TestPathNormalization:
     def test_uuid_segment(self):
         """UUID path segments are normalized to {id}."""
-        from src.api.routes._metrics_core import _normalize_path
+        from cogtrix_core.api.routes._metrics_core import _normalize_path
 
         assert (
             _normalize_path("/api/v1/sessions/123e4567-e89b-12d3-a456-426614174000")
@@ -37,20 +37,20 @@ class TestPathNormalization:
 
     def test_numeric_segment(self):
         """Numeric path segments are normalized to {id}."""
-        from src.api.routes._metrics_core import _normalize_path
+        from cogtrix_core.api.routes._metrics_core import _normalize_path
 
         assert _normalize_path("/api/v1/sessions/42") == "/api/v1/sessions/{id}"
 
     def test_preserves_static_segments(self):
         """Static path segments are preserved."""
-        from src.api.routes._metrics_core import _normalize_path
+        from cogtrix_core.api.routes._metrics_core import _normalize_path
 
         assert _normalize_path("/api/v1/health") == "/api/v1/health"
         assert _normalize_path("/api/v1/metrics") == "/api/v1/metrics"
 
     def test_mixed_path(self):
         """Paths with both static and dynamic segments."""
-        from src.api.routes._metrics_core import _normalize_path
+        from cogtrix_core.api.routes._metrics_core import _normalize_path
 
         assert (
             _normalize_path("/api/v1/sessions/42/messages/123e4567-e89b-12d3-a456-426614174000")

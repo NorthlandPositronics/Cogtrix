@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from src.agent.core import DEFAULT_SYSTEM_PROMPT, build_system_prompt
-from src.orchestration.reflection_delegate import (
+from cogtrix_core.agent.core import DEFAULT_SYSTEM_PROMPT, build_system_prompt
+from cogtrix_core.orchestration.reflection_delegate import (
     CLARIFICATION_POLICY_PROMPT,
     PRE_ACTION_CONFIRMATION_PROMPT,
 )
-from src.orchestration.run_config import AgentRunConfig
+from cogtrix_core.orchestration.run_config import AgentRunConfig
 
 # ── Group A: build_system_prompt parameter wiring ─────────────────────────────
 
@@ -70,7 +70,7 @@ class TestConversationModeAdditions:
     def _get_additions(self) -> str:
         from unittest.mock import MagicMock
 
-        from src.memory.modes.conversation import ConversationMemoryManager
+        from cogtrix_core.memory.modes.conversation import ConversationMemoryManager
 
         mgr = ConversationMemoryManager(store=MagicMock(), session_id="test", config=None)
         result = mgr.get_system_prompt_additions()
@@ -96,18 +96,18 @@ class TestConversationModeAdditions:
 
 class TestConfigPAC:
     def test_defaults_to_false(self) -> None:
-        from src.config import Config
+        from cogtrix_core.config import Config
 
         assert Config().pre_action_confirmation_enabled is False
 
     def test_field_exists(self) -> None:
-        from src.config import Config
+        from cogtrix_core.config import Config
 
         cfg = Config()
         assert hasattr(cfg, "pre_action_confirmation_enabled")
 
     def test_can_be_set_true(self) -> None:
-        from src.config import Config
+        from cogtrix_core.config import Config
 
         cfg = Config()
         cfg.pre_action_confirmation_enabled = True
@@ -119,12 +119,12 @@ class TestConfigPAC:
 
         import yaml
 
-        from src.config import Config, _apply_config_file
+        from cogtrix_core.config import Config, _apply_config_file
 
         yaml_content = "pre_action_confirmation:\n  enabled: true\n"
         parsed = yaml.safe_load(yaml_content)
         cfg = Config()
-        with patch("src.config._parse_config_file", return_value=parsed):
+        with patch("cogtrix_core.config._parse_config_file", return_value=parsed):
             _apply_config_file(cfg, Path("fake.yaml"))
         assert cfg.pre_action_confirmation_enabled is True
 
@@ -134,13 +134,13 @@ class TestConfigPAC:
 
         import yaml
 
-        from src.config import Config, _apply_config_file
+        from cogtrix_core.config import Config, _apply_config_file
 
         yaml_content = "pre_action_confirmation:\n  enabled: false\n"
         parsed = yaml.safe_load(yaml_content)
         cfg = Config()
         cfg.pre_action_confirmation_enabled = True  # start True, expect False
-        with patch("src.config._parse_config_file", return_value=parsed):
+        with patch("cogtrix_core.config._parse_config_file", return_value=parsed):
             _apply_config_file(cfg, Path("fake.yaml"))
         assert cfg.pre_action_confirmation_enabled is False
 

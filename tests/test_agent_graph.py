@@ -30,13 +30,13 @@ from cogtrix import (
     _build_agent_graph,
     run_agent,
 )
-from src.orchestration.compression import (
+from cogtrix_core.orchestration.compression import (
     apply_message_compression,
     compress_tool_message,
 )
-from src.orchestration.graph import _correct_tool_args, _tool_arg_schema_cache
-from src.orchestration.intent import OwnershipMode, OwnershipResult, TaskComplexity
-from src.orchestration.run_config import AgentRunConfig
+from cogtrix_core.orchestration.graph import _correct_tool_args, _tool_arg_schema_cache
+from cogtrix_core.orchestration.intent import OwnershipMode, OwnershipResult, TaskComplexity
+from cogtrix_core.orchestration.run_config import AgentRunConfig
 
 # ---------------------------------------------------------------------------
 # Shared helpers
@@ -176,7 +176,7 @@ class TestBuildAgentGraph:
         """When tools_ready is unset call_model returns a transient message (#114)."""
         import threading
 
-        from src.orchestration.run_config import AgentRunConfig
+        from cogtrix_core.orchestration.run_config import AgentRunConfig
 
         tools_ready = threading.Event()  # not yet set — simulates post-reconnect window
 
@@ -208,7 +208,7 @@ class TestBuildAgentGraph:
         """When tools_ready never fires within timeout, a transient retry message is returned."""
         import threading
 
-        from src.orchestration.run_config import AgentRunConfig
+        from cogtrix_core.orchestration.run_config import AgentRunConfig
 
         tools_ready = threading.Event()  # never set
         mock_llm = _make_mock_llm([])
@@ -389,7 +389,7 @@ class TestBuildAgentGraph:
         Pins the three-part contract: table + numbered headers + a
         claim-of-action signal. Each of the canonical claim-of-action
         patterns is exercised against a structural baseline."""
-        from src.orchestration.graph import _looks_like_markdown_phantom_report
+        from cogtrix_core.orchestration.graph import _looks_like_markdown_phantom_report
 
         # Structural shell: table + numbered header, no claim-of-action.
         # Pre-fix this returned True; post-fix it must return False.
@@ -674,7 +674,7 @@ class TestBuildAgentGraph:
 
     def test_denied_available_tool_returns_disabled_message(self):
         """A tool in available_tools that is denied returns 'disabled' message."""
-        from src.orchestration.session_state import SessionState
+        from cogtrix_core.orchestration.session_state import SessionState
 
         tool_call = {"name": "search_web", "args": {}, "id": "call_denied"}
         ai_with_tools = AIMessage(content="", tool_calls=[tool_call], id="m_denied")
@@ -767,7 +767,7 @@ class TestRunAgent:
         drain loop completes.
         """
         yield
-        from src.orchestration import runner as runner_mod
+        from cogtrix_core.orchestration import runner as runner_mod
 
         for _ in range(100):
             runner_mod._drain_background_compression_jobs()
@@ -875,7 +875,9 @@ class TestRunAgent:
         )
 
         with (
-            patch("src.orchestration.runner.classify_task_ownership", return_value=ownership),
+            patch(
+                "cogtrix_core.orchestration.runner.classify_task_ownership", return_value=ownership
+            ),
             patch("cogtrix._spinner"),
         ):
             first = run_agent(
@@ -911,7 +913,7 @@ class TestRunAgent:
         )
 
         with (
-            patch("src.orchestration.runner.classify_task_complexity") as classify_mock,
+            patch("cogtrix_core.orchestration.runner.classify_task_complexity") as classify_mock,
             patch("cogtrix._spinner"),
         ):
             result = run_agent(
@@ -933,7 +935,7 @@ class TestRunAgent:
         PR-G retired the legacy in-process DDG tool — see the comment
         on _SIMPLE_PRELOAD_TOOLS for the Bug D / cogtrix46 rationale.
         """
-        from src.orchestration.runner import _auto_load_simple_tools
+        from cogtrix_core.orchestration.runner import _auto_load_simple_tools
 
         available_tools = {}
         for name in (
@@ -973,7 +975,7 @@ class TestRunAgent:
 
     def test_reasoning_mode_preloads_cron_tools(self):
         """Reasoning mode should auto-load the cron trio without request_tools."""
-        from src.tools.configure import apply_tool_preset
+        from cogtrix_core.tools.configure import apply_tool_preset
 
         registry = SimpleNamespace(
             tools={
@@ -1007,7 +1009,7 @@ class TestRunAgent:
 
     def test_turn_start_compression_runs_in_background(self):
         """run_agent() must not block the first token on turn-start compression."""
-        from src.orchestration import runner as runner_mod
+        from cogtrix_core.orchestration import runner as runner_mod
 
         mock_llm = _make_mock_llm([AIMessage(content="Fast response", id="m4")])
         config = AgentRunConfig(
@@ -1031,7 +1033,7 @@ class TestRunAgent:
         try:
             with (
                 patch(
-                    "src.orchestration.runner.apply_message_compression",
+                    "cogtrix_core.orchestration.runner.apply_message_compression",
                     side_effect=_slow_compression,
                 ),
                 patch("cogtrix._spinner"),
@@ -1061,7 +1063,7 @@ class TestRunAgent:
 
     def test_post_turn_compression_runs_in_background(self):
         """run_agent() must not block response delivery on post-turn compression."""
-        from src.orchestration import runner as runner_mod
+        from cogtrix_core.orchestration import runner as runner_mod
 
         mock_llm = _make_mock_llm([AIMessage(content="Fast response", id="m5")])
         config = AgentRunConfig(
@@ -1086,7 +1088,7 @@ class TestRunAgent:
         try:
             with (
                 patch(
-                    "src.orchestration.runner.apply_message_compression",
+                    "cogtrix_core.orchestration.runner.apply_message_compression",
                     side_effect=_slow_compression,
                 ),
                 patch("cogtrix._spinner"),
@@ -1116,7 +1118,7 @@ class TestRunAgent:
 
     def test_completed_background_compression_job_merges_cache(self):
         """Completed background jobs must merge their warmed cache into the target."""
-        from src.orchestration import runner as runner_mod
+        from cogtrix_core.orchestration import runner as runner_mod
 
         target_cache: OrderedDict[str, str] = OrderedDict()
         snapshot: OrderedDict[str, str] = OrderedDict([("call_old", "Cached summary.")])
@@ -1134,7 +1136,7 @@ class TestRunAgent:
 
     def test_drain_with_target_cache_only_drains_matching_jobs(self):
         """Per-session drain must not steal jobs from other sessions (#901)."""
-        from src.orchestration import runner as runner_mod
+        from cogtrix_core.orchestration import runner as runner_mod
 
         cache_a: OrderedDict[str, str] = OrderedDict()
         cache_b: OrderedDict[str, str] = OrderedDict()
@@ -1168,7 +1170,7 @@ class TestRunAgent:
     def test_drain_runs_before_cache_snapshot_so_warm_up_visible(self):
         """Drain must happen before the local_compression_cache snapshot so that
         background warm-up results are included in the current turn's cache (#252)."""
-        from src.orchestration import runner as runner_mod
+        from cogtrix_core.orchestration import runner as runner_mod
 
         # Simulate a completed warm-up job that merged into persistent cache.
         warm_up_key = "tool_call_252"
@@ -1725,7 +1727,7 @@ class TestCorrectToolArgs:
         is marked failed (runner.py:910 — any tool error fails the
         run).
         """
-        from src.tools.checkpoint import CheckpointInput
+        from cogtrix_core.tools.checkpoint import CheckpointInput
 
         tool = MagicMock()
         tool.args_schema = CheckpointInput
@@ -1737,7 +1739,7 @@ class TestCorrectToolArgs:
     def test_well_known_remap_finding_synonyms(self):
         """Other plausible synonyms for the checkpoint ``finding`` field
         — observed in qwen/kimi/llama generations — must also remap."""
-        from src.tools.checkpoint import CheckpointInput
+        from cogtrix_core.tools.checkpoint import CheckpointInput
 
         synonyms = [
             "note",
@@ -1759,7 +1761,7 @@ class TestCorrectToolArgs:
     def test_finding_passthrough_when_correct(self):
         """Regression guard — the correct field name MUST pass through
         unchanged. A regression here would silently strip valid args."""
-        from src.tools.checkpoint import CheckpointInput
+        from cogtrix_core.tools.checkpoint import CheckpointInput
 
         tool = MagicMock()
         tool.args_schema = CheckpointInput
@@ -1790,7 +1792,7 @@ class TestQuantifierSuffixMapping:
     def test_max_points_maps_to_max_results(self):
         """The exact next-gate2 reproducer: search_web(max_points=...) must
         map to max_results before pydantic 'extra_forbidden' fires."""
-        from src.orchestration.tool_arg_correction import _correct_tool_args
+        from cogtrix_core.orchestration.tool_arg_correction import _correct_tool_args
 
         tool = MagicMock()
         tool.args_schema = _QuantifierSchema
@@ -1798,7 +1800,7 @@ class TestQuantifierSuffixMapping:
         assert result == {"query": "x", "max_results": 5}
 
     def test_num_items_maps_to_max_results(self):
-        from src.orchestration.tool_arg_correction import _correct_tool_args
+        from cogtrix_core.orchestration.tool_arg_correction import _correct_tool_args
 
         class _NumSchema(BaseModel):
             query: str = Field(description="q")
@@ -1812,7 +1814,7 @@ class TestQuantifierSuffixMapping:
     def test_min_results_NOT_mapped_to_max_results(self):
         """Different prefix (min vs max) — must NOT be remapped despite
         identical suffix. This is the key low-FP guarantee."""
-        from src.orchestration.tool_arg_correction import _correct_tool_args
+        from cogtrix_core.orchestration.tool_arg_correction import _correct_tool_args
 
         tool = MagicMock()
         tool.args_schema = _QuantifierSchema
@@ -1824,7 +1826,7 @@ class TestQuantifierSuffixMapping:
     def test_unrelated_suffix_NOT_mapped(self):
         """Suffix not in the equivalence set (e.g. depth) must not be
         remapped onto results."""
-        from src.orchestration.tool_arg_correction import _correct_tool_args
+        from cogtrix_core.orchestration.tool_arg_correction import _correct_tool_args
 
         tool = MagicMock()
         tool.args_schema = _QuantifierSchema
@@ -1836,7 +1838,7 @@ class TestQuantifierSuffixMapping:
     def test_short_prefix_NOT_mapped(self):
         """A single-letter prefix below the length floor must not trigger
         the equivalent-quantifier rule."""
-        from src.orchestration.tool_arg_correction import (
+        from cogtrix_core.orchestration.tool_arg_correction import (
             _correct_tool_args,
             _is_equivalent_quantifier_pair,
         )
@@ -1852,7 +1854,7 @@ class TestQuantifierSuffixMapping:
     def test_legit_args_pass_through_unchanged(self):
         """Regression: when the model uses the correct names, args are
         untouched (the new rule must not silently rewrite anything)."""
-        from src.orchestration.tool_arg_correction import _correct_tool_args
+        from cogtrix_core.orchestration.tool_arg_correction import _correct_tool_args
 
         tool = MagicMock()
         tool.args_schema = _QuantifierSchema
@@ -1862,7 +1864,7 @@ class TestQuantifierSuffixMapping:
     def test_pair_rule_unit_cases(self):
         """Direct unit coverage of the pair predicate — locks down both
         the should-map and must-not-map shapes."""
-        from src.orchestration.tool_arg_correction import _is_equivalent_quantifier_pair
+        from cogtrix_core.orchestration.tool_arg_correction import _is_equivalent_quantifier_pair
 
         # Should map.
         for unk, exp in [
@@ -2010,7 +2012,7 @@ class TestDuplicateToolCallDetection:
 
     def test_request_tools_exempt_from_dedup(self):
         """request_tools calls should never be deduplicated."""
-        from src.tools.configure import create_request_tools_tool
+        from cogtrix_core.tools.configure import create_request_tools_tool
 
         call_1 = {"name": "request_tools", "args": {}, "id": "c1"}
         call_2 = {"name": "request_tools", "args": {}, "id": "c2"}
@@ -2208,7 +2210,7 @@ class TestExtendRunWiring:
     """extend_run tool is injected into the graph when extend_run_state is provided."""
 
     def test_extend_run_tool_is_added_when_state_provided(self):
-        from src.tools.extend_run import ExtendRunState
+        from cogtrix_core.tools.extend_run import ExtendRunState
 
         state = ExtendRunState()
         active: list = []
@@ -2229,7 +2231,7 @@ class TestExtendRunWiring:
         assert any(getattr(t, "name", "") == "extend_run" for t in active)
 
     def test_extend_run_tool_is_not_duplicated_when_already_present(self):
-        from src.tools.extend_run import ExtendRunState
+        from cogtrix_core.tools.extend_run import ExtendRunState
 
         state = ExtendRunState()
         existing_extend_tool = SimpleNamespace(name="extend_run")
@@ -2269,7 +2271,7 @@ class TestExtendRunWiring:
         assert not any(getattr(t, "name", "") == "extend_run" for t in active)
 
     def test_extend_run_sets_state_requested(self):
-        from src.tools.extend_run import ExtendRunState
+        from cogtrix_core.tools.extend_run import ExtendRunState
 
         state = ExtendRunState()
         available: dict = {}
@@ -2292,7 +2294,7 @@ class TestExtendRunWiring:
         assert state.mode == "continue"
 
     def test_reset_for_new_run_updates_extend_run_state(self):
-        from src.tools.extend_run import ExtendRunState
+        from cogtrix_core.tools.extend_run import ExtendRunState
 
         state1 = ExtendRunState()
         available: dict = {}
@@ -2330,7 +2332,7 @@ class TestResetForNewRun:
         """Dirties every field, calls _reset_for_new_run, and asserts all are reset."""
         from dataclasses import fields
 
-        from src.orchestration.graph import PerRunState
+        from cogtrix_core.orchestration.graph import PerRunState
 
         mock_llm = _make_mock_llm([AIMessage(content="done", id="m1")])
         graph = _build_agent_graph(
@@ -2677,6 +2679,56 @@ class TestToolQualityGate:
                     content="This is a real result with substance.",
                     tool_call_id="tc2",
                     name="read_file",
+                ),
+            ]
+        }
+        graph.invoke(state)
+
+        assert len(recorded) >= 1
+        assert not self._has_quality_gate(recorded[0])
+
+    def test_no_inject_when_earlier_round_had_content(self):
+        """#2360: a turn that did real work in an EARLIER round and then ended
+        with a trailing empty verification command must NOT fire the gate. The
+        substantive result is separated from the empty one by an AIMessage, so
+        the old last-contiguous-block scan missed it; the turn-scoped check sees
+        the whole turn since the user message.
+        """
+        responses = [AIMessage(content="All done — verified.", id="m3")]
+        mock_llm, recorded = self._recording_mock_llm(responses)
+
+        graph = _build_agent_graph(
+            llm=mock_llm,
+            system_prompt="",
+            active_tools_list=[],
+            available_tools={},
+            registry=_make_registry(),
+            approvals=set(),
+            config=AgentRunConfig(tool_quality_gate_enabled=True),
+        )
+
+        state = {
+            "messages": [
+                HumanMessage(content="run the rebuild and verify", id="h1"),
+                # Round 1: a real, substantive result.
+                AIMessage(
+                    content="",
+                    tool_calls=[{"id": "tc1", "name": "execute_shell_command", "args": {}}],
+                    id="m1",
+                ),
+                ToolMessage(
+                    content="Done. New configuration is /nix/store/v5nd-nixos-system… (verified).",
+                    tool_call_id="tc1",
+                    name="execute_shell_command",
+                ),
+                # Round 2 (last block): a trailing empty verification command.
+                AIMessage(
+                    content="",
+                    tool_calls=[{"id": "tc2", "name": "execute_shell_command", "args": {}}],
+                    id="m2",
+                ),
+                ToolMessage(
+                    content="\n[exit code: 1]", tool_call_id="tc2", name="execute_shell_command"
                 ),
             ]
         }

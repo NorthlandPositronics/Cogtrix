@@ -1,8 +1,8 @@
-"""Tests for src/tools/calculator.py — factorial cap and safe evaluation."""
+"""Tests for cogtrix_core/tools/calculator.py — factorial cap and safe evaluation."""
 
 import pytest
 
-from src.tools.calculator import _safe_factorial, calculate
+from cogtrix_core.tools.calculator import _safe_factorial, calculate
 
 
 class TestSafeFactorial:

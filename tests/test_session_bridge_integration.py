@@ -15,7 +15,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from src.api.session_bridge import ApiSessionRegistry, warm_session
+from cogtrix_core.api.session_bridge import ApiSessionRegistry, warm_session
 
 
 def _make_record(
@@ -68,8 +68,8 @@ async def test_warm_session_creates_full_api_session() -> None:
     mock_llm = MagicMock()
 
     with (
-        patch("src.api.session_bridge._build_memory_manager", return_value=mock_mm),
-        patch("src.api.session_bridge._build_llm", return_value=mock_llm),
+        patch("cogtrix_core.api.session_bridge._build_memory_manager", return_value=mock_mm),
+        patch("cogtrix_core.api.session_bridge._build_llm", return_value=mock_llm),
     ):
         session = await warm_session(record, app_state)
 
@@ -104,15 +104,15 @@ async def test_warm_session_loads_tools_from_registry() -> None:
     mock_llm = MagicMock()
 
     with (
-        patch("src.api.session_bridge._build_memory_manager", return_value=mock_mm),
-        patch("src.api.session_bridge._build_llm", return_value=mock_llm),
+        patch("cogtrix_core.api.session_bridge._build_memory_manager", return_value=mock_mm),
+        patch("cogtrix_core.api.session_bridge._build_llm", return_value=mock_llm),
         patch(
-            "src.agent.registry.filter_tools_for_agent",
+            "cogtrix_core.agent.registry.filter_tools_for_agent",
             return_value=({"query_knowledge_base": mock_tool}, [mock_tool]),
         ),
-        patch("src.tools.configure.rag_should_auto_activate", return_value=False),
-        patch("src.tools.configure.build_tool_catalog", return_value={}),
-        patch("src.tools.configure.create_request_tools_tool", return_value=None),
+        patch("cogtrix_core.tools.configure.rag_should_auto_activate", return_value=False),
+        patch("cogtrix_core.tools.configure.build_tool_catalog", return_value={}),
+        patch("cogtrix_core.tools.configure.create_request_tools_tool", return_value=None),
     ):
         session = await warm_session(record, app_state)
 
@@ -131,8 +131,8 @@ async def test_warm_session_denies_dangerous_tools_by_default() -> None:
     mock_llm = MagicMock()
 
     with (
-        patch("src.api.session_bridge._build_memory_manager", return_value=mock_mm),
-        patch("src.api.session_bridge._build_llm", return_value=mock_llm),
+        patch("cogtrix_core.api.session_bridge._build_memory_manager", return_value=mock_mm),
+        patch("cogtrix_core.api.session_bridge._build_llm", return_value=mock_llm),
     ):
         session = await warm_session(record, app_state)
 
@@ -155,8 +155,8 @@ async def test_warm_session_wires_memory_manager_to_run_config() -> None:
     mock_llm = MagicMock()
 
     with (
-        patch("src.api.session_bridge._build_memory_manager", return_value=mock_mm),
-        patch("src.api.session_bridge._build_llm", return_value=mock_llm),
+        patch("cogtrix_core.api.session_bridge._build_memory_manager", return_value=mock_mm),
+        patch("cogtrix_core.api.session_bridge._build_llm", return_value=mock_llm),
     ):
         session = await warm_session(record, app_state)
 
@@ -191,14 +191,16 @@ async def test_get_or_warm_deduplicates_concurrent_calls() -> None:
     db_session = MagicMock()
 
     with (
-        patch("src.api.session_bridge.warm_session", side_effect=_slow_warm),
-        patch("src.api.session_bridge._build_memory_manager", return_value=mock_mm),
-        patch("src.api.session_bridge._build_llm", return_value=mock_llm),
+        patch("cogtrix_core.api.session_bridge.warm_session", side_effect=_slow_warm),
+        patch("cogtrix_core.api.session_bridge._build_memory_manager", return_value=mock_mm),
+        patch("cogtrix_core.api.session_bridge._build_llm", return_value=mock_llm),
     ):
         repo_mock = AsyncMock()
         repo_mock.get_by_id.return_value = record
 
-        with patch("src.api.db.repositories.sessions.SessionRepository", return_value=repo_mock):
+        with patch(
+            "cogtrix_core.api.db.repositories.sessions.SessionRepository", return_value=repo_mock
+        ):
             results = await asyncio.gather(
                 registry.get_or_warm("sess-dedup", db_session),
                 registry.get_or_warm("sess-dedup", db_session),

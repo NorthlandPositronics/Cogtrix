@@ -18,7 +18,7 @@ from langchain_core.messages import (  # noqa: E402
     ToolMessage,
 )
 
-from src.orchestration.message_repair import _repair_tool_message_pairs  # noqa: E402
+from cogtrix_core.orchestration.message_repair import _repair_tool_message_pairs  # noqa: E402
 
 
 def _declared_ids(messages: list) -> set[str]:

@@ -1,4 +1,4 @@
-"""Tests for src/tools/self_improve.py — M4.1 self-improvement tool.
+"""Tests for cogtrix_core/tools/self_improve.py — M4.1 self-improvement tool.
 
 Covers:
 - detect phase: ruff findings parsed correctly from JSON output
@@ -32,14 +32,14 @@ from unittest.mock import MagicMock, patch
 # ---------------------------------------------------------------------------
 
 _RUFF_ISSUE = {
-    "filename": "src/foo.py",
+    "filename": "cogtrix_core/foo.py",
     "location": {"row": 42, "column": 1},
     "code": "E501",
     "message": "Line too long (101 > 100 characters)",
 }
 
 _BANDIT_HIGH = {
-    "filename": "src/bar.py",
+    "filename": "cogtrix_core/bar.py",
     "line_number": 17,
     "test_id": "B105",
     "issue_text": "Hardcoded password string",
@@ -47,7 +47,7 @@ _BANDIT_HIGH = {
 }
 
 _BANDIT_MEDIUM = {
-    "filename": "src/baz.py",
+    "filename": "cogtrix_core/baz.py",
     "line_number": 5,
     "test_id": "B601",
     "issue_text": "Shell injection risk",
@@ -55,7 +55,7 @@ _BANDIT_MEDIUM = {
 }
 
 _BANDIT_LOW = {
-    "filename": "src/qux.py",
+    "filename": "cogtrix_core/qux.py",
     "line_number": 9,
     "test_id": "B110",
     "issue_text": "Try-except-pass",
@@ -119,29 +119,29 @@ def _make_subprocess_side_effect(
 
 class TestParseRuff:
     def test_ruff_findings_parsed_correctly(self):
-        from src.tools.self_improve import _parse_ruff
+        from cogtrix_core.tools.self_improve import _parse_ruff
 
         findings = _parse_ruff(_ruff_stdout([_RUFF_ISSUE]), cap=10)
         assert len(findings) == 1
         f = findings[0]
         assert f.linter == "ruff"
-        assert f.file == "src/foo.py"
+        assert f.file == "cogtrix_core/foo.py"
         assert f.line == 42
         assert f.code == "E501"
         assert "Line too long" in f.message
 
     def test_ruff_empty_output_returns_empty_list(self):
-        from src.tools.self_improve import _parse_ruff
+        from cogtrix_core.tools.self_improve import _parse_ruff
 
         assert _parse_ruff("", cap=10) == []
         assert _parse_ruff("[]", cap=10) == []
 
     def test_ruff_cap_respected(self):
-        from src.tools.self_improve import _parse_ruff
+        from cogtrix_core.tools.self_improve import _parse_ruff
 
         issues = [
             {
-                "filename": f"src/f{i}.py",
+                "filename": f"cogtrix_core/f{i}.py",
                 "location": {"row": i, "column": 1},
                 "code": "E501",
                 "message": "too long",
@@ -152,14 +152,14 @@ class TestParseRuff:
         assert len(findings) == 3
 
     def test_ruff_malformed_json_returns_empty(self):
-        from src.tools.self_improve import _parse_ruff
+        from cogtrix_core.tools.self_improve import _parse_ruff
 
         assert _parse_ruff("not json", cap=10) == []
 
 
 class TestParseBandit:
     def test_bandit_high_included(self):
-        from src.tools.self_improve import _parse_bandit
+        from cogtrix_core.tools.self_improve import _parse_bandit
 
         findings = _parse_bandit(_bandit_stdout([_BANDIT_HIGH]), cap=10)
         assert len(findings) == 1
@@ -167,20 +167,20 @@ class TestParseBandit:
         assert findings[0].linter == "bandit"
 
     def test_bandit_medium_included(self):
-        from src.tools.self_improve import _parse_bandit
+        from cogtrix_core.tools.self_improve import _parse_bandit
 
         findings = _parse_bandit(_bandit_stdout([_BANDIT_MEDIUM]), cap=10)
         assert len(findings) == 1
         assert findings[0].code == "B601"
 
     def test_bandit_low_skipped(self):
-        from src.tools.self_improve import _parse_bandit
+        from cogtrix_core.tools.self_improve import _parse_bandit
 
         findings = _parse_bandit(_bandit_stdout([_BANDIT_LOW]), cap=10)
         assert findings == []
 
     def test_bandit_mixed_severity_filters_correctly(self):
-        from src.tools.self_improve import _parse_bandit
+        from cogtrix_core.tools.self_improve import _parse_bandit
 
         findings = _parse_bandit(
             _bandit_stdout([_BANDIT_HIGH, _BANDIT_LOW, _BANDIT_MEDIUM]), cap=10
@@ -199,11 +199,11 @@ class TestParseBandit:
 
 class TestDetectPhase:
     def test_no_findings_returns_no_issues_message(self, tmp_path: Path, monkeypatch):
-        import src.tools.self_improve as mod
+        import cogtrix_core.tools.self_improve as mod
 
         monkeypatch.chdir(tmp_path)
         mod._config = _DUMMY_CONFIG
-        with patch("src.tools.self_improve._run") as mock_run:
+        with patch("cogtrix_core.tools.self_improve._run") as mock_run:
             mock_run.side_effect = lambda cmd, **kw: (
                 (0, "[]", "") if "ruff" in cmd else (0, '{"results":[]}', "")
             )
@@ -211,23 +211,23 @@ class TestDetectPhase:
         assert "No issues found" in result
 
     def test_no_findings_skips_patch_phase(self, tmp_path: Path):
-        import src.tools.self_improve as mod
+        import cogtrix_core.tools.self_improve as mod
 
         mod._config = _DUMMY_CONFIG
         with (
-            patch("src.tools.self_improve._run") as mock_run,
-            patch("src.tools.self_improve.create_chat_model_from_configs") as mock_llm,
+            patch("cogtrix_core.tools.self_improve._run") as mock_run,
+            patch("cogtrix_core.tools.self_improve.create_chat_model_from_configs") as mock_llm,
         ):
             mock_run.return_value = (0, "[]", "")
             mod.self_improve(target=str(tmp_path))
         mock_llm.assert_not_called()
 
     def test_bandit_nonzero_rc_empty_output_warns(self, tmp_path: Path, monkeypatch):
-        import src.tools.self_improve as mod
+        import cogtrix_core.tools.self_improve as mod
 
         monkeypatch.chdir(tmp_path)
         mod._config = _DUMMY_CONFIG
-        with patch("src.tools.self_improve._run") as mock_run:
+        with patch("cogtrix_core.tools.self_improve._run") as mock_run:
             mock_run.side_effect = lambda cmd, **kw: (
                 (0, "[]", "") if "ruff" in cmd else (127, "", "command not found: bandit")
             )
@@ -237,11 +237,11 @@ class TestDetectPhase:
         assert "command not found" in result
 
     def test_ruff_nonzero_rc_empty_output_warns(self, tmp_path: Path, monkeypatch):
-        import src.tools.self_improve as mod
+        import cogtrix_core.tools.self_improve as mod
 
         monkeypatch.chdir(tmp_path)
         mod._config = _DUMMY_CONFIG
-        with patch("src.tools.self_improve._run") as mock_run:
+        with patch("cogtrix_core.tools.self_improve._run") as mock_run:
             mock_run.side_effect = lambda cmd, **kw: (
                 (127, "", "command not found: ruff") if "ruff" in cmd else (0, '{"results":[]}', "")
             )
@@ -251,11 +251,11 @@ class TestDetectPhase:
         assert "command not found" in result
 
     def test_both_linters_nonzero_rc_warns(self, tmp_path: Path, monkeypatch):
-        import src.tools.self_improve as mod
+        import cogtrix_core.tools.self_improve as mod
 
         monkeypatch.chdir(tmp_path)
         mod._config = _DUMMY_CONFIG
-        with patch("src.tools.self_improve._run") as mock_run:
+        with patch("cogtrix_core.tools.self_improve._run") as mock_run:
             mock_run.side_effect = lambda cmd, **kw: (
                 (127, "", "command not found: ruff") if "ruff" in cmd else (1, "", "bandit crashed")
             )
@@ -264,14 +264,14 @@ class TestDetectPhase:
         assert "bandit exited with code 1" in result
 
     def test_nonzero_rc_with_valid_findings_no_warning(self, tmp_path: Path, monkeypatch):
-        import src.tools.self_improve as mod
+        import cogtrix_core.tools.self_improve as mod
 
         monkeypatch.chdir(tmp_path)
         mod._config = _DUMMY_CONFIG
         ruff_out = _ruff_stdout([_RUFF_ISSUE])
         with (
-            patch("src.tools.self_improve._run") as mock_run,
-            patch("src.tools.self_improve.create_chat_model_from_configs") as mock_llm,
+            patch("cogtrix_core.tools.self_improve._run") as mock_run,
+            patch("cogtrix_core.tools.self_improve.create_chat_model_from_configs") as mock_llm,
         ):
             mock_run.side_effect = lambda cmd, **kw: (
                 (1, ruff_out, "") if "ruff" in cmd else (0, '{"results":[]}', "")
@@ -289,15 +289,15 @@ class TestDetectPhase:
 
 class TestDryRun:
     def test_dry_run_returns_findings_without_patching(self, tmp_path: Path, monkeypatch):
-        import src.tools.self_improve as mod
+        import cogtrix_core.tools.self_improve as mod
 
         monkeypatch.chdir(tmp_path)
         mod._config = _DUMMY_CONFIG
         ruff_out = _ruff_stdout([_RUFF_ISSUE])
 
         with (
-            patch("src.tools.self_improve._run") as mock_run,
-            patch("src.tools.self_improve.create_chat_model_from_configs") as mock_llm,
+            patch("cogtrix_core.tools.self_improve._run") as mock_run,
+            patch("cogtrix_core.tools.self_improve.create_chat_model_from_configs") as mock_llm,
         ):
             mock_run.side_effect = lambda cmd, **kw: (
                 (1, ruff_out, "") if "ruff" in cmd else (0, '{"results":[]}', "")
@@ -309,7 +309,7 @@ class TestDryRun:
         mock_llm.assert_not_called()
 
     def test_dry_run_does_not_write_files(self, tmp_path: Path):
-        import src.tools.self_improve as mod
+        import cogtrix_core.tools.self_improve as mod
 
         mod._config = _DUMMY_CONFIG
         src_file = tmp_path / "src" / "foo.py"
@@ -318,7 +318,7 @@ class TestDryRun:
         ruff_issue = dict(_RUFF_ISSUE, filename=str(src_file))
         ruff_out = _ruff_stdout([ruff_issue])
 
-        with patch("src.tools.self_improve._run") as mock_run:
+        with patch("cogtrix_core.tools.self_improve._run") as mock_run:
             mock_run.side_effect = lambda cmd, **kw: (
                 (1, ruff_out, "") if "ruff" in cmd else (0, '{"results":[]}', "")
             )
@@ -334,7 +334,7 @@ class TestDryRun:
 
 class TestPathSecurity:
     def test_target_traversal_rejected(self):
-        import src.tools.self_improve as mod
+        import cogtrix_core.tools.self_improve as mod
 
         mod._config = _DUMMY_CONFIG
         result = mod.self_improve(target="../etc")
@@ -342,7 +342,7 @@ class TestPathSecurity:
         assert "traversal" in result.lower() or "outside" in result.lower()
 
     def test_absolute_path_outside_cwd_rejected(self):
-        import src.tools.self_improve as mod
+        import cogtrix_core.tools.self_improve as mod
 
         mod._config = _DUMMY_CONFIG
         result = mod.self_improve(target="/etc/passwd")
@@ -356,7 +356,7 @@ class TestPathSecurity:
 
 class TestPatchPhase:
     def test_llm_called_with_file_content_and_issue(self, tmp_path: Path, monkeypatch):
-        import src.tools.self_improve as mod
+        import cogtrix_core.tools.self_improve as mod
 
         monkeypatch.chdir(tmp_path)
         mod._config = _DUMMY_CONFIG
@@ -374,15 +374,18 @@ class TestPatchPhase:
         mock_llm.invoke.return_value = response
 
         with (
-            patch("src.tools.self_improve._run") as mock_run,
-            patch("src.tools.self_improve.create_chat_model_from_configs", return_value=mock_llm),
+            patch("cogtrix_core.tools.self_improve._run") as mock_run,
+            patch(
+                "cogtrix_core.tools.self_improve.create_chat_model_from_configs",
+                return_value=mock_llm,
+            ),
         ):
             mock_run.side_effect = lambda cmd, **kw: (
                 (1, ruff_out, "")
                 if "ruff" in cmd
                 else ((0, '{"results":[]}', "") if "bandit" in cmd else (0, "1 passed", ""))
             )
-            with patch("src.tools.self_improve._safe_patch_target", return_value=True):
+            with patch("cogtrix_core.tools.self_improve._safe_patch_target", return_value=True):
                 mod.self_improve(target=str(tmp_path))
 
         assert mock_llm.invoke.called
@@ -392,7 +395,7 @@ class TestPatchPhase:
         assert "x = 1  # original" in prompt_text
 
     def test_secrets_redacted_in_llm_prompt(self, tmp_path: Path, monkeypatch):
-        import src.tools.self_improve as mod
+        import cogtrix_core.tools.self_improve as mod
 
         monkeypatch.chdir(tmp_path)
         mod._config = _DUMMY_CONFIG
@@ -415,15 +418,18 @@ class TestPatchPhase:
         mock_llm.invoke.return_value = response
 
         with (
-            patch("src.tools.self_improve._run") as mock_run,
-            patch("src.tools.self_improve.create_chat_model_from_configs", return_value=mock_llm),
+            patch("cogtrix_core.tools.self_improve._run") as mock_run,
+            patch(
+                "cogtrix_core.tools.self_improve.create_chat_model_from_configs",
+                return_value=mock_llm,
+            ),
         ):
             mock_run.side_effect = lambda cmd, **kw: (
                 (1, ruff_out, "")
                 if "ruff" in cmd
                 else ((0, '{"results":[]}', "") if "bandit" in cmd else (0, "1 passed", ""))
             )
-            with patch("src.tools.self_improve._safe_patch_target", return_value=True):
+            with patch("cogtrix_core.tools.self_improve._safe_patch_target", return_value=True):
                 mod.self_improve(target=str(tmp_path))
 
         assert mock_llm.invoke.called
@@ -438,7 +444,7 @@ class TestPatchPhase:
         assert "***REDACTED***" in prompt_text or "sk-***" in prompt_text
 
     def test_invalid_python_from_llm_skipped_file_unchanged(self, tmp_path: Path, monkeypatch):
-        import src.tools.self_improve as mod
+        import cogtrix_core.tools.self_improve as mod
 
         monkeypatch.chdir(tmp_path)
         mod._config = _DUMMY_CONFIG
@@ -457,27 +463,30 @@ class TestPatchPhase:
         mock_llm.invoke.return_value = response
 
         with (
-            patch("src.tools.self_improve._run") as mock_run,
-            patch("src.tools.self_improve.create_chat_model_from_configs", return_value=mock_llm),
+            patch("cogtrix_core.tools.self_improve._run") as mock_run,
+            patch(
+                "cogtrix_core.tools.self_improve.create_chat_model_from_configs",
+                return_value=mock_llm,
+            ),
         ):
             mock_run.side_effect = lambda cmd, **kw: (
                 (1, ruff_out, "") if "ruff" in cmd else (0, '{"results":[]}', "")
             )
-            with patch("src.tools.self_improve._safe_patch_target", return_value=True):
+            with patch("cogtrix_core.tools.self_improve._safe_patch_target", return_value=True):
                 result = mod.self_improve(target=str(tmp_path))
 
         assert src_file.read_text(encoding="utf-8") == original
         assert "Skipped" in result or "skipped" in result.lower()
 
     def test_max_fixes_cap_respected(self, tmp_path: Path):
-        import src.tools.self_improve as mod
+        import cogtrix_core.tools.self_improve as mod
 
         mod._config = _DUMMY_CONFIG
 
         # 5 ruff issues, but max_fixes=2
         issues = [
             {
-                "filename": f"src/f{i}.py",
+                "filename": f"cogtrix_core/f{i}.py",
                 "location": {"row": i + 1, "column": 1},
                 "code": "E501",
                 "message": "too long",
@@ -492,9 +501,12 @@ class TestPatchPhase:
         mock_llm.invoke.return_value = response
 
         with (
-            patch("src.tools.self_improve._run") as mock_run,
-            patch("src.tools.self_improve.create_chat_model_from_configs", return_value=mock_llm),
-            patch("src.tools.self_improve._safe_patch_target", return_value=True),
+            patch("cogtrix_core.tools.self_improve._run") as mock_run,
+            patch(
+                "cogtrix_core.tools.self_improve.create_chat_model_from_configs",
+                return_value=mock_llm,
+            ),
+            patch("cogtrix_core.tools.self_improve._safe_patch_target", return_value=True),
             patch("pathlib.Path.read_text", return_value=_VALID_PYTHON),
             patch("pathlib.Path.write_text"),
         ):
@@ -523,7 +535,7 @@ class TestVerifyPhase:
         return src_file, original
 
     def test_pytest_passes_fix_retained(self, tmp_path: Path, monkeypatch):
-        import src.tools.self_improve as mod
+        import cogtrix_core.tools.self_improve as mod
 
         monkeypatch.chdir(tmp_path)
         mod._config = _DUMMY_CONFIG
@@ -543,9 +555,12 @@ class TestVerifyPhase:
         mock_llm.invoke.return_value = response
 
         with (
-            patch("src.tools.self_improve._run") as mock_run,
-            patch("src.tools.self_improve.create_chat_model_from_configs", return_value=mock_llm),
-            patch("src.tools.self_improve._safe_patch_target", return_value=True),
+            patch("cogtrix_core.tools.self_improve._run") as mock_run,
+            patch(
+                "cogtrix_core.tools.self_improve.create_chat_model_from_configs",
+                return_value=mock_llm,
+            ),
+            patch("cogtrix_core.tools.self_improve._safe_patch_target", return_value=True),
         ):
             mock_run.side_effect = lambda cmd, **kw: (
                 (1, _ruff_stdout([ruff_issue]), "")
@@ -559,7 +574,7 @@ class TestVerifyPhase:
         assert "Patched:  1" in result
 
     def test_pytest_fails_file_reverted(self, tmp_path: Path, monkeypatch):
-        import src.tools.self_improve as mod
+        import cogtrix_core.tools.self_improve as mod
 
         monkeypatch.chdir(tmp_path)
         mod._config = _DUMMY_CONFIG
@@ -578,9 +593,12 @@ class TestVerifyPhase:
         mock_llm.invoke.return_value = response
 
         with (
-            patch("src.tools.self_improve._run") as mock_run,
-            patch("src.tools.self_improve.create_chat_model_from_configs", return_value=mock_llm),
-            patch("src.tools.self_improve._safe_patch_target", return_value=True),
+            patch("cogtrix_core.tools.self_improve._run") as mock_run,
+            patch(
+                "cogtrix_core.tools.self_improve.create_chat_model_from_configs",
+                return_value=mock_llm,
+            ),
+            patch("cogtrix_core.tools.self_improve._safe_patch_target", return_value=True),
         ):
             mock_run.side_effect = lambda cmd, **kw: (
                 (1, _ruff_stdout([ruff_issue]), "")
@@ -612,7 +630,7 @@ class TestCommitPhase:
         return src_file, issue
 
     def test_auto_commit_false_no_git_commands(self, tmp_path: Path, monkeypatch):
-        import src.tools.self_improve as mod
+        import cogtrix_core.tools.self_improve as mod
 
         monkeypatch.chdir(tmp_path)
         mod._config = _DUMMY_CONFIG
@@ -638,16 +656,19 @@ class TestCommitPhase:
             return (0, "", "")
 
         with (
-            patch("src.tools.self_improve._run", side_effect=_side_effect),
-            patch("src.tools.self_improve.create_chat_model_from_configs", return_value=mock_llm),
-            patch("src.tools.self_improve._safe_patch_target", return_value=True),
+            patch("cogtrix_core.tools.self_improve._run", side_effect=_side_effect),
+            patch(
+                "cogtrix_core.tools.self_improve.create_chat_model_from_configs",
+                return_value=mock_llm,
+            ),
+            patch("cogtrix_core.tools.self_improve._safe_patch_target", return_value=True),
         ):
             mod.self_improve(target=str(tmp_path), auto_commit=False)
 
         assert git_calls == [], f"Expected no git calls but got: {git_calls}"
 
     def test_auto_commit_true_runs_git_add_and_commit(self, tmp_path: Path, monkeypatch):
-        import src.tools.self_improve as mod
+        import cogtrix_core.tools.self_improve as mod
 
         monkeypatch.chdir(tmp_path)
         mod._config = _DUMMY_CONFIG
@@ -673,9 +694,12 @@ class TestCommitPhase:
             return (0, "", "")
 
         with (
-            patch("src.tools.self_improve._run", side_effect=_side_effect),
-            patch("src.tools.self_improve.create_chat_model_from_configs", return_value=mock_llm),
-            patch("src.tools.self_improve._safe_patch_target", return_value=True),
+            patch("cogtrix_core.tools.self_improve._run", side_effect=_side_effect),
+            patch(
+                "cogtrix_core.tools.self_improve.create_chat_model_from_configs",
+                return_value=mock_llm,
+            ),
+            patch("cogtrix_core.tools.self_improve._safe_patch_target", return_value=True),
         ):
             result = mod.self_improve(target=str(tmp_path), auto_commit=True)
 
@@ -693,18 +717,18 @@ class TestCommitPhase:
 
 class TestToolRegistry:
     def test_tool_configs_requires_confirmation_true(self):
-        from src.tools.self_improve import TOOL_CONFIGS
+        from cogtrix_core.tools.self_improve import TOOL_CONFIGS
 
         cfg = TOOL_CONFIGS[0]
         assert cfg["requires_confirmation"] is True
 
     def test_tool_configs_name(self):
-        from src.tools.self_improve import TOOL_CONFIGS
+        from cogtrix_core.tools.self_improve import TOOL_CONFIGS
 
         assert TOOL_CONFIGS[0]["name"] == "self_improve"
 
     def test_tool_setup_sets_config(self):
-        import src.tools.self_improve as mod
+        import cogtrix_core.tools.self_improve as mod
 
         original = mod._config
         try:
@@ -716,7 +740,7 @@ class TestToolRegistry:
             mod._config = original
 
     def test_is_configured_false_when_no_config(self):
-        import src.tools.self_improve as mod
+        import cogtrix_core.tools.self_improve as mod
 
         original = mod._config
         try:
@@ -726,7 +750,7 @@ class TestToolRegistry:
             mod._config = original
 
     def test_self_improve_returns_error_when_not_configured(self):
-        import src.tools.self_improve as mod
+        import cogtrix_core.tools.self_improve as mod
 
         original = mod._config
         try:
@@ -745,7 +769,7 @@ class TestToolRegistry:
 
 class TestPatchTimeout:
     def test_llm_invoke_timeout_skips_finding(self, tmp_path: Path, monkeypatch):
-        import src.tools.self_improve as mod
+        import cogtrix_core.tools.self_improve as mod
 
         monkeypatch.chdir(tmp_path)
         mod._config = _DUMMY_CONFIG
@@ -766,13 +790,13 @@ class TestPatchTimeout:
         mock_llm.invoke.side_effect = _never_return
 
         with (
-            patch("src.tools.self_improve._run") as mock_run,
+            patch("cogtrix_core.tools.self_improve._run") as mock_run,
             patch(
-                "src.tools.self_improve.create_chat_model_from_configs",
+                "cogtrix_core.tools.self_improve.create_chat_model_from_configs",
                 return_value=mock_llm,
             ),
-            patch("src.tools.self_improve._safe_patch_target", return_value=True),
-            patch("src.tools.self_improve._SELF_IMPROVE_LLM_TIMEOUT_SECONDS", 0.1),
+            patch("cogtrix_core.tools.self_improve._safe_patch_target", return_value=True),
+            patch("cogtrix_core.tools.self_improve._SELF_IMPROVE_LLM_TIMEOUT_SECONDS", 0.1),
         ):
             mock_run.side_effect = lambda cmd, **kw: (
                 (1, ruff_out, "")
@@ -789,7 +813,7 @@ class TestPatchTimeout:
         assert "timed out" in result.lower() or "timeout" in result.lower()
 
     def test_hung_thread_returns_within_guard_timeout(self, tmp_path: Path, monkeypatch):
-        import src.tools.self_improve as mod
+        import cogtrix_core.tools.self_improve as mod
 
         monkeypatch.chdir(tmp_path)
         mod._config = _DUMMY_CONFIG
@@ -806,13 +830,13 @@ class TestPatchTimeout:
         mock_llm.invoke.side_effect = lambda *_a, **_kw: stop_event.wait(timeout=60)
 
         with (
-            patch("src.tools.self_improve._run") as mock_run,
+            patch("cogtrix_core.tools.self_improve._run") as mock_run,
             patch(
-                "src.tools.self_improve.create_chat_model_from_configs",
+                "cogtrix_core.tools.self_improve.create_chat_model_from_configs",
                 return_value=mock_llm,
             ),
-            patch("src.tools.self_improve._safe_patch_target", return_value=True),
-            patch("src.tools.self_improve._SELF_IMPROVE_LLM_TIMEOUT_SECONDS", 0.1),
+            patch("cogtrix_core.tools.self_improve._safe_patch_target", return_value=True),
+            patch("cogtrix_core.tools.self_improve._SELF_IMPROVE_LLM_TIMEOUT_SECONDS", 0.1),
         ):
             mock_run.side_effect = lambda cmd, **kw: (
                 (1, ruff_out, "")
@@ -835,13 +859,13 @@ class TestPatchTimeout:
 
 class TestConfigField:
     def test_self_improve_auto_commit_default_is_false(self):
-        from src.config import Config
+        from cogtrix_core.config import Config
 
         cfg = Config()
         assert cfg.self_improve_auto_commit is False
 
     def test_self_improve_auto_commit_can_be_set_true(self):
-        from src.config import Config
+        from cogtrix_core.config import Config
 
         cfg = Config(self_improve_auto_commit=True)
         assert cfg.self_improve_auto_commit is True

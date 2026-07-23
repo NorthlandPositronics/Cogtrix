@@ -21,21 +21,21 @@ import pytest
 
 
 def test_set_verbosity_clamps_to_zero():
-    from src.logging_config import get_verbosity, set_verbosity
+    from cogtrix_core.logging_config import get_verbosity, set_verbosity
 
     set_verbosity(-5)
     assert get_verbosity() == 0
 
 
 def test_set_verbosity_clamps_to_three():
-    from src.logging_config import get_verbosity, set_verbosity
+    from cogtrix_core.logging_config import get_verbosity, set_verbosity
 
     set_verbosity(99)
     assert get_verbosity() == 3
 
 
 def test_set_verbosity_valid_range():
-    from src.logging_config import get_verbosity, set_verbosity
+    from cogtrix_core.logging_config import get_verbosity, set_verbosity
 
     for level in range(4):
         set_verbosity(level)
@@ -43,7 +43,7 @@ def test_set_verbosity_valid_range():
 
 
 def test_is_verbose_false_below_two():
-    from src.logging_config import is_verbose, set_verbosity
+    from cogtrix_core.logging_config import is_verbose, set_verbosity
 
     for level in (0, 1):
         set_verbosity(level)
@@ -51,7 +51,7 @@ def test_is_verbose_false_below_two():
 
 
 def test_is_verbose_true_at_two_and_three():
-    from src.logging_config import is_verbose, set_verbosity
+    from cogtrix_core.logging_config import is_verbose, set_verbosity
 
     for level in (2, 3):
         set_verbosity(level)
@@ -59,7 +59,7 @@ def test_is_verbose_true_at_two_and_three():
 
 
 def test_is_trace_false_below_three():
-    from src.logging_config import is_trace, set_verbosity
+    from cogtrix_core.logging_config import is_trace, set_verbosity
 
     for level in (0, 1, 2):
         set_verbosity(level)
@@ -67,7 +67,7 @@ def test_is_trace_false_below_three():
 
 
 def test_is_trace_true_at_three():
-    from src.logging_config import is_trace, set_verbosity
+    from cogtrix_core.logging_config import is_trace, set_verbosity
 
     set_verbosity(3)
     assert is_trace()
@@ -83,8 +83,8 @@ def _make_config_from_dict(data: dict):  # type: ignore[return]
     import tempfile
     from pathlib import Path
 
-    from src.config import Config
-    from src.config import _apply_config_file as _acf  # noqa: PLC0415
+    from cogtrix_core.config import Config
+    from cogtrix_core.config import _apply_config_file as _acf  # noqa: PLC0415
 
     # Write a temp JSON config so _apply_config_file can parse it
     with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as fh:
@@ -169,7 +169,7 @@ def _args(**kwargs):
 
 
 def test_apply_cli_args_verbosity_zero():
-    from src.config import Config, _apply_cli_args
+    from cogtrix_core.config import Config, _apply_cli_args
 
     cfg = Config()
     _apply_cli_args(cfg, _args(verbosity=0))
@@ -178,7 +178,7 @@ def test_apply_cli_args_verbosity_zero():
 
 
 def test_apply_cli_args_verbosity_one():
-    from src.config import Config, _apply_cli_args
+    from cogtrix_core.config import Config, _apply_cli_args
 
     cfg = Config()
     _apply_cli_args(cfg, _args(verbosity=1))
@@ -187,7 +187,7 @@ def test_apply_cli_args_verbosity_one():
 
 
 def test_apply_cli_args_verbosity_two_enables_verbose():
-    from src.config import Config, _apply_cli_args
+    from cogtrix_core.config import Config, _apply_cli_args
 
     cfg = Config()
     _apply_cli_args(cfg, _args(verbosity=2))
@@ -198,7 +198,7 @@ def test_apply_cli_args_verbosity_two_enables_verbose():
 
 def test_apply_cli_args_debug_flag_sets_verbosity_two():
     """--debug flag sets verbosity 2 (full debug + verbose output)."""
-    from src.config import Config, _apply_cli_args
+    from cogtrix_core.config import Config, _apply_cli_args
 
     cfg = Config()
     _apply_cli_args(cfg, _args(debug=True, verbosity=None))
@@ -209,7 +209,7 @@ def test_apply_cli_args_debug_flag_sets_verbosity_two():
 
 def test_apply_cli_args_verbosity_takes_precedence_over_debug_flag():
     """--verbosity N beats --debug when both are provided."""
-    from src.config import Config, _apply_cli_args
+    from cogtrix_core.config import Config, _apply_cli_args
 
     cfg = Config()
     _apply_cli_args(cfg, _args(debug=True, verbosity=3))
@@ -219,7 +219,7 @@ def test_apply_cli_args_verbosity_takes_precedence_over_debug_flag():
 
 
 def test_apply_cli_args_no_verbosity_flag_leaves_config_unchanged():
-    from src.config import Config, _apply_cli_args
+    from cogtrix_core.config import Config, _apply_cli_args
 
     cfg = Config()
     cfg.verbosity = 2
@@ -229,7 +229,7 @@ def test_apply_cli_args_no_verbosity_flag_leaves_config_unchanged():
 
 def test_apply_cli_args_verbosity_one_autoenables_log():
     """--verbosity 1 turns on file logging (sets log_file to '' if None)."""
-    from src.config import Config, _apply_cli_args
+    from cogtrix_core.config import Config, _apply_cli_args
 
     cfg = Config()
     assert cfg.log_file is None
@@ -245,7 +245,7 @@ def test_apply_cli_args_verbosity_one_autoenables_log():
 def test_system_info_out_has_verbosity_field():
     from datetime import UTC, datetime
 
-    from src.api.schemas.system import SystemInfoOut
+    from cogtrix_core.api.schemas.system import SystemInfoOut
 
     info = SystemInfoOut(
         version="0.1.0",
@@ -266,7 +266,7 @@ def test_system_info_out_verbosity_range():
 
     import pydantic
 
-    from src.api.schemas.system import SystemInfoOut
+    from cogtrix_core.api.schemas.system import SystemInfoOut
 
     now = datetime.now(UTC)
     # Valid values
@@ -305,7 +305,7 @@ def test_system_info_out_verbosity_range():
 
 
 def test_debug_toggle_request_verbosity_field():
-    from src.api.schemas.system import DebugToggleRequest
+    from cogtrix_core.api.schemas.system import DebugToggleRequest
 
     req = DebugToggleRequest(verbosity=2)
     assert req.verbosity == 2
@@ -314,7 +314,7 @@ def test_debug_toggle_request_verbosity_field():
 
 
 def test_debug_toggle_request_verbosity_none_by_default():
-    from src.api.schemas.system import DebugToggleRequest
+    from cogtrix_core.api.schemas.system import DebugToggleRequest
 
     req = DebugToggleRequest()
     assert req.verbosity is None
@@ -323,7 +323,7 @@ def test_debug_toggle_request_verbosity_none_by_default():
 def test_debug_toggle_request_verbosity_out_of_range_rejected():
     import pydantic
 
-    from src.api.schemas.system import DebugToggleRequest
+    from cogtrix_core.api.schemas.system import DebugToggleRequest
 
     with pytest.raises(pydantic.ValidationError):
         DebugToggleRequest(verbosity=5)
@@ -348,15 +348,15 @@ def test_toggle_debug_verbosity_field_takes_effect():
     """POST /system/debug with verbosity=2 calls set_verbosity(2)."""
     import asyncio
 
-    from src.api.routes.system import toggle_debug
-    from src.api.schemas.system import DebugToggleRequest
+    from cogtrix_core.api.routes.system import toggle_debug
+    from cogtrix_core.api.schemas.system import DebugToggleRequest
 
     request = _make_mock_request()
     body = DebugToggleRequest(verbosity=2)
 
     with (
-        patch("src.api.routes.system.set_verbosity") as mock_sv,
-        patch("src.api.routes.system._make_system_info") as mock_si,
+        patch("cogtrix_core.api.routes.system.set_verbosity") as mock_sv,
+        patch("cogtrix_core.api.routes.system._make_system_info") as mock_si,
     ):
         mock_si.return_value = MagicMock()
         asyncio.run(toggle_debug(request=request, current_user=MagicMock(), body=body))
@@ -367,15 +367,15 @@ def test_toggle_debug_legacy_toggle_calls_set_verbosity():
     """POST /system/debug without verbosity — toggles debug flag and calls set_verbosity."""
     import asyncio
 
-    from src.api.routes.system import toggle_debug
-    from src.api.schemas.system import DebugToggleRequest
+    from cogtrix_core.api.routes.system import toggle_debug
+    from cogtrix_core.api.schemas.system import DebugToggleRequest
 
     request = _make_mock_request(debug=False)
     body = DebugToggleRequest()  # no verbosity, no debug
 
     with (
-        patch("src.api.routes.system.set_verbosity") as mock_sv,
-        patch("src.api.routes.system._make_system_info") as mock_si,
+        patch("cogtrix_core.api.routes.system.set_verbosity") as mock_sv,
+        patch("cogtrix_core.api.routes.system._make_system_info") as mock_si,
     ):
         mock_si.return_value = MagicMock()
         asyncio.run(toggle_debug(request=request, current_user=MagicMock(), body=body))
@@ -387,15 +387,15 @@ def test_toggle_debug_verbosity_zero_turns_off():
     """POST /system/debug with verbosity=0 disables debug and calls set_verbosity(0)."""
     import asyncio
 
-    from src.api.routes.system import toggle_debug
-    from src.api.schemas.system import DebugToggleRequest
+    from cogtrix_core.api.routes.system import toggle_debug
+    from cogtrix_core.api.schemas.system import DebugToggleRequest
 
     request = _make_mock_request(debug=True, verbosity=1)
     body = DebugToggleRequest(verbosity=0)
 
     with (
-        patch("src.api.routes.system.set_verbosity") as mock_sv,
-        patch("src.api.routes.system._make_system_info") as mock_si,
+        patch("cogtrix_core.api.routes.system.set_verbosity") as mock_sv,
+        patch("cogtrix_core.api.routes.system._make_system_info") as mock_si,
     ):
         mock_si.return_value = MagicMock()
         asyncio.run(toggle_debug(request=request, current_user=MagicMock(), body=body))

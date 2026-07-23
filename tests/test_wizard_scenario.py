@@ -35,7 +35,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import yaml
 
-from src.setup_wizard import run_setup_wizard
+from cogtrix_core.setup_wizard import run_setup_wizard
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -106,12 +106,12 @@ def _scenario(
 
     patches = [
         patch("builtins.input", side_effect=iter(answers)),
-        patch("src.setup_wizard._test_connection", new=test_conn),
-        patch("src.setup_wizard._detect_environment", return_value=env or {}),
-        patch("src.setup_wizard._load_existing_config", return_value=existing),
-        patch("src.setup_wizard._list_ollama_models", return_value=models or []),
-        patch("src.setup_wizard._load_docs", return_value="docs content"),
-        patch("src.config._apply_config_file"),
+        patch("cogtrix_core.setup_wizard._test_connection", new=test_conn),
+        patch("cogtrix_core.setup_wizard._detect_environment", return_value=env or {}),
+        patch("cogtrix_core.setup_wizard._load_existing_config", return_value=existing),
+        patch("cogtrix_core.setup_wizard._list_ollama_models", return_value=models or []),
+        patch("cogtrix_core.setup_wizard._load_docs", return_value="docs content"),
+        patch("cogtrix_core.config._apply_config_file"),
         *extra,
     ]
     with ExitStack() as stack:
@@ -237,7 +237,9 @@ class TestWizardScenario:
         with _scenario(
             answers,
             llm=llm,
-            extra=[patch("src.setup_wizard._read_masked_input", return_value="sk-ant-test")],
+            extra=[
+                patch("cogtrix_core.setup_wizard._read_masked_input", return_value="sk-ant-test")
+            ],
         ):
             run_setup_wizard(output_path=out)
 

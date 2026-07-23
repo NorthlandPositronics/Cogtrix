@@ -6,9 +6,9 @@ from pathlib import Path
 
 import pytest
 
-import src.tasks.goal_tracker as _goal_mod
-import src.tasks.queue as _queue_mod
-from src.tasks.queue import init_task_queue
+import cogtrix_core.tasks.goal_tracker as _goal_mod
+import cogtrix_core.tasks.queue as _queue_mod
+from cogtrix_core.tasks.queue import init_task_queue
 
 # ---------------------------------------------------------------------------
 # Helpers / fixtures
@@ -33,7 +33,7 @@ def _reset_goal_cache():
 
 def _make_registry(config=None):
     """Return a SlashCommandRegistry built by _build_slash_commands, with optional config."""
-    from src.cli.commands import _build_slash_commands
+    from cogtrix_core.cli.commands import _build_slash_commands
 
     reg = _build_slash_commands()
     reg.config = config
@@ -60,7 +60,7 @@ def _captured(capsys) -> str:
 
 class TestModeText:
     def test_reasoning_window_docs_match_code(self):
-        source = Path(__file__).resolve().parents[1] / "src" / "cli" / "commands.py"
+        source = Path(__file__).resolve().parents[1] / "cogtrix_core" / "cli" / "commands.py"
         text = source.read_text(encoding="utf-8")
         assert '"reasoning": 30' in text
         assert "(30 msgs)" in text
@@ -226,7 +226,7 @@ class TestGoal:
     def test_goal_set_creates_goal(self, cfg):
         reg = _make_registry(config=cfg)
         _dispatch(reg, "/goal set Migrate the auth module")
-        from src.tasks.goal_tracker import get_goal_stack
+        from cogtrix_core.tasks.goal_tracker import get_goal_stack
 
         stack = get_goal_stack(cfg.session, cfg.data_dir)
         goals = stack.list_active()
@@ -248,7 +248,7 @@ class TestGoal:
     def test_goal_complete_marks_complete(self, cfg):
         reg = _make_registry(config=cfg)
         _dispatch(reg, "/goal set Complete this")
-        from src.tasks.goal_tracker import GoalStatus, get_goal_stack
+        from cogtrix_core.tasks.goal_tracker import GoalStatus, get_goal_stack
 
         stack = get_goal_stack(cfg.session, cfg.data_dir)
         goal_id = stack.list_active()[0].goal_id
@@ -273,7 +273,7 @@ class TestGoal:
     def test_goal_abandon_marks_abandoned(self, cfg):
         reg = _make_registry(config=cfg)
         _dispatch(reg, "/goal set Abandon this goal")
-        from src.tasks.goal_tracker import GoalStatus, get_goal_stack
+        from cogtrix_core.tasks.goal_tracker import GoalStatus, get_goal_stack
 
         stack = get_goal_stack(cfg.session, cfg.data_dir)
         goal_id = stack.list_active()[0].goal_id
@@ -332,7 +332,7 @@ class TestSetRunner:
         import threading
         import time
 
-        from src.tasks.queue import TaskQueue, TaskStatus
+        from cogtrix_core.tasks.queue import TaskQueue, TaskStatus
 
         called_with: list = []
         done = threading.Event()
@@ -368,7 +368,7 @@ class TestSetRunner:
         """Without a runner the stub message is returned."""
         import time
 
-        from src.tasks.queue import TaskQueue, TaskStatus
+        from cogtrix_core.tasks.queue import TaskQueue, TaskStatus
 
         q = TaskQueue(tmp_path / "db.db", tmp_path / "logs")
         q.start()
@@ -389,7 +389,7 @@ class TestSetRunner:
         """If the runner raises, the task is marked FAILED with the error message."""
         import time
 
-        from src.tasks.queue import TaskQueue, TaskStatus
+        from cogtrix_core.tasks.queue import TaskQueue, TaskStatus
 
         def _bad_runner(record):
             raise ValueError("something went wrong")

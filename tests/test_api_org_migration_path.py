@@ -20,8 +20,8 @@ import pytest
 
 pytest.importorskip("fastapi")
 
-from src.api.db.repositories.organization import OrganizationRepository  # noqa: E402
-from src.api.db.repositories.users import UserRepository  # noqa: E402
+from cogtrix_core.api.db.repositories.organization import OrganizationRepository  # noqa: E402
+from cogtrix_core.api.db.repositories.users import UserRepository  # noqa: E402
 
 _PROJECT_ROOT = pathlib.Path(__file__).parent.parent
 

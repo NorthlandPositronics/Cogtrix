@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from src.orchestration.reflection_delegate import (
+from cogtrix_core.orchestration.reflection_delegate import (
     CounterPlanEvaluator,
     PlanGenerator,
     PlanSnapshot,
@@ -511,19 +511,19 @@ class TestFilterNonFlawsHardened:
     def test_genuine_flaw_containing_plan_is_sound_not_dropped(self):
         """'Plan is sound only for trivial inputs' contains 'plan is sound' as substring
         but is a real flaw — must not be dropped."""
-        from src.orchestration.reflection_delegate import _filter_non_flaws
+        from cogtrix_core.orchestration.reflection_delegate import _filter_non_flaws
 
         flaws = ["Plan is sound only for trivial inputs — fails on edge cases"]
         assert _filter_non_flaws(flaws) == flaws
 
     def test_pure_no_flaws_declaration_is_dropped(self):
-        from src.orchestration.reflection_delegate import _filter_non_flaws
+        from cogtrix_core.orchestration.reflection_delegate import _filter_non_flaws
 
         flaws = ["No critical flaws identified"]
         assert _filter_non_flaws(flaws) == []
 
     def test_mixed_list(self):
-        from src.orchestration.reflection_delegate import _filter_non_flaws
+        from cogtrix_core.orchestration.reflection_delegate import _filter_non_flaws
 
         flaws = ["No critical flaws identified", "Missing rollback path", "No major flaws"]
         assert _filter_non_flaws(flaws) == ["Missing rollback path"]

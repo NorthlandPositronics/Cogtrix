@@ -1,0 +1,27 @@
+id: role_sa_06_backup_timer
+area: ops
+title: Create a nightly backup via a systemd service + timer
+
+description: |
+  Operations competency with systemd units: a scheduled backup expressed as a
+  service + timer pair (the modern cron alternative). The check confirms the timer
+  is installed + enabled and that triggering the service actually produces a backup
+  artifact — i.e. the unit really works, not just that files exist.
+
+assignment: |
+  Please set up a nightly configuration backup on this server using systemd:
+    - a service unit named "etc-backup.service" that creates a compressed tar
+      archive of /etc into /var/backups/ (e.g. /var/backups/etc-<date>.tar.gz);
+    - a timer unit named "etc-backup.timer" that runs it daily and is enabled.
+  Make sure starting the service actually produces an archive. Tell me when it's
+  done and how you verified it.
+
+acceptance:
+  check: checks/sa_06_check.sh
+
+personas:
+  lead:
+    default_scope_answer: "A daily timer is fine; /var/backups is the right place for the archives."
+    scope_answers:
+      retention: "Don't worry about pruning old backups for now; just produce the archive."
+      time: "Any time overnight is fine for the daily run."

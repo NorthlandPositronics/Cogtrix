@@ -23,12 +23,12 @@ from fastapi.testclient import TestClient  # noqa: E402
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine  # noqa: E402
 from sqlalchemy.pool import StaticPool  # noqa: E402
 
-from src.api.db.engine import Base, get_db  # noqa: E402
+from cogtrix_core.api.db.engine import Base, get_db  # noqa: E402
 
 
 @pytest.fixture()
 def app():
-    from src.api.app import create_app
+    from cogtrix_core.api.app import create_app
 
     engine = create_async_engine(
         "sqlite+aiosqlite:///:memory:",
@@ -163,7 +163,7 @@ class TestReadiness:
         """When database is unreachable, readiness should return 503."""
         from unittest.mock import patch
 
-        import src.api.routes.health as health_mod
+        import cogtrix_core.api.routes.health as health_mod
 
         with patch.object(health_mod, "engine", None, create=True):
             r = client.get("/api/v1/health/ready")
@@ -246,7 +246,7 @@ class TestReadinessFull:
     def test_ready_full_db_ok_tool_registry_initialized(self, client, app):
         """When tool registry is initialized, ready-full should return 200."""
         # Simulate tool registry initialization
-        from src.registry import ToolRegistry
+        from cogtrix_core.registry import ToolRegistry
 
         app.state.tool_registry = ToolRegistry()
 
@@ -275,7 +275,7 @@ class TestReadinessFull:
         )
         engine_mock.connect.return_value.__aexit__ = AsyncMock(return_value=False)
 
-        with patch("src.api.db.engine._get_engine", return_value=engine_mock):
+        with patch("cogtrix_core.api.db.engine._get_engine", return_value=engine_mock):
             r = client.get("/api/v1/health/ready-full")
             assert r.status_code == 503
 

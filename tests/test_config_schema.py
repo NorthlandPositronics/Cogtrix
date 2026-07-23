@@ -8,7 +8,7 @@ import tempfile
 import pytest
 import yaml
 
-from src.config_schema import (
+from cogtrix_core.config_schema import (
     ModelConfig,
     ModelRegistry,
     Turn,

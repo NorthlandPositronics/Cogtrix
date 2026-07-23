@@ -1,4 +1,4 @@
-"""Regression tests for session tool-loading paths in src/api/routes/sessions.py.
+"""Regression tests for session tool-loading paths in cogtrix_core/api/routes/sessions.py.
 
 These tests verify that tools loaded via the `initial_tools` and `auto_approve_tools`
 fields in `POST /sessions` respect the same trust and safety guarantees as tools
@@ -440,7 +440,7 @@ class TestSessionToolLoadingSafetyWrapper:
 
         initial_tools = ["shell"]
 
-        with patch("src.agent.safety.create_safe_tool_wrapper") as mock_wrap:
+        with patch("cogtrix_core.agent.safety.create_safe_tool_wrapper") as mock_wrap:
             # Return the original tool unchanged so the test can verify the call
             mock_wrap.side_effect = lambda tool, name, reg, approvals, **kw: tool
             async with live.turn_lock:
@@ -456,7 +456,7 @@ class TestSessionToolLoadingSafetyWrapper:
                         atl = getattr(rc, "active_tools_list", None)
                         if atl is not None:
                             if tool_reg.requires_confirmation(name):
-                                from src.agent.safety import create_safe_tool_wrapper
+                                from cogtrix_core.agent.safety import create_safe_tool_wrapper
 
                                 tool_obj = create_safe_tool_wrapper(
                                     tool_obj,
@@ -496,7 +496,7 @@ class TestSessionToolLoadingSafetyWrapper:
 
         initial_tools = ["http_get"]
 
-        with patch("src.agent.safety.create_safe_tool_wrapper") as mock_wrap:
+        with patch("cogtrix_core.agent.safety.create_safe_tool_wrapper") as mock_wrap:
             async with live.turn_lock:
                 for name in initial_tools:
                     if ss.is_denied(name):
@@ -510,7 +510,7 @@ class TestSessionToolLoadingSafetyWrapper:
                         atl = getattr(rc, "active_tools_list", None)
                         if atl is not None:
                             if tool_reg.requires_confirmation(name):
-                                from src.agent.safety import create_safe_tool_wrapper
+                                from cogtrix_core.agent.safety import create_safe_tool_wrapper
 
                                 tool_obj = create_safe_tool_wrapper(
                                     tool_obj,

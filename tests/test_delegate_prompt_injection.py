@@ -10,7 +10,7 @@ Covers regression gaps identified in issue #745:
 import threading
 from unittest.mock import MagicMock, patch
 
-from src.tools.delegate import (
+from cogtrix_core.tools.delegate import (
     DelegateResult,
     _build_prompt,
     configure_delegate,
@@ -165,7 +165,7 @@ class TestPromptInjection:
 
     # ── integration-level: delegate_task with mock LLM ────────────
 
-    @patch("src.tools.delegate.create_delegate_llm")
+    @patch("cogtrix_core.tools.delegate.create_delegate_llm")
     def test_injection_task_reaches_llm(self, mock_create_llm):
         """A task containing injection instructions is forwarded to the LLM."""
         mock_llm = MagicMock()
@@ -189,7 +189,7 @@ class TestPromptInjection:
         # The LLM was invoked, showing the injection payload passed through.
         mock_llm.invoke.assert_called()
 
-    @patch("src.tools.delegate.create_delegate_llm")
+    @patch("cogtrix_core.tools.delegate.create_delegate_llm")
     def test_system_prompt_leak_attempt_reaches_llm(self, mock_create_llm):
         """Asking the delegate to output its system prompt reaches the LLM."""
         mock_llm = MagicMock()
@@ -333,11 +333,11 @@ class TestDelegateParallelEdgeCases:
             }
         )
 
-    @patch("src.tools.delegate._emit_status")
-    @patch("src.tools.delegate.time")
+    @patch("cogtrix_core.tools.delegate._emit_status")
+    @patch("cogtrix_core.tools.delegate.time")
     def test_parallel_with_more_than_ten_tasks(self, mock_time, mock_emit_status):
         """>10 tasks should still execute (max_workers capped at 10)."""
-        from src.tools import delegate as delegate_mod
+        from cogtrix_core.tools import delegate as delegate_mod
 
         mock_time.time.return_value = 1000.0
 
@@ -383,11 +383,11 @@ class TestDelegateParallelEdgeCases:
         assert recorded_max_workers[0] == 10
         assert "Parallel Delegation:** 15 tasks" in result
 
-    @patch("src.tools.delegate._emit_status")
-    @patch("src.tools.delegate.time")
+    @patch("cogtrix_core.tools.delegate._emit_status")
+    @patch("cogtrix_core.tools.delegate.time")
     def test_parallel_all_tasks_fail(self, mock_time, mock_emit_status):
         """When every task fails, the output reports 0/N successful."""
-        from src.tools import delegate as delegate_mod
+        from cogtrix_core.tools import delegate as delegate_mod
 
         mock_time.time.return_value = 1000.0
 
@@ -412,10 +412,10 @@ class TestDelegateParallelEdgeCases:
         for i in range(3):
             assert f"Task {i + 1}" in result
 
-    @patch("src.tools.delegate._emit_status")
+    @patch("cogtrix_core.tools.delegate._emit_status")
     def test_parallel_thread_local_tools_isolation(self, mock_emit_status):
         """Concurrent delegate_parallel calls use thread-local tool sets."""
-        from src.tools import delegate as delegate_mod
+        from cogtrix_core.tools import delegate as delegate_mod
 
         tool_a = MagicMock()
         tool_a.name = "read_file"

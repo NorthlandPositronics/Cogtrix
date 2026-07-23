@@ -1,10 +1,10 @@
-"""Tests for src/tools/slack_tools.py"""
+"""Tests for cogtrix_core/tools/slack_tools.py"""
 
 from __future__ import annotations
 
 import pytest
 
-from src.tools import slack_tools as st
+from cogtrix_core.tools import slack_tools as st
 
 
 class TestMarkdownToSlackConverter:

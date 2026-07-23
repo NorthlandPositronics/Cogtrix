@@ -20,8 +20,8 @@ from unittest.mock import MagicMock, patch
 
 from langchain_core.messages import AIMessage
 
-from src.orchestration.run_config import AgentRunConfig
-from src.orchestration.runner import run_agent
+from cogtrix_core.orchestration.run_config import AgentRunConfig
+from cogtrix_core.orchestration.runner import run_agent
 
 
 def _make_mock_llm(responses: list[AIMessage]) -> MagicMock:
@@ -73,7 +73,7 @@ class TestExtendRunOnNormalCompletion:
 
     def teardown_method(self) -> None:
         # Drain any background compression jobs so state doesn't leak between tests.
-        from src.orchestration import runner as runner_mod
+        from cogtrix_core.orchestration import runner as runner_mod
 
         for _ in range(100):
             runner_mod._drain_background_compression_jobs()
@@ -92,7 +92,7 @@ class TestExtendRunOnNormalCompletion:
             ]
         )
         with patch(
-            "src.orchestration.runner._handle_extend_run", return_value="SYNTHESIZED"
+            "cogtrix_core.orchestration.runner._handle_extend_run", return_value="SYNTHESIZED"
         ) as mock_handle:
             result = run_agent(
                 "check resources", [], _make_registry(), set(), config=_config(mock_llm)
@@ -114,7 +114,7 @@ class TestExtendRunOnNormalCompletion:
             ]
         )
         with patch(
-            "src.orchestration.runner._handle_extend_run", return_value="CONTINUED"
+            "cogtrix_core.orchestration.runner._handle_extend_run", return_value="CONTINUED"
         ) as mock_handle:
             result = run_agent("do a thing", [], _make_registry(), set(), config=_config(mock_llm))
 
@@ -124,7 +124,7 @@ class TestExtendRunOnNormalCompletion:
     def test_no_extension_normal_completion_unaffected(self) -> None:
         # No extend_run call at all: the normal response path is untouched.
         mock_llm = _make_mock_llm([AIMessage(content="Simple answer.", id="m1")])
-        with patch("src.orchestration.runner._handle_extend_run") as mock_handle:
+        with patch("cogtrix_core.orchestration.runner._handle_extend_run") as mock_handle:
             result = run_agent("hi", [], _make_registry(), set(), config=_config(mock_llm))
 
         mock_handle.assert_not_called()

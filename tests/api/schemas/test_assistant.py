@@ -1,4 +1,4 @@
-"""Tests for src/api/schemas/assistant.py."""
+"""Tests for cogtrix_core/api/schemas/assistant.py."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 import pytest
 from pydantic import ValidationError
 
-from src.api.schemas.assistant import (
+from cogtrix_core.api.schemas.assistant import (
     AssistantStartRequest,
     AssistantStatusOut,
     CampaignCreateRequest,

@@ -1,0 +1,27 @@
+id: role_sa_01_nginx
+area: provisioning
+title: Install and serve a static page with nginx
+
+description: |
+  Provisioning & services competency: stand up a working web server from a clean
+  box — install the package, serve the requested content, and ensure the service
+  is running now AND enabled on boot. A naive run that starts nginx but forgets to
+  enable it (or serves the stock page instead of the requested content) fails the
+  live check.
+
+assignment: |
+  We need a web server on this box. Please install nginx, make it serve a page at
+  http://localhost/ whose response body contains the exact text "Cogtrix OK", and
+  make sure nginx is running now and will start automatically on boot. Let me know
+  when it's done and how you verified it.
+
+acceptance:
+  check: checks/sa_01_check.sh
+
+personas:
+  lead:
+    default_scope_answer: "Use your best judgement; a minimal static page is fine."
+    scope_answers:
+      port: "The default HTTP port 80 is fine."
+      content: "The page body just needs to contain the exact text 'Cogtrix OK'."
+      https: "Plain HTTP on port 80 is fine for this; no TLS needed."

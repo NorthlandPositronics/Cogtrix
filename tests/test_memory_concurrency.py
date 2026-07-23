@@ -20,10 +20,10 @@ from unittest.mock import patch
 # available via the dev dependency group.
 from langchain_core.messages import AIMessage, HumanMessage  # type: ignore[import-untyped]
 
-from src.memory.json_store import JsonFileMemoryStore
-from src.memory.modes.code import CodeDevelopmentMemoryManager
-from src.memory.modes.conversation import ConversationMemoryManager
-from src.memory.modes.reasoning import ReasoningMemoryManager
+from cogtrix_core.memory.json_store import JsonFileMemoryStore
+from cogtrix_core.memory.modes.code import CodeDevelopmentMemoryManager
+from cogtrix_core.memory.modes.conversation import ConversationMemoryManager
+from cogtrix_core.memory.modes.reasoning import ReasoningMemoryManager
 
 
 def _make_manager(tmpdir: str, session_id: str = "test-session") -> ConversationMemoryManager:
@@ -818,7 +818,7 @@ def test_concurrent_get_facts_store_creates_single_instance() -> None:
             def clear(self):
                 pass
 
-        with patch("src.memory.facts.PersistentFactsStore", _CountingFactsStore):
+        with patch("cogtrix_core.memory.facts.PersistentFactsStore", _CountingFactsStore):
             start_barrier = threading.Barrier(5)
 
             def _worker() -> None:

@@ -110,7 +110,7 @@ class TestResolveConfigPath:
         sentinel = tmp_path / "canonical.yaml"
         sentinel.write_text("providers: {}\n")
         monkeypatch.setattr(
-            "src.config.find_config_file",
+            "cogtrix_core.config.find_config_file",
             lambda: sentinel,
         )
         # Block the legacy fallback paths too (they shouldn't be touched
@@ -127,7 +127,7 @@ class TestResolveConfigPath:
         legacy = tmp_path / "legacy.yaml"
         legacy.write_text("providers: {}\n")
         monkeypatch.setattr(
-            "src.config.find_config_file",
+            "cogtrix_core.config.find_config_file",
             lambda: None,
         )
         monkeypatch.setattr(
@@ -139,7 +139,7 @@ class TestResolveConfigPath:
     def test_nothing_found_raises_with_tried_paths(self, monkeypatch):
         """The error message enumerates every path consulted — the
         operator needs to know *where* to put the config."""
-        monkeypatch.setattr("src.config.find_config_file", lambda: None)
+        monkeypatch.setattr("cogtrix_core.config.find_config_file", lambda: None)
         monkeypatch.setattr(
             "tests.agent_complexity.runner._LEGACY_CONFIG_FALLBACKS",
             (),

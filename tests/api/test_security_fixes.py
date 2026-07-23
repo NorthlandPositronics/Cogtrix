@@ -23,9 +23,9 @@ import pytest
 
 pytest.importorskip("fastapi")
 
-from src.api.db.repositories.organization import OrganizationRepository  # noqa: E402
-from src.api.db.repositories.plans import PlanRepository  # noqa: E402
-from src.api.plan_enforcement import (  # noqa: E402
+from cogtrix_core.api.db.repositories.organization import OrganizationRepository  # noqa: E402
+from cogtrix_core.api.db.repositories.plans import PlanRepository  # noqa: E402
+from cogtrix_core.api.plan_enforcement import (  # noqa: E402
     PlanLimitSnapshot,
     get_plan_limit_snapshot,
     require_user_capacity,
@@ -149,8 +149,8 @@ class TestGetPlanLimitSnapshot:
     def test_current_users_count_is_accurate(self, sf):
         async def _run():
             async with sf() as session:
-                from src.api.auth import hash_password
-                from src.api.db.repositories.users import UserRepository
+                from cogtrix_core.api.auth import hash_password
+                from cogtrix_core.api.db.repositories.users import UserRepository
 
                 org_repo = OrganizationRepository(session)
                 user_repo = UserRepository(session)
@@ -185,7 +185,7 @@ class TestRequireWorkspaceCapacity:
 
         async def _run():
             async with sf() as session:
-                from src.api.db.repositories.workspaces import WorkspaceRepository
+                from cogtrix_core.api.db.repositories.workspaces import WorkspaceRepository
 
                 org_repo = OrganizationRepository(session)
                 plan_repo = PlanRepository(session)
@@ -253,8 +253,8 @@ class TestRequireUserCapacity:
 
         async def _run():
             async with sf() as session:
-                from src.api.auth import hash_password
-                from src.api.db.repositories.users import UserRepository
+                from cogtrix_core.api.auth import hash_password
+                from cogtrix_core.api.db.repositories.users import UserRepository
 
                 org_repo = OrganizationRepository(session)
                 plan_repo = PlanRepository(session)
@@ -316,7 +316,7 @@ class TestRequireUserCapacity:
 
 class TestCapacityDependencyWiring:
     def test_create_workspace_has_capacity_param(self):
-        from src.api.routes.workspaces import create_workspace
+        from cogtrix_core.api.routes.workspaces import create_workspace
 
         sig = inspect.signature(create_workspace)
         assert (
@@ -325,11 +325,11 @@ class TestCapacityDependencyWiring:
         param = sig.parameters["capacity"]
         assert param.annotation is PlanLimitSnapshot or str(param.annotation) in (
             "PlanLimitSnapshot",
-            "src.api.plan_enforcement.PlanLimitSnapshot",
+            "cogtrix_core.api.plan_enforcement.PlanLimitSnapshot",
         )
 
     def test_scim_create_user_has_capacity_param(self):
-        from src.api.routes.scim import scim_create_user
+        from cogtrix_core.api.routes.scim import scim_create_user
 
         sig = inspect.signature(scim_create_user)
         assert (
@@ -338,7 +338,7 @@ class TestCapacityDependencyWiring:
         param = sig.parameters["capacity"]
         assert param.annotation is PlanLimitSnapshot or str(param.annotation) in (
             "PlanLimitSnapshot",
-            "src.api.plan_enforcement.PlanLimitSnapshot",
+            "cogtrix_core.api.plan_enforcement.PlanLimitSnapshot",
         )
 
 
@@ -350,8 +350,8 @@ class TestCapacityDependencyWiring:
 class TestSCIMLocationHeaderSafety:
     def test_user_to_scim_always_sets_meta(self):
         """user_to_scim always populates meta, confirming normal path is safe."""
-        from src.api.db.models import User
-        from src.api.scim.mapping import user_to_scim
+        from cogtrix_core.api.db.models import User
+        from cogtrix_core.api.scim.mapping import user_to_scim
 
         user = User(
             id=_uid(),
@@ -367,7 +367,7 @@ class TestSCIMLocationHeaderSafety:
 
     def test_location_header_expression_safe_when_meta_is_none(self):
         """Verify the guard expression in scim_create_user does not raise when meta is None."""
-        from src.api.scim.schemas import SCIMUser
+        from cogtrix_core.api.scim.schemas import SCIMUser
 
         # Construct a SCIMUser with meta=None to simulate the guarded path.
         scim_user = SCIMUser(userName="bob", meta=None)
@@ -376,7 +376,7 @@ class TestSCIMLocationHeaderSafety:
         assert location_value == ""
 
     def test_location_header_expression_uses_meta_when_present(self):
-        from src.api.scim.schemas import SCIMMeta, SCIMUser
+        from cogtrix_core.api.scim.schemas import SCIMMeta, SCIMUser
 
         scim_user = SCIMUser(
             userName="carol",
@@ -400,7 +400,7 @@ class TestStripeUnsignedFlagHardening:
     def _make_webhook_app(self, sf):
         from fastapi import FastAPI
 
-        from src.api.routes import billing as billing_module
+        from cogtrix_core.api.routes import billing as billing_module
 
         app = FastAPI()
 
@@ -408,7 +408,7 @@ class TestStripeUnsignedFlagHardening:
             async with sf() as session:
                 yield session
 
-        from src.api.db.engine import get_db
+        from cogtrix_core.api.db.engine import get_db
 
         app.dependency_overrides[get_db] = _override_db
         app.include_router(billing_module.router)
@@ -498,7 +498,7 @@ class TestStripeUnsignedStartupAssertion:
 
         from unittest.mock import MagicMock
 
-        from src.api.app import lifespan
+        from cogtrix_core.api.app import lifespan
 
         mock_app = MagicMock()
 
@@ -517,7 +517,7 @@ class TestStripeUnsignedStartupAssertion:
 
         from unittest.mock import MagicMock
 
-        from src.api.app import lifespan
+        from cogtrix_core.api.app import lifespan
 
         mock_app = MagicMock()
 

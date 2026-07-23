@@ -17,13 +17,13 @@ from unittest.mock import MagicMock, patch
 def _make_channel(config: dict | None = None):
     """Create a WhatsAppChannel with minimal real config."""
     try:
-        from src.assistant.channels.whatsapp import WhatsAppChannel
+        from cogtrix_core.assistant.channels.whatsapp import WhatsAppChannel
     except ImportError:
         import pytest
 
         pytest.skip("WhatsApp channel not available")
 
-    with patch("src.tools._whatsapp_client.WahaClient.__init__", return_value=None):
+    with patch("cogtrix_core.tools._whatsapp_client.WahaClient.__init__", return_value=None):
         ch = WhatsAppChannel.__new__(WhatsAppChannel)
         # Manually initialize the minimal attributes needed
         import collections
@@ -53,7 +53,7 @@ class TestWatermarkEvictionFallback:
 
     def test_fallback_uses_reactivation_lookback(self):
         """When watermark is absent, filter_ts must be time.time() - _REACTIVATION_LOOKBACK."""
-        from src.assistant.channels.whatsapp import _REACTIVATION_LOOKBACK
+        from cogtrix_core.assistant.channels.whatsapp import _REACTIVATION_LOOKBACK
 
         ch = _make_channel()
         # Simulate an evicted watermark: no entry for this chat
@@ -69,7 +69,7 @@ class TestWatermarkEvictionFallback:
             return []
 
         ch._client.get_chat_messages = _fake_get_messages
-        with patch("src.assistant.channels.whatsapp.time.time", return_value=fake_now):
+        with patch("cogtrix_core.assistant.channels.whatsapp.time.time", return_value=fake_now):
             ch._fetch_new_messages(chat)
 
         assert captured, "get_chat_messages was never called"
@@ -96,7 +96,7 @@ class TestWatermarkEvictionFallback:
             return []
 
         ch._client.get_chat_messages = _fake_get_messages
-        with patch("src.assistant.channels.whatsapp.time.time", return_value=9999.0):
+        with patch("cogtrix_core.assistant.channels.whatsapp.time.time", return_value=9999.0):
             ch._fetch_new_messages(chat)
 
         assert captured, "get_chat_messages was never called"
@@ -104,6 +104,6 @@ class TestWatermarkEvictionFallback:
 
     def test_reactivation_lookback_constant_is_300(self):
         """_REACTIVATION_LOOKBACK must be 300.0 seconds."""
-        from src.assistant.channels.whatsapp import _REACTIVATION_LOOKBACK
+        from cogtrix_core.assistant.channels.whatsapp import _REACTIVATION_LOOKBACK
 
         assert _REACTIVATION_LOOKBACK == 300.0

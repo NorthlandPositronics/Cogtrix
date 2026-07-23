@@ -16,12 +16,12 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.api.routes.config import _get_wizard_sessions_lock, _wizard_sessions
+from cogtrix_core.api.routes.config import _get_wizard_sessions_lock, _wizard_sessions
 
 
 def test_wizard_sessions_lock_double_checked_locking() -> None:
     """Concurrent calls to ``_get_wizard_sessions_lock()`` must return the same ``asyncio.Lock``."""
-    import src.api.routes.config as _config_mod
+    import cogtrix_core.api.routes.config as _config_mod
 
     original_lock = _config_mod._wizard_sessions_lock
     original_guard = _config_mod._wizard_sessions_lock_guard
@@ -58,11 +58,12 @@ def test_wizard_sessions_lock_double_checked_locking() -> None:
 @pytest.mark.asyncio
 async def test_wizard_sessions_dict_access_is_lock_protected() -> None:
     """Concurrent start/cancel/advance operations must not corrupt ``_wizard_sessions``."""
-    import src.api.routes.config as _config_mod
-
-    # Use a fresh dict for isolation.
-    original_sessions = _config_mod._wizard_sessions
-    _config_mod._wizard_sessions = {}
+    # Isolate in place against any residual module-global state (#2247). This test's
+    # helpers (_start/_cancel) and assertions use the module-level ``_wizard_sessions``
+    # binding imported above, so swapping ``_config_mod._wizard_sessions`` to a fresh
+    # dict would NOT isolate them — clear the live binding instead and restore it after.
+    saved_sessions = dict(_wizard_sessions)
+    _wizard_sessions.clear()
 
     try:
         # Start 5 wizard sessions concurrently.
@@ -100,7 +101,8 @@ async def test_wizard_sessions_dict_access_is_lock_protected() -> None:
         expected = set(started_ids[3:])
         assert remaining == expected, f"Remaining sessions mismatch: {remaining} != {expected}"
     finally:
-        _config_mod._wizard_sessions = original_sessions
+        _wizard_sessions.clear()
+        _wizard_sessions.update(saved_sessions)
 
 
 @pytest.mark.asyncio
@@ -111,7 +113,7 @@ async def test_wizard_save_no_deadlock_when_caller_holds_sessions_lock() -> None
     tried to acquire ``_get_wizard_sessions_lock()`` while ``advance_wizard()`` already
     held it, the wizard completion path would hang forever.
     """
-    import src.api.routes.config as _config_mod
+    import cogtrix_core.api.routes.config as _config_mod
 
     wid = "test-wizard-deadlock"
     fake_msg = MagicMock()
@@ -131,7 +133,7 @@ async def test_wizard_save_no_deadlock_when_caller_holds_sessions_lock() -> None
         async with _get_wizard_sessions_lock():
             with (
                 patch.object(_config_mod, "_wizard_validate_and_write"),
-                patch("src.config.load_config", return_value=MagicMock()),
+                patch("cogtrix_core.config.load_config", return_value=MagicMock()),
             ):
                 fake_request = MagicMock()
                 # If _wizard_save re-acquires the lock, this will hang.

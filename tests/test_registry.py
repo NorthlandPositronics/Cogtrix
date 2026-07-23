@@ -1,4 +1,4 @@
-"""Tests for src/registry.py — BUG-047 fallback schema matching."""
+"""Tests for cogtrix_core/registry.py — BUG-047 fallback schema matching."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import types
 
 from pydantic import BaseModel
 
-from src.registry import _func_to_schema_name
+from cogtrix_core.registry import _func_to_schema_name
 
 # ── _func_to_schema_name ──────────────────────────────────────────────────────
 
@@ -82,7 +82,7 @@ class TestFallbackDiscovery:
     """BUG-047: fallback pairs function with schema by name convention."""
 
     def _extract(self, module: types.ModuleType) -> list[tuple]:
-        from src.registry import ToolRegistry
+        from cogtrix_core.registry import ToolRegistry
 
         registry = ToolRegistry.__new__(ToolRegistry)
         registry.tools = {}
@@ -194,7 +194,7 @@ class TestDiscoverToolModulesHygiene:
     def _make_registry_with_dir(self, tools_dir, files: dict[str, str]):
         """Materialise ``files`` (name → contents) under ``tools_dir`` and
         return a ToolRegistry pointed at it."""
-        from src.registry import ToolRegistry
+        from cogtrix_core.registry import ToolRegistry
 
         for name, content in files.items():
             (tools_dir / name).write_text(content)
@@ -237,7 +237,7 @@ class TestDiscoverToolModulesHygiene:
         agent tools."""
         import logging
 
-        from src.registry import ToolRegistry
+        from cogtrix_core.registry import ToolRegistry
 
         # Module with nothing tool-shaped — no TOOL_CONFIG, no *Input class,
         # no function pairings.

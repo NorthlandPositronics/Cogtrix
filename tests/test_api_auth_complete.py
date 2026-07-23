@@ -26,8 +26,8 @@ from fastapi.testclient import TestClient  # noqa: E402
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine  # noqa: E402
 from sqlalchemy.pool import StaticPool  # noqa: E402
 
-from src.api.auth import create_access_token  # noqa: E402
-from src.api.db.engine import Base, get_db  # noqa: E402
+from cogtrix_core.api.auth import create_access_token  # noqa: E402
+from cogtrix_core.api.db.engine import Base, get_db  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Shared fixture factory (function-scope so each test gets a fresh DB)
@@ -37,7 +37,7 @@ from src.api.db.engine import Base, get_db  # noqa: E402
 @pytest.fixture()
 def app():
     """FastAPI app backed by an in-memory SQLite database."""
-    from src.api.app import create_app
+    from cogtrix_core.api.app import create_app
 
     engine = create_async_engine(
         "sqlite+aiosqlite:///:memory:",
@@ -209,7 +209,7 @@ class TestRegister:
         from sqlalchemy.exc import IntegrityError
 
         with patch(
-            "src.api.db.repositories.users.UserRepository.create_with_role_election",
+            "cogtrix_core.api.db.repositories.users.UserRepository.create_with_role_election",
             new_callable=AsyncMock,
             side_effect=IntegrityError("stmt", "params", Exception("unique constraint")),
         ):
@@ -287,7 +287,7 @@ class TestLogin:
         """BUG-122: deactivated users must not be able to log in."""
         import asyncio as _asyncio
 
-        from src.api.db.repositories.users import UserRepository
+        from cogtrix_core.api.db.repositories.users import UserRepository
 
         uname = f"inactive_login_{uuid.uuid4().hex[:6]}"
         pw = _VALID_PASSWORD
@@ -354,7 +354,7 @@ class TestRefresh:
         expired_record.expires_at = datetime.now(UTC) - timedelta(days=1)
 
         with patch(
-            "src.api.db.repositories.tokens.RefreshTokenRepository.rotate_and_get",
+            "cogtrix_core.api.db.repositories.tokens.RefreshTokenRepository.rotate_and_get",
             new_callable=AsyncMock,
             return_value=expired_record,
         ):
@@ -378,12 +378,12 @@ class TestRefresh:
 
         with (
             patch(
-                "src.api.db.repositories.tokens.RefreshTokenRepository.rotate_and_get",
+                "cogtrix_core.api.db.repositories.tokens.RefreshTokenRepository.rotate_and_get",
                 new_callable=AsyncMock,
                 return_value=valid_record,
             ),
             patch(
-                "src.api.db.repositories.users.UserRepository.get_by_id",
+                "cogtrix_core.api.db.repositories.users.UserRepository.get_by_id",
                 new_callable=AsyncMock,
                 return_value=None,
             ),
@@ -398,7 +398,7 @@ class TestRefresh:
         """BUG-122: deactivated users must not be able to refresh tokens."""
         import asyncio as _asyncio
 
-        from src.api.db.repositories.users import UserRepository
+        from cogtrix_core.api.db.repositories.users import UserRepository
 
         uname = f"inactive_refresh_{uuid.uuid4().hex[:6]}"
         r = _register(client, username=uname)

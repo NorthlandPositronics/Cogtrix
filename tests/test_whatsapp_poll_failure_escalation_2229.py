@@ -18,7 +18,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.tools._whatsapp_client import _POLL_FAILURE_ESCALATION_THRESHOLD, WahaClient
+from cogtrix_core.tools._whatsapp_client import _POLL_FAILURE_ESCALATION_THRESHOLD, WahaClient
 
 _NOWEB_BODY = "Enable NOWEB store to use this method when starting a new session."
 
@@ -41,7 +41,7 @@ def _client() -> WahaClient:
 
 
 class TestPollFailureEscalation:
-    @patch("src.tools._whatsapp_client.requests")
+    @patch("cogtrix_core.tools._whatsapp_client.requests")
     def test_persistent_failure_escalates_once_with_body_and_hint(
         self, mock_requests: MagicMock, caplog: pytest.LogCaptureFixture
     ) -> None:
@@ -63,7 +63,7 @@ class TestPollFailureEscalation:
         assert "enable the noweb store" in msg.lower()  # the hint
         assert client._consecutive_poll_failures["fetch chats overview"] == 3
 
-    @patch("src.tools._whatsapp_client.requests")
+    @patch("cogtrix_core.tools._whatsapp_client.requests")
     def test_below_threshold_stays_at_debug(
         self, mock_requests: MagicMock, caplog: pytest.LogCaptureFixture
     ) -> None:
@@ -79,7 +79,7 @@ class TestPollFailureEscalation:
         assert not [r for r in caplog.records if r.levelno == logging.WARNING]
         assert [r for r in caplog.records if r.levelno == logging.DEBUG]
 
-    @patch("src.tools._whatsapp_client.requests")
+    @patch("cogtrix_core.tools._whatsapp_client.requests")
     def test_success_resets_counter_and_logs_recovery(
         self, mock_requests: MagicMock, caplog: pytest.LogCaptureFixture
     ) -> None:
@@ -104,7 +104,7 @@ class TestPollFailureEscalation:
         ]
         assert len(recovered) == 1
 
-    @patch("src.tools._whatsapp_client.requests")
+    @patch("cogtrix_core.tools._whatsapp_client.requests")
     def test_connection_error_without_response_body(
         self, mock_requests: MagicMock, caplog: pytest.LogCaptureFixture
     ) -> None:
@@ -120,7 +120,7 @@ class TestPollFailureEscalation:
         assert len(warnings) == 1
         assert "waha unreachable" in warnings[0].getMessage()
 
-    @patch("src.tools._whatsapp_client.requests")
+    @patch("cogtrix_core.tools._whatsapp_client.requests")
     def test_sibling_get_messages_also_escalates(
         self, mock_requests: MagicMock, caplog: pytest.LogCaptureFixture
     ) -> None:

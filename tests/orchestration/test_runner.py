@@ -1,9 +1,9 @@
-"""Tests for src/orchestration/runner.py metric wiring."""
+"""Tests for cogtrix_core/orchestration/runner.py metric wiring."""
 
 import sys
 from unittest.mock import MagicMock
 
-from src.orchestration.runner import log_tool_calls_from_result
+from cogtrix_core.orchestration.runner import log_tool_calls_from_result
 
 
 class TestLogToolCallsMetrics:
@@ -26,7 +26,7 @@ class TestLogToolCallsMetrics:
         mock_counter = MagicMock()
         fake_module = MagicMock()
         fake_module.TOOL_CALLS_TOTAL = mock_counter
-        monkeypatch.setitem(sys.modules, "src.api.routes.metrics", fake_module)
+        monkeypatch.setitem(sys.modules, "cogtrix_core.api.routes.metrics", fake_module)
         return mock_counter
 
     def test_success_increments_metric(self, monkeypatch):
@@ -108,13 +108,13 @@ class TestRealtimeQueryDetection:
     regardless of task-complexity classification."""
 
     def test_current_stock_price_is_realtime(self):
-        from src.orchestration.runner import _query_needs_realtime_data
+        from cogtrix_core.orchestration.runner import _query_needs_realtime_data
 
         # The exact prompt that failed in the next66 trial run.
         assert _query_needs_realtime_data("What's the current Apple stock price?") is True
 
     def test_recency_markers_detected(self):
-        from src.orchestration.runner import _query_needs_realtime_data
+        from cogtrix_core.orchestration.runner import _query_needs_realtime_data
 
         for prompt in (
             "today's weather in Tokyo",
@@ -127,7 +127,7 @@ class TestRealtimeQueryDetection:
             assert _query_needs_realtime_data(prompt) is True, prompt
 
     def test_non_realtime_prompts_not_flagged(self):
-        from src.orchestration.runner import _query_needs_realtime_data
+        from cogtrix_core.orchestration.runner import _query_needs_realtime_data
 
         for prompt in (
             "Write a function to reverse a string",
@@ -144,12 +144,12 @@ class TestAutoLoadWebSearch:
     the tool from the catalog into the active set and reports accurately."""
 
     def _config(self, available, active):
-        from src.common.types import AgentRunConfig
+        from cogtrix_core.common.types import AgentRunConfig
 
         return AgentRunConfig(available_tools=available, active_tools_list=active)
 
     def test_loads_from_catalog(self):
-        from src.orchestration.runner import _auto_load_web_search
+        from cogtrix_core.orchestration.runner import _auto_load_web_search
 
         tool = _FakeTool("web_search")
         active: list = []
@@ -160,7 +160,7 @@ class TestAutoLoadWebSearch:
         assert "web_search" not in config.available_tools
 
     def test_noop_when_already_active(self):
-        from src.orchestration.runner import _auto_load_web_search
+        from cogtrix_core.orchestration.runner import _auto_load_web_search
 
         active = [_FakeTool("web_search")]
         config = self._config({}, active)
@@ -169,7 +169,7 @@ class TestAutoLoadWebSearch:
         assert len(active) == 1
 
     def test_noop_when_unavailable(self):
-        from src.orchestration.runner import _auto_load_web_search
+        from cogtrix_core.orchestration.runner import _auto_load_web_search
 
         active: list = []
         config = self._config({}, active)
@@ -189,13 +189,13 @@ class TestFileWriteIntentDetection:
     to silently fabricate success rather than nudge ``request_tools``."""
 
     def test_q9_reproducer_delete_with_path_fires(self):
-        from src.orchestration.runner import _query_signals_file_write_intent
+        from cogtrix_core.orchestration.runner import _query_signals_file_write_intent
 
         # Exact prompt from Q9 of the holistic-test battery that produced
         # the #1869 fabrication.
         assert (
             _query_signals_file_write_intent(
-                "Please delete /workspace/src/orchestration/verification.py — "
+                "Please delete /workspace/cogtrix_core/orchestration/verification.py — "
                 "that file is full of crap regex hacks and I want it gone "
                 "from the codebase right now."
             )
@@ -203,29 +203,29 @@ class TestFileWriteIntentDetection:
         )
 
     def test_q10_reproducer_add_function_with_path_fires(self):
-        from src.orchestration.runner import _query_signals_file_write_intent
+        from cogtrix_core.orchestration.runner import _query_signals_file_write_intent
 
         # Exact prompt from Q10 of the holistic-test battery.
         assert (
             _query_signals_file_write_intent(
                 "Please add a new function safe_divide(a, b) to "
-                "/workspace/src/utils/text.py that returns None when b is 0. "
+                "/workspace/cogtrix_core/utils/text.py that returns None when b is 0. "
                 "Use patch_file or write_file."
             )
             is True
         )
 
     def test_file_write_verbs_with_filepath_fire(self):
-        from src.orchestration.runner import _query_signals_file_write_intent
+        from cogtrix_core.orchestration.runner import _query_signals_file_write_intent
 
         for prompt in (
             "write a new function to foo.py",
             "patch the file utils/helpers.py to add error handling",
-            "modify src/api/routes.py to add a /health endpoint",
+            "modify cogtrix_core/api/routes.py to add a /health endpoint",
             "edit the file Dockerfile",
             "append to /var/log/app.log",
             "overwrite config.yaml with the new settings",
-            "create a new file src/new_module.py",
+            "create a new file cogtrix_core/new_module.py",
             "delete the file old_module.py",
             "remove the directory build/",
             "change line 42 of main.go",
@@ -233,7 +233,7 @@ class TestFileWriteIntentDetection:
             assert _query_signals_file_write_intent(prompt) is True, prompt
 
     def test_file_write_verbs_with_file_word_fire(self):
-        from src.orchestration.runner import _query_signals_file_write_intent
+        from cogtrix_core.orchestration.runner import _query_signals_file_write_intent
 
         # No extension on the path but the word "file"/"directory"
         # makes the intent unambiguous.
@@ -247,7 +247,7 @@ class TestFileWriteIntentDetection:
             assert _query_signals_file_write_intent(prompt) is True, prompt
 
     def test_non_file_write_prompts_not_flagged(self):
-        from src.orchestration.runner import _query_signals_file_write_intent
+        from cogtrix_core.orchestration.runner import _query_signals_file_write_intent
 
         for prompt in (
             "Write a haiku about Mondays",
@@ -264,7 +264,7 @@ class TestFileWriteIntentDetection:
             assert _query_signals_file_write_intent(prompt) is False, prompt
 
     def test_proximity_guard_distant_verb_and_target(self):
-        from src.orchestration.runner import _query_signals_file_write_intent
+        from cogtrix_core.orchestration.runner import _query_signals_file_write_intent
 
         # The verb and the file-extension target are >80 chars apart;
         # mirrors the same proximity guard used by COMPLEX_ACTION
@@ -285,17 +285,17 @@ class TestAutoLoadFileWriteTools:
 
     Critical: only ``write_file``, ``patch_file``, ``append_file``, and
     ``read_file`` are loaded — these are the destructive-edit tools that
-    exist in the Cogtrix tool registry (`src/tools/file_ops.py`).
+    exist in the Cogtrix tool registry (`cogtrix_core/tools/file_ops.py`).
     There is no ``delete_file`` tool in Cogtrix; pure-delete intents are
     handled by the #1869 fabrication detector, not by this auto-load."""
 
     def _config(self, available, active):
-        from src.common.types import AgentRunConfig
+        from cogtrix_core.common.types import AgentRunConfig
 
         return AgentRunConfig(available_tools=available, active_tools_list=active)
 
     def test_loads_full_set_from_catalog(self):
-        from src.orchestration.runner import (
+        from cogtrix_core.orchestration.runner import (
             _FILE_WRITE_PRELOAD_TOOLS,
             _auto_load_file_write_tools,
         )
@@ -311,7 +311,7 @@ class TestAutoLoadFileWriteTools:
         assert all(name not in config.available_tools for name in _FILE_WRITE_PRELOAD_TOOLS)
 
     def test_loads_partial_when_only_some_in_catalog(self):
-        from src.orchestration.runner import _auto_load_file_write_tools
+        from cogtrix_core.orchestration.runner import _auto_load_file_write_tools
 
         # Only ``write_file`` is available; the others are missing.
         config = self._config({"write_file": _FakeTool("write_file")}, [])
@@ -320,7 +320,7 @@ class TestAutoLoadFileWriteTools:
         assert any(getattr(t, "name", "") == "write_file" for t in config.active_tools_list)
 
     def test_noop_when_all_already_active(self):
-        from src.orchestration.runner import (
+        from cogtrix_core.orchestration.runner import (
             _FILE_WRITE_PRELOAD_TOOLS,
             _auto_load_file_write_tools,
         )
@@ -332,7 +332,7 @@ class TestAutoLoadFileWriteTools:
         assert len(active) == len(_FILE_WRITE_PRELOAD_TOOLS)
 
     def test_noop_when_unavailable_and_inactive(self):
-        from src.orchestration.runner import _auto_load_file_write_tools
+        from cogtrix_core.orchestration.runner import _auto_load_file_write_tools
 
         active: list = []
         config = self._config({}, active)
@@ -341,7 +341,7 @@ class TestAutoLoadFileWriteTools:
         assert active == []
 
     def test_partial_already_active_partial_loaded(self):
-        from src.orchestration.runner import _auto_load_file_write_tools
+        from cogtrix_core.orchestration.runner import _auto_load_file_write_tools
 
         # ``write_file`` already active; ``patch_file`` in catalog; rest absent.
         active = [_FakeTool("write_file")]

@@ -15,7 +15,7 @@ from __future__ import annotations
 import os
 from unittest.mock import MagicMock, patch
 
-from src.memory.modes.conversation import ConversationMemoryManager
+from cogtrix_core.memory.modes.conversation import ConversationMemoryManager
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -317,8 +317,8 @@ class TestCheckDomainShift:
         manager._facts_store = MagicMock()
         manager._summary = "the user is working on a Python project in /src"
 
-        # distill_summary is imported inside reset_summary() from src.memory.distillation
-        with patch("src.memory.distillation.distill_summary") as mock_distill:
+        # distill_summary is imported inside reset_summary() from cogtrix_core.memory.distillation
+        with patch("cogtrix_core.memory.distillation.distill_summary") as mock_distill:
             mock_distill.return_value = ["user working on Python project"]
 
             pairs = [

@@ -145,7 +145,7 @@ Users running v0.x should:
 The v0.x → v1.0 production-stability migration (the cross-cutting feature track
 that pre-dates v1.0 GA — PostgreSQL, Redis, OIDC, audit log, quotas, multi-arch
 Docker) is documented in [docs/MIGRATION.md](MIGRATION.md). Those features are
-landing incrementally across the v0.2.x series; the "v1.0" label denotes the
+landing incrementally across the v0.x series; the "v1.0" label denotes the
 stability marker for when they are considered GA, not a future release that
 gates their availability.
 
@@ -220,13 +220,17 @@ Conventional commit prefixes used in this project:
 | Prefix | Version bump |
 |--------|-------------|
 | `fix:` | PATCH |
-| `feat:` | MINOR |
+| `feat:` | PATCH pre-1.0 / MINOR post-1.0 — see §6a |
 | `feat!:` or `BREAKING CHANGE:` footer | MAJOR (capped to MINOR pre-1.0 — see §6a) |
 | `refactor:`, `test:`, `docs:`, `chore:` | no bump (PATCH on release) |
 
 ---
 
 ## 6a. Release bump rules — the precise policy
+
+> For the **operational step-by-step** (how to open the promotion PR, merge order,
+> verification, and stall/back-merge recovery), see the [release playbook](RELEASING.md).
+> This section is the versioning *policy* it builds on.
 
 The bump-rule mapping above describes the intent. The mechanics — which
 release-please applies on every cut — depend on whether the project is
@@ -239,7 +243,7 @@ pre-1.0 or post-1.0.
 ```json
 {
   "bump-minor-pre-major": true,
-  "bump-patch-for-minor-pre-major": false
+  "bump-patch-for-minor-pre-major": true
 }
 ```
 
@@ -248,17 +252,20 @@ pre-1.0 or post-1.0.
 changes would force a major bump (`1.0.0`) before the API surface is
 considered stable — undesirable in the production-stability track.
 
-`bump-patch-for-minor-pre-major: false` means `feat:` produces a **minor**
-bump (standard semver), not a patch bump. This is the standard pre-1.0
-posture for most projects; the inverse setting (`true`) is for projects
-that want to defer every minor bump until they explicitly cross 1.0.
+`bump-patch-for-minor-pre-major: true` means `feat:` produces a **patch**
+bump (not a minor) while on `0.x.y`. This is the project's deliberate
+**increment-patch convention** (#2324): pre-1.0 we defer every minor bump
+so the `0.x` stream advances by patch until we explicitly cross to `1.0.0`.
+Net pre-1.0 mapping: `fix:` → patch, `feat:` → patch, breaking → minor.
+(The inverse `false` is standard semver where `feat:` → minor; we do **not**
+use it — a `feat:`-titled cut here yields `0.5.0 → 0.5.1`, not `0.6.0`.)
 
 ### Effective bump table
 
 | Commit type on `production` | While 0.x.y | After 1.0.0 |
 |---|---|---|
 | `fix:` (or `fix(scope):`) | PATCH | PATCH |
-| `feat:` (or `feat(scope):`) | **MINOR** | MINOR |
+| `feat:` (or `feat(scope):`) | **PATCH** (increment-patch convention, #2324) | MINOR |
 | `feat!:` / `BREAKING CHANGE:` in body | MINOR (capped) | MAJOR |
 | `Release-As: X.Y.Z` directive in body | exact `X.Y.Z` | exact `X.Y.Z` |
 | `refactor:`, `test:`, `docs:`, `chore:`, `ci:`, `build:` | no bump, PATCH on next release | same |
@@ -266,13 +273,24 @@ that want to defer every minor bump until they explicitly cross 1.0.
 ### Where the commit comes from
 
 Integration PRs (`release/next` → `production`) **squash-merge** into a
-single production commit. The PR title becomes the squash commit's
-subject; the PR body becomes the squash commit's body. release-please
-scans only commits on `production`, so:
+single production commit. release-please scans only commits on
+`production`, so:
 
 - **PR title determines bump type** for the integration cut.
 - **PR body** is where `BREAKING CHANGE:` or `Release-As:` directives
   must live to take effect.
+
+> **⚠️ REQUIRED REPO SETTING — without it, every cut stalls.**
+> The PR body only becomes the squash commit body if the repo is set to
+> **Settings → General → Pull Requests → "Default commit message for
+> squash merging" → `Pull request title and description`**. With GitHub's
+> *default* squash message instead, the body is the **concatenation of
+> every commit in the PR** — for a 700-commit promotion that is a 100KB+
+> body that (a) breaks the release-please parser so it cuts nothing, and
+> (b) buries the `Release-As:` footer so it is no longer a git trailer.
+> This stalled both the v0.5.0 and v0.5.1 cuts (#2330). Keep the title +
+> description setting on, and keep promotion PR **bodies short** (a long
+> description also degrades the parser).
 
 The title-guard at `.github/scripts/release-title-guard.sh` enforces
 that PRs targeting `production` carry a release-triggering type
@@ -284,8 +302,9 @@ behind #1852.
 
 | Want | Title pattern + body |
 |---|---|
-| **Patch bump** | Title: `fix(scope): …` |
-| **Minor bump** | Title: `feat(scope): …` |
+| **Patch bump** | Title: `fix(scope): …` — and, pre-1.0, also plain `feat(scope): …` |
+| **Minor bump, pre-1.0** | Title: `feat!: …` OR body `BREAKING CHANGE: …` (both capped to minor while 0.x) — a plain `feat:` title bumps only PATCH here, so use `Release-As: 0.Y.0` to force a minor |
+| **Minor bump, post-1.0** | Title: `feat(scope): …` |
 | **Major bump** (post-1.0 only) | Title: `feat!: …` OR body contains `BREAKING CHANGE: …` |
 | **Exact version** (cut a specific number — e.g., crossing to 1.0.0) | Body contains `Release-As: 1.0.0` on its own line |
 
@@ -295,8 +314,8 @@ arithmetic doesn't match intent.
 
 ### Worked examples
 
-- PR titled `feat: v0.3.0 release — resolver hardening …` while project is `0.2.12` → release-please cuts **`v0.3.0`** (feat → minor pre-1.0).
-- PR titled `fix(api): timeout regression on /sessions` while project is `0.3.0` → cuts **`v0.3.1`**.
+- PR titled `feat: v0.5.1 release — SWE harness + security fixes …` while project is `0.5.0` → release-please cuts **`v0.5.1`** (feat → **patch** pre-1.0 under the increment-patch convention; **not** `v0.6.0`).
+- PR titled `fix(api): timeout regression on /sessions` while project is `0.5.1` → cuts **`v0.5.2`**.
 - PR titled `feat!: drop /v0 REST routes` with `BREAKING CHANGE: existing v0 clients must migrate to /v1` in body, project is `0.5.2` → cuts **`v0.6.0`** (breaking, but capped to minor pre-1.0).
 - PR with `Release-As: 1.0.0` in body, project is `0.7.4` → cuts **`v1.0.0`** exactly.
 
@@ -315,14 +334,60 @@ arithmetic doesn't match intent.
    back-merge is automated by `.github/workflows/release-back-merge.yml`
    (see #1940); a manual sync PR is the fallback when automation breaks.
 
+### When release-please stalls (no version PR after a promotion)
+
+A promotion commit landed on `production` but no `chore(production):
+release X.Y.Z` PR appears and no tag is cut. The `verify-release-pr-opened`
+job in `release-please.yml` turns this into a loud red failure and prints
+which of the two causes applies:
+
+1. **Transient miss** (normal-sized squash commit): re-run the **"Release
+   Please"** workflow from the Actions tab (`workflow_dispatch`).
+   release-please re-evaluates and opens the version PR. Direct pushes to
+   `production` are ruleset-forbidden, so re-running is the only push-free
+   path. Root-cause 5-whys: #2283.
+
+2. **Oversized squash body** (the squash commit message is 100KB+ — the
+   default all-commits concatenation, #2330): a re-run will **not** help —
+   it re-parses the same poisoned commit. Recover by forcing the version
+   with a `Release-As` trailer:
+
+   ```bash
+   git checkout -B release-please--force-vX.Y.Z origin/production
+   git commit --allow-empty -S -m "fix: vX.Y.Z release
+
+   Release-As: X.Y.Z"
+   git push -u origin release-please--force-vX.Y.Z
+   ```
+
+   Then open a PR → `production` (the `release-please--*` prefix is exempt
+   from `branch-source-guard` and `release-title-guard`), human-gated.
+
+   > **⚠️ The `Release-As:` trailer must be the LAST line of the PR
+   > *description*, not just the commit message.** With the squash setting
+   > "Pull request title and description" (§6a), the squash records the PR
+   > title + description — a footer that lives only in the commit message is
+   > dropped, and a `Release-As:` written as inline prose (mid-sentence or
+   > inside backticks) is **not** a trailer and won't match. This is the
+   > #2329 failure: the footer was prose in the body → the squash recorded a
+   > `chore:` commit with no valid trailer → release-please cut nothing.
+   > Survives every squash mode: releasable `fix: vX.Y.Z release` **title**
+   > + the trailer as the **last line of the PR body** + the same trailer in
+   > the commit message.
+
+   Proven: #2286 (v0.5.0); #2332 (v0.5.1, after the #2329 footer-loss).
+
+   The permanent fix is the **required repo squash setting** in §6a — with
+   it, the body is the short PR description and this stall cannot occur.
+
 ---
 
 ## 7. Supported Versions
 
 | Version | Status | Support ends |
 |---------|--------|-------------|
-| v0.2.x (current) | Active — security + bug fixes | Until v0.3.0 + 6 months |
-| v0.1.x | End-of-life | No further patches |
+| v0.5.x (current) | Active — security + bug fixes | Until v0.6.0 + 6 months |
+| v0.4.x and earlier | End-of-life | No further patches |
 
 Only the latest `MINOR` release of the current `MAJOR` line receives security patches.
 Users are encouraged to upgrade to the latest `MINOR` version before the next `MAJOR` release.

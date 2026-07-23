@@ -18,7 +18,7 @@ python -m tests.role_pm.run --verbose                 # debug logging
 ## Prerequisites
 
 - `[rag]` and `[rag-rerank]` extras installed: `uv sync --extra rag --extra rag-rerank`.
-  - `[rag-rerank]` pulls in `sentence-transformers` (transitively `torch` + `transformers`, ~hundreds of MB) for the cross-encoder re-ranker the harness opts into. If the extra is absent, the CE stage degrades gracefully — retrieval falls back to the un-re-ranked FAISS pool, never *worse* than the baseline. See `src/rag/reranker.py` for the contract and #1952 / #2004 for the rationale.
+  - `[rag-rerank]` pulls in `sentence-transformers` (transitively `torch` + `transformers`, ~hundreds of MB) for the cross-encoder re-ranker the harness opts into. If the extra is absent, the CE stage degrades gracefully — retrieval falls back to the un-re-ranked FAISS pool, never *worse* than the baseline. See `cogtrix_core/rag/reranker.py` for the contract and #1952 / #2004 for the rationale.
 - An embedding-provider API key. By default OpenAI embeddings. Override via environment:
   - `ROLE_PM_EMBEDDING_PROVIDER` — `openai` (default), `ollama`, or `google`.
   - `ROLE_PM_EMBEDDING_MODEL` — model name; defaults match the provider's standard small embedding model.

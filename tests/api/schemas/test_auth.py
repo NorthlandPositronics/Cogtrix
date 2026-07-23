@@ -1,4 +1,4 @@
-"""Tests for src/api/schemas/auth.py — registration, login, tokens, API keys."""
+"""Tests for cogtrix_core/api/schemas/auth.py — registration, login, tokens, API keys."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 import pytest
 from pydantic import ValidationError
 
-from src.api.schemas.auth import (
+from cogtrix_core.api.schemas.auth import (
     APIKeyCreateRequest,
     APIKeyOut,
     LoginRequest,

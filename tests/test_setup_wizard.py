@@ -1,4 +1,4 @@
-"""Tests for src/setup_wizard.py."""
+"""Tests for cogtrix_core/setup_wizard.py."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import yaml
 
-from src.setup_wizard import (
+from cogtrix_core.setup_wizard import (
     _detect_environment,
     _extract_config_info,
     _extract_connection_error,
@@ -37,7 +37,7 @@ class TestDetectEnvironment:
 
     def test_no_openai_key(self):
         with patch.dict(os.environ, {}, clear=True):
-            with patch("src.setup_wizard.urllib.request.urlopen", side_effect=Exception):
+            with patch("cogtrix_core.setup_wizard.urllib.request.urlopen", side_effect=Exception):
                 env = _detect_environment()
         assert "openai_key" not in env
 
@@ -47,13 +47,15 @@ class TestDetectEnvironment:
         mock_resp.__enter__ = MagicMock(return_value=mock_resp)
         mock_resp.__exit__ = MagicMock(return_value=False)
         with patch.dict(os.environ, {}, clear=True):
-            with patch("src.setup_wizard.urllib.request.urlopen", return_value=mock_resp):
+            with patch("cogtrix_core.setup_wizard.urllib.request.urlopen", return_value=mock_resp):
                 env = _detect_environment()
         assert env.get("ollama_running") is True
 
     def test_ollama_not_running(self):
         with patch.dict(os.environ, {}, clear=True):
-            with patch("src.setup_wizard.urllib.request.urlopen", side_effect=Exception("refused")):
+            with patch(
+                "cogtrix_core.setup_wizard.urllib.request.urlopen", side_effect=Exception("refused")
+            ):
                 env = _detect_environment()
         assert "ollama_running" not in env
 
@@ -65,7 +67,9 @@ class TestLoadDocs:
         assert len(docs) > 100
 
     def test_url_fallback_on_failure(self):
-        with patch("src.setup_wizard.urllib.request.urlopen", side_effect=Exception("fail")):
+        with patch(
+            "cogtrix_core.setup_wizard.urllib.request.urlopen", side_effect=Exception("fail")
+        ):
             docs = _load_docs(url="https://example.com/bad")
         assert "Configuration" in docs
 
@@ -74,14 +78,14 @@ class TestLoadDocs:
         mock_resp.read.return_value = b"# Custom Docs\nContent here"
         mock_resp.__enter__ = MagicMock(return_value=mock_resp)
         mock_resp.__exit__ = MagicMock(return_value=False)
-        with patch("src.setup_wizard.urllib.request.urlopen", return_value=mock_resp):
+        with patch("cogtrix_core.setup_wizard.urllib.request.urlopen", return_value=mock_resp):
             docs = _load_docs(url="https://example.com/docs")
         assert docs == "# Custom Docs\nContent here"
 
 
 class TestLoadExistingConfig:
     def test_no_config_found(self):
-        with patch("src.config.find_config_file", return_value=None):
+        with patch("cogtrix_core.config.find_config_file", return_value=None):
             content, path = _load_existing_config()
         assert content == ""
         assert path is None
@@ -89,7 +93,7 @@ class TestLoadExistingConfig:
     def test_config_found(self, tmp_path):
         cfg_file = tmp_path / ".cogtrix.yaml"
         cfg_file.write_text("provider: ollama\nmodel: qwen3:8b\n")
-        with patch("src.config.find_config_file", return_value=cfg_file):
+        with patch("cogtrix_core.config.find_config_file", return_value=cfg_file):
             content, path = _load_existing_config()
         assert "provider: ollama" in content
         assert path == cfg_file
@@ -493,14 +497,14 @@ class TestListOllamaModels:
     def test_returns_model_names(self):
         payload = b'{"models": [{"name": "qwen3:8b", "size": 20000000000}, {"name": "llama3.2", "size": 500000000}]}'
         mock_urlopen = self._make_mock_urlopen(payload)
-        with patch("src.setup_wizard.urllib.request.urlopen", mock_urlopen):
+        with patch("cogtrix_core.setup_wizard.urllib.request.urlopen", mock_urlopen):
             names = _list_ollama_models("http://localhost:11434")
         assert names == ["qwen3:8b", "llama3.2"]
 
     def test_prints_model_names_and_sizes(self, capsys):
         payload = b'{"models": [{"name": "phi4", "size": 2500000000}]}'
         mock_urlopen = self._make_mock_urlopen(payload)
-        with patch("src.setup_wizard.urllib.request.urlopen", mock_urlopen):
+        with patch("cogtrix_core.setup_wizard.urllib.request.urlopen", mock_urlopen):
             _list_ollama_models("http://localhost:11434")
         captured = capsys.readouterr()
         assert "phi4" in captured.out
@@ -509,7 +513,7 @@ class TestListOllamaModels:
     def test_size_displayed_as_mb_when_under_1gb(self, capsys):
         payload = b'{"models": [{"name": "tiny", "size": 750000000}]}'
         mock_urlopen = self._make_mock_urlopen(payload)
-        with patch("src.setup_wizard.urllib.request.urlopen", mock_urlopen):
+        with patch("cogtrix_core.setup_wizard.urllib.request.urlopen", mock_urlopen):
             _list_ollama_models("http://localhost:11434")
         captured = capsys.readouterr()
         assert "MB" in captured.out
@@ -517,12 +521,14 @@ class TestListOllamaModels:
     def test_empty_models_list_returns_empty(self):
         payload = b'{"models": []}'
         mock_urlopen = self._make_mock_urlopen(payload)
-        with patch("src.setup_wizard.urllib.request.urlopen", mock_urlopen):
+        with patch("cogtrix_core.setup_wizard.urllib.request.urlopen", mock_urlopen):
             names = _list_ollama_models("http://localhost:11434")
         assert names == []
 
     def test_connection_failure_returns_empty(self):
-        with patch("src.setup_wizard.urllib.request.urlopen", side_effect=Exception("refused")):
+        with patch(
+            "cogtrix_core.setup_wizard.urllib.request.urlopen", side_effect=Exception("refused")
+        ):
             names = _list_ollama_models("http://localhost:11434")
         assert names == []
 
@@ -587,13 +593,13 @@ class TestTestConnection:
 
     def test_successful_connection_returns_llm(self):
         llm_mock = self._make_llm_mock("ok")
-        with patch("src.providers.create_chat_model", return_value=llm_mock):
+        with patch("cogtrix_core.providers.create_chat_model", return_value=llm_mock):
             result = _test_connection("ollama", "qwen3:8b", None, "http://localhost:11434")
         assert result is llm_mock
 
     def test_provider_setup_failure_returns_none(self, capsys):
         with patch(
-            "src.providers.create_chat_model",
+            "cogtrix_core.providers.create_chat_model",
             side_effect=ValueError("bad config"),
         ):
             result = _test_connection("ollama", "bad-model", None, None)
@@ -604,7 +610,7 @@ class TestTestConnection:
     def test_invoke_failure_returns_none(self, capsys):
         llm_mock = MagicMock()
         llm_mock.invoke.side_effect = RuntimeError("timeout")
-        with patch("src.providers.create_chat_model", return_value=llm_mock):
+        with patch("cogtrix_core.providers.create_chat_model", return_value=llm_mock):
             result = _test_connection("openai", "gpt-4.1-mini", "sk-test", None)
         assert result is None
         captured = capsys.readouterr()
@@ -612,7 +618,7 @@ class TestTestConnection:
 
     def test_empty_response_returns_none(self, capsys):
         llm_mock = self._make_llm_mock("   ")
-        with patch("src.providers.create_chat_model", return_value=llm_mock):
+        with patch("cogtrix_core.providers.create_chat_model", return_value=llm_mock):
             result = _test_connection("openai", "gpt-4.1-mini", "sk-test", None)
         assert result is None
         captured = capsys.readouterr()
@@ -625,14 +631,16 @@ class TestTestConnection:
 
         llm_mock = MagicMock()
         llm_mock.invoke.return_value = _NoContent()
-        with patch("src.providers.create_chat_model", return_value=llm_mock):
+        with patch("cogtrix_core.providers.create_chat_model", return_value=llm_mock):
             result = _test_connection("ollama", "llama3.2", None, "http://localhost:11434")
         assert result is llm_mock
 
     def test_create_chat_model_called_with_max_retries_zero(self) -> None:
         """Connection test must use max_retries=0 to fail fast on unreachable hosts."""
         llm_mock = self._make_llm_mock("ok")
-        with patch("src.providers.create_chat_model", return_value=llm_mock) as mock_factory:
+        with patch(
+            "cogtrix_core.providers.create_chat_model", return_value=llm_mock
+        ) as mock_factory:
             _test_connection("openai", "gpt-4o", "sk-test", None)
         _kwargs = mock_factory.call_args.kwargs
         assert _kwargs.get("max_retries") == 0, (
@@ -661,7 +669,7 @@ class TestTestConnection:
             }
         }  # type: ignore[attr-defined]
         llm_mock.invoke.side_effect = exc
-        with patch("src.providers.create_chat_model", return_value=llm_mock):
+        with patch("cogtrix_core.providers.create_chat_model", return_value=llm_mock):
             _test_connection("openai", "gpt-oss", "sk-test", "http://192.168.70.254:8080/v1")
         captured = capsys.readouterr()
         assert "No connected db." in captured.out
@@ -675,8 +683,8 @@ class TestTestConnection:
         llm_mock = MagicMock()
         llm_mock.invoke.side_effect = FuturesTimeoutError("hung")
 
-        with patch("src.providers.create_chat_model", return_value=llm_mock):
-            with patch("src.setup_wizard._SETUP_WIZARD_LLM_TIMEOUT_SECONDS", 0.3):
+        with patch("cogtrix_core.providers.create_chat_model", return_value=llm_mock):
+            with patch("cogtrix_core.setup_wizard._SETUP_WIZARD_LLM_TIMEOUT_SECONDS", 0.3):
                 t0 = time.monotonic()
                 result = _test_connection("openai", "gpt-4.1-mini", "sk-test", None)
                 elapsed = time.monotonic() - t0
@@ -725,7 +733,7 @@ class TestWizardSystemPromptTemplate:
     """BUG-074 — _WIZARD_SYSTEM_PROMPT uses string.Template to handle curly braces."""
 
     def _full_substitute(self, **overrides):
-        from src.setup_wizard import _WIZARD_SYSTEM_PROMPT
+        from cogtrix_core.setup_wizard import _WIZARD_SYSTEM_PROMPT
 
         defaults = dict(
             existing_config="cfg content",
@@ -811,14 +819,14 @@ class TestFormatProductionContext:
         }
 
     def test_same_object_returns_same_as_bootstrap(self):
-        from src.setup_wizard import _format_production_context
+        from cogtrix_core.setup_wizard import _format_production_context
 
         bootstrap = self._info()
         result = _format_production_context(bootstrap, bootstrap)
         assert "Same as bootstrap" in result
 
     def test_same_values_returns_same_as_bootstrap(self):
-        from src.setup_wizard import _format_production_context
+        from cogtrix_core.setup_wizard import _format_production_context
 
         bootstrap = self._info()
         production = self._info()  # equal dict but different object
@@ -826,7 +834,7 @@ class TestFormatProductionContext:
         assert "Same as bootstrap" in result
 
     def test_different_model_returns_production_context(self):
-        from src.setup_wizard import _format_production_context
+        from cogtrix_core.setup_wizard import _format_production_context
 
         bootstrap = self._info(model="small-model")
         production = self._info(model="big-model")
@@ -835,7 +843,7 @@ class TestFormatProductionContext:
         assert "separate production model" in result
 
     def test_different_provider_returns_production_context(self):
-        from src.setup_wizard import _format_production_context
+        from cogtrix_core.setup_wizard import _format_production_context
 
         bootstrap = self._info(provider="local")
         production = self._info(
@@ -847,7 +855,7 @@ class TestFormatProductionContext:
         assert "models.default" in result
 
     def test_production_context_includes_all_fields(self):
-        from src.setup_wizard import _format_production_context
+        from cogtrix_core.setup_wizard import _format_production_context
 
         bootstrap = self._info(model="tiny")
         production = self._info(
@@ -864,7 +872,7 @@ class TestFormatProductionContext:
         assert "yes" in result  # api_key configured: yes
 
     def test_no_key_shows_no(self):
-        from src.setup_wizard import _format_production_context
+        from cogtrix_core.setup_wizard import _format_production_context
 
         bootstrap = self._info(model="tiny")
         production = self._info(model="big", api_key="")
@@ -873,7 +881,7 @@ class TestFormatProductionContext:
 
     def test_no_secret_in_context(self):
         """Real API keys must never appear in the production context string."""
-        from src.setup_wizard import _format_production_context
+        from cogtrix_core.setup_wizard import _format_production_context
 
         bootstrap = self._info(model="tiny")
         production = self._info(model="big", api_key="sk-supersecret")
@@ -894,7 +902,7 @@ class TestMaybeConfigureProductionModel:
         }
 
     def test_no_returns_bootstrap_unchanged(self):
-        from src.setup_wizard import _maybe_configure_production_model
+        from cogtrix_core.setup_wizard import _maybe_configure_production_model
 
         bootstrap = self._bootstrap()
         with patch("builtins.input", return_value="no"):
@@ -903,7 +911,7 @@ class TestMaybeConfigureProductionModel:
 
     def test_default_is_no(self):
         """Pressing Enter (empty input) must default to 'no'."""
-        from src.setup_wizard import _maybe_configure_production_model
+        from cogtrix_core.setup_wizard import _maybe_configure_production_model
 
         bootstrap = self._bootstrap()
         with patch("builtins.input", return_value=""):
@@ -911,7 +919,7 @@ class TestMaybeConfigureProductionModel:
         assert result is bootstrap
 
     def test_yes_runs_bootstrap_llm_and_returns_production(self):
-        from src.setup_wizard import _maybe_configure_production_model
+        from cogtrix_core.setup_wizard import _maybe_configure_production_model
 
         bootstrap = self._bootstrap()
         prod_info = {
@@ -924,7 +932,9 @@ class TestMaybeConfigureProductionModel:
         prod_llm = MagicMock()
         with (
             patch("builtins.input", return_value="yes"),
-            patch("src.setup_wizard._bootstrap_llm", return_value=(prod_llm, prod_info)) as mock_bl,
+            patch(
+                "cogtrix_core.setup_wizard._bootstrap_llm", return_value=(prod_llm, prod_info)
+            ) as mock_bl,
         ):
             result = _maybe_configure_production_model(bootstrap, {"openai_key": "sk-prod"})
         mock_bl.assert_called_once()
@@ -932,7 +942,7 @@ class TestMaybeConfigureProductionModel:
         assert result["model"] == "gpt-4o"
 
     def test_output_shows_current_model(self, capsys):
-        from src.setup_wizard import _maybe_configure_production_model
+        from cogtrix_core.setup_wizard import _maybe_configure_production_model
 
         bootstrap = self._bootstrap()
         with patch("builtins.input", return_value="no"):
@@ -964,7 +974,7 @@ class TestInjectBootstrapTwoProvider:
         }
 
     def test_single_provider_bootstrap_is_default(self):
-        from src.setup_wizard import _inject_bootstrap
+        from cogtrix_core.setup_wizard import _inject_bootstrap
 
         data: dict = {}
         _inject_bootstrap(data, self._bootstrap())
@@ -972,7 +982,7 @@ class TestInjectBootstrapTwoProvider:
         assert data["models"]["default_model"]["model"] == "small-model"
 
     def test_production_provider_becomes_default(self):
-        from src.setup_wizard import _inject_bootstrap
+        from cogtrix_core.setup_wizard import _inject_bootstrap
 
         data: dict = {}
         _inject_bootstrap(data, self._bootstrap(), production_info=self._production())
@@ -980,7 +990,7 @@ class TestInjectBootstrapTwoProvider:
         assert data["models"]["default_model"]["model"] == "gpt-4o"
 
     def test_both_providers_in_providers_section(self):
-        from src.setup_wizard import _inject_bootstrap
+        from cogtrix_core.setup_wizard import _inject_bootstrap
 
         data: dict = {}
         _inject_bootstrap(data, self._bootstrap(), production_info=self._production())
@@ -988,14 +998,14 @@ class TestInjectBootstrapTwoProvider:
         assert "cloud" in data["providers"]
 
     def test_bootstrap_key_injected(self):
-        from src.setup_wizard import _inject_bootstrap
+        from cogtrix_core.setup_wizard import _inject_bootstrap
 
         data: dict = {}
         _inject_bootstrap(data, self._bootstrap(), production_info=self._production())
         assert data["providers"]["wizard-llm"]["api_key"] == "sk-wiz"
 
     def test_production_key_injected(self):
-        from src.setup_wizard import _inject_bootstrap
+        from cogtrix_core.setup_wizard import _inject_bootstrap
 
         data: dict = {}
         _inject_bootstrap(data, self._bootstrap(), production_info=self._production())
@@ -1003,7 +1013,7 @@ class TestInjectBootstrapTwoProvider:
 
     def test_same_provider_not_duplicated(self):
         """When production == bootstrap, only one provider entry is created."""
-        from src.setup_wizard import _inject_bootstrap
+        from cogtrix_core.setup_wizard import _inject_bootstrap
 
         bootstrap = self._bootstrap()
         data: dict = {}
@@ -1013,7 +1023,7 @@ class TestInjectBootstrapTwoProvider:
         assert data["models"]["default_model"]["provider"] == "wizard-llm"
 
     def test_no_production_key_when_none(self):
-        from src.setup_wizard import _inject_bootstrap
+        from cogtrix_core.setup_wizard import _inject_bootstrap
 
         prod = {**self._production(), "api_key": None}
         data: dict = {}
@@ -1023,7 +1033,7 @@ class TestInjectBootstrapTwoProvider:
     def test_is_template_instance(self):
         from string import Template
 
-        from src.setup_wizard import _WIZARD_SYSTEM_PROMPT
+        from cogtrix_core.setup_wizard import _WIZARD_SYSTEM_PROMPT
 
         assert isinstance(_WIZARD_SYSTEM_PROMPT, Template)
 
@@ -1269,7 +1279,7 @@ class TestRunConversation:
         llm = MagicMock()
         llm.invoke.side_effect = FuturesTimeoutError("hung")
 
-        with patch("src.setup_wizard._SETUP_WIZARD_LLM_TIMEOUT_SECONDS", 0.3):
+        with patch("cogtrix_core.setup_wizard._SETUP_WIZARD_LLM_TIMEOUT_SECONDS", 0.3):
             t0 = time.monotonic()
             with pytest.raises(SystemExit):
                 _run_conversation(llm, "system prompt")
@@ -1294,7 +1304,7 @@ class TestRunConversation:
 
         inputs = iter(["no, continue editing", "add model setting"])
         with patch("builtins.input", side_effect=inputs):
-            with patch("src.setup_wizard._SETUP_WIZARD_LLM_TIMEOUT_SECONDS", 0.3):
+            with patch("cogtrix_core.setup_wizard._SETUP_WIZARD_LLM_TIMEOUT_SECONDS", 0.3):
                 t0 = time.monotonic()
                 with pytest.raises(SystemExit):
                     _run_conversation(llm, "system prompt")
@@ -1317,7 +1327,7 @@ class TestRunConversation:
 
         inputs = iter(["I need a bot"])
         with patch("builtins.input", side_effect=inputs):
-            with patch("src.setup_wizard._SETUP_WIZARD_LLM_TIMEOUT_SECONDS", 0.3):
+            with patch("cogtrix_core.setup_wizard._SETUP_WIZARD_LLM_TIMEOUT_SECONDS", 0.3):
                 t0 = time.monotonic()
                 with pytest.raises(SystemExit):
                     _run_conversation(llm, "system prompt")

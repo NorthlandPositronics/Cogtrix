@@ -3,13 +3,13 @@
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.messages.modifier import RemoveMessage
 
-from src.orchestration.nodes.recovery import (
+from cogtrix_core.orchestration.nodes.recovery import (
     _RECOVERY_INJECTED_MARKER,
     _find_current_turn_start,
     build_handle_action_intent_node,
     build_handle_phantom_node,
 )
-from src.orchestration.nodes.recovery import HumanMessage as _RecoveryHumanMessage
+from cogtrix_core.orchestration.nodes.recovery import HumanMessage as _RecoveryHumanMessage
 
 
 class _DummyLogger:
@@ -250,7 +250,7 @@ class TestTopicSubstitutionDoesNotFireOnRecoveryNudge:
     """
 
     def test_topic_substitution_skips_recovery_nudge(self) -> None:
-        from src.orchestration.verification import (
+        from cogtrix_core.orchestration.verification import (
             collect_grounded_sources,
             detect_topic_substitution,
         )

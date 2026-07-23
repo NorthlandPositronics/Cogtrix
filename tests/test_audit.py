@@ -1,4 +1,4 @@
-"""Tests for src/audit.py — structured audit log module."""
+"""Tests for cogtrix_core/audit.py — structured audit log module."""
 
 from __future__ import annotations
 
@@ -10,8 +10,8 @@ from pathlib import Path
 
 import pytest
 
-import src.audit as audit_module
-from src.audit import (
+import cogtrix_core.audit as audit_module
+from cogtrix_core.audit import (
     AuditLogger,
     configure_audit,
     record_auth,
@@ -292,7 +292,7 @@ def test_convenience_noop_when_not_configured(tmp_path: Path) -> None:
 
 
 def test_config_has_audit_fields() -> None:
-    from src.config import Config
+    from cogtrix_core.config import Config
 
     cfg = Config()
     assert cfg.audit_log_enabled is True
@@ -300,7 +300,7 @@ def test_config_has_audit_fields() -> None:
 
 
 def test_config_audit_yaml_parsing(tmp_path: Path) -> None:
-    from src.config import _apply_config_file  # type: ignore[attr-defined]
+    from cogtrix_core.config import _apply_config_file  # type: ignore[attr-defined]
 
     cfg_file = tmp_path / "cogtrix.yaml"
     cfg_file.write_text(
@@ -308,7 +308,7 @@ def test_config_audit_yaml_parsing(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    from src.config import Config
+    from cogtrix_core.config import Config
 
     cfg = Config()
     _apply_config_file(cfg, cfg_file)

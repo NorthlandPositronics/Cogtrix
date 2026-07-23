@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import logging
 
-from src.orchestration.runner import _is_user_config_error, format_agent_error
+from cogtrix_core.orchestration.runner import _is_user_config_error, format_agent_error
 
 
 # A stand-in for ``openai.BadRequestError`` — classification keys on the class
@@ -113,3 +113,78 @@ def test_user_config_error_logged_without_stack_trace(caplog) -> None:
     # And the inverse path stays ERROR-worthy.
     with caplog.at_level(logging.ERROR):
         assert _is_user_config_error(ValueError("genuine internal bug")) is False
+
+
+# #2358 — OpenRouter 402 (out of daily credits / max_tokens too high). The raw
+# message embeds a key-management URL containing the key id, which must never
+# reach a log line or a user-facing error frame.
+class APIStatusError(Exception):
+    pass
+
+
+_402_WITH_KEY_URL = (
+    "Error code: 402 - {'error': {'message': \"This request requires more credits, "
+    "or fewer max_tokens. You requested up to 65536 tokens, but can only afford "
+    "34908. To increase, visit https://openrouter.ai/workspaces/default/keys/"
+    "4cc243185e37d3ff658e3ed51653b9fe4f0454acb802f53c3852f23e60422714 and adjust "
+    "the key's daily limit\", 'code': 402}}"
+)
+
+
+class TestOpenRouter402:
+    def test_402_is_user_config_error(self) -> None:
+        assert _is_user_config_error(APIStatusError(_402_WITH_KEY_URL)) is True
+
+    def test_402_message_is_actionable(self) -> None:
+        msg = format_agent_error(APIStatusError(_402_WITH_KEY_URL)).lower()
+        assert "credits" in msg or "budget" in msg
+        assert "max_tokens" in msg
+
+    def test_402_message_does_not_leak_key_url(self) -> None:
+        msg = format_agent_error(APIStatusError(_402_WITH_KEY_URL))
+        assert "http" not in msg
+        assert "openrouter.ai" not in msg
+        assert "4cc243185e37d3ff" not in msg  # the key id
+
+    def test_sanitize_redacts_urls(self) -> None:
+        from cogtrix_core.orchestration.runner import _sanitize_sdk_error
+
+        out = _sanitize_sdk_error(_402_WITH_KEY_URL)
+        assert "http" not in out
+        assert "openrouter.ai" not in out
+        assert "4cc243185e37d3ff" not in out
+        assert out.strip()  # never empty (#2291)
+
+
+class TestProviderMessageRedaction:
+    """Forge audit: URL redaction must cover EVERY provider-message echo, not only
+    _sanitize_sdk_error — _extract_api_message feeds the 429 / invalid-model
+    branches of format_agent_error and previously leaked the raw key URL."""
+
+    _429_WITH_KEY_URL = (
+        "Error code: 429 - {'error': {'message': \"You are over your quota; top up "
+        "at https://openrouter.ai/keys/4cc243185e37d3ff to continue\", 'code': 429}}"
+    )
+
+    def test_extract_api_message_redacts_url(self) -> None:
+        from cogtrix_core.orchestration.runner import _extract_api_message
+
+        out = _extract_api_message(self._429_WITH_KEY_URL)
+        assert out is not None
+        assert "http" not in out
+        assert "openrouter.ai" not in out
+        assert "4cc243185e37d3ff" not in out
+        assert "over your quota" in out  # the actionable text survives
+
+    def test_rate_limit_branch_does_not_leak_key_url(self) -> None:
+        # "rate_limit"/"429" in the message routes through the rate-limit branch,
+        # which echoes _extract_api_message — now redacted.
+        msg = format_agent_error(Exception("rate_limit — " + self._429_WITH_KEY_URL))
+        assert "4cc243185e37d3ff" not in msg
+        assert "openrouter.ai" not in msg
+
+    def test_payment_required_classified_and_actionable(self) -> None:
+        e = APIStatusError("Error code: 402 - {'error': {'message': 'Payment Required'}}")
+        assert _is_user_config_error(e) is True
+        out = format_agent_error(e).lower()
+        assert "budget" in out or "credits" in out  # hits the 402 branch, not generic

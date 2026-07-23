@@ -25,7 +25,7 @@ import pytest
 
 
 def _make_ingest_config(tmp_path: Path, entity_index_path: Path | None = None):
-    from src.rag.ingest import IngestConfig
+    from cogtrix_core.rag.ingest import IngestConfig
 
     return IngestConfig(
         docs_dir=tmp_path / "docs",
@@ -48,14 +48,14 @@ def _fake_document(text: str = "hello world", source: str = "doc.txt"):
 
 class TestIngestMany:
     def test_empty_paths_returns_empty(self):
-        from src.rag.ingest import IngestConfig, ingest_many
+        from cogtrix_core.rag.ingest import IngestConfig, ingest_many
 
         config = IngestConfig(docs_dir=Path("/tmp"), vectordb_dir=Path("/tmp"))
         result = ingest_many([], config)
         assert result == {}
 
     def test_all_succeed(self, tmp_path: Path):
-        from src.rag.ingest import ingest_many
+        from cogtrix_core.rag.ingest import ingest_many
 
         config = _make_ingest_config(tmp_path)
         paths: list[str | Path] = [tmp_path / f"file{i}.txt" for i in range(3)]
@@ -68,10 +68,14 @@ class TestIngestMany:
             return prepared.get(str(path))
 
         with (
-            patch("src.rag.ingest._prepare_ingest_file", side_effect=fake_prepare) as mock_prepare,
-            patch("src.rag.ingest._create_embeddings", return_value=MagicMock()),
-            patch("src.rag.ingest.FAISS.from_documents", return_value=mock_store) as mock_faiss,
-            patch("src.rag.ingest.save_faiss_store") as mock_save_store,
+            patch(
+                "cogtrix_core.rag.ingest._prepare_ingest_file", side_effect=fake_prepare
+            ) as mock_prepare,
+            patch("cogtrix_core.rag.ingest._create_embeddings", return_value=MagicMock()),
+            patch(
+                "cogtrix_core.rag.ingest.FAISS.from_documents", return_value=mock_store
+            ) as mock_faiss,
+            patch("cogtrix_core.rag.ingest.save_faiss_store") as mock_save_store,
         ):
             result = ingest_many(paths, config)
 
@@ -88,7 +92,7 @@ class TestIngestMany:
         (embedding endpoint down, FAISS write error, ...), the failure is
         logged at WARNING — not silently swallowed — and every prepared file
         is still reported as failed."""
-        from src.rag.ingest import ingest_many
+        from cogtrix_core.rag.ingest import ingest_many
 
         config = _make_ingest_config(tmp_path)
         paths: list[str | Path] = [tmp_path / f"file{i}.txt" for i in range(3)]
@@ -99,12 +103,12 @@ class TestIngestMany:
 
         mock_log = MagicMock()
         with (
-            patch("src.rag.ingest._prepare_ingest_file", side_effect=fake_prepare),
+            patch("cogtrix_core.rag.ingest._prepare_ingest_file", side_effect=fake_prepare),
             patch(
-                "src.rag.ingest._create_embeddings",
+                "cogtrix_core.rag.ingest._create_embeddings",
                 side_effect=RuntimeError("embedding endpoint 401"),
             ),
-            patch("src.rag.ingest._log", mock_log),
+            patch("cogtrix_core.rag.ingest._log", mock_log),
         ):
             result = ingest_many(paths, config)
 
@@ -118,7 +122,7 @@ class TestIngestMany:
 
     def test_partial_failure(self, tmp_path: Path):
         """When some files fail, successes and failures are reported correctly."""
-        from src.rag.ingest import ingest_many
+        from cogtrix_core.rag.ingest import ingest_many
 
         config = _make_ingest_config(tmp_path)
         call_count = 0
@@ -133,10 +137,10 @@ class TestIngestMany:
         mock_store = MagicMock()
 
         with (
-            patch("src.rag.ingest._prepare_ingest_file", side_effect=alternating),
-            patch("src.rag.ingest._create_embeddings", return_value=MagicMock()),
-            patch("src.rag.ingest.FAISS.from_documents", return_value=mock_store),
-            patch("src.rag.ingest.save_faiss_store") as mock_save_store,
+            patch("cogtrix_core.rag.ingest._prepare_ingest_file", side_effect=alternating),
+            patch("cogtrix_core.rag.ingest._create_embeddings", return_value=MagicMock()),
+            patch("cogtrix_core.rag.ingest.FAISS.from_documents", return_value=mock_store),
+            patch("cogtrix_core.rag.ingest.save_faiss_store") as mock_save_store,
         ):
             paths: list[str | Path] = [tmp_path / f"file{i}.txt" for i in range(4)]
             result = ingest_many(paths, config)
@@ -150,7 +154,7 @@ class TestIngestMany:
         mock_save_store.assert_called_once_with(mock_store, config.vectordb_dir)
 
     def test_builds_single_index_from_all_chunks(self, tmp_path: Path):
-        from src.rag.ingest import ingest_many
+        from cogtrix_core.rag.ingest import ingest_many
 
         config = _make_ingest_config(tmp_path)
         paths: list[str | Path] = [tmp_path / "a.txt", tmp_path / "b.txt"]
@@ -161,10 +165,12 @@ class TestIngestMany:
         mock_store = MagicMock()
 
         with (
-            patch("src.rag.ingest._prepare_ingest_file", side_effect=fake_prepare),
-            patch("src.rag.ingest._create_embeddings", return_value=MagicMock()),
-            patch("src.rag.ingest.FAISS.from_documents", return_value=mock_store) as mock_faiss,
-            patch("src.rag.ingest.save_faiss_store") as mock_save_store,
+            patch("cogtrix_core.rag.ingest._prepare_ingest_file", side_effect=fake_prepare),
+            patch("cogtrix_core.rag.ingest._create_embeddings", return_value=MagicMock()),
+            patch(
+                "cogtrix_core.rag.ingest.FAISS.from_documents", return_value=mock_store
+            ) as mock_faiss,
+            patch("cogtrix_core.rag.ingest.save_faiss_store") as mock_save_store,
         ):
             result = ingest_many(paths, config)
 
@@ -178,7 +184,7 @@ class TestIngestMany:
 
     def test_worker_cap_at_eight(self, tmp_path: Path):
         """Workers are capped at min(len(paths), workers, 8)."""
-        from src.rag.ingest import ingest_many
+        from cogtrix_core.rag.ingest import ingest_many
 
         config = _make_ingest_config(tmp_path)
         captured_max_workers: list[int] = []
@@ -192,8 +198,8 @@ class TestIngestMany:
                 captured_max_workers.append(max_workers)
                 super().__init__(max_workers=max_workers, **kw)
 
-        with patch("src.rag.ingest.ThreadPoolExecutor", CapturingTPE):
-            with patch("src.rag.ingest._prepare_ingest_file", return_value=None):
+        with patch("cogtrix_core.rag.ingest.ThreadPoolExecutor", CapturingTPE):
+            with patch("cogtrix_core.rag.ingest._prepare_ingest_file", return_value=None):
                 paths: list[str | Path] = [tmp_path / f"f{i}.txt" for i in range(12)]
                 ingest_many(paths, config, workers=20)
 
@@ -201,7 +207,7 @@ class TestIngestMany:
 
     def test_worker_capped_at_path_count(self, tmp_path: Path):
         """When fewer paths than workers, workers = len(paths)."""
-        from src.rag.ingest import ingest_many
+        from cogtrix_core.rag.ingest import ingest_many
 
         config = _make_ingest_config(tmp_path)
         captured: list[int] = []
@@ -215,8 +221,8 @@ class TestIngestMany:
                 captured.append(max_workers)
                 super().__init__(max_workers=max_workers, **kw)
 
-        with patch("src.rag.ingest.ThreadPoolExecutor", CapTPE):
-            with patch("src.rag.ingest._prepare_ingest_file", return_value=None):
+        with patch("cogtrix_core.rag.ingest.ThreadPoolExecutor", CapTPE):
+            with patch("cogtrix_core.rag.ingest._prepare_ingest_file", return_value=None):
                 paths: list[str | Path] = [tmp_path / "only_one.txt"]
                 ingest_many(paths, config, workers=8)
 
@@ -224,12 +230,14 @@ class TestIngestMany:
 
     def test_exception_in_worker_returns_false(self, tmp_path: Path):
         """If a worker raises an unexpected exception, path maps to False."""
-        from src.rag.ingest import ingest_many
+        from cogtrix_core.rag.ingest import ingest_many
 
         config = _make_ingest_config(tmp_path)
         paths: list[str | Path] = [tmp_path / "bad.txt"]
 
-        with patch("src.rag.ingest._prepare_ingest_file", side_effect=RuntimeError("boom")):
+        with patch(
+            "cogtrix_core.rag.ingest._prepare_ingest_file", side_effect=RuntimeError("boom")
+        ):
             result = ingest_many(paths, config)
 
         assert list(result.values()) == [False]
@@ -244,7 +252,7 @@ class TestExtractEntities:
     def test_capitalized_phrases_extracted(self):
         from langchain_core.documents import Document
 
-        from src.rag.ingest import _extract_entities
+        from cogtrix_core.rag.ingest import _extract_entities
 
         chunks = [Document(page_content="John Smith visited New York last week.")]
         entities = _extract_entities(chunks, "test.txt")
@@ -254,7 +262,7 @@ class TestExtractEntities:
     def test_quoted_strings_extracted(self):
         from langchain_core.documents import Document
 
-        from src.rag.ingest import _extract_entities
+        from cogtrix_core.rag.ingest import _extract_entities
 
         chunks = [Document(page_content='The system said "operation complete" to the user.')]
         entities = _extract_entities(chunks, "test.txt")
@@ -263,7 +271,7 @@ class TestExtractEntities:
     def test_frequent_words_extracted(self):
         from langchain_core.documents import Document
 
-        from src.rag.ingest import _extract_entities
+        from cogtrix_core.rag.ingest import _extract_entities
 
         # Repeat a non-stop word 3 times
         text = "python python python is great for data processing"
@@ -274,7 +282,7 @@ class TestExtractEntities:
     def test_stop_words_excluded(self):
         from langchain_core.documents import Document
 
-        from src.rag.ingest import _extract_entities
+        from cogtrix_core.rag.ingest import _extract_entities
 
         # "their" appears 3+ times but is a stop word
         text = "their their their data is important"
@@ -285,7 +293,7 @@ class TestExtractEntities:
     def test_chunk_refs_include_source_name(self):
         from langchain_core.documents import Document
 
-        from src.rag.ingest import _extract_entities
+        from cogtrix_core.rag.ingest import _extract_entities
 
         chunks = [Document(page_content='He said "hello world" to everyone.')]
         entities = _extract_entities(chunks, "myfile.txt")
@@ -301,7 +309,7 @@ class TestExtractEntities:
 
 class TestUpdateEntityIndex:
     def test_creates_index_when_absent(self, tmp_path: Path):
-        from src.rag.ingest import _update_entity_index
+        from cogtrix_core.rag.ingest import _update_entity_index
 
         index_path = tmp_path / "entity_index.json"
         _update_entity_index({"Python": ["doc.txt:chunk_0"]}, index_path)
@@ -310,7 +318,7 @@ class TestUpdateEntityIndex:
         assert "Python" in data
 
     def test_merges_into_existing_index(self, tmp_path: Path):
-        from src.rag.ingest import _update_entity_index
+        from cogtrix_core.rag.ingest import _update_entity_index
 
         index_path = tmp_path / "entity_index.json"
         index_path.write_text(json.dumps({"Existing": ["old.txt:chunk_0"]}))
@@ -321,7 +329,7 @@ class TestUpdateEntityIndex:
 
     def test_concurrent_writes_are_safe(self, tmp_path: Path):
         """Multiple threads writing to the same index should not corrupt it."""
-        from src.rag.ingest import _update_entity_index
+        from cogtrix_core.rag.ingest import _update_entity_index
 
         index_path = tmp_path / "entity_index.json"
         errors: list[Exception] = []
@@ -358,7 +366,7 @@ class TestScoreThreshold:
     def test_results_below_threshold_excluded(self, tmp_path: Path):
         from langchain_core.documents import Document
 
-        from src.tools.rag import configure_rag, query_knowledge_base
+        from cogtrix_core.tools.rag import configure_rag, query_knowledge_base
 
         configure_rag({"vectordb_dir": str(tmp_path / "faiss_index"), "score_threshold": 0.0})
 
@@ -374,9 +382,9 @@ class TestScoreThreshold:
         mock_store = self._make_mock_store(pairs)
 
         with (
-            patch("src.tools.rag.FAISS_AVAILABLE", True),
-            patch("src.tools.rag.load_faiss_store_safe", return_value=mock_store),
-            patch("src.tools.rag._get_embeddings", return_value=MagicMock()),
+            patch("cogtrix_core.tools.rag.FAISS_AVAILABLE", True),
+            patch("cogtrix_core.tools.rag.load_faiss_store_safe", return_value=mock_store),
+            patch("cogtrix_core.tools.rag._get_embeddings", return_value=MagicMock()),
         ):
             # threshold 0.8 → only similarity >= 0.8 passes (distance <= 0.25)
             result = query_knowledge_base("test", k=5, score_threshold=0.8)
@@ -387,7 +395,7 @@ class TestScoreThreshold:
     def test_no_results_below_threshold_returns_message(self, tmp_path: Path):
         from langchain_core.documents import Document
 
-        from src.tools.rag import configure_rag, query_knowledge_base
+        from cogtrix_core.tools.rag import configure_rag, query_knowledge_base
 
         configure_rag({"vectordb_dir": str(tmp_path / "faiss_index"), "score_threshold": 0.0})
 
@@ -401,9 +409,9 @@ class TestScoreThreshold:
         mock_store = self._make_mock_store(pairs)
 
         with (
-            patch("src.tools.rag.FAISS_AVAILABLE", True),
-            patch("src.tools.rag.load_faiss_store_safe", return_value=mock_store),
-            patch("src.tools.rag._get_embeddings", return_value=MagicMock()),
+            patch("cogtrix_core.tools.rag.FAISS_AVAILABLE", True),
+            patch("cogtrix_core.tools.rag.load_faiss_store_safe", return_value=mock_store),
+            patch("cogtrix_core.tools.rag._get_embeddings", return_value=MagicMock()),
         ):
             result = query_knowledge_base("test", k=5, score_threshold=0.9)
 
@@ -413,7 +421,7 @@ class TestScoreThreshold:
         """score_threshold=0.0 (default) must not filter anything."""
         from langchain_core.documents import Document
 
-        from src.tools.rag import configure_rag, query_knowledge_base
+        from cogtrix_core.tools.rag import configure_rag, query_knowledge_base
 
         configure_rag({"vectordb_dir": str(tmp_path / "faiss_index"), "score_threshold": 0.0})
 
@@ -427,9 +435,9 @@ class TestScoreThreshold:
         mock_store = self._make_mock_store(pairs)
 
         with (
-            patch("src.tools.rag.FAISS_AVAILABLE", True),
-            patch("src.tools.rag.load_faiss_store_safe", return_value=mock_store),
-            patch("src.tools.rag._get_embeddings", return_value=MagicMock()),
+            patch("cogtrix_core.tools.rag.FAISS_AVAILABLE", True),
+            patch("cogtrix_core.tools.rag.load_faiss_store_safe", return_value=mock_store),
+            patch("cogtrix_core.tools.rag._get_embeddings", return_value=MagicMock()),
         ):
             result = query_knowledge_base("test", k=5, score_threshold=0.0)
 
@@ -443,7 +451,7 @@ class TestScoreThreshold:
 
 class TestRagFindEntity:
     def test_finds_exact_entity(self, tmp_path: Path):
-        from src.tools.rag import configure_rag, rag_find_entity
+        from cogtrix_core.tools.rag import configure_rag, rag_find_entity
 
         index = {"Python": ["file.txt:chunk_0", "file.txt:chunk_3"]}
         index_path = tmp_path / "entity_index.json"
@@ -455,7 +463,7 @@ class TestRagFindEntity:
         assert "chunk_0" in result
 
     def test_case_insensitive_search(self, tmp_path: Path):
-        from src.tools.rag import configure_rag, rag_find_entity
+        from cogtrix_core.tools.rag import configure_rag, rag_find_entity
 
         index = {"Machine Learning": ["ml.pdf:chunk_1"]}
         index_path = tmp_path / "entity_index.json"
@@ -466,7 +474,7 @@ class TestRagFindEntity:
         assert "Machine Learning" in result
 
     def test_not_found_message(self, tmp_path: Path):
-        from src.tools.rag import configure_rag, rag_find_entity
+        from cogtrix_core.tools.rag import configure_rag, rag_find_entity
 
         index_path = tmp_path / "entity_index.json"
         index_path.write_text(json.dumps({"Python": ["f.txt:chunk_0"]}))
@@ -476,14 +484,14 @@ class TestRagFindEntity:
         assert "not found" in result.lower()
 
     def test_no_entity_index_configured(self):
-        from src.tools.rag import configure_rag, rag_find_entity
+        from cogtrix_core.tools.rag import configure_rag, rag_find_entity
 
         configure_rag({"entity_index_path": None})
         result = rag_find_entity("Anything")
         assert "not configured" in result.lower()
 
     def test_max_results_respected(self, tmp_path: Path):
-        from src.tools.rag import configure_rag, rag_find_entity
+        from cogtrix_core.tools.rag import configure_rag, rag_find_entity
 
         refs = [f"file.txt:chunk_{i}" for i in range(20)]
         index_path = tmp_path / "entity_index.json"
@@ -503,18 +511,18 @@ class TestRagFindEntity:
 
 class TestRagIngest:
     def test_no_paths_returns_message(self):
-        from src.tools.rag import rag_ingest
+        from cogtrix_core.tools.rag import rag_ingest
 
         result = rag_ingest("  ,  ")
         assert "No file paths" in result
 
     def test_calls_ingest_many(self, tmp_path: Path):
-        from src.tools.rag import configure_rag, rag_ingest
+        from cogtrix_core.tools.rag import configure_rag, rag_ingest
 
         configure_rag({"vectordb_dir": str(tmp_path / "vectordb" / "faiss_index")})
 
         with patch(
-            "src.rag.ingest.ingest_many", return_value={str(tmp_path / "a.txt"): True}
+            "cogtrix_core.rag.ingest.ingest_many", return_value={str(tmp_path / "a.txt"): True}
         ) as mock_im:
             result = rag_ingest(str(tmp_path / "a.txt"))
 
@@ -522,12 +530,12 @@ class TestRagIngest:
         assert "1/1" in result
 
     def test_reports_failures(self, tmp_path: Path):
-        from src.tools.rag import configure_rag, rag_ingest
+        from cogtrix_core.tools.rag import configure_rag, rag_ingest
 
         configure_rag({"vectordb_dir": str(tmp_path / "vectordb" / "faiss_index")})
 
         paths_result = {str(tmp_path / "a.txt"): True, str(tmp_path / "b.txt"): False}
-        with patch("src.rag.ingest.ingest_many", return_value=paths_result):
+        with patch("cogtrix_core.rag.ingest.ingest_many", return_value=paths_result):
             result = rag_ingest(f"{tmp_path}/a.txt,{tmp_path}/b.txt")
 
         assert "1/2" in result
@@ -541,32 +549,32 @@ class TestRagIngest:
 
 class TestRAGConfigScoreThreshold:
     def test_default_is_zero(self):
-        from src.config import RAGConfig
+        from cogtrix_core.config import RAGConfig
 
         cfg = RAGConfig()
         assert cfg.score_threshold == 0.0
 
     def test_valid_threshold_accepted(self):
-        from src.config import RAGConfig
+        from cogtrix_core.config import RAGConfig
 
         cfg = RAGConfig(score_threshold=0.75)
         assert cfg.score_threshold == 0.75
 
     def test_threshold_above_one_raises(self):
-        from src.config import ConfigError, RAGConfig
+        from cogtrix_core.config import ConfigError, RAGConfig
 
         with pytest.raises(ConfigError, match="score_threshold"):
             RAGConfig(score_threshold=1.5)
 
     def test_threshold_below_zero_raises(self):
-        from src.config import ConfigError, RAGConfig
+        from cogtrix_core.config import ConfigError, RAGConfig
 
         with pytest.raises(ConfigError, match="score_threshold"):
             RAGConfig(score_threshold=-0.1)
 
     def test_parsed_from_config_dict(self, tmp_path: Path):
         """score_threshold is correctly parsed from a JSON config file."""
-        from src.config import Config, _apply_config_file
+        from cogtrix_core.config import Config, _apply_config_file
 
         cfg_file = tmp_path / "cogtrix.json"
         cfg_file.write_text(json.dumps({"rag": {"score_threshold": 0.6}}))
@@ -576,7 +584,7 @@ class TestRAGConfigScoreThreshold:
         assert config.rag.score_threshold == 0.6
 
     def test_invalid_config_value_uses_default(self, tmp_path: Path):
-        from src.config import Config, _apply_config_file
+        from cogtrix_core.config import Config, _apply_config_file
 
         cfg_file = tmp_path / "cogtrix.json"
         cfg_file.write_text(json.dumps({"rag": {"score_threshold": "not-a-float"}}))
@@ -594,8 +602,8 @@ class TestRAGConfigScoreThreshold:
 class TestConfigureRagToolWiring:
     def test_entity_index_path_wired(self, tmp_path: Path):
         """configure_rag_tool passes entity_index_path to configure_rag."""
-        from src.config import Config
-        from src.tools.configure import configure_rag_tool
+        from cogtrix_core.config import Config
+        from cogtrix_core.tools.configure import configure_rag_tool
 
         config = Config()
         config.data_dir = str(tmp_path)
@@ -607,12 +615,12 @@ class TestConfigureRagToolWiring:
             captured.update(cfg)
 
         with (
-            patch("src.tools.rag.configure_rag", fake_configure_rag),
-            patch("src.tools.rag.TOOL_CONFIG", {}),
-            patch("src.tools.rag._build_description", return_value="desc"),
-            patch("src.tools.rag.knowledge_base_exists", return_value=False),
+            patch("cogtrix_core.tools.rag.configure_rag", fake_configure_rag),
+            patch("cogtrix_core.tools.rag.TOOL_CONFIG", {}),
+            patch("cogtrix_core.tools.rag._build_description", return_value="desc"),
+            patch("cogtrix_core.tools.rag.knowledge_base_exists", return_value=False),
             patch(
-                "src.config.Config.resolve_embedding_config",
+                "cogtrix_core.config.Config.resolve_embedding_config",
                 return_value=("ollama", "nomic-embed-text", "http://localhost:11434", None),
             ),
         ):
@@ -622,8 +630,8 @@ class TestConfigureRagToolWiring:
         assert captured["entity_index_path"] is not None
 
     def test_score_threshold_wired(self, tmp_path: Path):
-        from src.config import Config
-        from src.tools.configure import configure_rag_tool
+        from cogtrix_core.config import Config
+        from cogtrix_core.tools.configure import configure_rag_tool
 
         config = Config()
         config.data_dir = str(tmp_path)
@@ -636,12 +644,12 @@ class TestConfigureRagToolWiring:
             captured.update(cfg)
 
         with (
-            patch("src.tools.rag.configure_rag", fake_configure_rag),
-            patch("src.tools.rag.TOOL_CONFIG", {}),
-            patch("src.tools.rag._build_description", return_value="desc"),
-            patch("src.tools.rag.knowledge_base_exists", return_value=False),
+            patch("cogtrix_core.tools.rag.configure_rag", fake_configure_rag),
+            patch("cogtrix_core.tools.rag.TOOL_CONFIG", {}),
+            patch("cogtrix_core.tools.rag._build_description", return_value="desc"),
+            patch("cogtrix_core.tools.rag.knowledge_base_exists", return_value=False),
             patch(
-                "src.config.Config.resolve_embedding_config",
+                "cogtrix_core.config.Config.resolve_embedding_config",
                 return_value=("ollama", "nomic-embed-text", "http://localhost:11434", None),
             ),
         ):

@@ -53,15 +53,15 @@ from langchain_core.messages import (
 )
 from langgraph.prebuilt import create_react_agent
 
-from src.agent.core import (
+from cogtrix_core.agent.core import (
     _estimate_msg_tokens,
     create_llm_from_provider_config,
     prepare_messages_with_context,
 )
-from src.config import ModelConfig, ProviderConfig
-from src.memory.json_store import JsonFileMemoryStore
-from src.memory.modes.conversation import ConversationMemoryManager
-from src.registry import ToolRegistry
+from cogtrix_core.config import ModelConfig, ProviderConfig
+from cogtrix_core.memory.json_store import JsonFileMemoryStore
+from cogtrix_core.memory.modes.conversation import ConversationMemoryManager
+from cogtrix_core.registry import ToolRegistry
 
 # Mark every test in this module as both an integration test and a live-LLM
 # test.  Excluded from the fast unit-test suite via:
@@ -222,7 +222,7 @@ def safe_tools() -> list:
         "split_text",
         "trim_text",
     }
-    from src.registry import LazyToolProxy
+    from cogtrix_core.registry import LazyToolProxy
 
     tools = []
     for name, t in all_tools.items():
@@ -636,7 +636,7 @@ class TestMemoryWorkflow:
 
     def test_sanitize_history_filters_errors(self):
         """Ensure error messages in history are cleaned by sanitize_history."""
-        from src.memory.manager import BaseMemoryManager
+        from cogtrix_core.memory.manager import BaseMemoryManager
 
         history: list[Any] = [
             HumanMessage(content="Do something"),

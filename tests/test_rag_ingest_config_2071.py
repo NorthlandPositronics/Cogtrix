@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
-import src.tools.rag as rag_tool
+import cogtrix_core.tools.rag as rag_tool
 
 
 def test_agent_rag_ingest_threads_embedding_and_chunk_config() -> None:
@@ -33,7 +33,7 @@ def test_agent_rag_ingest_threads_embedding_and_chunk_config() -> None:
             captured["config"] = config
             return {str(p): True for p in paths}
 
-        with patch("src.rag.ingest.ingest_many", fake_ingest_many):
+        with patch("cogtrix_core.rag.ingest.ingest_many", fake_ingest_many):
             rag_tool.rag_ingest("/tmp/some-doc.txt")
 
         cfg = captured["config"]

@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 import pytest
 
-from src.api.rate_limit import (
+from cogtrix_core.api.rate_limit import (
     configure_trusted_proxy_cidrs,
     per_route_rate_limit,
     rate_limit_key,
@@ -34,7 +34,7 @@ from slowapi.errors import RateLimitExceeded  # noqa: E402
 from slowapi.middleware import SlowAPIMiddleware  # noqa: E402
 from slowapi.util import get_remote_address  # noqa: E402
 
-from src.api.app import _rate_limit_exceeded_handler  # noqa: E402
+from cogtrix_core.api.app import _rate_limit_exceeded_handler  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
@@ -147,7 +147,7 @@ class TestPerRouteRateLimit:
         app = _make_per_route_app(max_calls=2, window_seconds=60)
         with (
             TestClient(app, raise_server_exceptions=False) as client,
-            patch("src.api.rate_limit.get_remote_address", return_value="127.0.0.1"),
+            patch("cogtrix_core.api.rate_limit.get_remote_address", return_value="127.0.0.1"),
         ):
             # Exhaust limit for client A
             assert client.get("/test", headers={"x-forwarded-for": "1.1.1.1"}).status_code == 200
@@ -164,7 +164,7 @@ class TestPerRouteRateLimit:
         app = _make_per_route_app(max_calls=2, window_seconds=60)
         with (
             TestClient(app, raise_server_exceptions=False) as client,
-            patch("src.api.rate_limit.get_remote_address", return_value="127.0.0.1"),
+            patch("cogtrix_core.api.rate_limit.get_remote_address", return_value="127.0.0.1"),
         ):
             # 127.0.0.1 is trusted, so x-forwarded-for is honoured
             assert client.get("/test", headers={"x-forwarded-for": "3.3.3.3"}).status_code == 200

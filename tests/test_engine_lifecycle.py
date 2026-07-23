@@ -19,7 +19,7 @@ deletes and re-imports ``src.api.db.engine`` mid-suite to test
 ``data_dir`` precedence.  Although it restores ``sys.modules`` on
 teardown, the ``validate_connection`` function captured by ``app.py``
 at import time still binds to the ORIGINAL module's closure, while
-the lifespan's runtime ``import src.api.db.engine as _db_engine_mod``
+the lifespan's runtime ``import cogtrix_core.api.db.engine as _db_engine_mod``
 resolves to whichever instance is currently in ``sys.modules``.  The
 two references can diverge after the re-import class runs, which
 makes direct ``_engine is None`` assertions flaky in the full suite.
@@ -44,7 +44,7 @@ os.environ.setdefault("COGTRIX_DB_URL", "sqlite+aiosqlite:///:memory:")
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-from src.api.app import create_app  # noqa: E402
+from cogtrix_core.api.app import create_app  # noqa: E402
 
 
 def test_consecutive_test_clients_work() -> None:
@@ -70,7 +70,7 @@ def test_data_does_not_leak_between_test_clients() -> None:
 
     Regression for the parent-package-attribute drift bug
     (commit 4620f9e): when the lifespan resolved the engine module via
-    ``import src.api.db.engine`` instead of ``sys.modules``, a prior
+    ``import cogtrix_core.api.db.engine`` instead of ``sys.modules``, a prior
     re-import test (``test_api_db_url_resolution``) could leave the
     parent package's ``engine`` attribute pointing at an orphaned
     module.  Startup then created tables on that orphan while
@@ -89,7 +89,7 @@ def test_data_does_not_leak_between_test_clients() -> None:
     from pathlib import Path
     from unittest.mock import AsyncMock, patch
 
-    from src.api.auth import create_access_token
+    from cogtrix_core.api.auth import create_access_token
 
     admin_token = create_access_token(user_id=str(uuid.uuid4()), role="admin")
 
@@ -98,11 +98,11 @@ def test_data_does_not_leak_between_test_clients() -> None:
     with TestClient(app_1, raise_server_exceptions=True) as client_1:
         with (
             patch(
-                "src.api.routes.rag.ingest_document_task",
+                "cogtrix_core.api.routes.rag.ingest_document_task",
                 new=AsyncMock(return_value=None),
             ),
-            patch("src.api.routes.rag._get_uploads_dir", return_value=Path("/tmp")),
-            patch("src.api.tasks.rag._get_uploads_dir", return_value=Path("/tmp")),
+            patch("cogtrix_core.api.routes.rag._get_uploads_dir", return_value=Path("/tmp")),
+            patch("cogtrix_core.api.tasks.rag._get_uploads_dir", return_value=Path("/tmp")),
         ):
             upload = client_1.post(
                 "/api/v1/rag/documents",

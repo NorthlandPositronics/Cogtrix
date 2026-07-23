@@ -28,10 +28,10 @@ from fastapi.testclient import TestClient  # noqa: E402
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine  # noqa: E402
 from sqlalchemy.pool import StaticPool  # noqa: E402
 
-import src.tasks.queue as _queue_mod  # noqa: E402
-from src.api.db.engine import Base, get_db  # noqa: E402
-from src.api.db.repositories.organization import OrganizationRepository  # noqa: E402
-from src.api.db.repositories.users import UserRepository  # noqa: E402
+import cogtrix_core.tasks.queue as _queue_mod  # noqa: E402
+from cogtrix_core.api.db.engine import Base, get_db  # noqa: E402
+from cogtrix_core.api.db.repositories.organization import OrganizationRepository  # noqa: E402
+from cogtrix_core.api.db.repositories.users import UserRepository  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # App / DB fixture
@@ -40,7 +40,7 @@ from src.api.db.repositories.users import UserRepository  # noqa: E402
 
 @pytest.fixture()
 def app():
-    from src.api.app import create_app
+    from cogtrix_core.api.app import create_app
 
     engine = create_async_engine(
         "sqlite+aiosqlite:///:memory:",
@@ -140,7 +140,7 @@ def _auth(token: str) -> dict:
 
 @pytest.fixture()
 def queue(tmp_path):
-    from src.tasks.queue import init_task_queue
+    from cogtrix_core.tasks.queue import init_task_queue
 
     q = init_task_queue(tmp_path / "tasks.db", tmp_path / "logs")
     yield q
@@ -646,7 +646,7 @@ class TestOrgIsolation:
         queue.submit("agent", "task in org B", user_id=user_id, org_id=org_b)
 
         # Override require_org_context to return org_a
-        from src.api.org_context import OrgContext, require_org_context
+        from cogtrix_core.api.org_context import OrgContext, require_org_context
 
         def _override_org_a():
             return OrgContext(user_id=user_id, org_id=org_a)
@@ -672,7 +672,7 @@ class TestOrgIsolation:
         other_org = f"org_other_{uuid.uuid4().hex[:8]}"
         task_id = queue.submit("agent", "secret", user_id=user_id, org_id=task_org)
 
-        from src.api.org_context import OrgContext, require_org_context
+        from cogtrix_core.api.org_context import OrgContext, require_org_context
 
         def _override_other_org():
             return OrgContext(user_id=user_id, org_id=other_org)

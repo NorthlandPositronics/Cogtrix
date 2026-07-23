@@ -28,10 +28,10 @@ pytest.importorskip("fastapi")
 # Ensure stripe is importable; skip entire module if not installed.
 stripe_mod = pytest.importorskip("stripe", reason="stripe package not installed")
 
-from src.api.db.models import Organization, ProcessedStripeEvent  # noqa: E402
-from src.api.db.repositories.organization import OrganizationRepository  # noqa: E402
-from src.api.db.repositories.plans import PlanRepository  # noqa: E402
-from src.api.routes.billing import (  # noqa: E402
+from cogtrix_core.api.db.models import Organization, ProcessedStripeEvent  # noqa: E402
+from cogtrix_core.api.db.repositories.organization import OrganizationRepository  # noqa: E402
+from cogtrix_core.api.db.repositories.plans import PlanRepository  # noqa: E402
+from cogtrix_core.api.routes.billing import (  # noqa: E402
     _dispatch_event,
     _handle_checkout_completed,
     _handle_subscription_deleted,
@@ -58,14 +58,14 @@ def _uid() -> str:
 class TestGetStripeClient:
     def test_raises_when_key_missing(self, monkeypatch):
         monkeypatch.delenv("STRIPE_SECRET_KEY", raising=False)
-        from src.api.stripe_client import get_stripe_client
+        from cogtrix_core.api.stripe_client import get_stripe_client
 
         with pytest.raises(RuntimeError, match="STRIPE_SECRET_KEY not configured"):
             get_stripe_client()
 
     def test_returns_stripe_module_with_key_set(self, monkeypatch):
         monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_dummy")
-        from src.api.stripe_client import get_stripe_client
+        from cogtrix_core.api.stripe_client import get_stripe_client
 
         result = get_stripe_client()
         import stripe as _stripe
@@ -273,8 +273,8 @@ def _make_app_for_billing(org: Organization, user_id: str, role: str = "user"):
     """Build a minimal FastAPI test app that injects a fixed OrgContext."""
     from fastapi import FastAPI
 
-    from src.api.org_context import OrgContext
-    from src.api.routes import billing as billing_module
+    from cogtrix_core.api.org_context import OrgContext
+    from cogtrix_core.api.routes import billing as billing_module
 
     app = FastAPI()
 
@@ -287,12 +287,12 @@ def _make_app_for_billing(org: Organization, user_id: str, role: str = "user"):
         )
 
     def _override_current_user():
-        from src.api.auth import TokenData
+        from cogtrix_core.api.auth import TokenData
 
         return TokenData(user_id=user_id, role=role, raw_claims={"sub": user_id, "role": role})
 
-    from src.api.auth import get_current_user
-    from src.api.org_context import require_org_context
+    from cogtrix_core.api.auth import get_current_user
+    from cogtrix_core.api.org_context import require_org_context
 
     app.dependency_overrides[require_org_context] = _override_org_context
     app.dependency_overrides[get_current_user] = _override_current_user
@@ -402,7 +402,7 @@ class TestCheckoutEndpoint:
             return None
 
         monkeypatch.setattr(
-            "src.api.db.repositories.plans.PlanRepository.get_by_slug",
+            "cogtrix_core.api.db.repositories.plans.PlanRepository.get_by_slug",
             _fake_get_by_slug,
         )
 
@@ -440,7 +440,7 @@ class TestCheckoutEndpoint:
             return FakePlan()
 
         monkeypatch.setattr(
-            "src.api.db.repositories.plans.PlanRepository.get_by_slug",
+            "cogtrix_core.api.db.repositories.plans.PlanRepository.get_by_slug",
             _fake_get_by_slug,
         )
 
@@ -456,7 +456,7 @@ class TestCheckoutEndpoint:
             return FakeStripe()
 
         monkeypatch.setattr(
-            "src.api.routes.billing.get_stripe_client",
+            "cogtrix_core.api.routes.billing.get_stripe_client",
             _fake_get_stripe_client,
         )
 
@@ -496,7 +496,7 @@ class TestCheckoutEndpoint:
             return FakePlan()
 
         monkeypatch.setattr(
-            "src.api.db.repositories.plans.PlanRepository.get_by_slug",
+            "cogtrix_core.api.db.repositories.plans.PlanRepository.get_by_slug",
             _fake_get_by_slug,
         )
 
@@ -517,7 +517,7 @@ class TestCheckoutEndpoint:
                         return {"url": "https://checkout.stripe.com/test", "id": "cs_test"}
 
         monkeypatch.setattr(
-            "src.api.routes.billing.get_stripe_client",
+            "cogtrix_core.api.routes.billing.get_stripe_client",
             lambda: FakeStripe(),
         )
 
@@ -559,7 +559,7 @@ class TestCheckoutRaceCondition:
         mock_inspect = MagicMock()
         mock_inspect.return_value.persistent = True
         monkeypatch.setattr(
-            "src.api.routes.billing.sa_inspect",
+            "cogtrix_core.api.routes.billing.sa_inspect",
             mock_inspect,
         )
 
@@ -578,7 +578,7 @@ class TestCheckoutRaceCondition:
             return mock_plan
 
         monkeypatch.setattr(
-            "src.api.db.repositories.plans.PlanRepository.get_by_slug",
+            "cogtrix_core.api.db.repositories.plans.PlanRepository.get_by_slug",
             _fake_plan_get_by_slug,
         )
 
@@ -595,11 +595,11 @@ class TestCheckoutRaceCondition:
                         return {"url": "https://checkout.test", "id": "cs_race"}
 
         monkeypatch.setattr(
-            "src.api.routes.billing.get_stripe_client",
+            "cogtrix_core.api.routes.billing.get_stripe_client",
             lambda: FakeStripe(),
         )
 
-        from src.api.routes.billing import create_checkout_session
+        from cogtrix_core.api.routes.billing import create_checkout_session
 
         body = MagicMock()
         body.plan_slug = "pro"
@@ -626,7 +626,7 @@ class TestWebhookEndpoint:
         """Build a dedicated webhook test app wired to the in-memory session."""
         from fastapi import FastAPI
 
-        from src.api.routes import billing as billing_module
+        from cogtrix_core.api.routes import billing as billing_module
 
         app = FastAPI()
 
@@ -634,7 +634,7 @@ class TestWebhookEndpoint:
             async with sf() as session:
                 yield session
 
-        from src.api.db.engine import get_db
+        from cogtrix_core.api.db.engine import get_db
 
         app.dependency_overrides[get_db] = _override_db
         app.include_router(billing_module.router)

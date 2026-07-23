@@ -6,7 +6,7 @@ Issue #712 — Missing tests for:
 3. Cancel event lifecycle (WebSocket cancel → pipeline stop)
 4. Background task lifecycle (eviction loop stop)
 
-Tests only — no src/ changes.
+Tests only — no cogtrix_core/ changes.
 """
 
 from __future__ import annotations
@@ -212,7 +212,7 @@ class TestCancelEventLifecycle:
     @pytest.mark.asyncio
     async def test_cancel_event_set_stops_pipeline(self) -> None:
         """Setting cancel_event between pipeline phases raises CancelledError."""
-        from src.api.turn_runner import _run_think_pipeline
+        from cogtrix_core.api.turn_runner import _run_think_pipeline
 
         session = _make_mock_session()
         run_config = MagicMock()
@@ -221,7 +221,7 @@ class TestCancelEventLifecycle:
         # Set cancel_event so the first check gate triggers
         session.cancel_event.set()
 
-        with patch("src.api.turn_runner._enqueue_agent_state", new_callable=AsyncMock):
+        with patch("cogtrix_core.api.turn_runner._enqueue_agent_state", new_callable=AsyncMock):
             with pytest.raises(asyncio.CancelledError, match="Cancel requested"):
                 await _run_think_pipeline(session, "task", "response", [], run_config)
 
@@ -265,14 +265,16 @@ class TestCancelEventLifecycle:
     @pytest.mark.asyncio
     async def test_cancel_event_checked_in_delegate_pipeline(self) -> None:
         """cancel_event.is_set() causes _run_delegate_pipeline to raise CancelledError."""
-        from src.api.turn_runner import _run_delegate_pipeline
+        from cogtrix_core.api.turn_runner import _run_delegate_pipeline
 
         session = _make_mock_session()
         session.cancel_event.set()
         run_config = MagicMock()
 
-        with patch("src.api.turn_runner._enqueue_agent_state", new_callable=AsyncMock):
-            with patch("src.orchestration.phases.was_delegation_called", return_value=False):
+        with patch("cogtrix_core.api.turn_runner._enqueue_agent_state", new_callable=AsyncMock):
+            with patch(
+                "cogtrix_core.orchestration.phases.was_delegation_called", return_value=False
+            ):
                 with pytest.raises(asyncio.CancelledError, match="Cancel requested"):
                     await _run_delegate_pipeline(session, "task", "original", [], run_config)
 
@@ -289,7 +291,7 @@ class TestCancelEventLifecycle:
     @pytest.mark.asyncio
     async def test_cancel_propagates_to_pipeline_post_processing(self) -> None:
         """CancelledError from run_agent should be caught, state set to idle, and re-raised."""
-        from src.api.turn_runner import _run_message_turn_inner
+        from cogtrix_core.api.turn_runner import _run_message_turn_inner
 
         session = _make_mock_session()
         session.memory_manager = MagicMock()
@@ -301,9 +303,9 @@ class TestCancelEventLifecycle:
             s.agent_state = state
             enqueue_states.append(state)
 
-        with patch("src.api.turn_runner._enqueue_agent_state", side_effect=_fake_enqueue):
+        with patch("cogtrix_core.api.turn_runner._enqueue_agent_state", side_effect=_fake_enqueue):
             with patch(
-                "src.api.turn_runner.asyncio.to_thread",
+                "cogtrix_core.api.turn_runner.asyncio.to_thread",
                 side_effect=asyncio.CancelledError("agent cancelled"),
             ):
                 with pytest.raises(asyncio.CancelledError):
@@ -447,7 +449,7 @@ class TestBackgroundTaskLifecycle:
     @pytest.mark.asyncio
     async def test_eviction_task_cancelled_on_stop(self) -> None:
         """stop_eviction_loop cancels the eviction background task."""
-        from src.api.session_bridge import ApiSession, ApiSessionRegistry
+        from cogtrix_core.api.session_bridge import ApiSession, ApiSessionRegistry
 
         mock_app_state = SimpleNamespace(
             config=None,
@@ -475,7 +477,7 @@ class TestBackgroundTaskLifecycle:
     @pytest.mark.asyncio
     async def test_eviction_loop_saves_sessions_before_stop(self) -> None:
         """stop_eviction_loop saves all sessions before cancelling the eviction task."""
-        from src.api.session_bridge import ApiSession, ApiSessionRegistry
+        from cogtrix_core.api.session_bridge import ApiSession, ApiSessionRegistry
 
         mock_app_state = SimpleNamespace(
             config=None,
@@ -490,7 +492,9 @@ class TestBackgroundTaskLifecycle:
         registry.start_eviction_loop()
 
         # Mock _save_memory to track it was called
-        with patch("src.api.session_bridge._save_memory", new_callable=AsyncMock) as mock_save:
+        with patch(
+            "cogtrix_core.api.session_bridge._save_memory", new_callable=AsyncMock
+        ) as mock_save:
             await registry.stop_eviction_loop()
             # Should have attempted to save at least the session we added
             assert mock_save.called, "_save_memory should be called during stop_eviction_loop"
@@ -498,7 +502,7 @@ class TestBackgroundTaskLifecycle:
     @pytest.mark.asyncio
     async def test_eviction_loop_handles_stop_error_gracefully(self) -> None:
         """stop_eviction_loop does not raise when save fails."""
-        from src.api.session_bridge import ApiSession, ApiSessionRegistry
+        from cogtrix_core.api.session_bridge import ApiSession, ApiSessionRegistry
 
         mock_app_state = SimpleNamespace(
             config=None,
@@ -514,7 +518,7 @@ class TestBackgroundTaskLifecycle:
 
         # Mock _save_memory to raise — stop should handle it gracefully
         with patch(
-            "src.api.session_bridge._save_memory",
+            "cogtrix_core.api.session_bridge._save_memory",
             side_effect=RuntimeError("DB connection lost"),
         ):
             # Should not raise
@@ -528,7 +532,7 @@ class TestBackgroundTaskLifecycle:
     @pytest.mark.asyncio
     async def test_stop_eviction_clears_task_reference(self) -> None:
         """After stop_eviction_loop, _eviction_task is done (cancelled or None)."""
-        from src.api.session_bridge import ApiSessionRegistry
+        from cogtrix_core.api.session_bridge import ApiSessionRegistry
 
         mock_app_state = SimpleNamespace(
             config=None,

@@ -648,6 +648,10 @@ cogtrix/
 │   ├── logging_config.py     # Logging infrastructure
 │   ├── setup_wizard.py       # Interactive --setup wizard
 │   │
+│   ├── common/
+│   │   ├── types.py          # AgentRunConfig, ExecutionSettings, SessionState (shared dataclasses)
+│   │   └── message_validation.py  # Message-shape validation helpers
+│   │
 │   ├── providers/
 │   │   ├── __init__.py       # Registry: create_chat_model(), create_embeddings()
 │   │   ├── defaults.py       # Default models, base URLs, env vars, presets
@@ -671,9 +675,9 @@ cogtrix/
 │   │   ├── phases.py             # post-agent pipeline stages
 │   │   ├── compression.py        # context compression
 │   │   ├── intent.py             # intent detection
-│   │   ├── run_config.py         # AgentRunConfig dataclass
+│   │   ├── run_config.py         # re-export shim — AgentRunConfig now lives in src/common/types.py
 │   │   ├── session_orchestrator.py  # session switching
-│   │   └── session_state.py      # SessionState dataclass
+│   │   └── session_state.py      # re-export shim — SessionState now lives in src/common/types.py
 │   │
 │   ├── assistant/
 │   │   ├── __init__.py      # Package exports

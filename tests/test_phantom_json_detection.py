@@ -2,7 +2,7 @@
 
 from unittest.mock import MagicMock
 
-from src.orchestration.graph import _looks_like_phantom_tool_markup
+from cogtrix_core.orchestration.graph import _looks_like_phantom_tool_markup
 
 
 def _message(content: str, tool_calls=None):

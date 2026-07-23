@@ -8,8 +8,8 @@ class TestEscapeMonitorUnavailable:
     """When termios is unavailable (Windows, piped stdin), everything is a no-op."""
 
     def test_no_op_when_unavailable(self):
-        with patch("src.cli.escape_monitor._AVAILABLE", False):
-            from src.cli.escape_monitor import EscapeMonitor
+        with patch("cogtrix_core.cli.escape_monitor._AVAILABLE", False):
+            from cogtrix_core.cli.escape_monitor import EscapeMonitor
 
             mon = EscapeMonitor()
             assert not mon.available
@@ -21,8 +21,8 @@ class TestEscapeMonitorUnavailable:
             assert mon._thread is None
 
     def test_double_stop_is_safe(self):
-        with patch("src.cli.escape_monitor._AVAILABLE", False):
-            from src.cli.escape_monitor import EscapeMonitor
+        with patch("cogtrix_core.cli.escape_monitor._AVAILABLE", False):
+            from cogtrix_core.cli.escape_monitor import EscapeMonitor
 
             mon = EscapeMonitor()
             mon.stop()
@@ -33,8 +33,8 @@ class TestEscapeMonitorLifecycle:
     """State transitions without actual terminal I/O."""
 
     def test_start_sets_running(self):
-        with patch("src.cli.escape_monitor._AVAILABLE", True):
-            from src.cli.escape_monitor import EscapeMonitor
+        with patch("cogtrix_core.cli.escape_monitor._AVAILABLE", True):
+            from cogtrix_core.cli.escape_monitor import EscapeMonitor
 
             mon = EscapeMonitor()
             mon._fd = 0
@@ -55,8 +55,8 @@ class TestEscapeMonitorLifecycle:
                 mock_thread.start.assert_called_once()
 
     def test_stop_clears_running(self):
-        with patch("src.cli.escape_monitor._AVAILABLE", True):
-            from src.cli.escape_monitor import EscapeMonitor
+        with patch("cogtrix_core.cli.escape_monitor._AVAILABLE", True):
+            from cogtrix_core.cli.escape_monitor import EscapeMonitor
 
             mon = EscapeMonitor()
             mon._running = True
@@ -73,8 +73,8 @@ class TestEscapeMonitorLifecycle:
             assert mon._thread is None
 
     def test_stop_when_not_running_is_noop(self):
-        with patch("src.cli.escape_monitor._AVAILABLE", True):
-            from src.cli.escape_monitor import EscapeMonitor
+        with patch("cogtrix_core.cli.escape_monitor._AVAILABLE", True):
+            from cogtrix_core.cli.escape_monitor import EscapeMonitor
 
             mon = EscapeMonitor()
             mon._running = False
@@ -85,8 +85,8 @@ class TestEscapeMonitorLifecycle:
             mon._restore_terminal.assert_not_called()
 
     def test_idempotent_start(self):
-        with patch("src.cli.escape_monitor._AVAILABLE", True):
-            from src.cli.escape_monitor import EscapeMonitor
+        with patch("cogtrix_core.cli.escape_monitor._AVAILABLE", True):
+            from cogtrix_core.cli.escape_monitor import EscapeMonitor
 
             mon = EscapeMonitor()
             mon._running = True
@@ -97,8 +97,8 @@ class TestEscapeMonitorLifecycle:
             mon._enter_cbreak.assert_not_called()
 
     def test_pause_sets_flag_and_restores_terminal(self):
-        with patch("src.cli.escape_monitor._AVAILABLE", True):
-            from src.cli.escape_monitor import EscapeMonitor
+        with patch("cogtrix_core.cli.escape_monitor._AVAILABLE", True):
+            from cogtrix_core.cli.escape_monitor import EscapeMonitor
 
             mon = EscapeMonitor()
             mon._running = True
@@ -112,8 +112,8 @@ class TestEscapeMonitorLifecycle:
             mon._restore_terminal.assert_called_once()
 
     def test_pause_when_already_paused_is_noop(self):
-        with patch("src.cli.escape_monitor._AVAILABLE", True):
-            from src.cli.escape_monitor import EscapeMonitor
+        with patch("cogtrix_core.cli.escape_monitor._AVAILABLE", True):
+            from cogtrix_core.cli.escape_monitor import EscapeMonitor
 
             mon = EscapeMonitor()
             mon._running = True
@@ -125,8 +125,8 @@ class TestEscapeMonitorLifecycle:
             mon._restore_terminal.assert_not_called()
 
     def test_pause_when_not_running_is_noop(self):
-        with patch("src.cli.escape_monitor._AVAILABLE", True):
-            from src.cli.escape_monitor import EscapeMonitor
+        with patch("cogtrix_core.cli.escape_monitor._AVAILABLE", True):
+            from cogtrix_core.cli.escape_monitor import EscapeMonitor
 
             mon = EscapeMonitor()
             mon._running = False
@@ -137,8 +137,8 @@ class TestEscapeMonitorLifecycle:
             mon._restore_terminal.assert_not_called()
 
     def test_resume_clears_flag_and_enters_cbreak(self):
-        with patch("src.cli.escape_monitor._AVAILABLE", True):
-            from src.cli.escape_monitor import EscapeMonitor
+        with patch("cogtrix_core.cli.escape_monitor._AVAILABLE", True):
+            from cogtrix_core.cli.escape_monitor import EscapeMonitor
 
             mon = EscapeMonitor()
             mon._running = True
@@ -152,8 +152,8 @@ class TestEscapeMonitorLifecycle:
             mon._enter_cbreak.assert_called_once()
 
     def test_resume_when_not_paused_is_noop(self):
-        with patch("src.cli.escape_monitor._AVAILABLE", True):
-            from src.cli.escape_monitor import EscapeMonitor
+        with patch("cogtrix_core.cli.escape_monitor._AVAILABLE", True):
+            from cogtrix_core.cli.escape_monitor import EscapeMonitor
 
             mon = EscapeMonitor()
             mon._running = True
@@ -169,7 +169,7 @@ class TestSpinnerEscapeIntegration:
     """ActivityIndicator correctly delegates to escape monitor."""
 
     def test_spinner_delegates_start(self):
-        from src.ui.spinner import ActivityIndicator
+        from cogtrix_core.ui.spinner import ActivityIndicator
 
         spinner = ActivityIndicator()
         mock_monitor = MagicMock()
@@ -181,7 +181,7 @@ class TestSpinnerEscapeIntegration:
             spinner._running = False  # prevent thread issues
 
     def test_spinner_delegates_stop(self):
-        from src.ui.spinner import ActivityIndicator
+        from cogtrix_core.ui.spinner import ActivityIndicator
 
         spinner = ActivityIndicator()
         mock_monitor = MagicMock()
@@ -194,7 +194,7 @@ class TestSpinnerEscapeIntegration:
         mock_monitor.stop.assert_called_once()
 
     def test_spinner_delegates_pause_on_first_pause(self):
-        from src.ui.spinner import ActivityIndicator
+        from cogtrix_core.ui.spinner import ActivityIndicator
 
         spinner = ActivityIndicator()
         mock_monitor = MagicMock()
@@ -210,7 +210,7 @@ class TestSpinnerEscapeIntegration:
         mock_monitor.pause.assert_not_called()
 
     def test_spinner_delegates_resume_on_last_resume(self):
-        from src.ui.spinner import ActivityIndicator
+        from cogtrix_core.ui.spinner import ActivityIndicator
 
         spinner = ActivityIndicator()
         mock_monitor = MagicMock()
@@ -230,7 +230,7 @@ class TestSpinnerEscapeIntegration:
         mock_monitor.resume.assert_called_once()
 
     def test_no_monitor_no_error(self):
-        from src.ui.spinner import ActivityIndicator
+        from cogtrix_core.ui.spinner import ActivityIndicator
 
         spinner = ActivityIndicator()
         # No monitor set — none of these should raise
@@ -239,7 +239,7 @@ class TestSpinnerEscapeIntegration:
         spinner.resume()
 
     def test_stop_without_start_no_error(self):
-        from src.ui.spinner import ActivityIndicator
+        from cogtrix_core.ui.spinner import ActivityIndicator
 
         spinner = ActivityIndicator()
         mock_monitor = MagicMock()

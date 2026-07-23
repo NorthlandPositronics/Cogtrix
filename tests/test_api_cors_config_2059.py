@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import pytest
 
-from src.config import APIConfig, ConfigError, load_config
+from cogtrix_core.config import APIConfig, ConfigError, load_config
 
 
 def _load_with_yaml(monkeypatch, yaml_path):
@@ -83,7 +83,7 @@ class TestCorsOriginsEnv:
 
 class TestGetCorsOriginsHelper:
     def test_resolves_env_through_config(self, tmp_path, monkeypatch) -> None:
-        from src.api.app import _get_cors_origins
+        from cogtrix_core.api.app import _get_cors_origins
 
         empty = tmp_path / "cogtrix.yaml"
         empty.write_text("{}\n")
@@ -92,7 +92,7 @@ class TestGetCorsOriginsHelper:
         assert _get_cors_origins() == ["https://cogtrix.ai"]
 
     def test_default_has_no_placeholder(self, tmp_path, monkeypatch) -> None:
-        from src.api.app import _get_cors_origins
+        from cogtrix_core.api.app import _get_cors_origins
 
         empty = tmp_path / "cogtrix.yaml"
         empty.write_text("{}\n")

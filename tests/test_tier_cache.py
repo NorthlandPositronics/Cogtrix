@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.memory.tier_cache import CompressedMessage, TierCacheSnapshot
+from cogtrix_core.memory.tier_cache import CompressedMessage, TierCacheSnapshot
 
 # ---------------------------------------------------------------------------
 # CompressedMessage
@@ -187,8 +187,8 @@ class TestTierCacheSnapshot:
 
 def _make_manager(tmp_path: Path):
     """Create a ConversationMemoryManager backed by a temp directory."""
-    from src.memory.json_store import JsonFileMemoryStore
-    from src.memory.modes.conversation import ConversationMemoryManager
+    from cogtrix_core.memory.json_store import JsonFileMemoryStore
+    from cogtrix_core.memory.modes.conversation import ConversationMemoryManager
 
     store = JsonFileMemoryStore(base_dir=str(tmp_path))
     mm = ConversationMemoryManager(store=store, session_id="test-session")
@@ -203,8 +203,8 @@ class TestTierCachePath:
         assert p.parent == tmp_path.resolve()
 
     def test_path_traversal_raises(self, tmp_path):
-        from src.memory.json_store import JsonFileMemoryStore
-        from src.memory.modes.conversation import ConversationMemoryManager
+        from cogtrix_core.memory.json_store import JsonFileMemoryStore
+        from cogtrix_core.memory.modes.conversation import ConversationMemoryManager
 
         store = JsonFileMemoryStore(base_dir=str(tmp_path))
         mm = ConversationMemoryManager(store=store, session_id="../../etc/passwd")
@@ -214,8 +214,8 @@ class TestTierCachePath:
         assert p.is_relative_to(tmp_path.resolve())
 
     def test_sanitized_session_id_used_in_path(self, tmp_path):
-        from src.memory.json_store import JsonFileMemoryStore
-        from src.memory.modes.conversation import ConversationMemoryManager
+        from cogtrix_core.memory.json_store import JsonFileMemoryStore
+        from cogtrix_core.memory.modes.conversation import ConversationMemoryManager
 
         store = JsonFileMemoryStore(base_dir=str(tmp_path))
         mm = ConversationMemoryManager(store=store, session_id="abc/def")
@@ -420,13 +420,13 @@ class TestTierCacheThreadSafety:
 
 class TestMemoryContextTierTokenCounts:
     def test_default_is_empty_dict(self):
-        from src.memory.context import MemoryContext
+        from cogtrix_core.memory.context import MemoryContext
 
         ctx = MemoryContext()
         assert ctx.tier_token_counts == {}
 
     def test_can_set_tier_token_counts(self):
-        from src.memory.context import MemoryContext
+        from cogtrix_core.memory.context import MemoryContext
 
         ctx = MemoryContext(tier_token_counts={0: 5000, 1: 3800, 2: 1050, 3: 280})
         assert ctx.tier_token_counts[0] == 5000
@@ -435,7 +435,7 @@ class TestMemoryContextTierTokenCounts:
         assert ctx.tier_token_counts[3] == 280
 
     def test_existing_fields_unchanged(self):
-        from src.memory.context import MemoryContext
+        from cogtrix_core.memory.context import MemoryContext
 
         ctx = MemoryContext(
             messages=[],
@@ -485,7 +485,7 @@ def _content(msg) -> str:
 
 class TestAssembleFromTiers:
     def test_empty_snapshot_returns_raw_messages(self):
-        from src.memory.tier_cache import assemble_from_tiers
+        from cogtrix_core.memory.tier_cache import assemble_from_tiers
 
         snapshot = TierCacheSnapshot()
         msgs = [_make_human("hello"), _make_ai("world")]
@@ -499,7 +499,7 @@ class TestAssembleFromTiers:
 
     def test_assembly_order_t3_t2_t1_t0(self):
         """Tier 3 summary first, then T2, T1, T0 verbatim tail."""
-        from src.memory.tier_cache import assemble_from_tiers
+        from cogtrix_core.memory.tier_cache import assemble_from_tiers
 
         # Two verbatim messages (index 2 and 3), boundary at index 2
         raw_msgs = [_make_human("old0"), _make_human("old1"), _make_human("t0a"), _make_ai("t0b")]
@@ -522,9 +522,17 @@ class TestAssembleFromTiers:
         )
         # Expected order: T3 (summary HumanMessage), T2 AIMessage, T1 ToolMessage, T0 x2
         assert len(assembled) == 5
-        # T3: summary prefix
-        assert "[Session context summary]" in _content(assembled[0])
-        assert "narrative summary" in _content(assembled[0])
+        # T3: summary prefix (#2364 strengthened the marker to a "context only,
+        # do not relay" instruction — still opens with the same marker stem).
+        _t3 = _content(assembled[0])
+        assert "[Session context summary" in _t3
+        assert "narrative summary" in _t3
+        # GAP-9 (forge audit): pin the "do not relay" deterrent body so a silent
+        # revert to the bare "[Session context summary]\n…" marker is caught — the
+        # assistant guard now matches by prefix, but this keeps the deterrent text
+        # (the in-context half of the #2364 defence) from regressing unnoticed.
+        assert "do not repeat" in _t3.lower()
+        assert "relay this block" in _t3.lower()
         # T2: AIMessage with heavy compressed content
         assert "T2 heavy summary" in _content(assembled[1])
         # T1: ToolMessage with light compressed content
@@ -534,7 +542,7 @@ class TestAssembleFromTiers:
         assert _content(assembled[4]) == "t0b"
 
     def test_tier_token_counts_returned_correctly(self):
-        from src.memory.tier_cache import assemble_from_tiers
+        from cogtrix_core.memory.tier_cache import assemble_from_tiers
 
         snapshot = TierCacheSnapshot(
             tier0_boundary_idx=1,
@@ -561,7 +569,7 @@ class TestAssembleFromTiers:
     def test_uses_calibration_ratio_when_available(self):
         """When calibration_tokens and calibration_chars are set,
         the token counts should use the calibration ratio instead of _CHARS_PER_TOKEN."""
-        from src.memory.tier_cache import _CHARS_PER_TOKEN, assemble_from_tiers
+        from cogtrix_core.memory.tier_cache import _CHARS_PER_TOKEN, assemble_from_tiers
 
         # calibration: 1 token per 1 char (ratio=1.0), much denser than _CHARS_PER_TOKEN=2
         snapshot = TierCacheSnapshot(
@@ -580,7 +588,7 @@ class TestAssembleFromTiers:
 
     def test_calibration_not_used_when_chars_zero(self):
         """calibration_tokens>0 but calibration_chars=0 must not divide by zero."""
-        from src.memory.tier_cache import assemble_from_tiers
+        from cogtrix_core.memory.tier_cache import assemble_from_tiers
 
         snapshot = TierCacheSnapshot(
             tier0_boundary_idx=0,
@@ -596,7 +604,7 @@ class TestAssembleFromTiers:
 
     def test_tier0_boundary_clamped_when_beyond_list(self):
         """Stale tier0_boundary_idx beyond len(messages) is clamped silently."""
-        from src.memory.tier_cache import assemble_from_tiers
+        from cogtrix_core.memory.tier_cache import assemble_from_tiers
 
         raw = [_make_human("only message")]
         snapshot = TierCacheSnapshot(
@@ -611,7 +619,7 @@ class TestAssembleFromTiers:
         assert tier_counts[0] == 0
 
     def test_no_summary_skips_tier3(self):
-        from src.memory.tier_cache import assemble_from_tiers
+        from cogtrix_core.memory.tier_cache import assemble_from_tiers
 
         snapshot = TierCacheSnapshot()
         raw = [_make_human("msg")]
@@ -624,7 +632,7 @@ class TestAssembleFromTiers:
 
     def test_empty_tiers_and_no_summary_returns_all_raw(self):
         """Empty snapshot with no summary returns all raw messages in T0."""
-        from src.memory.tier_cache import assemble_from_tiers
+        from cogtrix_core.memory.tier_cache import assemble_from_tiers
 
         raw = [_make_human("a"), _make_ai("b"), _make_human("c")]
         snapshot = TierCacheSnapshot(tier0_boundary_idx=0)
@@ -645,8 +653,8 @@ class TestAssembleFromTiers:
 class TestPrepareContextTierPath:
     def _make_warm_manager(self, tmp_path: Path, boundary: int = 0):
         """Return a ConversationMemoryManager with a warm tier cache."""
-        from src.memory.json_store import JsonFileMemoryStore
-        from src.memory.modes.conversation import ConversationMemoryManager
+        from cogtrix_core.memory.json_store import JsonFileMemoryStore
+        from cogtrix_core.memory.modes.conversation import ConversationMemoryManager
 
         store = JsonFileMemoryStore(base_dir=str(tmp_path))
         mm = ConversationMemoryManager(store=store, session_id="tier-test")
@@ -674,8 +682,8 @@ class TestPrepareContextTierPath:
         assert ctx.token_estimate == sum(ctx.tier_token_counts.values())
 
     def test_prepare_context_falls_back_when_cache_cold(self, tmp_path):
-        from src.memory.json_store import JsonFileMemoryStore
-        from src.memory.modes.conversation import ConversationMemoryManager
+        from cogtrix_core.memory.json_store import JsonFileMemoryStore
+        from cogtrix_core.memory.modes.conversation import ConversationMemoryManager
 
         store = JsonFileMemoryStore(base_dir=str(tmp_path))
         mm = ConversationMemoryManager(store=store, session_id="cold-test")
@@ -703,8 +711,8 @@ class TestPrepareContextTierPath:
         assert any("question" in c for c in contents)
 
     def test_code_manager_prepare_context_uses_tier_cache(self, tmp_path):
-        from src.memory.json_store import JsonFileMemoryStore
-        from src.memory.modes.code import CodeDevelopmentMemoryManager
+        from cogtrix_core.memory.json_store import JsonFileMemoryStore
+        from cogtrix_core.memory.modes.code import CodeDevelopmentMemoryManager
 
         store = JsonFileMemoryStore(base_dir=str(tmp_path))
         mm = CodeDevelopmentMemoryManager(store=store, session_id="code-tier-test")
@@ -722,8 +730,8 @@ class TestPrepareContextTierPath:
         assert ctx.token_estimate == sum(ctx.tier_token_counts.values())
 
     def test_reasoning_manager_prepare_context_uses_tier_cache(self, tmp_path):
-        from src.memory.json_store import JsonFileMemoryStore
-        from src.memory.modes.reasoning import ReasoningMemoryManager
+        from cogtrix_core.memory.json_store import JsonFileMemoryStore
+        from cogtrix_core.memory.modes.reasoning import ReasoningMemoryManager
 
         store = JsonFileMemoryStore(base_dir=str(tmp_path))
         mm = ReasoningMemoryManager(store=store, session_id="reasoning-tier-test")
@@ -767,7 +775,7 @@ def _make_ai_final(content: str):
 
 class TestCompressToTier:
     def test_tier1_calls_compress_tool_message(self):
-        from src.memory.tier_cache import compress_to_tier
+        from cogtrix_core.memory.tier_cache import compress_to_tier
 
         llm = MagicMock()
         # Return something clearly shorter than the long input
@@ -782,7 +790,7 @@ class TestCompressToTier:
 
     def test_tier2_produces_shorter_output_via_different_prompt(self):
         """Tier-2 prompt asks for a one-line summary; tier-1 prompt is more verbose."""
-        from src.memory.tier_cache import (
+        from cogtrix_core.memory.tier_cache import (
             _TIER1_PROMPT_SUFFIX,
             _TIER2_PROMPT_SUFFIX,
             compress_to_tier,
@@ -802,7 +810,7 @@ class TestCompressToTier:
         assert "ONE short sentence" in call_arg or "one sentence" in call_arg.lower()
 
     def test_compress_to_tier_handles_llm_failure_gracefully(self):
-        from src.memory.tier_cache import compress_to_tier
+        from cogtrix_core.memory.tier_cache import compress_to_tier
 
         llm = MagicMock()
         llm.invoke.side_effect = RuntimeError("network error")
@@ -813,7 +821,7 @@ class TestCompressToTier:
         assert len(result) > 0
 
     def test_compress_to_tier_fallback_when_compressed_empty(self):
-        from src.memory.tier_cache import compress_to_tier
+        from cogtrix_core.memory.tier_cache import compress_to_tier
 
         llm = MagicMock()
         llm.invoke.return_value = MagicMock(content="")  # empty result
@@ -826,7 +834,7 @@ class TestCompressToTier:
 
     def test_compress_to_tier_returns_original_when_not_reduced(self):
         """If compressed version is >= original, return original."""
-        from src.memory.tier_cache import compress_to_tier
+        from cogtrix_core.memory.tier_cache import compress_to_tier
 
         original = "short text"
         llm = MagicMock()
@@ -841,7 +849,7 @@ class TestCompressToTier:
         import time
         from unittest.mock import patch
 
-        from src.memory.tier_cache import compress_to_tier
+        from cogtrix_core.memory.tier_cache import compress_to_tier
 
         def _slow_invoke(_prompt: str) -> object:
             time.sleep(2)  # longer than the patched timeout
@@ -851,7 +859,7 @@ class TestCompressToTier:
         llm.invoke.side_effect = _slow_invoke
 
         content = "some long content " * 50
-        with patch("src.memory.tier_cache._COMPRESSION_TIMEOUT_SECONDS", 0.1):
+        with patch("cogtrix_core.memory.tier_cache._COMPRESSION_TIMEOUT_SECONDS", 0.1):
             result = compress_to_tier(content, "tool", 1, llm)
 
         # Must fall back to truncation, not hang or return empty
@@ -861,7 +869,7 @@ class TestCompressToTier:
 
     def test_compress_to_tier_fast_llm_still_works_with_executor(self):
         """Normal (fast) LLM calls must continue to work through the executor."""
-        from src.memory.tier_cache import compress_to_tier
+        from cogtrix_core.memory.tier_cache import compress_to_tier
 
         llm = MagicMock()
         llm.invoke.return_value = MagicMock(content="compressed result")
@@ -878,7 +886,7 @@ class TestCompressToTier:
         import time
         from unittest.mock import patch
 
-        from src.memory.tier_cache import compress_to_tier
+        from cogtrix_core.memory.tier_cache import compress_to_tier
 
         event = threading.Event()
 
@@ -891,7 +899,7 @@ class TestCompressToTier:
 
         content = "some long content " * 50
         start = time.monotonic()
-        with patch("src.memory.tier_cache._COMPRESSION_TIMEOUT_SECONDS", 0.1):
+        with patch("cogtrix_core.memory.tier_cache._COMPRESSION_TIMEOUT_SECONDS", 0.1):
             result = compress_to_tier(content, "tool", 1, llm)
         elapsed = time.monotonic() - start
 
@@ -910,7 +918,7 @@ class TestCompressToTier:
 
 class TestRollForward:
     def test_empty_messages_returns_empty_snapshot(self):
-        from src.memory.tier_cache import roll_forward
+        from cogtrix_core.memory.tier_cache import roll_forward
 
         snap = roll_forward(
             messages=[],
@@ -928,7 +936,7 @@ class TestRollForward:
 
     def test_small_history_all_fits_in_tier0(self):
         """With a tiny message list and a large budget, everything stays in Tier 0."""
-        from src.memory.tier_cache import roll_forward
+        from cogtrix_core.memory.tier_cache import roll_forward
 
         msgs = [_make_human("hi"), _make_ai_final("hello")]
         snap = roll_forward(
@@ -946,7 +954,7 @@ class TestRollForward:
 
     def test_large_messages_overflow_into_tier1(self):
         """Messages that exceed the Tier 0 budget spill into Tier 1."""
-        from src.memory.tier_cache import roll_forward
+        from cogtrix_core.memory.tier_cache import roll_forward
 
         # Very small context window to force overflow.
         max_tokens = 2_048
@@ -970,7 +978,7 @@ class TestRollForward:
 
     def test_reuses_already_compressed_content_from_current_snapshot(self):
         """Messages already in current_snapshot.tier1_messages are not re-compressed."""
-        from src.memory.tier_cache import roll_forward
+        from cogtrix_core.memory.tier_cache import roll_forward
 
         # Tiny context to ensure overflow.
         max_tokens = 2_048
@@ -1021,7 +1029,7 @@ class TestRollForward:
 
     def test_reuses_compression_cache_entries(self):
         """compression_cache dict entries are reused without new LLM calls."""
-        from src.memory.tier_cache import roll_forward
+        from cogtrix_core.memory.tier_cache import roll_forward
 
         max_tokens = 2_048
         tcid = "cc-tool-id"
@@ -1058,7 +1066,7 @@ class TestRollForward:
 
     def test_works_without_llm_uses_truncation(self):
         """When llm=None, compression falls back to truncation without error."""
-        from src.memory.tier_cache import roll_forward
+        from cogtrix_core.memory.tier_cache import roll_forward
 
         max_tokens = 2_048
         long_content = "data " * 200
@@ -1083,7 +1091,7 @@ class TestRollForward:
 
     def test_human_messages_never_compressed(self):
         """HumanMessage content must not appear in tier1_messages or tier2_messages."""
-        from src.memory.tier_cache import roll_forward
+        from cogtrix_core.memory.tier_cache import roll_forward
 
         max_tokens = 2_048
         msgs = [
@@ -1104,7 +1112,7 @@ class TestRollForward:
             assert cm.original_type != "HumanMessage"
 
     def test_returns_tier_cache_snapshot_type(self):
-        from src.memory.tier_cache import roll_forward
+        from cogtrix_core.memory.tier_cache import roll_forward
 
         msgs = [_make_human("hello"), _make_ai_final("world")]
         result = roll_forward(
@@ -1118,7 +1126,7 @@ class TestRollForward:
         assert isinstance(result, TierCacheSnapshot)
 
     def test_tier_token_counts_are_non_negative(self):
-        from src.memory.tier_cache import roll_forward
+        from cogtrix_core.memory.tier_cache import roll_forward
 
         msgs = [_make_tool_msg("output " * 10, "id1", "tool"), _make_ai_final("response")]
         snap = roll_forward(
@@ -1155,8 +1163,8 @@ class TestScheduleTierRollForward:
     _SMALL_TOKENS = 2_048
 
     def _make_manager(self, tmp_path: Path):
-        from src.memory.json_store import JsonFileMemoryStore
-        from src.memory.modes.conversation import ConversationMemoryManager
+        from cogtrix_core.memory.json_store import JsonFileMemoryStore
+        from cogtrix_core.memory.modes.conversation import ConversationMemoryManager
 
         store = JsonFileMemoryStore(base_dir=str(tmp_path))
         return ConversationMemoryManager(store=store, session_id="roll-test")
@@ -1227,7 +1235,7 @@ class TestScheduleTierRollForward:
         dead_pool = ThreadPoolExecutor(max_workers=1)
         dead_pool.shutdown(wait=True)
 
-        with patch("src.memory.manager._get_summarization_pool", return_value=dead_pool):
+        with patch("cogtrix_core.memory.manager._get_summarization_pool", return_value=dead_pool):
             # Must not raise
             mm.schedule_tier_roll_forward(max_context_tokens=128_000, llm=None)
 
@@ -1273,8 +1281,8 @@ class TestScheduleTierRollForward:
     def test_update_triggers_roll_forward_code(self, tmp_path):
         """CodeDevelopmentMemoryManager.update() schedules roll-forward when
         message count exceeds the working memory window."""
-        from src.memory.json_store import JsonFileMemoryStore
-        from src.memory.modes.code import CodeDevelopmentMemoryManager
+        from cogtrix_core.memory.json_store import JsonFileMemoryStore
+        from cogtrix_core.memory.modes.code import CodeDevelopmentMemoryManager
 
         store = JsonFileMemoryStore(base_dir=str(tmp_path))
         mm = CodeDevelopmentMemoryManager(store=store, session_id="code-roll")
@@ -1296,8 +1304,8 @@ class TestScheduleTierRollForward:
     def test_update_triggers_roll_forward_reasoning(self, tmp_path):
         """ReasoningMemoryManager.update() schedules roll-forward when
         message count exceeds the working memory window."""
-        from src.memory.json_store import JsonFileMemoryStore
-        from src.memory.modes.reasoning import ReasoningMemoryManager
+        from cogtrix_core.memory.json_store import JsonFileMemoryStore
+        from cogtrix_core.memory.modes.reasoning import ReasoningMemoryManager
 
         store = JsonFileMemoryStore(base_dir=str(tmp_path))
         mm = ReasoningMemoryManager(store=store, session_id="reason-roll")
@@ -1330,7 +1338,7 @@ class TestPhase4PostTurnCompressionGate:
     def _drain_compression_jobs(self):
         """Drain pending background compression jobs after each test."""
         yield
-        from src.orchestration import runner as runner_mod
+        from cogtrix_core.orchestration import runner as runner_mod
 
         for _ in range(100):
             runner_mod._drain_background_compression_jobs()
@@ -1340,13 +1348,13 @@ class TestPhase4PostTurnCompressionGate:
             time.sleep(0.01)
 
     def test_tier_cache_enabled_field_defaults_to_true(self):
-        from src.orchestration.run_config import AgentRunConfig
+        from cogtrix_core.orchestration.run_config import AgentRunConfig
 
         cfg = AgentRunConfig()
         assert cfg.tier_cache_enabled is True
 
     def test_tier_cache_enabled_field_can_be_set_false(self):
-        from src.orchestration.run_config import AgentRunConfig
+        from cogtrix_core.orchestration.run_config import AgentRunConfig
 
         cfg = AgentRunConfig(tier_cache_enabled=False)
         assert cfg.tier_cache_enabled is False
@@ -1357,8 +1365,8 @@ class TestPhase4PostTurnCompressionGate:
 
         from langchain_core.messages import AIMessage, HumanMessage
 
-        from src.orchestration.run_config import AgentRunConfig
-        from src.orchestration.runner import run_agent
+        from cogtrix_core.orchestration.run_config import AgentRunConfig
+        from cogtrix_core.orchestration.runner import run_agent
 
         msgs = [HumanMessage(content="hello"), AIMessage(content="world")]
         mock_graph_result = {"messages": msgs}
@@ -1376,8 +1384,8 @@ class TestPhase4PostTurnCompressionGate:
         )
 
         with (
-            patch("src.orchestration.runner.build_agent_graph") as mock_build_graph,
-            patch("src.orchestration.runner.apply_message_compression") as mock_compress,
+            patch("cogtrix_core.orchestration.runner.build_agent_graph") as mock_build_graph,
+            patch("cogtrix_core.orchestration.runner.apply_message_compression") as mock_compress,
         ):
             mock_graph = MagicMock()
             mock_graph.stream.return_value = [mock_graph_result]
@@ -1405,9 +1413,9 @@ class TestPhase4PostTurnCompressionGate:
 
         from langchain_core.messages import AIMessage, HumanMessage
 
-        from src.orchestration import runner as runner_mod
-        from src.orchestration.run_config import AgentRunConfig
-        from src.orchestration.runner import run_agent
+        from cogtrix_core.orchestration import runner as runner_mod
+        from cogtrix_core.orchestration.run_config import AgentRunConfig
+        from cogtrix_core.orchestration.runner import run_agent
 
         msgs = [HumanMessage(content="hello"), AIMessage(content="world")]
         mock_graph_result = {"messages": msgs}
@@ -1436,9 +1444,9 @@ class TestPhase4PostTurnCompressionGate:
 
         try:
             with (
-                patch("src.orchestration.runner.build_agent_graph") as mock_build_graph,
+                patch("cogtrix_core.orchestration.runner.build_agent_graph") as mock_build_graph,
                 patch(
-                    "src.orchestration.runner.apply_message_compression",
+                    "cogtrix_core.orchestration.runner.apply_message_compression",
                     side_effect=_slow_compression,
                 ),
                 patch("cogtrix._spinner"),
@@ -1472,7 +1480,7 @@ class TestPhase4MaybeCompressThreshold:
         """Verify TCC enabled uses higher (0.80) threshold via compression behavior."""
         from unittest.mock import MagicMock
 
-        from src.memory.tier_cache import compress_to_tier
+        from cogtrix_core.memory.tier_cache import compress_to_tier
 
         llm = MagicMock()
         llm.invoke.return_value = MagicMock(content="short")
@@ -1490,7 +1498,7 @@ class TestPhase4MaybeCompressThreshold:
 
     def test_maybe_compress_threshold_normal_when_tcc_disabled(self):
         """Verify the 60% constant is used via _MID_TURN_COMPRESSION_THRESHOLD."""
-        from src.orchestration.graph import _MID_TURN_COMPRESSION_THRESHOLD
+        from cogtrix_core.orchestration.graph import _MID_TURN_COMPRESSION_THRESHOLD
 
         # The module constant must equal 0.60 (the "normal" non-TCC threshold)
         assert (
@@ -1501,7 +1509,7 @@ class TestPhase4MaybeCompressThreshold:
         """Verify runner post-turn gate behavior via actual compression queueing."""
         import time
 
-        from src.orchestration import runner as runner_mod
+        from cogtrix_core.orchestration import runner as runner_mod
 
         # Clear any pending jobs
         for _ in range(100):
@@ -1525,14 +1533,14 @@ class TestPhase5Config:
 
     def test_config_tier_cache_enabled_default(self):
         """Config().tier_cache_enabled is True by default."""
-        from src.config import Config
+        from cogtrix_core.config import Config
 
         cfg = Config()
         assert cfg.tier_cache_enabled is True
 
     def test_config_tier_fractions_default(self):
         """Default tier fractions match ADR-001 section 4 values."""
-        from src.config import Config
+        from cogtrix_core.config import Config
 
         cfg = Config()
         assert cfg.tier0_fraction == 0.60
@@ -1541,7 +1549,7 @@ class TestPhase5Config:
 
     def test_config_tier_fractions_parsed(self):
         """Tier fractions are read from context_compression dict."""
-        from src.config import Config, _apply_config_file
+        from cogtrix_core.config import Config, _apply_config_file
 
         cfg = Config()
         from pathlib import Path
@@ -1568,7 +1576,7 @@ class TestPhase5Config:
         """tiered_cache: false disables tier_cache_enabled."""
         from pathlib import Path
 
-        from src.config import Config, _apply_config_file
+        from cogtrix_core.config import Config, _apply_config_file
 
         cfg = Config()
         yaml_content = "context_compression:\n  tiered_cache: false\n"
@@ -1584,7 +1592,7 @@ class TestPhase5Config:
         """Fractions summing > 1.0 raise ConfigError."""
         from pathlib import Path
 
-        from src.config import Config, ConfigError, _apply_config_file
+        from cogtrix_core.config import Config, ConfigError, _apply_config_file
 
         cfg = Config()
         yaml_content = (
@@ -1605,7 +1613,7 @@ class TestPhase5Config:
         """A fraction outside [0.01, 0.95] raises ConfigError."""
         from pathlib import Path
 
-        from src.config import Config, ConfigError, _apply_config_file
+        from cogtrix_core.config import Config, ConfigError, _apply_config_file
 
         cfg = Config()
         yaml_content = "context_compression:\n  tier0_fraction: 1.5\n"
@@ -1623,14 +1631,14 @@ class TestPhase5AgentRunConfig:
 
     def test_agent_run_config_tier_cache_enabled_default(self):
         """AgentRunConfig.tier_cache_enabled defaults to True."""
-        from src.orchestration.run_config import AgentRunConfig
+        from cogtrix_core.orchestration.run_config import AgentRunConfig
 
         cfg = AgentRunConfig()
         assert cfg.tier_cache_enabled is True
 
     def test_agent_run_config_tier_cache_enabled_can_be_false(self):
         """AgentRunConfig accepts tier_cache_enabled=False."""
-        from src.orchestration.run_config import AgentRunConfig
+        from cogtrix_core.orchestration.run_config import AgentRunConfig
 
         cfg = AgentRunConfig(tier_cache_enabled=False)
         assert cfg.tier_cache_enabled is False
@@ -1730,8 +1738,8 @@ class TestPhase5GetStats:
         """BaseMemoryManager.get_stats() always returns tier_cache_ready."""
         from unittest.mock import MagicMock
 
-        from src.memory.base import BaseMemoryStore
-        from src.memory.modes.conversation import ConversationMemoryManager
+        from cogtrix_core.memory.base import BaseMemoryStore
+        from cogtrix_core.memory.modes.conversation import ConversationMemoryManager
 
         store = MagicMock(spec=BaseMemoryStore)
         store.load_history.return_value = []
@@ -1744,9 +1752,9 @@ class TestPhase5GetStats:
         """get_stats() includes tier token counts when cache has been set."""
         from unittest.mock import MagicMock
 
-        from src.memory.base import BaseMemoryStore
-        from src.memory.modes.conversation import ConversationMemoryManager
-        from src.memory.tier_cache import CompressedMessage, TierCacheSnapshot
+        from cogtrix_core.memory.base import BaseMemoryStore
+        from cogtrix_core.memory.modes.conversation import ConversationMemoryManager
+        from cogtrix_core.memory.tier_cache import CompressedMessage, TierCacheSnapshot
 
         store = MagicMock(spec=BaseMemoryStore)
         store.load_history.return_value = []
@@ -1800,7 +1808,9 @@ class TestCompactOutputVisibility:
         reg.last_input_tokens = 11_520  # 9%
 
         # apply_message_compression returns messages unchanged → nothing compressed
-        with patch("src.cli.commands.apply_message_compression", return_value=mm._messages):
+        with patch(
+            "cogtrix_core.cli.commands.apply_message_compression", return_value=mm._messages
+        ):
             reg.dispatch("/compact")
 
         out = capsys.readouterr().out
@@ -1829,7 +1839,9 @@ class TestCompactOutputVisibility:
         reg.max_context_tokens = 128_000
         reg.last_input_tokens = 50_000
 
-        with patch("src.cli.commands.apply_message_compression", return_value=[compressed]):
+        with patch(
+            "cogtrix_core.cli.commands.apply_message_compression", return_value=[compressed]
+        ):
             reg.dispatch("/compact")
 
         out = capsys.readouterr().out

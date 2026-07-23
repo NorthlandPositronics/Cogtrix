@@ -1,4 +1,4 @@
-"""Tests for src/tools/calendar_tools.py."""
+"""Tests for cogtrix_core/tools/calendar_tools.py."""
 
 from __future__ import annotations
 
@@ -7,8 +7,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-import src.tools.calendar_tools as _mod
-from src.tools.calendar_tools import (
+import cogtrix_core.tools.calendar_tools as _mod
+from cogtrix_core.tools.calendar_tools import (
     TOOL_CONFIGS,
     CalendarCreateEventInput,
     CalendarListEventsInput,

@@ -1,4 +1,4 @@
-"""Unit tests for src/assistant/handler.py — MessageHandler."""
+"""Unit tests for cogtrix_core/assistant/handler.py — MessageHandler."""
 
 from __future__ import annotations
 
@@ -9,10 +9,10 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.agent.safety import UserCancelledRun
-from src.assistant.channel import IncomingMessage, SendResult
-from src.assistant.handler import _DEFAULT_EXCLUDED, MessageHandler
-from src.memory.context import MemoryContext
+from cogtrix_core.agent.safety import UserCancelledRun
+from cogtrix_core.assistant.channel import IncomingMessage, SendResult
+from cogtrix_core.assistant.handler import _DEFAULT_EXCLUDED, MessageHandler
+from cogtrix_core.memory.context import MemoryContext
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -262,8 +262,8 @@ class TestOutboundPrValidation:
             return result
 
         with (
-            patch("src.assistant.handler.shutil.which", return_value="/usr/bin/gh"),
-            patch("src.assistant.handler.subprocess.run", side_effect=_fake_run),
+            patch("cogtrix_core.assistant.handler.shutil.which", return_value="/usr/bin/gh"),
+            patch("cogtrix_core.assistant.handler.subprocess.run", side_effect=_fake_run),
         ):
             response, message_id = handler.handle_outbound(
                 contact_name="Amy",
@@ -298,8 +298,8 @@ class TestOutboundPrValidation:
             return result
 
         with (
-            patch("src.assistant.handler.shutil.which", return_value="/usr/bin/gh"),
-            patch("src.assistant.handler.subprocess.run", side_effect=_fake_run),
+            patch("cogtrix_core.assistant.handler.shutil.which", return_value="/usr/bin/gh"),
+            patch("cogtrix_core.assistant.handler.subprocess.run", side_effect=_fake_run),
         ):
             response, message_id = handler.handle_outbound(
                 contact_name="Amy",
@@ -335,8 +335,8 @@ class TestOutboundPrValidation:
             return result
 
         with (
-            patch("src.assistant.handler.shutil.which", return_value="/usr/bin/gh"),
-            patch("src.assistant.handler.subprocess.run", side_effect=_fake_run),
+            patch("cogtrix_core.assistant.handler.shutil.which", return_value="/usr/bin/gh"),
+            patch("cogtrix_core.assistant.handler.subprocess.run", side_effect=_fake_run),
         ):
             response, message_id = handler.handle_outbound(
                 contact_name="Amy",
@@ -363,8 +363,8 @@ class TestOutboundPrValidation:
             raise subprocess.TimeoutExpired(cmd, 30)
 
         with (
-            patch("src.assistant.handler.shutil.which", return_value="/usr/bin/gh"),
-            patch("src.assistant.handler.subprocess.run", side_effect=_fake_run),
+            patch("cogtrix_core.assistant.handler.shutil.which", return_value="/usr/bin/gh"),
+            patch("cogtrix_core.assistant.handler.subprocess.run", side_effect=_fake_run),
         ):
             response, message_id = handler.handle_outbound(
                 contact_name="Amy",
@@ -397,8 +397,8 @@ class TestOutboundPrValidation:
             return result
 
         with (
-            patch("src.assistant.handler.shutil.which", return_value="/usr/bin/gh"),
-            patch("src.assistant.handler.subprocess.run", side_effect=_fake_run),
+            patch("cogtrix_core.assistant.handler.shutil.which", return_value="/usr/bin/gh"),
+            patch("cogtrix_core.assistant.handler.subprocess.run", side_effect=_fake_run),
         ):
             handler.handle_outbound(
                 contact_name="Amy",
@@ -920,7 +920,11 @@ class TestBug110EditFailFallback:
 
     def test_failed_edit_falls_back_to_send(self):
         """When edit_message returns ok=False and no schedule/queue, channel.send() is called."""
-        from src.assistant.scheduler import EditReplyState, QueueReplyState, ScheduleReplyState
+        from cogtrix_core.assistant.scheduler import (
+            EditReplyState,
+            QueueReplyState,
+            ScheduleReplyState,
+        )
 
         handler, session, channel, _ = self._make_handler_with_edit_state()
 
@@ -941,7 +945,11 @@ class TestBug110EditFailFallback:
 
     def test_failed_edit_updates_last_sent_message_id(self):
         """Fallback send updates session.last_sent_message_id with the new message ID."""
-        from src.assistant.scheduler import EditReplyState, QueueReplyState, ScheduleReplyState
+        from cogtrix_core.assistant.scheduler import (
+            EditReplyState,
+            QueueReplyState,
+            ScheduleReplyState,
+        )
 
         handler, session, channel, _ = self._make_handler_with_edit_state()
 
@@ -961,7 +969,11 @@ class TestBug110EditFailFallback:
 
     def test_successful_edit_does_not_call_send(self):
         """When edit_message succeeds, channel.send() must NOT be called."""
-        from src.assistant.scheduler import EditReplyState, QueueReplyState, ScheduleReplyState
+        from cogtrix_core.assistant.scheduler import (
+            EditReplyState,
+            QueueReplyState,
+            ScheduleReplyState,
+        )
 
         handler, session, channel, _ = self._make_handler_with_edit_state()
 
@@ -982,7 +994,11 @@ class TestBug110EditFailFallback:
     def test_failed_edit_with_schedule_does_not_call_send(self):
         """When edit fails but schedule_reply was also called, send() is NOT triggered
         because a scheduled delivery already covers the response."""
-        from src.assistant.scheduler import EditReplyState, QueueReplyState, ScheduleReplyState
+        from cogtrix_core.assistant.scheduler import (
+            EditReplyState,
+            QueueReplyState,
+            ScheduleReplyState,
+        )
 
         handler, session, channel, _ = self._make_handler_with_edit_state()
         # Wire a scheduler so schedule_reply can be processed
@@ -1006,7 +1022,11 @@ class TestBug110EditFailFallback:
 
     def test_failed_edit_fallback_send_failure_is_logged(self):
         """When the fallback send also fails, the method still returns without raising."""
-        from src.assistant.scheduler import EditReplyState, QueueReplyState, ScheduleReplyState
+        from cogtrix_core.assistant.scheduler import (
+            EditReplyState,
+            QueueReplyState,
+            ScheduleReplyState,
+        )
 
         handler, session, channel, _ = self._make_handler_with_edit_state()
 
@@ -1031,7 +1051,11 @@ class TestBug110EditFailFallback:
         catches the exception, logs a warning, and returns None — enabling the
         caller to invoke discard_prerecord() so orphaned prerecord files are
         cleaned up (issue #1092)."""
-        from src.assistant.scheduler import EditReplyState, QueueReplyState, ScheduleReplyState
+        from cogtrix_core.assistant.scheduler import (
+            EditReplyState,
+            QueueReplyState,
+            ScheduleReplyState,
+        )
 
         handler, session, channel, _ = self._make_handler_with_edit_state()
 
@@ -1057,7 +1081,11 @@ class TestBug110EditFailFallback:
         """When channel.send() raises in the edit-fallback send path, _route_response()
         catches the exception, logs a warning, and returns None — enabling the
         caller to invoke discard_prerecord() (issue #1092)."""
-        from src.assistant.scheduler import EditReplyState, QueueReplyState, ScheduleReplyState
+        from cogtrix_core.assistant.scheduler import (
+            EditReplyState,
+            QueueReplyState,
+            ScheduleReplyState,
+        )
 
         handler, session, channel, _ = self._make_handler_with_edit_state()
 

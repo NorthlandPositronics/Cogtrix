@@ -1,4 +1,4 @@
-"""Tests for src/tools/goal_tools.py — goal-tracking CRUD tools.
+"""Tests for cogtrix_core/tools/goal_tools.py — goal-tracking CRUD tools.
 
 Covers: set_goal, add_subgoal, complete_goal, abandon_goal, list_goals.
 Issue: #1225 (zero test coverage).
@@ -11,8 +11,8 @@ Test isolation strategy:
 
 import pytest
 
-import src.tools.goal_tools as goal_tools_module
-from src.tasks.goal_tracker import get_goal_stack
+import cogtrix_core.tools.goal_tools as goal_tools_module
+from cogtrix_core.tasks.goal_tracker import get_goal_stack
 
 
 @pytest.fixture
@@ -38,7 +38,7 @@ def isolated_goal_tools(tmp_path):
     goal_tools_module._data_dir = data_dir
 
     # Clear any cached stack for this session (could be stale from prior test)
-    from src.tasks import goal_tracker
+    from cogtrix_core.tasks import goal_tracker
 
     with goal_tracker._stacks_lock:
         goal_tracker._stacks.pop(session_id, None)

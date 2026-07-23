@@ -1,4 +1,4 @@
-"""Tests for src/api/schemas/workspace.py."""
+"""Tests for cogtrix_core/api/schemas/workspace.py."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 import pytest
 from pydantic import ValidationError
 
-from src.api.schemas.workspace import (
+from cogtrix_core.api.schemas.workspace import (
     AddWorkspaceMemberRequest,
     WorkspaceCreate,
     WorkspaceMemberOut,

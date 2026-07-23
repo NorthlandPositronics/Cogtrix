@@ -3,9 +3,9 @@
 import threading
 from typing import Any
 
-from src.memory.base import BaseMemoryStore
-from src.memory.factory import MemoryFactory
-from src.memory.manager import BaseMemoryManager
+from cogtrix_core.memory.base import BaseMemoryStore
+from cogtrix_core.memory.factory import MemoryFactory
+from cogtrix_core.memory.manager import BaseMemoryManager
 
 
 class DummyStore(BaseMemoryStore):
@@ -41,7 +41,7 @@ class DummyManager(BaseMemoryManager):
         return []
 
     def prepare_context(self, user_input: str) -> Any:
-        from src.memory.context import MemoryContext
+        from cogtrix_core.memory.context import MemoryContext
 
         return MemoryContext()
 

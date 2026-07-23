@@ -23,11 +23,11 @@ import pytest
 from fastapi import HTTPException
 from pydantic import ValidationError
 
-import src.api.routes.auth as auth_routes
-import src.api.routes.users as users_routes
-from src.api.auth import hash_password
-from src.api.schemas.auth import ChangePasswordRequest
-from src.api.schemas.user import PasswordResetRequest
+import cogtrix_core.api.routes.auth as auth_routes
+import cogtrix_core.api.routes.users as users_routes
+from cogtrix_core.api.auth import hash_password
+from cogtrix_core.api.schemas.auth import ChangePasswordRequest
+from cogtrix_core.api.schemas.user import PasswordResetRequest
 
 _OLD = "OldPass1!"
 _NEW = "NewPass2@"

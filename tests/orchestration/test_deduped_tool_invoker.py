@@ -23,9 +23,9 @@ from unittest.mock import MagicMock
 import pytest
 from langchain_core.messages import ToolMessage
 
-from src.orchestration.deduped_tool_invoker import DedupedToolInvoker
-from src.orchestration.graph_runtime import PerRunState
-from src.orchestration.session_state import SessionState
+from cogtrix_core.orchestration.deduped_tool_invoker import DedupedToolInvoker
+from cogtrix_core.orchestration.graph_runtime import PerRunState
+from cogtrix_core.orchestration.session_state import SessionState
 
 
 def _make_per_run_state(tool: Any, tool_name: str = "echo_tool") -> PerRunState:
@@ -50,7 +50,11 @@ def _make_invoker(
     tool_budget_soft_exempt: set[str] | None = None,
     tool_budget_retrieval_tools: set[str] | None = None,
     tool_budget_retrieval_ceiling_divisor: int = 3,
+    tool_budget_action_tools: set[str] | None = None,
+    tool_budget_action_ceiling_divisor: int = 3,
     tool_call_guard: Any = None,
+    resolve_tool_category: Any = None,
+    safe_tool_name: Any = None,
 ) -> tuple[DedupedToolInvoker, PerRunState, dict[str, threading.Event], list[Any]]:
     """Construct a DedupedToolInvoker with sensible defaults."""
     per_run_state = (
@@ -89,6 +93,8 @@ def _make_invoker(
     def _safe(name: Any, max_len: int = 80) -> str:
         return str(name)[:max_len]
 
+    _safe_fn = safe_tool_name if safe_tool_name is not None else _safe
+
     invoker = DedupedToolInvoker(
         per_run_state=[per_run_state],
         history_lock=threading.Lock(),
@@ -101,7 +107,7 @@ def _make_invoker(
         tool_call_key=_key,
         check_duplicate=_check_dup,
         correct_tool_args=_correct,
-        safe_tool_name=_safe,
+        safe_tool_name=_safe_fn,
         max_tool_call_history=256,
         tool_budget_hard=tool_budget_hard,
         tool_budget_soft=tool_budget_soft,
@@ -111,6 +117,11 @@ def _make_invoker(
             tool_budget_retrieval_tools if tool_budget_retrieval_tools is not None else set()
         ),
         tool_budget_retrieval_ceiling_divisor=tool_budget_retrieval_ceiling_divisor,
+        tool_budget_action_tools=(
+            tool_budget_action_tools if tool_budget_action_tools is not None else set()
+        ),
+        tool_budget_action_ceiling_divisor=tool_budget_action_ceiling_divisor,
+        resolve_tool_category=resolve_tool_category,
     )
     return invoker, per_run_state, pending_events, active_tools_list
 
@@ -189,7 +200,7 @@ class TestDedupCache:
 
 class TestDuplicateBanner:
     def test_banner_escalates_at_threshold(self) -> None:
-        from src.orchestration.deduped_tool_invoker import (
+        from cogtrix_core.orchestration.deduped_tool_invoker import (
             _DUPLICATE_ESCALATION_THRESHOLD,
             duplicate_call_banner,
         )
@@ -298,12 +309,95 @@ class TestBudgetHardCap:
         result_over = invoker.invoke_one(call_over, None)
 
         assert isinstance(result_over, ToolMessage)
-        assert "disabled after 3 calls" in result_over.content
-        # Tool removed from active set + lookup; version bumped to force bind refresh.
-        assert tool not in active_tools
-        assert "noisy_tool" not in state.tool_lookup
-        assert "noisy_tool" not in state.active_names
+        assert "hit its per-turn call limit (3 calls)" in result_over.content
+        # #2213 per-turn stop: tool is budget-stopped (filtered from bind_tools) and
+        # version bumped — but NOT removed from active_tools_list / tool_lookup and
+        # NOT session-denied, so _reset_for_new_run restores it next turn.
+        assert "noisy_tool" in state.budget_stopped_tools
         assert state.tool_version[0] == version_before + 1
+        assert tool in active_tools  # stays — restored next turn, not session-killed
+        assert "noisy_tool" in state.tool_lookup
+
+    def test_budget_trip_does_not_session_deny(self):
+        """#2213: a budget trip must NOT add to session denials (that would kill the
+        tool for the whole session); it's a per-run stop only."""
+        tool = MagicMock()
+        tool.name = "noisy_tool"
+        tool.invoke.side_effect = lambda inp, *a, **k: ToolMessage(
+            content=f"r-{inp['id']}", tool_call_id=inp["id"], name="noisy_tool"
+        )
+        ss = SessionState()
+        invoker, state, _, _ = _make_invoker(
+            tool=tool, tool_name="noisy_tool", session_state=ss, tool_budget_hard=2
+        )
+        for i in range(3):  # 3rd call trips the cap of 2
+            invoker.invoke_one({"name": "noisy_tool", "args": {"i": i}, "id": f"c{i}"}, None)
+        assert "noisy_tool" in state.budget_stopped_tools  # per-run stop
+        assert not ss.is_denied("noisy_tool")  # NOT session-denied
+
+
+class TestActionCeiling:
+    """#2213 Layer 2: action tools get a recursion-aware ceiling (not the fixed
+    cap, not uncapped) — high enough for a long build, still bounded."""
+
+    def _shell(self):
+        tool = MagicMock()
+        tool.name = "shell"
+        tool.invoke.side_effect = lambda inp, *a, **k: ToolMessage(
+            content=f"r-{inp['id']}", tool_call_id=inp["id"], name="shell"
+        )
+        return tool
+
+    def test_action_survives_past_fixed_cap(self):
+        tool = self._shell()
+        invoker, state, _, active = _make_invoker(
+            tool=tool,
+            tool_name="shell",
+            tool_budget_hard=3,
+            tool_budget_soft=2,
+            tool_budget_action_tools={"shell"},
+            tool_budget_action_ceiling_divisor=3,
+        )
+        cfg = {"recursion_limit": 30}  # action ceiling = max(3, 30 // 3) = 10
+        for i in range(9):  # 9 calls — well past the fixed cap of 3, under ceiling 10
+            r = invoker.invoke_one({"name": "shell", "args": {"i": i}, "id": f"c{i}"}, cfg)
+            assert "disabled" not in r.content, f"action tool disabled at call {i}"
+        assert tool in active
+        assert "shell" in state.tool_lookup
+
+    def test_action_still_bounded_by_ceiling(self):
+        tool = self._shell()
+        invoker, state, _, active = _make_invoker(
+            tool=tool,
+            tool_name="shell",
+            tool_budget_hard=3,
+            tool_budget_action_tools={"shell"},
+            tool_budget_action_ceiling_divisor=3,
+        )
+        cfg = {"recursion_limit": 12}  # action ceiling = max(3, 12 // 3) = 4
+        for i in range(4):
+            r = invoker.invoke_one({"name": "shell", "args": {"i": i}, "id": f"c{i}"}, cfg)
+            assert "disabled" not in r.content
+        over = invoker.invoke_one({"name": "shell", "args": {"i": 99}, "id": "over"}, cfg)
+        assert "hit its per-turn call limit (4 calls)" in over.content  # bounded, not uncapped
+        assert tool in active  # #2213: stays (per-turn stop, not removed)
+
+    def test_action_gets_higher_ceiling_than_retrieval(self):
+        # Same recursion budget: action divisor 3 (looser) allows more calls than
+        # retrieval divisor 4 — action tools are meant to sustain longer sequences.
+        tool = self._shell()
+        invoker, _, _, _ = _make_invoker(
+            tool=tool,
+            tool_name="shell",
+            tool_budget_hard=3,
+            tool_budget_action_tools={"shell"},
+            tool_budget_action_ceiling_divisor=3,
+            tool_budget_retrieval_ceiling_divisor=4,
+        )
+        cfg = {"recursion_limit": 40}  # action ceiling 13 > retrieval-equiv ceiling 10
+        for i in range(13):
+            r = invoker.invoke_one({"name": "shell", "args": {"i": i}, "id": f"c{i}"}, cfg)
+            assert "disabled" not in r.content, f"disabled at {i} — action ceiling too tight"
 
 
 class TestExceptionCleansSentinel:
@@ -432,7 +526,7 @@ class TestEarlyReturnReleasesSentinel:
         over = {"name": "noisy_tool", "args": {"i": 99}, "id": "c_over"}
         result = invoker.invoke_one(over, None)
 
-        assert "disabled after 2 calls" in result.content
+        assert "hit its per-turn call limit (2 calls)" in result.content
         # Every key (the successful ones AND the capped one) must be released.
         assert pending_events == {}
 
@@ -486,9 +580,9 @@ class TestRetrievalRecursionCeiling:
 
         # The 11th call exceeds the ceiling of 10 → hard stop (was: never capped).
         r = invoker.invoke_one({"name": "search_web", "args": {"q": 99}, "id": "c99"}, cfg)
-        assert "disabled after 10 calls" in r.content
-        assert "search_web" not in state.tool_lookup
-        assert tool not in active
+        assert "hit its per-turn call limit (10 calls)" in r.content
+        assert "search_web" in state.tool_lookup
+        assert tool in active  # #2213: stays (per-turn stop, not removed)
         assert tool.invoke.call_count == 10  # the capped call did NOT execute the tool
 
     def test_retrieval_ceiling_scales_with_recursion_budget(self):
@@ -509,6 +603,123 @@ class TestRetrievalRecursionCeiling:
             r = invoker.invoke_one({"name": "search_web", "args": {"q": i}, "id": f"c{i}"}, cfg)
         assert r is not None and "disabled" not in r.content
         assert "search_web" in state.tool_lookup
+
+    def test_knowledge_base_gets_recursion_ceiling_not_fixed_cap(self):
+        """#2213: a non-web read-only retrieval tool (query_knowledge_base, the
+        #2014 runaway) must get the recursion-aware ceiling, NOT the fixed cap of
+        8 — it survives past 8 progressive lookups but is still bounded (stops at
+        the ceiling), rather than running unbounded to the recursion limit."""
+        tool = MagicMock()
+        tool.name = "query_knowledge_base"
+        tool.invoke.side_effect = lambda inp, *a, **k: ToolMessage(
+            content=f"chunks-{inp['id']}", tool_call_id=inp["id"], name="query_knowledge_base"
+        )
+        invoker, state, _, active = _make_invoker(
+            tool=tool,
+            tool_name="query_knowledge_base",
+            tool_budget_hard=8,
+            tool_budget_hard_exempt={"query_knowledge_base"},
+            tool_budget_retrieval_tools={"query_knowledge_base"},
+            tool_budget_retrieval_ceiling_divisor=4,
+        )
+        cfg = {"recursion_limit": 60}  # ceiling = max(8, 60 // 4) = 15
+
+        # Past the fixed cap of 8 — the old classification would have stopped here.
+        for i in range(15):
+            r = invoker.invoke_one(
+                {"name": "query_knowledge_base", "args": {"q": i}, "id": f"k{i}"}, cfg
+            )
+            assert "disabled" not in r.content, f"KB capped too early at call {i + 1}"
+
+        # ...but still bounded: the 16th call exceeds the ceiling of 15 → hard stop.
+        r = invoker.invoke_one(
+            {"name": "query_knowledge_base", "args": {"q": 99}, "id": "k99"}, cfg
+        )
+        assert "hit its per-turn call limit (15 calls)" in r.content
+        assert "query_knowledge_base" in state.tool_lookup
+        assert tool in active  # #2213: stays (per-turn stop, not removed)
+
+
+class TestDuplicateLoopTripsHardCap:
+    """#2390: cache-served duplicate calls must still be charged against the
+    per-tool budget, so a model spamming the EXACT same call trips the existing
+    hard cap instead of looping to the wall-clock / recursion limit. Distinct
+    from the reverted #2356 breaker — reuses the per-tool budget; no
+    duplicate_hit_count keying, no forced thinking break, no terminal synthesis.
+    """
+
+    def test_exact_duplicate_loop_trips_hard_cap_via_cache_path(self):
+        """Repeated identical calls (served from cache via the TOCTOU history
+        check) eventually trip the per-tool hard cap and disable the tool."""
+        tool = MagicMock()
+        tool.name = "register_supplier"
+        tool.invoke.side_effect = lambda inp, *a, **k: ToolMessage(
+            content="registered", tool_call_id=inp["id"], name="register_supplier"
+        )
+        invoker, state, _, active = _make_invoker(
+            tool=tool, tool_name="register_supplier", tool_budget_hard=3, tool_budget_soft=2
+        )
+        base = {"name": "register_supplier", "args": {"company": "Global Widgets"}}
+
+        results = [invoker.invoke_one({**base, "id": f"c{i}"}, None) for i in range(4)]
+
+        # First call executes once; calls 2-3 are cache-served (count 2,3 ≤ 3).
+        assert tool.invoke.call_count == 1
+        assert "disabled" not in results[1].content
+        assert "disabled" not in results[2].content
+        # The 4th attempt exceeds the hard cap of 3 → graceful stop, tool disabled.
+        assert "hit its per-turn call limit (3 calls)" in results[3].content
+        assert "synthesize" in results[3].content.lower()
+        assert "register_supplier" in state.tool_lookup
+        assert "register_supplier" in state.active_names
+        assert tool in active  # #2213: stays (per-turn stop, not removed)
+
+    def test_check_duplicate_pre_check_path_also_charges_budget(self):
+        """In production the sequential-duplicate loop is caught by the
+        check_duplicate pre-check (graph._check_duplicate), which returns BEFORE
+        the TOCTOU block. That path must charge the budget too."""
+        tool = MagicMock()
+        tool.name = "register_supplier"
+
+        def _always_dup(call: dict, key: str | None = None) -> ToolMessage:
+            return ToolMessage(
+                content="[Duplicate call] cached", tool_call_id=call["id"], name=call["name"]
+            )
+
+        invoker, state, _, _ = _make_invoker(
+            tool=tool, tool_name="register_supplier", tool_budget_hard=3
+        )
+        invoker._check_duplicate = _always_dup  # exercise the pre-check (line-190) path
+
+        base = {"name": "register_supplier", "args": {"x": 1}}
+        results = [invoker.invoke_one({**base, "id": f"c{i}"}, None) for i in range(4)]
+
+        # Always served as a duplicate — the tool never executes.
+        assert tool.invoke.call_count == 0
+        assert "hit its per-turn call limit (3 calls)" in results[3].content
+        assert "register_supplier" in state.tool_lookup
+
+    def test_hard_exempt_tool_duplicates_not_charged(self):
+        """A hard-exempt tool's duplicates are not budget-charged (mirrors the
+        main path's exemption) — no premature disable however many times the
+        identical call repeats."""
+        tool = MagicMock()
+        tool.name = "shell_exec"
+        tool.invoke.side_effect = lambda inp, *a, **k: ToolMessage(
+            content="ok", tool_call_id=inp["id"], name="shell_exec"
+        )
+        invoker, state, _, active = _make_invoker(
+            tool=tool,
+            tool_name="shell_exec",
+            tool_budget_hard=2,
+            tool_budget_hard_exempt={"shell_exec"},
+        )
+        base = {"name": "shell_exec", "args": {"cmd": "ls"}}
+        for i in range(6):
+            r = invoker.invoke_one({**base, "id": f"c{i}"}, None)
+            assert "disabled" not in r.content
+        assert "shell_exec" in state.tool_lookup
+        assert tool in active
 
 
 @pytest.fixture(autouse=True)

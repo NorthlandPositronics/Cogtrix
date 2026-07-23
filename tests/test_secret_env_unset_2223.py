@@ -18,7 +18,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from src.config import load_config
+from cogtrix_core.config import load_config
 
 # Minimal config file so the test never resolves a machine config, and so the
 # `spark` provider exists for the generic-key path.

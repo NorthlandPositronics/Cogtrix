@@ -27,16 +27,16 @@ from fastapi.testclient import TestClient  # noqa: E402
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine  # noqa: E402
 from sqlalchemy.pool import StaticPool  # noqa: E402
 
-from src.api.auth import create_access_token  # noqa: E402
-from src.api.db import models as _models  # noqa: E402, F401
-from src.api.db.engine import Base, get_db  # noqa: E402
-from src.api.ldap.config import (  # noqa: E402
+from cogtrix_core.api.auth import create_access_token  # noqa: E402
+from cogtrix_core.api.db import models as _models  # noqa: E402, F401
+from cogtrix_core.api.db.engine import Base, get_db  # noqa: E402
+from cogtrix_core.api.ldap.config import (  # noqa: E402
     LDAPConfig,
     configure_ldap,
     get_ldap_config,
     is_ldap_configured,
 )
-from src.api.ldap.sync import LDAPSyncResult, _fetch_ldap_users  # noqa: E402
+from cogtrix_core.api.ldap.sync import LDAPSyncResult, _fetch_ldap_users  # noqa: E402
 
 
 def _uid() -> str:
@@ -51,7 +51,7 @@ def _admin_header(user_id: str) -> dict:
 
 @pytest.fixture(autouse=True)
 def reset_ldap_config():
-    import src.api.ldap.config as _cfg
+    import cogtrix_core.api.ldap.config as _cfg
 
     _cfg._ldap_config = None
     yield
@@ -171,7 +171,7 @@ def ldap_client():
 
     asyncio.run(_seed())
 
-    from src.api.app import create_app
+    from cogtrix_core.api.app import create_app
 
     with patch.dict(os.environ, {"COGTRIX_JWT_SECRET": _TEST_JWT_SECRET}):
         app = create_app()
@@ -262,10 +262,10 @@ class TestLDAPSyncWithMock:
 
         with (
             patch(
-                "src.api.ldap.sync._require_ldap3",
+                "cogtrix_core.api.ldap.sync._require_ldap3",
                 return_value=(server_ctor, conn_ctor, tls_ctor, object(), object()),
             ),
-            patch("src.api.ldap.sync.certifi.where", return_value="/etc/ssl/certs/ca.pem"),
+            patch("cogtrix_core.api.ldap.sync.certifi.where", return_value="/etc/ssl/certs/ca.pem"),
         ):
             users = _fetch_ldap_users(cfg)
 
@@ -297,7 +297,7 @@ class TestLDAPSyncWithMock:
         tls_ctor = MagicMock(return_value="tls-object")
 
         with patch(
-            "src.api.ldap.sync._require_ldap3",
+            "cogtrix_core.api.ldap.sync._require_ldap3",
             return_value=(server_ctor, conn_ctor, tls_ctor, object(), object()),
         ):
             users = _fetch_ldap_users(cfg)
@@ -333,8 +333,8 @@ class TestLDAPSyncWithMock:
             async with engine.begin() as conn:
                 await conn.run_sync(Base.metadata.create_all)
 
-            from src.api.db.repositories.users import UserRepository
-            from src.api.ldap.sync import sync_users
+            from cogtrix_core.api.db.repositories.users import UserRepository
+            from cogtrix_core.api.ldap.sync import sync_users
 
             cfg = _make_config()
             cfg.use_ssl = False
@@ -357,7 +357,7 @@ class TestLDAPSyncWithMock:
             mock_conn.entries = [fake_entry_1, fake_entry_2]
             mock_conn.result = {}
 
-            with patch("src.api.ldap.sync._fetch_ldap_users") as mock_fetch:
+            with patch("cogtrix_core.api.ldap.sync._fetch_ldap_users") as mock_fetch:
                 mock_fetch.return_value = [
                     {"username": "alice", "email": "alice@example.com"},
                     {"username": "bob", "email": "bob@example.com"},
@@ -397,8 +397,8 @@ class TestLDAPSyncWithMock:
             async with engine.begin() as conn:
                 await conn.run_sync(Base.metadata.create_all)
 
-            from src.api.db.repositories.users import UserRepository
-            from src.api.ldap.sync import sync_users
+            from cogtrix_core.api.db.repositories.users import UserRepository
+            from cogtrix_core.api.ldap.sync import sync_users
 
             cfg = _make_config()
             cfg.org_id = _uid()
@@ -415,7 +415,7 @@ class TestLDAPSyncWithMock:
                 )
                 await db.commit()
 
-            with patch("src.api.ldap.sync._fetch_ldap_users") as mock_fetch:
+            with patch("cogtrix_core.api.ldap.sync._fetch_ldap_users") as mock_fetch:
                 mock_fetch.return_value = [
                     {"username": "alice", "email": "new-alice@example.com"},
                 ]

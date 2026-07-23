@@ -1,6 +1,6 @@
 """Unit tests for the extracted call_model node.
 
-Tests for the call_model node in src/orchestration/nodes/call_model.py.
+Tests for the call_model node in cogtrix_core/orchestration/nodes/call_model.py.
 
 The call_model node:
 - Binds active tools to the LLM
@@ -27,8 +27,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
-from src.agent.core import CogtrixState
-from src.orchestration.nodes.call_model import (
+from cogtrix_core.agent.core import CogtrixState
+from cogtrix_core.orchestration.nodes.call_model import (
     CallModelContext,
     _compute_search_effort,
     _has_arithmetic_intent,
@@ -64,6 +64,7 @@ def _make_node(**overrides: object) -> Any:
         "tools_ready": MagicMock(),
         "active_tools_list": [],
         "active_names": set(),
+        "budget_stopped_tools": set(),
         "bound_cache": OrderedDict(),
         "bound_cache_lock": MagicMock(),
         "cached_fingerprint": [()],
@@ -210,7 +211,7 @@ class TestCallModelTopicSwitchDetection:
         )
         # Patch _should_reset_summary_for_topic_switch
         with patch(
-            "src.orchestration.nodes.call_model._should_reset_summary_for_topic_switch",
+            "cogtrix_core.orchestration.nodes.call_model._should_reset_summary_for_topic_switch",
             should_reset,
         ):
             state = _make_state([HumanMessage(content="new topic")])
@@ -240,7 +241,7 @@ class TestCallModelTopicSwitchDetection:
             invoke_with_timeout=capture_invoke,
         )
         with patch(
-            "src.orchestration.nodes.call_model._should_reset_summary_for_topic_switch",
+            "cogtrix_core.orchestration.nodes.call_model._should_reset_summary_for_topic_switch",
             should_reset,
         ):
             state = _make_state([HumanMessage(content="new topic")])
@@ -251,7 +252,7 @@ class TestCallModelTopicSwitchDetection:
             isinstance(m, SystemMessage) and "changed topic" in m.content for m in captured_msgs
         )
         with patch(
-            "src.orchestration.nodes.call_model._should_reset_summary_for_topic_switch",
+            "cogtrix_core.orchestration.nodes.call_model._should_reset_summary_for_topic_switch",
             should_reset,
         ):
             state = _make_state([HumanMessage(content="new topic")])
@@ -844,7 +845,7 @@ class TestCallModelDecisionAccountability:
         )
 
         with patch(
-            "src.orchestration.nodes.call_model.extract_decision_justification",
+            "cogtrix_core.orchestration.nodes.call_model.extract_decision_justification",
             return_value=da_result,
         ):
             state = _make_state([HumanMessage(content="hello")])
@@ -880,7 +881,7 @@ class TestCallModelDecisionAccountability:
         )
 
         with patch(
-            "src.orchestration.nodes.call_model.extract_decision_justification",
+            "cogtrix_core.orchestration.nodes.call_model.extract_decision_justification",
             return_value=da_result,
         ):
             state = _make_state([HumanMessage(content="hello")])
@@ -2155,13 +2156,13 @@ class TestHasSubstantiveSearchResults:
         return "\n".join(lines)
 
     def test_empty_messages(self):
-        from src.orchestration.nodes.call_model import _has_substantive_search_results
+        from cogtrix_core.orchestration.nodes.call_model import _has_substantive_search_results
 
         assert _has_substantive_search_results([]) is False
 
     def test_single_url_is_not_substantive(self):
         """A single URL: line could be a sponsored slot; require ≥ 2 URL: lines."""
-        from src.orchestration.nodes.call_model import _has_substantive_search_results
+        from cogtrix_core.orchestration.nodes.call_model import _has_substantive_search_results
 
         msgs = [
             AIMessage(
@@ -2177,7 +2178,7 @@ class TestHasSubstantiveSearchResults:
         assert _has_substantive_search_results(msgs) is False
 
     def test_two_url_results_are_substantive(self):
-        from src.orchestration.nodes.call_model import _has_substantive_search_results
+        from cogtrix_core.orchestration.nodes.call_model import _has_substantive_search_results
 
         msgs = [
             AIMessage(
@@ -2194,7 +2195,7 @@ class TestHasSubstantiveSearchResults:
 
     def test_five_url_results_are_substantive(self):
         """Typical DDG response with 5 results — most common substantive case."""
-        from src.orchestration.nodes.call_model import _has_substantive_search_results
+        from cogtrix_core.orchestration.nodes.call_model import _has_substantive_search_results
 
         msgs = [
             AIMessage(
@@ -2211,7 +2212,7 @@ class TestHasSubstantiveSearchResults:
 
     def test_error_results_are_not_substantive(self):
         """Error-wrapper messages must not count, even if they happen to contain 'URL:' text."""
-        from src.orchestration.nodes.call_model import _has_substantive_search_results
+        from cogtrix_core.orchestration.nodes.call_model import _has_substantive_search_results
 
         msgs = [
             AIMessage(
@@ -2230,7 +2231,7 @@ class TestHasSubstantiveSearchResults:
         assert _has_substantive_search_results(msgs) is False
 
     def test_no_results_placeholder_is_not_substantive(self):
-        from src.orchestration.nodes.call_model import _has_substantive_search_results
+        from cogtrix_core.orchestration.nodes.call_model import _has_substantive_search_results
 
         msgs = [
             AIMessage(
@@ -2247,7 +2248,7 @@ class TestHasSubstantiveSearchResults:
 
     def test_not_loaded_stub_is_not_substantive(self):
         """The 'tool not loaded' placeholder must not count."""
-        from src.orchestration.nodes.call_model import _has_substantive_search_results
+        from cogtrix_core.orchestration.nodes.call_model import _has_substantive_search_results
 
         msgs = [
             AIMessage(
@@ -2267,7 +2268,7 @@ class TestHasSubstantiveSearchResults:
 
     def test_short_content_is_not_substantive(self):
         """Even with ≥ 2 URL: lines, very short content (< 300 chars) is not enough."""
-        from src.orchestration.nodes.call_model import _has_substantive_search_results
+        from cogtrix_core.orchestration.nodes.call_model import _has_substantive_search_results
 
         short_payload = "Search results for: q\n\n1. A\n   URL: u1\n\n2. B\n   URL: u2\n"
         assert len(short_payload) < 300
@@ -2291,7 +2292,7 @@ class TestHasSubstantiveSearchResults:
         success from short-circuiting the rich-yield branch on a fresh question
         where the new turn's searches actually returned empty.
         """
-        from src.orchestration.nodes.call_model import _has_substantive_search_results
+        from cogtrix_core.orchestration.nodes.call_model import _has_substantive_search_results
 
         msgs = [
             HumanMessage(content="first question"),
@@ -2322,7 +2323,7 @@ class TestHasSubstantiveSearchResults:
         """If any of the current turn's searches returned rich results, the
         flag should be True — even if other searches in the same turn failed
         (e.g. 4 successful + 1 infra error, as in the cogtrix29 trace)."""
-        from src.orchestration.nodes.call_model import _has_substantive_search_results
+        from cogtrix_core.orchestration.nodes.call_model import _has_substantive_search_results
 
         msgs = [
             HumanMessage(content="question"),
@@ -2363,7 +2364,7 @@ class TestCallModelBudgetGuard:
         # Verify the budget guard pattern exists in source
         source = (
             Path(__file__).parent.parent.parent
-            / "src"
+            / "cogtrix_core"
             / "orchestration"
             / "nodes"
             / "call_model.py"
@@ -2385,7 +2386,7 @@ class TestCallModelRepairToolMessagePairs:
         # Verify the repair pattern exists in source
         source = (
             Path(__file__).parent.parent.parent
-            / "src"
+            / "cogtrix_core"
             / "orchestration"
             / "nodes"
             / "call_model.py"
@@ -2398,7 +2399,7 @@ class TestCallModelRepairToolMessagePairs:
         # This is a source-level check - verify the repair logic is present
         source = (
             Path(__file__).parent.parent.parent
-            / "src"
+            / "cogtrix_core"
             / "orchestration"
             / "nodes"
             / "call_model.py"
@@ -2420,7 +2421,7 @@ class TestCallModelBoundCache:
         """Bound cache operations should be under lock."""
         source = (
             Path(__file__).parent.parent.parent
-            / "src"
+            / "cogtrix_core"
             / "orchestration"
             / "nodes"
             / "call_model.py"
@@ -2723,7 +2724,7 @@ class TestCallModelUtilityFunctions:
 
     def test_infer_llm_provider(self):
         """_infer_llm_provider_name should extract provider from LLM object."""
-        from src.orchestration.graph import _infer_llm_provider_name
+        from cogtrix_core.orchestration.graph import _infer_llm_provider_name
 
         # Test with OpenAI LLM (proper module path)
         class MockOpenAI:
@@ -2745,7 +2746,7 @@ class TestCallModelUtilityFunctions:
 
     def test_infer_llm_model(self):
         """_infer_llm_model_name should extract model name from LLM object."""
-        from src.orchestration.graph import _infer_llm_model_name
+        from cogtrix_core.orchestration.graph import _infer_llm_model_name
 
         class MockLLM:
             model_name = "gpt-4"
@@ -2770,7 +2771,7 @@ class TestGuardTruncatedToolCalls:
     """
 
     def setup_method(self):
-        from src.orchestration.nodes.call_model import _guard_truncated_tool_calls
+        from cogtrix_core.orchestration.nodes.call_model import _guard_truncated_tool_calls
 
         self.guard = _guard_truncated_tool_calls
         self.log = MagicMock()

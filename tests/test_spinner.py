@@ -1,6 +1,6 @@
 """Tests for ActivityIndicator pause/resume reference-counting logic."""
 
-from src.ui.spinner import ActivityIndicator
+from cogtrix_core.ui.spinner import ActivityIndicator
 
 
 class TestPauseResumeCounter:

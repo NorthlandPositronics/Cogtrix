@@ -21,8 +21,8 @@ pytest.importorskip("fastapi")
 from pydantic import ValidationError  # noqa: E402
 from sqlalchemy.exc import IntegrityError  # noqa: E402
 
-from src.api.db.models import Organization  # noqa: E402
-from src.api.schemas.organization import (  # noqa: E402
+from cogtrix_core.api.db.models import Organization  # noqa: E402
+from cogtrix_core.api.schemas.organization import (  # noqa: E402
     OrganizationCreate,
     OrganizationOut,
     OrganizationUpdate,
@@ -289,7 +289,7 @@ class TestOrgNameFilterEscaping2166:
     def test_underscore_is_literal_not_wildcard(self, session_factory):
         import uuid
 
-        from src.api.db.repositories.organization import OrganizationRepository
+        from cogtrix_core.api.db.repositories.organization import OrganizationRepository
 
         async def _run():
             async with session_factory() as session:
@@ -308,7 +308,7 @@ class TestOrgNameFilterEscaping2166:
     def test_percent_is_literal_not_wildcard(self, session_factory):
         import uuid
 
-        from src.api.db.repositories.organization import OrganizationRepository
+        from cogtrix_core.api.db.repositories.organization import OrganizationRepository
 
         async def _run():
             async with session_factory() as session:

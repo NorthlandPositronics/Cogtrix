@@ -9,7 +9,7 @@ and an empty-subtasks delegate must clearly NOT register an extension.
 
 from __future__ import annotations
 
-from src.tools.extend_run import ExtendRunState, create_extend_run_tool
+from cogtrix_core.tools.extend_run import ExtendRunState, create_extend_run_tool
 
 
 def _invoke(state: ExtendRunState, **kwargs) -> str:

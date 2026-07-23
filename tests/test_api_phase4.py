@@ -42,7 +42,7 @@ os.environ.setdefault("COGTRIX_DB_URL", "sqlite+aiosqlite:///:memory:")
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-from src.api.auth import create_access_token  # noqa: E402
+from cogtrix_core.api.auth import create_access_token  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Mock factories
@@ -93,7 +93,7 @@ def _make_config() -> MagicMock:
 
 def _make_live_session(session_id: str) -> MagicMock:
     """Build a mock ApiSession."""
-    from src.orchestration.session_state import SessionState
+    from cogtrix_core.orchestration.session_state import SessionState
 
     ss = SessionState(no_confirm=True)
     live = MagicMock()
@@ -126,7 +126,7 @@ def _api_client(
     State is injected *inside* the TestClient context so it overwrites whatever
     the lifespan put on app.state.
     """
-    from src.api.app import create_app
+    from cogtrix_core.api.app import create_app
 
     registry = _make_tool_registry()
     config = _make_config()
@@ -511,8 +511,8 @@ class TestMemoryEndpoints:
         }
         with (
             _api_client(extra_state={"session_registry": sr}) as (client, *_),
-            patch("src.memory.MemoryFactory") as mock_factory,
-            patch("src.memory.JsonFileMemoryStore"),
+            patch("cogtrix_core.memory.MemoryFactory") as mock_factory,
+            patch("cogtrix_core.memory.JsonFileMemoryStore"),
         ):
             mock_factory.is_registered.return_value = True
             mock_factory.create.return_value = new_mm
@@ -602,7 +602,7 @@ class TestConfigEndpoints:
         mock_new_cfg.config_file_path = None
         with (
             _api_client() as (client, registry, config, admin_token, _),
-            patch("src.config.Config", return_value=mock_new_cfg),
+            patch("cogtrix_core.config.Config", return_value=mock_new_cfg),
         ):
             resp = client.post(
                 "/api/v1/config/reload",
@@ -641,7 +641,7 @@ class TestConfigEndpoints:
     def test_wizard_start_returns_501(self) -> None:
         from fastapi.testclient import TestClient as _TC
 
-        from src.api.app import create_app
+        from cogtrix_core.api.app import create_app
 
         app = create_app()
         admin_token = create_access_token(user_id=str(uuid.uuid4()), role="admin")
@@ -660,7 +660,7 @@ class TestConfigEndpoints:
     def test_wizard_step_unknown_id_returns_404(self) -> None:
         from fastapi.testclient import TestClient as _TC
 
-        from src.api.app import create_app
+        from cogtrix_core.api.app import create_app
 
         app = create_app()
         admin_token = create_access_token(user_id=str(uuid.uuid4()), role="admin")
@@ -676,7 +676,7 @@ class TestConfigEndpoints:
     def test_wizard_cancel_unknown_id_returns_404(self) -> None:
         from fastapi.testclient import TestClient as _TC
 
-        from src.api.app import create_app
+        from cogtrix_core.api.app import create_app
 
         app = create_app()
         admin_token = create_access_token(user_id=str(uuid.uuid4()), role="admin")
@@ -699,7 +699,7 @@ class TestConfigEndpoints:
     def test_switch_provider_known_type(self) -> None:
         with (
             _api_client() as (client, registry, config, admin_token, _),
-            patch("src.orchestration.runner.invalidate_llm_caches", return_value=None),
+            patch("cogtrix_core.orchestration.runner.invalidate_llm_caches", return_value=None),
         ):
             resp = client.post(
                 "/api/v1/config/provider",
@@ -711,8 +711,8 @@ class TestConfigEndpoints:
     def test_switch_model(self) -> None:
         with (
             _api_client() as (client, registry, config, admin_token, _),
-            patch("src.orchestration.runner.invalidate_llm_caches", return_value=None),
-            patch("src.config._resolve_model"),
+            patch("cogtrix_core.orchestration.runner.invalidate_llm_caches", return_value=None),
+            patch("cogtrix_core.config._resolve_model"),
         ):
             resp = client.post(
                 "/api/v1/config/model",
@@ -824,7 +824,7 @@ class TestMCPEndpoints:
             config.mcp_servers = {
                 "srv1": {"command": "python", "args": [], "requires_confirmation": True}
             }
-            with patch("src.api.routes.mcp._persist_mcp_servers"):
+            with patch("cogtrix_core.api.routes.mcp._persist_mcp_servers"):
                 resp = client.delete(
                     "/api/v1/mcp/servers/srv1",
                     headers={"Authorization": f"Bearer {admin_token}"},
@@ -859,7 +859,7 @@ class TestSystemEndpoints:
         assert "platform" in data
 
     def test_system_info_version_matches(self) -> None:
-        from src._version import get_version_string
+        from cogtrix_core._version import get_version_string
 
         with _api_client() as (client, registry, config, admin_token, _):
             resp = client.get(
@@ -922,7 +922,7 @@ class TestSystemEndpoints:
 
 class TestPaginationHelpers:
     def test_encode_decode_cursor(self) -> None:
-        from src.api.pagination import decode_cursor, encode_cursor
+        from cogtrix_core.api.pagination import decode_cursor, encode_cursor
 
         original = "some-tool-name"
         encoded = encode_cursor(original)
@@ -930,7 +930,7 @@ class TestPaginationHelpers:
         assert decode_cursor(encoded) == original
 
     def test_paginate_list_basic(self) -> None:
-        from src.api.pagination import paginate_list
+        from cogtrix_core.api.pagination import paginate_list
 
         items = ["a", "b", "c", "d", "e"]
         page, next_cursor, has_more = paginate_list(items, None, 3)
@@ -939,7 +939,7 @@ class TestPaginationHelpers:
         assert next_cursor is not None
 
     def test_paginate_list_last_page(self) -> None:
-        from src.api.pagination import paginate_list
+        from cogtrix_core.api.pagination import paginate_list
 
         items = ["a", "b"]
         page, next_cursor, has_more = paginate_list(items, None, 10)
@@ -948,7 +948,7 @@ class TestPaginationHelpers:
         assert next_cursor is None
 
     def test_paginate_list_with_cursor(self) -> None:
-        from src.api.pagination import paginate_list
+        from cogtrix_core.api.pagination import paginate_list
 
         items = ["a", "b", "c", "d"]
         page, next_cursor, has_more = paginate_list(items, "b", 2)
@@ -956,14 +956,14 @@ class TestPaginationHelpers:
         assert has_more is False
 
     def test_paginate_list_limit_clamped(self) -> None:
-        from src.api.pagination import paginate_list
+        from cogtrix_core.api.pagination import paginate_list
 
         items = list(range(100))
         page, _, _ = paginate_list(items, None, 0)  # 0 becomes 1
         assert len(page) == 1
 
     def test_decode_cursor_invalid(self) -> None:
-        from src.api.pagination import decode_cursor
+        from cogtrix_core.api.pagination import decode_cursor
 
         # "!!!" characters make base64 decoding produce non-UTF8 bytes -> UnicodeDecodeError
         # OR binascii.Error for truly malformed padding — either is expected

@@ -19,7 +19,7 @@ import textwrap
 from pathlib import Path
 from types import SimpleNamespace
 
-from src.config import _reset_secret_env_cache, load_config
+from cogtrix_core.config import _reset_secret_env_cache, load_config
 
 # Provider keyed ONLY by env (no inline api_key) + one with an inline key.
 _YAML = textwrap.dedent("""

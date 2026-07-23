@@ -29,7 +29,7 @@ class TestBuildMemoryManagerHistoryPath:
 
     def _call(self, app_state: object) -> str | None:
         """Call _build_memory_manager and return the base_dir used."""
-        from src.api.session_bridge import _build_memory_manager
+        from cogtrix_core.api.session_bridge import _build_memory_manager
 
         captured: list[str] = []
         fake_cls = _make_fake_store_cls(captured)
@@ -38,11 +38,11 @@ class TestBuildMemoryManagerHistoryPath:
         mock_mm.load = MagicMock()
 
         # The import happens lazily inside _build_memory_manager:
-        #   from src.memory import JsonFileMemoryStore, MemoryFactory
+        #   from cogtrix_core.memory import JsonFileMemoryStore, MemoryFactory
         # so we patch at src.memory.
         with (
-            patch("src.memory.JsonFileMemoryStore", fake_cls),
-            patch("src.memory.MemoryFactory") as mock_factory,
+            patch("cogtrix_core.memory.JsonFileMemoryStore", fake_cls),
+            patch("cogtrix_core.memory.MemoryFactory") as mock_factory,
         ):
             mock_factory.is_registered.return_value = True
             mock_factory.create.return_value = mock_mm
@@ -98,8 +98,8 @@ class TestSwitchMemoryModeHistoryPath:
         mock_mm.load = MagicMock()
 
         with (
-            patch("src.memory.JsonFileMemoryStore", fake_cls),
-            patch("src.memory.MemoryFactory") as mock_factory,
+            patch("cogtrix_core.memory.JsonFileMemoryStore", fake_cls),
+            patch("cogtrix_core.memory.MemoryFactory") as mock_factory,
         ):
             mock_factory.is_registered.return_value = True
             mock_factory.create.return_value = mock_mm
@@ -107,7 +107,7 @@ class TestSwitchMemoryModeHistoryPath:
             # Simulate the _create_and_load closure logic from the route.
             app_cfg = cfg
             history_dir = str(Path(app_cfg.data_dir) / "history")
-            import src.memory as _mem
+            import cogtrix_core.memory as _mem
 
             _mem.JsonFileMemoryStore(history_dir)
 

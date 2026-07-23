@@ -1,4 +1,4 @@
-"""Tests for src/tasks/goal_tracker.py — GoalStack and get_goal_stack."""
+"""Tests for cogtrix_core/tasks/goal_tracker.py — GoalStack and get_goal_stack."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from src.tasks.goal_tracker import Goal, GoalStack, GoalStatus, get_goal_stack
+from cogtrix_core.tasks.goal_tracker import Goal, GoalStack, GoalStatus, get_goal_stack
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 

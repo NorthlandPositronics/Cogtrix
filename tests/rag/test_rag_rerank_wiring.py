@@ -59,7 +59,7 @@ class _FakeStore:
 def _restore_rag_config():
     """Save/restore ``_rag_config`` so per-test ``configure_rag`` calls
     don't leak across tests."""
-    import src.tools.rag as _rag_mod
+    import cogtrix_core.tools.rag as _rag_mod
 
     original = dict(_rag_mod._rag_config)
     yield
@@ -71,7 +71,7 @@ def _restore_rag_config():
 def _reset_reranker_cache():
     """Reset the CE singleton between tests so monkeypatched stubs
     don't leak."""
-    from src.rag.reranker import _reset_model_cache_for_tests
+    from cogtrix_core.rag.reranker import _reset_model_cache_for_tests
 
     _reset_model_cache_for_tests()
     yield
@@ -114,7 +114,7 @@ class TestRerankOffByDefault:
 
     @pytest.mark.usefixtures("_restore_rag_config")
     def test_pure_vector_path_unchanged_when_flag_off(self, tmp_path: Path) -> None:
-        from src.tools.rag import _rag_config, _retrieve_from_index
+        from cogtrix_core.tools.rag import _rag_config, _retrieve_from_index
 
         # Belt-and-braces: even on a fresh ``_rag_config``, the flag
         # must be explicitly False — a future default flip would change
@@ -149,7 +149,7 @@ class TestRerankFlagOnPureVector:
     def test_reorders_pure_vector_pool_by_ce_score(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from src.tools.rag import _retrieve_from_index, configure_rag
+        from cogtrix_core.tools.rag import _retrieve_from_index, configure_rag
 
         # FAISS hands back docs in WRONG order — pre-CE rank #0 has the
         # lowest CE score; the right answer is at FAISS rank #4.
@@ -190,7 +190,7 @@ class TestRerankFlagOnPureVector:
         At ``multiplier=3`` and ``k=4``, the FAISS store must be queried
         with ``k=12`` (3 × 4) so the CE has a wider pool.
         """
-        from src.tools.rag import _retrieve_from_index, configure_rag
+        from cogtrix_core.tools.rag import _retrieve_from_index, configure_rag
 
         docs = [_FakeDoc(f"d{i}") for i in range(20)]
         store = _FakeStore([(d, float(i)) for i, d in enumerate(docs)])
@@ -219,7 +219,7 @@ class TestRerankFlagOnPureVector:
     def test_passes_configured_model_and_device(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from src.tools.rag import _retrieve_from_index, configure_rag
+        from cogtrix_core.tools.rag import _retrieve_from_index, configure_rag
 
         docs = [_FakeDoc("a"), _FakeDoc("b")]
         store = _FakeStore([(d, float(i)) for i, d in enumerate(docs)])
@@ -254,7 +254,7 @@ class TestRerankFlagOnPureVector:
         it falls back to the over-fetched pool's top-K.  Retrieval is
         never worse than the baseline.
         """
-        from src.tools.rag import _retrieve_from_index, configure_rag
+        from cogtrix_core.tools.rag import _retrieve_from_index, configure_rag
 
         # Force ImportError when reranker tries to ``import sentence_transformers``.
         monkeypatch.setitem(sys.modules, "sentence_transformers", None)

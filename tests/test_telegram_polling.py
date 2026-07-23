@@ -5,8 +5,8 @@ from __future__ import annotations
 import time
 from unittest.mock import MagicMock
 
-from src.assistant.channels.telegram import TelegramChannel
-from src.tools._telegram_client import TelegramBotClient, TelegramMessage
+from cogtrix_core.assistant.channels.telegram import TelegramChannel
+from cogtrix_core.tools._telegram_client import TelegramBotClient, TelegramMessage
 
 
 def _make_tg_msg(

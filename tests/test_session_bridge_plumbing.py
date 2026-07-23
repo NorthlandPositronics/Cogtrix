@@ -8,8 +8,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.api.session_bridge import warm_session
-from src.memory.manager import BaseMemoryManager
+from cogtrix_core.api.session_bridge import warm_session
+from cogtrix_core.memory.manager import BaseMemoryManager
 
 
 @pytest.mark.asyncio
@@ -34,8 +34,8 @@ async def test_warm_session_threads_memory_manager_into_run_config() -> None:
     mock_llm = MagicMock()
 
     with (
-        patch("src.api.session_bridge._build_memory_manager", return_value=mock_mm),
-        patch("src.api.session_bridge._build_llm", return_value=mock_llm),
+        patch("cogtrix_core.api.session_bridge._build_memory_manager", return_value=mock_mm),
+        patch("cogtrix_core.api.session_bridge._build_llm", return_value=mock_llm),
     ):
         session = await warm_session(record, app_state)
 
@@ -65,8 +65,8 @@ async def test_warm_session_uses_public_compression_api() -> None:
     mock_llm = MagicMock()
 
     with (
-        patch("src.api.session_bridge._build_memory_manager", return_value=mock_mm),
-        patch("src.api.session_bridge._build_llm", return_value=mock_llm),
+        patch("cogtrix_core.api.session_bridge._build_memory_manager", return_value=mock_mm),
+        patch("cogtrix_core.api.session_bridge._build_llm", return_value=mock_llm),
     ):
         session = await warm_session(record, app_state)
 

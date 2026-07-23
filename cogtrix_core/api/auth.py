@@ -1,0 +1,839 @@
+"""JWT authentication and API key validation.
+
+All endpoints (except /api/v1/health, /api/v1/health/ready, and the auth
+registration/login endpoints) require a valid bearer token in the
+``Authorization: Bearer <jwt>`` header. API keys with the ``cgx_live_``
+prefix are also accepted on the same bearer channel and are validated via
+``validate_api_key()``.
+
+WebSocket endpoints accept the token either in the Authorization header or
+as the ``token`` query parameter (browsers cannot set custom WS headers).
+
+JWT claims:
+    sub  — user UUID v4
+    exp  — expiry UNIX timestamp
+    iat  — issued-at UNIX timestamp
+    role — 'admin' or 'user'
+
+The JWT secret is read exclusively from the environment variable
+``COGTRIX_JWT_SECRET`` — never hardcoded.  API startup snapshots the value
+into an in-process cache so token operations do not re-read the environment
+on every request.
+
+Error codes:
+    UNAUTHORIZED   — token missing, malformed, or signature invalid
+    TOKEN_EXPIRED  — token is valid but has expired (frontend should refresh)
+    FORBIDDEN      — token valid but role insufficient for this endpoint
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import os
+import threading
+import time
+from datetime import UTC, datetime, timedelta
+from typing import Any
+
+import bcrypt
+import jwt
+from fastapi import Depends, HTTPException, Query, Request, status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from jwt.exceptions import ExpiredSignatureError, InvalidTokenError
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from cogtrix_core.api.db import get_db
+
+log = logging.getLogger("cogtrix.api.auth")
+
+# In-process debounce for API key last_used_at writes.
+# Maps key_id -> monotonic timestamp of the last DB write.
+_API_KEY_LAST_USED: dict[str, float] = {}
+_API_KEY_DEBOUNCE_SECONDS = 60.0
+_API_KEY_LOCK = asyncio.Lock()
+
+
+def _cleanup_stale_api_key_entries() -> None:
+    """Remove entries older than twice the debounce interval."""
+    cutoff = time.monotonic() - (_API_KEY_DEBOUNCE_SECONDS * 2)
+    stale = [k for k, v in _API_KEY_LAST_USED.items() if v < cutoff]
+    for k in stale:
+        del _API_KEY_LAST_USED[k]
+
+
+def _hash_api_key(token: str) -> str:
+    """HMAC-SHA256 hash for API key lookup — delegates to isolated module."""
+    from cogtrix_core.api._key_hash import hash_api_key
+
+    return hash_api_key(token)
+
+
+# ---------------------------------------------------------------------------
+# Security scheme (used by FastAPI /docs and OpenAPI schema)
+# ---------------------------------------------------------------------------
+
+_bearer_scheme = HTTPBearer(auto_error=False)
+
+# ---------------------------------------------------------------------------
+# bcrypt password hashing helpers
+# ---------------------------------------------------------------------------
+
+_BCRYPT_ROUNDS = 12
+
+
+def hash_password(password: str) -> str:
+    """Hash a password with bcrypt, returning the encoded hash string."""
+    pw_bytes = password.encode("utf-8")[:72]  # bcrypt truncates at 72 bytes
+    salt = bcrypt.gensalt(rounds=_BCRYPT_ROUNDS)
+    return bcrypt.hashpw(pw_bytes, salt).decode("utf-8")
+
+
+def verify_password(password: str, password_hash: str) -> bool:
+    """Verify a password against a bcrypt hash."""
+    pw_bytes = password.encode("utf-8")[:72]
+    hash_bytes = password_hash.encode("utf-8")
+    return bcrypt.checkpw(pw_bytes, hash_bytes)
+
+
+# Cached dummy hash used by ``verify_password_constant_time`` to keep the
+# no-such-user branch at the same wall-clock cost as the real-user branch.
+# In production this is pre-computed by ``configure_dummy_password_hash()``
+# at API startup so the very first login request runs in equal time;
+# ``_dummy_hash_lock`` guards a lazy fallback for CLI / test contexts that
+# don't go through the startup hook.
+_DUMMY_PASSWORD_HASH: str | None = None
+_dummy_hash_lock = threading.Lock()
+
+
+def configure_dummy_password_hash() -> None:
+    """Eagerly compute the dummy bcrypt hash used by ``verify_password_constant_time``.
+
+    Called from API startup so the first login request after a fresh process
+    boot doesn't pay ~150 ms more than subsequent ones — that delta would
+    re-introduce the H3 timing oracle for the *first* no-such-user
+    attempt against every freshly-started worker. Idempotent.
+    """
+    global _DUMMY_PASSWORD_HASH
+    with _dummy_hash_lock:
+        if _DUMMY_PASSWORD_HASH is None:
+            _DUMMY_PASSWORD_HASH = hash_password("x")
+
+
+def verify_password_constant_time(password: str, password_hash: str | None) -> bool:
+    """Verify a password whose corresponding hash may be ``None``.
+
+    Forge audit H3 (2026-05-23): the login route returned within ~5 ms when
+    the username didn't exist and ~100 ms when it did, leaking which
+    usernames are valid via response timing. This helper always runs bcrypt
+    — against a precomputed dummy hash when the real hash is missing — so
+    the no-such-user and wrong-password code paths run for the same wall
+    time. The return value for ``password_hash is None`` is always
+    ``False``; callers should still propagate "invalid credentials" in
+    that case.
+    """
+    global _DUMMY_PASSWORD_HASH
+    # Fast path: dummy was eagerly computed at startup. The lock-free read
+    # is safe because string assignment is atomic in CPython and the dummy
+    # is set exactly once for the process lifetime.
+    dummy = _DUMMY_PASSWORD_HASH
+    if dummy is None:
+        # Lazy fallback (CLI / tests / processes that didn't run startup).
+        # Lock + double-check prevents two concurrent first-callers from
+        # each paying the bcrypt cost — without this, the FIRST request
+        # against the no-such-user path leaks ~2× timing (forge audit B5).
+        with _dummy_hash_lock:
+            if _DUMMY_PASSWORD_HASH is None:
+                _DUMMY_PASSWORD_HASH = hash_password("x")
+            dummy = _DUMMY_PASSWORD_HASH
+    if password_hash is None:
+        # Run bcrypt anyway to equalise timing; discard the boolean.
+        verify_password(password, dummy)
+        return False
+    return verify_password(password, password_hash)
+
+
+# ---------------------------------------------------------------------------
+# JWT constants
+# ---------------------------------------------------------------------------
+
+_ALGORITHM = "HS256"
+_ACCESS_TOKEN_EXPIRE_SECONDS = 3600  # 1 hour
+_REFRESH_TOKEN_EXPIRE_DAYS = 30
+_JWT_SECRET: str | None = None
+
+
+def configure_jwt_secret(secret: str) -> None:
+    """Snapshot the JWT signing secret for this process."""
+    if len(secret) < 32:
+        raise RuntimeError(
+            "COGTRIX_JWT_SECRET must be set to at least 32 characters. "
+            'Generate one with: python -c "import secrets; print(secrets.token_hex(32))"'
+        )
+    global _JWT_SECRET
+    _JWT_SECRET = secret
+
+
+def _get_jwt_secret() -> str:
+    """Return the cached JWT signing secret, lazily initializing it once."""
+    global _JWT_SECRET
+    if _JWT_SECRET is None:
+        # Resolve via the #2103 _FILE convention (COGTRIX_JWT_SECRET_FILE).
+        from cogtrix_core.config import secret_from_env_or_file
+
+        configure_jwt_secret(secret_from_env_or_file("COGTRIX_JWT_SECRET") or "")
+    if _JWT_SECRET is None:
+        raise RuntimeError("JWT secret not configured")
+    return _JWT_SECRET
+
+
+# ---------------------------------------------------------------------------
+# Token data model
+# ---------------------------------------------------------------------------
+
+
+class TokenData:
+    """Decoded, validated JWT claims attached to the request.
+
+    Available on every authenticated endpoint via the ``current_user``
+    FastAPI dependency.
+    """
+
+    def __init__(self, user_id: str, role: str, raw_claims: dict[str, Any]) -> None:
+        self.user_id = user_id
+        """UUID v4 of the authenticated user (``sub`` claim)."""
+        self.role = role
+        """Role string: 'admin', 'superadmin', or 'user'."""
+        self.raw_claims = raw_claims
+        """Full decoded JWT payload for advanced use."""
+
+    @property
+    def is_admin(self) -> bool:
+        """True when the user holds the 'admin' or 'superadmin' role."""
+        return self.role in ("admin", "superadmin")
+
+    @property
+    def is_superadmin(self) -> bool:
+        """True when the user holds the 'superadmin' role."""
+        return self.role == "superadmin"
+
+    @property
+    def is_impersonating(self) -> bool:
+        """True when the request is carrying an impersonation token."""
+        return bool(self.raw_claims.get("impersonated_by"))
+
+
+# ---------------------------------------------------------------------------
+# JWT helpers (used by auth routes)
+# ---------------------------------------------------------------------------
+
+
+def create_access_token(user_id: str, role: str) -> str:
+    """Mint a new HS256 access JWT with a 1-hour expiry."""
+    now = datetime.now(UTC)
+    claims = {
+        "sub": user_id,
+        "role": role,
+        "iat": now,
+        "exp": now + timedelta(seconds=_ACCESS_TOKEN_EXPIRE_SECONDS),
+    }
+    return jwt.encode(claims, _get_jwt_secret(), algorithm=_ALGORITHM)
+
+
+def create_impersonation_token(
+    impersonated_user_id: str,
+    impersonated_role: str,
+    superadmin_id: str,
+    session_id: str,
+    duration_minutes: int = 30,
+) -> str:
+    """Mint an impersonation JWT.
+
+    The token encodes the impersonated user as ``sub`` and includes
+    ``impersonated_by`` / ``impersonation_session_id`` claims so the
+    auth layer can validate the active session on every request.
+    """
+    now = datetime.now(UTC)
+    claims = {
+        "sub": impersonated_user_id,
+        "role": impersonated_role,
+        "impersonated_by": superadmin_id,
+        "impersonation_session_id": session_id,
+        "iat": now,
+        "exp": now + timedelta(minutes=duration_minutes),
+    }
+    return jwt.encode(claims, _get_jwt_secret(), algorithm=_ALGORITHM)
+
+
+# ---------------------------------------------------------------------------
+# JWT validation
+# ---------------------------------------------------------------------------
+
+
+def _decode_jwt(token: str) -> dict[str, Any]:
+    """Decode and verify a JWT, returning its claims.
+
+    Uses ``PyJWT`` with the HS256 algorithm.  The secret is loaded
+    from the COGTRIX_JWT_SECRET environment variable.
+
+    Raises:
+        HTTPException 401 UNAUTHORIZED — token is malformed or signature invalid.
+        HTTPException 401 TOKEN_EXPIRED — token has a valid signature but is expired.
+    """
+    try:
+        claims: dict[str, Any] = jwt.decode(token, _get_jwt_secret(), algorithms=[_ALGORITHM])
+        return claims
+    except ExpiredSignatureError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={
+                "code": "TOKEN_EXPIRED",
+                "message": "The JWT has expired; refresh the token and retry.",
+            },
+        ) from exc
+    except InvalidTokenError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={"code": "UNAUTHORIZED", "message": "Missing or invalid bearer token."},
+        ) from exc
+
+
+# ---------------------------------------------------------------------------
+# FastAPI dependencies
+# ---------------------------------------------------------------------------
+
+
+async def get_current_user(
+    request: Request,
+    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),
+    token: str | None = Query(
+        default=None, description="JWT for WebSocket connections that cannot set headers."
+    ),
+    db: AsyncSession = Depends(get_db),
+) -> TokenData:
+    """FastAPI dependency: validate the bearer token and return decoded claims.
+
+    Accepts the token from:
+    1. ``Authorization: Bearer <jwt>`` header (preferred).
+    2. ``?token=<jwt>`` query parameter (WebSocket fallback).
+
+    API keys with the ``cgx_live_`` prefix are validated through the API key
+    repository path before JWT decoding.
+
+    Falls back to OIDC validation when a validator is configured and the local
+    JWT check raises UNAUTHORIZED (invalid token).  TOKEN_EXPIRED is never
+    retried via OIDC — it propagates immediately so the frontend can refresh.
+
+    Raises:
+        HTTPException 401 UNAUTHORIZED — no token provided or invalid signature.
+        HTTPException 401 TOKEN_EXPIRED — valid signature but token expired.
+    """
+    raw_token: str | None = None
+    if credentials is not None:
+        raw_token = credentials.credentials
+    elif token is not None:
+        raw_token = token
+
+    if raw_token is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={"code": "UNAUTHORIZED", "message": "Missing or invalid bearer token."},
+        )
+
+    if raw_token.startswith("cgx_live_"):
+        current = await validate_api_key(raw_token, db)
+        await _reject_inactive_user(current.user_id, db)
+        return current
+
+    try:
+        claims = _decode_jwt(raw_token)
+    except HTTPException as local_exc:
+        detail = local_exc.detail
+        code = detail.get("code") if isinstance(detail, dict) else None
+        if code == "TOKEN_EXPIRED":
+            raise
+        # UNAUTHORIZED: try OIDC fallback if configured.
+        from cogtrix_core.api.oidc import get_validator  # lazy to avoid circular at import time
+
+        validator = get_validator()
+        if validator is None:
+            raise
+        try:
+            # validator.validate() uses urllib (blocking I/O) — run in a
+            # thread pool to avoid blocking the async event loop.
+            import asyncio as _asyncio
+
+            oidc_claims = await _asyncio.to_thread(validator.validate, raw_token)
+        except Exception:
+            raise local_exc from None
+        oidc_role = validator.map_role(oidc_claims)
+        oidc_user_id = str(oidc_claims.get("sub", ""))
+        if not oidc_user_id:
+            raise local_exc from None
+        current = TokenData(user_id=oidc_user_id, role=oidc_role, raw_claims=oidc_claims)
+        # OIDC tokens come from an external IdP; the ``sub`` claim does
+        # not imply a local user row exists. Insist on it
+        # (forge audit H1, 2026-05-23). Native JWT/API-key paths above
+        # use the default tolerant behaviour because we issued those
+        # tokens ourselves and the user existed at issue time.
+        await _reject_inactive_user(current.user_id, db, require_exists=True)
+        return current
+
+    user_id: str = claims.get("sub", "")
+    role: str = claims.get("role", "user")
+    if not user_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={"code": "UNAUTHORIZED", "message": "Missing or invalid bearer token."},
+        )
+
+    # Handle impersonation tokens
+    impersonation_session_id: str | None = claims.get("impersonation_session_id")
+    if impersonation_session_id is not None:
+        from sqlalchemy import select
+
+        from cogtrix_core.api.db.models import ImpersonationSession
+
+        result = await db.execute(
+            select(ImpersonationSession).where(ImpersonationSession.id == impersonation_session_id)
+        )
+        imp_session = result.scalar_one_or_none()
+        now = datetime.now(UTC)
+        if imp_session is None or (imp_session.ended_at is not None):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail={
+                    "code": "UNAUTHORIZED",
+                    "message": "Impersonation session has ended or does not exist.",
+                },
+            )
+        expires_at = imp_session.expires_at
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=UTC)
+        if expires_at < now:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail={
+                    "code": "TOKEN_EXPIRED",
+                    "message": "Impersonation session has expired; re-authenticate.",
+                },
+            )
+
+        # Re-verify that the originating superadmin is still privileged and
+        # active (forge audit H2, 2026-05-23). Without this check, an
+        # impersonation token issued by ``superadmin-X`` remains valid for
+        # up to its full TTL even after ``superadmin-X`` is demoted,
+        # deactivated, or deleted. The impersonator could end up exercising
+        # superadmin-derived privileges on behalf of a user account whose
+        # impersonator no longer has the authority that justified the
+        # impersonation in the first place.
+        #
+        # Forge audit B7 (second-order to H2): the previous ``if
+        # impersonator_id:`` falsy-check let a token bearing
+        # ``"impersonated_by": ""`` (or ``0``, ``[]``, ``{}``) skip the
+        # re-verification entirely — JWT claims are signed but anyone with
+        # access to a buggy issuance path that wrote a falsy value would
+        # have escaped the H2 guard. Gate on claim *presence* and fail
+        # closed for malformed values.
+        if "impersonated_by" in claims:
+            impersonator_id = claims.get("impersonated_by")
+            if not isinstance(impersonator_id, str) or not impersonator_id:
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail={
+                        "code": "UNAUTHORIZED",
+                        "message": "Impersonation session originator claim is malformed.",
+                    },
+                )
+            from cogtrix_core.api.db.repositories.users import UserRepository
+
+            impersonator = await UserRepository(db).get_by_id(impersonator_id)
+            if (
+                impersonator is None
+                or not impersonator.is_active
+                or impersonator.role
+                not in (
+                    "admin",
+                    "superadmin",
+                )
+            ):
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail={
+                        "code": "UNAUTHORIZED",
+                        "message": "Impersonation session originator no longer authorised.",
+                    },
+                )
+
+    current = TokenData(user_id=user_id, role=role, raw_claims=claims)
+    await _reject_inactive_user(current.user_id, db)
+    return current
+
+
+async def require_admin(current_user: TokenData = Depends(get_current_user)) -> TokenData:
+    """FastAPI dependency: require admin role.
+
+    Raises:
+        HTTPException 403 FORBIDDEN — authenticated user is not an admin.
+    """
+    if not current_user.is_admin:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": "FORBIDDEN",
+                "message": "Authenticated user lacks permission for this action.",
+            },
+        )
+    return current_user
+
+
+async def require_superadmin(current_user: TokenData = Depends(get_current_user)) -> TokenData:
+    """FastAPI dependency: require superadmin role.
+
+    Raises:
+        HTTPException 403 FORBIDDEN — authenticated user is not a superadmin.
+    """
+    if not current_user.is_superadmin:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": "FORBIDDEN",
+                "message": "Authenticated user lacks permission for this action.",
+            },
+        )
+    return current_user
+
+
+def _org_scoping_enabled() -> bool:
+    """Whether admin-role org scoping is enabled (Phase 2 rollout flag).
+
+    Off by default for backward compatibility; opt in via
+    ``COGTRIX_ENABLE_ORG_SCOPING`` set to ``true``/``1``/``yes``.
+    """
+    return os.getenv("COGTRIX_ENABLE_ORG_SCOPING", "").lower() in ("true", "1", "yes")
+
+
+async def get_admin_org(
+    current_user: TokenData = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> str | None:
+    """FastAPI dependency: return the admin's org_id, or None for superadmins.
+
+    Used by admin enumeration endpoints that need org-scoping.  Superadmins
+    (role == 'superadmin') receive ``None`` so they can see data across all
+    organizations.  Regular admins receive their ``org_id`` from the user
+    record so the endpoint can filter (or reject when org metadata is not
+    yet available).
+
+    When ``enable_org_scoping`` is False (default), all admins receive ``None``
+    to preserve backward compatibility until Phase 2 rollout.
+
+    Raises:
+        HTTPException 403 FORBIDDEN — authenticated user is not an admin.
+    """
+    if not current_user.is_admin:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": "FORBIDDEN",
+                "message": "Authenticated user lacks permission for this action.",
+            },
+        )
+    # Feature flag: disable org scoping by default for backward compatibility
+    if not _org_scoping_enabled():
+        return None
+    if current_user.is_superadmin:
+        return None
+    from cogtrix_core.api.db.repositories.users import UserRepository
+
+    repo = UserRepository(db)
+    user = await repo.get_by_id(current_user.user_id)
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": "FORBIDDEN",
+                "message": "Authenticated user lacks permission for this action.",
+            },
+        )
+    if user.org_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": "ORG_NOT_ASSIGNED",
+                "message": "Admin account is not assigned to an organization.",
+            },
+        )
+    return user.org_id
+
+
+async def get_current_user_optional(
+    request: Request,
+    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),
+    token: str | None = Query(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> TokenData | None:
+    """FastAPI dependency: return decoded claims or None if no token is present.
+
+    Used on endpoints that behave differently for authenticated vs. anonymous
+    callers.
+
+    Re-raises TOKEN_EXPIRED and UNAUTHORIZED so callers cannot exploit an
+    expired token to obtain anonymous-level access on protected endpoints.
+    """
+    raw_token: str | None = None
+    if credentials is not None:
+        raw_token = credentials.credentials
+    elif token is not None:
+        raw_token = token
+
+    if raw_token is None:
+        return None
+
+    # A token was supplied — validate it strictly.  Do not silently degrade
+    # an invalid/expired credential to anonymous access.
+    return await get_current_user(request, credentials, token, db)
+
+
+async def _reject_inactive_user(
+    user_id: str,
+    db: AsyncSession,
+    *,
+    require_exists: bool = False,
+) -> None:
+    """Reject authentication for a deactivated (and optionally missing) user.
+
+    Default behaviour: raises when the user row exists and is inactive;
+    silently passes when no row exists. That tolerance is intentional for
+    native JWT tokens — we issued them ourselves at ``/login`` / ``/refresh``
+    after verifying the user existed, and within the 1-hour TTL we accept
+    the tail risk of mid-token deletion.
+
+    ``require_exists=True`` (forge audit H1, 2026-05-23) is for the OIDC
+    fallback path: external IdPs can mint tokens for arbitrary ``sub``
+    claims with no corresponding local user, so the OIDC caller must
+    insist on a present row. JIT-provisioning endpoints in
+    ``cogtrix_core/api/jit/provisioning.py`` create the row first; subsequent
+    OIDC-authenticated requests then resolve normally.
+    """
+    from cogtrix_core.api.db.repositories.users import UserRepository
+
+    repo = UserRepository(db)
+    user = await repo.get_by_id(user_id)
+    if user is None:
+        if require_exists:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail={
+                    "code": "UNAUTHORIZED",
+                    "message": "Missing or invalid bearer token.",
+                },
+            )
+        return
+    if not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={"code": "UNAUTHORIZED", "message": "Missing or invalid bearer token."},
+        )
+
+
+# ---------------------------------------------------------------------------
+# API key validation (programmatic access alternative to JWT)
+# ---------------------------------------------------------------------------
+
+
+async def validate_api_key(api_key: str, db: AsyncSession) -> TokenData:
+    """Look up an API key and return the associated user's TokenData.
+
+    API keys are stored hashed in the database.  The raw key is only
+    available at creation time.
+
+    Args:
+        api_key: The raw API key string.
+        db: The caller's database session (from ``Depends(get_db)``).
+
+    Raises:
+        HTTPException 401 UNAUTHORIZED — key not found or revoked.
+        HTTPException 401 TOKEN_EXPIRED — key has passed its expires_at timestamp.
+    """
+    from cogtrix_core.api.db.repositories.api_keys import ApiKeyRepository
+    from cogtrix_core.api.db.repositories.users import UserRepository
+
+    key_hash = _hash_api_key(api_key)
+
+    repo = ApiKeyRepository(db)
+    key_record = await repo.get_by_hash(key_hash)
+
+    if key_record is None or key_record.revoked:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={"code": "UNAUTHORIZED", "message": "Missing or invalid bearer token."},
+        )
+
+    if key_record.expires_at is not None:
+        now = datetime.now(UTC)
+        expires = key_record.expires_at
+        if expires.tzinfo is None:
+            expires = expires.replace(tzinfo=UTC)
+        if now > expires:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail={"code": "UNAUTHORIZED", "message": "Missing or invalid bearer token."},
+            )
+
+    user_repo = UserRepository(db)
+    user = await user_repo.get_by_id(key_record.user_id)
+    if user is None or not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={"code": "UNAUTHORIZED", "message": "Missing or invalid bearer token."},
+        )
+
+    # Update last_used_at only after confirming the user exists.
+    # Debounce in-process to avoid write amplification at high QPS.
+    async with _API_KEY_LOCK:
+        now_mono = time.monotonic()
+        last_written = _API_KEY_LAST_USED.get(key_record.id, 0)
+        if now_mono - last_written >= _API_KEY_DEBOUNCE_SECONDS:
+            await repo.update_last_used(key_record.id, datetime.now(UTC))
+            await db.commit()
+            _API_KEY_LAST_USED[key_record.id] = now_mono
+            _cleanup_stale_api_key_entries()
+
+    return TokenData(
+        user_id=user.id,
+        role=user.role,
+        raw_claims={"sub": user.id, "role": user.role},
+    )
+
+
+# ---------------------------------------------------------------------------
+# Session ownership guard
+# ---------------------------------------------------------------------------
+
+
+async def verify_session_owner(
+    session_id: str,
+    current_user: TokenData,
+    db: AsyncSession,
+    *,
+    admin_bypass: bool = True,
+) -> None:
+    """Ensure the current user owns the given session and is a workspace member.
+
+    Admins may access any session when *admin_bypass* is ``True`` (default).
+    The breadth of that bypass depends on org scoping (``COGTRIX_ENABLE_ORG_SCOPING``,
+    see :func:`_org_scoping_enabled`):
+
+    * Org scoping **off** (default) — every admin keeps a global bypass
+      (legacy behaviour).
+    * Org scoping **on** — superadmins keep the global bypass, but a regular
+      admin may only bypass for sessions belonging to *their own* organization
+      (#2115: cross-org session IDOR).  The session's org is resolved from its
+      workspace (authoritative) or, failing that, from the owner's org.
+
+    Regular users may only access their own sessions, and must still be a
+    member of the workspace the session belongs to (if any).
+
+    Args:
+        session_id: UUID v4 of the session to check.
+        current_user: Decoded JWT claims from the request.
+        db: The caller's database session (from ``Depends(get_db)``).
+        admin_bypass: When ``True``, skip the ownership check for admin callers
+            (subject to org scoping above).
+
+    Raises:
+        HTTPException 404 SESSION_NOT_FOUND — session does not exist.
+        HTTPException 403 FORBIDDEN — session belongs to a different user/org
+            or caller is no longer a workspace member.
+        HTTPException 403 ORG_NOT_ASSIGNED — org-scoped admin has no org_id.
+    """
+    is_admin = current_user.is_admin
+    # An org-scoped admin must prove org membership against the resource; a
+    # superadmin (and every admin when scoping is off) keeps the global bypass.
+    org_scoped_admin = (
+        admin_bypass and is_admin and not current_user.is_superadmin and _org_scoping_enabled()
+    )
+
+    if admin_bypass and is_admin and not org_scoped_admin:
+        return
+
+    from sqlalchemy import select
+
+    from cogtrix_core.api.db.models import ApiSessionRecord
+
+    result = await db.execute(select(ApiSessionRecord).where(ApiSessionRecord.id == session_id))
+    record = result.scalar_one_or_none()
+
+    if record is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "code": "SESSION_NOT_FOUND",
+                "message": "The requested session does not exist.",
+            },
+        )
+
+    if org_scoped_admin:
+        from cogtrix_core.api.db.repositories.users import UserRepository
+
+        user_repo = UserRepository(db)
+        admin_user = await user_repo.get_by_id(current_user.user_id)
+        admin_org = admin_user.org_id if admin_user is not None else None
+        if admin_org is None:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={
+                    "code": "ORG_NOT_ASSIGNED",
+                    "message": "Admin account is not assigned to an organization.",
+                },
+            )
+
+        # Resolve the session's org: workspace org is authoritative; otherwise
+        # fall back to the owner's org.  A session whose org cannot be resolved
+        # (None) never matches a real admin org, so access is denied by default.
+        session_org: str | None = None
+        if record.workspace_id is not None:
+            from cogtrix_core.api.db.repositories.workspaces import WorkspaceRepository
+
+            ws = await WorkspaceRepository(db).get_by_id(record.workspace_id)
+            if ws is not None:
+                session_org = ws.org_id
+        if session_org is None:
+            owner = await user_repo.get_by_id(record.user_id)
+            session_org = owner.org_id if owner is not None else None
+
+        if session_org != admin_org:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={
+                    "code": "FORBIDDEN",
+                    "message": "Authenticated user lacks permission for this action.",
+                },
+            )
+        return
+
+    # Regular ownership check (non-admins, and admins with admin_bypass=False).
+    if record.user_id != current_user.user_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": "FORBIDDEN",
+                "message": "Authenticated user lacks permission for this action.",
+            },
+        )
+
+    # Workspace isolation: must still be a member of the session's workspace.
+    if record.workspace_id is not None:
+        from cogtrix_core.api.db.repositories.workspaces import WorkspaceRepository
+
+        ws_repo = WorkspaceRepository(db)
+        membership = await ws_repo.get_membership(record.workspace_id, current_user.user_id)
+        if membership is None:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={
+                    "code": "NOT_A_MEMBER",
+                    "message": "You are not a member of this workspace.",
+                },
+            )

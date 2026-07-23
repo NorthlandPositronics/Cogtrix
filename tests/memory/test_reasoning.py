@@ -5,9 +5,9 @@ from datetime import datetime
 
 import pytest
 
-from src.memory.factory import MemoryFactory
-from src.memory.json_store import JsonFileMemoryStore
-from src.memory.modes.reasoning import ReasoningMemoryManager
+from cogtrix_core.memory.factory import MemoryFactory
+from cogtrix_core.memory.json_store import JsonFileMemoryStore
+from cogtrix_core.memory.modes.reasoning import ReasoningMemoryManager
 
 
 def _ensure_registration():
@@ -712,8 +712,8 @@ class TestGoalDataDir2160:
     sees goals the goal tools persisted under config.data_dir."""
 
     def test_goal_prefix_reads_from_store_data_dir(self, tmp_path) -> None:
-        import src.tasks.goal_tracker as gt
-        from src.tasks.goal_tracker import GoalStack
+        import cogtrix_core.tasks.goal_tracker as gt
+        from cogtrix_core.tasks.goal_tracker import GoalStack
 
         session_id = "reasoning-2160"
         # Persist a goal under the CONFIGURED data_dir (tmp_path), as the goal
@@ -735,7 +735,7 @@ class TestGoalDataDir2160:
 
     def test_falls_back_to_data_without_base_path(self, tmp_path) -> None:
         """A store without base_path doesn't crash the prefix build (#2160)."""
-        import src.tasks.goal_tracker as gt
+        import cogtrix_core.tasks.goal_tracker as gt
 
         gt._stacks.clear()
         manager = ReasoningMemoryManager(MockStore(), "reasoning-2160-fallback")

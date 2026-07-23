@@ -1,4 +1,4 @@
-"""Tests for src/orchestration/search_quality (#1593, Option B; #1603).
+"""Tests for cogtrix_core/orchestration/search_quality (#1593, Option B; #1603).
 
 Covers:
 - SearchQualityThresholds dataclass defaults.
@@ -19,7 +19,7 @@ import logging
 
 import pytest
 
-from src.orchestration.search_quality import (
+from cogtrix_core.orchestration.search_quality import (
     SearchQualityThresholds,
     has_substantive_search_results,
 )

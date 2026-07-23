@@ -1,6 +1,6 @@
-"""Tests for src/tools/_path_policy — canonical path-policy error strings."""
+"""Tests for cogtrix_core/tools/_path_policy — canonical path-policy error strings."""
 
-from src.tools._path_policy import (
+from cogtrix_core.tools._path_policy import (
     ERR_PATH_TRAVERSAL,
     ERR_READ_OUTSIDE_PERMITTED_AREA,
     ERR_WRITE_OUTSIDE_PERMITTED_AREA,

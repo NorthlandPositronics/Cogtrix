@@ -2,7 +2,7 @@
 
 Provides the foundation for integration tests when RBAC enforcement middleware
 is implemented (issue #596). All helpers work against the permission model
-defined in src/auth/permissions.py (PR #658 / issue #594).
+defined in cogtrix_core/auth/permissions.py (PR #658 / issue #594).
 
 Issue: #598 — RBAC integration tests + audit (Phase 2.2.7)
 """
@@ -14,7 +14,7 @@ from typing import Any
 
 import pytest
 
-from src.auth.permissions import (
+from cogtrix_core.auth.permissions import (
     Action,
     Permission,
     Resource,

@@ -1,4 +1,4 @@
-"""Tests for src/tools/error_sanitizer.py.
+"""Tests for cogtrix_core/tools/error_sanitizer.py.
 
 Issue #1454: network OSError subclasses (ConnectionResetError, ConnectionError,
 TimeoutError) are covered by TestNetworkOSErrorSubclasses at the end of this file.
@@ -12,7 +12,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.tools.error_sanitizer import (
+from cogtrix_core.tools.error_sanitizer import (
     _google_http_category,
     sanitize_error,
     sanitize_file_error,

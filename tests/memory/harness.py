@@ -11,11 +11,11 @@ from typing import Any
 
 from langchain_core.messages import BaseMessage
 
-from src.memory.base import BaseMemoryStore
-from src.memory.modes.code import CodeDevelopmentMemoryManager
-from src.memory.modes.conversation import ConversationMemoryManager
-from src.memory.modes.reasoning import ReasoningMemoryManager
-from src.orchestration.graph import _apply_context_message_cap
+from cogtrix_core.memory.base import BaseMemoryStore
+from cogtrix_core.memory.modes.code import CodeDevelopmentMemoryManager
+from cogtrix_core.memory.modes.conversation import ConversationMemoryManager
+from cogtrix_core.memory.modes.reasoning import ReasoningMemoryManager
+from cogtrix_core.orchestration.graph import _apply_context_message_cap
 
 from .judge import DEFAULT_JUDGE, Judge
 

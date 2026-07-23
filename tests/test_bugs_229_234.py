@@ -32,18 +32,18 @@ class TestBug229OllamaEnvSSRF:
 
     def test_safe_ollama_url_allows_loopback(self):
         """127.0.0.1 (canonical Ollama address) must pass _is_safe_ollama_url."""
-        from src.setup_wizard import _is_safe_ollama_url
+        from cogtrix_core.setup_wizard import _is_safe_ollama_url
 
         assert _is_safe_ollama_url("http://127.0.0.1:11434") is True
 
     def test_safe_ollama_url_allows_localhost(self):
-        from src.setup_wizard import _is_safe_ollama_url
+        from cogtrix_core.setup_wizard import _is_safe_ollama_url
 
         assert _is_safe_ollama_url("http://localhost:11434") is True
 
     def test_safe_ollama_url_blocks_link_local(self):
         """169.254.x.x (AWS metadata, link-local) must be blocked."""
-        from src.setup_wizard import _is_safe_ollama_url
+        from cogtrix_core.setup_wizard import _is_safe_ollama_url
 
         # We patch getaddrinfo so we don't need real DNS resolution in CI.
         with patch("socket.getaddrinfo") as mock_gai:
@@ -52,7 +52,7 @@ class TestBug229OllamaEnvSSRF:
 
     def test_safe_ollama_url_blocks_rfc1918_in_strict_mode(self):
         """In strict mode (env-var probe), RFC-1918 addresses must be blocked."""
-        from src.setup_wizard import _is_safe_ollama_url
+        from cogtrix_core.setup_wizard import _is_safe_ollama_url
 
         with patch("socket.getaddrinfo") as mock_gai:
             mock_gai.return_value = [(None, None, None, None, ("10.0.0.1", 80))]
@@ -64,7 +64,7 @@ class TestBug229OllamaEnvSSRF:
 
     def test_safe_ollama_url_allows_rfc1918_in_user_mode(self):
         """With allow_private=True (user-typed URL), LAN addresses must be allowed."""
-        from src.setup_wizard import _is_safe_ollama_url
+        from cogtrix_core.setup_wizard import _is_safe_ollama_url
 
         with patch("socket.getaddrinfo") as mock_gai:
             mock_gai.return_value = [(None, None, None, None, ("192.168.70.200", 11434))]
@@ -76,24 +76,24 @@ class TestBug229OllamaEnvSSRF:
 
     def test_safe_ollama_url_still_blocks_link_local_in_user_mode(self):
         """allow_private=True must still block link-local (AWS metadata) addresses."""
-        from src.setup_wizard import _is_safe_ollama_url
+        from cogtrix_core.setup_wizard import _is_safe_ollama_url
 
         with patch("socket.getaddrinfo") as mock_gai:
             mock_gai.return_value = [(None, None, None, None, ("169.254.169.254", 80))]
             assert _is_safe_ollama_url("http://169.254.169.254/", allow_private=True) is False
 
     def test_safe_ollama_url_blocks_empty_hostname(self):
-        from src.setup_wizard import _is_safe_ollama_url
+        from cogtrix_core.setup_wizard import _is_safe_ollama_url
 
         assert _is_safe_ollama_url("not-a-url") is False
         assert _is_safe_ollama_url("") is False
 
     def test_detect_environment_skips_probe_for_unsafe_url(self):
         """_detect_environment must NOT call urlopen when URL is unsafe (BUG-229)."""
-        from src.setup_wizard import _detect_environment
+        from cogtrix_core.setup_wizard import _detect_environment
 
         with (
-            patch("src.setup_wizard._is_safe_ollama_url", return_value=False) as mock_safe,
+            patch("cogtrix_core.setup_wizard._is_safe_ollama_url", return_value=False) as mock_safe,
             patch("urllib.request.urlopen") as mock_urlopen,
             patch.dict("os.environ", {"OLLAMA_BASE_URL": "http://169.254.169.254/"}, clear=False),
         ):
@@ -105,7 +105,7 @@ class TestBug229OllamaEnvSSRF:
 
     def test_detect_environment_probes_safe_url(self):
         """_detect_environment MUST call urlopen when URL is safe."""
-        from src.setup_wizard import _detect_environment
+        from cogtrix_core.setup_wizard import _detect_environment
 
         mock_resp = MagicMock()
         mock_resp.__enter__ = lambda s: s
@@ -113,7 +113,7 @@ class TestBug229OllamaEnvSSRF:
         mock_resp.status = 200
 
         with (
-            patch("src.setup_wizard._is_safe_ollama_url", return_value=True),
+            patch("cogtrix_core.setup_wizard._is_safe_ollama_url", return_value=True),
             patch("urllib.request.urlopen", return_value=mock_resp) as mock_urlopen,
             patch.dict("os.environ", {"OLLAMA_BASE_URL": "http://127.0.0.1:11434"}, clear=False),
         ):
@@ -133,10 +133,10 @@ class TestBug230OllamaUserURLSSRF:
 
     def test_list_ollama_models_skips_unsafe_url(self):
         """_list_ollama_models must return [] and NOT call urlopen for unsafe URL."""
-        from src.setup_wizard import _list_ollama_models
+        from cogtrix_core.setup_wizard import _list_ollama_models
 
         with (
-            patch("src.setup_wizard._is_safe_ollama_url", return_value=False),
+            patch("cogtrix_core.setup_wizard._is_safe_ollama_url", return_value=False),
             patch("urllib.request.urlopen") as mock_urlopen,
         ):
             result = _list_ollama_models("http://169.254.169.254/")
@@ -146,7 +146,7 @@ class TestBug230OllamaUserURLSSRF:
 
     def test_list_ollama_models_fetches_for_safe_url(self):
         """_list_ollama_models must proceed normally for safe URLs."""
-        from src.setup_wizard import _list_ollama_models
+        from cogtrix_core.setup_wizard import _list_ollama_models
 
         payload = b'{"models": [{"name": "qwen3:8b", "size": 5000000000}]}'
         mock_resp = MagicMock()
@@ -155,7 +155,7 @@ class TestBug230OllamaUserURLSSRF:
         mock_resp.read.return_value = payload
 
         with (
-            patch("src.setup_wizard._is_safe_ollama_url", return_value=True),
+            patch("cogtrix_core.setup_wizard._is_safe_ollama_url", return_value=True),
             patch("urllib.request.urlopen", return_value=mock_resp),
         ):
             result = _list_ollama_models("http://127.0.0.1:11434")
@@ -164,7 +164,7 @@ class TestBug230OllamaUserURLSSRF:
 
     def test_list_ollama_models_allows_lan_address(self):
         """LAN Ollama servers (192.168.x.x) must NOT be blocked by user-typed URL guard."""
-        from src.setup_wizard import _list_ollama_models
+        from cogtrix_core.setup_wizard import _list_ollama_models
 
         payload = b'{"models": [{"name": "qwen3:8b", "size": 5000000000}]}'
         mock_resp = MagicMock()
@@ -187,7 +187,7 @@ class TestBug230OllamaUserURLSSRF:
     def test_list_ollama_models_dns_failure_logs_network_hint(self):
         """DNS resolution failure (e.g. inside Docker) must log a clear message,
         not the misleading 'blocked address (link-local/reserved)' text."""
-        from src.setup_wizard import _list_ollama_models
+        from cogtrix_core.setup_wizard import _list_ollama_models
 
         with (
             patch("socket.getaddrinfo", side_effect=OSError("Name or service not known")),
@@ -201,7 +201,7 @@ class TestBug230OllamaUserURLSSRF:
     def test_list_ollama_models_allows_hostname_resolving_to_lan(self):
         """A hostname that resolves to an RFC-1918 address (e.g. 'spark' → 192.168.x.x)
         must succeed — the user-typed URL guard allows private addresses."""
-        from src.setup_wizard import _list_ollama_models
+        from cogtrix_core.setup_wizard import _list_ollama_models
 
         payload = b'{"models": [{"name": "llama3:8b", "size": 4000000000}]}'
         mock_resp = MagicMock()
@@ -232,7 +232,7 @@ class TestBug231NoKeyPlaceholder:
 
     def test_placeholder_literal_value(self):
         """The exact string used as fallback must be 'not-required' when no env var is set."""
-        from src.providers import create_chat_model
+        from cogtrix_core.providers import create_chat_model
 
         captured = {}
 
@@ -241,8 +241,8 @@ class TestBug231NoKeyPlaceholder:
                 captured.update(kwargs)
 
         with (
-            patch("src.providers.openai.ChatOpenAI", _FakeChatOpenAI),
-            patch("src.providers.openai.OpenAIEmbeddings", MagicMock()),
+            patch("cogtrix_core.providers.openai.ChatOpenAI", _FakeChatOpenAI),
+            patch("cogtrix_core.providers.openai.OpenAIEmbeddings", MagicMock()),
             patch.dict(os.environ, {}, clear=True),
         ):
             create_chat_model(
@@ -258,7 +258,7 @@ class TestBug231NoKeyPlaceholder:
 
     def test_env_var_fallback_used(self):
         """OPENAI_API_KEY env var must be used when api_key is None and base_url is set."""
-        from src.providers import create_chat_model
+        from cogtrix_core.providers import create_chat_model
 
         captured = {}
 
@@ -267,8 +267,8 @@ class TestBug231NoKeyPlaceholder:
                 captured.update(kwargs)
 
         with (
-            patch("src.providers.openai.ChatOpenAI", _FakeChatOpenAI),
-            patch("src.providers.openai.OpenAIEmbeddings", MagicMock()),
+            patch("cogtrix_core.providers.openai.ChatOpenAI", _FakeChatOpenAI),
+            patch("cogtrix_core.providers.openai.OpenAIEmbeddings", MagicMock()),
             patch.dict(os.environ, {"OPENAI_API_KEY": "sk-env-key"}),
         ):
             create_chat_model(
@@ -488,7 +488,7 @@ class TestBug230IsafeUrlAllowLocal:
 
     def test_strict_mode_blocks_loopback(self):
         """Default strict mode blocks loopback addresses."""
-        from src.setup_wizard import _is_safe_url
+        from cogtrix_core.setup_wizard import _is_safe_url
 
         with patch("socket.getaddrinfo") as mock_gai:
             mock_gai.return_value = [(None, None, None, None, ("127.0.0.1", 80))]
@@ -496,7 +496,7 @@ class TestBug230IsafeUrlAllowLocal:
 
     def test_strict_mode_blocks_rfc1918(self):
         """Default strict mode blocks RFC-1918 private addresses."""
-        from src.setup_wizard import _is_safe_url
+        from cogtrix_core.setup_wizard import _is_safe_url
 
         with patch("socket.getaddrinfo") as mock_gai:
             mock_gai.return_value = [(None, None, None, None, ("192.168.1.1", 80))]
@@ -504,7 +504,7 @@ class TestBug230IsafeUrlAllowLocal:
 
     def test_strict_mode_always_blocks_link_local(self):
         """Link-local (169.254.x.x) is always blocked even in strict mode."""
-        from src.setup_wizard import _is_safe_url
+        from cogtrix_core.setup_wizard import _is_safe_url
 
         with patch("socket.getaddrinfo") as mock_gai:
             mock_gai.return_value = [(None, None, None, None, ("169.254.169.254", 80))]
@@ -512,7 +512,7 @@ class TestBug230IsafeUrlAllowLocal:
 
     def test_allow_local_permits_loopback(self):
         """allow_local=True must allow loopback (e.g. local vLLM doc server)."""
-        from src.setup_wizard import _is_safe_url
+        from cogtrix_core.setup_wizard import _is_safe_url
 
         with patch("socket.getaddrinfo") as mock_gai:
             mock_gai.return_value = [(None, None, None, None, ("127.0.0.1", 8080))]
@@ -520,7 +520,7 @@ class TestBug230IsafeUrlAllowLocal:
 
     def test_allow_local_permits_rfc1918(self):
         """allow_local=True must allow RFC-1918 addresses (e.g. intranet doc server)."""
-        from src.setup_wizard import _is_safe_url
+        from cogtrix_core.setup_wizard import _is_safe_url
 
         with patch("socket.getaddrinfo") as mock_gai:
             mock_gai.return_value = [(None, None, None, None, ("10.0.0.5", 80))]
@@ -532,7 +532,7 @@ class TestBug230IsafeUrlAllowLocal:
 
     def test_allow_local_still_blocks_link_local(self):
         """allow_local=True must still block link-local (169.254.x.x / AWS metadata)."""
-        from src.setup_wizard import _is_safe_url
+        from cogtrix_core.setup_wizard import _is_safe_url
 
         with patch("socket.getaddrinfo") as mock_gai:
             mock_gai.return_value = [(None, None, None, None, ("169.254.169.254", 80))]
@@ -541,9 +541,9 @@ class TestBug230IsafeUrlAllowLocal:
     def test_load_docs_passes_allow_local_true(self):
         """_load_docs must call _is_safe_url with allow_local=True so that user-
         provided URLs on private networks (loopback, RFC-1918) are permitted."""
-        from src.setup_wizard import _load_docs
+        from cogtrix_core.setup_wizard import _load_docs
 
-        with patch("src.setup_wizard._is_safe_url") as mock_safe:
+        with patch("cogtrix_core.setup_wizard._is_safe_url") as mock_safe:
             mock_safe.return_value = True
             # Simulate a successful fetch from a LAN address
             with patch("urllib.request.urlopen") as mock_open:

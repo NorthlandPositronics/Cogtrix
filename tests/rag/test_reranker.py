@@ -16,7 +16,7 @@ from typing import Any
 
 import pytest
 
-from src.rag.reranker import (
+from cogtrix_core.rag.reranker import (
     DEFAULT_RERANK_MODEL,
     _document_text,
     _reset_model_cache_for_tests,

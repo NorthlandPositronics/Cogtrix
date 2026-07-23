@@ -5,7 +5,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from src.mcp_client import MCPManager
+from cogtrix_core.mcp_client import MCPManager
 
 
 class _FakeLoop:
@@ -70,7 +70,8 @@ def test_close_all_clears_tools_ready_before_connection_close():
         return _FakeFuture()
 
     with patch(
-        "src.mcp_client.asyncio.run_coroutine_threadsafe", side_effect=fake_run_coroutine_threadsafe
+        "cogtrix_core.mcp_client.asyncio.run_coroutine_threadsafe",
+        side_effect=fake_run_coroutine_threadsafe,
     ):
         manager.close_all()
 
@@ -93,7 +94,8 @@ def test_close_all_stops_loop_after_pending_task_cancellation():
         return _FakeFuture()
 
     with patch(
-        "src.mcp_client.asyncio.run_coroutine_threadsafe", side_effect=fake_run_coroutine_threadsafe
+        "cogtrix_core.mcp_client.asyncio.run_coroutine_threadsafe",
+        side_effect=fake_run_coroutine_threadsafe,
     ):
         manager.close_all()
 
@@ -114,7 +116,8 @@ def test_close_all_stops_loop_even_if_task_cancellation_fails():
         return _FakeFuture(side_effect=RuntimeError("boom"))
 
     with patch(
-        "src.mcp_client.asyncio.run_coroutine_threadsafe", side_effect=fake_run_coroutine_threadsafe
+        "cogtrix_core.mcp_client.asyncio.run_coroutine_threadsafe",
+        side_effect=fake_run_coroutine_threadsafe,
     ):
         manager.close_all()
 

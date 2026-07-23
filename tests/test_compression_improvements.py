@@ -37,7 +37,7 @@ def _make_human_message(content: str):
 
 def test_emergency_pass_lowers_min_age():
     """When context > 85%, min_age_cycles drops to 1."""
-    from src.orchestration.compression import apply_message_compression
+    from cogtrix_core.orchestration.compression import apply_message_compression
 
     # Return a compressed version (shorter than original) to simulate real compression
     mock_llm = MagicMock()
@@ -78,7 +78,7 @@ def test_emergency_pass_lowers_min_age():
 
 def test_normal_pass_respects_min_age():
     """Below emergency threshold, min_age_cycles=3 is respected."""
-    from src.orchestration.compression import apply_message_compression
+    from cogtrix_core.orchestration.compression import apply_message_compression
 
     tool_msg = _make_tool_message("x" * 100, tool_call_id="tc1")
     ai_msg = _make_ai_message("tc1")
@@ -106,7 +106,7 @@ def test_human_message_truncated_when_over_limit():
     Uses max_context_tokens=16_384 (minimum allowed) so 50_000-char message
     exceeds the 72% threshold (47,185 chars) and the compression pass runs.
     """
-    from src.orchestration.compression import apply_message_compression
+    from cogtrix_core.orchestration.compression import apply_message_compression
 
     # 50_000 chars > 16_384 * 4 * 0.72 = 47,185 → triggers compression pass
     long_content = "A" * 50_000
@@ -132,7 +132,7 @@ def test_human_message_truncated_when_over_limit():
 
 def test_human_message_not_truncated_when_under_limit():
     """Short HumanMessages are not modified."""
-    from src.orchestration.compression import apply_message_compression
+    from cogtrix_core.orchestration.compression import apply_message_compression
 
     human_msg = _make_human_message("Hello world")
     messages = [human_msg]
@@ -154,7 +154,7 @@ def test_human_message_not_truncated_when_under_limit():
 
 def test_human_msg_truncation_disabled_when_zero():
     """human_msg_max_chars=0 disables truncation."""
-    from src.orchestration.compression import apply_message_compression
+    from cogtrix_core.orchestration.compression import apply_message_compression
 
     long_content = "B" * 50_000
     human_msg = _make_human_message(long_content)
@@ -176,7 +176,7 @@ def test_human_msg_truncation_disabled_when_zero():
 
 def test_config_defaults():
     """New config fields have correct defaults."""
-    from src.config import Config
+    from cogtrix_core.config import Config
 
     c = Config()
     assert c.context_compression_emergency_threshold == 0.85
@@ -185,7 +185,7 @@ def test_config_defaults():
 
 def test_config_custom_values():
     """New config fields can be set."""
-    from src.config import Config
+    from cogtrix_core.config import Config
 
     c = Config(
         context_compression_emergency_threshold=0.90,

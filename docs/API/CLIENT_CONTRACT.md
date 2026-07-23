@@ -38,15 +38,18 @@ headers: {
 }
 ```
 
-For WebSocket connections the browser API does not allow custom headers.
-Use a reverse proxy that injects the ``Authorization`` header from a cookie
-or query param — the session WebSocket no longer accepts ``?token=`` (removed
-in #1128 to prevent token exposure in access logs).  The log stream WebSocket
-(``/ws/v1/logs``) still accepts ``?token=`` for admin auth.
+For WebSocket connections the browser API does not allow custom headers, so
+attach the token via the `Sec-WebSocket-Protocol` subprotocol instead — the
+session WebSocket no longer accepts `?token=` (removed in #1128 to prevent
+token exposure in access logs). The log stream WebSocket (`/ws/v1/logs`)
+still accepts `?token=` for admin auth. See
+[`WEBSOCKET_PROTOCOL.md` §2](WEBSOCKET_PROTOCOL.md#2-authentication) for
+the full authentication contract.
 
 ```typescript
-// The proxy injects Authorization from a cookie/query param; do NOT use ?token=
-new WebSocket(`${WS_V1}/sessions/${sessionId}`);
+// Browsers cannot set custom headers on a WebSocket upgrade; the `protocols`
+// argument is the only portable way to attach the bearer token.
+new WebSocket(`${WS_V1}/sessions/${sessionId}`, ["bearer", accessToken]);
 ```
 
 ### 2.2 Token storage
@@ -73,7 +76,7 @@ export function clearTokens(): void { accessToken = null; refreshToken = null; }
 - **Login username field**: The `username` field in `POST /api/v1/auth/login` accepts either a username or an email address.
 - **Refresh token rotation**: `POST /api/v1/auth/refresh` invalidates the submitted refresh token before issuing a new pair. If the response is lost (e.g. network timeout), the old token cannot be reused — the client must re-login.
 - **Logout scope**: `POST /api/v1/auth/logout` revokes **only the single refresh token** supplied in the request body (`{"refresh_token": "..."}`). To sign a user out across all devices, call `POST /api/v1/auth/logout-all` instead — that endpoint requires the user's current password and invalidates every refresh token issued to the account.
-- **API keys**: API key management endpoints (`GET/POST/DELETE /api/v1/auth/api-keys`) are implemented, but API key authentication is not yet wired into request validation. Use JWT bearer tokens for all requests.
+- **API keys**: API keys work as an alternative to JWT bearer tokens. Create one via `POST /api/v1/auth/api-keys`, then send it as `Authorization: Bearer cgx_live_...`. `get_current_user` detects the `cgx_live_` prefix and dispatches to `validate_api_key()` (`src/api/auth.py`).
 
 ### 2.4 Handling 401 / TOKEN_EXPIRED
 
@@ -997,10 +1000,10 @@ export class SessionSocket {
   ) {}
 
   connect(): void {
-    // The reverse proxy injects Authorization from a cookie or query param.
-    // Do NOT use ?token= for session WebSocket — it is no longer supported (see #1128).
+    // Attach the bearer token via Sec-WebSocket-Protocol (see §2.1) — browsers
+    // cannot set custom headers, and ?token= is no longer supported (#1128).
     const url = `${WS_V1}/sessions/${this.sessionId}?last_seq=${this.lastSeq}`;
-    this.ws = new WebSocket(url);
+    this.ws = new WebSocket(url, ["bearer", this.getToken()]);
 
     this.ws.onopen = () => {
       // Start keepalive ping every 30s

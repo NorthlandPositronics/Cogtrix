@@ -18,7 +18,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from sqlalchemy import text
 
-from src.api.db.repositories.tokens import RefreshTokenRepository
+from cogtrix_core.api.db.repositories.tokens import RefreshTokenRepository
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -236,7 +236,9 @@ class TestRefreshEndpointUsesAtomicRotation:
         import ast
         from pathlib import Path
 
-        auth_path = Path(__file__).parent.parent.parent / "src" / "api" / "routes" / "auth.py"
+        auth_path = (
+            Path(__file__).parent.parent.parent / "cogtrix_core" / "api" / "routes" / "auth.py"
+        )
         source = auth_path.read_text(encoding="utf-8")
         tree = ast.parse(source)
 

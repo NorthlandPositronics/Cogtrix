@@ -1,8 +1,8 @@
-"""Tests for src/tools/checkpoint.py — CheckpointStore and create_checkpoint_tool."""
+"""Tests for cogtrix_core/tools/checkpoint.py — CheckpointStore and create_checkpoint_tool."""
 
 import pytest
 
-from src.tools.checkpoint import CheckpointStore, create_checkpoint_tool
+from cogtrix_core.tools.checkpoint import CheckpointStore, create_checkpoint_tool
 
 
 class TestCheckpointStore:

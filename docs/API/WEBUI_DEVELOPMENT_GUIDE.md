@@ -6,7 +6,7 @@ Last updated: 2026-03-27
 
 Related documents:
 - `docs/API/OVERVIEW.md` — API orientation, quick start, environment variables (start here if new to the API)
-- `docs/API/OPENAPI.yaml` / `OPENAPI.json` — full OpenAPI 3.1 schema, authoritative source for request/response shapes
+- Live OpenAPI 3.1 schema at `/api/v1/openapi.json` (Swagger UI at `/api/v1/docs`) — authoritative source for request/response shapes
 - `docs/API/CLIENT_CONTRACT.md` — TypeScript types and API client patterns (start here for code)
 - `docs/API/WEBSOCKET_PROTOCOL.md` — WebSocket message types, lifecycle diagrams, and reconnection strategy
 

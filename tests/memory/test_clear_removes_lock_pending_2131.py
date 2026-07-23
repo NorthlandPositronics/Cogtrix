@@ -11,9 +11,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from src.memory import modes  # noqa: F401 — triggers mode registration
-from src.memory.json_store import JsonFileMemoryStore
-from src.memory.modes.conversation import ConversationMemoryManager
+from cogtrix_core.memory import modes  # noqa: F401 — triggers mode registration
+from cogtrix_core.memory.json_store import JsonFileMemoryStore
+from cogtrix_core.memory.modes.conversation import ConversationMemoryManager
 
 
 def test_delete_lock_removes_lock_file(tmp_path: Path) -> None:

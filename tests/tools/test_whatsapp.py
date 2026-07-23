@@ -11,7 +11,7 @@ class TestContactFiltering:
     """Tests for whitelist / blacklist enforcement."""
 
     def test_whitelist_allows_listed_contact(self):
-        from src.tools.whatsapp import _cfg, _check_contact
+        from cogtrix_core.tools.whatsapp import _cfg, _check_contact
 
         _cfg.filter_mode = "whitelist"
         _cfg.contacts = ["+14155551234"]
@@ -22,7 +22,7 @@ class TestContactFiltering:
         assert reason == ""
 
     def test_whitelist_blocks_unlisted_contact(self):
-        from src.tools.whatsapp import _cfg, _check_contact
+        from cogtrix_core.tools.whatsapp import _cfg, _check_contact
 
         _cfg.filter_mode = "whitelist"
         _cfg.contacts = ["+14155551234"]
@@ -33,7 +33,7 @@ class TestContactFiltering:
         assert "not in the allowed whitelist" in reason
 
     def test_blacklist_blocks_listed_contact(self):
-        from src.tools.whatsapp import _cfg, _check_contact
+        from cogtrix_core.tools.whatsapp import _cfg, _check_contact
 
         _cfg.filter_mode = "blacklist"
         _cfg.contacts = ["+14155551234"]
@@ -44,7 +44,7 @@ class TestContactFiltering:
         assert "blacklist" in reason
 
     def test_blacklist_allows_unlisted_contact(self):
-        from src.tools.whatsapp import _cfg, _check_contact
+        from cogtrix_core.tools.whatsapp import _cfg, _check_contact
 
         _cfg.filter_mode = "blacklist"
         _cfg.contacts = ["+14155551234"]
@@ -54,7 +54,7 @@ class TestContactFiltering:
         assert allowed is True
 
     def test_filter_none_allows_all(self):
-        from src.tools.whatsapp import _cfg, _check_contact
+        from cogtrix_core.tools.whatsapp import _cfg, _check_contact
 
         _cfg.filter_mode = "none"
         _cfg.contacts = ["+14155551234"]
@@ -63,7 +63,7 @@ class TestContactFiltering:
         assert allowed is True
 
     def test_phonebook_nickname_resolved(self):
-        from src.tools.whatsapp import _cfg, _check_contact
+        from cogtrix_core.tools.whatsapp import _cfg, _check_contact
 
         _cfg.filter_mode = "whitelist"
         _cfg.contacts = ["+14155551234"]
@@ -73,7 +73,7 @@ class TestContactFiltering:
         assert allowed is True
 
     def test_phonebook_case_insensitive(self):
-        from src.tools.whatsapp import _cfg, _check_contact
+        from cogtrix_core.tools.whatsapp import _cfg, _check_contact
 
         _cfg.filter_mode = "whitelist"
         _cfg.contacts = ["+14155551234"]
@@ -83,7 +83,7 @@ class TestContactFiltering:
         assert allowed is True
 
     def test_allow_allows_listed_contact(self):
-        from src.tools.whatsapp import _cfg, _check_contact
+        from cogtrix_core.tools.whatsapp import _cfg, _check_contact
 
         _cfg.filter_mode = "allow"
         _cfg.contacts = ["+14155551234"]
@@ -94,7 +94,7 @@ class TestContactFiltering:
         assert reason == ""
 
     def test_allow_blocks_unlisted_contact(self):
-        from src.tools.whatsapp import _cfg, _check_contact
+        from cogtrix_core.tools.whatsapp import _cfg, _check_contact
 
         _cfg.filter_mode = "allow"
         _cfg.contacts = ["+14155551234"]
@@ -105,7 +105,7 @@ class TestContactFiltering:
         assert "allow list" in reason
 
     def test_ignore_blocks_listed_contact(self):
-        from src.tools.whatsapp import _cfg, _check_contact
+        from cogtrix_core.tools.whatsapp import _cfg, _check_contact
 
         _cfg.filter_mode = "ignore"
         _cfg.contacts = ["+14155551234"]
@@ -116,7 +116,7 @@ class TestContactFiltering:
         assert "ignore" in reason
 
     def test_ignore_allows_unlisted_contact(self):
-        from src.tools.whatsapp import _cfg, _check_contact
+        from cogtrix_core.tools.whatsapp import _cfg, _check_contact
 
         _cfg.filter_mode = "ignore"
         _cfg.contacts = ["+14155551234"]
@@ -126,7 +126,7 @@ class TestContactFiltering:
         assert allowed is True
 
     def test_blacklist_blocks_listed_contact_via_check_contact(self):
-        from src.tools.whatsapp import _cfg, _check_contact
+        from cogtrix_core.tools.whatsapp import _cfg, _check_contact
 
         _cfg.filter_mode = "blacklist"
         _cfg.contacts = ["+14155551234"]
@@ -146,39 +146,39 @@ class TestNumberNormalization:
     """Tests for phone number handling."""
 
     def test_normalize_e164(self):
-        from src.tools.whatsapp import _normalize_number
+        from cogtrix_core.tools.whatsapp import _normalize_number
 
         assert _normalize_number("+14155551234") == "+14155551234"
 
     def test_normalize_bare_digits(self):
-        from src.tools.whatsapp import _cfg, _normalize_number
+        from cogtrix_core.tools.whatsapp import _cfg, _normalize_number
 
         _cfg.phonebook = {}
         result = _normalize_number("14155551234")
         assert result == "+14155551234"
 
     def test_normalize_with_chat_id_suffix(self):
-        from src.tools.whatsapp import _cfg, _normalize_number
+        from cogtrix_core.tools.whatsapp import _cfg, _normalize_number
 
         _cfg.phonebook = {}
         result = _normalize_number("14155551234@c.us")
         assert result == "+14155551234"
 
     def test_normalize_with_whatsapp_net_suffix(self):
-        from src.tools.whatsapp import _cfg, _normalize_number
+        from cogtrix_core.tools.whatsapp import _cfg, _normalize_number
 
         _cfg.phonebook = {}
         result = _normalize_number("14155551234@s.whatsapp.net")
         assert result == "+14155551234"
 
     def test_to_chat_id(self):
-        from src.tools.whatsapp import _cfg, _to_chat_id
+        from cogtrix_core.tools.whatsapp import _cfg, _to_chat_id
 
         _cfg.phonebook = {}
         assert _to_chat_id("+14155551234") == "14155551234@c.us"
 
     def test_to_chat_id_from_nickname(self):
-        from src.tools.whatsapp import _cfg, _to_chat_id
+        from cogtrix_core.tools.whatsapp import _cfg, _to_chat_id
 
         _cfg.phonebook = {"bob": "+442071234567"}
         assert _to_chat_id("bob") == "442071234567@c.us"
@@ -193,7 +193,7 @@ class TestRateLimiter:
     """Tests for the in-memory rate limiter."""
 
     def test_rate_limit_allows_under_threshold(self):
-        from src.tools.whatsapp import _cfg, _rate_limit_ok, _send_timestamps
+        from cogtrix_core.tools.whatsapp import _cfg, _rate_limit_ok, _send_timestamps
 
         _send_timestamps.clear()
         _cfg.rate_limit = 5
@@ -201,7 +201,7 @@ class TestRateLimiter:
 
     def test_rate_limit_blocks_at_threshold(self):
 
-        from src.tools.whatsapp import (
+        from cogtrix_core.tools.whatsapp import (
             _cfg,
             _rate_limit_ok,
             _record_send,
@@ -215,7 +215,7 @@ class TestRateLimiter:
         assert _rate_limit_ok() is False
 
     def test_rate_limit_unlimited(self):
-        from src.tools.whatsapp import _cfg, _rate_limit_ok, _send_timestamps
+        from cogtrix_core.tools.whatsapp import _cfg, _rate_limit_ok, _send_timestamps
 
         _send_timestamps.clear()
         _cfg.rate_limit = 0
@@ -233,30 +233,30 @@ class TestIsConfigured:
     """Tests for the is_configured gating function."""
 
     def test_configured_when_requests_available(self):
-        from src.tools.whatsapp import _cfg
+        from cogtrix_core.tools.whatsapp import _cfg
 
         _cfg.allow_send = True
         _cfg.allow_receive = True
 
-        with patch("src.tools.whatsapp.REQUESTS_AVAILABLE", True):
-            from src.tools.whatsapp import is_configured
+        with patch("cogtrix_core.tools.whatsapp.REQUESTS_AVAILABLE", True):
+            from cogtrix_core.tools.whatsapp import is_configured
 
             assert is_configured() is True
 
     def test_not_configured_both_disabled(self):
-        from src.tools.whatsapp import _cfg
+        from cogtrix_core.tools.whatsapp import _cfg
 
         _cfg.allow_send = False
         _cfg.allow_receive = False
 
-        with patch("src.tools.whatsapp.REQUESTS_AVAILABLE", True):
-            from src.tools.whatsapp import is_configured
+        with patch("cogtrix_core.tools.whatsapp.REQUESTS_AVAILABLE", True):
+            from cogtrix_core.tools.whatsapp import is_configured
 
             assert is_configured() is False
 
     def test_not_configured_no_requests(self):
-        with patch("src.tools.whatsapp.REQUESTS_AVAILABLE", False):
-            from src.tools.whatsapp import is_configured
+        with patch("cogtrix_core.tools.whatsapp.REQUESTS_AVAILABLE", False):
+            from cogtrix_core.tools.whatsapp import is_configured
 
             assert is_configured() is False
 
@@ -270,7 +270,7 @@ class TestReceiveFilter:
     """Tests for inbound message filtering."""
 
     def test_receive_whitelist_allows(self):
-        from src.tools.whatsapp import _cfg, _check_receive_contact
+        from cogtrix_core.tools.whatsapp import _cfg, _check_receive_contact
 
         _cfg.filter_mode = "whitelist"
         _cfg.contacts = ["+14155551234"]
@@ -279,7 +279,7 @@ class TestReceiveFilter:
         assert _check_receive_contact("14155551234@c.us") is True
 
     def test_receive_whitelist_blocks(self):
-        from src.tools.whatsapp import _cfg, _check_receive_contact
+        from cogtrix_core.tools.whatsapp import _cfg, _check_receive_contact
 
         _cfg.filter_mode = "whitelist"
         _cfg.contacts = ["+14155551234"]
@@ -288,7 +288,7 @@ class TestReceiveFilter:
         assert _check_receive_contact("99999999999@c.us") is False
 
     def test_receive_none_allows_all(self):
-        from src.tools.whatsapp import _cfg, _check_receive_contact
+        from cogtrix_core.tools.whatsapp import _cfg, _check_receive_contact
 
         _cfg.filter_mode = "none"
         assert _check_receive_contact("anything@c.us") is True
@@ -303,7 +303,7 @@ class TestWhatsAppSend:
     """Tests for the whatsapp_send tool function."""
 
     def setup_method(self):
-        from src.tools.whatsapp import _cfg, _send_timestamps
+        from cogtrix_core.tools.whatsapp import _cfg, _send_timestamps
 
         _cfg.filter_mode = "none"
         _cfg.rate_limit = 0
@@ -311,11 +311,11 @@ class TestWhatsAppSend:
         _cfg.phonebook = {}
         _send_timestamps.clear()
 
-    @patch("src.tools.whatsapp.REQUESTS_AVAILABLE", True)
-    @patch("src.tools.whatsapp._get_client")
+    @patch("cogtrix_core.tools.whatsapp.REQUESTS_AVAILABLE", True)
+    @patch("cogtrix_core.tools.whatsapp._get_client")
     def test_send_success(self, mock_get_client):
-        from src.tools._whatsapp_client import SendResult
-        from src.tools.whatsapp import whatsapp_send
+        from cogtrix_core.tools._whatsapp_client import SendResult
+        from cogtrix_core.tools.whatsapp import whatsapp_send
 
         mock_client = MagicMock()
         mock_client.send_text.return_value = SendResult(ok=True, message_id="abc123")
@@ -326,11 +326,11 @@ class TestWhatsAppSend:
         assert "abc123" in result
         mock_client.send_text.assert_called_once_with("14155551234@c.us", "Hello!")
 
-    @patch("src.tools.whatsapp.REQUESTS_AVAILABLE", True)
-    @patch("src.tools.whatsapp._get_client")
+    @patch("cogtrix_core.tools.whatsapp.REQUESTS_AVAILABLE", True)
+    @patch("cogtrix_core.tools.whatsapp._get_client")
     def test_send_failure(self, mock_get_client):
-        from src.tools._whatsapp_client import SendResult
-        from src.tools.whatsapp import whatsapp_send
+        from cogtrix_core.tools._whatsapp_client import SendResult
+        from cogtrix_core.tools.whatsapp import whatsapp_send
 
         mock_client = MagicMock()
         mock_client.send_text.return_value = SendResult(ok=False, error="Connection refused")
@@ -339,9 +339,9 @@ class TestWhatsAppSend:
         result = whatsapp_send("+14155551234", "Hello!")
         assert "failed" in result.lower()
 
-    @patch("src.tools.whatsapp.REQUESTS_AVAILABLE", True)
+    @patch("cogtrix_core.tools.whatsapp.REQUESTS_AVAILABLE", True)
     def test_send_blocked_by_whitelist(self):
-        from src.tools.whatsapp import _cfg, whatsapp_send
+        from cogtrix_core.tools.whatsapp import _cfg, whatsapp_send
 
         _cfg.filter_mode = "whitelist"
         _cfg.contacts = ["+10000000000"]
@@ -349,9 +349,9 @@ class TestWhatsAppSend:
         result = whatsapp_send("+14155551234", "Hello!")
         assert "blocked" in result.lower()
 
-    @patch("src.tools.whatsapp.REQUESTS_AVAILABLE", True)
+    @patch("cogtrix_core.tools.whatsapp.REQUESTS_AVAILABLE", True)
     def test_send_rate_limited(self):
-        from src.tools.whatsapp import _cfg, _record_send, whatsapp_send
+        from cogtrix_core.tools.whatsapp import _cfg, _record_send, whatsapp_send
 
         _cfg.rate_limit = 2
         _record_send()
@@ -360,11 +360,11 @@ class TestWhatsAppSend:
         result = whatsapp_send("+14155551234", "Hello!")
         assert "rate limit" in result.lower()
 
-    @patch("src.tools.whatsapp.REQUESTS_AVAILABLE", True)
-    @patch("src.tools.whatsapp._get_client")
+    @patch("cogtrix_core.tools.whatsapp.REQUESTS_AVAILABLE", True)
+    @patch("cogtrix_core.tools.whatsapp._get_client")
     def test_send_truncates_long_message(self, mock_get_client):
-        from src.tools._whatsapp_client import SendResult
-        from src.tools.whatsapp import _cfg, whatsapp_send
+        from cogtrix_core.tools._whatsapp_client import SendResult
+        from cogtrix_core.tools.whatsapp import _cfg, whatsapp_send
 
         _cfg.max_message_length = 10
 
@@ -381,16 +381,16 @@ class TestWhatsAppCheck:
     """Tests for the whatsapp_check tool function."""
 
     def setup_method(self):
-        from src.tools.whatsapp import _cfg
+        from cogtrix_core.tools.whatsapp import _cfg
 
         _cfg.filter_mode = "none"
         _cfg.phonebook = {}
 
-    @patch("src.tools.whatsapp.REQUESTS_AVAILABLE", True)
-    @patch("src.tools.whatsapp._get_client")
+    @patch("cogtrix_core.tools.whatsapp.REQUESTS_AVAILABLE", True)
+    @patch("cogtrix_core.tools.whatsapp._get_client")
     def test_check_returns_messages(self, mock_get_client):
-        from src.tools._whatsapp_client import ChatOverview, Message
-        from src.tools.whatsapp import whatsapp_check
+        from cogtrix_core.tools._whatsapp_client import ChatOverview, Message
+        from cogtrix_core.tools.whatsapp import whatsapp_check
 
         msg = Message(
             id="msg1",
@@ -408,10 +408,10 @@ class TestWhatsAppCheck:
         assert "Hi there!" in result
         assert "14155551234" in result
 
-    @patch("src.tools.whatsapp.REQUESTS_AVAILABLE", True)
-    @patch("src.tools.whatsapp._get_client")
+    @patch("cogtrix_core.tools.whatsapp.REQUESTS_AVAILABLE", True)
+    @patch("cogtrix_core.tools.whatsapp._get_client")
     def test_check_no_messages(self, mock_get_client):
-        from src.tools.whatsapp import whatsapp_check
+        from cogtrix_core.tools.whatsapp import whatsapp_check
 
         mock_client = MagicMock()
         mock_client.get_chats_overview.return_value = []
@@ -420,11 +420,11 @@ class TestWhatsAppCheck:
         result = whatsapp_check()
         assert "no recent messages" in result.lower()
 
-    @patch("src.tools.whatsapp.REQUESTS_AVAILABLE", True)
-    @patch("src.tools.whatsapp._get_client")
+    @patch("cogtrix_core.tools.whatsapp.REQUESTS_AVAILABLE", True)
+    @patch("cogtrix_core.tools.whatsapp._get_client")
     def test_check_filters_by_contact(self, mock_get_client):
-        from src.tools._whatsapp_client import ChatOverview, Message
-        from src.tools.whatsapp import _cfg, whatsapp_check
+        from cogtrix_core.tools._whatsapp_client import ChatOverview, Message
+        from cogtrix_core.tools.whatsapp import _cfg, whatsapp_check
 
         _cfg.filter_mode = "whitelist"
         _cfg.contacts = ["+14155551234"]
@@ -456,12 +456,12 @@ class TestWhatsAppCheck:
         assert "Allowed" in result
         assert "Filtered out" not in result
 
-    @patch("src.tools.whatsapp.REQUESTS_AVAILABLE", True)
-    @patch("src.tools.whatsapp._get_client")
+    @patch("cogtrix_core.tools.whatsapp.REQUESTS_AVAILABLE", True)
+    @patch("cogtrix_core.tools.whatsapp._get_client")
     def test_check_preserves_outgoing_messages_with_whitelist(self, mock_get_client):
         """Outgoing messages (from_me=True) must not be dropped by the contact filter."""
-        from src.tools._whatsapp_client import ChatOverview, Message
-        from src.tools.whatsapp import _cfg, whatsapp_check
+        from cogtrix_core.tools._whatsapp_client import ChatOverview, Message
+        from cogtrix_core.tools.whatsapp import _cfg, whatsapp_check
 
         _cfg.filter_mode = "whitelist"
         _cfg.contacts = ["+14155551234"]
@@ -499,14 +499,14 @@ class TestWhatsAppContacts:
     """Tests for the whatsapp_contacts tool function."""
 
     def test_contacts_empty_phonebook(self):
-        from src.tools.whatsapp import _cfg, whatsapp_contacts
+        from cogtrix_core.tools.whatsapp import _cfg, whatsapp_contacts
 
         _cfg.phonebook = {}
         result = whatsapp_contacts()
         assert "no phonebook" in result.lower()
 
     def test_contacts_with_entries(self):
-        from src.tools.whatsapp import _cfg, whatsapp_contacts
+        from cogtrix_core.tools.whatsapp import _cfg, whatsapp_contacts
 
         _cfg.phonebook = {
             "alice": "+14155551234",
@@ -520,7 +520,7 @@ class TestWhatsAppContacts:
         assert "bob" in result
 
     def test_contacts_shows_filter_mode(self):
-        from src.tools.whatsapp import _cfg, whatsapp_contacts
+        from cogtrix_core.tools.whatsapp import _cfg, whatsapp_contacts
 
         _cfg.phonebook = {"alice": "+14155551234"}
         _cfg.filter_mode = "whitelist"
@@ -539,7 +539,7 @@ class TestToolConfigs:
     """Tests for the dynamically built TOOL_CONFIGS."""
 
     def test_tool_configs_have_required_fields(self):
-        from src.tools.whatsapp import TOOL_CONFIGS
+        from cogtrix_core.tools.whatsapp import TOOL_CONFIGS
 
         for cfg in TOOL_CONFIGS:
             assert "name" in cfg
@@ -554,7 +554,7 @@ class TestToolConfigs:
         # .cogtrix.yaml) cannot cause this test to fail.
         from unittest.mock import patch
 
-        import src.tools.whatsapp as _wa
+        import cogtrix_core.tools.whatsapp as _wa
 
         with (
             patch.object(_wa._cfg, "require_confirmation", True),
@@ -568,7 +568,7 @@ class TestToolConfigs:
             assert tool["requires_confirmation"] is True
 
     def test_check_tool_no_confirmation(self):
-        from src.tools.whatsapp import TOOL_CONFIGS
+        from cogtrix_core.tools.whatsapp import TOOL_CONFIGS
 
         check_tools = [
             c for c in TOOL_CONFIGS if c["name"] in ("whatsapp_check", "whatsapp_contacts")
@@ -585,9 +585,9 @@ class TestToolConfigs:
 class TestWahaClient:
     """Tests for the WahaClient HTTP wrapper."""
 
-    @patch("src.tools._whatsapp_client.requests")
+    @patch("cogtrix_core.tools._whatsapp_client.requests")
     def test_send_text_success(self, mock_requests):
-        from src.tools._whatsapp_client import WahaClient
+        from cogtrix_core.tools._whatsapp_client import WahaClient
 
         mock_resp = MagicMock()
         mock_resp.status_code = 200
@@ -599,9 +599,9 @@ class TestWahaClient:
         assert result.ok is True
         assert result.message_id == "msg_abc"
 
-    @patch("src.tools._whatsapp_client.requests")
+    @patch("cogtrix_core.tools._whatsapp_client.requests")
     def test_send_text_http_error(self, mock_requests):
-        from src.tools._whatsapp_client import WahaClient
+        from cogtrix_core.tools._whatsapp_client import WahaClient
 
         mock_resp = MagicMock()
         mock_resp.status_code = 500
@@ -613,11 +613,11 @@ class TestWahaClient:
         assert result.ok is False
         assert "500" in (result.error or "")
 
-    @patch("src.tools._whatsapp_client.requests")
+    @patch("cogtrix_core.tools._whatsapp_client.requests")
     def test_send_text_connection_error(self, mock_requests):
         import requests as real_requests
 
-        from src.tools._whatsapp_client import WahaClient
+        from cogtrix_core.tools._whatsapp_client import WahaClient
 
         mock_requests.post.side_effect = real_requests.exceptions.ConnectionError()
         mock_requests.exceptions = real_requests.exceptions
@@ -627,9 +627,9 @@ class TestWahaClient:
         assert result.ok is False
         assert "connect" in (result.error or "").lower()
 
-    @patch("src.tools._whatsapp_client.requests")
+    @patch("cogtrix_core.tools._whatsapp_client.requests")
     def test_get_messages(self, mock_requests):
-        from src.tools._whatsapp_client import WahaClient
+        from cogtrix_core.tools._whatsapp_client import WahaClient
 
         mock_resp = MagicMock()
         mock_resp.status_code = 200
@@ -652,9 +652,9 @@ class TestWahaClient:
         assert messages[0].body == "Hello"
         assert messages[0].from_number == "14155551234@c.us"
 
-    @patch("src.tools._whatsapp_client.requests")
+    @patch("cogtrix_core.tools._whatsapp_client.requests")
     def test_is_ready_working(self, mock_requests):
-        from src.tools._whatsapp_client import WahaClient
+        from cogtrix_core.tools._whatsapp_client import WahaClient
 
         mock_resp = MagicMock()
         mock_resp.status_code = 200
@@ -669,9 +669,9 @@ class TestWahaClient:
         client = WahaClient(base_url="http://localhost:3000")
         assert client.is_ready() is True
 
-    @patch("src.tools._whatsapp_client.requests")
+    @patch("cogtrix_core.tools._whatsapp_client.requests")
     def test_is_ready_not_working(self, mock_requests):
-        from src.tools._whatsapp_client import WahaClient
+        from cogtrix_core.tools._whatsapp_client import WahaClient
 
         mock_resp = MagicMock()
         mock_resp.status_code = 200
@@ -685,9 +685,9 @@ class TestWahaClient:
         client = WahaClient(base_url="http://localhost:3000")
         assert client.is_ready() is False
 
-    @patch("src.tools._whatsapp_client.requests")
+    @patch("cogtrix_core.tools._whatsapp_client.requests")
     def test_headers_include_api_key(self, mock_requests):
-        from src.tools._whatsapp_client import WahaClient
+        from cogtrix_core.tools._whatsapp_client import WahaClient
 
         mock_resp = MagicMock()
         mock_resp.status_code = 200

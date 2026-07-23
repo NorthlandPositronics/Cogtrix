@@ -47,13 +47,13 @@ def _make_registry(requires_confirmation: bool = False) -> MagicMock:
 def run_scenario(scenario: Scenario) -> HarnessResult:
     """Run a scenario through the real Cogtrix agent graph with mock LLM and tools.
 
-    Uses build_agent_graph from src.orchestration.graph directly (not the
+    Uses build_agent_graph from cogtrix_core.orchestration.graph directly (not the
     cogtrix.py wrapper) so there are no session file or config dependencies.
 
     Compression is disabled for determinism. Parallel tool execution is
     disabled so tool call order matches the script exactly.
     """
-    from src.orchestration.graph import build_agent_graph
+    from cogtrix_core.orchestration.graph import build_agent_graph
 
     mock_llm = build_mock_llm(scenario)
     tool_stubs = build_tool_stubs(scenario)

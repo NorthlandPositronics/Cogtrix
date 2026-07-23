@@ -25,12 +25,12 @@ from unittest.mock import patch  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 from sqlalchemy.ext.asyncio import async_sessionmaker  # noqa: E402
 
-from src.api.auth import create_access_token  # noqa: E402
-from src.api.db.engine import get_db  # noqa: E402
-from src.api.db.repositories.organization import OrganizationRepository  # noqa: E402
-from src.api.db.repositories.teams import TeamRepository  # noqa: E402
-from src.api.db.repositories.users import UserRepository  # noqa: E402
-from src.api.jit.config import (  # noqa: E402
+from cogtrix_core.api.auth import create_access_token  # noqa: E402
+from cogtrix_core.api.db.engine import get_db  # noqa: E402
+from cogtrix_core.api.db.repositories.organization import OrganizationRepository  # noqa: E402
+from cogtrix_core.api.db.repositories.teams import TeamRepository  # noqa: E402
+from cogtrix_core.api.db.repositories.users import UserRepository  # noqa: E402
+from cogtrix_core.api.jit.config import (  # noqa: E402
     JITConfig,
     configure_jit,
     get_jit_config,
@@ -50,7 +50,7 @@ def _admin_header(user_id: str) -> dict:
 
 @pytest.fixture(autouse=True)
 def reset_jit():
-    import src.api.jit.config as _cfg
+    import cogtrix_core.api.jit.config as _cfg
 
     _cfg._jit_config = None
     yield
@@ -105,7 +105,7 @@ class TestJITConfig:
 
 class TestProvisionJITUser:
     def test_creates_new_user(self, sf):
-        from src.api.jit.provisioning import provision_jit_user
+        from cogtrix_core.api.jit.provisioning import provision_jit_user
 
         cfg = JITConfig(enabled=True)
 
@@ -121,7 +121,7 @@ class TestProvisionJITUser:
         asyncio.run(_run())
 
     def test_returns_existing_user(self, sf):
-        from src.api.jit.provisioning import provision_jit_user
+        from cogtrix_core.api.jit.provisioning import provision_jit_user
 
         cfg = JITConfig(enabled=True)
         user_id = _uid()
@@ -151,7 +151,7 @@ class TestProvisionJITUser:
     def test_domain_denied_raises_403(self, sf):
         from fastapi import HTTPException
 
-        from src.api.jit.provisioning import provision_jit_user
+        from cogtrix_core.api.jit.provisioning import provision_jit_user
 
         cfg = JITConfig(enabled=True, allowed_domains=["company.com"])
 
@@ -169,7 +169,7 @@ class TestProvisionJITUser:
     def test_capacity_exceeded_raises_403(self, sf):
         from fastapi import HTTPException
 
-        from src.api.jit.provisioning import provision_jit_user
+        from cogtrix_core.api.jit.provisioning import provision_jit_user
 
         cfg = JITConfig(enabled=True, max_users=1)
 
@@ -203,7 +203,7 @@ class TestProvisionJITUser:
     def test_disabled_raises_503(self, sf):
         from fastapi import HTTPException
 
-        from src.api.jit.provisioning import provision_jit_user
+        from cogtrix_core.api.jit.provisioning import provision_jit_user
 
         cfg = JITConfig(enabled=False)
 
@@ -218,7 +218,7 @@ class TestProvisionJITUser:
         asyncio.run(_run())
 
     def test_auto_team_assignment(self, sf):
-        from src.api.jit.provisioning import provision_jit_user
+        from cogtrix_core.api.jit.provisioning import provision_jit_user
 
         async def _run():
             org_id = _uid()
@@ -249,7 +249,7 @@ class TestProvisionJITUser:
         """Auto-team must belong to the user's org — cross-org is a security violation."""
         from fastapi import HTTPException
 
-        from src.api.jit.provisioning import provision_jit_user
+        from cogtrix_core.api.jit.provisioning import provision_jit_user
 
         async def _run():
             org_a_id = _uid()
@@ -285,7 +285,7 @@ class TestProvisionJITUser:
         asyncio.run(_run())
 
     def test_username_deduplication(self, sf):
-        from src.api.jit.provisioning import provision_jit_user
+        from cogtrix_core.api.jit.provisioning import provision_jit_user
 
         cfg = JITConfig(enabled=True)
 
@@ -321,7 +321,7 @@ def jit_client(engine):
     factory = async_sessionmaker(engine, expire_on_commit=False)
     admin_id = _uid()
 
-    from src.api.app import create_app
+    from cogtrix_core.api.app import create_app
 
     with patch.dict(os.environ, {"COGTRIX_JWT_SECRET": _TEST_JWT_SECRET}):
         app = create_app()

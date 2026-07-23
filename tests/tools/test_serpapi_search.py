@@ -7,20 +7,20 @@ class TestSerpAPISearch:
     """Unit tests for serpapi_search()."""
 
     def test_serpapi_search_not_available_returns_error(self):
-        from src.tools.serpapi_search import serpapi_search
+        from cogtrix_core.tools.serpapi_search import serpapi_search
 
-        with patch("src.tools.serpapi_search.SERPAPI_AVAILABLE", False):
+        with patch("cogtrix_core.tools.serpapi_search.SERPAPI_AVAILABLE", False):
             result = serpapi_search("python")
 
         assert "Error" in result
         assert "google-search-results is not installed" in result
 
     def test_serpapi_search_missing_api_key(self):
-        from src.tools.serpapi_search import serpapi_search
+        from cogtrix_core.tools.serpapi_search import serpapi_search
 
         with (
-            patch("src.tools.serpapi_search.SERPAPI_AVAILABLE", True),
-            patch("src.tools.serpapi_search._get_api_key", return_value=None),
+            patch("cogtrix_core.tools.serpapi_search.SERPAPI_AVAILABLE", True),
+            patch("cogtrix_core.tools.serpapi_search._get_api_key", return_value=None),
         ):
             result = serpapi_search("python")
 
@@ -28,11 +28,11 @@ class TestSerpAPISearch:
         assert "SerpAPI key" in result
 
     def test_serpapi_search_empty_query_returns_error(self):
-        from src.tools.serpapi_search import serpapi_search
+        from cogtrix_core.tools.serpapi_search import serpapi_search
 
         with (
-            patch("src.tools.serpapi_search.SERPAPI_AVAILABLE", True),
-            patch("src.tools.serpapi_search._get_api_key", return_value="test-key"),
+            patch("cogtrix_core.tools.serpapi_search.SERPAPI_AVAILABLE", True),
+            patch("cogtrix_core.tools.serpapi_search._get_api_key", return_value="test-key"),
         ):
             result = serpapi_search("   ")
 
@@ -40,7 +40,7 @@ class TestSerpAPISearch:
         assert "Empty" in result
 
     def test_serpapi_search_returns_results(self):
-        from src.tools.serpapi_search import serpapi_search
+        from cogtrix_core.tools.serpapi_search import serpapi_search
 
         mock_search = MagicMock()
         mock_search.get_dict.return_value = {
@@ -62,9 +62,9 @@ class TestSerpAPISearch:
         mock_google_search_class = MagicMock(return_value=mock_search)
 
         with (
-            patch("src.tools.serpapi_search.SERPAPI_AVAILABLE", True),
-            patch("src.tools.serpapi_search.GoogleSearch", mock_google_search_class),
-            patch("src.tools.serpapi_search._get_api_key", return_value="test-key"),
+            patch("cogtrix_core.tools.serpapi_search.SERPAPI_AVAILABLE", True),
+            patch("cogtrix_core.tools.serpapi_search.GoogleSearch", mock_google_search_class),
+            patch("cogtrix_core.tools.serpapi_search._get_api_key", return_value="test-key"),
         ):
             result = serpapi_search("python", num_results=2)
 
@@ -78,7 +78,7 @@ class TestSerpAPISearch:
         assert "What is Python?" in result
 
     def test_serpapi_search_answer_box_and_knowledge_graph(self):
-        from src.tools.serpapi_search import serpapi_search
+        from cogtrix_core.tools.serpapi_search import serpapi_search
 
         mock_search = MagicMock()
         mock_search.get_dict.return_value = {
@@ -94,9 +94,9 @@ class TestSerpAPISearch:
         mock_google_search_class = MagicMock(return_value=mock_search)
 
         with (
-            patch("src.tools.serpapi_search.SERPAPI_AVAILABLE", True),
-            patch("src.tools.serpapi_search.GoogleSearch", mock_google_search_class),
-            patch("src.tools.serpapi_search._get_api_key", return_value="test-key"),
+            patch("cogtrix_core.tools.serpapi_search.SERPAPI_AVAILABLE", True),
+            patch("cogtrix_core.tools.serpapi_search.GoogleSearch", mock_google_search_class),
+            patch("cogtrix_core.tools.serpapi_search._get_api_key", return_value="test-key"),
         ):
             result = serpapi_search("python")
 
@@ -105,7 +105,7 @@ class TestSerpAPISearch:
         assert "A high-level language." in result
 
     def test_serpapi_search_no_results(self):
-        from src.tools.serpapi_search import serpapi_search
+        from cogtrix_core.tools.serpapi_search import serpapi_search
 
         mock_search = MagicMock()
         mock_search.get_dict.return_value = {"organic_results": []}
@@ -113,16 +113,16 @@ class TestSerpAPISearch:
         mock_google_search_class = MagicMock(return_value=mock_search)
 
         with (
-            patch("src.tools.serpapi_search.SERPAPI_AVAILABLE", True),
-            patch("src.tools.serpapi_search.GoogleSearch", mock_google_search_class),
-            patch("src.tools.serpapi_search._get_api_key", return_value="test-key"),
+            patch("cogtrix_core.tools.serpapi_search.SERPAPI_AVAILABLE", True),
+            patch("cogtrix_core.tools.serpapi_search.GoogleSearch", mock_google_search_class),
+            patch("cogtrix_core.tools.serpapi_search._get_api_key", return_value="test-key"),
         ):
             result = serpapi_search("xyzzy_nothing_matches")
 
         assert "No results found" in result
 
     def test_serpapi_search_error_in_response(self):
-        from src.tools.serpapi_search import serpapi_search
+        from cogtrix_core.tools.serpapi_search import serpapi_search
 
         mock_search = MagicMock()
         mock_search.get_dict.return_value = {"error": "Invalid API key"}
@@ -130,9 +130,9 @@ class TestSerpAPISearch:
         mock_google_search_class = MagicMock(return_value=mock_search)
 
         with (
-            patch("src.tools.serpapi_search.SERPAPI_AVAILABLE", True),
-            patch("src.tools.serpapi_search.GoogleSearch", mock_google_search_class),
-            patch("src.tools.serpapi_search._get_api_key", return_value="test-key"),
+            patch("cogtrix_core.tools.serpapi_search.SERPAPI_AVAILABLE", True),
+            patch("cogtrix_core.tools.serpapi_search.GoogleSearch", mock_google_search_class),
+            patch("cogtrix_core.tools.serpapi_search._get_api_key", return_value="test-key"),
         ):
             result = serpapi_search("test")
 
@@ -140,14 +140,14 @@ class TestSerpAPISearch:
         assert "Invalid API key" in result
 
     def test_serpapi_search_exception(self):
-        from src.tools.serpapi_search import serpapi_search
+        from cogtrix_core.tools.serpapi_search import serpapi_search
 
         mock_google_search_class = MagicMock(side_effect=Exception("network error"))
 
         with (
-            patch("src.tools.serpapi_search.SERPAPI_AVAILABLE", True),
-            patch("src.tools.serpapi_search.GoogleSearch", mock_google_search_class),
-            patch("src.tools.serpapi_search._get_api_key", return_value="test-key"),
+            patch("cogtrix_core.tools.serpapi_search.SERPAPI_AVAILABLE", True),
+            patch("cogtrix_core.tools.serpapi_search.GoogleSearch", mock_google_search_class),
+            patch("cogtrix_core.tools.serpapi_search._get_api_key", return_value="test-key"),
         ):
             result = serpapi_search("test")
 
@@ -156,7 +156,7 @@ class TestSerpAPISearch:
         assert "request failed" in result.lower()  # sanitized message present
 
     def test_serpapi_search_num_results_clamped(self):
-        from src.tools.serpapi_search import serpapi_search
+        from cogtrix_core.tools.serpapi_search import serpapi_search
 
         mock_search = MagicMock()
         mock_search.get_dict.return_value = {
@@ -169,9 +169,9 @@ class TestSerpAPISearch:
         mock_google_search_class = MagicMock(return_value=mock_search)
 
         with (
-            patch("src.tools.serpapi_search.SERPAPI_AVAILABLE", True),
-            patch("src.tools.serpapi_search.GoogleSearch", mock_google_search_class),
-            patch("src.tools.serpapi_search._get_api_key", return_value="test-key"),
+            patch("cogtrix_core.tools.serpapi_search.SERPAPI_AVAILABLE", True),
+            patch("cogtrix_core.tools.serpapi_search.GoogleSearch", mock_google_search_class),
+            patch("cogtrix_core.tools.serpapi_search._get_api_key", return_value="test-key"),
         ):
             result = serpapi_search("test", num_results=50)
 
@@ -182,7 +182,7 @@ class TestSerpAPISearch:
         assert len(result_lines) <= 20
 
     def test_serpapi_search_invalid_engine_defaults_to_google(self):
-        from src.tools.serpapi_search import serpapi_search
+        from cogtrix_core.tools.serpapi_search import serpapi_search
 
         mock_search = MagicMock()
         mock_search.get_dict.return_value = {"organic_results": []}
@@ -190,9 +190,9 @@ class TestSerpAPISearch:
         mock_google_search_class = MagicMock(return_value=mock_search)
 
         with (
-            patch("src.tools.serpapi_search.SERPAPI_AVAILABLE", True),
-            patch("src.tools.serpapi_search.GoogleSearch", mock_google_search_class),
-            patch("src.tools.serpapi_search._get_api_key", return_value="test-key"),
+            patch("cogtrix_core.tools.serpapi_search.SERPAPI_AVAILABLE", True),
+            patch("cogtrix_core.tools.serpapi_search.GoogleSearch", mock_google_search_class),
+            patch("cogtrix_core.tools.serpapi_search._get_api_key", return_value="test-key"),
         ):
             serpapi_search("test", engine="invalid")
 
@@ -201,7 +201,7 @@ class TestSerpAPISearch:
         assert call_args["engine"] == "google"
 
     def test_serpapi_search_time_period_param(self):
-        from src.tools.serpapi_search import serpapi_search
+        from cogtrix_core.tools.serpapi_search import serpapi_search
 
         mock_search = MagicMock()
         mock_search.get_dict.return_value = {"organic_results": []}
@@ -209,9 +209,9 @@ class TestSerpAPISearch:
         mock_google_search_class = MagicMock(return_value=mock_search)
 
         with (
-            patch("src.tools.serpapi_search.SERPAPI_AVAILABLE", True),
-            patch("src.tools.serpapi_search.GoogleSearch", mock_google_search_class),
-            patch("src.tools.serpapi_search._get_api_key", return_value="test-key"),
+            patch("cogtrix_core.tools.serpapi_search.SERPAPI_AVAILABLE", True),
+            patch("cogtrix_core.tools.serpapi_search.GoogleSearch", mock_google_search_class),
+            patch("cogtrix_core.tools.serpapi_search._get_api_key", return_value="test-key"),
         ):
             serpapi_search("test", time_period="qdr:w")
 
@@ -223,34 +223,34 @@ class TestSerpAPIConfigure:
     """Unit tests for configuration helpers."""
 
     def test_is_configured_false_when_no_key(self):
-        from src.tools.serpapi_search import is_configured
+        from cogtrix_core.tools.serpapi_search import is_configured
 
         with (
-            patch("src.tools.serpapi_search.SERPAPI_AVAILABLE", True),
-            patch("src.tools.serpapi_search._get_api_key", return_value=None),
+            patch("cogtrix_core.tools.serpapi_search.SERPAPI_AVAILABLE", True),
+            patch("cogtrix_core.tools.serpapi_search._get_api_key", return_value=None),
         ):
             assert is_configured() is False
 
     def test_is_configured_false_when_not_available(self):
-        from src.tools.serpapi_search import is_configured
+        from cogtrix_core.tools.serpapi_search import is_configured
 
         with (
-            patch("src.tools.serpapi_search.SERPAPI_AVAILABLE", False),
-            patch("src.tools.serpapi_search._get_api_key", return_value="test-key"),
+            patch("cogtrix_core.tools.serpapi_search.SERPAPI_AVAILABLE", False),
+            patch("cogtrix_core.tools.serpapi_search._get_api_key", return_value="test-key"),
         ):
             assert is_configured() is False
 
     def test_is_configured_true_when_available_and_key_set(self):
-        from src.tools.serpapi_search import is_configured
+        from cogtrix_core.tools.serpapi_search import is_configured
 
         with (
-            patch("src.tools.serpapi_search.SERPAPI_AVAILABLE", True),
-            patch("src.tools.serpapi_search._get_api_key", return_value="test-key"),
+            patch("cogtrix_core.tools.serpapi_search.SERPAPI_AVAILABLE", True),
+            patch("cogtrix_core.tools.serpapi_search._get_api_key", return_value="test-key"),
         ):
             assert is_configured() is True
 
     def test_configure_serpapi_sets_key(self):
-        from src.tools.serpapi_search import _get_api_key, configure_serpapi
+        from cogtrix_core.tools.serpapi_search import _get_api_key, configure_serpapi
 
         configure_serpapi({"api_key": "my-key"})
         assert _get_api_key() == "my-key"
@@ -262,7 +262,7 @@ class TestSerpAPISearchInput:
     """Unit tests for the Pydantic input schema."""
 
     def test_serpapi_search_input_defaults(self):
-        from src.tools.serpapi_search import SerpAPISearchInput
+        from cogtrix_core.tools.serpapi_search import SerpAPISearchInput
 
         schema = SerpAPISearchInput(query="test")
         assert schema.query == "test"
@@ -272,7 +272,7 @@ class TestSerpAPISearchInput:
         assert schema.time_period == ""
 
     def test_serpapi_search_input_custom_values(self):
-        from src.tools.serpapi_search import SerpAPISearchInput
+        from cogtrix_core.tools.serpapi_search import SerpAPISearchInput
 
         schema = SerpAPISearchInput(
             query="test", engine="bing", num_results=5, search_type="nws", time_period="qdr:d"

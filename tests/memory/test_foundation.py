@@ -3,10 +3,10 @@
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
-from src.memory.base import BaseMemoryStore
-from src.memory.context import MemoryContext
-from src.memory.factory import MemoryFactory
-from src.memory.manager import BaseMemoryManager, _sanitize_session_id
+from cogtrix_core.memory.base import BaseMemoryStore
+from cogtrix_core.memory.context import MemoryContext
+from cogtrix_core.memory.factory import MemoryFactory
+from cogtrix_core.memory.manager import BaseMemoryManager, _sanitize_session_id
 
 
 class MockStore(BaseMemoryStore):
@@ -484,31 +484,31 @@ class TestSessionVectorStoreTraversal:
     """Tests that SessionVectorStore rejects path-traversal session IDs."""
 
     def test_normal_session_id_accepted(self, tmp_path):
-        from src.memory.recall import SessionVectorStore
+        from cogtrix_core.memory.recall import SessionVectorStore
 
         store = SessionVectorStore("my-session", storage_dir=str(tmp_path))
         assert str(store._index_dir).startswith(str(tmp_path.resolve()))
 
     def test_dotdot_session_id_sanitized(self, tmp_path):
-        from src.memory.recall import SessionVectorStore
+        from cogtrix_core.memory.recall import SessionVectorStore
 
         store = SessionVectorStore("../outside", storage_dir=str(tmp_path))
         assert str(store._index_dir).startswith(str(tmp_path.resolve()))
 
     def test_slash_session_id_sanitized(self, tmp_path):
-        from src.memory.recall import SessionVectorStore
+        from cogtrix_core.memory.recall import SessionVectorStore
 
         store = SessionVectorStore("sub/dir", storage_dir=str(tmp_path))
         assert str(store._index_dir).startswith(str(tmp_path.resolve()))
 
     def test_backslash_session_id_sanitized(self, tmp_path):
-        from src.memory.recall import SessionVectorStore
+        from cogtrix_core.memory.recall import SessionVectorStore
 
         store = SessionVectorStore("sub\\dir", storage_dir=str(tmp_path))
         assert str(store._index_dir).startswith(str(tmp_path.resolve()))
 
     def test_null_byte_session_id_sanitized(self, tmp_path):
-        from src.memory.recall import SessionVectorStore
+        from cogtrix_core.memory.recall import SessionVectorStore
 
         store = SessionVectorStore("session\x00evil", storage_dir=str(tmp_path))
         assert "\x00" not in str(store._index_dir)

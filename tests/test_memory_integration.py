@@ -4,21 +4,21 @@ import json
 from argparse import Namespace
 from unittest.mock import patch
 
-from src.config import Config, load_config
-from src.memory import JsonFileMemoryStore, MemoryFactory
-from src.memory.modes.conversation import ConversationMemoryManager
+from cogtrix_core.config import Config, load_config
+from cogtrix_core.memory import JsonFileMemoryStore, MemoryFactory
+from cogtrix_core.memory.modes.conversation import ConversationMemoryManager
 
 
 class TestMemoryConfigIntegration:
     """Test memory configuration loading."""
 
-    @patch("src.config.find_config_file", return_value=None)
+    @patch("cogtrix_core.config.find_config_file", return_value=None)
     def test_default_memory_mode(self, mock_find):
         """Default memory mode should be 'conversation'."""
         config = load_config(None)
         assert config.memory_mode == "conversation"
 
-    @patch("src.config.find_config_file", return_value=None)
+    @patch("cogtrix_core.config.find_config_file", return_value=None)
     def test_default_memory_config_is_none(self, mock_find):
         """Default memory config should be None."""
         config = load_config(None)
@@ -65,7 +65,7 @@ class TestMemoryConfigIntegration:
             )
         )
 
-        with patch("src.config.find_config_file", return_value=config_file):
+        with patch("cogtrix_core.config.find_config_file", return_value=config_file):
             config = load_config(None)
             assert config.memory_mode == "code"
 
@@ -87,7 +87,7 @@ class TestMemoryConfigIntegration:
             )
         )
 
-        with patch("src.config.find_config_file", return_value=config_file):
+        with patch("cogtrix_core.config.find_config_file", return_value=config_file):
             config = load_config(None)
             assert config.memory_mode == "conversation"
             assert config.memory_config == {"working_memory_size": 50}
@@ -104,7 +104,7 @@ class TestMemoryConfigIntegration:
             memory_mode="code",
         )
 
-        with patch("src.config.find_config_file", return_value=config_file):
+        with patch("cogtrix_core.config.find_config_file", return_value=config_file):
             config = load_config(args)
             assert config.memory_mode == "code"
 
@@ -245,17 +245,17 @@ class TestConfigPriority:
         config_file.write_text(json.dumps({"memory": {"mode": "reasoning"}}))
 
         # Test 1: Default (no overrides)
-        with patch("src.config.find_config_file", return_value=None):
+        with patch("cogtrix_core.config.find_config_file", return_value=None):
             config = load_config(None)
             assert config.memory_mode == "conversation"  # Default
 
         # Test 2: Config file overrides default
-        with patch("src.config.find_config_file", return_value=config_file):
+        with patch("cogtrix_core.config.find_config_file", return_value=config_file):
             config = load_config(None)
             assert config.memory_mode == "reasoning"  # From file
 
         # Test 3: ENV overrides config file
-        with patch("src.config.find_config_file", return_value=config_file):
+        with patch("cogtrix_core.config.find_config_file", return_value=config_file):
             with patch.dict("os.environ", {"COGTRIX_MEMORY_MODE": "code"}):
                 config = load_config(None)
                 assert config.memory_mode == "code"  # From env
@@ -267,7 +267,7 @@ class TestConfigPriority:
             session=None,
             memory_mode="conversation",
         )
-        with patch("src.config.find_config_file", return_value=config_file):
+        with patch("cogtrix_core.config.find_config_file", return_value=config_file):
             with patch.dict("os.environ", {"COGTRIX_MEMORY_MODE": "code"}):
                 config = load_config(args)
                 assert config.memory_mode == "conversation"  # From CLI

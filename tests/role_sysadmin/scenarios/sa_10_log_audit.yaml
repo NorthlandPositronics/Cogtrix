@@ -1,0 +1,40 @@
+id: role_sa_10_log_audit
+area: audit
+title: Full-read audit of large SSH access logs (context-heavy)
+
+description: |
+  Context-heavy workload for the context_max_tokens compression sweep
+  (#2360 / #2365). The box is seeded with several large incident POST-MORTEMS
+  (natural-language prose) that the agent must read IN FULL to answer a
+  cross-document synthesis question. Prose + a "common themes" question is used
+  deliberately so the task CANNOT be shortcut with grep/awk/wc on the box (which
+  keeps tool outputs — and therefore context — small, as the config scenarios do);
+  the large narratives must flow through the model's context to be synthesised,
+  which is what genuinely exercises the compression path. Not a break-fix; grading
+  is intentionally lightweight (a themes report exists and cites the incidents).
+  The metric that matters for the sweep is compression churn / tool-pair integrity,
+  captured out-of-band from the run log.
+
+assignment: |
+  The reliability team is running a review across eight recent outages. Each
+  outage has a written post-mortem under /var/incidents/ (incident_1.md …
+  incident_8.md). Read EACH post-mortem in full — read them one at a time (a
+  single combined read is truncated and you will miss most of the content). The
+  post-mortems describe DIFFERENT technical triggers, but the review's real
+  interest is the ORGANISATIONAL contributing factors that let each small trigger
+  become a long outage (e.g. gaps in monitoring, change review, rollback
+  readiness, alerting, redundancy, capacity planning). These factors are woven
+  into each narrative in prose — they are NOT labelled or listed, so you cannot
+  grep for them; you have to read and infer them. Identify the THREE contributing
+  factors that recur most across the eight incidents, and for each one name which
+  incident files exhibit it. Write your findings to /root/themes.txt (one section
+  per factor, citing the incident_N.md files), then hand off to the ops lead.
+
+acceptance:
+  check: checks/sa_10_check.sh
+  seed: seeds/sa_10/setup.sh
+  requires_rootcause: false
+
+personas:
+  lead:
+    default_scope_answer: "Read every /var/incidents/incident_N.md in full, infer the organisational contributing factors from the prose, write the top 3 recurring ones (citing the incident files) to /root/themes.txt, then hand off."

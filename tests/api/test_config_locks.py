@@ -11,14 +11,14 @@ from __future__ import annotations
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from src.api.routes.config import _get_provider_write_lock
+from cogtrix_core.api.routes.config import _get_provider_write_lock
 
 
 def test_provider_write_lock_double_checked_locking() -> None:
     """Concurrent calls to ``_get_provider_write_lock()`` must return the same ``asyncio.Lock``."""
     # Reset the module-level lock so we can observe the race window.
     global _provider_write_lock
-    import src.api.routes.config as _config_mod
+    import cogtrix_core.api.routes.config as _config_mod
 
     original_lock = _config_mod._provider_write_lock
     _config_mod._provider_write_lock = None

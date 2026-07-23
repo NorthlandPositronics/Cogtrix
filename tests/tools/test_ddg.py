@@ -1,4 +1,4 @@
-"""Tests for ``src/tools/_ddg.py`` — the curl_cffi-based DDG HTML
+"""Tests for ``cogtrix_core/tools/_ddg.py`` — the curl_cffi-based DDG HTML
 scraper that replaces the retired ``ddgs``/``primp`` stack
 (Bug D phase 2).
 
@@ -24,7 +24,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.tools._ddg import (
+from cogtrix_core.tools._ddg import (
     DDGFetchError,
     _decode_redirect,
     _strip_html,

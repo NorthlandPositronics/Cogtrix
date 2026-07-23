@@ -27,7 +27,7 @@ class TestBug031ActiveToolsListDeepCopy:
 
     def test_execution_phase_does_not_mutate_config_active_tools(self):
         """run_execution_phase must not modify the original config's active_tools_list."""
-        from src.orchestration.run_config import AgentRunConfig
+        from cogtrix_core.orchestration.run_config import AgentRunConfig
 
         tool_a = MagicMock(name="tool_a")
         tool_b = MagicMock(name="tool_b")
@@ -41,8 +41,8 @@ class TestBug031ActiveToolsListDeepCopy:
         )
         original_ids = [id(t) for t in config.active_tools_list]
 
-        with patch("src.orchestration.runner.run_agent", return_value="done"):
-            from src.orchestration.phases import run_execution_phase
+        with patch("cogtrix_core.orchestration.runner.run_agent", return_value="done"):
+            from cogtrix_core.orchestration.phases import run_execution_phase
 
             run_execution_phase(
                 analysis="analysis text",
@@ -59,7 +59,7 @@ class TestBug031ActiveToolsListDeepCopy:
 
     def test_execution_phase_does_not_mutate_config_available_tools(self):
         """run_execution_phase must not modify the original config's available_tools."""
-        from src.orchestration.run_config import AgentRunConfig
+        from cogtrix_core.orchestration.run_config import AgentRunConfig
 
         original_avail = {"tool_x": MagicMock()}
         config = AgentRunConfig(
@@ -69,8 +69,8 @@ class TestBug031ActiveToolsListDeepCopy:
             active_tools_list=[MagicMock()],
         )
 
-        with patch("src.orchestration.runner.run_agent", return_value="done"):
-            from src.orchestration.phases import run_execution_phase
+        with patch("cogtrix_core.orchestration.runner.run_agent", return_value="done"):
+            from cogtrix_core.orchestration.phases import run_execution_phase
 
             run_execution_phase(
                 analysis="analysis",
@@ -93,7 +93,7 @@ class TestBug032CompressionFallbackCap:
     """BUG-032: Compression fallback must be capped at _FALLBACK_MAX_CHARS."""
 
     def test_fallback_truncation_capped(self):
-        from src.orchestration.compression import _FALLBACK_MAX_CHARS, truncate_tool_output
+        from cogtrix_core.orchestration.compression import _FALLBACK_MAX_CHARS, truncate_tool_output
 
         content = "x" * 200_000
         fallback_len = min(len(content) * 3 // 4, _FALLBACK_MAX_CHARS)
@@ -104,7 +104,7 @@ class TestBug032CompressionFallbackCap:
         """When compress_tool_message raises, _compress_one caps at _FALLBACK_MAX_CHARS."""
         from langchain_core.messages import AIMessage, ToolMessage
 
-        from src.orchestration.compression import (
+        from cogtrix_core.orchestration.compression import (
             _FALLBACK_MAX_CHARS,
             apply_message_compression,
         )
@@ -149,7 +149,7 @@ class TestBug033OrphanedToolMessageChains:
         including the triggering HumanMessage (BUG-033 fix)."""
         from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
-        from src.memory.manager import BaseMemoryManager
+        from cogtrix_core.memory.manager import BaseMemoryManager
 
         messages = [
             HumanMessage(content="hello"),
@@ -172,7 +172,7 @@ class TestBug033OrphanedToolMessageChains:
         including the triggering HumanMessage (BUG-033 fix)."""
         from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
-        from src.memory.manager import BaseMemoryManager
+        from cogtrix_core.memory.manager import BaseMemoryManager
 
         messages = [
             HumanMessage(content="hello"),
@@ -192,7 +192,7 @@ class TestBug033OrphanedToolMessageChains:
     def test_valid_tool_chain_preserved(self):
         from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
-        from src.memory.manager import BaseMemoryManager
+        from cogtrix_core.memory.manager import BaseMemoryManager
 
         messages = [
             HumanMessage(content="search for cats"),
@@ -212,7 +212,7 @@ class TestBug033OrphanedToolMessageChains:
         including the triggering HumanMessage (BUG-033 fix)."""
         from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
-        from src.memory.manager import BaseMemoryManager
+        from cogtrix_core.memory.manager import BaseMemoryManager
 
         messages = [
             HumanMessage(content="do stuff"),
@@ -323,19 +323,19 @@ class TestBug040JsonStoreFdLeak:
     """BUG-040: save_history must close the fd when json.dump raises."""
 
     def test_fd_closed_on_dump_failure(self, tmp_path):
-        from src.memory.json_store import JsonFileMemoryStore
+        from cogtrix_core.memory.json_store import JsonFileMemoryStore
 
         store = JsonFileMemoryStore(str(tmp_path))
 
-        with patch("src.memory.json_store.json.dump", side_effect=OSError("disk full")):
-            with patch("src.memory.json_store.os.close") as mock_close:
+        with patch("cogtrix_core.memory.json_store.json.dump", side_effect=OSError("disk full")):
+            with patch("cogtrix_core.memory.json_store.os.close") as mock_close:
                 # save_history catches the exception internally (logs warning)
                 store.save_history("test_session", [{"type": "human", "content": "hi"}])
                 # os.close should have been called on the fd in the except handler
                 mock_close.assert_called_once()
 
     def test_save_history_succeeds_normally(self, tmp_path):
-        from src.memory.json_store import JsonFileMemoryStore
+        from cogtrix_core.memory.json_store import JsonFileMemoryStore
 
         store = JsonFileMemoryStore(str(tmp_path))
         store.save_history("test_session", [{"type": "human", "content": "hello"}])
@@ -356,7 +356,7 @@ class TestPerf001CompressionThreshold:
     """PERF-001: Compression threshold should be 0.72."""
 
     def test_threshold_is_072(self):
-        from src.orchestration.compression import _COMPRESSION_THRESHOLD_RATIO
+        from cogtrix_core.orchestration.compression import _COMPRESSION_THRESHOLD_RATIO
 
         assert _COMPRESSION_THRESHOLD_RATIO == 0.72
 
@@ -371,7 +371,7 @@ class TestSanitizeHistoryOrphanedHuman:
     """sanitize_history must not crash or silently drop a trailing HumanMessage."""
 
     def _sanitize(self, msgs):
-        from src.memory.manager import BaseMemoryManager
+        from cogtrix_core.memory.manager import BaseMemoryManager
 
         return BaseMemoryManager.sanitize_history(msgs)
 
@@ -424,7 +424,7 @@ class TestCompressionFallbackCapDirectCall:
     """compress_tool_message must cap output at _FALLBACK_MAX_CHARS on LLM failure."""
 
     def test_llm_failure_caps_output(self) -> None:
-        from src.orchestration.compression import (
+        from cogtrix_core.orchestration.compression import (
             _FALLBACK_MAX_CHARS,
             compress_tool_message,
         )
@@ -441,7 +441,7 @@ class TestCompressionFallbackCapDirectCall:
 
     def test_llm_failure_short_content_unchanged(self) -> None:
         """Content shorter than _FALLBACK_MAX_CHARS is returned as-is on LLM failure."""
-        from src.orchestration.compression import compress_tool_message
+        from cogtrix_core.orchestration.compression import compress_tool_message
 
         short_content = "short output"
         failing_llm = MagicMock()
@@ -452,7 +452,10 @@ class TestCompressionFallbackCapDirectCall:
 
     def test_empty_llm_response_uses_truncation(self) -> None:
         """An LLM that returns empty string triggers the tiny-result fallback."""
-        from src.orchestration.compression import _FALLBACK_MAX_CHARS, compress_tool_message
+        from cogtrix_core.orchestration.compression import (
+            _FALLBACK_MAX_CHARS,
+            compress_tool_message,
+        )
 
         long_content = "y" * (_FALLBACK_MAX_CHARS + 1000)
         mock_response = MagicMock()
@@ -473,7 +476,7 @@ class TestAgentPerformedWritesEmptyMsgs:
     """agent_performed_writes([]) must return False without raising."""
 
     def test_empty_msgs_returns_false(self) -> None:
-        from src.orchestration.phases import agent_performed_writes
+        from cogtrix_core.orchestration.phases import agent_performed_writes
 
         assert agent_performed_writes([]) is False
 
@@ -485,7 +488,7 @@ class TestAgentPerformedWritesEmptyMsgs:
             pytest.skip("langchain_core not installed")
         from langchain_core.messages import ToolMessage
 
-        from src.orchestration.phases import agent_performed_writes
+        from cogtrix_core.orchestration.phases import agent_performed_writes
 
         msgs = [ToolMessage(content="output", tool_call_id="t1", name="read_file")]
         assert agent_performed_writes(msgs) is False
@@ -498,7 +501,7 @@ class TestAgentPerformedWritesEmptyMsgs:
             pytest.skip("langchain_core not installed")
         from langchain_core.messages import ToolMessage
 
-        from src.orchestration.phases import agent_performed_writes
+        from cogtrix_core.orchestration.phases import agent_performed_writes
 
         msgs = [ToolMessage(content="Written successfully", tool_call_id="t1", name="write_file")]
         assert agent_performed_writes(msgs) is True
@@ -511,7 +514,7 @@ class TestAgentPerformedWritesEmptyMsgs:
             pytest.skip("langchain_core not installed")
         from langchain_core.messages import ToolMessage
 
-        from src.orchestration.phases import agent_performed_writes
+        from cogtrix_core.orchestration.phases import agent_performed_writes
 
         msgs = [
             ToolMessage(content="Error: permission denied", tool_call_id="t1", name="write_file")

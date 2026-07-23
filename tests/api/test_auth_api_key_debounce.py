@@ -14,7 +14,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from src.api import auth
+from cogtrix_core.api import auth
 
 
 @pytest.fixture(autouse=True)
@@ -107,11 +107,11 @@ class TestApiKeyDebounceLock:
         with (
             patch.object(auth, "_hash_api_key", return_value="hash"),
             patch(
-                "src.api.db.repositories.api_keys.ApiKeyRepository",
+                "cogtrix_core.api.db.repositories.api_keys.ApiKeyRepository",
                 return_value=mock_repo,
             ),
             patch(
-                "src.api.db.repositories.users.UserRepository",
+                "cogtrix_core.api.db.repositories.users.UserRepository",
                 return_value=user_repo_mock,
             ),
             patch("time.monotonic", _MonoClock()),
@@ -131,11 +131,11 @@ class TestApiKeyDebounceLock:
         async def _call():
             with patch.object(auth, "_hash_api_key", return_value="hash"):
                 with patch(
-                    "src.api.db.repositories.api_keys.ApiKeyRepository",
+                    "cogtrix_core.api.db.repositories.api_keys.ApiKeyRepository",
                     return_value=mock_repo,
                 ):
                     with patch(
-                        "src.api.db.repositories.users.UserRepository",
+                        "cogtrix_core.api.db.repositories.users.UserRepository",
                         return_value=_make_user_repo_mock(),
                     ):
                         return await auth.validate_api_key("ak-test", mock_db)
@@ -186,11 +186,11 @@ class TestApiKeyLastUsedCleanup:
 
             with patch.object(auth, "_hash_api_key", return_value="hash"):
                 with patch(
-                    "src.api.db.repositories.api_keys.ApiKeyRepository",
+                    "cogtrix_core.api.db.repositories.api_keys.ApiKeyRepository",
                     return_value=mock_repo,
                 ):
                     with patch(
-                        "src.api.db.repositories.users.UserRepository",
+                        "cogtrix_core.api.db.repositories.users.UserRepository",
                         return_value=_make_user_repo_mock(),
                     ):
                         await auth.validate_api_key("ak-test", mock_db)

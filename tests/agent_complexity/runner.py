@@ -36,7 +36,7 @@ from pathlib import Path
 
 # Standard fallback paths consulted when ``find_config_file()`` returns
 # None.  The order mirrors the cogtrix install conventions documented
-# in src/config.py + the legacy ``~/.cogtrix/config/cogtrix.yaml``
+# in cogtrix_core/config.py + the legacy ``~/.cogtrix/config/cogtrix.yaml``
 # layout some installs use (e.g. when ``cogtrix --setup`` historically
 # wrote there).  None of these paths are auto-created by the runner.
 _LEGACY_CONFIG_FALLBACKS: tuple[Path, ...] = (
@@ -96,7 +96,7 @@ def resolve_config_path(override: Path | None = None) -> Path:
     # when ``src.config`` import fails at collection time (e.g. when
     # the runner is invoked outside the venv).
     try:
-        from src.config import find_config_file
+        from cogtrix_core.config import find_config_file
 
         found = find_config_file()
     except Exception as exc:  # noqa: BLE001

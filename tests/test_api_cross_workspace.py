@@ -19,18 +19,18 @@ from unittest.mock import patch  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 from sqlalchemy.ext.asyncio import async_sessionmaker  # noqa: E402
 
-from src.api.auth import create_access_token  # noqa: E402
-from src.api.cross_workspace import (  # noqa: E402
+from cogtrix_core.api.auth import create_access_token  # noqa: E402
+from cogtrix_core.api.cross_workspace import (  # noqa: E402
     CrossWorkspaceMessage,
     CrossWorkspacePolicy,
     delete_message,
     read_inbox,
     write_to_inbox,
 )
-from src.api.db.engine import Base, get_db  # noqa: E402
-from src.api.db.repositories.organization import OrganizationRepository  # noqa: E402
-from src.api.db.repositories.users import UserRepository  # noqa: E402
-from src.api.db.repositories.workspaces import WorkspaceRepository  # noqa: E402
+from cogtrix_core.api.db.engine import Base, get_db  # noqa: E402
+from cogtrix_core.api.db.repositories.organization import OrganizationRepository  # noqa: E402
+from cogtrix_core.api.db.repositories.users import UserRepository  # noqa: E402
+from cogtrix_core.api.db.repositories.workspaces import WorkspaceRepository  # noqa: E402
 
 
 def _uid() -> str:
@@ -123,7 +123,7 @@ class TestUuidValidation:
         ],
     )
     def test_invalid_uuid4_rejected_in_inbox_dir(self, tmp_path, value):
-        from src.api.cross_workspace import _inbox_dir
+        from cogtrix_core.api.cross_workspace import _inbox_dir
 
         with pytest.raises(ValueError, match="Invalid workspace_id"):
             _inbox_dir(tmp_path, value)
@@ -144,7 +144,7 @@ class TestUuidValidation:
             delete_message(valid_ws, value, data_root=tmp_path)
 
     def test_valid_uuid4_passes_inbox_dir(self, tmp_path):
-        from src.api.cross_workspace import _inbox_dir
+        from cogtrix_core.api.cross_workspace import _inbox_dir
 
         uid = _uid()
         result = _inbox_dir(tmp_path, uid)
@@ -253,8 +253,8 @@ def cw_setup(tmp_path, engine):
 
     asyncio.run(_seed())
 
-    from src.api.app import create_app
-    from src.api.routes.cross_workspace import configure_cross_workspace_policy
+    from cogtrix_core.api.app import create_app
+    from cogtrix_core.api.routes.cross_workspace import configure_cross_workspace_policy
 
     # Reset to open policy.
     configure_cross_workspace_policy(CrossWorkspacePolicy(enabled=True))
@@ -386,11 +386,11 @@ class TestCrossWorkspaceRoutes:
 
         # Try sending from ws_a (org) to other_ws (different org) — must fail.
         # We can test this by directly calling the service logic.
-        from src.api.cross_workspace import CrossWorkspacePolicy
+        from cogtrix_core.api.cross_workspace import CrossWorkspacePolicy
 
         # Policy pair enforcement (simulates cross-org via policy).
         policy = CrossWorkspacePolicy(enabled=True, allowed_pairs=[(ws_a, ws_b)])
-        from src.api.routes.cross_workspace import configure_cross_workspace_policy
+        from cogtrix_core.api.routes.cross_workspace import configure_cross_workspace_policy
 
         configure_cross_workspace_policy(policy)
         r = client.post(
@@ -407,7 +407,7 @@ class TestCrossWorkspaceRoutes:
         asyncio.run(engine2.dispose())
 
     def test_disabled_policy_returns_503(self, cw_setup):
-        from src.api.routes.cross_workspace import configure_cross_workspace_policy
+        from cogtrix_core.api.routes.cross_workspace import configure_cross_workspace_policy
 
         client, _, user_id, ws_a, ws_b, _ = cw_setup
         configure_cross_workspace_policy(CrossWorkspacePolicy(enabled=False))

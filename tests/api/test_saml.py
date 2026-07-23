@@ -20,11 +20,11 @@ import pytest
 
 pytest.importorskip("fastapi")
 
-from src.api.db.repositories.organization import OrganizationRepository  # noqa: E402
-from src.api.db.repositories.users import UserRepository  # noqa: E402
-from src.api.routes.saml import _provision_user  # noqa: E402
-from src.api.saml.config import SAMLConfig, SAMLIdPConfig  # noqa: E402
-from src.api.saml.provider import SAMLAssertion  # noqa: E402
+from cogtrix_core.api.db.repositories.organization import OrganizationRepository  # noqa: E402
+from cogtrix_core.api.db.repositories.users import UserRepository  # noqa: E402
+from cogtrix_core.api.routes.saml import _provision_user  # noqa: E402
+from cogtrix_core.api.saml.config import SAMLConfig, SAMLIdPConfig  # noqa: E402
+from cogtrix_core.api.saml.provider import SAMLAssertion  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Infrastructure helpers
@@ -141,7 +141,7 @@ class TestProvisionUserExistingUser:
                 await org_repo.create(org_id=org_id, name="Same Org", slug="same-org")
                 await session.commit()
 
-                from src.api.auth import hash_password
+                from cogtrix_core.api.auth import hash_password
 
                 await user_repo.create(
                     user_id=_uid(),
@@ -180,7 +180,7 @@ class TestProvisionUserUsernameCollisions:
                 await org_repo.create(org_id=org_id, name="Collision Org", slug="collision-org")
                 await session.commit()
 
-                from src.api.auth import hash_password
+                from cogtrix_core.api.auth import hash_password
 
                 await user_repo.create(
                     user_id=_uid(),
@@ -193,7 +193,7 @@ class TestProvisionUserUsernameCollisions:
                 await session.commit()
 
                 username_gen = Mock(side_effect=["takenname", "takenname_2"])
-                monkeypatch.setattr("src.api.routes.saml._unique_username", username_gen)
+                monkeypatch.setattr("cogtrix_core.api.routes.saml._unique_username", username_gen)
 
                 config = _make_config(org_id=org_id)
                 assertion = _make_assertion(
@@ -222,7 +222,7 @@ class TestProvisionUserUsernameCollisions:
                 await org_repo.create(org_id=org_id, name="Retry Org", slug="retry-org")
                 await session.commit()
 
-                from src.api.auth import hash_password
+                from cogtrix_core.api.auth import hash_password
 
                 await user_repo.create(
                     user_id=_uid(),
@@ -235,7 +235,7 @@ class TestProvisionUserUsernameCollisions:
                 await session.commit()
 
                 username_gen = Mock(return_value="takenname")
-                monkeypatch.setattr("src.api.routes.saml._unique_username", username_gen)
+                monkeypatch.setattr("cogtrix_core.api.routes.saml._unique_username", username_gen)
 
                 config = _make_config(org_id=org_id)
                 assertion = _make_assertion(
@@ -269,7 +269,7 @@ class TestProvisionUserUsernameCollisions:
                 await org_repo.create(org_id=org_b_id, name="Org B", slug="org-b-saml")
                 await session.commit()
 
-                from src.api.auth import hash_password
+                from cogtrix_core.api.auth import hash_password
 
                 await user_repo.create(
                     user_id=_uid(),

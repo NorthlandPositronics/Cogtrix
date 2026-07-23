@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from src.rag.bm25 import save_sidecar
+from cogtrix_core.rag.bm25 import save_sidecar
 
 
 class _FakeDoc:
@@ -59,7 +59,7 @@ class TestRetrieveFromIndexPureVector:
     the pre-#1981 behaviour."""
 
     def test_returns_store_results_unchanged(self, tmp_path: Path) -> None:
-        from src.tools.rag import _retrieve_from_index
+        from cogtrix_core.tools.rag import _retrieve_from_index
 
         docs = [_FakeDoc(f"chunk {i}") for i in range(5)]
         store = _FakeStore([(d, float(i) + 0.1) for i, d in enumerate(docs)])
@@ -86,7 +86,7 @@ class TestHybridFallsBackWithoutSidecar:
     ``vector_dir``, the pure-vector path runs."""
 
     def test_no_sidecar_means_pure_vector(self, tmp_path: Path) -> None:
-        from src.tools.rag import _retrieve_from_index
+        from cogtrix_core.tools.rag import _retrieve_from_index
 
         docs = [_FakeDoc(f"c{i}") for i in range(3)]
         store = _FakeStore([(d, float(i)) for i, d in enumerate(docs)])
@@ -111,7 +111,7 @@ class TestHybridRetrievalWithSidecar:
     chunks that appear on only one."""
 
     def test_fused_top1_is_shared_between_ranklists(self, tmp_path: Path) -> None:
-        from src.tools.rag import _retrieve_from_index
+        from cogtrix_core.tools.rag import _retrieve_from_index
 
         # Build a sidecar with five chunks; one of them ("the budget chunk")
         # is the one that should rise to the top under fusion.  The text
@@ -123,7 +123,7 @@ class TestHybridRetrievalWithSidecar:
             "Stakeholder register: Beatriz Cazadora-Olesen (Data Lead).",
             "Risk register R-12: AcmeDB cross-region replication lag.",
         ]
-        from src.rag.bm25 import build_sidecar
+        from cogtrix_core.rag.bm25 import build_sidecar
 
         sidecar = build_sidecar([_FakeDoc(t) for t in chunks_text])
         assert sidecar is not None
@@ -160,8 +160,8 @@ class TestHybridRetrievalWithSidecar:
         )
 
     def test_fused_result_count_capped_at_k(self, tmp_path: Path) -> None:
-        from src.rag.bm25 import build_sidecar
-        from src.tools.rag import _retrieve_from_index
+        from cogtrix_core.rag.bm25 import build_sidecar
+        from cogtrix_core.tools.rag import _retrieve_from_index
 
         # Sidecar has 6 chunks; vector store has 6 chunks; both retrievers
         # over-fetch to 6, but ``k=2`` must clamp the final return.
@@ -187,8 +187,8 @@ class TestHybridRetrievalWithSidecar:
         scores so the caller's existing sort-ascending logic keeps working
         without special-casing.  Verify the scores are monotonically
         increasing across the returned list."""
-        from src.rag.bm25 import build_sidecar
-        from src.tools.rag import _retrieve_from_index
+        from cogtrix_core.rag.bm25 import build_sidecar
+        from cogtrix_core.tools.rag import _retrieve_from_index
 
         chunks_text = [f"alpha beta gamma chunk {i}" for i in range(4)]
         sidecar = build_sidecar([_FakeDoc(t) for t in chunks_text])
@@ -223,7 +223,7 @@ class TestHybridGracefulDegradation:
     silently.  Retrieval is never WORSE than the baseline."""
 
     def test_corrupt_sidecar_falls_back(self, tmp_path: Path) -> None:
-        from src.tools.rag import _retrieve_from_index
+        from cogtrix_core.tools.rag import _retrieve_from_index
 
         # Garbage bytes — ``load_sidecar`` returns None, hybrid path
         # falls through.

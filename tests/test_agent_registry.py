@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from src.agent.registry import (
+from cogtrix_core.agent.registry import (
     AgentConfig,
     AgentRegistry,
     clear,
@@ -250,7 +250,7 @@ class TestModuleSingleton:
         assert list_agents() == []
 
     def test_load_from_config_via_singleton(self) -> None:
-        from src.agent.registry import load_from_config
+        from cogtrix_core.agent.registry import load_from_config
 
         class _Cfg:
             agents = {"singleton_agent": {"description": "loaded from config"}}
@@ -261,7 +261,7 @@ class TestModuleSingleton:
         assert a.description == "loaded from config"
 
     def test_merge_from_agents_md_via_singleton(self) -> None:
-        from src.agent.registry import merge_from_agents_md
+        from cogtrix_core.agent.registry import merge_from_agents_md
 
         defn = _FakeAgentDef("md_agent", description="from md")
         merge_from_agents_md({"md_agent": defn})

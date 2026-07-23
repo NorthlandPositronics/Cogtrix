@@ -14,7 +14,7 @@ os.environ.setdefault("COGTRIX_DB_URL", "sqlite+aiosqlite:///:memory:")
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage  # noqa: E402
 
-from src.orchestration.graph import build_agent_graph  # noqa: E402
+from cogtrix_core.orchestration.graph import build_agent_graph  # noqa: E402
 
 
 def _make_registry() -> MagicMock:

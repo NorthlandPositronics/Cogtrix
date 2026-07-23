@@ -26,9 +26,9 @@ from fastapi.testclient import TestClient  # noqa: E402
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine  # noqa: E402
 from sqlalchemy.pool import StaticPool  # noqa: E402
 
-from src.api.db.engine import Base, get_db  # noqa: E402
-from src.api.db.models import Organization  # noqa: E402
-from src.api.db.repositories.users import UserRepository  # noqa: E402
+from cogtrix_core.api.db.engine import Base, get_db  # noqa: E402
+from cogtrix_core.api.db.models import Organization  # noqa: E402
+from cogtrix_core.api.db.repositories.users import UserRepository  # noqa: E402
 
 _VALID_PASSWORD = "TestPass1!"
 
@@ -69,7 +69,7 @@ def _seed_user(sf, username, email, role, org_id):
     async def _run():
         async with sf() as db:
             repo = UserRepository(db)
-            from src.api.auth import hash_password
+            from cogtrix_core.api.auth import hash_password
 
             user = await repo.create(
                 user_id=_uid(),
@@ -120,10 +120,10 @@ def _make_app(sf, user_id, org_id, role="admin", *, bypass_auth=False):
     from fastapi import FastAPI, HTTPException, Request
     from fastapi.responses import JSONResponse
 
-    from src.api.auth import TokenData, get_current_user
-    from src.api.org_context import OrgContext, get_org_context
-    from src.api.routes import organizations as org_module
-    from src.api.schemas.common import APIError, APIResponse
+    from cogtrix_core.api.auth import TokenData, get_current_user
+    from cogtrix_core.api.org_context import OrgContext, get_org_context
+    from cogtrix_core.api.routes import organizations as org_module
+    from cogtrix_core.api.schemas.common import APIError, APIResponse
 
     app = FastAPI()
 

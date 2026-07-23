@@ -2,9 +2,13 @@
 requires = ["setuptools~=82.0"]
 build-backend = "setuptools.build_meta"
 
+[tool.setuptools.packages.find]
+include = ["cogtrix_core*"]
+namespaces = false
+
 [project]
 name = "cogtrix"
-version = "0.5.1"
+version = "0.5.2"
 description = "Modular AI assistant with 67 built-in tools, multi-provider LLM support, and hybrid memory"
 readme = "README.md"
 requires-python = "~=3.13.0"
@@ -24,12 +28,12 @@ dependencies = [
     # LangChain Ecosystem
     "langchain-core>=1.3.3",
     "langchain-ollama~=1.1.0",
-    "langchain-openai~=1.3.2",
+    "langchain-openai~=1.3.3",
     "langchain-text-splitters~=1.1.0",
     "langchain-community~=0.4.2",
     "langgraph~=1.2.6",
     # LLM Providers
-    "openai~=2.43.0",
+    "openai~=2.44.0",
     # Data Validation
     "pydantic~=2.13.4",
     # CLI & Display
@@ -47,10 +51,10 @@ dependencies = [
     "trafilatura~=2.1",          # web_search.py — HTML→Markdown extraction (ADR-0056)
     "tldextract~=5.3.1",         # web_search.py — registered-domain extraction (ADR-0056)
     "cachetools~=7.1.4",         # web_search.py — TTL cache for query results (ADR-0056)
-    "croniter~=6.0",             # cron_tools.py
-    "pluggy~=1.6",               # src/plugins/ — tool plugin system
+    "croniter~=6.2",             # cron_tools.py
+    "pluggy~=1.6",               # cogtrix_core/plugins/ — tool plugin system
     "prompt-toolkit>=3.0",       # pinned prompt input session
-    "opentelemetry-sdk>=1.41.1",
+    "opentelemetry-sdk>=1.43.0",
     "opentelemetry-api>=1.42.1",
     "opentelemetry-instrumentation-fastapi>=0.62b1",
     "opentelemetry-exporter-otlp-proto-grpc>=1.41.1",
@@ -84,7 +88,7 @@ rag-rerank = [
 ]
 search = [
     "tavily-python~=0.7.26",
-    "exa-py~=2.14.0",
+    "exa-py~=2.16.0",
     "google-search-results~=2.4.2",
 ]
 postgresql = ["asyncpg>=0.29.0"]
@@ -104,43 +108,43 @@ dev = [
     "pytest-cov~=7.1.0",
     "pytest-timeout~=2.4.0",
     "pytest-xdist~=3.8.0",
-    "coverage~=7.14.2",
+    "coverage~=7.15.0",
     "black~=26.5.1",
-    "ruff~=0.15.18",
+    "ruff~=0.15.20",
     "bandit~=1.9.4",
-    "pyright~=1.1.410",
+    "pyright~=1.1.411",
     "tavily-python~=0.7.26",
-    "exa-py~=2.14.0",
+    "exa-py~=2.16.0",
     "google-search-results~=2.4.2",
-    "mcp~=1.28.0",
-    "langchain-anthropic~=1.4.4",
+    "mcp~=1.28.1",
+    "langchain-anthropic~=1.4.8",
     "langchain-google-genai~=4.2.5",
     "argparse-manpage>=4",
     # #1879 Slice B — Redis rate-limit backend tests. fakeredis ships
     # the Lua extra (``lupa``) because ``limits`` uses EVALSHA in its
     # Redis storage; without it the test server raises
     # ``ResponseError: unknown command 'evalsha'``.
-    "redis>=8.0.0,<9",
-    "fakeredis[lua]>=2.30,<3",
+    "redis>=8.0.1,<9",
+    "fakeredis[lua]>=2.36.2,<3",
 ]
 science = [
-    "numpy~=2.4.6",
+    "numpy~=2.5.1",
 ]
 discord = [
     "discord.py>=2.3",
 ]
 slack = [
-    "slack-sdk>=3.42.0",
+    "slack-sdk>=3.43.0",
 ]
 mcp = [
-    "mcp~=1.28.0",
+    "mcp~=1.28.1",
 ]
 anthropic = [
-    "langchain-anthropic~=1.4.4",
+    "langchain-anthropic~=1.4.8",
 ]
 google = [
     "langchain-google-genai~=4.2.5",
-    "google-api-python-client>=2.197.0",
+    "google-api-python-client>=2.198.0",
     "google-auth-oauthlib>=1.4.0",
     "google-auth-httplib2>=0.2",
 ]
@@ -149,11 +153,11 @@ api = [
     "uvicorn[standard]~=0.49.0",
     "sqlalchemy[asyncio]~=2.0.51",
     "aiosqlite~=0.22.0",
-    "alembic~=1.18.0",
+    "alembic~=1.18.5",
     "pyjwt[crypto]~=2.13.0",
     "bcrypt~=5.0.0",
     "email-validator~=2.3.0",
-    "stripe>=15.2.1",
+    "stripe>=15.3.0",
 ]
 redis = [
     # Optional Redis-backed shared counter for the API rate limiter
@@ -161,11 +165,11 @@ redis = [
     # sliding-window counter across pods. Without this extra, the
     # rate limiter runs in-memory per process (correct for single-node
     # only). Install with:  pip install cogtrix[api,redis]
-    "redis>=8.0.0,<9",
+    "redis>=8.0.1,<9",
 ]
 
 [tool.hatch.build.targets.wheel]
-include = ["src/**", "man/**"]
+include = ["cogtrix_core/**", "man/**"]
 
 [project.scripts]
 make-man = "argparse_manpage:main"
@@ -199,14 +203,14 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"src/agent/core.py" = ["E501"]
-"src/tools/delegate.py" = ["E501"]
-"src/api/**" = ["B008"]
-"src/auth/**" = ["B008"]
+"cogtrix_core/agent/core.py" = ["E501"]
+"cogtrix_core/tools/delegate.py" = ["E501"]
+"cogtrix_core/api/**" = ["B008"]
+"cogtrix_core/auth/**" = ["B008"]
 "tests/**" = ["B008"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["src"]
+known-first-party = ["cogtrix_core"]
 
 [tool.black]
 line-length = 100
@@ -229,7 +233,7 @@ reportOptionalMemberAccess = "warning"
 reportOptionalCall = "warning"
 reportAttributeAccessIssue = "warning"
 reportArgumentType = "warning"
-exclude = ["src/api", "tests"]
+exclude = ["cogtrix_core/api", "tests"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -248,7 +252,7 @@ markers = [
 ]
 
 [tool.coverage.run]
-source = ["src"]
+source = ["cogtrix_core"]
 omit = ["tests/*", "venv/*", ".venv/*"]
 
 [tool.coverage.report]
@@ -263,22 +267,22 @@ dev = [
     "pytest-cov~=7.1.0",
     "pytest-timeout~=2.4.0",
     "pytest-xdist~=3.8.0",
-    "coverage~=7.14.2",
+    "coverage~=7.15.0",
     "black~=26.5.1",
-    "ruff~=0.15.18",
+    "ruff~=0.15.20",
     "bandit~=1.9.4",
-    "pyright~=1.1.410",
+    "pyright~=1.1.411",
     "tavily-python~=0.7.26",
-    "exa-py~=2.14.0",
+    "exa-py~=2.16.0",
     "google-search-results~=2.4.2",
-    "mcp~=1.28.0",
-    "langchain-anthropic~=1.4.4",
+    "mcp~=1.28.1",
+    "langchain-anthropic~=1.4.8",
     "langchain-google-genai~=4.2.5",
     "argparse-manpage>=4",
     # #1879 Slice B — Redis rate-limit backend tests. fakeredis ships
     # the Lua extra (``lupa``) because ``limits`` uses EVALSHA in its
     # Redis storage; without it the test server raises
     # ``ResponseError: unknown command 'evalsha'``.
-    "redis>=8.0.0,<9",
-    "fakeredis[lua]>=2.30,<3",
+    "redis>=8.0.1,<9",
+    "fakeredis[lua]>=2.36.2,<3",
 ]

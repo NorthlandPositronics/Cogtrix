@@ -46,7 +46,17 @@ success_criteria:
   # naming Yusuf when the stakeholder register chunk wasn't fully
   # retrieved.  The signal is "model engaged with the vendor-
   # ownership question" — not "model knew the exact name".
-  - "at_least_n_contains: 1 | Yusuf Almasi | Technical Account Manager | AcmeCloud TAM | TAM"
+  #
+  # #2426: also accept ``Tomislav Hessford`` — the corpus records R-13's
+  # owner as *"Tomislav Hessford (Sponsor — delegated to Yusuf Almasi for
+  # operational tracking)"* (05_risk_register.md), so naming the FORMAL
+  # owner is corpus-correct, not a miss.  Before this, a model that
+  # correctly answered "R-13 owner: Tomislav Hessford" was failed while a
+  # model naming only the delegate passed — under-crediting a grounded
+  # answer.  A wrong-only attribution (a hallucinated/other-risk name with
+  # neither the formal owner nor the delegate) still fails, and the
+  # corpus-attribution guard independently catches mis-attributions.
+  - "at_least_n_contains: 1 | Yusuf Almasi | Technical Account Manager | AcmeCloud TAM | TAM | Tomislav Hessford"
   - "not_contains: AWS"
   - "not_contains: Azure"
   - "not_contains: Google Cloud"

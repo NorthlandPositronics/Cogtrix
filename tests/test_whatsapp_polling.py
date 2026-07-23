@@ -10,9 +10,9 @@ import threading
 import time
 from unittest.mock import MagicMock, patch
 
-from src.assistant.channel import IncomingMessage
-from src.assistant.channels.whatsapp import WhatsAppChannel
-from src.tools._whatsapp_client import ChatOverview, Message, WahaClient
+from cogtrix_core.assistant.channel import IncomingMessage
+from cogtrix_core.assistant.channels.whatsapp import WhatsAppChannel
+from cogtrix_core.tools._whatsapp_client import ChatOverview, Message, WahaClient
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -364,7 +364,7 @@ class TestWhatsAppPolling:
 
 
 class TestGetChatMessagesClient:
-    @patch("src.tools._whatsapp_client.requests")
+    @patch("cogtrix_core.tools._whatsapp_client.requests")
     def test_get_chat_messages_client_method(self, mock_requests: MagicMock) -> None:
         mock_resp = MagicMock()
         mock_resp.status_code = 200
@@ -405,7 +405,7 @@ class TestGetChatMessagesClient:
         assert "filter.fromMe" not in params
         assert "filter.timestamp.gte" not in params
 
-    @patch("src.tools._whatsapp_client.requests")
+    @patch("cogtrix_core.tools._whatsapp_client.requests")
     def test_client_side_filtering(self, mock_requests: MagicMock) -> None:
         """Filters are applied in Python, not as query params (WAHA WEBJS bug workaround)."""
         mock_resp = MagicMock()
@@ -509,7 +509,7 @@ class TestChatOverviewArchived:
         ]
 
         client = WahaClient(base_url="http://localhost:3000")
-        with _patch("src.tools._whatsapp_client.requests") as mock_req:
+        with _patch("cogtrix_core.tools._whatsapp_client.requests") as mock_req:
             mock_req.get.return_value = raw_response
             chats = client.get_chats_overview()
 
@@ -532,7 +532,7 @@ class TestChatOverviewArchived:
         ]
 
         client = WahaClient(base_url="http://localhost:3000")
-        with _patch("src.tools._whatsapp_client.requests") as mock_req:
+        with _patch("cogtrix_core.tools._whatsapp_client.requests") as mock_req:
             mock_req.get.return_value = raw_response
             chats = client.get_chats_overview()
 
@@ -548,7 +548,7 @@ class TestChatOverviewArchived:
         raw_response.json.return_value = [{"id": "789@c.us", "name": "Carol", "lastMessage": None}]
 
         client = WahaClient(base_url="http://localhost:3000")
-        with _patch("src.tools._whatsapp_client.requests") as mock_req:
+        with _patch("cogtrix_core.tools._whatsapp_client.requests") as mock_req:
             mock_req.get.return_value = raw_response
             chats = client.get_chats_overview()
 
@@ -572,7 +572,7 @@ class TestChatOverviewArchived:
         ]
 
         client = WahaClient(base_url="http://localhost:3000")
-        with _patch("src.tools._whatsapp_client.requests") as mock_req:
+        with _patch("cogtrix_core.tools._whatsapp_client.requests") as mock_req:
             mock_req.get.return_value = raw_response
             chats = client.get_chats_overview()
 

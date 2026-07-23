@@ -91,7 +91,7 @@ WORKDIR /app
 # can distinguish builds that share the same pyproject.toml version
 # (release-please updates that lazily, so several `next` builds report
 # the same x.y.z). The banner falls back to bare `__version__` when
-# GIT_COMMIT is unset — see src/_version.py:get_version_string.
+# GIT_COMMIT is unset — see cogtrix_core/_version.py:get_version_string.
 # Pass with: docker build --build-arg GIT_COMMIT=$(git rev-parse --short=7 HEAD) ...
 ARG GIT_COMMIT=""
 
@@ -146,7 +146,7 @@ COPY --chmod=0755 docker/docker-entrypoint.sh ./
 COPY alembic.ini ./
 COPY alembic/ ./alembic/
 COPY cogtrix.py ./
-COPY src/ ./src/
+COPY cogtrix_core/ ./cogtrix_core/
 
 VOLUME /data
 

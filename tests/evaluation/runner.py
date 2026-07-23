@@ -169,6 +169,14 @@ class ModelConfig:
     # in the models.yaml comment so it can be flipped back off once
     # the underlying bug is fixed.
     prefer_openrouter: bool = False
+    # Declarative inverse of ``prefer_openrouter`` (#2359).  When True and the
+    # model's own ``env_key`` is present in the environment, ``_build_llm``
+    # drops any higher-priority routing key (OpenRouter/Cerebras) and routes
+    # through the model's NATIVE provider (its ``base_url`` + ``env_key``).
+    # Used for native Moonshot Kimi so it runs against api.moonshot.* with the
+    # operator's Moonshot key rather than being hijacked by OpenRouter (which
+    # resolve_active_key returns first).  No effect if the native key is unset.
+    prefer_native: bool = False
     # Per-model retry backoff in seconds.  When set to a positive value,
     # ``_try_run_with_key`` sleeps this long *before* a transient /
     # empty-response retry attempt against this model.  Default 0 keeps
@@ -187,6 +195,25 @@ class ModelConfig:
     # models.yaml comment so it can be flipped back to 0 once the
     # underlying capacity flakiness clears.
     retry_backoff_seconds: int = 0
+    # Per-model sampling temperature.  Default ``None`` keeps the historical
+    # behaviour (the runner does not pin temperature; the underlying chat
+    # model uses its own default).  Set this when a model REQUIRES a specific
+    # temperature: native Moonshot Kimi K2.7 only accepts ``temperature: 1``
+    # and returns an API error for any other value (#2359).  When the caller
+    # passes an explicit temperature to ``_build_llm`` that still wins; this
+    # is the fallback used when the caller (e.g. the role-test harness) does
+    # not pin one.  Applies on every route (native / OpenRouter / Cerebras),
+    # since the constraint is a property of the model, not the endpoint.
+    temperature: float | None = None
+    # #2484: the model's real INPUT context window (tokens).  Declared so
+    # ``_build_llm`` can stamp it onto the built llm (``_cogtrix_context_window``),
+    # letting the pre-flight compression guard + ``build_agent_graph``'s default-cap
+    # scaler size to the true window instead of the 32768 ModelConfig default.
+    # Without it, big-window models (Kimi 262k, DeepSeek 128k) are force-compressed
+    # to a flat 40k on EVERY turn — the compression storm that made RAG-heavy
+    # role-test scenarios minutes-per-turn slow and unrepresentative of production
+    # (which resolves the cap via ``Config.resolve_context_max_tokens``).
+    context_window: int | None = None
 
 
 def load_model_registry(path: Path = _MODELS_YAML) -> list[ModelConfig]:
@@ -605,6 +632,15 @@ class EvalResult:
     error: str | None = None
     notes: str = ""
 
+    # #2212: True when a turn hit the LangGraph recursion cap and was finalized
+    # via the production-equivalent step-limit recovery (re-invoke once with a
+    # "answer now, no more tools" nudge) instead of crashing — mirroring
+    # run_agent / recover_from_step_limit and the role_sysadmin (#2368) / role_swe
+    # harnesses. REPORTED only; it never gates ``passed`` (the recovered turn is
+    # still scored on its content), so a looped-but-recovered pass stays
+    # distinguishable from a clean first-pass and honest failures still fail.
+    recovered_from_step_limit: bool = False
+
     # Tier 1 metrics (parallel with Gate 1 synthetic harness)
     tool_selection_rate: float = 0.0  # % of required tools called
     task_completion: bool = False
@@ -658,6 +694,7 @@ class EvalResult:
             "final_response": self.final_response[:500],
             "error": self.error,
             "notes": self.notes,
+            "recovered_from_step_limit": self.recovered_from_step_limit,
             "tool_selection_rate": self.tool_selection_rate,
             "task_completion": self.task_completion,
             "prompt_tokens": self.prompt_tokens,
@@ -678,7 +715,7 @@ class EvalResult:
 # ── LLM instantiation ─────────────────────────────────────────────────────────
 
 
-def _build_llm(
+def _build_raw_llm(
     model: ModelConfig,
     temperature: float | None = None,
     active_key: tuple[str, str] | None = None,
@@ -699,8 +736,24 @@ def _build_llm(
     from langchain_openai import ChatOpenAI
 
     kwargs: dict[str, Any] = {}
-    if temperature is not None:
-        kwargs["temperature"] = temperature
+    # An explicit caller temperature wins; otherwise fall back to the model's
+    # own pinned temperature (e.g. Moonshot Kimi K2.7 requires temperature=1,
+    # #2359).  Applied here — before the route branches below — so it reaches
+    # the OpenRouter / Cerebras / native ChatOpenAI alike via **kwargs.
+    _temperature = temperature if temperature is not None else model.temperature
+    if _temperature is not None:
+        kwargs["temperature"] = _temperature
+
+    # ── Force the model's NATIVE provider when it asks for it (#2359) ──────────
+    # A higher-priority routing key (e.g. OpenRouter, which resolve_active_key
+    # returns first) would otherwise hijack a model that the operator wants run
+    # natively.  ``prefer_native`` is the declarative inverse of
+    # ``prefer_openrouter``: when set AND the model's own env_key is present, we
+    # drop the routing key so the native-provider branch below uses the model's
+    # base_url + key (native Moonshot Kimi runs against api.moonshot.* with the
+    # COGTRIX_PROVIDER_KIMI_API_KEY, not via OpenRouter).
+    if model.prefer_native and os.environ.get(model.env_key, ""):
+        active_key = None
 
     # ── Route through the active priority key when available ──────────────────
     if active_key is not None:
@@ -756,7 +809,7 @@ def _build_llm(
         # is selected automatically for api.deepseek.com. Direct ChatOpenAI
         # instantiation bypasses the subclass and causes HTTP 400 on turn ≥ 2
         # for thinking-mode models (deepseek-reasoner / deepseek-v4-flash).
-        from src.providers import create_chat_model
+        from cogtrix_core.providers import create_chat_model
 
         return create_chat_model(
             "openai",
@@ -769,7 +822,95 @@ def _build_llm(
     raise ValueError(f"Unknown provider '{model.provider}' for model '{model.id}'.")
 
 
+def _build_llm(
+    model: ModelConfig,
+    temperature: float | None = None,
+    active_key: tuple[str, str] | None = None,
+) -> Any:
+    """Build the model's LLM (see :func:`_build_raw_llm`) and stamp its declared
+    input window on the result (#2484).
+
+    Production's ``create_chat_model`` stamps ``_cogtrix_context_window`` on its
+    wrapper so the pre-flight compression guard sizes to the real window; the
+    eval's raw ``ChatOpenAI`` routes don't, so a big-window model got capped at
+    the flat 40k default and force-compressed every turn.  Stamping the declared
+    ``model.context_window`` here (a harmless no-op when undeclared) makes the
+    eval measure production's resolved behaviour.
+    """
+    llm = _build_raw_llm(model, temperature=temperature, active_key=active_key)
+    win = model.context_window
+    if isinstance(win, int) and not isinstance(win, bool) and win > 0:
+        try:
+            llm._cogtrix_context_window = win  # type: ignore[attr-defined]
+        except (AttributeError, TypeError):  # pragma: no cover — frozen/exotic objects
+            pass
+    return llm
+
+
 # ── Runner ────────────────────────────────────────────────────────────────────
+
+#: Tight budget for the step-limit recovery re-invoke — mirrors
+#: ``recover_from_step_limit``'s ``retry_config["recursion_limit"] = 4`` in
+#: cogtrix_core/orchestration/phases.py (at most 1 tool call + a final answer). Same
+#: constant as the role_sysadmin (#2368) / role_swe harnesses.
+_STEP_LIMIT_RECOVERY_LIMIT = 4
+
+
+def _invoke_with_step_limit_recovery(
+    graph: Any, invoke_state: dict, config: dict
+) -> tuple[dict, bool]:
+    """Drive one turn to completion, recovering at the recursion cap like production.
+
+    The Gate-2 harness used to call ``graph.invoke`` raw, so a
+    ``GraphRecursionError`` propagated and the turn was scored as a crash
+    (``tools=0 turns=0 error=Recursion limit…`` — #2212). But production's
+    ``run_agent`` does NOT crash there: ``recover_from_step_limit`` re-invokes
+    once with a tight "answer now, no more tools" nudge and finalizes a
+    best-effort turn. The raw-invoke harness OVER-reported failures vs the live
+    product — a weak model that gathered what it needed and then looped read as a
+    hard crash on exactly the runs we most want to score.
+
+    Mirror production (same fix as tests/role_sysadmin #2368 and tests/role_swe):
+    stream so we keep the latest full state, and on ``GraphRecursionError``
+    re-invoke once with the finalize nudge under ``_STEP_LIMIT_RECOVERY_LIMIT``
+    instead of propagating the crash. Returns ``(final_state, recovered)`` where
+    ``recovered`` is reported but never gates the pass — the recovered turn is
+    still scored on its content, so honest failures still fail.
+    """
+    from langchain_core.messages import HumanMessage
+    from langgraph.errors import GraphRecursionError
+
+    last: dict = dict(invoke_state)
+
+    def _drain(seed_messages: list, limit: int) -> None:
+        nonlocal last
+        cfg = dict(config)
+        cfg["recursion_limit"] = limit
+        for state in graph.stream({"messages": seed_messages}, config=cfg, stream_mode="values"):
+            if isinstance(state, dict) and "messages" in state:
+                last = state
+
+    # The harness always sets recursion_limit (scenario.max_turns * 5); the
+    # fallback only guards a programmatic caller that omitted it.
+    base_limit = config.get("recursion_limit", 60)
+    recovered = False
+    try:
+        _drain(list(invoke_state.get("messages", [])), base_limit)
+    except GraphRecursionError:
+        recovered = True
+        nudge = HumanMessage(
+            content=(
+                "Please provide your final response now. Summarize what you have "
+                "found so far. Do NOT call any more tools — just answer with the "
+                "information you already have."
+            )
+        )
+        try:
+            _drain(list(last.get("messages", [])) + [nudge], _STEP_LIMIT_RECOVERY_LIMIT)
+        except GraphRecursionError:
+            # Recovery itself capped — keep the trail we have; still no crash.
+            pass
+    return last, recovered
 
 
 def run_scenario(
@@ -792,7 +933,7 @@ def run_scenario(
     """
     from langchain_core.messages import AIMessage, HumanMessage
 
-    from src.orchestration.graph import build_agent_graph
+    from cogtrix_core.orchestration.graph import build_agent_graph
 
     start = time.monotonic()
 
@@ -878,6 +1019,7 @@ def run_scenario(
         state: dict[str, Any] = {"messages": []}
         per_turn_failed: list[bool] = []
         per_turn_results: list[TurnResult] = []
+        recovered_from_step_limit = False  # #2212: reported, never gates the pass
 
         for turn_idx, turn in enumerate(effective_turns):
             msg_offset = len(state["messages"])
@@ -886,13 +1028,16 @@ def run_scenario(
                 HumanMessage(content=turn.user_prompt)
             ]
             executor = ThreadPoolExecutor(max_workers=1)
+            # #2212: recover at the recursion cap like production instead of
+            # scoring a crash — see _invoke_with_step_limit_recovery.
             future = executor.submit(
-                graph.invoke,
+                _invoke_with_step_limit_recovery,
+                graph,
                 invoke_state,
-                config={"recursion_limit": scenario.max_turns * 5},
+                {"recursion_limit": scenario.max_turns * 5},
             )
             try:
-                turn_result = future.result(timeout=timeout)
+                turn_result, turn_recovered = future.result(timeout=timeout)
             except FutureTimeoutError:
                 future.cancel()
                 executor.shutdown(wait=False)
@@ -903,6 +1048,7 @@ def run_scenario(
             else:
                 executor.shutdown(wait=True)
 
+            recovered_from_step_limit = recovered_from_step_limit or turn_recovered
             state = turn_result
             turn_messages = state["messages"][msg_offset:]
             turn_final = ""
@@ -1002,12 +1148,13 @@ def run_scenario(
         tool_errors=tool_errors_observed,
         tool_errors_unrecovered=tool_errors_unrecovered,
         turn_results=per_turn_results,
+        recovered_from_step_limit=recovered_from_step_limit,
     )
 
 
 _TOOL_ERROR_MARKERS: tuple[str, ...] = (
     # The orchestration graph wraps any tool-raised exception with this
-    # prefix (see src/orchestration/graph.py: _invoke_one — "Error
+    # prefix (see cogtrix_core/orchestration/graph.py: _invoke_one — "Error
     # executing {tool}: {exc}"). Pydantic ValidationErrors, network
     # exceptions, and uncaught provider errors all surface this way.
     "error executing ",

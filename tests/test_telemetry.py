@@ -6,7 +6,7 @@ from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 # Module-level tracer reference
-from src.observability import tracing
+from cogtrix_core.observability import tracing
 
 
 @pytest.fixture(autouse=True)
@@ -19,11 +19,11 @@ def reset_tracer():
 
 
 def test_setup_telemetry_noop_when_endpoint_missing(monkeypatch):
-    from src.observability.tracing import setup_tracing
+    from cogtrix_core.observability.tracing import setup_tracing
 
     set_provider_calls: list[object] = []
     monkeypatch.setattr(
-        "src.observability.tracing.trace.set_tracer_provider",
+        "cogtrix_core.observability.tracing.trace.set_tracer_provider",
         lambda provider: set_provider_calls.append(provider),
     )
 
@@ -33,7 +33,7 @@ def test_setup_telemetry_noop_when_endpoint_missing(monkeypatch):
 
 def test_setup_tracing_success_with_valid_endpoint(monkeypatch, tmp_path):
     """Test setup_tracing() success path with a valid endpoint."""
-    from src.observability.tracing import setup_tracing
+    from cogtrix_core.observability.tracing import setup_tracing
 
     # Set a valid endpoint but mock the actual OTLP exporter to avoid network calls
     monkeypatch.setenv("OTEL_TRACE_SAMPLING_RATE", "0.5")
@@ -54,9 +54,9 @@ def test_setup_tracing_success_with_valid_endpoint(monkeypatch, tmp_path):
         def export(self, spans):
             return 0
 
-    monkeypatch.setattr("src.observability.tracing.OTLPSpanExporter", MockExporter)
+    monkeypatch.setattr("cogtrix_core.observability.tracing.OTLPSpanExporter", MockExporter)
     monkeypatch.setattr(
-        "src.observability.tracing.trace.set_tracer_provider",
+        "cogtrix_core.observability.tracing.trace.set_tracer_provider",
         lambda provider: export_calls.append(("provider_set", type(provider).__name__)),
     )
 
@@ -81,14 +81,14 @@ def test_get_sampling_rate_default(monkeypatch):
     """Test _get_sampling_rate() with no env var set."""
     monkeypatch.delenv("OTEL_TRACE_SAMPLING_RATE", raising=False)
 
-    from src.observability.tracing import _get_sampling_rate
+    from cogtrix_core.observability.tracing import _get_sampling_rate
 
     assert _get_sampling_rate() == 0.1  # Default
 
 
 def test_get_sampling_rate_valid(monkeypatch):
     """Test _get_sampling_rate() with valid values."""
-    from src.observability.tracing import _get_sampling_rate
+    from cogtrix_core.observability.tracing import _get_sampling_rate
 
     # Test various valid values
     for rate_str, expected in [
@@ -104,7 +104,7 @@ def test_get_sampling_rate_valid(monkeypatch):
 
 def test_get_sampling_rate_boundary_clamping(monkeypatch):
     """Test _get_sampling_rate() clamps out-of-range values to [0.0, 1.0]."""
-    from src.observability.tracing import _get_sampling_rate
+    from cogtrix_core.observability.tracing import _get_sampling_rate
 
     # Values above 1.0 should be clamped to 1.0
     monkeypatch.setenv("OTEL_TRACE_SAMPLING_RATE", "1.5")
@@ -119,7 +119,7 @@ def test_get_sampling_rate_invalid_string(monkeypatch):
     """Test _get_sampling_rate() with invalid string falls back to default."""
     monkeypatch.setenv("OTEL_TRACE_SAMPLING_RATE", "not-a-number")
 
-    from src.observability.tracing import _get_sampling_rate
+    from cogtrix_core.observability.tracing import _get_sampling_rate
 
     assert _get_sampling_rate() == 0.1  # Default
 
@@ -128,21 +128,21 @@ def test_get_sampling_rate_empty_string(monkeypatch):
     """Test _get_sampling_rate() with empty string falls back to default."""
     monkeypatch.setenv("OTEL_TRACE_SAMPLING_RATE", "")
 
-    from src.observability.tracing import _get_sampling_rate
+    from cogtrix_core.observability.tracing import _get_sampling_rate
 
     assert _get_sampling_rate() == 0.1  # Default
 
 
 def test_normalize_attribute_value_none():
     """Test _normalize_attribute_value() with None."""
-    from src.observability.tracing import _normalize_attribute_value
+    from cogtrix_core.observability.tracing import _normalize_attribute_value
 
     assert _normalize_attribute_value(None) is None
 
 
 def test_normalize_attribute_value_basic_types():
     """Test _normalize_attribute_value() with basic types."""
-    from src.observability.tracing import _normalize_attribute_value
+    from cogtrix_core.observability.tracing import _normalize_attribute_value
 
     # String should be scrubbed
     assert isinstance(_normalize_attribute_value("test"), str)
@@ -155,7 +155,7 @@ def test_normalize_attribute_value_basic_types():
 
 def test_normalize_attribute_value_bytes():
     """Test _normalize_attribute_value() with bytes."""
-    from src.observability.tracing import _normalize_attribute_value
+    from cogtrix_core.observability.tracing import _normalize_attribute_value
 
     result = _normalize_attribute_value(b"hello")
     assert isinstance(result, str)
@@ -164,7 +164,7 @@ def test_normalize_attribute_value_bytes():
 
 def test_normalize_attribute_value_list():
     """Test _normalize_attribute_value() with list."""
-    from src.observability.tracing import _normalize_attribute_value
+    from cogtrix_core.observability.tracing import _normalize_attribute_value
 
     result = _normalize_attribute_value([1, "two", None])
     assert isinstance(result, list)
@@ -174,7 +174,7 @@ def test_normalize_attribute_value_list():
 
 def test_normalize_attribute_value_tuple():
     """Test _normalize_attribute_value() with tuple."""
-    from src.observability.tracing import _normalize_attribute_value
+    from cogtrix_core.observability.tracing import _normalize_attribute_value
 
     result = _normalize_attribute_value((1, 2, 3))
     assert isinstance(result, list)
@@ -184,7 +184,7 @@ def test_normalize_attribute_value_tuple():
 
 def test_normalize_attribute_value_dict_converts_to_string():
     """Test _normalize_attribute_value() with dict (converts to string)."""
-    from src.observability.tracing import _normalize_attribute_value
+    from cogtrix_core.observability.tracing import _normalize_attribute_value
 
     result = _normalize_attribute_value({"key": "value"})
     assert isinstance(result, str)
@@ -195,7 +195,7 @@ def test_normalize_attribute_value_dict_converts_to_string():
 def test_normalize_attribute_value_scrubs_secrets(monkeypatch):
     """Test _normalize_attribute_value() scrubs secrets from values."""
     monkeypatch.setenv("SCRUB_SECRETS_PATTERN", r"(?i)api.?key|secret|token")
-    from src.observability.tracing import _normalize_attribute_value
+    from cogtrix_core.observability.tracing import _normalize_attribute_value
 
     # API key should be scrubbed
     result = _normalize_attribute_value("api_key=sk-12345")
@@ -204,7 +204,7 @@ def test_normalize_attribute_value_scrubs_secrets(monkeypatch):
 
 def test_scrub_span_attributes():
     """Test scrub_span_attributes() with a dictionary of attributes."""
-    from src.observability.tracing import scrub_span_attributes
+    from cogtrix_core.observability.tracing import scrub_span_attributes
 
     attrs = {
         "key1": "value1",
@@ -229,7 +229,7 @@ def test_get_trace_id_no_span(monkeypatch):
     # Mock trace.get_current_span to return None
     monkeypatch.setattr("opentelemetry.trace.get_current_span", lambda: None)
 
-    from src.observability.tracing import get_trace_id
+    from cogtrix_core.observability.tracing import get_trace_id
 
     assert get_trace_id() is None
 
@@ -239,21 +239,21 @@ def test_get_span_id_no_span(monkeypatch):
     # Mock trace.get_current_span to return None
     monkeypatch.setattr("opentelemetry.trace.get_current_span", lambda: None)
 
-    from src.observability.tracing import get_span_id
+    from cogtrix_core.observability.tracing import get_span_id
 
     assert get_span_id() is None
 
 
 def test_start_span_with_attributes(monkeypatch):
     """Test start_span() records attributes correctly."""
-    from src.observability.tracing import start_span
+    from cogtrix_core.observability.tracing import start_span
 
     exporter = InMemorySpanExporter()
     provider = TracerProvider()
     provider.add_span_processor(SimpleSpanProcessor(exporter))
     tracer = provider.get_tracer("tests.telemetry")
 
-    monkeypatch.setattr("src.observability.tracing.trace.get_tracer", lambda name: tracer)
+    monkeypatch.setattr("cogtrix_core.observability.tracing.trace.get_tracer", lambda name: tracer)
 
     with start_span(
         "test-span",
@@ -279,14 +279,14 @@ def test_start_span_with_attributes(monkeypatch):
 
 def test_start_http_span(monkeypatch):
     """Test start_http_span() creates span with HTTP attributes."""
-    from src.observability.tracing import start_http_span
+    from cogtrix_core.observability.tracing import start_http_span
 
     exporter = InMemorySpanExporter()
     provider = TracerProvider()
     provider.add_span_processor(SimpleSpanProcessor(exporter))
     tracer = provider.get_tracer("tests.telemetry")
 
-    monkeypatch.setattr("src.observability.tracing.trace.get_tracer", lambda name: tracer)
+    monkeypatch.setattr("cogtrix_core.observability.tracing.trace.get_tracer", lambda name: tracer)
 
     with start_http_span("GET", "/api/test", attributes={"http.status_code": 200}):
         pass
@@ -303,14 +303,14 @@ def test_start_http_span(monkeypatch):
 
 def test_start_llm_span(monkeypatch):
     """Test start_llm_span() creates span with LLM attributes."""
-    from src.observability.tracing import start_llm_span
+    from cogtrix_core.observability.tracing import start_llm_span
 
     exporter = InMemorySpanExporter()
     provider = TracerProvider()
     provider.add_span_processor(SimpleSpanProcessor(exporter))
     tracer = provider.get_tracer("tests.telemetry")
 
-    monkeypatch.setattr("src.observability.tracing.trace.get_tracer", lambda name: tracer)
+    monkeypatch.setattr("cogtrix_core.observability.tracing.trace.get_tracer", lambda name: tracer)
 
     with start_llm_span(
         "openai",
@@ -331,14 +331,14 @@ def test_start_llm_span(monkeypatch):
 
 def test_start_tool_span_scrubs_tool_args(monkeypatch):
     """Test start_tool_span() scrubs tool args from span attributes."""
-    from src.observability.tracing import start_tool_span
+    from cogtrix_core.observability.tracing import start_tool_span
 
     exporter = InMemorySpanExporter()
     provider = TracerProvider()
     provider.add_span_processor(SimpleSpanProcessor(exporter))
     tracer = provider.get_tracer("tests.telemetry")
 
-    monkeypatch.setattr("src.observability.tracing.trace.get_tracer", lambda name: tracer)
+    monkeypatch.setattr("cogtrix_core.observability.tracing.trace.get_tracer", lambda name: tracer)
 
     with start_tool_span(
         "search_database",
@@ -361,14 +361,14 @@ def test_start_tool_span_scrubs_tool_args(monkeypatch):
 
 def test_start_db_span_truncates_query(monkeypatch):
     """Test start_db_span() truncates long queries and scrubs secrets."""
-    from src.observability.tracing import start_db_span
+    from cogtrix_core.observability.tracing import start_db_span
 
     exporter = InMemorySpanExporter()
     provider = TracerProvider()
     provider.add_span_processor(SimpleSpanProcessor(exporter))
     tracer = provider.get_tracer("tests.telemetry")
 
-    monkeypatch.setattr("src.observability.tracing.trace.get_tracer", lambda name: tracer)
+    monkeypatch.setattr("cogtrix_core.observability.tracing.trace.get_tracer", lambda name: tracer)
 
     # Create a long query with potential PII
     # Standalone column names should NOT be scrubbed; key-value patterns SHOULD be
@@ -402,14 +402,14 @@ def test_start_db_span_truncates_query(monkeypatch):
 
 def test_start_mcp_span(monkeypatch):
     """Test start_mcp_span() creates span with MCP attributes."""
-    from src.observability.tracing import start_mcp_span
+    from cogtrix_core.observability.tracing import start_mcp_span
 
     exporter = InMemorySpanExporter()
     provider = TracerProvider()
     provider.add_span_processor(SimpleSpanProcessor(exporter))
     tracer = provider.get_tracer("tests.telemetry")
 
-    monkeypatch.setattr("src.observability.tracing.trace.get_tracer", lambda name: tracer)
+    monkeypatch.setattr("cogtrix_core.observability.tracing.trace.get_tracer", lambda name: tracer)
 
     with start_mcp_span(
         "server-1",
@@ -435,7 +435,7 @@ def test_start_mcp_span(monkeypatch):
 
 def test_full_observability_workflow(monkeypatch):
     """Integration test: full workflow through tracing functions."""
-    from src.observability.tracing import (
+    from cogtrix_core.observability.tracing import (
         setup_tracing,
         start_http_span,
         start_llm_span,
@@ -449,7 +449,7 @@ def test_full_observability_workflow(monkeypatch):
         captured_provider.append(provider)
 
     monkeypatch.setattr(
-        "src.observability.tracing.trace.set_tracer_provider",
+        "cogtrix_core.observability.tracing.trace.set_tracer_provider",
         capture_provider,
     )
 
@@ -460,13 +460,13 @@ def test_full_observability_workflow(monkeypatch):
 
     # Set the tracer provider to our test provider so spans go to our exporter
     monkeypatch.setattr(
-        "src.observability.tracing.trace.get_tracer",
+        "cogtrix_core.observability.tracing.trace.get_tracer",
         lambda name: provider.get_tracer(name),
     )
 
     # Mock OTLPSpanExporter to return our exporter
     monkeypatch.setattr(
-        "src.observability.tracing.OTLPSpanExporter",
+        "cogtrix_core.observability.tracing.OTLPSpanExporter",
         lambda *args, **kwargs: exporter,
     )
 

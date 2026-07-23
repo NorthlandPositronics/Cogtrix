@@ -1,11 +1,11 @@
-"""Tests for src/api/schemas/config.py — providers, models, config view/edit, wizard."""
+"""Tests for cogtrix_core/api/schemas/config.py — providers, models, config view/edit, wizard."""
 
 from __future__ import annotations
 
 import pytest
 from pydantic import ValidationError
 
-from src.api.schemas.config import (
+from cogtrix_core.api.schemas.config import (
     ConfigOut,
     ConfigPatchRequest,
     ConfigReloadResponse,

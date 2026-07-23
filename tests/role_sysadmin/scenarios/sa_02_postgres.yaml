@@ -1,0 +1,30 @@
+id: role_sa_02_postgres
+area: provisioning
+title: Install PostgreSQL and provision an application database + user
+
+description: |
+  Provisioning & services competency on a stateful service: install PostgreSQL,
+  create an application database and a login role with a password, ensure the
+  server is running now and enabled on boot, and confirm the role can actually
+  connect to the database over TCP. A run that creates the role but not the
+  database (or sets no password, or leaves the cluster down) fails the live check.
+
+assignment: |
+  Please set up PostgreSQL on this server for a new application:
+    - install PostgreSQL and make sure it is running now and starts on boot;
+    - create a database named "appdb";
+    - create a login role named "appuser" with the password "Cogtrix-pw-2026";
+    - make "appuser" able to connect to "appdb" over a local TCP connection
+      (host 127.0.0.1).
+  Let me know when it's done and how you verified the connection works.
+
+acceptance:
+  check: checks/sa_02_check.sh
+
+personas:
+  lead:
+    default_scope_answer: "Use your best judgement; a standard single-node local install is fine."
+    scope_answers:
+      owner: "appuser should be able to use appdb; making appuser the owner of appdb is fine."
+      version: "Whatever the distro's default PostgreSQL version is, is fine."
+      remote: "Local TCP on 127.0.0.1 only — no remote/network access needed."

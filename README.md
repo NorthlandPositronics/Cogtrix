@@ -117,24 +117,26 @@ Full reference: **[Configuration Guide](docs/CONFIGURATION.md)**.
 
 ## 💬 Interactive commands
 
-| Command | Aliases | What it does |
-|---|---|---|
-| `/help [cmd]` | `/h`, `/?` | List commands or detailed help |
-| `/think <task>` | `/T` | Tree‑of‑Thought deep reasoning |
-| `/delegate <task>` | `/d` | Parallel multi-model investigation |
-| `/tools [search\|load\|enable\|disable]` | `/t`, `/tool` | Inspect and manage the toolbox |
-| `/model [name]` | `/m` | Show or switch LLM |
-| `/mode [name]` | `/M` | Show or switch memory mode (`conversation`, `code`, `reasoning`) |
-| `/session [id]` | `/s` | Show or switch session |
-| `/setup` | — | Interactive setup wizard |
-| `/approve` | `/a` | Toggle tool auto-approval (also `-y` at startup) |
-| `/paste` | `/P` | Multi-line paste mode |
-| `/clear` | `/c` | Clear conversation history |
-| `/optimizer [prompt]` | `/o` | Toggle prompt optimizer / force-optimize a prompt |
-| `/mcp [restart [name]]` | — | Manage MCP server connections |
-| `/info` | `/i` | Session info (provider, model, mode) |
-| `/quit` | `/exit`, `/q` | Exit |
-| `!<command>` | — | Inline shell, e.g. `!ls -la` |
+| Command | What it does |
+|---|---|
+| `/help [cmd]` | List commands or detailed help |
+| `/think <task>` | Tree‑of‑Thought deep reasoning |
+| `/delegate <task>` | Parallel multi-model investigation |
+| `/tools [search\|load\|enable\|disable]` | Inspect and manage the toolbox |
+| `/model [name]` | Show or switch LLM |
+| `/mode [name]` | Show or switch memory mode (`conversation`, `code`, `reasoning`) |
+| `/session [id]` | Show or switch session |
+| `/setup` | Interactive setup wizard |
+| `/approve` | Toggle tool auto-approval (also `-y` at startup) |
+| `/paste` | Multi-line paste mode |
+| `/clear` | Clear conversation history |
+| `/optimizer [prompt]` | Toggle prompt optimizer / force-optimize a prompt |
+| `/mcp [restart [name]]` | Manage MCP server connections |
+| `/info` | Session info (provider, model, mode) |
+| `/quit` | Exit |
+| `!<command>` | Inline shell, e.g. `!ls -la` |
+
+A few commands have short aliases: `/memory` → `/mem`, `/tasks` → `/task`, `/goal` → `/goals`, `/export` → `/save`.
 
 Arrow keys, Home/End, and history all work via `readline`.
 
@@ -159,7 +161,7 @@ Arrow keys, Home/End, and history all work via `readline`.
 | **Knowledge (RAG)** | `query_knowledge_base`, `save_to_knowledge_base` |
 | **Messaging** | WhatsApp via [Waha](https://waha.devlike.pro/), Telegram via bot token |
 
-**Tools auto-hide when their API keys are missing** — no errors, no clutter. The startup banner reports `Tools: [██████████░░] 41 on demand (3 unavailable)` and the agent loads what it needs through an internal `request_tools` meta-tool. You don't manage any of this. Full parameter reference: **[Tools Reference](docs/TOOLS_REFERENCE.md)**.
+**Tools auto-hide when their API keys are missing** — no errors, no clutter. The `full` startup banner reports a summary line like `41 active (+3 on request)`, and the agent loads what it needs through an internal `request_tools` meta-tool. You don't manage any of this. Full parameter reference: **[Tools Reference](docs/TOOLS_REFERENCE.md)**.
 
 ---
 
@@ -206,8 +208,8 @@ Cogtrix ships a FastAPI server that exposes **159 REST endpoints across 27 route
 
 ```bash
 export COGTRIX_JWT_SECRET="$(python -c 'import secrets; print(secrets.token_hex(32))')"
-python -m src.api
-# or: python -m src.api --debug --reload
+python -m cogtrix_core.api
+# or: python -m cogtrix_core.api --debug --reload
 ```
 
 Interactive docs at `http://localhost:8000/api/v1/docs` (Swagger) and `/api/v1/redoc`.
@@ -252,7 +254,7 @@ Route map by group:
 | `ws://host/ws/v1/sessions/{id}` | WS | Streaming agent turns, tool confirmation, token events |
 | `ws://host/ws/v1/logs` | WS | Live log stream (admin only) |
 
-Full reference: **[API Reference](docs/API/OPENAPI.yaml)** · **[Client Contract](docs/API/CLIENT_CONTRACT.md)** · **[WebSocket Protocol](docs/API/WEBSOCKET_PROTOCOL.md)**.
+Full reference: **[API Overview](docs/API/OVERVIEW.md)** · **[Client Contract](docs/API/CLIENT_CONTRACT.md)** · **[WebSocket Protocol](docs/API/WEBSOCKET_PROTOCOL.md)**. The machine-readable OpenAPI 3.1 schema is served live at `/api/v1/openapi.json`.
 
 ---
 
@@ -302,7 +304,7 @@ Detailed debugging: run with `--debug` (logs every LLM call, tool input/output, 
 | [RAG Guide](docs/RAG_GUIDE.md) | Build a knowledge base from your documents |
 | [Architecture](docs/ARCHITECTURE.md) | System design, data flow, components |
 | [Development](docs/DEVELOPMENT.md) | Add tools, memory modes, slash commands; testing |
-| [API Reference](docs/API/OPENAPI.yaml) | OpenAPI 3.1 schema (also available as [JSON](docs/API/OPENAPI.json)) |
+| [API Reference](docs/API/OVERVIEW.md) | Transport layers, auth, surface map. The machine-readable OpenAPI 3.1 schema is served live at `/api/v1/openapi.json` by a running API instance (authoritative) |
 | [Client Contract](docs/API/CLIENT_CONTRACT.md) | TypeScript API types |
 | [WebSocket Protocol](docs/API/WEBSOCKET_PROTOCOL.md) | Streaming session protocol |
 

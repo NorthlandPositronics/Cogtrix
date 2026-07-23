@@ -15,16 +15,16 @@ import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from cogtrix import _build_agent_graph, _cleanup_milestones, _inject_milestones
-from src.agent.core import build_system_prompt, format_milestone_instructions
-from src.orchestration.intent import (
+from cogtrix_core.agent.core import build_system_prompt, format_milestone_instructions
+from cogtrix_core.orchestration.intent import (
     classify_think_task,
     prompt_requests_action,
     user_wants_deep_think,
     user_wants_delegation,
 )
-from src.orchestration.phases import agent_performed_writes
-from src.prompt.optimizer import Milestone, PromptPlan, optimize_prompt
-from src.tools.report_progress import create_report_progress_tool, set_progress_callback
+from cogtrix_core.orchestration.phases import agent_performed_writes
+from cogtrix_core.prompt.optimizer import Milestone, PromptPlan, optimize_prompt
+from cogtrix_core.tools.report_progress import create_report_progress_tool, set_progress_callback
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -103,11 +103,11 @@ REFACTOR_PROMPT = (
     "Refactor the authentication module to use JWT tokens instead of sessions. "
     "The config file is at /etc/app/config.yaml and contains the session secret key "
     "which should be replaced with a JWT signing key. Update all API endpoints in "
-    "src/api/ to validate JWT tokens from the Authorization header. The user model "
-    "is in src/models/user.py and needs a refresh_token field added. Write migration "
+    "cogtrix_core/api/ to validate JWT tokens from the Authorization header. The user model "
+    "is in cogtrix_core/models/user.py and needs a refresh_token field added. Write migration "
     "scripts for the database schema change. Ensure all existing tests in tests/auth/ "
     "still pass and add new tests for JWT token validation, expiry, and refresh flow. "
-    "The frontend at src/ui/auth.js also needs updating to store and send JWT tokens."
+    "The frontend at cogtrix_core/ui/auth.js also needs updating to store and send JWT tokens."
 )
 
 REFACTOR_OPTIMIZER_RESPONSE = (
@@ -115,11 +115,11 @@ REFACTOR_OPTIMIZER_RESPONSE = (
     "Migrate authentication from session-based to JWT tokens.\n\n"
     "**Constraints:**\n"
     "- Config at /etc/app/config.yaml — replace session secret with JWT signing key\n"
-    "- User model at src/models/user.py — add refresh_token field\n"
-    "- Frontend at src/ui/auth.js — store and send JWT tokens\n\n"
+    "- User model at cogtrix_core/models/user.py — add refresh_token field\n"
+    "- Frontend at cogtrix_core/ui/auth.js — store and send JWT tokens\n\n"
     "**Phases:**\n"
     "1. Update config and user model\n"
-    "2. Update API endpoints in src/api/ for JWT validation\n"
+    "2. Update API endpoints in cogtrix_core/api/ for JWT validation\n"
     "3. Write database migration scripts\n"
     "4. Update frontend auth handling\n"
     "5. Fix existing tests and add JWT-specific tests\n"

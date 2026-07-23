@@ -64,10 +64,13 @@ _SHARD_MAP: dict[str, frozenset[str]] = {
             "regression_web_search_no_external_url_recommendation_on_low_yield",
         }
     ),
-    # 120 + 120 + 180 + 180 = 600s
+    # 240 + 120 + 180 + 180 = 720s
     #   (regression_deepseek_native_tool_call_format bumped 60 → 120 alongside
     #    PR #1999 to give kimi-k2-5 enough room for the PR #1997 retry-backoff
-    #    path when Moonshot capacity is exhausted; see scenario YAML comment).
+    #    path when Moonshot capacity is exhausted; see scenario YAML comment.
+    #    procurement_supplier_registration bumped 120 → 240 (#2402): kimi-k2-6 is
+    #    slow and intermittently loops register_supplier, and 120s barely covers
+    #    even the happy path — the timeout reds this cell on unrelated PRs.)
     "C": frozenset(
         {
             "procurement_supplier_registration",
@@ -141,6 +144,52 @@ _JUDGE_PASS_THRESHOLD = 0.5
 # is only enforced when both estimate and actual cost are non-zero —
 # scenarios or models without pricing data opt out.
 _COST_CEILING_MULTIPLIER = 3.0
+
+# #2435 follow-up — step-limit-recovery convergence signal.
+#
+# #2442: the ORIGINAL per-cell FAIL shipped in #2441 was mis-calibrated — a CI cell
+# is one (shard × model) with only 2-4 scenarios, so an absolute floor of 2 over a
+# 2-4 denominator is unsound BOTH ways: it misses a single-scenario regression
+# (1 recovery, below the floor) AND flakes on two independent weak-model recoveries
+# (2/2 = 100%). Per-cell rate gating is the wrong granularity; a real convergence
+# gate needs a cross-cell rollup over the whole matrix keyed on (model, scenario)
+# — the follow-up. Until that lands, this per-cell check is ADVISORY-only (emits a
+# warning, never sets any_failures), so it can't red-X unrelated PRs while
+# delivering no real strictness. The SHARD_SUMMARY recovery-rate line stays
+# (observability). ``_recovery_gate_tripped`` is kept for the cross-cell rollup.
+
+
+def _parse_recovery_rate_env() -> float:
+    """Parse GATE2_MAX_RECOVERY_RATE defensively (#2442).
+
+    A malformed value must NOT raise at import — that would fail *every* Gate-2
+    cell with an opaque traceback. Fall back to the default + warn, and clamp to
+    ``[0.0, 1.0]`` (a value > 1 would silently disable the check forever).
+    """
+    raw = os.environ.get("GATE2_MAX_RECOVERY_RATE", "0.5")
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        _flushing_print(f"[gate2] WARN invalid GATE2_MAX_RECOVERY_RATE={raw!r}; using 0.5")
+        return 0.5
+    return min(1.0, max(0.0, val))
+
+
+_MAX_RECOVERY_RATE = _parse_recovery_rate_env()
+_MIN_RECOVERIES_TO_GATE = 2
+
+
+def _recovery_gate_tripped(recovered_runs: int, total_runs: int) -> bool:
+    """True when the step-limit-recovery rate signals a convergence regression.
+
+    Kept as the pure predicate for the cross-cell rollup (#2442 follow-up). NOTE:
+    it is NOT sound over a single 2-4-scenario cell (see the module note above) —
+    per-cell use is advisory-only. Trips when a floor (``>= _MIN_RECOVERIES_TO_GATE``)
+    AND the rate (``> _MAX_RECOVERY_RATE``) are both exceeded.
+    """
+    if total_runs <= 0 or recovered_runs < _MIN_RECOVERIES_TO_GATE:
+        return False
+    return (recovered_runs / total_runs) > _MAX_RECOVERY_RATE
 
 
 def _eligible_models(
@@ -472,6 +521,8 @@ def run_gate2_smoke(
     models: list[ModelConfig] | None = None,
     judge_model: str = _DEFAULT_JUDGE_MODEL,
     emit: Callable[[str], None] = _flushing_print,
+    recovery_report_dir: str | None = None,
+    shard_label: str = "?",
 ) -> int:
     """Run the Gate 2 smoke subset, trying API keys in priority order.
 
@@ -505,6 +556,11 @@ def run_gate2_smoke(
         return 0
 
     any_failures = False
+    total_runs = 0  # #2435: runs that actually executed (excludes key-exhaustion)
+    recovered_runs = 0  # ...of which finalized via step-limit recovery
+    passed_count = 0
+    # #2442(b): per-(model, scenario) recovery for the cross-cell rollup report.
+    report_scenarios_by_model: dict[str, list[dict[str, Any]]] = {}
 
     for scenario in smoke_scenarios:
         for model in all_smoke_models:
@@ -546,11 +602,25 @@ def run_gate2_smoke(
                 any_failures = True
                 continue
 
+            # #2435: count executed runs + recoveries for the convergence gate below.
+            total_runs += 1
+            if result.recovered_from_step_limit:
+                recovered_runs += 1
+
             score = score_result(scenario, result, judge_model=judge_model)
             # Strict gate: structural completion AND judge approval AND
             # within cost ceiling AND no transport error.  See _final_passed
             # for the rationale (issue #1268).
             final_passed = _final_passed(scenario, result, score)
+            if final_passed:
+                passed_count += 1
+            report_scenarios_by_model.setdefault(model.id, []).append(
+                {
+                    "id": scenario.id,
+                    "recovered": bool(result.recovered_from_step_limit),
+                    "passed": final_passed,
+                }
+            )
             cost_ceiling_breached = _cost_ceiling_breached(scenario, result)
 
             emit(
@@ -564,6 +634,9 @@ def run_gate2_smoke(
                 f"cost_usd={result.actual_cost_usd:.4f} "
                 f"budget_usd={scenario.budget_usd_estimate:.4f} "
                 f"error={result.error or 'none'}"
+                # #2212: flag a turn finalized via production-equivalent step-limit
+                # recovery (reported only — never gates the pass).
+                + (" recovered_from_step_limit=True" if result.recovered_from_step_limit else "")
             )
             if not result.task_completion:
                 missing = sorted(set(result.tool_calls_required) - set(result.tool_calls_made))
@@ -601,6 +674,39 @@ def run_gate2_smoke(
                     _final_text = _final_text[:600] + " …[truncated]"
                 emit(f"[gate2]   tools_called={result.tool_calls_made or '[]'}")
                 emit(f"[gate2]   final_response={_final_text!r}")
+
+    # #2435 recovery signal — observability + ADVISORY only (#2442).
+    # Always surface the per-cell recovery rate (observability). The per-cell
+    # THRESHOLD is only advisory here: over a single 2-4-scenario cell it both
+    # misses single-scenario regressions and flakes on two independent weak-model
+    # recoveries (#2442), so it must NOT set any_failures. The real strict gate is
+    # the cross-cell rollup (#2442 follow-up) which aggregates recoveries over the
+    # whole matrix keyed on (model, scenario). A recovered run still faces the full
+    # strict _final_passed bar individually, so correctness is never masked here.
+    _recovery_rate = (recovered_runs / total_runs) if total_runs else 0.0
+    emit(
+        f"[gate2] SHARD_SUMMARY total={total_runs} passed={passed_count} "
+        f"recovered_from_step_limit={recovered_runs} recovery_rate={_recovery_rate:.0%} "
+        f"(threshold={_MAX_RECOVERY_RATE:.0%}, min_to_gate={_MIN_RECOVERIES_TO_GATE})"
+    )
+    if _recovery_gate_tripped(recovered_runs, total_runs):
+        emit(
+            f"[gate2] RECOVERY_ADVISORY — {recovered_runs}/{total_runs} runs "
+            f"({_recovery_rate:.0%}) needed step-limit recovery in this cell, over the "
+            f"{_MAX_RECOVERY_RATE:.0%} advisory threshold. NOT failing the cell "
+            "(#2442: per-cell rate is unsound over 2-4 scenarios). The cross-cell "
+            "rollup is the strict convergence gate — investigate if this recurs."
+        )
+
+    # #2442(b): emit the per-cell recovery report for the cross-cell rollup job.
+    if recovery_report_dir:
+        from tests.evaluation.gate2_recovery_rollup import write_cell_report
+
+        for model_id, scns in report_scenarios_by_model.items():
+            path = write_cell_report(
+                recovery_report_dir, shard=shard_label, model=model_id, scenarios=scns
+            )
+            emit(f"[gate2] RECOVERY_REPORT wrote {path}")
 
     return 1 if any_failures else 0
 
@@ -664,7 +770,14 @@ def main(argv: list[str] | None = None) -> int:
         f"[gate2] shard={args.shard or 'ALL'} model={args.model or 'ALL'} "
         f"scenarios={[s.id for s in (scenarios or [])] or 'ALL'}"
     )
-    return run_gate2_smoke(scenarios=scenarios, models=models)
+    # #2442(b): CI sets GATE2_RECOVERY_REPORT_DIR so each cell drops a per-cell
+    # recovery report the post-matrix rollup job aggregates into the strict gate.
+    return run_gate2_smoke(
+        scenarios=scenarios,
+        models=models,
+        recovery_report_dir=os.environ.get("GATE2_RECOVERY_REPORT_DIR") or None,
+        shard_label=args.shard or "ALL",
+    )
 
 
 if __name__ == "__main__":

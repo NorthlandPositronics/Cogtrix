@@ -14,7 +14,7 @@ from __future__ import annotations
 import time
 from unittest.mock import MagicMock, patch
 
-from src.assistant.knowledge import Fact, SharedKnowledgeStore, _compute_hash
+from cogtrix_core.assistant.knowledge import Fact, SharedKnowledgeStore, _compute_hash
 
 
 def _make_store() -> SharedKnowledgeStore:
@@ -23,7 +23,7 @@ def _make_store() -> SharedKnowledgeStore:
     with (
         patch.object(SharedKnowledgeStore, "_load", return_value=None),
         patch.object(SharedKnowledgeStore, "_setup_embeddings", return_value=None),
-        patch("src.assistant.knowledge.threading.Thread"),
+        patch("cogtrix_core.assistant.knowledge.threading.Thread"),
     ):
         store = SharedKnowledgeStore(config=config, llm=MagicMock())
     store._embeddings_ready.set()

@@ -14,12 +14,12 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from src.tools._http_fetch import FetchResult
-from src.tools._web_search_aggregator import CoverageInfo, RankedResult
-from src.tools._web_search_domain_class import DomainClass
-from src.tools._web_search_extractor import ExtractedSource
-from src.tools._web_search_fetcher import FetchOutcome
-from src.tools.web_search import TOOL_CONFIGS, _sync_web_search, web_search
+from cogtrix_core.tools._http_fetch import FetchResult
+from cogtrix_core.tools._web_search_aggregator import CoverageInfo, RankedResult
+from cogtrix_core.tools._web_search_domain_class import DomainClass
+from cogtrix_core.tools._web_search_extractor import ExtractedSource
+from cogtrix_core.tools._web_search_fetcher import FetchOutcome
+from cogtrix_core.tools.web_search import TOOL_CONFIGS, _sync_web_search, web_search
 
 
 def _rank(url: str) -> RankedResult:
@@ -63,7 +63,7 @@ def _extracted(url: str, text: str = "Body content.") -> ExtractedSource:
 @pytest.fixture(autouse=True)
 def _clear_cache():
     """Each test starts with an empty cache."""
-    from src.tools._web_search_cache import cache_clear
+    from cogtrix_core.tools._web_search_cache import cache_clear
 
     cache_clear()
     yield
@@ -75,7 +75,7 @@ def _reset_synthesis_llm():
     """Each test starts with no injected synthesis LLM — the
     ContextVars would otherwise leak across tests when one of them
     calls ``set_synthesis_llm`` without a scoped context manager."""
-    from src.tools.web_search import (
+    from cogtrix_core.tools.web_search import (
         _synthesis_fallback_llm_var,
         _synthesis_llm_var,
     )
@@ -101,7 +101,7 @@ class TestRegistration:
         """The agent catalogue no longer exposes them, but the sync
         functions stay in their modules for power-user / internal use
         (web_search._resolve_providers reaches them via _search_async)."""
-        from src.tools.web_search import search_news, search_web
+        from cogtrix_core.tools.web_search import search_news, search_web
 
         assert callable(search_web)
         assert callable(search_news)
@@ -120,7 +120,7 @@ class TestSchemaGuidance:
     """
 
     def test_query_field_warns_against_exclusions(self) -> None:
-        from src.tools.web_search import WebSearchToolInput
+        from cogtrix_core.tools.web_search import WebSearchToolInput
 
         query_field = WebSearchToolInput.model_fields["query"]
         desc = (query_field.description or "").lower()
@@ -134,7 +134,7 @@ class TestSchemaGuidance:
         assert "except" in desc
 
     def test_query_field_warns_against_conversational_scaffolding(self) -> None:
-        from src.tools.web_search import WebSearchToolInput
+        from cogtrix_core.tools.web_search import WebSearchToolInput
 
         query_field = WebSearchToolInput.model_fields["query"]
         desc = (query_field.description or "").lower()
@@ -167,7 +167,7 @@ class TestLegacySearchWebSubprocessRouting:
     ) -> None:
         """``search_web`` must route through ``_ddg_subprocess_call`` —
         never call ``fetch_ddg_html`` directly."""
-        from src.tools import web_search as ws
+        from cogtrix_core.tools import web_search as ws
 
         # Force DDG_AVAILABLE so the early "not available" return path
         # doesn't short-circuit the test.
@@ -196,7 +196,7 @@ class TestLegacySearchWebSubprocessRouting:
         # Stub the module-level fetch_ddg_html import path defensively;
         # if any rewrite re-introduces the in-process call it'll trip
         # the assertion above.
-        import src.tools._ddg as _ddg_mod
+        import cogtrix_core.tools._ddg as _ddg_mod
 
         monkeypatch.setattr(_ddg_mod, "fetch_ddg_html", fake_fetch)
 
@@ -204,7 +204,11 @@ class TestLegacySearchWebSubprocessRouting:
 
         assert subprocess_called == [("vienna soudal sealant", "wt-wt", 2)]
         assert fetch_ddg_called == []
-        assert "example.com" in result.lower() or "Example" in result
+        # Substring check on the tool's OUTPUT text, not URL-host sanitization (false positive).
+        assert (
+            "example.com" in result.lower()  # codeql[py/incomplete-url-substring-sanitization]
+            or "Example" in result
+        )
 
     def test_search_web_returns_error_on_subprocess_failure(
         self, monkeypatch: pytest.MonkeyPatch
@@ -213,7 +217,7 @@ class TestLegacySearchWebSubprocessRouting:
         legacy ``search_web`` shim must surface the documented
         ``"Error searching: ..."`` shape rather than propagating the
         exception."""
-        from src.tools import web_search as ws
+        from cogtrix_core.tools import web_search as ws
 
         monkeypatch.setattr(ws, "DDG_AVAILABLE", True)
 
@@ -228,7 +232,7 @@ class TestLegacySearchWebSubprocessRouting:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """The empty-query short-circuit must not spawn a subprocess."""
-        from src.tools import web_search as ws
+        from cogtrix_core.tools import web_search as ws
 
         monkeypatch.setattr(ws, "DDG_AVAILABLE", True)
 
@@ -264,13 +268,15 @@ class TestAsyncEntryPoint:
             return [], _coverage()
 
         with (
-            patch("src.tools.web_search._resolve_providers", return_value={}),
-            patch("src.tools._web_search_aggregator.aggregate", new=fake_aggregate),
+            patch("cogtrix_core.tools.web_search._resolve_providers", return_value={}),
+            patch("cogtrix_core.tools._web_search_aggregator.aggregate", new=fake_aggregate),
             patch(
-                "src.tools._web_search_fetcher.fetch_top_k",
+                "cogtrix_core.tools._web_search_fetcher.fetch_top_k",
                 new=AsyncMock(return_value=[]),
             ),
-            patch("src.tools._web_search_extractor.extract", new=AsyncMock(return_value=[])),
+            patch(
+                "cogtrix_core.tools._web_search_extractor.extract", new=AsyncMock(return_value=[])
+            ),
         ):
             await web_search("a query", depth=20)
         assert captured["k"] == 10
@@ -293,7 +299,7 @@ class TestAsyncEntryPoint:
         (used by LangChain tool schema) and the async function
         default (used when call sites do not pass depth).
         """
-        from src.tools.web_search import WebSearchToolInput
+        from cogtrix_core.tools.web_search import WebSearchToolInput
 
         # Pydantic field default — what the LLM sees as the default
         # when it constructs a tool call without specifying depth.
@@ -315,13 +321,15 @@ class TestAsyncEntryPoint:
             return [], _coverage()
 
         with (
-            patch("src.tools.web_search._resolve_providers", return_value={}),
-            patch("src.tools._web_search_aggregator.aggregate", new=fake_aggregate),
+            patch("cogtrix_core.tools.web_search._resolve_providers", return_value={}),
+            patch("cogtrix_core.tools._web_search_aggregator.aggregate", new=fake_aggregate),
             patch(
-                "src.tools._web_search_fetcher.fetch_top_k",
+                "cogtrix_core.tools._web_search_fetcher.fetch_top_k",
                 new=AsyncMock(return_value=[]),
             ),
-            patch("src.tools._web_search_extractor.extract", new=AsyncMock(return_value=[])),
+            patch(
+                "cogtrix_core.tools._web_search_extractor.extract", new=AsyncMock(return_value=[])
+            ),
         ):
             await web_search("a query")  # no depth arg
         assert captured["k"] == 3, (
@@ -335,17 +343,20 @@ class TestAsyncEntryPoint:
         extracted = [_extracted("https://example.com/a", "UNIQUE_BODY")]
 
         with (
-            patch("src.tools.web_search._resolve_providers", return_value={"ddg": AsyncMock()}),
             patch(
-                "src.tools._web_search_aggregator.aggregate",
+                "cogtrix_core.tools.web_search._resolve_providers",
+                return_value={"ddg": AsyncMock()},
+            ),
+            patch(
+                "cogtrix_core.tools._web_search_aggregator.aggregate",
                 new=AsyncMock(return_value=(ranked, _coverage())),
             ),
             patch(
-                "src.tools._web_search_fetcher.fetch_top_k",
+                "cogtrix_core.tools._web_search_fetcher.fetch_top_k",
                 new=AsyncMock(return_value=fetched),
             ),
             patch(
-                "src.tools._web_search_extractor.extract",
+                "cogtrix_core.tools._web_search_extractor.extract",
                 new=AsyncMock(return_value=extracted),
             ),
         ):
@@ -376,10 +387,13 @@ class TestCache:
         extract_mock = AsyncMock(return_value=extracted)
 
         with (
-            patch("src.tools.web_search._resolve_providers", return_value={"ddg": AsyncMock()}),
-            patch("src.tools._web_search_aggregator.aggregate", new=aggregate_mock),
-            patch("src.tools._web_search_fetcher.fetch_top_k", new=fetch_mock),
-            patch("src.tools._web_search_extractor.extract", new=extract_mock),
+            patch(
+                "cogtrix_core.tools.web_search._resolve_providers",
+                return_value={"ddg": AsyncMock()},
+            ),
+            patch("cogtrix_core.tools._web_search_aggregator.aggregate", new=aggregate_mock),
+            patch("cogtrix_core.tools._web_search_fetcher.fetch_top_k", new=fetch_mock),
+            patch("cogtrix_core.tools._web_search_extractor.extract", new=extract_mock),
         ):
             r1 = await web_search("cached query")
             r2 = await web_search("cached query")
@@ -406,7 +420,7 @@ class TestHardDeadline:
         Pin: the constant must be at least the sum of the worst-case
         per-stage budgets so a stage-5 call that respects its own
         7 s deadline never trips the outer ceiling."""
-        from src.tools.web_search import _WEB_SEARCH_HARD_DEADLINE_S
+        from cogtrix_core.tools.web_search import _WEB_SEARCH_HARD_DEADLINE_S
 
         # Sum of worst-case stage budgets per ADR-0056 + per-task fetch
         # safety margin: 5 + 7 + 2 + 7 = 21 s for the primary path.
@@ -421,15 +435,18 @@ class TestHardDeadline:
         """When the pipeline exceeds 15s the outer wait_for fires and we
         emit the synthesis-unavailable fallback."""
         # Shrink the deadline so the test runs fast.
-        monkeypatch.setattr("src.tools.web_search._WEB_SEARCH_HARD_DEADLINE_S", 0.1)
+        monkeypatch.setattr("cogtrix_core.tools.web_search._WEB_SEARCH_HARD_DEADLINE_S", 0.1)
 
         async def slow_aggregate(*_args, **_kwargs):
             await asyncio.sleep(1.0)
             return [], _coverage()
 
         with (
-            patch("src.tools.web_search._resolve_providers", return_value={"ddg": AsyncMock()}),
-            patch("src.tools._web_search_aggregator.aggregate", new=slow_aggregate),
+            patch(
+                "cogtrix_core.tools.web_search._resolve_providers",
+                return_value={"ddg": AsyncMock()},
+            ),
+            patch("cogtrix_core.tools._web_search_aggregator.aggregate", new=slow_aggregate),
         ):
             result = await web_search("slow query")
 
@@ -450,17 +467,20 @@ class TestSyncWrapper:
         extracted = [_extracted("https://example.com/a", "SYNC_BODY")]
 
         with (
-            patch("src.tools.web_search._resolve_providers", return_value={"ddg": AsyncMock()}),
             patch(
-                "src.tools._web_search_aggregator.aggregate",
+                "cogtrix_core.tools.web_search._resolve_providers",
+                return_value={"ddg": AsyncMock()},
+            ),
+            patch(
+                "cogtrix_core.tools._web_search_aggregator.aggregate",
                 new=AsyncMock(return_value=(ranked, _coverage())),
             ),
             patch(
-                "src.tools._web_search_fetcher.fetch_top_k",
+                "cogtrix_core.tools._web_search_fetcher.fetch_top_k",
                 new=AsyncMock(return_value=fetched),
             ),
             patch(
-                "src.tools._web_search_extractor.extract",
+                "cogtrix_core.tools._web_search_extractor.extract",
                 new=AsyncMock(return_value=extracted),
             ),
         ):
@@ -475,9 +495,9 @@ class TestSyncWrapper:
 
 class TestResolveProviders:
     def test_ddg_included_when_available(self) -> None:
-        from src.tools.web_search import _resolve_providers
+        from cogtrix_core.tools.web_search import _resolve_providers
 
-        with patch("src.tools.web_search.DDGS_AVAILABLE", True):
+        with patch("cogtrix_core.tools.web_search.DDGS_AVAILABLE", True):
             providers = _resolve_providers()
         # Either ddg present OR no providers at all (other extras
         # may also not be installed in this env). Just assert resolver
@@ -485,14 +505,14 @@ class TestResolveProviders:
         assert isinstance(providers, dict)
 
     def test_no_providers_when_nothing_configured(self) -> None:
-        from src.tools.web_search import _resolve_providers
+        from cogtrix_core.tools.web_search import _resolve_providers
 
         # Force every provider to look unavailable.
         def fake_import(name: str, fromlist=None):  # type: ignore[no-untyped-def]
             raise ImportError(name)
 
         with (
-            patch("src.tools.web_search.DDGS_AVAILABLE", False),
+            patch("cogtrix_core.tools.web_search.DDGS_AVAILABLE", False),
             patch("builtins.__import__", side_effect=fake_import),
         ):
             try:
@@ -512,7 +532,7 @@ class TestResolveProviders:
 
 class TestSynthesisInjection:
     def test_set_synthesis_llm_stores_primary_and_fallback(self) -> None:
-        from src.tools.web_search import (
+        from cogtrix_core.tools.web_search import (
             _synthesis_fallback_llm_var,
             _synthesis_llm_var,
             set_synthesis_llm,
@@ -525,7 +545,7 @@ class TestSynthesisInjection:
         assert _synthesis_fallback_llm_var.get() is fallback
 
     def test_set_synthesis_llm_clears_with_none(self) -> None:
-        from src.tools.web_search import _synthesis_llm_var, set_synthesis_llm
+        from cogtrix_core.tools.web_search import _synthesis_llm_var, set_synthesis_llm
 
         set_synthesis_llm(object())
         set_synthesis_llm(None)
@@ -537,7 +557,7 @@ class TestSynthesisInjection:
         gives us per-context isolation; module globals would not."""
         import threading
 
-        from src.tools.web_search import _synthesis_llm_var, synthesis_llm_scope
+        from cogtrix_core.tools.web_search import _synthesis_llm_var, synthesis_llm_scope
 
         observed: dict[str, Any] = {}
         gate_a = threading.Event()
@@ -567,7 +587,7 @@ class TestSynthesisInjection:
     def test_synthesis_llm_scope_resets_on_exit(self) -> None:
         """Leaving the scope (normally or by exception) must restore
         the prior value so the next run starts clean."""
-        from src.tools.web_search import _synthesis_llm_var, synthesis_llm_scope
+        from cogtrix_core.tools.web_search import _synthesis_llm_var, synthesis_llm_scope
 
         assert _synthesis_llm_var.get() is None
         with synthesis_llm_scope("LLM-X"):
@@ -590,20 +610,23 @@ class TestSynthesisInjection:
         synth_mock = AsyncMock()
 
         with (
-            patch("src.tools.web_search._resolve_providers", return_value={"ddg": AsyncMock()}),
             patch(
-                "src.tools._web_search_aggregator.aggregate",
+                "cogtrix_core.tools.web_search._resolve_providers",
+                return_value={"ddg": AsyncMock()},
+            ),
+            patch(
+                "cogtrix_core.tools._web_search_aggregator.aggregate",
                 new=AsyncMock(return_value=(ranked, _coverage())),
             ),
             patch(
-                "src.tools._web_search_fetcher.fetch_top_k",
+                "cogtrix_core.tools._web_search_fetcher.fetch_top_k",
                 new=AsyncMock(return_value=fetched),
             ),
             patch(
-                "src.tools._web_search_extractor.extract",
+                "cogtrix_core.tools._web_search_extractor.extract",
                 new=AsyncMock(return_value=extracted),
             ),
-            patch("src.tools._web_search_synthesiser.synthesise", new=synth_mock),
+            patch("cogtrix_core.tools._web_search_synthesiser.synthesise", new=synth_mock),
         ):
             result = await web_search("q1")
 
@@ -618,8 +641,8 @@ class TestSynthesisInjection:
     async def test_synthesis_runs_when_llm_injected(self) -> None:
         """When an LLM is injected and extracts have content, stage 5
         runs and its text appears in the final output."""
-        from src.tools._web_search_synthesiser import SynthesisResult
-        from src.tools.web_search import set_synthesis_llm
+        from cogtrix_core.tools._web_search_synthesiser import SynthesisResult
+        from cogtrix_core.tools.web_search import set_synthesis_llm
 
         ranked = [_rank("https://example.com/a")]
         fetched = [_extracted("https://example.com/a").fetch_outcome]
@@ -639,21 +662,24 @@ class TestSynthesisInjection:
         set_synthesis_llm(_FakeLLM())
 
         with (
-            patch("src.tools.web_search._resolve_providers", return_value={"ddg": AsyncMock()}),
             patch(
-                "src.tools._web_search_aggregator.aggregate",
+                "cogtrix_core.tools.web_search._resolve_providers",
+                return_value={"ddg": AsyncMock()},
+            ),
+            patch(
+                "cogtrix_core.tools._web_search_aggregator.aggregate",
                 new=AsyncMock(return_value=(ranked, _coverage())),
             ),
             patch(
-                "src.tools._web_search_fetcher.fetch_top_k",
+                "cogtrix_core.tools._web_search_fetcher.fetch_top_k",
                 new=AsyncMock(return_value=fetched),
             ),
             patch(
-                "src.tools._web_search_extractor.extract",
+                "cogtrix_core.tools._web_search_extractor.extract",
                 new=AsyncMock(return_value=extracted),
             ),
             patch(
-                "src.tools._web_search_synthesiser.synthesise",
+                "cogtrix_core.tools._web_search_synthesiser.synthesise",
                 new=AsyncMock(return_value=synth_result),
             ),
         ):
@@ -668,8 +694,8 @@ class TestSynthesisInjection:
         """If every extract is snippet-only (extracted_text is None) we
         don't even attempt synthesis — there's nothing to synthesise.
         Coverage records the skip."""
-        from src.tools._web_search_extractor import ExtractedSource
-        from src.tools.web_search import set_synthesis_llm
+        from cogtrix_core.tools._web_search_extractor import ExtractedSource
+        from cogtrix_core.tools.web_search import set_synthesis_llm
 
         ranked = [_rank("https://example.com/a")]
         fetched = [_extracted("https://example.com/a").fetch_outcome]
@@ -683,20 +709,23 @@ class TestSynthesisInjection:
         synth_mock = AsyncMock()
 
         with (
-            patch("src.tools.web_search._resolve_providers", return_value={"ddg": AsyncMock()}),
             patch(
-                "src.tools._web_search_aggregator.aggregate",
+                "cogtrix_core.tools.web_search._resolve_providers",
+                return_value={"ddg": AsyncMock()},
+            ),
+            patch(
+                "cogtrix_core.tools._web_search_aggregator.aggregate",
                 new=AsyncMock(return_value=(ranked, _coverage())),
             ),
             patch(
-                "src.tools._web_search_fetcher.fetch_top_k",
+                "cogtrix_core.tools._web_search_fetcher.fetch_top_k",
                 new=AsyncMock(return_value=fetched),
             ),
             patch(
-                "src.tools._web_search_extractor.extract",
+                "cogtrix_core.tools._web_search_extractor.extract",
                 new=AsyncMock(return_value=[empty]),
             ),
-            patch("src.tools._web_search_synthesiser.synthesise", new=synth_mock),
+            patch("cogtrix_core.tools._web_search_synthesiser.synthesise", new=synth_mock),
         ):
             result = await web_search("q3")
 
@@ -708,7 +737,7 @@ class TestSynthesisInjection:
     async def test_synthesis_failure_falls_through_to_unavailable(self) -> None:
         """If synthesise() raises, the tool must not crash — it falls
         through to the Sources-only "Synthesis unavailable" shape."""
-        from src.tools.web_search import set_synthesis_llm
+        from cogtrix_core.tools.web_search import set_synthesis_llm
 
         ranked = [_rank("https://example.com/a")]
         fetched = [_extracted("https://example.com/a").fetch_outcome]
@@ -717,21 +746,24 @@ class TestSynthesisInjection:
         set_synthesis_llm(object())
 
         with (
-            patch("src.tools.web_search._resolve_providers", return_value={"ddg": AsyncMock()}),
             patch(
-                "src.tools._web_search_aggregator.aggregate",
+                "cogtrix_core.tools.web_search._resolve_providers",
+                return_value={"ddg": AsyncMock()},
+            ),
+            patch(
+                "cogtrix_core.tools._web_search_aggregator.aggregate",
                 new=AsyncMock(return_value=(ranked, _coverage())),
             ),
             patch(
-                "src.tools._web_search_fetcher.fetch_top_k",
+                "cogtrix_core.tools._web_search_fetcher.fetch_top_k",
                 new=AsyncMock(return_value=fetched),
             ),
             patch(
-                "src.tools._web_search_extractor.extract",
+                "cogtrix_core.tools._web_search_extractor.extract",
                 new=AsyncMock(return_value=extracted),
             ),
             patch(
-                "src.tools._web_search_synthesiser.synthesise",
+                "cogtrix_core.tools._web_search_synthesiser.synthesise",
                 new=AsyncMock(side_effect=RuntimeError("synth boom")),
             ),
         ):
@@ -745,8 +777,8 @@ class TestSynthesisInjection:
         """When synthesise returns SynthesisResult(text=None, ...) the
         formatter emits the Sources-only fallback, not the synthesis
         text."""
-        from src.tools._web_search_synthesiser import SynthesisResult
-        from src.tools.web_search import set_synthesis_llm
+        from cogtrix_core.tools._web_search_synthesiser import SynthesisResult
+        from cogtrix_core.tools.web_search import set_synthesis_llm
 
         ranked = [_rank("https://example.com/a")]
         fetched = [_extracted("https://example.com/a").fetch_outcome]
@@ -761,21 +793,24 @@ class TestSynthesisInjection:
         set_synthesis_llm(object())
 
         with (
-            patch("src.tools.web_search._resolve_providers", return_value={"ddg": AsyncMock()}),
             patch(
-                "src.tools._web_search_aggregator.aggregate",
+                "cogtrix_core.tools.web_search._resolve_providers",
+                return_value={"ddg": AsyncMock()},
+            ),
+            patch(
+                "cogtrix_core.tools._web_search_aggregator.aggregate",
                 new=AsyncMock(return_value=(ranked, _coverage())),
             ),
             patch(
-                "src.tools._web_search_fetcher.fetch_top_k",
+                "cogtrix_core.tools._web_search_fetcher.fetch_top_k",
                 new=AsyncMock(return_value=fetched),
             ),
             patch(
-                "src.tools._web_search_extractor.extract",
+                "cogtrix_core.tools._web_search_extractor.extract",
                 new=AsyncMock(return_value=extracted),
             ),
             patch(
-                "src.tools._web_search_synthesiser.synthesise",
+                "cogtrix_core.tools._web_search_synthesiser.synthesise",
                 new=AsyncMock(return_value=failed),
             ),
         ):
@@ -826,7 +861,7 @@ class TestDdgSubprocessIsolation:
         worker, not call DDGS in-process."""
         import json
 
-        from src.tools.web_search import _search_async
+        from cogtrix_core.tools.web_search import _search_async
 
         canned_stdout = json.dumps(
             {
@@ -869,7 +904,7 @@ class TestDdgSubprocessIsolation:
         — the aggregator treats that as a per-provider failure and
         falls back to the other providers, instead of the abort taking
         down the agent."""
-        from src.tools.web_search import _search_async
+        from cogtrix_core.tools.web_search import _search_async
 
         proc = _FakeProc(stdout=b"", stderr=b"primp: munmap_chunk\n", returncode=-6)
         with (
@@ -885,7 +920,7 @@ class TestDdgSubprocessIsolation:
     async def test_subprocess_sigsegv_surfaces_as_error(self) -> None:
         """returncode == -11 (SIGSEGV) is the other heap-corruption
         signal we've seen in real sessions."""
-        from src.tools.web_search import _search_async
+        from cogtrix_core.tools.web_search import _search_async
 
         proc = _FakeProc(stdout=b"", returncode=-11)
         with (
@@ -902,11 +937,11 @@ class TestDdgSubprocessIsolation:
         """If the worker hangs past the deadline, the caller must
         SIGKILL it (primp can be unresponsive to SIGTERM after a
         corruption) and surface a clean timeout error."""
-        from src.tools.web_search import _search_async
+        from cogtrix_core.tools.web_search import _search_async
 
         proc = _FakeProc(stdout=b"", returncode=0, communicate_delay=10.0)
         with (
-            patch("src.tools.web_search._DDG_SUBPROCESS_TIMEOUT_S", 0.05),
+            patch("cogtrix_core.tools.web_search._DDG_SUBPROCESS_TIMEOUT_S", 0.05),
             patch(
                 "asyncio.create_subprocess_exec",
                 new=AsyncMock(return_value=proc),
@@ -923,7 +958,7 @@ class TestDdgSubprocessIsolation:
         RuntimeError."""
         import json
 
-        from src.tools.web_search import _search_async
+        from cogtrix_core.tools.web_search import _search_async
 
         proc = _FakeProc(stdout=json.dumps({"error": "RateLimited: blah"}).encode())
         with (
@@ -940,7 +975,7 @@ class TestDdgSubprocessIsolation:
         """If the worker prints garbage (e.g. interleaved native
         stderr), the caller must raise rather than crash the
         aggregator with a JSONDecodeError leak."""
-        from src.tools.web_search import _search_async
+        from cogtrix_core.tools.web_search import _search_async
 
         proc = _FakeProc(stdout=b"not json")
         with (
@@ -957,7 +992,7 @@ class TestDdgSubprocessIsolation:
         """Empty / whitespace-only queries short-circuit before
         spawning the subprocess — the agent shouldn't be charged for
         a no-op fork."""
-        from src.tools.web_search import _search_async
+        from cogtrix_core.tools.web_search import _search_async
 
         with patch("asyncio.create_subprocess_exec", new=AsyncMock()) as spawn:
             assert await _search_async("") == []

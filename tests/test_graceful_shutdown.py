@@ -20,7 +20,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.api.session_bridge import ApiSession, ApiSessionRegistry
+from cogtrix_core.api.session_bridge import ApiSession, ApiSessionRegistry
 
 
 class TestCLIShutdownHandler:
@@ -60,13 +60,13 @@ class TestCLIShutdownHandler:
 
 
 class TestAPIShutdownHandler:
-    """Tests for SIGTERM handler in src/api/app.py API."""
+    """Tests for SIGTERM handler in cogtrix_core/api/app.py API."""
 
     @pytest.mark.asyncio
     async def test_sigterm_handler_sets_shutdown_flag(self) -> None:
         """API SIGTERM handler should set shutdown flag."""
-        from src.api import app as app_module
-        from src.api.app import _handle_sigterm_for_api_sync, _register_sigterm_handler
+        from cogtrix_core.api import app as app_module
+        from cogtrix_core.api.app import _handle_sigterm_for_api_sync, _register_sigterm_handler
 
         # Register the handler (must be sync function)
         _register_sigterm_handler()
@@ -84,8 +84,8 @@ class TestAPIShutdownHandler:
     @pytest.mark.asyncio
     async def test_second_sigterm_logs_warning(self) -> None:
         """Second SIGTERM should log warning and prepare to force exit."""
-        from src.api import app as app_module
-        from src.api.app import _handle_sigterm_for_api_sync, _register_sigterm_handler
+        from cogtrix_core.api import app as app_module
+        from cogtrix_core.api.app import _handle_sigterm_for_api_sync, _register_sigterm_handler
 
         # Register the handler
         _register_sigterm_handler()
@@ -94,7 +94,7 @@ class TestAPIShutdownHandler:
         app_module._shutdown_initiated = True
 
         # Mock os._exit to verify it's called
-        with patch("src.api.app.os._exit") as mock_exit:
+        with patch("cogtrix_core.api.app.os._exit") as mock_exit:
             mock_exit.side_effect = SystemExit
 
             # Second SIGTERM should call os._exit(1)
@@ -156,7 +156,9 @@ class TestSessionDrain:
         await registry.put(session)
 
         # Mock _save_memory to raise an error
-        with patch("src.api.session_bridge._save_memory", side_effect=RuntimeError("DB Error")):
+        with patch(
+            "cogtrix_core.api.session_bridge._save_memory", side_effect=RuntimeError("DB Error")
+        ):
             # Should not raise, should log warning instead
             await registry.stop_eviction_loop()
 
@@ -232,7 +234,7 @@ class TestDBEngineCleanup:
         """Engine dispose should clean up all connections."""
         import sqlalchemy as sa
 
-        from src.api.db.engine import AsyncSessionLocal, engine
+        from cogtrix_core.api.db.engine import AsyncSessionLocal, engine
 
         # Create a session to ensure connections exist
         async with AsyncSessionLocal() as session:

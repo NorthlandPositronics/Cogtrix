@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
-from src.tools.delegate import get_delegate_tools, set_delegate_tools
+from cogtrix_core.tools.delegate import get_delegate_tools, set_delegate_tools
 
 
 def _tool(name: str) -> MagicMock:

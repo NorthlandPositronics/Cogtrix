@@ -16,7 +16,7 @@ from unittest.mock import MagicMock, patch
 
 from langchain_core.messages import HumanMessage
 
-from src.memory.modes.conversation import ConversationMemoryManager
+from cogtrix_core.memory.modes.conversation import ConversationMemoryManager
 
 
 class _MockStore:
@@ -53,7 +53,7 @@ def test_in_flight_job_skips_resubmit() -> None:
     mgr._bg_future = _running_future()
     mgr._bg_submitted_at = time.monotonic()
     fake_pool = MagicMock()
-    with patch("src.memory.manager._get_summarization_pool", return_value=fake_pool):
+    with patch("cogtrix_core.memory.manager._get_summarization_pool", return_value=fake_pool):
         mgr._schedule_slow_path(_messages(), window_size=5)
     fake_pool.submit.assert_not_called()
 
@@ -80,7 +80,7 @@ def test_concurrent_schedule_submits_exactly_one_job() -> None:
         barrier.wait()
         mgr._schedule_slow_path(messages, window_size=5)
 
-    with patch("src.memory.manager._get_summarization_pool", return_value=fake_pool):
+    with patch("cogtrix_core.memory.manager._get_summarization_pool", return_value=fake_pool):
         threads = [threading.Thread(target=worker) for _ in range(2)]
         for t in threads:
             t.start()

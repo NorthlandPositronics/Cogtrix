@@ -1,4 +1,4 @@
-"""Tests for src/memory/summarizer.py.
+"""Tests for cogtrix_core/memory/summarizer.py.
 
 Covers:
   * The historical conversation-summary path (purpose default).
@@ -15,7 +15,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from src.memory.summarizer import generate_summary
+from cogtrix_core.memory.summarizer import generate_summary
 
 
 def _fake_llm(content: str | None) -> Any:
@@ -75,6 +75,35 @@ class TestConversationPath:
         msgs = [_make_message("HumanMessage", "x")]
         result = generate_summary(llm, msgs, existing_summary="prior")
         assert result == "prior"
+
+
+class TestOperatorInstructionExclusion:
+    """#2367: operator-instruction turns must NOT be folded into the rolling
+    summary — they carry operator strategy that would leak into the
+    contact-visible summary. The contact-facing conversation around them is
+    still summarized normally."""
+
+    def test_operator_instruction_excluded_from_summary_input(self) -> None:
+        llm = _fake_llm("Summary.")
+        msgs = [
+            _make_message(
+                "HumanMessage",
+                "[Operator instruction] Push for 90K — Marina Height 2 is the best lead.",
+            ),
+            _make_message("AIMessage", "Hi! Is the 2BR in Marina Height 2 still available?"),
+            _make_message("HumanMessage", "Yes, asking 95K."),
+        ]
+        generate_summary(llm, msgs, existing_summary=None)
+
+        # The human prompt the summarizer LLM saw = intro + formatted messages.
+        prompt_text = llm.invoke.call_args[0][0][1].content
+        # Operator strategy must be absent.
+        assert "Operator instruction" not in prompt_text
+        assert "90K" not in prompt_text
+        assert "best lead" not in prompt_text
+        # The contact-facing exchange is still summarized.
+        assert "still available" in prompt_text
+        assert "95K" in prompt_text
 
 
 # ── Web search synthesis path ────────────────────────────────────────

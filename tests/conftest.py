@@ -43,7 +43,7 @@ from sqlalchemy.pool import StaticPool  # noqa: E402
 # file-backed URL — defeating per-test isolation for any code path that
 # bypasses the ``get_db`` dependency override (e.g. ``_api_client()`` in
 # test_api_phase5.py and test_api_rag_config_system.py).
-import src.api.db.engine  # noqa: F401, E402
+import cogtrix_core.api.db.engine  # noqa: F401, E402
 
 # ── Session-scoped environment ──────────────────────────────────────────────
 
@@ -73,7 +73,7 @@ def _reset_rate_limit_counters() -> None:
     accumulate hits across functions and trigger 429 responses unexpectedly.
     """
     try:
-        from src.api.rate_limit import reset_rate_limits
+        from cogtrix_core.api.rate_limit import reset_rate_limits
 
         reset_rate_limits()
     except Exception:  # noqa: BLE001
@@ -90,7 +90,7 @@ def _reset_secret_env_cache() -> None:
     flipping provider-default assertions). Mirrors the rate-limit reset above.
     """
     try:
-        from src.config import _reset_secret_env_cache as _reset
+        from cogtrix_core.config import _reset_secret_env_cache as _reset
 
         _reset()
     except Exception:  # noqa: BLE001
@@ -107,7 +107,7 @@ def _reset_cached_config() -> None:
     leak into later tests via the cache. Mirrors the secret-env reset above.
     """
     try:
-        from src.config import reset_cached_config
+        from cogtrix_core.config import reset_cached_config
 
         reset_cached_config()
     except Exception:  # noqa: BLE001
@@ -160,7 +160,7 @@ def engine():
     signal threads that were started in the TestClient's anyio portal,
     causing those threads to hang in tx.get() during teardown.
     """
-    from src.api.db.engine import Base
+    from cogtrix_core.api.db.engine import Base
 
     eng = _make_engine()
 
@@ -232,8 +232,8 @@ def app():
     from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
     from sqlalchemy.pool import StaticPool
 
-    from src.api.app import create_app
-    from src.api.db.engine import Base, get_db
+    from cogtrix_core.api.app import create_app
+    from cogtrix_core.api.db.engine import Base, get_db
 
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)

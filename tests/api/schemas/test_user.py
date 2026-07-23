@@ -1,4 +1,4 @@
-"""Tests for src/api/schemas/user.py — admin user management schemas.
+"""Tests for cogtrix_core/api/schemas/user.py — admin user management schemas.
 
 Note: this module's UserOut/Create/Update schemas are the org-admin user-
 management surface (POST/PATCH /api/v1/users/{id}); the auth.py UserOut
@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 import pytest
 from pydantic import ValidationError
 
-from src.api.schemas.user import UserCreateRequest, UserOut, UserUpdateRequest
+from cogtrix_core.api.schemas.user import UserCreateRequest, UserOut, UserUpdateRequest
 
 # ---------------------------------------------------------------------------
 # UserOut — public profile, ensure_utc on created_at

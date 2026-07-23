@@ -34,7 +34,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine  # noqa: E402
 from sqlalchemy.pool import StaticPool  # noqa: E402
 
-from src.api.db.engine import Base, get_db  # noqa: E402
+from cogtrix_core.api.db.engine import Base, get_db  # noqa: E402
 
 _VALID_PASSWORD = "TestPass1!"
 
@@ -46,7 +46,7 @@ _VALID_PASSWORD = "TestPass1!"
 
 @pytest.fixture()
 def app():
-    from src.api.app import create_app
+    from cogtrix_core.api.app import create_app
 
     loop = _asyncio.new_event_loop()
     _asyncio.set_event_loop(loop)
@@ -160,19 +160,19 @@ class TestRequestBodyValidationRendering:
     reads cleanly (no leading whitespace, no internal token leak)."""
 
     def test_humanize_name_special_cases_root(self) -> None:
-        from src.api.validation import _humanize_name
+        from cogtrix_core.api.validation import _humanize_name
 
         assert _humanize_name("_root") == "Request body"
 
     def test_humanize_name_unchanged_for_regular_fields(self) -> None:
-        from src.api.validation import _humanize_name
+        from cogtrix_core.api.validation import _humanize_name
 
         # The fix must not alter unrelated field-name humanisation.
         assert _humanize_name("workspace_id") == "Workspace id"
         assert _humanize_name("system_prompt") == "System prompt"
 
     def test_build_fallback_message_for_root_missing(self) -> None:
-        from src.api.validation import _build_fallback_message
+        from cogtrix_core.api.validation import _build_fallback_message
 
         msg = _build_fallback_message("_root", {"type": "missing"})
         assert msg == "Request body is required."
@@ -183,7 +183,7 @@ class TestRequestBodyValidationRendering:
         assert "  " not in msg
 
     def test_extract_field_path_falls_back_to_root_sentinel(self) -> None:
-        from src.api.validation import _extract_field_path
+        from cogtrix_core.api.validation import _extract_field_path
 
         # An empty loc tuple (or one stripped of all prefixes) must
         # surface as the ``_root`` sentinel for the special-cased

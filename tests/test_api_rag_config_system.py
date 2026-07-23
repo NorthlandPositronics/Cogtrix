@@ -42,7 +42,7 @@ os.environ.setdefault("COGTRIX_DB_URL", "sqlite+aiosqlite:///:memory:")
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-from src.api.auth import create_access_token  # noqa: E402
+from cogtrix_core.api.auth import create_access_token  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Shared helpers
@@ -80,7 +80,7 @@ def _api_client(
     extra_state: dict | None = None,
 ) -> Iterator[tuple[TestClient, str, str]]:
     """Yield (client, admin_token, user_token) with mocked app state."""
-    from src.api.app import create_app
+    from cogtrix_core.api.app import create_app
 
     admin_token = create_access_token(user_id=str(uuid.uuid4()), role="admin")
     user_token = create_access_token(user_id=str(uuid.uuid4()), role="user")
@@ -188,8 +188,10 @@ class TestRagUpload:
     def test_upload_txt_returns_202(self, tmp_path: Path) -> None:
         with (
             _api_client() as (client, admin_token, _),
-            patch("src.api.routes.rag.ingest_document_task", new=AsyncMock(return_value=None)),
-            patch("src.api.routes.rag._get_uploads_dir", return_value=tmp_path),
+            patch(
+                "cogtrix_core.api.routes.rag.ingest_document_task", new=AsyncMock(return_value=None)
+            ),
+            patch("cogtrix_core.api.routes.rag._get_uploads_dir", return_value=tmp_path),
         ):
             resp = client.post(
                 "/api/v1/rag/documents",
@@ -205,8 +207,10 @@ class TestRagUpload:
     def test_upload_pdf_accepted(self, tmp_path: Path) -> None:
         with (
             _api_client() as (client, admin_token, _),
-            patch("src.api.routes.rag.ingest_document_task", new=AsyncMock(return_value=None)),
-            patch("src.api.routes.rag._get_uploads_dir", return_value=tmp_path),
+            patch(
+                "cogtrix_core.api.routes.rag.ingest_document_task", new=AsyncMock(return_value=None)
+            ),
+            patch("cogtrix_core.api.routes.rag._get_uploads_dir", return_value=tmp_path),
         ):
             resp = client.post(
                 "/api/v1/rag/documents",
@@ -218,8 +222,10 @@ class TestRagUpload:
     def test_upload_md_accepted(self, tmp_path: Path) -> None:
         with (
             _api_client() as (client, admin_token, _),
-            patch("src.api.routes.rag.ingest_document_task", new=AsyncMock(return_value=None)),
-            patch("src.api.routes.rag._get_uploads_dir", return_value=tmp_path),
+            patch(
+                "cogtrix_core.api.routes.rag.ingest_document_task", new=AsyncMock(return_value=None)
+            ),
+            patch("cogtrix_core.api.routes.rag._get_uploads_dir", return_value=tmp_path),
         ):
             resp = client.post(
                 "/api/v1/rag/documents",
@@ -231,8 +237,10 @@ class TestRagUpload:
     def test_upload_csv_accepted(self, tmp_path: Path) -> None:
         with (
             _api_client() as (client, admin_token, _),
-            patch("src.api.routes.rag.ingest_document_task", new=AsyncMock(return_value=None)),
-            patch("src.api.routes.rag._get_uploads_dir", return_value=tmp_path),
+            patch(
+                "cogtrix_core.api.routes.rag.ingest_document_task", new=AsyncMock(return_value=None)
+            ),
+            patch("cogtrix_core.api.routes.rag._get_uploads_dir", return_value=tmp_path),
         ):
             resp = client.post(
                 "/api/v1/rag/documents",
@@ -325,8 +333,10 @@ class TestRagUpload:
     def test_upload_response_has_required_fields(self, tmp_path: Path) -> None:
         with (
             _api_client() as (client, admin_token, _),
-            patch("src.api.routes.rag.ingest_document_task", new=AsyncMock(return_value=None)),
-            patch("src.api.routes.rag._get_uploads_dir", return_value=tmp_path),
+            patch(
+                "cogtrix_core.api.routes.rag.ingest_document_task", new=AsyncMock(return_value=None)
+            ),
+            patch("cogtrix_core.api.routes.rag._get_uploads_dir", return_value=tmp_path),
         ):
             resp = client.post(
                 "/api/v1/rag/documents",
@@ -360,8 +370,10 @@ class TestRagList:
     def test_list_after_upload_document_appears(self, tmp_path: Path) -> None:
         with (
             _api_client() as (client, admin_token, _),
-            patch("src.api.routes.rag.ingest_document_task", new=AsyncMock(return_value=None)),
-            patch("src.api.routes.rag._get_uploads_dir", return_value=tmp_path),
+            patch(
+                "cogtrix_core.api.routes.rag.ingest_document_task", new=AsyncMock(return_value=None)
+            ),
+            patch("cogtrix_core.api.routes.rag._get_uploads_dir", return_value=tmp_path),
         ):
             upload = client.post(
                 "/api/v1/rag/documents",
@@ -382,8 +394,10 @@ class TestRagList:
     def test_list_status_filter_pending(self, tmp_path: Path) -> None:
         with (
             _api_client() as (client, admin_token, _),
-            patch("src.api.routes.rag.ingest_document_task", new=AsyncMock(return_value=None)),
-            patch("src.api.routes.rag._get_uploads_dir", return_value=tmp_path),
+            patch(
+                "cogtrix_core.api.routes.rag.ingest_document_task", new=AsyncMock(return_value=None)
+            ),
+            patch("cogtrix_core.api.routes.rag._get_uploads_dir", return_value=tmp_path),
         ):
             client.post(
                 "/api/v1/rag/documents",
@@ -756,7 +770,7 @@ class TestConfigReload:
         mock_new_cfg.config_file_path = None
         with (
             _api_client() as (client, admin_token, _),
-            patch("src.config.Config", return_value=mock_new_cfg),
+            patch("cogtrix_core.config.Config", return_value=mock_new_cfg),
         ):
             resp = client.post(
                 "/api/v1/config/reload",
@@ -785,7 +799,7 @@ class TestConfigReload:
         mock_new_cfg.config_file_path = None
         with (
             _api_client() as (client, admin_token, _),
-            patch("src.config.Config", return_value=mock_new_cfg),
+            patch("cogtrix_core.config.Config", return_value=mock_new_cfg),
         ):
             resp = client.post(
                 "/api/v1/config/reload",
@@ -895,7 +909,7 @@ class TestConfigProviders:
     def test_switch_provider_known_type_succeeds(self) -> None:
         with (
             _api_client() as (client, admin_token, _),
-            patch("src.orchestration.runner.invalidate_llm_caches", return_value=None),
+            patch("cogtrix_core.orchestration.runner.invalidate_llm_caches", return_value=None),
         ):
             resp = client.post(
                 "/api/v1/config/provider",
@@ -925,7 +939,7 @@ class TestConfigProviders:
     def test_switch_model_admin_succeeds(self) -> None:
         with (
             _api_client() as (client, admin_token, _),
-            patch("src.orchestration.runner.invalidate_llm_caches", return_value=None),
+            patch("cogtrix_core.orchestration.runner.invalidate_llm_caches", return_value=None),
         ):
             resp = client.post(
                 "/api/v1/config/model",
@@ -996,7 +1010,7 @@ class TestSystemInfo:
         assert resp.json()["data"]["uptime_s"] >= 0
 
     def test_version_matches_package_version(self) -> None:
-        from src._version import get_version_string
+        from cogtrix_core._version import get_version_string
 
         with _api_client() as (client, admin_token, _):
             resp = client.get(
@@ -1187,7 +1201,7 @@ class TestProviderCreate:
 
         with (
             _api_client(extra_state={"config": cfg}) as (client, admin_token, _),
-            patch("src.api.routes.config._write_providers_to_config"),
+            patch("cogtrix_core.api.routes.config._write_providers_to_config"),
         ):
             resp = client.post(
                 "/api/v1/config/providers",
@@ -1207,7 +1221,7 @@ class TestProviderCreate:
 
         with (
             _api_client(extra_state={"config": cfg}) as (client, admin_token, _),
-            patch("src.api.routes.config._write_providers_to_config"),
+            patch("cogtrix_core.api.routes.config._write_providers_to_config"),
         ):
             resp = client.post(
                 "/api/v1/config/providers",
@@ -1224,7 +1238,7 @@ class TestProviderCreate:
 
         with (
             _api_client(extra_state={"config": cfg}) as (client, admin_token, _),
-            patch("src.api.routes.config._write_providers_to_config"),
+            patch("cogtrix_core.api.routes.config._write_providers_to_config"),
         ):
             resp = client.post(
                 "/api/v1/config/providers",
@@ -1260,7 +1274,7 @@ class TestProviderUpdate:
 
         with (
             _api_client(extra_state={"config": cfg}) as (client, admin_token, _),
-            patch("src.api.routes.config._write_providers_to_config"),
+            patch("cogtrix_core.api.routes.config._write_providers_to_config"),
         ):
             resp = client.patch(
                 "/api/v1/config/providers/openai",
@@ -1305,7 +1319,7 @@ class TestProviderDelete:
 
         with (
             _api_client(extra_state={"config": cfg}) as (client, admin_token, _),
-            patch("src.api.routes.config._write_providers_to_config"),
+            patch("cogtrix_core.api.routes.config._write_providers_to_config"),
         ):
             resp = client.delete(
                 "/api/v1/config/providers/my-provider",
@@ -1364,7 +1378,7 @@ class TestProviderWriteLock:
         import asyncio
         import importlib
 
-        mod = importlib.import_module("src.api.routes.config")
+        mod = importlib.import_module("cogtrix_core.api.routes.config")
         assert hasattr(
             mod, "_get_provider_write_lock"
         ), "_get_provider_write_lock missing — BUG-237 fix not applied"
@@ -1374,7 +1388,7 @@ class TestProviderWriteLock:
     def test_create_provider_acquires_lock(self) -> None:
         import inspect
 
-        import src.api.routes.config as _mod
+        import cogtrix_core.api.routes.config as _mod
 
         src = inspect.getsource(_mod.create_provider)
         assert (
@@ -1384,7 +1398,7 @@ class TestProviderWriteLock:
     def test_update_provider_acquires_lock(self) -> None:
         import inspect
 
-        import src.api.routes.config as _mod
+        import cogtrix_core.api.routes.config as _mod
 
         src = inspect.getsource(_mod.update_provider)
         assert (
@@ -1394,7 +1408,7 @@ class TestProviderWriteLock:
     def test_delete_provider_acquires_lock(self) -> None:
         import inspect
 
-        import src.api.routes.config as _mod
+        import cogtrix_core.api.routes.config as _mod
 
         src = inspect.getsource(_mod.delete_provider)
         assert (
@@ -1441,7 +1455,7 @@ class TestProviderBaseUrlSSRFGuard:
 
         with (
             _api_client(extra_state={"config": cfg}) as (client, admin_token, _),
-            patch("src.api.routes.config._write_providers_to_config"),
+            patch("cogtrix_core.api.routes.config._write_providers_to_config"),
         ):
             resp = client.post(
                 "/api/v1/config/providers",
@@ -1466,7 +1480,7 @@ class TestProviderCrudNoConfigFile:
         """_write_providers_to_config raises RuntimeError when cfg has no file path (BUG-243)."""
         import pytest
 
-        import src.api.routes.config as _mod
+        import cogtrix_core.api.routes.config as _mod
 
         mock_cfg = type("Cfg", (), {"config_file_path": None})()
         with pytest.raises(RuntimeError, match="No config file is loaded"):
@@ -1495,8 +1509,8 @@ class TestProviderHealthBaseUrlAccess:
 
         with (
             _api_client(extra_state={"config": cfg}) as (client, admin_token, _),
-            patch("src.providers.create_chat_model", return_value=MagicMock()),
-            patch("src.providers.get_default_model", return_value="test-model"),
+            patch("cogtrix_core.providers.create_chat_model", return_value=MagicMock()),
+            patch("cogtrix_core.providers.get_default_model", return_value="test-model"),
         ):
             resp = client.post(
                 "/api/v1/config/providers/openai/health",
@@ -1518,7 +1532,7 @@ class TestWizardSessionLock:
         """start_wizard must store asyncio.Lock in the wizard session dict (BUG-239)."""
         import inspect
 
-        import src.api.routes.config as _mod
+        import cogtrix_core.api.routes.config as _mod
 
         src = inspect.getsource(_mod.start_wizard)
         assert (
@@ -1529,7 +1543,7 @@ class TestWizardSessionLock:
         """advance_wizard must acquire ws['lock'] before reading/modifying session (BUG-239)."""
         import inspect
 
-        import src.api.routes.config as _mod
+        import cogtrix_core.api.routes.config as _mod
 
         src = inspect.getsource(_mod.advance_wizard)
         assert (
@@ -1554,7 +1568,7 @@ class TestProviderCreateExtra:
 
         with (
             _api_client(extra_state={"config": cfg}) as (client, admin_token, _),
-            patch("src.api.routes.config._write_providers_to_config"),
+            patch("cogtrix_core.api.routes.config._write_providers_to_config"),
         ):
             resp = client.post(
                 "/api/v1/config/providers",
@@ -1576,7 +1590,7 @@ class TestProviderCreateExtra:
 
         with (
             _api_client(extra_state={"config": cfg}) as (client, admin_token, _),
-            patch("src.api.routes.config._write_providers_to_config"),
+            patch("cogtrix_core.api.routes.config._write_providers_to_config"),
         ):
             resp = client.post(
                 "/api/v1/config/providers",
@@ -1596,7 +1610,7 @@ class TestProviderCreateExtra:
 
         with (
             _api_client(extra_state={"config": cfg}) as (client, admin_token, _),
-            patch("src.api.routes.config._write_providers_to_config"),
+            patch("cogtrix_core.api.routes.config._write_providers_to_config"),
         ):
             resp = client.post(
                 "/api/v1/config/providers",
@@ -1652,7 +1666,7 @@ class TestProviderUpdateExtra:
 
         with (
             _api_client(extra_state={"config": cfg}) as (client, admin_token, _),
-            patch("src.api.routes.config._write_providers_to_config"),
+            patch("cogtrix_core.api.routes.config._write_providers_to_config"),
         ):
             resp = client.patch(
                 "/api/v1/config/providers/myp",
@@ -1671,7 +1685,7 @@ class TestProviderUpdateExtra:
 
         with (
             _api_client(extra_state={"config": cfg}) as (client, admin_token, _),
-            patch("src.api.routes.config._write_providers_to_config"),
+            patch("cogtrix_core.api.routes.config._write_providers_to_config"),
         ):
             resp = client.patch(
                 "/api/v1/config/providers/combo",
@@ -1692,7 +1706,7 @@ class TestProviderUpdateExtra:
 
         with (
             _api_client(extra_state={"config": cfg}) as (client, admin_token, _),
-            patch("src.api.routes.config._write_providers_to_config"),
+            patch("cogtrix_core.api.routes.config._write_providers_to_config"),
         ):
             resp = client.patch(
                 "/api/v1/config/providers/stable",
@@ -1726,7 +1740,7 @@ class TestProviderUpdateExtra:
 
         with (
             _api_client(extra_state={"config": cfg}) as (client, admin_token, _),
-            patch("src.api.routes.config._write_providers_to_config"),
+            patch("cogtrix_core.api.routes.config._write_providers_to_config"),
         ):
             resp = client.patch(
                 "/api/v1/config/providers/lan-llm",
@@ -1780,7 +1794,7 @@ class TestProviderDeleteExtra:
 
         with (
             _api_client(extra_state={"config": cfg}) as (client, admin_token, _),
-            patch("src.api.routes.config._write_providers_to_config"),
+            patch("cogtrix_core.api.routes.config._write_providers_to_config"),
         ):
             resp = client.delete(
                 "/api/v1/config/providers/removable",
@@ -1803,7 +1817,7 @@ class TestWizardProbeWarningFallback:
         is set and the first real LLM call also fails."""
         from unittest.mock import MagicMock, patch
 
-        import src.api.routes.config as _mod
+        import cogtrix_core.api.routes.config as _mod
 
         # Simulate: probe soft-fails (sets probe_warning) AND first real LLM call fails
         probe_warning = "Error code: 400 - No connected db."
@@ -1835,7 +1849,7 @@ class TestWizardProbeWarningFallback:
             patch.object(_mod, "_wizard_test_connection", return_value=(fake_llm, probe_warning)),
             patch.object(_mod, "_wizard_load_docs", return_value="# Docs"),
             patch.object(_mod, "_wizard_invoke_llm", side_effect=RuntimeError("No connected db.")),
-            patch("src.setup_wizard._WIZARD_SYSTEM_PROMPT") as mock_tpl,
+            patch("cogtrix_core.setup_wizard._WIZARD_SYSTEM_PROMPT") as mock_tpl,
         ):
             mock_tpl.substitute.return_value = "System prompt"
 
@@ -1863,7 +1877,7 @@ class TestWizardProbeWarningFallback:
         wizard loads the full CONFIGURATION.md docs."""
         from unittest.mock import MagicMock, patch
 
-        import src.api.routes.config as _mod
+        import cogtrix_core.api.routes.config as _mod
 
         fake_llm = MagicMock()
         fake_ws: dict = {
@@ -1891,7 +1905,7 @@ class TestWizardProbeWarningFallback:
             patch.object(_mod, "_wizard_test_connection", return_value=(fake_llm, None)),
             patch.object(_mod, "_wizard_load_docs", return_value="# Docs"),
             patch.object(_mod, "_wizard_invoke_llm", side_effect=ctx_error),
-            patch("src.setup_wizard._WIZARD_SYSTEM_PROMPT") as mock_tpl,
+            patch("cogtrix_core.setup_wizard._WIZARD_SYSTEM_PROMPT") as mock_tpl,
         ):
             mock_tpl.substitute.return_value = "System prompt"
 
@@ -1916,7 +1930,7 @@ class TestWizardValidateAndWriteStripNulls:
         """_strip_nulls removes null values and empty dicts from the YAML structure."""
         import yaml
 
-        from src.setup_wizard import _strip_nulls
+        from cogtrix_core.setup_wizard import _strip_nulls
 
         raw = """
 providers:
