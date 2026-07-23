@@ -67,11 +67,14 @@ class ApiSession:
     cancel_event: Any = None  # asyncio.Event
     ws_queue: Any = None  # asyncio.Queue
     _lock: Any = None  # asyncio.Lock
+    turn_lock: Any = None  # asyncio.Lock — serializes concurrent agent turns per session
     last_activity: float = field(default_factory=time.time)
 
     def __post_init__(self) -> None:
         if self._lock is None:
             self._lock = asyncio.Lock()
+        if self.turn_lock is None:
+            self.turn_lock = asyncio.Lock()
         if self.cancel_event is None:
             self.cancel_event = asyncio.Event()
         if self.ws_queue is None:
@@ -105,11 +108,11 @@ async def warm_session(record: ApiSessionRecord, app_state: Any) -> ApiSession:
     # 2. Session state — API sessions never use CLI confirmation
     session_state = SessionState(no_confirm=True)
 
-    # 3. Build memory manager — may perform file I/O (manager.load()); run in thread.
-    memory_manager = await asyncio.to_thread(_build_memory_manager, record.id, config, app_state)
-
-    # 4. Create LLM — may perform network I/O; run in thread.
-    llm = await asyncio.to_thread(_build_llm, config, app_state)
+    # 3 & 4. Build memory manager and LLM concurrently — both are I/O-bound and independent.
+    memory_manager, llm = await asyncio.gather(
+        asyncio.to_thread(_build_memory_manager, record.id, config, app_state),
+        asyncio.to_thread(_build_llm, config, app_state),
+    )
 
     # 5. Build AgentRunConfig
     run_config = _build_run_config(llm, session_state, config, app_state)
@@ -216,6 +219,18 @@ def _build_run_config(
             available_tools = dict(all_tools)
         except Exception as exc:
             log.warning("Could not read tool registry: %s", exc)
+
+    # Seed active_tools_list with request_tools so the agent can load on-demand tools.
+    if available_tools:
+        try:
+            from src.tools.configure import build_tool_catalog, create_request_tools_tool
+
+            catalog = build_tool_catalog(available_tools)
+            rt_tool = create_request_tools_tool(available_tools, catalog)
+            if rt_tool is not None:
+                active_tools_list = [rt_tool]
+        except Exception as exc:
+            log.warning("Could not create request_tools for session: %s", exc)
 
     # Resolve settings from session config with fallbacks
     app_cfg = getattr(app_state, "config", None)
@@ -423,9 +438,10 @@ class ApiSessionRegistry:
         async with self._lock:
             self._sessions[session.id] = session
 
-    def get_cached(self, session_id: str) -> ApiSession | None:
-        """Return the cached session synchronously (no DB fallback)."""
-        return self._sessions.get(session_id)
+    async def get_cached(self, session_id: str) -> ApiSession | None:
+        """Return the cached session without a DB fallback."""
+        async with self._lock:
+            return self._sessions.get(session_id)
 
 
 # ---------------------------------------------------------------------------

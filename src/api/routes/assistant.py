@@ -253,27 +253,9 @@ async def start_assistant(
         )
 
     try:
-        from src.assistant.service import AssistantService
-        from src.providers import create_chat_model_from_config
+        from src.api.assistant_lifecycle import create_and_start_assistant
 
-        # create_chat_model_from_config may perform network I/O (e.g. Ollama API
-        # introspection); run it off the event loop thread to prevent stalls.
-        llm = await asyncio.to_thread(create_chat_model_from_config, app_config)
-        tools_dict: dict[str, Any] = dict(tool_registry.tools)
-        new_svc = AssistantService(
-            config=app_config,
-            llm=llm,
-            registry=tool_registry,
-            system_prompt="",
-            available_tools=tools_dict,
-            active_tools=[],
-        )
-        # Start background threads without blocking (do not call run() which blocks)
-        new_svc._poller.start()
-        new_svc._scheduler.start()
-        if new_svc._deferral_mgr is not None:
-            new_svc._deferral_mgr.start()
-        new_svc._started_at = datetime.now(UTC)  # type: ignore[attr-defined]
+        new_svc = await create_and_start_assistant(app_config, tool_registry)
         request.app.state.assistant_service = new_svc
     except Exception as exc:
         raise HTTPException(
@@ -307,52 +289,9 @@ async def stop_assistant(
     """
     svc = _require_service(request)
 
-    def _shutdown() -> None:
-        """Run all blocking shutdown steps on a worker thread."""
-        poller = getattr(svc, "_poller", None)
-        scheduler = getattr(svc, "_scheduler", None)
-        deferral_mgr = getattr(svc, "_deferral_mgr", None)
-        executor = getattr(svc, "_executor", None)
-        session_mgr = getattr(svc, "_session_mgr", None)
-        knowledge_store = getattr(svc, "_knowledge_store", None)
+    from src.api.assistant_lifecycle import shutdown_assistant_sync
 
-        try:
-            if poller is not None:
-                poller.stop()
-        except Exception:
-            pass
-        try:
-            if scheduler is not None:
-                scheduler.stop()
-                scheduler.save()
-        except Exception:
-            pass
-        try:
-            if deferral_mgr is not None:
-                deferral_mgr.stop()
-                deferral_mgr.save()
-        except Exception:
-            pass
-        try:
-            if executor is not None:
-                # wait=True mirrors service.py _handle_shutdown: drain in-flight agent
-                # turns before save_all() runs so memory writes are not racing with
-                # concurrent tool/LLM work still executing on executor threads.
-                executor.shutdown(wait=True, cancel_futures=False)
-        except Exception:
-            pass
-        try:
-            if session_mgr is not None:
-                session_mgr.save_all()
-        except Exception:
-            pass
-        try:
-            if knowledge_store is not None:
-                knowledge_store.save()
-        except Exception:
-            pass
-
-    await asyncio.to_thread(_shutdown)
+    await asyncio.to_thread(shutdown_assistant_sync, svc)
 
     request.app.state.assistant_service = None
     out = AssistantStatusOut(status="stopped", channels=[], started_at=None, uptime_s=None)

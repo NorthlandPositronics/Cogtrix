@@ -18,6 +18,7 @@ async context — to stay compatible with LangGraph's internal threading.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import logging
 import time
@@ -227,13 +228,29 @@ async def run_message_turn(
         db: Async DB session for persisting the AI message.
         app_state: FastAPI app.state (unused currently; reserved for future hooks).
     """
-    from src.api.callbacks import WebSocketCallbackHandler
-    from src.api.confirmation import ApiConfirmationUI
-    from src.orchestration.runner import run_agent
-
     if mode not in ("normal", "think", "delegate"):
         log.warning("run_message_turn: unknown mode %r — treating as 'normal'", mode)
         mode = "normal"
+
+    async with session.turn_lock:
+        await _run_message_turn_inner(session, text, mode, db, app_state)
+
+
+async def _run_message_turn_inner(
+    session: ApiSession,
+    text: str,
+    mode: str,
+    db: Any,
+    app_state: Any,
+) -> None:
+    """Execute one agent turn while holding ``session.turn_lock``.
+
+    Separated from ``run_message_turn`` so the lock scope is obvious and
+    tests can call this directly when they already hold the lock.
+    """
+    from src.api.callbacks import WebSocketCallbackHandler
+    from src.api.confirmation import ApiConfirmationUI
+    from src.orchestration.runner import run_agent
 
     turn_start = time.monotonic()
     session.agent_state = "thinking"
@@ -243,10 +260,12 @@ async def run_message_turn(
     ws_callback = WebSocketCallbackHandler(session.ws_queue, loop)
     confirmation_ui = ApiConfirmationUI(session.ws_queue, loop)
 
-    # Wire confirmation UI into the run config so SafeTool uses it.
+    # Build a per-turn copy of the run config with the confirmation UI wired in.
+    # Never mutate the shared session.run_config — concurrent REST + WebSocket turns
+    # would race on the same object (BUG-117).
     run_config = session.run_config
     if run_config is not None:
-        run_config.confirmation_ui = confirmation_ui
+        run_config = dataclasses.replace(run_config, confirmation_ui=confirmation_ui)
 
     # Read history from memory manager.
     history_messages = _build_history(session.memory_manager, text)

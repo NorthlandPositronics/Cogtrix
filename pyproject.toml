@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cogtrix"
-version = "0.1.18"
+version = "0.1.19"
 description = "Modular AI assistant with 52 built-in tools, multi-provider LLM support, and hybrid memory"
 readme = "README.md"
 requires-python = "~=3.13.0"

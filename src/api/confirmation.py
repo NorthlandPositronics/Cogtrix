@@ -70,6 +70,15 @@ class ApiConfirmationUI:
     ) -> None:
         """Enqueue a ``tool_confirm_request`` message to the WebSocket queue."""
         with self._lock:
+            if self._pending_event is not None and not self._pending_event.is_set():
+                # A previous read_choice() caller is still blocking on the old event.
+                # Unblock it immediately with a denial so it never waits the full timeout.
+                self._pending_action = "n"
+                self._pending_event.set()
+                log.warning(
+                    "ApiConfirmationUI.render_prompt: displaced a pending confirmation for %s",
+                    self._confirmation_id,
+                )
             self._confirmation_id = str(uuid.uuid4())
             self._pending_event = threading.Event()
             self._pending_action = "n"

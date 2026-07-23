@@ -378,24 +378,27 @@ class ConnectionManager:
         No-op when no connection exists for the session, but the message is still
         buffered so it can be replayed on reconnect.
 
-        The sequence number is allocated and the message is buffered inside the
-        lock so that seq numbers remain contiguous in the replay buffer.  The
-        actual JSON serialisation is done inside the lock too (it is fast and
-        must observe the allocated seq), but the network send is always outside
-        to avoid holding the lock across I/O.
+        Lock is held only for the minimal critical section: allocating the seq
+        number and reading the ws/buf references.  JSON serialisation (CPU-bound
+        Pydantic work) and the network send (I/O) both happen outside the lock.
+        A second brief lock acquisition appends the built message to the replay
+        buffer; two lock acquisitions per send is cheaper than holding one lock
+        across serialisation for all concurrent senders.
         """
+        # Phase 1: allocate seq and capture mutable state references.
         async with self._lock:
             seq = self._seq.get(session_id, 0)
-            # Build the message before incrementing the seq counter so that a
-            # Pydantic serialisation failure does not leave a gap in seq numbers.
-            json_str = self._build_message(session_id, message_type, payload, seq)
             self._seq[session_id] = seq + 1
-
             buf = self._buffers.setdefault(session_id, deque())
+            ws = self._connections.get(session_id)
+
+        # CPU-bound serialisation outside the lock so other coroutines can send.
+        json_str = self._build_message(session_id, message_type, payload, seq)
+
+        # Phase 2: append to replay buffer (separate brief lock acquisition).
+        async with self._lock:
             buf.append((seq, datetime.now(UTC).timestamp(), json_str))
             self._prune_buffer(buf)
-
-            ws = self._connections.get(session_id)
 
         # Network I/O always outside the lock.
         if ws is not None:

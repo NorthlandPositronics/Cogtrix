@@ -154,11 +154,38 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     app.state.guardrail_pipeline = None
     app.state.knowledge_store = None
 
+    # Auto-start assistant if configured
+    if cfg is not None and app.state.tool_registry is not None:
+        assistant_cfg = getattr(cfg, "assistant_config", None) or {}
+        if assistant_cfg.get("auto_start", False):
+            try:
+                from src.api.assistant_lifecycle import create_and_start_assistant
+
+                svc = await create_and_start_assistant(cfg, app.state.tool_registry)
+                app.state.assistant_service = svc
+                log.info("Assistant service auto-started")
+            except Exception as exc:
+                log.warning("Assistant auto-start failed: %s", exc)
+
     log.info("Cogtrix API startup complete")
     yield  # application runs here
 
     # ---- shutdown ----
     log.info("Cogtrix API shutting down")
+
+    # Stop assistant service if running
+    try:
+        svc = getattr(app.state, "assistant_service", None)
+        if svc is not None:
+            import asyncio as _asyncio
+
+            from src.api.assistant_lifecycle import shutdown_assistant_sync
+
+            await _asyncio.to_thread(shutdown_assistant_sync, svc)
+            app.state.assistant_service = None
+            log.info("Assistant service stopped")
+    except Exception as exc:
+        log.warning("Error stopping assistant service: %s", exc)
 
     # Save all in-memory sessions before shutting down
     try:

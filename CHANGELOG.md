@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.1.19](https://github.com/NorthlandPositronics/Cogtrix/compare/v0.1.18...v0.1.19) (2026-03-05)
+
+
+### Features
+
+* **api:** assistant auto-start on API server boot ([838dfd6](https://github.com/NorthlandPositronics/Cogtrix/commit/838dfd6b11ac4f3e523cb0f4e4cd9764c18f0671))
+* **api:** assistant auto-start on API server boot ([5c361da](https://github.com/NorthlandPositronics/Cogtrix/commit/5c361dab74d297b8d029c55fed6443c5c8aaa73c))
+
+
+### Bug Fixes
+
+* BUG-118 protect compress_tool_message against prompt injection ([93a7c9c](https://github.com/NorthlandPositronics/Cogtrix/commit/93a7c9c4159f61eb2abbfdfbcd27d624ee3cf11a))
+* move Pydantic serialisation outside asyncio.Lock in ConnectionManager.send ([df78f2e](https://github.com/NorthlandPositronics/Cogtrix/commit/df78f2eb04356fa34c3571053a2825e0fc0fe59a))
+* ProjectForge audit sprint 1 — 9 API bugs + 1 security fix ([5f6c5f6](https://github.com/NorthlandPositronics/Cogtrix/commit/5f6c5f6e26ef5691a3c28303bc90ea7e04d56282))
+* resolve BUG-115 and BUG-117 in API turn runner concurrency ([36f1d35](https://github.com/NorthlandPositronics/Cogtrix/commit/36f1d35a1e359c56b0a68bf65f2928997eb78f0b))
+* resolve BUG-116 — ApiConfirmationUI.render_prompt unblocks displaced callers ([e0ef573](https://github.com/NorthlandPositronics/Cogtrix/commit/e0ef57319d69e92024dc2f661d6c7ce28961d50c))
+* resolve BUG-120 and BUG-126 in api/routes/sessions.py ([547ba15](https://github.com/NorthlandPositronics/Cogtrix/commit/547ba1535f49d5dbccd2a1649b60e54219a0c085))
+* resolve BUG-122, BUG-113, and PERF-03 in session_bridge ([8080f65](https://github.com/NorthlandPositronics/Cogtrix/commit/8080f65347d935e0563f781c4ea1c8edd84e987e))
+
 ## [0.1.18](https://github.com/NorthlandPositronics/Cogtrix/compare/v0.1.17...v0.1.18) (2026-03-05)
 
 

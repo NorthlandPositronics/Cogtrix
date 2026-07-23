@@ -280,7 +280,10 @@ async def list_sessions(
     page_rows = rows[:limit]
 
     registry = _get_registry(request)
-    items = [_record_to_out(r, registry.get_cached(r.id) if registry else None) for r in page_rows]
+    items = []
+    for r in page_rows:
+        live = (await registry.get_cached(r.id)) if registry else None
+        items.append(_record_to_out(r, live))
 
     next_cursor = None
     if has_more and page_rows:
@@ -324,7 +327,7 @@ async def get_session(
     record = await _check_session_access(session_id, current_user, db)
 
     registry = _get_registry(request)
-    live_session = registry.get_cached(session_id) if registry else None
+    live_session = (await registry.get_cached(session_id)) if registry else None
 
     return APIResponse(data=_record_to_out(record, live_session))
 
@@ -362,6 +365,25 @@ async def patch_session(
     record = await _check_session_access(session_id, current_user, db)
     repo = SessionRepository(db)
 
+    # Refuse to mutate LLM/config while an agent turn is actively running.
+    # The turn's finally block merges its local bound-tools cache back into
+    # the persistent cache, which would re-pollute it with stale entries if
+    # we allowed the patch to proceed concurrently.
+    registry_early = _get_registry(request)
+    live_session_early = registry_early.get_cached(session_id) if registry_early else None
+    if live_session_early is not None and body.config is not None:
+        if live_session_early.turn_task is not None and not live_session_early.turn_task.done():
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "code": "TURN_IN_PROGRESS",
+                    "message": (
+                        "An agent turn is in progress for this session. "
+                        "Wait for it to complete before patching the config."
+                    ),
+                },
+            )
+
     # Build update dict
     updates: dict[str, Any] = {}
 
@@ -393,7 +415,7 @@ async def patch_session(
 
     # If provider/model changed, rebuild the LLM in the live session
     registry = _get_registry(request)
-    live_session = registry.get_cached(session_id) if registry else None
+    live_session = (await registry.get_cached(session_id)) if registry else None
 
     if live_session is not None and body.config is not None:
         provider_changed = body.config.provider is not None
@@ -458,12 +480,20 @@ async def delete_session(
     # Cancel any running turn and save memory
     registry = _get_registry(request)
     if registry is not None:
-        live_session = registry.get_cached(session_id)
+        live_session = await registry.get_cached(session_id)
         if live_session is not None:
             # Signal cancellation
             if live_session.cancel_event is not None:
                 live_session.cancel_event.set()
             if live_session.turn_task is not None and not live_session.turn_task.done():
+                # Unblock any agent thread blocked in read_choice() before
+                # cancelling the task; otherwise it can stay blocked for up
+                # to 5 minutes waiting for a WebSocket confirmation that will
+                # never arrive.
+                if live_session.run_config is not None:
+                    _conf_ui = getattr(live_session.run_config, "confirmation_ui", None)
+                    if _conf_ui is not None and hasattr(_conf_ui, "cancel"):
+                        _conf_ui.cancel()
                 live_session.turn_task.cancel()
                 try:
                     await live_session.turn_task

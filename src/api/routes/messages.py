@@ -92,7 +92,7 @@ async def _get_session_or_404(session_id: str, request: Request, db: AsyncSessio
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail={"code": "INTERNAL_ERROR", "message": "Session registry not available."},
         )
-    sess = registry.get_cached(session_id)
+    sess = await registry.get_cached(session_id)
     if sess is None:
         sess = await registry.get_or_warm(session_id, db)
     if sess is None:
@@ -336,7 +336,7 @@ async def clear_history(
     # clear() joins the background summarization thread and unlinks files — run in thread.
     registry = getattr(request.app.state, "session_registry", None)
     if registry is not None:
-        sess = registry.get_cached(session_id)
+        sess = await registry.get_cached(session_id)
         if sess is not None and sess.memory_manager is not None:
             mm = sess.memory_manager
             try:
