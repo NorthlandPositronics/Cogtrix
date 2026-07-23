@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.23](https://github.com/NorthlandPositronics/Cogtrix/compare/v0.1.22...v0.1.23) (2026-03-20)
+
+
+### Bug Fixes
+
+* **ci:** post status checks to correct SHA after Contents API commit ([d18249c](https://github.com/NorthlandPositronics/Cogtrix/commit/d18249c3f79ae0606daea1c3aefbda2fb604d7ed))
+* **ci:** post status checks to the new commit SHA after Contents API push ([a63e146](https://github.com/NorthlandPositronics/Cogtrix/commit/a63e14675f95b8cede988917a6bd53ca813309db))
+
 ## [0.1.22](https://github.com/NorthlandPositronics/Cogtrix/compare/v0.1.21...v0.1.22) (2026-03-20)
 
 
