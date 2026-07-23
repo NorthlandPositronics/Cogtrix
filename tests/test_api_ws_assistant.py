@@ -418,11 +418,6 @@ class TestWebSocketAuth:
 class TestWebSocketPingPong:
     """WebSocket ping/pong and resilience tests."""
 
-    # The sync TestClient's receive_text() has no timeout; it can hang waiting
-    # for an agent_state message that the async WS handler sends only after
-    # session warm-up completes.  Mark xfail(strict=False) so a hang (caught
-    # by pytest-timeout) doesn't break CI.  These tests are validated in the
-    # full async integration suite instead.
     @pytest.mark.xfail(
         strict=False,
         reason="sync TestClient may hang waiting for agent_state before pong",
@@ -476,9 +471,6 @@ class TestWebSocketPingPong:
 class TestWebSocketReconnect:
     """?last_seq= replay on reconnect."""
 
-    @pytest.mark.xfail(
-        strict=False, reason="sync TestClient may hang on receive_text before replay"
-    )
     @pytest.mark.timeout(10)
     def test_last_seq_triggers_replay(self, ws_client: TestClient) -> None:
         """Connecting with ?last_seq=0 should replay buffered messages with seq > 0."""
@@ -517,7 +509,6 @@ class TestWebSocketReconnect:
 class TestLogWebSocket:
     """Log-stream WebSocket — admin-only (P0)."""
 
-    @pytest.mark.xfail(strict=False, reason="sync TestClient may hang on receive_text for pong")
     @pytest.mark.timeout(10)
     def test_admin_connects_successfully(self, client: TestClient) -> None:
         """Admin token → connection accepted; first message or pong possible."""
@@ -556,7 +547,6 @@ class TestLogWebSocket:
         except Exception:
             pass
 
-    @pytest.mark.xfail(strict=False, reason="sync TestClient may hang on receive_text for pong")
     @pytest.mark.timeout(10)
     def test_admin_token_in_header(self, client: TestClient) -> None:
         """Admin token in Authorization header → accepted."""
@@ -630,20 +620,28 @@ class TestAssistantStartStop:
         assert resp.json()["error"]["code"] == "ASSISTANT_ALREADY_RUNNING"
 
     def test_start_config_missing_returns_409_internal_error(self, client: TestClient) -> None:
-        """POST start when config is absent (test env) returns 409 INTERNAL_ERROR.
+        """POST start when config is absent returns 409 INTERNAL_ERROR.
 
-        app.state.config is None in the test environment, so the endpoint
-        raises 409 with code INTERNAL_ERROR, not ASSISTANT_ALREADY_RUNNING.
+        Temporarily removes app.state.config so the endpoint hits the
+        "config not available" branch and returns INTERNAL_ERROR quickly,
+        without attempting actual network connections.
         Auth is still checked first (401/403 would indicate an auth bug).
         """
-        resp = client.post(
-            "/api/v1/assistant/start",
-            json={"force_restart": False},
-            headers=_admin_headers(),
-        )
+        from src.api.app import app
+
+        saved_config = getattr(app.state, "config", None)
+        app.state.config = None
+        try:
+            resp = client.post(
+                "/api/v1/assistant/start",
+                json={"force_restart": False},
+                headers=_admin_headers(),
+            )
+        finally:
+            app.state.config = saved_config
         assert resp.status_code not in (401, 403)
-        if resp.status_code == 409:
-            assert resp.json()["error"]["code"] != "ASSISTANT_ALREADY_RUNNING"
+        assert resp.status_code == 409
+        assert resp.json()["error"]["code"] == "INTERNAL_ERROR"
 
     # --- stop ---
 

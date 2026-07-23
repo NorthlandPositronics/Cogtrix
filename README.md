@@ -222,7 +222,7 @@ Full reference: **[Configuration Guide](docs/CONFIGURATION.md)**
 | `/optimizer [prompt]` | `/o` | Toggle prompt optimizer / force-optimize a prompt |
 | `/debug` | `/D` | Toggle debug mode |
 | `/verbose` | `/v` | Toggle verbose logging |
-| `/mcp [restart]` | — | List or restart MCP server connections |
+| `/mcp [restart [name]]` | — | List or restart MCP server connections |
 | `/quit` | `/exit`, `/q` | Exit |
 | `!<command>` | — | Execute a shell command inline (e.g. `!ls -la`) |
 
@@ -367,7 +367,7 @@ WebSocket connections that cannot set custom headers may pass the token as a `?t
 | `/api/v1/sessions/{id}/memory/*` | 3 | Get memory state, switch mode, clear memory |
 | `/api/v1/sessions/{id}/tools/*` | 4 | List, load, enable, disable tools |
 | `/api/v1/config/*` | 12 | Read/write config, provider management, model aliases |
-| `/api/v1/assistant/*` | 16 | Start/stop assistant mode, channel management, phonebook |
+| `/api/v1/assistant/*` | 23 | Start/stop assistant mode, channel management, phonebook, outbound, campaigns |
 | `/api/v1/assistant/workflows/*` | 11 | Workflow CRUD, per-workflow documents, chat bindings |
 | `/api/v1/users/*` | 4 | User management: list, create, update role, delete (admin) |
 | `/api/v1/rag/*` | 5 | Upload documents, list, delete, query knowledge base |

@@ -62,5 +62,21 @@ class WorkflowBindingOut(BaseModel):
     assigned_by: str | None = Field(default=None)
 
 
+class WorkflowDocumentOut(BaseModel):
+    """A document stored in a workflow's knowledge base."""
+
+    doc_id: str = Field(..., description="Unique document identifier (UUID).")
+    filename: str = Field(..., description="Original uploaded filename.")
+    size_bytes: int = Field(..., description="File size in bytes.")
+    content_type: str | None = Field(
+        default=None,
+        description="MIME type inferred from filename; null if unknown.",
+    )
+    status: str | None = Field(
+        default=None,
+        description="Upload status; present on upload response only (e.g. 'saved').",
+    )
+
+
 class BindWorkflowRequest(BaseModel):
     workflow_id: str = Field(..., description="Workflow identifier to bind.")

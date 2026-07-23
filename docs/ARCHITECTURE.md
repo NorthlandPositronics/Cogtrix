@@ -148,7 +148,7 @@ src/
 │   │   ├── memory.py      # Get memory state, switch mode, clear memory (3 endpoints)
 │   │   ├── tools.py       # List tools, load, enable, disable (4 endpoints)
 │   │   ├── config.py      # Read/write config sections, provider management, model aliases (12 endpoints)
-│   │   ├── assistant.py   # Start/stop assistant, channel management, phonebook (16 endpoints)
+│   │   ├── assistant.py   # Start/stop assistant, channel management, phonebook, outbound, campaigns (23 endpoints)
 │   │   ├── workflows.py   # Workflow CRUD, per-workflow docs, chat bindings (11 endpoints)
 │   │   ├── users.py       # User management: list, create, update role, delete (4 admin endpoints)
 │   │   ├── rag.py         # Upload documents, list, delete, query knowledge base (5 endpoints)
@@ -206,6 +206,7 @@ src/
 │   ├── guardrails.py      # Security guardrails (input/output/rate-limit/LLM judge)
 │   ├── deferral.py        # DeferralManager — deferred re-processing passes
 │   ├── scheduler.py       # MessageScheduler — deferred reply delivery
+│   ├── campaign.py        # CampaignManager — multi-contact outbound campaigns
 │   ├── workflows.py       # WorkflowRegistry: YAML definitions, bindings, auto-detect
 │   └── service.py         # Main orchestrator (AssistantService)
 ├── rag/
@@ -343,7 +344,7 @@ User Input
 | `/quit` | `/exit`, `/q` | End session |
 | `/info` | `/i` | Session information (provider, model, system prompt size, mode) |
 | `/tools` | `/t`, `/tool` | List / manage tools (load, enable, disable) |
-| `/mcp` | | List or restart MCP server connections |
+| `/mcp [restart [name]]` | | List or restart MCP server connections |
 | `/think` | `/T` | Deep Tree-of-Thought reasoning |
 | `/delegate` | `/d` | Force task delegation across models |
 | `/mode` | `/M` | Show / switch memory mode |
@@ -526,14 +527,19 @@ class SessionState:
     deny_all: bool              # blanket forbid (reset each prompt cycle)
     no_confirm: bool            # True in assistant mode (auto-approve)
     approvals: set[str]         # tools auto-approved via 'a' or /approve
-    loaded_tools: set[str]      # tools dynamically loaded from on-demand pool
+    loaded_tools: set[str]      # agent-loaded + pinned tools currently active
+    pinned_tools: set[str]      # manually pinned tools (persist across prompt cycles)
     all_tool_descriptions: dict[str, str]   # process-scoped, populated at startup
     all_tool_originals: dict[str, Any]      # process-scoped, populated at startup
 ```
 
+**Two-tier tool loading:**
+- **Agent-loaded** tools are added to `loaded_tools` when the LLM calls `request_tools`. They are cleared at prompt boundaries by `reset_for_new_prompt()` (`loaded_tools &= pinned_tools`).
+- **Pinned** tools are in both `loaded_tools` and `pinned_tools`. They are loaded manually via `/tools load`, `PATCH /sessions/{id}/tools`, or `--activate-tools` and persist across prompt cycles until explicitly unloaded.
+
 **Lifetime mapping:**
-- `denials`, `loaded_tools`, `approvals` — session-scoped; cleared on session switch via `reset_for_new_session()`
-- `deny_all` — per-prompt; reset at the start of each new prompt cycle via `reset_for_new_prompt()`
+- `denials`, `loaded_tools`, `pinned_tools`, `approvals` — session-scoped; cleared on session switch via `reset_for_new_session()`
+- `deny_all` — per-prompt; reset at the start of each new prompt cycle via `reset_for_new_prompt()` (`loaded_tools &= pinned_tools` also runs here)
 - `no_confirm` — process-scoped; set once at startup
 - `all_tool_descriptions`, `all_tool_originals` — process-scoped; populated once at startup
 
@@ -605,6 +611,7 @@ Wraps sensitive tools with confirmation prompts.
 @runtime_checkable
 class ConfirmationUI(Protocol):
     def render_prompt(self, tool_name, tool_args) -> str
+    def read_choice(self) -> str
     def pause_spinner(self) -> None
     def resume_spinner(self) -> None
 ```

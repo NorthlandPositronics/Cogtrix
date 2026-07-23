@@ -31,6 +31,7 @@ from src.api.schemas.workflow import (
     BindWorkflowRequest,
     WorkflowBindingOut,
     WorkflowCreate,
+    WorkflowDocumentOut,
     WorkflowOut,
     WorkflowUpdate,
 )
@@ -304,7 +305,7 @@ def _wf_docs_dir(registry: object, workflow_id: str) -> Path:
 @router.post(
     "/{workflow_id}/documents",
     summary="Upload a document to workflow knowledge base",
-    response_model=APIResponse[dict],
+    response_model=APIResponse[WorkflowDocumentOut],
     status_code=202,
 )
 async def upload_workflow_document(
@@ -312,7 +313,7 @@ async def upload_workflow_document(
     request: Request,
     file: UploadFile = File(...),
     current_user: TokenData = Depends(require_admin),
-) -> APIResponse[dict]:
+) -> APIResponse[WorkflowDocumentOut]:
     _validate_wf_id(workflow_id)
     registry = _get_registry(request)
     wf = await asyncio.to_thread(registry.get_workflow, workflow_id)  # type: ignore[attr-defined]
@@ -348,7 +349,7 @@ async def upload_workflow_document(
 
     doc_id = str(uuid.uuid4())
 
-    def _save_and_ingest() -> dict:
+    def _save_and_ingest() -> WorkflowDocumentOut:
         from src.assistant.workflows import WorkflowRegistry
 
         reg: WorkflowRegistry = registry  # type: ignore[assignment]
@@ -367,7 +368,9 @@ async def upload_workflow_document(
             filename,
             len(data),
         )
-        return {"doc_id": doc_id, "filename": filename, "size_bytes": len(data), "status": "saved"}
+        return WorkflowDocumentOut(
+            doc_id=doc_id, filename=filename, size_bytes=len(data), status="saved"
+        )
 
     try:
         result = await asyncio.to_thread(_save_and_ingest)
@@ -382,13 +385,13 @@ async def upload_workflow_document(
 @router.get(
     "/{workflow_id}/documents",
     summary="List documents in workflow knowledge base",
-    response_model=APIResponse[list[dict]],
+    response_model=APIResponse[list[WorkflowDocumentOut]],
 )
 async def list_workflow_documents(
     workflow_id: str,
     request: Request,
     current_user: TokenData = Depends(get_current_user),
-) -> APIResponse[list[dict]]:
+) -> APIResponse[list[WorkflowDocumentOut]]:
     _validate_wf_id(workflow_id)
     registry = _get_registry(request)
     wf = await asyncio.to_thread(registry.get_workflow, workflow_id)  # type: ignore[attr-defined]
@@ -398,14 +401,14 @@ async def list_workflow_documents(
             detail={"code": "NOT_FOUND", "message": f"Workflow '{workflow_id}' not found."},
         )
 
-    def _list_docs() -> list[dict]:
+    def _list_docs() -> list[WorkflowDocumentOut]:
         from src.assistant.workflows import WorkflowRegistry
 
         reg: WorkflowRegistry = registry  # type: ignore[assignment]
         docs_root = reg._workflows_dir / workflow_id / "docs"
         if not docs_root.is_dir():
             return []
-        items = []
+        items: list[WorkflowDocumentOut] = []
         for doc_dir in sorted(docs_root.iterdir()):
             if not doc_dir.is_dir():
                 continue
@@ -413,12 +416,12 @@ async def list_workflow_documents(
                 if f.is_file():
                     mime, _ = mimetypes.guess_type(f.name)
                     items.append(
-                        {
-                            "doc_id": doc_dir.name,
-                            "filename": f.name,
-                            "size_bytes": f.stat().st_size,
-                            "content_type": mime or "application/octet-stream",
-                        }
+                        WorkflowDocumentOut(
+                            doc_id=doc_dir.name,
+                            filename=f.name,
+                            size_bytes=f.stat().st_size,
+                            content_type=mime or "application/octet-stream",
+                        )
                     )
                     break
         return items

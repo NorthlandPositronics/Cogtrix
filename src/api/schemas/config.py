@@ -271,6 +271,15 @@ class WizardStepOut(BaseModel):
         ...,
         description="True when all steps are done and the config has been saved.",
     )
+    requires_acceptance: bool = Field(
+        default=False,
+        description=(
+            "True when the LLM has produced a YAML config and the user must explicitly "
+            "accept or reject it before the wizard advances to the save step. "
+            "When true, the frontend should render Accept/Cancel buttons instead of "
+            "a free-text answer input."
+        ),
+    )
     warnings: list[str] = Field(
         default_factory=list,
         description="Non-fatal warnings from this step.",

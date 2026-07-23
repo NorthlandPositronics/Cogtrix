@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.1.27](https://github.com/NorthlandPositronics/Cogtrix/compare/v0.1.26...v0.1.27) (2026-03-22)
+
+
+### Bug Fixes
+
+* add WorkflowDocumentOut schema to workflow document endpoints ([#30](https://github.com/NorthlandPositronics/Cogtrix/issues/30)) ([ce1f958](https://github.com/NorthlandPositronics/Cogtrix/commit/ce1f958ae3bcbda7db45c408e49e91d65960391a))
+* forge audit findings — test timeout + type annotation ([5945af8](https://github.com/NorthlandPositronics/Cogtrix/commit/5945af868d7e493dcb1dac303b528e0201e234e2))
+* **wizard:** structured error on connection failure + remove protocol leakage ([ab67912](https://github.com/NorthlandPositronics/Cogtrix/commit/ab67912d17653dd85fc749714d92d8207b0b5721))
+
+
+### Documentation
+
+* **api:** holistic API documentation audit — 9 issues fixed ([#29](https://github.com/NorthlandPositronics/Cogtrix/issues/29)) ([6e4dc1c](https://github.com/NorthlandPositronics/Cogtrix/commit/6e4dc1c80f270b0e095a06b0e42d7c73d7fc85c1))
+* holistic general documentation audit — 6 corrections ([#31](https://github.com/NorthlandPositronics/Cogtrix/issues/31)) ([6891847](https://github.com/NorthlandPositronics/Cogtrix/commit/6891847f5936429bb4a3ed7c2172f4bf1387ffcf))
+
 ## [0.1.26](https://github.com/NorthlandPositronics/Cogtrix/compare/v0.1.25...v0.1.26) (2026-03-22)
 
 

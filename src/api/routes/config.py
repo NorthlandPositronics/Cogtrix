@@ -655,8 +655,8 @@ async def advance_wizard(
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail={
-                    "code": "WIZARD_STEP_ERROR",
-                    "message": f"Connection failed: {exc}",
+                    "code": "PROVIDER_UNREACHABLE",
+                    "message": str(exc),
                 },
             ) from exc
 
@@ -686,7 +686,16 @@ async def advance_wizard(
         from langchain_core.messages import AIMessage, SystemMessage
 
         messages = [SystemMessage(content=system_prompt)]
-        ai_text = await asyncio.to_thread(_wizard_invoke_llm, llm, messages)
+        try:
+            ai_text = await asyncio.to_thread(_wizard_invoke_llm, llm, messages)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail={
+                    "code": "PROVIDER_UNREACHABLE",
+                    "message": str(exc),
+                },
+            ) from exc
         messages.append(AIMessage(content=ai_text))
         ws["messages"] = messages
         ws["step"] = 1
@@ -739,16 +748,22 @@ async def advance_wizard(
         from src.setup_wizard import _has_yaml_block
 
         yaml_preview = None
-        warnings: list[str] = []
+        requires_acceptance = False
+        question_text = ai_text
         if _has_yaml_block(ai_text):
             try:
                 from src.setup_wizard import _extract_yaml, _mask_secrets
 
                 raw_yaml = _extract_yaml(ai_text)
                 yaml_preview = _mask_secrets(raw_yaml)
+                # Strip the YAML code block from question to avoid duplication
+                # (yaml_preview is the canonical place for config content)
+                import re as _re
+
+                question_text = _re.sub(r"```ya?ml\b.*?```", "", ai_text, flags=_re.DOTALL).strip()
             except Exception:
                 pass
-            warnings.append("YAML config detected. Send data: {accept: true} to save it.")
+            requires_acceptance = True
 
         return APIResponse(
             data=WizardStepOut(
@@ -756,10 +771,11 @@ async def advance_wizard(
                 step=1,
                 total_steps=3,
                 step_name="Configure",
-                question=ai_text,
+                question=question_text,
                 yaml_preview=yaml_preview,
+                requires_acceptance=requires_acceptance,
                 complete=False,
-                warnings=warnings,
+                warnings=[],
             )
         )
 

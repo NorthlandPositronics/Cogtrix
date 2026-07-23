@@ -196,12 +196,9 @@ Fast inference with open-source models.
 
 1. Get an API key from [console.groq.com](https://console.groq.com/keys)
 
-2. Set the environment variable (or use `api_key` in config):
-   ```bash
-   export GROQ_API_KEY=gsk-...
-   ```
+2. Configure (`.cogtrix.yaml`) with the key in the `api_key` field:
 
-3. Configure (`.cogtrix.yaml`):
+   > **Note:** Cogtrix does not read `GROQ_API_KEY` from the environment. The key must be set in the config file's `api_key` field (or provided via `--setup`). Only `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, and `XAI_API_KEY` are read automatically.
    ```yaml
    providers:
      groq:
@@ -216,7 +213,7 @@ Fast inference with open-source models.
        model: llama-3.3-70b-versatile
    ```
 
-4. Run:
+3. Run:
    ```bash
    uv run python cogtrix.py --model groq
    ```
