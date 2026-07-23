@@ -161,11 +161,32 @@ class AssistantService:
             schedule_path = Path(top_data_dir) / "assistant" / "schedule.json"
             channels_map = {ch.name: ch for ch in self._channels}
             quiet_cfg: dict[str, Any] = asst_cfg.get("response_timing", {})
+
+            # Build the phonebook maps up-front so the scheduler can reverse
+            # resolve a chat_id to its contact name for per-contact quiet hours
+            # (#2141); the WorkflowRegistry below reuses the same maps.
+            services_config_full: dict[str, Any] = (
+                config.services if hasattr(config, "services") else {}
+            )
+            merged_phonebook: dict[str, str] = {}
+            merged_contact_prompts: dict[str, str] = {}
+            for ch_name in ("whatsapp", "telegram"):
+                ch_cfg = services_config_full.get(ch_name, {})
+                pb = ch_cfg.get("phonebook", {})
+                if isinstance(pb, dict):
+                    for name, ident in pb.items():
+                        key = str(ident).replace("@c.us", "").replace("@s.whatsapp.net", "")
+                        merged_phonebook[key] = str(name)
+                cp = ch_cfg.get("contact_prompts", {})
+                if isinstance(cp, dict):
+                    merged_contact_prompts.update(cp)
+
             self._scheduler = MessageScheduler(
                 channels_map,
                 schedule_path,
                 quiet_cfg,
                 dispatch_interval=float(asst_cfg.get("dispatch_interval", 30.0)),
+                contact_resolver=merged_phonebook,
             )
 
             debounce_seconds = float(asst_cfg.get("debounce_seconds", 3.0))
@@ -186,21 +207,9 @@ class AssistantService:
 
             from src.assistant.workflows import WorkflowRegistry
 
-            services_config_full: dict[str, Any] = (
-                config.services if hasattr(config, "services") else {}
-            )
-            merged_phonebook: dict[str, str] = {}
-            merged_contact_prompts: dict[str, str] = {}
-            for ch_name in ("whatsapp", "telegram"):
-                ch_cfg = services_config_full.get(ch_name, {})
-                pb = ch_cfg.get("phonebook", {})
-                if isinstance(pb, dict):
-                    for name, ident in pb.items():
-                        key = str(ident).replace("@c.us", "").replace("@s.whatsapp.net", "")
-                        merged_phonebook[key] = str(name)
-                cp = ch_cfg.get("contact_prompts", {})
-                if isinstance(cp, dict):
-                    merged_contact_prompts.update(cp)
+            # services_config_full / merged_phonebook / merged_contact_prompts
+            # were computed above (before the scheduler, which reuses the
+            # phonebook for #2141 quiet-hours resolution).
             data_dir = getattr(config, "data_dir", "data")
             self._workflow_registry = WorkflowRegistry(
                 data_dir=data_dir,
@@ -217,6 +226,16 @@ class AssistantService:
                     check_interval=float(campaign_cfg.get("check_interval", 60.0)),
                 )
 
+            # Resolve the active model's per-call timeout so it reaches the run
+            # config (#2146); falls back to the AgentRunConfig default on error.
+            model_timeout = 180
+            try:
+                _, _active_mc = config.resolve_llm_config()
+                if getattr(_active_mc, "timeout", None):
+                    model_timeout = int(_active_mc.timeout)
+            except Exception as exc:
+                log.debug("Could not resolve model timeout for assistant handler: %s", exc)
+
             self._handler = MessageHandler(
                 session_mgr=self._session_mgr,
                 config=asst_cfg,
@@ -227,6 +246,7 @@ class AssistantService:
                 available_tools=available_tools,
                 active_tools=active_tools,
                 max_context_tokens=max_context_tokens,
+                llm_timeout=model_timeout,
                 compression_llm=compression_llm,
                 knowledge_store=self._knowledge_store,
                 guardrails=guardrails,

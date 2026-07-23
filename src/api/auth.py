@@ -501,6 +501,15 @@ async def require_superadmin(current_user: TokenData = Depends(get_current_user)
     return current_user
 
 
+def _org_scoping_enabled() -> bool:
+    """Whether admin-role org scoping is enabled (Phase 2 rollout flag).
+
+    Off by default for backward compatibility; opt in via
+    ``COGTRIX_ENABLE_ORG_SCOPING`` set to ``true``/``1``/``yes``.
+    """
+    return os.getenv("COGTRIX_ENABLE_ORG_SCOPING", "").lower() in ("true", "1", "yes")
+
+
 async def get_admin_org(
     current_user: TokenData = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
@@ -528,7 +537,7 @@ async def get_admin_org(
             },
         )
     # Feature flag: disable org scoping by default for backward compatibility
-    if os.getenv("COGTRIX_ENABLE_ORG_SCOPING", "").lower() not in ("true", "1", "yes"):
+    if not _org_scoping_enabled():
         return None
     if current_user.is_superadmin:
         return None
@@ -710,6 +719,16 @@ async def verify_session_owner(
     """Ensure the current user owns the given session and is a workspace member.
 
     Admins may access any session when *admin_bypass* is ``True`` (default).
+    The breadth of that bypass depends on org scoping (``COGTRIX_ENABLE_ORG_SCOPING``,
+    see :func:`_org_scoping_enabled`):
+
+    * Org scoping **off** (default) — every admin keeps a global bypass
+      (legacy behaviour).
+    * Org scoping **on** — superadmins keep the global bypass, but a regular
+      admin may only bypass for sessions belonging to *their own* organization
+      (#2115: cross-org session IDOR).  The session's org is resolved from its
+      workspace (authoritative) or, failing that, from the owner's org.
+
     Regular users may only access their own sessions, and must still be a
     member of the workspace the session belongs to (if any).
 
@@ -717,14 +736,23 @@ async def verify_session_owner(
         session_id: UUID v4 of the session to check.
         current_user: Decoded JWT claims from the request.
         db: The caller's database session (from ``Depends(get_db)``).
-        admin_bypass: When ``True``, skip the check for admin callers.
+        admin_bypass: When ``True``, skip the ownership check for admin callers
+            (subject to org scoping above).
 
     Raises:
         HTTPException 404 SESSION_NOT_FOUND — session does not exist.
-        HTTPException 403 FORBIDDEN — session belongs to a different user
+        HTTPException 403 FORBIDDEN — session belongs to a different user/org
             or caller is no longer a workspace member.
+        HTTPException 403 ORG_NOT_ASSIGNED — org-scoped admin has no org_id.
     """
-    if admin_bypass and current_user.is_admin:
+    is_admin = current_user.is_admin
+    # An org-scoped admin must prove org membership against the resource; a
+    # superadmin (and every admin when scoping is off) keeps the global bypass.
+    org_scoped_admin = (
+        admin_bypass and is_admin and not current_user.is_superadmin and _org_scoping_enabled()
+    )
+
+    if admin_bypass and is_admin and not org_scoped_admin:
         return
 
     from sqlalchemy import select
@@ -743,7 +771,47 @@ async def verify_session_owner(
             },
         )
 
-    if not (admin_bypass and current_user.is_admin) and record.user_id != current_user.user_id:
+    if org_scoped_admin:
+        from src.api.db.repositories.users import UserRepository
+
+        user_repo = UserRepository(db)
+        admin_user = await user_repo.get_by_id(current_user.user_id)
+        admin_org = admin_user.org_id if admin_user is not None else None
+        if admin_org is None:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={
+                    "code": "ORG_NOT_ASSIGNED",
+                    "message": "Admin account is not assigned to an organization.",
+                },
+            )
+
+        # Resolve the session's org: workspace org is authoritative; otherwise
+        # fall back to the owner's org.  A session whose org cannot be resolved
+        # (None) never matches a real admin org, so access is denied by default.
+        session_org: str | None = None
+        if record.workspace_id is not None:
+            from src.api.db.repositories.workspaces import WorkspaceRepository
+
+            ws = await WorkspaceRepository(db).get_by_id(record.workspace_id)
+            if ws is not None:
+                session_org = ws.org_id
+        if session_org is None:
+            owner = await user_repo.get_by_id(record.user_id)
+            session_org = owner.org_id if owner is not None else None
+
+        if session_org != admin_org:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={
+                    "code": "FORBIDDEN",
+                    "message": "Authenticated user lacks permission for this action.",
+                },
+            )
+        return
+
+    # Regular ownership check (non-admins, and admins with admin_bypass=False).
+    if record.user_id != current_user.user_id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail={
@@ -752,8 +820,8 @@ async def verify_session_owner(
             },
         )
 
-    # Workspace isolation: non-admins must still be a member of the session's workspace.
-    if record.workspace_id is not None and not (admin_bypass and current_user.is_admin):
+    # Workspace isolation: must still be a member of the session's workspace.
+    if record.workspace_id is not None:
         from src.api.db.repositories.workspaces import WorkspaceRepository
 
         ws_repo = WorkspaceRepository(db)

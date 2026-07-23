@@ -161,8 +161,13 @@ class TaskQueue:
                         org_id,
                     ),
                 )
-        if self._executor is not None:
-            self._executor.submit(self._worker, task_id)
+            # Snapshot the executor under the lock so a concurrent stop()
+            # cannot null/shut it down between this read and the submit below
+            # (#2174). Dispatch happens outside the lock to avoid holding it
+            # across executor bookkeeping.
+            executor = self._executor
+        if executor is not None:
+            executor.submit(self._worker, task_id)
         return task_id
 
     def get(self, task_id: str) -> TaskRecord | None:
@@ -218,16 +223,51 @@ class TaskQueue:
         return True
 
     def start(self) -> None:
-        self._executor = ThreadPoolExecutor(max_workers=self._max_workers)
-        # Re-submit any PENDING tasks that survived a previous crash.
+        with self._lock:
+            # Idempotence: a second start() without an intervening stop() must
+            # not leak the first executor (its worker threads would never be
+            # shut down) — #2159.
+            if self._executor is not None:
+                return
+            # Finalize tasks left RUNNING by a previous process crash. start()
+            # runs before any worker in this process, so a RUNNING row here is
+            # always an orphan from a prior run. Agent tasks are not idempotent,
+            # so mark them FAILED rather than leaving them "running" forever or
+            # blindly re-running them (#2159).
+            now = time.time()
+            with self._connect() as conn:
+                conn.execute(
+                    """
+                    UPDATE tasks
+                    SET status = ?, finished_at = ?, error = ?
+                    WHERE status = ?
+                    """,
+                    (
+                        TaskStatus.FAILED.value,
+                        now,
+                        "Task was interrupted by a process restart while running.",
+                        TaskStatus.RUNNING.value,
+                    ),
+                )
+            executor = ThreadPoolExecutor(max_workers=self._max_workers)
+            self._executor = executor
+        # Re-submit any PENDING tasks that survived a previous crash. Done
+        # outside the lock so concurrent submit() traffic isn't blocked; a
+        # task that is also dispatched by submit() is a no-op because
+        # _worker's PENDING→RUNNING transition is a check-then-act under
+        # _lock (the second worker early-returns).
         pending = self.list(status=TaskStatus.PENDING, limit=1000)
         for record in pending:
-            self._executor.submit(self._worker, record.task_id)
+            executor.submit(self._worker, record.task_id)
 
     def stop(self) -> None:
-        if self._executor is not None:
-            self._executor.shutdown(wait=True)
-            self._executor = None
+        # Null the executor under the lock so a concurrent submit() observes a
+        # consistent value (#2174); shut it down on the local snapshot outside
+        # the lock so the blocking join doesn't stall submit()/start() traffic.
+        with self._lock:
+            executor, self._executor = self._executor, None
+        if executor is not None:
+            executor.shutdown(wait=True)
 
     # ── Internal workers ───────────────────────────────────────────────────
 

@@ -52,7 +52,10 @@ services:
       # /data is the Dockerfile default; explicit here for clarity.
       COGTRIX_DATA_DIR: /data
       COGTRIX_WHATSAPP_URL: "http://waha:3000"
-      COGTRIX_ALLOWED_WRITE_PATHS: "/tmp,/data/output,/data/log"
+      # /data/work is the agent's writable runtime cwd (#2068); keep it in the
+      # write allowlist so relative file writes from the agent's cwd are accepted.
+      COGTRIX_WORKDIR: /data/work
+      COGTRIX_ALLOWED_WRITE_PATHS: "/tmp,/data/work,/data/output,/data/log"
       # Browser origins allowed to call the API (#2059). Comma-separated.
       # Defaults to localhost only — set your real web UI origin(s) here for
       # any non-local deployment, e.g. "https://cogtrix.ai,https://www.cogtrix.ai".

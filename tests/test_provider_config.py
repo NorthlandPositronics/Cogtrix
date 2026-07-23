@@ -252,6 +252,59 @@ class TestModelConfig:
         mc = ModelConfig(provider="ollama", model="test")
         assert mc.max_tokens is None
 
+    def test_model_config_model_kwargs_default_empty(self):
+        """#2122: model_kwargs defaults to an empty dict, not shared/None."""
+        mc1 = ModelConfig(provider="ollama", model="a")
+        mc2 = ModelConfig(provider="ollama", model="b")
+        assert mc1.model_kwargs == {}
+        mc1.model_kwargs["x"] = 1
+        assert mc2.model_kwargs == {}  # no shared mutable default
+
+    def test_model_config_model_kwargs_accepts_mapping(self):
+        """#2122: model_kwargs stores operator sampling overrides."""
+        mc = ModelConfig(
+            provider="openai",
+            model="qwen3",
+            model_kwargs={"frequency_penalty": 0.3, "extra_body": {"repetition_penalty": 1.1}},
+        )
+        assert mc.model_kwargs["frequency_penalty"] == 0.3
+        assert mc.model_kwargs["extra_body"] == {"repetition_penalty": 1.1}
+
+    def test_model_config_rejects_non_dict_model_kwargs(self):
+        """#2122: a non-mapping model_kwargs is a config error."""
+        with pytest.raises(ConfigError, match="model_kwargs"):
+            ModelConfig(provider="ollama", model="test", model_kwargs=["not", "a", "dict"])  # type: ignore[arg-type]
+
+    def test_parse_models_section_reads_model_kwargs(self):
+        """#2122: model_kwargs is parsed from the models section of config."""
+        config = Config()
+        _parse_models_section(
+            config,
+            {
+                "qwen3": {
+                    "provider": "litellm",
+                    "model": "qwen3",
+                    "model_kwargs": {
+                        "frequency_penalty": 0.3,
+                        "extra_body": {"repetition_penalty": 1.1},
+                    },
+                }
+            },
+        )
+        mc = config.models["qwen3"]
+        assert mc.model_kwargs["frequency_penalty"] == 0.3
+        assert mc.model_kwargs["extra_body"] == {"repetition_penalty": 1.1}
+
+    def test_parse_models_section_ignores_non_dict_model_kwargs(self):
+        """#2122: a non-mapping model_kwargs in YAML is ignored, not fatal."""
+        config = Config()
+        _parse_models_section(
+            config,
+            {"m": {"provider": "openai", "model": "gpt-4o", "model_kwargs": "oops"}},
+        )
+        # Model still loads; model_kwargs falls back to empty.
+        assert config.models["m"].model_kwargs == {}
+
 
 class TestConfigProviders:
     """Tests for Config.providers functionality."""

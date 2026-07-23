@@ -18,6 +18,36 @@ mkdir -p \
     "$DATA_DIR/log" \
     "$DATA_DIR/documents"
 
+# Resolve a WRITABLE runtime working directory and cd into it before exec
+# (#2068). The image WORKDIR is /app, which is read-only at runtime by design,
+# so the agent's default cwd was non-writable: any file tool writing relative
+# to the cwd (e.g. write_file("foo.txt")) failed unless the operator passed
+# --workdir. Default to "$DATA_DIR/work" (override via COGTRIX_WORKDIR); it
+# lives under the writable data volume. PYTHONPATH=/app still resolves imports.
+WORK_DIR="${COGTRIX_WORKDIR:-$DATA_DIR/work}"
+mkdir -p "$WORK_DIR"
+cd "$WORK_DIR"
+# NOTE: after this cd the cwd is no longer /app, so every subsequent exec must
+# use absolute paths / module form (``python -m src.api`` via PYTHONPATH=/app,
+# ``/app/cogtrix.py``, ``alembic -c /app/alembic.ini``) — a relative
+# ``python cogtrix.py`` would resolve against $WORK_DIR and fail (#2068).
+
+# Config discovery searches the CWD for .cogtrix.{yaml,yml,json}; the conventional
+# mount point is /app/.cogtrix.yaml (docker-compose, Helm ConfigMap), which the
+# cd above moved out of the search path. Point COGTRIX_CONFIG_FILE at it when a
+# config is actually present so it's still found from $WORK_DIR (#2068). This is
+# conditional on purpose: an unconditional value would make load_config raise
+# "Config file not found" when no config is mounted (e.g. env-only API runs).
+# An explicit COGTRIX_CONFIG_FILE override is always honored.
+if [ -z "${COGTRIX_CONFIG_FILE:-}" ]; then
+    for _cfg in /app/.cogtrix.yaml /app/.cogtrix.yml /app/.cogtrix.json; do
+        if [ -f "$_cfg" ]; then
+            export COGTRIX_CONFIG_FILE="$_cfg"
+            break
+        fi
+    done
+fi
+
 # ── API server mode ──────────────────────────────────────────
 # Invoked as:
 #   docker run cogtrix api
@@ -31,8 +61,11 @@ if [ "${1}" = "api" ] || [ "${1}" = "--api" ]; then
     # so a non-zero exit always indicates a genuine failure (locked table, schema
     # conflict, missing revision). Let it propagate and kill the container rather
     # than starting uvicorn against a potentially broken schema.
+    # Explicit -c so migrations work from any cwd: the entrypoint cd's into a
+    # writable runtime workdir (#2068), but alembic.ini lives at /app. Its
+    # script_location uses %(here)s, so it resolves correctly regardless of cwd.
     echo "Running database migrations..."
-    alembic upgrade head
+    alembic -c /app/alembic.ini upgrade head
     echo "Migrations complete."
 
     # Mark API mode so the HEALTHCHECK can skip the HTTP probe in CLI mode
@@ -82,8 +115,8 @@ if [ $# -eq 0 ] && ! _cogtrix_has_config && [ -t 0 ]; then
        [ -z "${DEEPSEEK_API_KEY:-}" ] && \
        [ -z "${COGTRIX_OLLAMA:-}" ] && \
        [ -z "${OLLAMA_BASE_URL:-}" ]; then
-        exec python cogtrix.py --setup
+        exec python /app/cogtrix.py --setup
     fi
 fi
 
-exec python cogtrix.py "$@"
+exec python /app/cogtrix.py "$@"

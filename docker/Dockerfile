@@ -98,13 +98,17 @@ ARG GIT_COMMIT=""
 # PYTHONPATH ensures "python -m src.api" and "import src.*" resolve from /app
 # COGTRIX_DATA_DIR=/data moves all runtime writes outside /app, keeping /app read-only.
 # COGTRIX_ALLOWED_WRITE_PATHS uses comma separators to match file_ops.py runtime parser.
+# COGTRIX_WORKDIR is the agent's writable runtime cwd (#2068): the entrypoint cd's
+# into it before exec so relative file writes don't hit the read-only /app WORKDIR.
+# It is included in COGTRIX_ALLOWED_WRITE_PATHS so the file tools accept writes there.
 ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONPATH="/app" \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     TZ=UTC \
     COGTRIX_DATA_DIR="/data" \
-    COGTRIX_ALLOWED_WRITE_PATHS="/tmp,/data/output,/data/log" \
+    COGTRIX_WORKDIR="/data/work" \
+    COGTRIX_ALLOWED_WRITE_PATHS="/tmp,/data/work,/data/output,/data/log" \
     GIT_COMMIT="${GIT_COMMIT}"
 
 # Virtual environment from builder — --link enables independent layer caching.

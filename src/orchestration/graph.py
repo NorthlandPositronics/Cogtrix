@@ -30,6 +30,7 @@ from src.orchestration.nodes.process_tools import (
     extract_prohibited_tools,
 )
 from src.orchestration.nodes.recovery import (
+    _RECOVERY_INJECTED_MARKER,
     build_handle_action_intent_node,
     build_handle_corpus_attribution_mismatch_node,
     build_handle_entity_owner_mismatch_node,
@@ -492,6 +493,29 @@ from src.orchestration.tool_arg_correction import (  # noqa: E402, F401
 )
 
 
+def _last_human_msg_idx(msgs: list[Any]) -> int:
+    """Return the index of the most recent *genuine user* ``HumanMessage``,
+    or -1 if none. Used by the cascade-budget bookkeeping in
+    ``route_after_model`` to detect turn boundaries.
+
+    Recovery-injected nudges are themselves ``HumanMessage``s (tagged with
+    ``_RECOVERY_INJECTED_MARKER``); they must be skipped here. Counting them
+    advanced the turn marker on every recovery round, resetting the per-turn
+    cascade budget so the #1960 kill switch never reached its cap and a
+    no-progress loop ran to the recursion limit (#2055 / #2014). Only a real
+    user message marks a new turn.
+    """
+    from langchain_core.messages import HumanMessage
+
+    for i in range(len(msgs) - 1, -1, -1):
+        m = msgs[i]
+        if isinstance(m, HumanMessage):
+            if (getattr(m, "additional_kwargs", None) or {}).get(_RECOVERY_INJECTED_MARKER):
+                continue
+            return i
+    return -1
+
+
 def build_agent_graph(
     llm: Any = None,
     system_prompt: str = "",
@@ -738,12 +762,23 @@ def build_agent_graph(
     # any specific detector's behaviour — works as a kill switch
     # regardless of which combination of detectors misfires.
     #
-    # The #1960 reproducer hit 4 firings in a single turn (one per
-    # detector).  Cap of 3 stops at the 4th and lets the agent's
-    # response ship.  Per-detector retry counters (one revision each)
-    # mean the cap is reached only when MULTIPLE detectors fire on
-    # the same response — i.e. exactly the runaway-cascade case.
-    _MAX_RECOVERY_FIRINGS_PER_TURN = 3
+    # This cross-detector backstop MUST sit strictly above the largest
+    # single-detector retry budget (the _MAX_*_RETRIES above top out at
+    # 3 for phantom / fabrication / action-intent).  A lone misfiring
+    # detector fires up to its own budget and then self-terminates with
+    # a coherent give-up message on its (budget + 1)th firing — e.g.
+    # handle_phantom synthesises a polite fallback when phantom_count
+    # exceeds _MAX_PHANTOM_RETRIES.  If this cap equalled that budget,
+    # the backstop would short-circuit to END one firing too early and
+    # eat the give-up, shipping an empty phantom instead of the fallback
+    # (regression caught by test_phantom_exhaustion once #2055 stopped
+    # the budget resetting on every recovery nudge).
+    #
+    # At 4, a single self-terminating detector always reaches its own
+    # give-up first, while the #1960 multi-detector cascade (distinct
+    # detectors firing on one response, none self-terminating) is still
+    # bounded — caught on the firing after a full cascade cycle.
+    _MAX_RECOVERY_FIRINGS_PER_TURN = 4
     # After the 3 standard action-intent nudges are exhausted, the model
     # gets exactly one more chance if the response contains incompleteness
     # language ("first", "to start", "step 1") — a stronger nudge that
@@ -1553,15 +1588,8 @@ def build_agent_graph(
         tool_trust=config.tool_trust if config is not None else None,
     )
 
-    def _last_human_msg_idx(msgs: list[Any]) -> int:
-        """Return the index of the most recent ``HumanMessage`` in *msgs*,
-        or -1 if none.  Used by the cascade-budget bookkeeping in
-        ``route_after_model`` to detect turn boundaries.
-        """
-        for i in range(len(msgs) - 1, -1, -1):
-            if isinstance(msgs[i], HumanMessage):
-                return i
-        return -1
+    # _last_human_msg_idx is defined at module scope (testable); the call in
+    # route_after_model below resolves to it via normal name lookup.
 
     def _route_after_model_decision(state: CogtrixState) -> str:
         msgs = state["messages"]

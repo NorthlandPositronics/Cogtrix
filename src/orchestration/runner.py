@@ -15,7 +15,7 @@ from concurrent.futures import Future
 from typing import Any
 
 from src.agent.core import prepare_messages_with_context
-from src.agent.safety import UserCancelledRun
+from src.agent.safety import AgentExecutionError, UserCancelledRun
 from src.logging_config import get_logger, is_trace, is_verbose, log_tool_call
 from src.orchestration.compression import (
     COMPRESSION_MIN_AGE_CYCLES,
@@ -587,6 +587,29 @@ def _extract_api_message(error_str: str) -> str | None:
     return None
 
 
+def _is_user_config_error(e: Exception) -> bool:
+    """True for provider 4xx errors caused by user configuration or credentials.
+
+    Bad model IDs, invalid/missing API keys, and malformed requests are
+    actionable by the operator and are *not* Cogtrix faults — they should be
+    surfaced cleanly (see :func:`format_agent_error`) and logged concisely,
+    without an ERROR-level stack trace that reads like an internal crash (#2124).
+    """
+    error_type = type(e).__name__
+    error_str = str(e).lower()
+    if any(t in error_type for t in ("BadRequestError", "NotFoundError", "AuthenticationError")):
+        return True
+    return any(
+        needle in error_str
+        for needle in (
+            "not a valid model",
+            "model_not_found",
+            "invalid_api_key",
+            "invalid_request_error",
+        )
+    )
+
+
 def format_agent_error(e: Exception) -> str:
     """Format agent execution errors into user-friendly messages.
 
@@ -597,6 +620,20 @@ def format_agent_error(e: Exception) -> str:
     """
     error_str = str(e)
     error_type = type(e).__name__
+
+    # Provider 400 "not a valid model ID" — a config error, not a Cogtrix fault.
+    # Caught before the generic BadRequest branch so the operator gets an
+    # actionable message naming the rejected model and how to fix it (#2124).
+    if "not a valid model" in error_str.lower():
+        actual = _extract_api_message(error_str) or _sanitize_sdk_error(error_str)
+        return (
+            f"**Invalid model ID:** {actual}\n\n"
+            "The provider rejected the configured model name. Please check:\n"
+            "- `models.<alias>.model` is the provider's **exact** model slug "
+            "(e.g. `qwen/qwen3-...` on OpenRouter, not a bare `qwen3`)\n"
+            "- The model is available to your account / API key\n"
+            "- The provider `base_url` points at the intended endpoint"
+        )
 
     if "NotFoundError" in error_type or "model_not_found" in error_str:
         if "does not exist" in error_str:
@@ -1507,10 +1544,31 @@ def run_agent(
                         _merge_compression_cache(
                             _persistent_compression_cache, local_compression_cache
                         )
-            config.system_prompt = _base_system_prompt
 
     except UserCancelledRun:
         raise
     except Exception as e:
-        log.error("Agent execution failed: %s", e, exc_info=True)
-        return format_agent_error(e)
+        if _is_user_config_error(e):
+            # Provider rejected the request for a user-actionable reason (bad
+            # model id, invalid key, malformed request). Log concisely without a
+            # stack trace — it's a config error, not a Cogtrix fault (#2124).
+            log.warning(
+                "Agent run rejected by the model provider (user-actionable): %s",
+                _sanitize_sdk_error(str(e)),
+            )
+        else:
+            log.error("Agent execution failed: %s", e, exc_info=True)
+        # #2124: signal failure to callers via a typed exception instead of
+        # returning an error string that masquerades as a normal answer. Callers
+        # (CLI / API turn runner / assistant) decide how to surface it; the API
+        # path turns this into a proper error frame rather than a 200 reply.
+        raise AgentExecutionError(format_agent_error(e)) from e
+    finally:
+        # Always restore the session-constant system prompt (#2172). run_agent
+        # mutates config.system_prompt above to apply per-run task-ownership /
+        # clarification constraints; an exception raised before the inner
+        # graph.stream try (e.g. in prepare_messages_with_context or
+        # build_agent_graph) would otherwise skip the restore and leave the
+        # caller's AgentRunConfig dirty, stacking TASK MODE constraint blocks on
+        # any cross-turn reuse.
+        config.system_prompt = _base_system_prompt

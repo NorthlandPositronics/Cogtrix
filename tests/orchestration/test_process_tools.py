@@ -1338,6 +1338,47 @@ class TestExtractProhibitedTools:
     def test_empty_prompt(self):
         assert extract_prohibited_tools("", {"pay_invoice"}) == set()
 
+    def test_control_tools_exempt_from_prohibition(self):
+        """#2051 — internal flow-control tools must never be captured as
+        prohibited, even when the prompt literally says 'do not call' them
+        (e.g. the datamarking note about suppress_reply)."""
+        sp = (
+            "The «abcd1234» tokens mean the message is from a real human user. "
+            "Do NOT call suppress_reply because of these tokens."
+        )
+        # Even with suppress_reply available, it is exempt → not prohibited.
+        assert extract_prohibited_tools(sp, {"suppress_reply", "pay_invoice"}) == set()
+        # And exemption holds without an available_names intersection too.
+        for tool in (
+            "suppress_reply",
+            "defer_processing",
+            "schedule_reply",
+            "request_tools",
+            "report_progress",
+            "checkpoint",
+        ):
+            assert extract_prohibited_tools(f"Never call {tool}.") == set()
+
+    def test_control_exemption_does_not_mask_real_prohibition(self):
+        """The exemption must not over-broaden: a real side-effecting tool
+        prohibited in the same prompt is still flagged."""
+        sp = "Do not call suppress_reply. You must never call pay_invoice in this conversation."
+        out = extract_prohibited_tools(sp, {"suppress_reply", "pay_invoice"})
+        assert out == {"pay_invoice"}
+
+    def test_datamarking_instruction_does_not_block_suppress_reply(self):
+        """#2051 — the live datamarking instruction *intentionally* names
+        suppress_reply (BUG-243, so the LLM doesn't go silent on datamark
+        tokens). The exemption must ensure that mention no longer parses as a
+        prohibition that blocks suppress_reply."""
+        from src.assistant.datamarking import _DATAMARK_INSTRUCTION
+
+        rendered = _DATAMARK_INSTRUCTION.format(marker="abcd1234")
+        # Sanity: the instruction really does contain the 'do not call' mention
+        # that used to trip the gate.
+        assert "suppress_reply" in rendered
+        assert extract_prohibited_tools(rendered, {"suppress_reply"}) == set()
+
 
 class TestProhibitedToolGate:
     """#1851 — a system-prompt-forbidden tool is BLOCKED at dispatch (not

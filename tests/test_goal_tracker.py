@@ -377,3 +377,70 @@ def test_save_creates_parent_dir_if_missing(tmp_path: Path) -> None:
     stack.push("First goal")  # triggers save()
     assert goals_dir.exists()
     assert (goals_dir / "newdir.json").exists()
+
+
+# ── #2158: thread-safety ──────────────────────────────────────────────────────
+
+
+def test_concurrent_mutations_and_reads_are_thread_safe(tmp_path: Path) -> None:
+    """#2158 — GoalStack mutations and reads must be serialized. Pre-fix, a
+    reader iterating _order/_goals while clear_completed deletes raised
+    'dictionary changed size during iteration' / KeyError."""
+    import threading
+
+    stack = GoalStack(session_id="concurrent", data_dir=tmp_path)
+    errors: list[Exception] = []
+    stop = threading.Event()
+
+    def mutate() -> None:
+        try:
+            for _ in range(40):
+                gid = stack.push("top goal")
+                stack.add_subgoal(gid, "child")
+                stack.complete(gid)
+                stack.clear_completed()
+        except Exception as exc:  # pragma: no cover - failure path
+            errors.append(exc)
+        finally:
+            stop.set()
+
+    def read() -> None:
+        try:
+            while not stop.is_set():
+                stack.to_context_prefix()
+                stack.list_active()
+                stack.list_all()
+        except Exception as exc:  # pragma: no cover - failure path
+            errors.append(exc)
+
+    threads = [threading.Thread(target=mutate) for _ in range(4)]
+    threads += [threading.Thread(target=read) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+
+    assert errors == [], f"concurrent access raised: {errors[:3]}"
+
+
+def test_goalstack_lock_is_reentrant_no_deadlock(tmp_path: Path) -> None:
+    """The lock must be re-entrant: add_subgoal() holds it then calls push()
+    (which re-acquires it), and mutators call save() under it — a plain Lock
+    would self-deadlock. Run in a thread with a timeout so a regression fails
+    cleanly instead of hanging the suite."""
+    import threading
+
+    stack = GoalStack(session_id="reentrant", data_dir=tmp_path)
+    parent = stack.push("parent")
+    done = threading.Event()
+    captured: dict[str, str] = {}
+
+    def go() -> None:
+        captured["child"] = stack.add_subgoal(parent, "child")
+        done.set()
+
+    t = threading.Thread(target=go, daemon=True)
+    t.start()
+    t.join(timeout=5)
+    assert done.is_set(), "add_subgoal deadlocked — GoalStack lock is not re-entrant"
+    assert stack.get(captured["child"]) is not None

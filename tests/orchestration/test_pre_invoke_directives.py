@@ -996,3 +996,49 @@ class TestRollingSummaryPlumbing:
         apply_pre_invoke_directives(context, list(repaired), repaired, list(repaired), log)
 
         assert seen_kwargs.get("evicted_summary") is None
+
+
+# ─────────────────────────────────────────────────────────────────────
+# #2054 — stuck-conclusion nudge must skip short conversational replies
+# ─────────────────────────────────────────────────────────────────────
+
+
+def _has_stuck_nudge(msgs: list[Any]) -> bool:
+    return any(
+        isinstance(m, HumanMessage)
+        and isinstance(getattr(m, "content", ""), str)
+        and "[Stuck-conclusion check]" in m.content
+        for m in msgs
+    )
+
+
+class TestStuckConclusionLengthGuard:
+    """#2054 — the Bug-G nudge fires only for substantial repeated answers, so
+    short conversational acknowledgments don't get force-rewritten into
+    duplicate replies on chat channels."""
+
+    def _ctx(self) -> Any:
+        # Isolate the stuck-conclusion path: first round, calibration done,
+        # topic-switch off.
+        return _make_context(
+            call_count=[1],
+            stuck_threshold_calibrated=[True],
+            topic_switch_detection_enabled=False,
+        )
+
+    def test_short_near_identical_replies_do_not_trip_nudge(self) -> None:
+        short = "No rush, take your time."
+        msgs = [AIMessage(content=short), AIMessage(content=short)]
+        out = apply_pre_invoke_directives(self._ctx(), list(msgs), list(msgs), msgs, _DummyLogger())
+        assert not _has_stuck_nudge(out), "short acks must not trigger the stuck-conclusion nudge"
+
+    def test_substantial_near_identical_replies_still_trip_nudge(self) -> None:
+        long_answer = (
+            "Based on the available evidence the project timeline cannot be accelerated "
+            "without descoping at least one milestone; the critical path runs through "
+            "vendor delivery which is fixed."
+        )
+        assert len(long_answer) > 80
+        msgs = [AIMessage(content=long_answer), AIMessage(content=long_answer)]
+        out = apply_pre_invoke_directives(self._ctx(), list(msgs), list(msgs), msgs, _DummyLogger())
+        assert _has_stuck_nudge(out), "substantial repeated answers must still trigger the nudge"

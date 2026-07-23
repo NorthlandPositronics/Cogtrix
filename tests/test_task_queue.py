@@ -208,6 +208,40 @@ class TestLifecycle:
     def test_stop_without_start_is_safe(self, queue):
         queue.stop()  # should not raise
 
+    def test_start_finalizes_orphaned_running_tasks(self, queue):
+        """#2159 — a task left RUNNING by a previous crash is marked FAILED on
+        start() (not left running forever)."""
+        task_id = queue.submit("a", "p")
+        # Simulate a crash survivor: a row stuck in RUNNING from a prior process.
+        with queue._lock:
+            with queue._connect() as conn:
+                conn.execute(
+                    "UPDATE tasks SET status = ?, started_at = ? WHERE task_id = ?",
+                    (TaskStatus.RUNNING.value, time.time(), task_id),
+                )
+        queue.start()
+        queue.stop()
+        record = queue.get(task_id)
+        assert record is not None
+        assert record.status == TaskStatus.FAILED
+        assert "interrupted by a process restart" in record.error
+        assert record.finished_at is not None
+
+    def test_start_is_idempotent_no_executor_leak(self, queue):
+        """#2159 — a second start() without an intervening stop() must not
+        replace (and leak) the first executor."""
+        queue.start()
+        first = queue._executor
+        assert first is not None
+        queue.start()  # must be a no-op
+        assert queue._executor is first
+        queue.stop()
+        # After a real stop(), start() may create a fresh executor again.
+        queue.start()
+        assert queue._executor is not None
+        assert queue._executor is not first
+        queue.stop()
+
 
 # ---------------------------------------------------------------------------
 # Task execution (end-to-end with real threads)

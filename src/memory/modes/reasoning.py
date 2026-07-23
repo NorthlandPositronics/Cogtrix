@@ -496,7 +496,14 @@ class ReasoningMemoryManager(BaseMemoryManager):
 
             from src.tasks.goal_tracker import get_goal_stack
 
-            _goal_prefix = get_goal_stack(self.session_id, Path("data")).to_context_prefix()
+            # Derive the goal data_dir from the store's configured root
+            # (base_path is ``<data_dir>/history``) so goals are read from the
+            # same directory the goal tools write to (``config.data_dir``),
+            # instead of a hardcoded ``data`` that diverges on custom deploys
+            # (#2160). Falls back to ``data`` for stores without a base_path.
+            _store_base = getattr(self.store, "base_path", None)
+            _goal_data_dir = Path(_store_base).parent if _store_base else Path("data")
+            _goal_prefix = get_goal_stack(self.session_id, _goal_data_dir).to_context_prefix()
             if _goal_prefix:
                 prefix_parts.append(_goal_prefix)
         except Exception:

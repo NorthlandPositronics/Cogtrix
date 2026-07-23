@@ -280,3 +280,45 @@ class TestOrganizationMigration:
 
         # Clean up
         db_path.unlink(missing_ok=True)
+
+
+class TestOrgNameFilterEscaping2166:
+    """#2166 — the org name filter must escape LIKE wildcards so '%'/'_' in the
+    value match literally, not as wildcards."""
+
+    def test_underscore_is_literal_not_wildcard(self, session_factory):
+        import uuid
+
+        from src.api.db.repositories.organization import OrganizationRepository
+
+        async def _run():
+            async with session_factory() as session:
+                repo = OrganizationRepository(session)
+                await repo.create(org_id=str(uuid.uuid4()), name="acme_corp", slug="acme-corp")
+                await repo.create(org_id=str(uuid.uuid4()), name="acmexcorp", slug="acmexcorp")
+                await session.commit()
+
+                # Pre-fix '_' matched any char, so this returned both rows.
+                rows = await repo.list_orgs(name_filter="acme_corp")
+                assert {o.name for o in rows} == {"acme_corp"}
+                assert await repo.count_orgs(name_filter="acme_corp") == 1
+
+        asyncio.run(_run())
+
+    def test_percent_is_literal_not_wildcard(self, session_factory):
+        import uuid
+
+        from src.api.db.repositories.organization import OrganizationRepository
+
+        async def _run():
+            async with session_factory() as session:
+                repo = OrganizationRepository(session)
+                await repo.create(org_id=str(uuid.uuid4()), name="100%off", slug="pct-off")
+                await repo.create(org_id=str(uuid.uuid4()), name="100xoff", slug="x-off")
+                await session.commit()
+
+                rows = await repo.list_orgs(name_filter="100%off")
+                assert {o.name for o in rows} == {"100%off"}
+                assert await repo.count_orgs(name_filter="100%off") == 1
+
+        asyncio.run(_run())

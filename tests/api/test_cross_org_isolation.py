@@ -621,3 +621,179 @@ class TestAdr0055Canary:
             headers=_auth_header(admin_a, role="admin"),
         )
         assert r.status_code == 403, f"Expected 403 after ADR-0055, got {r.status_code}: {r.json()}"
+
+
+# ===========================================================================
+# Org-scoped admin bypass (#2115) — admin bypass must respect the resource org
+# when COGTRIX_ENABLE_ORG_SCOPING is enabled.
+# ===========================================================================
+
+
+class TestOrgScopedAdminBypass:
+    """Verify the org-scoped admin bypass introduced for issue #2115.
+
+    With ``COGTRIX_ENABLE_ORG_SCOPING`` enabled, a regular (non-superadmin)
+    admin may only bypass session ownership for sessions belonging to *their
+    own* organization.  Superadmins keep the global bypass, and when the flag
+    is off every admin keeps the legacy global bypass.
+
+    These call :func:`verify_session_owner` directly with a live DB session
+    (matching ``TestAdminBypassDisabled``) because the session endpoints do
+    not yet expose the org-scoping toggle.
+    """
+
+    def test_org_scoping_on_admin_denied_cross_org(self, seeded_client, engine, monkeypatch):
+        """Org-A admin must be denied an Org-B session when scoping is on."""
+        monkeypatch.setenv("COGTRIX_ENABLE_ORG_SCOPING", "true")
+        _, _, _, _, _, _, sb, admin_a = seeded_client
+        from src.api.auth import verify_session_owner
+
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+
+        async def _test():
+            async with factory() as session:
+                admin_token = TokenData(
+                    user_id=admin_a,
+                    role="admin",
+                    raw_claims={"sub": admin_a, "role": "admin"},
+                )
+                with pytest.raises(HTTPException) as exc_info:
+                    await verify_session_owner(sb, admin_token, session)
+                assert exc_info.value.status_code == 403
+                assert exc_info.value.detail["code"] == "FORBIDDEN"
+
+        asyncio.run(_test())
+
+    def test_org_scoping_on_admin_allowed_same_org(self, seeded_client, engine, monkeypatch):
+        """Org-A admin must still bypass for an Org-A session when scoping is on."""
+        monkeypatch.setenv("COGTRIX_ENABLE_ORG_SCOPING", "true")
+        _, _, _, _, _, sa, _, admin_a = seeded_client
+        from src.api.auth import verify_session_owner
+
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+
+        async def _test():
+            async with factory() as session:
+                admin_token = TokenData(
+                    user_id=admin_a,
+                    role="admin",
+                    raw_claims={"sub": admin_a, "role": "admin"},
+                )
+                # Same-org admin bypass — must not raise.
+                await verify_session_owner(sa, admin_token, session)
+
+        asyncio.run(_test())
+
+    def test_org_scoping_on_superadmin_keeps_global_bypass(
+        self, seeded_client, engine, monkeypatch
+    ):
+        """Superadmin keeps the global bypass even with scoping on."""
+        monkeypatch.setenv("COGTRIX_ENABLE_ORG_SCOPING", "true")
+        _, _, _, _, _, _, sb, _ = seeded_client
+        from src.api.auth import verify_session_owner
+
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+
+        async def _test():
+            async with factory() as session:
+                su_token = TokenData(
+                    user_id="superadmin-1",
+                    role="superadmin",
+                    raw_claims={"sub": "superadmin-1", "role": "superadmin"},
+                )
+                # Global bypass — must not raise (no DB lookup needed).
+                await verify_session_owner(sb, su_token, session)
+
+        asyncio.run(_test())
+
+    def test_org_scoping_off_admin_keeps_global_bypass(self, seeded_client, engine, monkeypatch):
+        """With scoping off (default), an admin keeps the legacy global bypass."""
+        monkeypatch.delenv("COGTRIX_ENABLE_ORG_SCOPING", raising=False)
+        _, _, _, _, _, _, sb, admin_a = seeded_client
+        from src.api.auth import verify_session_owner
+
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+
+        async def _test():
+            async with factory() as session:
+                admin_token = TokenData(
+                    user_id=admin_a,
+                    role="admin",
+                    raw_claims={"sub": admin_a, "role": "admin"},
+                )
+                # Legacy behaviour: cross-org bypass allowed — must not raise.
+                await verify_session_owner(sb, admin_token, session)
+
+        asyncio.run(_test())
+
+    def test_org_scoping_on_admin_without_org_denied(self, seeded_client, engine, monkeypatch):
+        """An org-scoped admin with no org assigned is denied (ORG_NOT_ASSIGNED)."""
+        monkeypatch.setenv("COGTRIX_ENABLE_ORG_SCOPING", "true")
+        _, _, _, _, _, _, sb, _ = seeded_client
+        from src.api.auth import verify_session_owner
+
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+
+        async def _test():
+            async with factory() as session:
+                # Admin token whose user row does not exist → org_id unresolvable.
+                orphan_admin = TokenData(
+                    user_id=_uid(),
+                    role="admin",
+                    raw_claims={"sub": "orphan", "role": "admin"},
+                )
+                with pytest.raises(HTTPException) as exc_info:
+                    await verify_session_owner(sb, orphan_admin, session)
+                assert exc_info.value.status_code == 403
+                assert exc_info.value.detail["code"] == "ORG_NOT_ASSIGNED"
+
+        asyncio.run(_test())
+
+    def test_org_scoping_on_workspace_org_is_authoritative(
+        self, seeded_client, engine, monkeypatch
+    ):
+        """Workspace org overrides owner org: an Org-A admin is denied a session
+        owned by an Org-A user but assigned to an Org-B workspace."""
+        monkeypatch.setenv("COGTRIX_ENABLE_ORG_SCOPING", "true")
+        _, _, org_b, ua, _, _, _, admin_a = seeded_client
+        from src.api.auth import verify_session_owner
+
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        ws_b_id = _uid()
+        sess_id = _uid()
+
+        async def _seed_and_test():
+            async with factory() as session:
+                session.add(
+                    Workspace(
+                        id=ws_b_id,
+                        org_id=org_b,
+                        name="WS B",
+                        description="Org B workspace",
+                        is_active=True,
+                    )
+                )
+                # Session owned by an Org-A user but living in an Org-B workspace.
+                session.add(
+                    ApiSessionRecord(
+                        id=sess_id,
+                        user_id=ua,
+                        name="Cross-org session",
+                        state="idle",
+                        workspace_id=ws_b_id,
+                    )
+                )
+                await session.commit()
+
+            async with factory() as session:
+                admin_token = TokenData(
+                    user_id=admin_a,
+                    role="admin",
+                    raw_claims={"sub": admin_a, "role": "admin"},
+                )
+                with pytest.raises(HTTPException) as exc_info:
+                    await verify_session_owner(sess_id, admin_token, session)
+                assert exc_info.value.status_code == 403
+                assert exc_info.value.detail["code"] == "FORBIDDEN"
+
+        asyncio.run(_seed_and_test())

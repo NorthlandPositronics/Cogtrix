@@ -196,6 +196,8 @@ def _is_tool_excluded(tool: Any) -> bool:
 def set_delegate_tools(
     active_tools: list[Any],
     available_tools: dict[str, Any] | None = None,
+    denials: frozenset[str] | None = None,
+    deny_all: bool = False,
 ) -> None:
     """Register tools that delegate agents can use.
 
@@ -212,6 +214,15 @@ def set_delegate_tools(
     messaging, scheduling, confirmation) plus a legacy name-based fallback
     for backward compatibility with the existing deny-list.
 
+    #2113: the static exclusion list is NOT the only source of truth. A
+    delegate must also honour the *session's* runtime denials — the set that
+    backs ``api_dangerous_tools`` (``_API_DENIED_DANGEROUS_TOOLS``), per-turn
+    budget denials, and ``/tools disable``. Previously the delegate sub-agent
+    only consulted the static list, so anything the session denied (but that
+    wasn't also hardcoded here) was still reachable inside a delegate — an
+    RCE-bypass class. Passing ``denials``/``deny_all`` closes that regardless
+    of whether the two lists drift.
+
     Parameters
     ----------
     active_tools:
@@ -219,19 +230,31 @@ def set_delegate_tools(
     available_tools:
         On-demand tools not yet active in the main agent.  Merged into
         the delegate toolset after sandbox filtering.
+    denials:
+        The session's denied tool names (``SessionState.get_denials_snapshot()``).
+        Any tool whose name is in this set is excluded from the delegate set.
+    deny_all:
+        When the session has ``deny_all`` set, delegates receive no tools.
     """
+    # deny_all (per-prompt kill switch) means the session blocked everything —
+    # delegates inherit that and get nothing.
+    if deny_all:
+        _delegate_tools_tls.tools = []
+        return
+
+    _denied = denials or frozenset()
     seen: set[str] = set()
     merged: list[Any] = []
 
     for t in active_tools:
         name = getattr(t, "name", "")
-        if not _is_tool_excluded(t) and name not in seen:
+        if not _is_tool_excluded(t) and name not in _denied and name not in seen:
             merged.append(t)
             seen.add(name)
 
     if available_tools:
         for name, t in available_tools.items():
-            if not _is_tool_excluded(t) and name not in seen:
+            if not _is_tool_excluded(t) and name not in _denied and name not in seen:
                 merged.append(t)
                 seen.add(name)
 

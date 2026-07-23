@@ -276,6 +276,58 @@ class TestRetryableChatModel5xx:
         assert "exhausted after 3 attempts" in str(exc_info.value)
 
 
+class TestAuthErrorClassification2147:
+    """#2147 — _is_auth_error must not treat a bare ``auth`` substring as an
+    auth failure.  Genuine auth signals (the specific strings + 401/403) are
+    still detected, but a transient error whose text merely contains ``auth``
+    (``oauth``, ``author``, ``authoritative``, a 5xx body echoing such text)
+    must fall through to the retry path instead of becoming a permanent
+    ProviderAuthError.
+    """
+
+    def test_transient_503_with_auth_substring_is_retried(self) -> None:
+        """A 503 whose message contains 'auth' as a substring retries and
+        succeeds — it must NOT be misclassified as a non-retryable auth error."""
+        mock_model = MagicMock()
+        error_503 = Exception("503 Service Unavailable: upstream oauth-gateway is down")
+        error_503.status_code = 503  # type: ignore[attr-defined]
+
+        call_count = 0
+
+        def side_effect(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise error_503
+            return "recovered"
+
+        mock_model.invoke = MagicMock(side_effect=side_effect)
+
+        wrapper = RetryableChatModel(mock_model, initial_delay=0.01)
+        result = wrapper.invoke("test input")
+
+        assert result == "recovered"
+        assert call_count == 2  # retried, not raised as ProviderAuthError
+
+    def test_is_auth_error_false_for_bare_auth_substring(self) -> None:
+        """Direct unit check: an error mentioning 'author' with no real auth
+        signal is not classified as an auth error."""
+        wrapper = RetryableChatModel(MockLangChainModel(), initial_delay=0.01)
+        assert wrapper._is_auth_error(Exception("request blocked by content authority")) is False
+        assert wrapper._is_auth_error(Exception("oauth token refresh queued")) is False
+
+    def test_genuine_auth_signals_still_detected(self) -> None:
+        """Regression guard: the precise auth checks (strings + 401/403) still
+        classify real auth failures after removing the bare-substring clause."""
+        wrapper = RetryableChatModel(MockLangChainModel(), initial_delay=0.01)
+        assert wrapper._is_auth_error(Exception("Authentication failed")) is True
+        assert wrapper._is_auth_error(Exception("error: invalid_api_key")) is True
+        assert wrapper._is_auth_error(Exception("401 Unauthorized")) is True
+        status_err = Exception("forbidden")
+        status_err.status_code = 403  # type: ignore[attr-defined]
+        assert wrapper._is_auth_error(status_err) is True
+
+
 class TestCreateChatModelWrapping:
     """Tests that create_chat_model wraps models with RetryableChatModel."""
 

@@ -11,6 +11,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.api.db.models import Organization, User
 
 
+def _escape_like(value: str) -> str:
+    """Escape LIKE/ILIKE wildcards so *value* is matched literally.
+
+    Without this, ``%`` and ``_`` in a user-supplied filter act as wildcards
+    (e.g. ``foo_bar`` matches ``fooxbar``, and ``%`` matches everything). Use
+    with ``.ilike(pattern, escape="\\")`` (#2166).
+    """
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 class OrganizationRepository:
     """Data access layer for Organization records."""
 
@@ -75,9 +85,12 @@ class OrganizationRepository:
         """Return organizations with optional filters and cursor pagination.
 
         Args:
-            after_id:  Cursor — return rows after this org id (by created_at).
+            after_id:  Cursor — return rows whose id sorts after this org id.
+                Results are ordered by ``id`` (a unique total order), so the
+                cursor is stable and skip/dupe-free over a fixed dataset.
             limit:     Maximum rows to return.
-            name_filter: Substring match on org name (case-insensitive).
+            name_filter: Case-insensitive literal substring match on org name
+                (LIKE wildcards ``%``/``_`` in the value are escaped).
             status_filter: Exact match on status.
             plan_filter: Exact match on plan.
             created_after: Return orgs created on or after this datetime.
@@ -87,7 +100,9 @@ class OrganizationRepository:
         if after_id:
             stmt = stmt.where(Organization.id > after_id)
         if name_filter:
-            stmt = stmt.where(Organization.name.ilike(f"%{name_filter}%"))
+            stmt = stmt.where(
+                Organization.name.ilike(f"%{_escape_like(name_filter)}%", escape="\\")
+            )
         if status_filter:
             stmt = stmt.where(Organization.status == status_filter)
         if plan_filter:
@@ -110,7 +125,9 @@ class OrganizationRepository:
         """Return total count of organizations matching the filters."""
         stmt = select(func.count()).select_from(Organization)
         if name_filter:
-            stmt = stmt.where(Organization.name.ilike(f"%{name_filter}%"))
+            stmt = stmt.where(
+                Organization.name.ilike(f"%{_escape_like(name_filter)}%", escape="\\")
+            )
         if status_filter:
             stmt = stmt.where(Organization.status == status_filter)
         if plan_filter:

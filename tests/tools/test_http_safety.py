@@ -64,6 +64,27 @@ class TestIsBlockedIp:
         assert _is_blocked_ip("") is False
         assert _is_blocked_ip("not-an-ip") is False
 
+    @pytest.mark.parametrize(
+        "host",
+        [
+            "2130706433",  # decimal 127.0.0.1
+            "0x7f000001",  # hex 127.0.0.1
+            "0177.0.0.1",  # octal-leading 127.0.0.1
+            "127.1",  # short form 127.0.0.1
+            "0x7f.1",  # mixed hex+short
+            "3232235521",  # decimal 192.168.0.1 (private)
+            "2852039166",  # decimal 169.254.169.254 (IMDS link-local)
+        ],
+    )
+    def test_obfuscated_numeric_ipv4_is_blocked(self, host: str) -> None:
+        """#2136 F3: decimal/hex/octal/short IPv4 forms (which ipaddress rejects)
+        must still be recognized as their real (blocked) address via inet_aton."""
+        assert _is_blocked_ip(host) is True
+
+    def test_obfuscated_numeric_public_ipv4_not_blocked(self) -> None:
+        # 134744072 == 8.8.8.8 (public) — canonicalized but not blocked.
+        assert _is_blocked_ip("134744072") is False
+
 
 class TestValidateUrl:
     def test_valid_https_url_returns_resolved_ip(self) -> None:
@@ -126,6 +147,22 @@ class TestValidateUrl:
         ok, err, _ = _validate_url(url)
         assert ok is False, url
         assert "private" in err.lower() or "reserved" in err.lower() or "internal" in err.lower()
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "http://localhost./",  # trailing-dot FQDN form
+            "http://LOCALHOST./",
+            "http://169.254.169.254./",  # trailing-dot IMDS literal
+            "http://metadata.google.internal./",
+        ],
+    )
+    def test_trailing_dot_hosts_blocked(self, url: str) -> None:
+        """#2136 F4: a trailing dot must not let an internal host/IP slip the
+        pre-resolution name + IP-literal block (no DNS needed)."""
+        ok, err, _ = _validate_url(url)
+        assert ok is False, url
+        assert "localhost" in err.lower() or "private" in err.lower() or "internal" in err.lower()
 
     def test_dns_returning_private_address_blocked(self) -> None:
         """DNS rebinding attempt: hostname resolves to a private IP → blocked."""

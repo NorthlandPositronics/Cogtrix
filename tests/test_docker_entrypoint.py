@@ -235,16 +235,16 @@ class TestEntrypointLogic:
     def test_wizard_runs_setup(self) -> None:
         text = _entrypoint_text()
         assert (
-            "exec python cogtrix.py --setup" in text
-        ), "Wizard branch must run 'exec python cogtrix.py --setup'"
+            "exec python /app/cogtrix.py --setup" in text
+        ), "Wizard branch must run 'exec python /app/cogtrix.py --setup'"
 
     def test_final_fallback_is_cogtrix(self) -> None:
         text = _entrypoint_text()
         lines = text.strip().splitlines()
         last_line = lines[-1].strip()
         assert (
-            last_line == 'exec python cogtrix.py "$@"'
-        ), f"Final fallback must be 'exec python cogtrix.py \"$@\"', got: {last_line!r}"
+            last_line == 'exec python /app/cogtrix.py "$@"'
+        ), f"Final fallback must be 'exec python /app/cogtrix.py \"$@\"', got: {last_line!r}"
 
 
 # ── Data directory consistency ────────────────────────────────────

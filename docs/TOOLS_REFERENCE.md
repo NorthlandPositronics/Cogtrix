@@ -1,6 +1,6 @@
 # Cogtrix Tools Reference
 
-Complete documentation of all 76 built-in tools (plus dynamic MCP-sourced tools). You don't need to memorize these — the agent picks the right tool automatically based on your request. This page is a reference for when you want to know exactly what's available, what parameters a tool accepts, or how to configure optional providers.
+Complete documentation of all 67 built-in tools (plus dynamic MCP-sourced tools). You don't need to memorize these — the agent picks the right tool automatically based on your request. This page is a reference for when you want to know exactly what's available, what parameters a tool accepts, or how to configure optional providers.
 
 **Quick orientation:**
 

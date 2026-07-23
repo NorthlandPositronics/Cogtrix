@@ -1119,6 +1119,11 @@ class TestThinkPipelineResearchDelegateSetup:
         session = MagicMock()
         session.cancel_event = MagicMock()
         session.cancel_event.is_set.return_value = False
+        # #2113: the research-delegate path now threads the session denial set
+        # into set_delegate_tools. Make the mock session realistic: no denials,
+        # deny_all off.
+        session.session_state.get_denials_snapshot.return_value = frozenset()
+        session.session_state.deny_all = False
 
         run_config = MagicMock()
         run_config.llm = MagicMock()
@@ -1151,7 +1156,10 @@ class TestThinkPipelineResearchDelegateSetup:
             await _run_think_pipeline(session, "test", "initial", [], run_config)
 
         mock_set_tools.assert_called_once_with(
-            ["tool_a"], {"tool_a": run_config.available_tools["tool_a"]}
+            ["tool_a"],
+            {"tool_a": run_config.available_tools["tool_a"]},
+            denials=frozenset(),
+            deny_all=False,
         )
         mock_rd.assert_called_once()
 

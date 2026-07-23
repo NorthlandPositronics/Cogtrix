@@ -26,9 +26,11 @@ import time
 import uuid
 from typing import TYPE_CHECKING, Any
 
+from src.agent.safety import AgentExecutionError
 from src.api.callbacks import WebSocketCallbackHandler
 from src.api.confirmation import ApiConfirmationUI
 from src.logging_config import clear_session_id, set_session_id
+from src.tools.error_sanitizer import sanitize_error
 
 log = logging.getLogger("cogtrix.api.turn_runner")
 
@@ -183,12 +185,20 @@ async def _run_think_pipeline(
             )
             _active = list(getattr(run_config, "active_tools_list", None) or [])
             _avail = dict(getattr(run_config, "available_tools", None) or {})
+            # #2113: forward the session's runtime denials so the research
+            # delegate honours them too (not just the static delegate exclude
+            # list). Snapshot now (immutable) before crossing the thread.
+            _ss = getattr(session, "session_state", None)
+            _denials = _ss.get_denials_snapshot() if _ss is not None else frozenset()
+            _deny_all = bool(getattr(_ss, "deny_all", False))
 
             def _run_research_with_tools(
                 urls: list,
                 task: str,
                 active: list = _active,
                 avail: dict = _avail,
+                denials: frozenset = _denials,
+                deny_all: bool = _deny_all,
                 max_context_tokens: int | None = max_ctx,
                 timeout: int = rd_timeout,
                 cap_ratio: float = rd_cap,
@@ -196,7 +206,7 @@ async def _run_think_pipeline(
                 """Inject delegate tools into this worker thread, then run the delegate."""
                 from src.tools.delegate import set_delegate_tools
 
-                set_delegate_tools(active, avail)
+                set_delegate_tools(active, avail, denials=denials, deny_all=deny_all)
                 return run_research_delegate(
                     urls,
                     task,
@@ -425,12 +435,29 @@ async def _run_message_turn_inner(
                 log.warning("Queue full, dropping CANCELLED error for session %s", session.id)
             raise
         except Exception as exc:
-            log.exception("Agent turn failed for session %s: %s", session.id, exc)
+            if isinstance(exc, AgentExecutionError):
+                # #2124: run_agent already logged the underlying cause at the
+                # right level (WARNING for user-config errors, ERROR for
+                # internal). Avoid a duplicate ERROR-level traceback here for
+                # what is often a config error; still surface a sanitized error
+                # frame below (no infra leak — #2114).
+                log.info("Agent turn failed for session %s (detail logged by runner)", session.id)
+            else:
+                log.exception("Agent turn failed for session %s: %s", session.id, exc)
             session.agent_state = "error"
             await _enqueue_agent_state(session, "error")
+            # #2114: the runner-level exception (LangGraph/provider/config layer) is
+            # surfaced to API clients over the WS error/done frames and, on the REST
+            # sync path, in the HTTP 500 body. Raw str(exc) leaks base URLs, model
+            # ids, paths, and auth detail to a chat user who can deliberately induce
+            # errors. Sanitize here (full detail is logged above, server-side only)
+            # — the API-side analog of the assistant fix in #2052.
+            safe_error = sanitize_error(
+                exc, fallback="The agent encountered an internal error. Please try again."
+            )
             try:
                 session.ws_queue.put_nowait(
-                    {"type": "error", "payload": {"code": "AGENT_ERROR", "message": str(exc)}}
+                    {"type": "error", "payload": {"code": "AGENT_ERROR", "message": safe_error}}
                 )
             except asyncio.QueueFull:
                 log.warning("Queue full, dropping AGENT_ERROR for session %s", session.id)
@@ -438,7 +465,7 @@ async def _run_message_turn_inner(
             # and can surface the error rather than returning HTTP 200 with empty text.
             try:
                 session.ws_queue.put_nowait(
-                    {"type": "done", "payload": {"text": "", "error": str(exc)}}
+                    {"type": "done", "payload": {"text": "", "error": safe_error}}
                 )
             except asyncio.QueueFull:
                 log.warning("Queue full, dropping done-on-error for session %s", session.id)

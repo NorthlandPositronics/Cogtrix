@@ -252,6 +252,44 @@ class TestRefreshTokenSecurity:
         resp = client.post("/api/v1/auth/refresh", json={"refresh_token": access})
         assert resp.status_code == 401
 
+    def test_inactive_user_refresh_persists_revoke_2164(self, client: TestClient) -> None:
+        """#2164 — the rotation revoke must persist even though the inactive-user
+        check rolls the request back. Otherwise a deactivated user's refresh
+        token stays live and works again on reactivation."""
+        import asyncio as _asyncio
+        import hashlib as _hashlib
+
+        from src.api.db.repositories.tokens import RefreshTokenRepository
+
+        _, refresh = _register(client, "rf_2164", "rf_2164@test.com")
+        token_hash = _hashlib.sha256(refresh.encode()).hexdigest()
+
+        async def _deactivate() -> None:
+            factory = client.app.state.test_session_factory
+            async with factory() as db:
+                repo = UserRepository(db)
+                user = await repo.get_by_username("rf_2164")
+                assert user is not None
+                await repo.set_active(user.id, False)
+                await db.commit()
+
+        _asyncio.run(_deactivate())
+
+        # Inactive user → 401, and the rotation must have durably revoked the
+        # token (pre-fix the revoke was rolled back with the request).
+        resp = client.post("/api/v1/auth/refresh", json={"refresh_token": refresh})
+        assert resp.status_code == 401
+
+        async def _is_revoked() -> bool:
+            factory = client.app.state.test_session_factory
+            async with factory() as db:
+                rec = await RefreshTokenRepository(db).get_by_hash(token_hash)
+                return bool(rec is not None and rec.revoked)
+
+        assert (
+            _asyncio.run(_is_revoked()) is True
+        ), "refresh-rotation revoke was rolled back on the inactive-user path (#2164)"
+
 
 class TestAuthRateLimits:
     """Auth-sensitive endpoints should be rate-limited more aggressively."""

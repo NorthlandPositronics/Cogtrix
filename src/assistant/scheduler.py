@@ -601,6 +601,9 @@ class MessageScheduler:
         quiet_hours_cfg: Dict from ``services.<channel>.response_timing``
             (per-contact overrides keyed by contact name; ``_default`` key
             applies to all contacts without a specific entry).
+        contact_resolver: Map of normalized chat identifier -> contact name,
+            used to reverse-resolve a dispatch-time ``chat_id`` to the contact
+            name that ``quiet_hours_cfg`` is keyed by (#2141).
     """
 
     def __init__(
@@ -609,6 +612,7 @@ class MessageScheduler:
         persist_path: Path,
         quiet_hours_cfg: dict[str, Any] | None = None,
         dispatch_interval: float = 30.0,
+        contact_resolver: dict[str, str] | None = None,
     ) -> None:
         self._channels = channels
         assert isinstance(
@@ -616,6 +620,10 @@ class MessageScheduler:
         ), f"persist_path must be a Path, got {type(persist_path).__name__}"
         self._persist_path = persist_path
         self._quiet_cfg: dict[str, Any] = quiet_hours_cfg or {}
+        # Maps a normalized chat identifier -> contact name so quiet-hours
+        # config (keyed by contact name) can be resolved at dispatch time when
+        # only the chat_id is known (#2141).
+        self._contact_resolver: dict[str, str] = contact_resolver or {}
         self._dispatch_interval = dispatch_interval
         self._queue: dict[str, ScheduledMessage] = {}
         self._lock = threading.Lock()
@@ -859,16 +867,36 @@ class MessageScheduler:
     def _get_quiet_policy(self, _channel: str, chat_id: str) -> QuietHoursPolicy | None:
         """Resolve quiet-hours policy for a chat.
 
-        Priority: per-contact entry > _default entry > None.
-        The quiet_cfg dict is keyed by contact name; since we only have chat_id
-        here, we check chat_id directly then fall back to _default.
+        Priority: per-contact entry (by contact name) > legacy chat_id entry >
+        ``_default`` entry > None.  ``quiet_cfg`` is keyed by contact NAME, but
+        dispatch only has the ``chat_id`` — so we reverse-resolve the chat_id to
+        a contact name via the phonebook (``_contact_resolver``) before the
+        lookup (#2141).  Without that resolution the per-contact branch was dead
+        and only the ``_default`` entry ever applied to scheduled sends.
         """
         if not self._quiet_cfg:
             return None
-        contact_cfg = self._quiet_cfg.get(chat_id) or self._quiet_cfg.get("_default")
+        contact_name = self._resolve_contact_name(chat_id)
+        contact_cfg = (
+            (self._quiet_cfg.get(contact_name) if contact_name else None)
+            or self._quiet_cfg.get(chat_id)
+            or self._quiet_cfg.get("_default")
+        )
         if not contact_cfg:
             return None
         return _parse_quiet_hours(contact_cfg)
+
+    def _resolve_contact_name(self, chat_id: str) -> str | None:
+        """Reverse-resolve *chat_id* to its phonebook contact name, or None.
+
+        Normalizes the chat_id the same way ``service.py`` builds the resolver
+        map (strips the WhatsApp ``@c.us`` / ``@s.whatsapp.net`` suffixes) so a
+        name-keyed quiet-hours entry matches the dispatch-time chat_id (#2141).
+        """
+        if not self._contact_resolver:
+            return None
+        normalized = chat_id.replace("@c.us", "").replace("@s.whatsapp.net", "")
+        return self._contact_resolver.get(normalized) or self._contact_resolver.get(chat_id)
 
     def _next_wake_interval(self) -> float:
         """Compute sleep duration until the next pending message is due."""

@@ -717,11 +717,24 @@ def _error_result(url: str, started_at: float, category: str, detail: str) -> Fe
 
 
 def _registered_domain(url: str) -> str:
-    """Registered-domain extraction shared with the redirect check."""
-    host = urlparse(url).hostname or ""
-    extracted = _EXTRACT(host.casefold())
+    """Same-origin key for the same-domain redirect check.
+
+    For normal hosts this is the registered domain (so ``example.com`` and
+    ``www.example.com`` are treated as same-site). Suffix-less or IP-literal
+    hosts have no registered domain, so fall back to the full ``host:port``
+    authority — a port change on an IP/bare host is then treated as a
+    cross-origin redirect (fail closed) instead of collapsing distinct
+    targets to the bare host (#2136 F6).
+    """
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").casefold()
+    extracted = _EXTRACT(host)
     if not extracted.domain or not extracted.suffix:
-        return host.casefold()
+        try:
+            port = parsed.port
+        except ValueError:
+            port = None
+        return f"{host}:{port}" if port is not None else host
     return f"{extracted.domain}.{extracted.suffix}"
 
 

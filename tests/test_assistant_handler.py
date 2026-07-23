@@ -1106,3 +1106,70 @@ class TestMemoryOnSendFailure:
         # update() is never called in this path
         session.memory_manager.update.assert_not_called()
         session.memory_manager.save.assert_not_called()
+
+
+class TestOutboundPrerecordLock:
+    """#2140 — handle_outbound must (A) pre-record the operator instruction
+    INSIDE session.lock, matching handle(), so a concurrent inbound turn on
+    the same session can't race on the shared {session_id}_pending.json, and
+    (B) discard the pending record on the guardrail-block early return so a
+    rejected (possibly injection-laden) instruction can't be recovered on
+    restart.
+    """
+
+    def test_guardrail_block_discards_prerecord(self):
+        """On the guardrail-block path, the pending record is dropped and no
+        memory update / channel send occurs."""
+        handler, session_mgr = _make_handler()
+        session = session_mgr.get_or_create.return_value
+        # Force the input guardrail to reject the operator instruction.
+        handler._check_guardrails = MagicMock(return_value=False)
+
+        channel = MagicMock()
+        channel.name = "slack"
+
+        response, message_id = handler.handle_outbound(
+            contact_name="Amy",
+            instructions="do something",
+            channel=channel,
+            chat_id="42",
+        )
+
+        assert message_id is None
+        assert "blocked" in response.lower()
+        session.memory_manager.prerecord_user.assert_called_once_with(
+            "[Operator instruction] do something"
+        )
+        # The block path must clean up the pending record (the regression).
+        session.memory_manager.discard_prerecord.assert_called_once()
+        session.memory_manager.update.assert_not_called()
+        channel.send.assert_not_called()
+
+    def test_prerecord_happens_inside_session_lock(self):
+        """prerecord_user() must run while session.lock is held — the inbound
+        handle() path does this to avoid racing on the pending file; outbound
+        must match (the lock-free prerecord was the #2140 High defect)."""
+        handler, session_mgr = _make_handler()
+        session = session_mgr.get_or_create.return_value
+
+        state = {"locked": False, "prerecord_while_locked": None}
+
+        session.lock.__enter__ = MagicMock(side_effect=lambda: state.update(locked=True))
+        session.lock.__exit__ = MagicMock(
+            side_effect=lambda *a: state.update(locked=False) or False
+        )
+        session.memory_manager.prerecord_user = MagicMock(
+            side_effect=lambda _text: state.update(prerecord_while_locked=state["locked"])
+        )
+        # Block immediately after prerecord so the agent never runs.
+        handler._check_guardrails = MagicMock(return_value=False)
+
+        channel = MagicMock()
+        channel.name = "slack"
+        handler.handle_outbound(
+            contact_name="Amy", instructions="hi", channel=channel, chat_id="42"
+        )
+
+        assert (
+            state["prerecord_while_locked"] is True
+        ), "prerecord_user must be called while session.lock is held (#2140)"

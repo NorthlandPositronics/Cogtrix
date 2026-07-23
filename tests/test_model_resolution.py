@@ -373,6 +373,74 @@ class TestCreateChatModelFromConfigs:
             result = create_chat_model_from_configs(pc, mc)
             assert result is sentinel
 
+    def test_model_kwargs_forwarded_to_create_chat_model(self) -> None:
+        """#2122: sampling passthrough reaches the low-level factory verbatim."""
+        from src.providers import create_chat_model_from_configs
+
+        pc = ProviderConfig(name="spark", type="openai", base_url="http://spark:8080/v1")
+        mc = ModelConfig(
+            provider="spark",
+            model="qwen3",
+            model_kwargs={
+                "frequency_penalty": 0.3,
+                "top_p": 0.9,
+                "extra_body": {"repetition_penalty": 1.1},
+            },
+        )
+
+        with patch("src.providers.create_chat_model") as mock_create:
+            mock_create.return_value = MagicMock()
+            create_chat_model_from_configs(pc, mc)
+            _, call_kwargs = mock_create.call_args
+            assert call_kwargs["frequency_penalty"] == 0.3
+            assert call_kwargs["top_p"] == 0.9
+            assert call_kwargs["extra_body"] == {"repetition_penalty": 1.1}
+
+    def test_empty_model_kwargs_adds_no_extra_params(self) -> None:
+        """Default (empty) model_kwargs must not perturb the existing call shape."""
+        from src.providers import create_chat_model_from_configs
+
+        pc = ProviderConfig(name="openai", type="openai", api_key="sk-openai")
+        mc = ModelConfig(provider="openai", model="gpt-4o")
+
+        with patch("src.providers.create_chat_model") as mock_create:
+            mock_create.return_value = MagicMock()
+            create_chat_model_from_configs(pc, mc)
+            _, call_kwargs = mock_create.call_args
+            assert set(call_kwargs) == {
+                "model",
+                "api_key",
+                "base_url",
+                "temperature",
+                "num_ctx",
+                "max_tokens",
+                "streaming",
+                "max_retries",
+            }
+
+    def test_reserved_model_kwargs_keys_are_dropped(self) -> None:
+        """Reserved keys in model_kwargs must not override explicit params or
+        raise a duplicate-keyword TypeError."""
+        from src.providers import create_chat_model_from_configs
+
+        pc = ProviderConfig(name="openai", type="openai", api_key="sk-openai")
+        mc = ModelConfig(
+            provider="openai",
+            model="gpt-4o",
+            temperature=0.2,
+            model_kwargs={"temperature": 1.9, "max_tokens": 99, "frequency_penalty": 0.5},
+        )
+
+        with patch("src.providers.create_chat_model") as mock_create:
+            mock_create.return_value = MagicMock()
+            create_chat_model_from_configs(pc, mc)
+            _, call_kwargs = mock_create.call_args
+            # Dedicated config field wins; reserved key from model_kwargs dropped.
+            assert call_kwargs["temperature"] == 0.2
+            assert call_kwargs["max_tokens"] is None
+            # Non-reserved sampling key still forwarded.
+            assert call_kwargs["frequency_penalty"] == 0.5
+
 
 # ── Tests: _resolve_model() ───────────────────────────────────────────
 

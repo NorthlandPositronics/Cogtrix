@@ -64,7 +64,7 @@ Cogtrix is a modular LangChain-based AI agent built with a layered architecture:
 ┌───────────────┴───────────────┐ ┌───────────────┴───────────────┐
 │        Memory System          │ │        Tool Modules           │
 │       (src/memory/)           │ │       (src/tools/)            │
-│  • Mode managers              │ │  • 76 built-in tools          │
+│  • Mode managers              │ │  • 67 built-in tools          │
 │  • Context preparation        │ │  • Auto-discovery             │
 │  • JSON persistence           │ │  • Pydantic schemas           │
 └───────────────────────────────┘ └───────────────────────────────┘

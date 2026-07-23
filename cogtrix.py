@@ -23,7 +23,7 @@ from src.agent.core import (
     build_system_prompt,
     format_milestone_instructions,
 )
-from src.agent.safety import UserCancelledRun
+from src.agent.safety import AgentExecutionError, UserCancelledRun
 from src.analysis.session_metrics import write_session_metrics
 from src.cli.args import color_enabled, parse_arguments
 from src.cli.banner import print_startup
@@ -445,6 +445,23 @@ _extract_ai_content = extract_ai_content
 _extract_response = extract_response
 _build_tool_results_response = build_tool_results_response
 _log_tool_calls_from_result = log_tool_calls_from_result
+
+
+def _run_agent_cli(*args: Any, **kwargs: Any) -> str:
+    """CLI wrapper around ``run_agent`` (#2124).
+
+    ``run_agent`` now raises :class:`AgentExecutionError` on an irrecoverable
+    turn failure instead of returning the error text as a normal answer. The
+    interactive CLI deliberately *displays* that message (its existing panels
+    already render ``run_agent``'s string return), so we convert the typed
+    failure back into its display message here. Other callers (API turn
+    runner, assistant handler) catch the exception themselves to surface a
+    proper error frame / reply.
+    """
+    try:
+        return run_agent(*args, **kwargs)
+    except AgentExecutionError as exc:
+        return exc.user_message
 
 
 def _format_stats_line(
@@ -2742,7 +2759,7 @@ def run_single_prompt(
                 _run_config.confirmation_ui = _rich_ui
                 _run_config.on_tool_expansion = _tool_expansion_ui
                 _run_config.tools_ready = _MCP_TOOLS_READY_EVENT
-                output = run_agent(
+                output = _run_agent_cli(
                     prompt_text,
                     context.messages,
                     registry,
@@ -3303,7 +3320,7 @@ def main():
         _cron_run_config.session_state = inherited_session
         _cron_run_config.tools_ready = _MCP_TOOLS_READY_EVENT
         _cron_run_config.checkpoint_store = _session.checkpoint_store
-        return run_agent(
+        return _run_agent_cli(
             job.prompt,
             cron_context.messages if cron_context is not None else [],
             registry,
@@ -3835,7 +3852,7 @@ def main():
                         )
                         _tq_run_config.checkpoint_store = _session.checkpoint_store
                         _tq_run_config.tools_ready = _MCP_TOOLS_READY_EVENT
-                        result = run_agent(
+                        result = _run_agent_cli(
                             record.prompt,
                             [],
                             _tq_registry,
@@ -4632,7 +4649,7 @@ def main():
                                 _gather_run_config.on_tool_expansion = _tool_expansion_ui
                                 _gather_run_config.tools_ready = _MCP_TOOLS_READY_EVENT
                                 _gather_run_config.checkpoint_store = _session.checkpoint_store
-                                gather_output = run_agent(
+                                gather_output = _run_agent_cli(
                                     gather_prompt,
                                     gather_context.messages,
                                     registry,
@@ -5173,7 +5190,7 @@ def main():
                     _repl_run_config.on_tool_expansion = _tool_expansion_ui
                     _repl_run_config.tools_ready = _MCP_TOOLS_READY_EVENT
                     _repl_run_config.checkpoint_store = _session.checkpoint_store
-                    output = run_agent(
+                    output = _run_agent_cli(
                         user_input,
                         context.messages,
                         registry,

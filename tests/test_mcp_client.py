@@ -2320,3 +2320,88 @@ class TestMCPConfigFieldAllowlists:
         assert cfg.url == "http://example/sse"
         # And ``allowed_directories`` is dropped (no attribute slot).
         assert not hasattr(cfg, "allowed_directories")
+
+
+class TestMCPRestart2152:
+    """#2152 — restart() must await connect/close inline on the MCP event
+    loop. The old code routed them through self._run(), which blocks on
+    future.result() from the loop thread → the loop can't progress → the
+    restart deadlocks, returns {} after a timeout, and wedges MCP.
+    """
+
+    def test_restart_reconnects_without_deadlock(self) -> None:
+        manager = MCPManager()
+        cfg = MCPServerConfig(name="srv", command="cmd", timeout=5)
+        tool = _make_mock_tool("mytool")
+
+        async def fake_connect(self_conn: MCPConnection) -> None:
+            self_conn._tools = [tool]
+
+        async def fake_close(self_conn: MCPConnection) -> None:
+            return None
+
+        with patch("src.mcp_client.MCP_AVAILABLE", True):
+            with patch.object(MCPConnection, "connect", fake_connect):
+                with patch.object(MCPConnection, "close", fake_close):
+                    manager.connect_all([cfg])
+                    # Pre-fix this deadlocks the loop and returns {} after the
+                    # timeout; post-fix it reconnects and returns the tools.
+                    tools = manager.restart("srv", builtin_tool_names=set())
+
+        manager.close_all()
+        assert "mytool" in tools
+
+    def test_restart_unknown_server_returns_empty(self) -> None:
+        """restart() on an unknown server is a clean no-op (and starts the
+        loop via _ensure_loop rather than raising on a None loop)."""
+        manager = MCPManager()
+        try:
+            result = manager.restart("does-not-exist", builtin_tool_names=set())
+            assert result == {}
+        finally:
+            manager.close_all()
+
+
+class TestMCPUrlValidationOffLoop2154:
+    """#2154 — MCP SSE URL validation does a blocking socket.getaddrinfo, so
+    it must run OFF the event loop (in an executor) to avoid stalling the MCP
+    loop / heartbeat on a slow DNS lookup."""
+
+    def test_getaddrinfo_runs_off_the_event_loop(self) -> None:
+        import socket
+        import threading
+
+        from src.mcp_client import _validate_mcp_url_off_loop
+
+        seen: dict[str, int] = {}
+
+        def fake_getaddrinfo(host: str, *a: object, **k: object) -> list:
+            seen["dns_thread"] = threading.get_ident()
+            return [(socket.AF_INET, socket.SOCK_STREAM, 0, "", ("93.184.216.34", 0))]
+
+        async def run() -> int:
+            loop_thread = threading.get_ident()
+            with patch("src.mcp_client.socket.getaddrinfo", fake_getaddrinfo):
+                await _validate_mcp_url_off_loop("https://example.com/sse")
+            return loop_thread
+
+        loop_thread = asyncio.run(run())
+        assert "dns_thread" in seen, "getaddrinfo was never called"
+        assert seen["dns_thread"] != loop_thread, "DNS resolution ran on the event-loop thread"
+
+    def test_off_loop_wrapper_still_blocks_internal_host(self) -> None:
+        from src.mcp_client import _validate_mcp_url_off_loop
+
+        with pytest.raises(ValueError, match="blocked IP"):
+            asyncio.run(_validate_mcp_url_off_loop("https://127.0.0.1/sse"))
+
+    def test_off_loop_wrapper_accepts_public_https(self) -> None:
+        import socket
+
+        from src.mcp_client import _validate_mcp_url_off_loop
+
+        def fake_getaddrinfo(host: str, *a: object, **k: object) -> list:
+            return [(socket.AF_INET, socket.SOCK_STREAM, 0, "", ("93.184.216.34", 0))]
+
+        with patch("src.mcp_client.socket.getaddrinfo", fake_getaddrinfo):
+            asyncio.run(_validate_mcp_url_off_loop("https://example.com/sse"))

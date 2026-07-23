@@ -257,8 +257,20 @@ async def send_message(
                 db=turn_db,
                 app_state=request.app.state,
             )
+    except asyncio.CancelledError:
+        # #2117: a concurrent WS `cancel` aborted this sync turn. The CANCELLED
+        # frame is already on ws_queue; fall through to the drain loop so it is
+        # surfaced via the normal agent_error path (HTTP 500 AGENT_ERROR) rather
+        # than propagating a raw CancelledError out of the request handler.
+        pass
     finally:
-        sentinel.set_result(None)
+        # The sentinel may already be cancelled/resolved by a racing cancel; only
+        # resolve it if still pending to avoid InvalidStateError (#2117).
+        if not sentinel.done():
+            sentinel.set_result(None)
+        # Reset any cancellation raised during this turn so it doesn't leak into
+        # the next turn on this session.
+        sess.cancel_event.clear()
         sess.turn_task = None
 
     # Drain ws_queue to find the done message (which carries the response text).
@@ -506,6 +518,48 @@ async def clear_history(
 
 
 ws_router = APIRouter(tags=["WebSocket"])
+
+
+async def _cancel_active_turn(sess: Any) -> None:
+    """Cancel the session's in-flight turn, if any (#2117).
+
+    ``sess.turn_task`` carries one of two things:
+
+    * a real async turn :class:`asyncio.Task` (WS ``user_message`` path) — cancel
+      it and await its unwind, then clear ``cancel_event``; or
+    * a plain :class:`asyncio.Future` *sentinel* (REST ``?sync=true`` path) that
+      merely marks the turn in-progress. The sentinel is **not** the running
+      turn, so cancelling/awaiting it would (a) race the sync handler's
+      ``sentinel.set_result(...)`` → ``InvalidStateError`` and (b) not stop the
+      turn. For a sentinel we only raise ``cancel_event`` (which the inline sync
+      turn observes) and leave the sync handler to resolve the sentinel and clear
+      ``cancel_event`` in its ``finally`` — clearing it here would race the turn
+      observing it and silently drop the cancel.
+
+    The reference is snapshotted so a concurrent ``turn_task`` mutation (the sync
+    path runs outside this coroutine) can't change the object mid-check.
+    """
+    turn_obj = sess.turn_task
+    if turn_obj is None or turn_obj.done():
+        return
+
+    sess.cancel_event.set()
+    # Unblock any pending confirmation so the agent thread exits promptly
+    # instead of waiting up to 5 minutes.
+    conf_ui = getattr(sess, "active_confirmation_ui", None)
+    if conf_ui is not None and hasattr(conf_ui, "cancel"):
+        conf_ui.cancel()
+
+    if isinstance(turn_obj, asyncio.Task):
+        turn_obj.cancel()
+        try:
+            await turn_obj
+        except (asyncio.CancelledError, Exception):
+            pass
+        finally:
+            sess.cancel_event.clear()
+    # else: ?sync=true sentinel — the sync request handler resolves it and clears
+    # cancel_event once the inline turn observes the cancellation.
 
 
 @ws_router.websocket("/ws/v1/sessions/{session_id}")
@@ -784,20 +838,10 @@ async def session_websocket(
                     confirmation_ui.resolve(confirmation_id, action)
 
             elif client_msg.type == "cancel":
-                if sess.turn_task is not None and not sess.turn_task.done():
-                    sess.cancel_event.set()
-                    # Unblock any pending confirmation so the agent thread
-                    # exits promptly instead of waiting up to 5 minutes.
-                    _conf_ui = getattr(sess, "active_confirmation_ui", None)
-                    if _conf_ui is not None and hasattr(_conf_ui, "cancel"):
-                        _conf_ui.cancel()
-                    sess.turn_task.cancel()
-                    try:
-                        await sess.turn_task
-                    except (asyncio.CancelledError, Exception):
-                        pass
-                    finally:
-                        sess.cancel_event.clear()
+                # #2117: distinguishes a real turn Task from the REST sync
+                # Future sentinel so a cancel during a ?sync=true turn can't
+                # corrupt the sentinel or drop the cancellation.
+                await _cancel_active_turn(sess)
 
     except Exception as exc:
         log.debug("WebSocket receive loop error for session %s: %s", session_id, exc)

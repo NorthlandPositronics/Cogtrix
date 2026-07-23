@@ -102,7 +102,12 @@ def test_run_agent_no_dead_code_comment() -> None:
 
 
 def test_run_agent_has_exactly_three_returns() -> None:
-    """_run_agent() must have exactly 3 return statements (UserCancelledRun + except + normal path)."""
+    """_run_agent() must have exactly 4 return statements (UserCancelledRun +
+    AgentExecutionError + generic except + normal path).
+
+    The AgentExecutionError branch was added in #2124 so the assistant surfaces
+    run_agent's actionable failure message instead of the generic prefix; it is a
+    legitimate path, not dead code."""
     src_text = pathlib.Path("src/assistant/handler.py").read_text()
     tree = ast.parse(src_text)
 
@@ -127,8 +132,9 @@ def test_run_agent_has_exactly_three_returns() -> None:
     for stmt in method_body:
         _Visitor().visit(stmt)
 
-    assert len(all_returns) == 3, (
-        f"Expected 3 return statements in _run_agent (UserCancelledRun + except + normal), "
+    assert len(all_returns) == 4, (
+        f"Expected 4 return statements in _run_agent (UserCancelledRun + "
+        f"AgentExecutionError + generic except + normal), "
         f"got {len(all_returns)}. Dead code conditional may be present."
     )
 

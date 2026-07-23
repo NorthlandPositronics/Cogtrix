@@ -89,6 +89,14 @@ from src.orchestration.graph import _TOPIC_SWITCH_NUDGE
 # contract (tests do ``patch("src.orchestration.nodes.call_model.
 # _should_reset_summary_for_topic_switch", ...)``).
 
+# #2054: the stuck-conclusion nudge (Bug G #1713) only makes sense for
+# substantial research-style answers. Short conversational acknowledgments
+# (e.g. "No rush, take your time.") trivially exceed the 90% similarity
+# threshold and would otherwise trip the nudge, forcing the assistant to
+# re-reply and producing duplicate/broken-record messages on chat channels.
+# Require the (near-identical) prior finals to exceed this length before firing.
+_STUCK_CONCLUSION_MIN_CHARS = 80
+
 
 def apply_pre_invoke_directives(
     context: Any,
@@ -407,7 +415,12 @@ def _phase_p1_post_bind_prep(
             from difflib import SequenceMatcher as _SeqMatch
 
             _sim = _SeqMatch(None, _prior_finals[0], _prior_finals[1]).ratio()
-            if _sim >= 0.90:
+            # #2054: only fire for substantial answers — skip short
+            # conversational acknowledgments that are near-identical by nature.
+            _both_substantial = (
+                min(len(_prior_finals[0]), len(_prior_finals[1])) > _STUCK_CONCLUSION_MIN_CHARS
+            )
+            if _sim >= 0.90 and _both_substantial:
                 msgs.append(
                     HumanMessage(
                         content=(

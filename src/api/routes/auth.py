@@ -269,6 +269,13 @@ async def refresh(
             detail={"code": "UNAUTHORIZED", "message": "Missing or invalid bearer token."},
         )
 
+    # Persist the single-use revoke now, before the expiry / inactive-user
+    # checks below. Those raise HTTPException, which rolls back the request
+    # session — without this commit the revoke would be undone, leaving the
+    # presented token live (e.g. a deactivated user's token would work again
+    # on reactivation) — #2164.
+    await db.commit()
+
     now = datetime.now(UTC)
     expires = token_record.expires_at
     if expires.tzinfo is None:

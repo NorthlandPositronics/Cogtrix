@@ -384,16 +384,26 @@ async def patch_session_tools(
     # execution as a backstop.)
     app_config = getattr(request.app.state, "config", None)
     if not getattr(app_config, "api_dangerous_tools", False):
-        _blocked = (set(body.load or []) | set(body.enable or [])) & set(
-            _API_DENIED_DANGEROUS_TOOLS
-        )
+        _requested = set(body.load or []) | set(body.enable or [])
+        _blocked = _requested & set(_API_DENIED_DANGEROUS_TOOLS)
+        # #2116: also reject confirmation-gated tools — on no_confirm API
+        # sessions they have no confirmation path, so loading/enabling one would
+        # let it execute unguarded. Mirrors the warm-time deny in session_bridge.
+        _tool_registry = getattr(request.app.state, "tool_registry", None)
+        if _tool_registry is not None:
+            for _name in _requested:
+                try:
+                    if _tool_registry.requires_confirmation(_name):
+                        _blocked.add(_name)
+                except Exception:  # noqa: BLE001 — per-tool lookup must not 500 the route
+                    continue
         if _blocked:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail={
                     "code": "FORBIDDEN",
                     "message": (
-                        "Cannot load or enable dangerous tools ("
+                        "Cannot load or enable confirmation-gated/dangerous tools ("
                         + ", ".join(sorted(_blocked))
                         + ") while api_dangerous_tools is disabled."
                     ),

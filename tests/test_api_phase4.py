@@ -139,7 +139,7 @@ def _api_client(
         app.state.tool_registry = registry
         app.state.config = config
         app.state.session_registry = None
-        app.state.mcp_client = None
+        app.state.mcp_manager = None
         if extra_state:
             for k, v in extra_state.items():
                 setattr(app.state, k, v)
@@ -751,7 +751,7 @@ class TestMCPEndpoints:
             }
         ]
 
-        with _api_client(extra_state={"mcp_client": mock_client}) as (
+        with _api_client(extra_state={"mcp_manager": mock_client}) as (
             client,
             registry,
             config,
@@ -776,7 +776,7 @@ class TestMCPEndpoints:
         mock_client = MagicMock()
         mock_client.get_server_info.return_value = []
 
-        with _api_client(extra_state={"mcp_client": mock_client}) as (
+        with _api_client(extra_state={"mcp_manager": mock_client}) as (
             client,
             registry,
             config,

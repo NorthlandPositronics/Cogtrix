@@ -223,6 +223,25 @@ def _unresolved_tool_message(
     )
 
 
+# Internal flow-control tools have no external side effects — they let the agent
+# manage its own turn (stay silent, defer, schedule, discover/load tools, report
+# progress, checkpoint). They must never be capturable as "prohibited" tools: a
+# benign system-prompt mention like the datamarking note "Do NOT call
+# suppress_reply because of these tokens" otherwise trips the #1851 prohibition
+# gate and permanently blocks suppress_reply, forcing the agent to reply when
+# silence is correct (#2051).
+_PROHIBITION_EXEMPT_CONTROL_TOOLS: frozenset[str] = frozenset(
+    {
+        "suppress_reply",
+        "defer_processing",
+        "schedule_reply",
+        "request_tools",
+        "report_progress",
+        "checkpoint",
+    }
+)
+
+
 def extract_prohibited_tools(
     system_prompt: str, available_names: set[str] | None = None
 ) -> set[str]:
@@ -232,6 +251,10 @@ def extract_prohibited_tools(
     called", …) and returns the named tools (lower-cased). When
     ``available_names`` is given the result is intersected with it, so a
     captured non-tool word can never become a phantom prohibition.
+
+    Internal flow-control tools (:data:`_PROHIBITION_EXEMPT_CONTROL_TOOLS`) are
+    always excluded — they are side-effect-free turn-management tools and a
+    passing mention must not block them (#2051).
     """
     if not system_prompt or not isinstance(system_prompt, str):
         return set()
@@ -239,6 +262,7 @@ def extract_prohibited_tools(
     for rx in _PROHIBITION_RES:
         for m in rx.finditer(system_prompt):
             found.add(m.group(1).lower())
+    found -= _PROHIBITION_EXEMPT_CONTROL_TOOLS
     if available_names is not None:
         avail_lower = {n.lower() for n in available_names}
         found = {n for n in found if n in avail_lower}
@@ -1025,7 +1049,12 @@ def build_process_tools_node(
                         active_tools_list.append(rt)
                         _tool_lookup["request_tools"] = rt
 
-            configure_delegate_tools(active_tools_list, _available_tools_ref[0])
+            configure_delegate_tools(
+                active_tools_list,
+                _available_tools_ref[0],
+                denials=session_state.get_denials_snapshot(),
+                deny_all=session_state.deny_all,
+            )
 
             visible_count = sum(
                 1 for t in active_tools_list if getattr(t, "name", "") != "request_tools"

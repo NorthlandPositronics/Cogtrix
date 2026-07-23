@@ -310,3 +310,18 @@ class JsonFileMemoryStore(BaseMemoryStore):
                     os.close(lock_fd)
                 except OSError:
                     pass
+
+    def delete_lock(self, session_id: str) -> None:
+        """Remove the per-session ``.lock`` file created during save.
+
+        The flock guard file is ``O_CREAT``'d on every ``save_history`` and is
+        otherwise never removed, so a server cycling through many session ids
+        accumulates one ``{id}.lock`` per session forever (#2131 C5).
+        ``BaseMemoryManager.clear()`` calls this to clean it up. Best-effort:
+        a missing file or path error is ignored.
+        """
+        try:
+            lock_path = self._session_path(session_id).with_suffix(".lock")
+            lock_path.unlink(missing_ok=True)
+        except Exception:
+            pass

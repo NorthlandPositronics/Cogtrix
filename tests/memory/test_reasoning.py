@@ -704,3 +704,44 @@ class TestTokensSinceSummaryLockRegression:
         assert t1.is_alive() is False, "thread t1 did not finish"
         assert t2.is_alive() is False, "thread t2 did not finish"
         assert errors == [], f"Concurrent access raised: {errors}"
+
+
+class TestGoalDataDir2160:
+    """#2160 — the reasoning prefix must read goals from the store's configured
+    data_dir (base_path = <data_dir>/history), not a hardcoded 'data', so it
+    sees goals the goal tools persisted under config.data_dir."""
+
+    def test_goal_prefix_reads_from_store_data_dir(self, tmp_path) -> None:
+        import src.tasks.goal_tracker as gt
+        from src.tasks.goal_tracker import GoalStack
+
+        session_id = "reasoning-2160"
+        # Persist a goal under the CONFIGURED data_dir (tmp_path), as the goal
+        # tools would. A direct GoalStack avoids polluting the module cache.
+        GoalStack(session_id, tmp_path).push("ship the widget")
+        gt._stacks.clear()  # ensure reasoning is the first cache user
+
+        store = JsonFileMemoryStore(str(tmp_path / "history"))
+        manager = ReasoningMemoryManager(store, session_id)
+        manager.load()
+        try:
+            context = manager.prepare_context("next")
+            prefix = context.context_prefix or ""
+        finally:
+            gt._stacks.clear()
+
+        # Pre-fix this looked in ./data/goals (empty) and missed the goal.
+        assert "ship the widget" in prefix
+
+    def test_falls_back_to_data_without_base_path(self, tmp_path) -> None:
+        """A store without base_path doesn't crash the prefix build (#2160)."""
+        import src.tasks.goal_tracker as gt
+
+        gt._stacks.clear()
+        manager = ReasoningMemoryManager(MockStore(), "reasoning-2160-fallback")
+        manager.load()
+        try:
+            context = manager.prepare_context("next")  # must not raise
+            assert context is not None
+        finally:
+            gt._stacks.clear()

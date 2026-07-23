@@ -45,7 +45,10 @@ def _get_config(request: Request) -> Any:
 
 
 def _get_mcp_client(request: Request) -> Any:
-    return getattr(request.app.state, "mcp_client", None)
+    # The lifespan startup stores the MCPManager on ``app.state.mcp_manager``
+    # (src/api/app.py); ``app.state.mcp_client`` was never set in production, so
+    # reading it made every /mcp route operate on None (#2151).
+    return getattr(request.app.state, "mcp_manager", None)
 
 
 def _get_mcp_servers(cfg: Any) -> dict[str, dict[str, Any]]:

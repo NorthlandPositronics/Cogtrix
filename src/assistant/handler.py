@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from src.agent.core import AgentRunner
-from src.agent.safety import UserCancelledRun
+from src.agent.safety import AgentExecutionError, UserCancelledRun
 from src.assistant.channel import Channel, IncomingMessage
 from src.assistant.datamarking import apply_datamark as _apply_datamark
 from src.assistant.datamarking import datamark_history as _datamark_history
@@ -156,6 +156,12 @@ class MessageHandler:
         datamarking_enabled: Enable Microsoft Spotlighting prompt injection defense.
     """
 
+    # Class-level default for the per-call LLM timeout (#2146). ``__init__``
+    # overrides it per-instance from ModelConfig.timeout; the default keeps
+    # ``self._llm_timeout`` resolvable for partially-constructed instances
+    # (e.g. tests that build via ``__new__`` to exercise a single method).
+    _llm_timeout: int = 180
+
     def __init__(
         self,
         session_mgr: Any,
@@ -168,6 +174,7 @@ class MessageHandler:
         active_tools: list[Any],
         *,
         max_context_tokens: int | None = None,
+        llm_timeout: int = 180,
         compression_llm: Any = None,
         knowledge_store: Any = None,
         guardrails: Any = None,
@@ -186,6 +193,7 @@ class MessageHandler:
         self._registry = registry
         self._approvals = approvals
         self._max_context_tokens = max_context_tokens
+        self._llm_timeout = llm_timeout  # per-call LLM timeout from ModelConfig (#2146)
         self._compression_llm = compression_llm
         self._knowledge_store = knowledge_store
         self._guardrails = guardrails if guardrails is not None else GuardrailPipeline({})
@@ -448,6 +456,7 @@ class MessageHandler:
                 available_tools=available,
                 active_tools_list=active_tools,
                 max_context_tokens=self._max_context_tokens,
+                llm_timeout=self._llm_timeout,
                 compression_llm=self._compression_llm,
                 tool_call_guard=self._guardrails.check_tool_call,
                 session_state=call_session_state,
@@ -465,6 +474,11 @@ class MessageHandler:
         except UserCancelledRun:
             log.info("Agent run cancelled for %s", session.session_key)
             return "", set()
+        except AgentExecutionError as exc:
+            # #2124: run_agent signalled an irrecoverable turn failure with an
+            # already-formatted, user-facing message — surface it directly.
+            log.warning("Agent run failed for session %s: %s", session.session_key, exc)
+            return f"{_AGENT_ERROR_PREFIX} {exc.user_message}", set()
         except Exception as exc:
             log.error("Agent error for session %s: %s", session.session_key, exc)
             response = f"{_AGENT_ERROR_PREFIX} {type(exc).__name__} error. Please try again or contact the administrator."
@@ -901,13 +915,23 @@ class MessageHandler:
         session = self._session_mgr.get_or_create(synthetic_msg)
 
         memory_user_text = f"[Operator instruction] {instructions}"
-        session.memory_manager.prerecord_user(memory_user_text)
 
         with session.lock:
+            # Pre-record the operator instruction for shutdown durability INSIDE
+            # the lock — matching handle() (#2140).  Campaign/operator outbound
+            # runs on its own executor threads, so a lock-free prerecord here
+            # races with a concurrent inbound turn's update()/discard_prerecord()
+            # on the same session's shared {session_id}_pending.json.
+            session.memory_manager.prerecord_user(memory_user_text)
+
             session.last_activity = time.monotonic()
             # Operator-originated messages skip rate-limit/blacklist (trusted) but
             # still run injection detection and encoding checks (#1076).
             if not self._check_guardrails(synthetic_msg, session, channel, skip_trusted=True):
+                # Drop the pending record on the block path so the rejected
+                # (possibly injection-laden) instruction can't be recovered on
+                # restart — matching handle()'s guardrail-block discard (#2140).
+                session.memory_manager.discard_prerecord()
                 return "[Operator instruction blocked — injection or encoding detected]", None
             context, combined_prefix = self._prepare_context(synthetic_msg, session)
 
@@ -1152,6 +1176,7 @@ class MessageHandler:
                 available_tools=available,
                 active_tools_list=active_tools,
                 max_context_tokens=self._max_context_tokens,
+                llm_timeout=self._llm_timeout,
                 compression_llm=self._compression_llm,
                 tool_call_guard=_tracking_tool_guard,
                 session_state=call_session_state,

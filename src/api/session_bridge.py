@@ -36,21 +36,66 @@ _DEFAULT_MAX_IDLE_AGE = 1800  # 30 minutes
 # How often the background eviction task runs.
 _EVICTION_INTERVAL = 300  # 5 minutes
 
-# #2050: Tools denied on API sessions unless ``api_dangerous_tools`` is enabled.
-# This MUST list the agent-CALLABLE tool names (``execute_shell_command`` /
-# ``execute_python``) because ``SessionState.is_denied()`` matches on the
-# canonical tool name, not the module name. The original list used the module
-# names (``shell`` / ``python_exec``), which never matched the names the deny is
-# enforced against in process_tools.py / safety.py — so the deny was a silent
-# no-op and shell/python remained loadable via ``request_tools`` (RCE on the API
-# host). The module/alias names are kept as defence-in-depth.
-_API_DENIED_DANGEROUS_TOOLS: tuple[str, ...] = (
+# #2050/#2118: Tools denied on API sessions unless ``api_dangerous_tools`` is
+# enabled. Two distinct roles — kept as separate tuples so it is unambiguous
+# which entries actually enforce (#2118):
+#
+# * ``_API_DENIED_EXEC_TOOLS`` — the **canonical, agent-callable** tool names.
+#   These are the load-bearing entries: ``SessionState.is_denied()`` matches on
+#   the canonical tool name (not the module name), so only these are honoured at
+#   the execution chokepoint (process_tools.py / safety.py). The original list
+#   used module names, which never matched — a silent no-op that left shell/python
+#   loadable via ``request_tools`` (RCE on the API host).
+# * ``_API_DENIED_DANGEROUS_TOOL_ALIASES`` — module/alias name strings. These do
+#   NOT match ``is_denied`` (so ``deny_tool`` on them is a no-op), but they ARE
+#   load-bearing in the tools-route block (tools.py), which intersects the
+#   *user-supplied* ``load``/``enable`` name strings against the combined set —
+#   blocking a caller that passes e.g. ``load=["shell"]``. They are intentionally
+#   non-canonical; ``test_deny_set_integrity_2118`` fails loud if one ever becomes
+#   a real registered tool (i.e. a no-op silently turning load-bearing).
+_API_DENIED_EXEC_TOOLS: tuple[str, ...] = (
     "execute_shell_command",
     "execute_python",
+)
+_API_DENIED_DANGEROUS_TOOL_ALIASES: tuple[str, ...] = (
     "shell",
     "bash",
     "python_exec",
 )
+# Combined set used by the tools route's load/enable block (string match against
+# user input). The warm-time deny below only needs the canonical names.
+_API_DENIED_DANGEROUS_TOOLS: tuple[str, ...] = (
+    _API_DENIED_EXEC_TOOLS + _API_DENIED_DANGEROUS_TOOL_ALIASES
+)
+
+
+def confirmation_required_tool_names(tool_registry: Any) -> list[str]:
+    """Return the registered tools whose only guard is ``requires_confirmation``.
+
+    #2116: API sessions run with ``no_confirm=True``, so the safety wrapper's
+    confirmation block (and its ``is_denied`` re-check) is skipped entirely —
+    any tool whose sole guard is ``requires_confirmation=True`` (e.g.
+    ``http_post``, ``write_file``, ``patch_file``) would otherwise execute with
+    no gate at all. The agreed policy (deny by default) denies this whole class
+    on API sessions unless ``api_dangerous_tools`` is enabled.
+
+    Best-effort and defensive: a missing/odd registry yields an empty list so
+    warm-up never fails on this account.
+    """
+    if tool_registry is None:
+        return []
+    try:
+        names = list(tool_registry.list_tools())
+    except Exception:  # noqa: BLE001 — registry shape varies (tests use mocks)
+        return []
+    out: list[str] = []
+    for name in names:
+        try:
+            if tool_registry.requires_confirmation(name):
+                out.append(name)
+        except Exception:  # noqa: BLE001 — per-tool lookup must not break warm-up
+            continue
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -132,10 +177,21 @@ async def warm_session(record: ApiSessionRecord, app_state: Any) -> ApiSession:
 
         # 2. Session state — API sessions never use CLI confirmation
         session_state = SessionState(no_confirm=True)
-        # Deny shell/exec tools unless explicitly enabled in config
+        # Deny shell/exec tools unless explicitly enabled in config. Deny the
+        # full combined set (canonical names + module aliases): is_denied()
+        # matches the canonical names against agent tool calls, while the alias
+        # strings populate the denials snapshot (get_denials_snapshot), which the
+        # delegate/research cross-check consumes (#2113) and which the tools-route
+        # load/enable block intersects against user input — defence-in-depth that
+        # must not regress (#2118).
         app_config = getattr(app_state, "config", None)
         if not getattr(app_config, "api_dangerous_tools", False):
             for _t in _API_DENIED_DANGEROUS_TOOLS:
+                session_state.deny_tool(_t)
+            # #2116: also deny confirmation-gated tools — on no_confirm API
+            # sessions there is no confirmation path, so their only guard is
+            # absent. Deny by default; api_dangerous_tools opts back in.
+            for _t in confirmation_required_tool_names(getattr(app_state, "tool_registry", None)):
                 session_state.deny_tool(_t)
 
         # 3 & 4. Build memory manager and LLM concurrently — both are I/O-bound and independent.
@@ -377,8 +433,10 @@ def _build_run_config(
 
             system_prompt = DEFAULT_SYSTEM_PROMPT
 
-    # Determine context window from the active model's context_window — matching CLI behavior.
+    # Determine context window + per-call timeout from the active model's
+    # ModelConfig — matching CLI behavior (#2146: timeout was never wired).
     max_context_tokens: int | None = None
+    model_timeout: int = 180
     if app_cfg is not None:
         session_model = config.get("model")
         try:
@@ -387,6 +445,8 @@ def _build_run_config(
             else:
                 _, mc = app_cfg.resolve_llm_config()
             max_context_tokens = mc.context_window
+            if getattr(mc, "timeout", None):
+                model_timeout = int(mc.timeout)
         except Exception as exc:
             log.warning(
                 "Could not resolve context window for session model %r: %s — using fallback %d",
@@ -405,6 +465,7 @@ def _build_run_config(
         available_tools=available_tools,
         active_tools_list=active_tools_list,
         max_context_tokens=max_context_tokens,
+        llm_timeout=model_timeout,
         context_max_messages=context_max_messages,
         context_max_tokens=context_max_tokens,
         context_compression=bool(context_compression),

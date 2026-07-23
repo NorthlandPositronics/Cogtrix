@@ -953,13 +953,22 @@ class BaseMemoryManager(ABC):
             new_summary = generate_summary(self._llm, batch, summary_before)
             if new_summary is not None:
                 with self._hybrid_lock:
-                    self._summary = new_summary
-                    self._summary_msg_idx = unsummarized_end
-                    self._summary_last_updated_at = datetime.now(UTC)
-                    # Reset the token counter so _check_summary_token_ttl does not
-                    # immediately wipe the summary we just wrote (#486).
-                    self._tokens_since_summary = 0
-                    self._summary_dirty = True
+                    # #2131 C4: only ever ADVANCE the summary boundary, never
+                    # rewind it. The stuck-job fall-through (>_BG_JOB_TIMEOUT) can
+                    # run two summarizers concurrently; if a late-finishing OLDER
+                    # job wrote back unconditionally it would overwrite the newer
+                    # summary and move _summary_msg_idx backward, leaving the
+                    # messages between the two boundaries uncovered (neither
+                    # summarized nor re-exposed). Apply the summary and its
+                    # boundary together, and only when this job extends coverage.
+                    if unsummarized_end > self._summary_msg_idx:
+                        self._summary = new_summary
+                        self._summary_msg_idx = unsummarized_end
+                        self._summary_last_updated_at = datetime.now(UTC)
+                        # Reset the token counter so _check_summary_token_ttl does
+                        # not immediately wipe the summary we just wrote (#486).
+                        self._tokens_since_summary = 0
+                        self._summary_dirty = True
                 if is_verbose():
                     log.debug(
                         "Background summary updated in %.2fs, covers messages 0..%d (%d tokens est.)",
@@ -1430,10 +1439,18 @@ class BaseMemoryManager(ABC):
         Subclasses should call ``super().save()`` to persist vector store
         and hybrid summary meta.
         """
-        fut = self._bg_future
-        if fut is None or fut.done():
+        # #2131 (C1): read _bg_future / _summary_dirty under _hybrid_lock (the
+        # documented contract) so a background summarizer completing between
+        # turns cannot interleave into a state where neither branch flushes the
+        # just-computed rolling summary. Snapshot under the lock, then release
+        # before the I/O (_save_hybrid_meta re-acquires it internally).
+        with self._hybrid_lock:
+            fut = self._bg_future
+            fut_inactive = fut is None or fut.done()
+            summary_dirty = self._summary_dirty
+        if fut_inactive:
             self._save_hybrid_meta()
-        elif self._summary_dirty:
+        elif summary_dirty:
             self._save_hybrid_meta()
             with self._hybrid_lock:
                 self._summary_dirty = False
@@ -1504,11 +1521,15 @@ class BaseMemoryManager(ABC):
         ``os._exit()`` afterward to prevent Python's internal
         ``_python_exit()`` from blocking on ThreadPoolExecutor threads.
         """
-        fut = self._bg_future
+        # #2131 (C2): read+null _bg_future atomically under _hybrid_lock so a
+        # concurrent _schedule_slow_path submit (which sets it under the lock)
+        # cannot be lost — defeating the cancel — or replaced mid-check.
+        with self._hybrid_lock:
+            fut = self._bg_future
+            self._bg_future = None
         bg_still_running = fut is not None and fut.running()
         if fut is not None and not fut.done():
             fut.cancel()
-        self._bg_future = None
         if bg_still_running:
             # The background thread may be holding _hybrid_lock while doing
             # summarization or embedding work.  A full save() would block on
@@ -1593,6 +1614,15 @@ class BaseMemoryManager(ABC):
             cache_path = self._tier_cache_path()
             if cache_path.exists():
                 cache_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        # Remove the per-session history .lock file (store artifact) so cleared
+        # sessions don't leak one lock file each (#2131 C5). Best-effort and
+        # guarded — not every store implements delete_lock.
+        try:
+            _delete_lock = getattr(self.store, "delete_lock", None)
+            if callable(_delete_lock):
+                _delete_lock(self.session_id)
         except Exception:
             pass
 

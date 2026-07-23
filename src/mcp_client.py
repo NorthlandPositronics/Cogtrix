@@ -205,6 +205,21 @@ def _validate_mcp_url(url: str, allow_insecure: bool = False) -> None:
             raise ValueError(f"MCP SSE URL resolves to blocked IP: {ip_str}")
 
 
+async def _validate_mcp_url_off_loop(url: str, allow_insecure: bool = False) -> None:
+    """Async wrapper that runs :func:`_validate_mcp_url` off the event loop.
+
+    ``_validate_mcp_url`` performs a blocking ``socket.getaddrinfo`` lookup.
+    Calling it directly from ``MCPConnection.connect`` (which runs on the
+    background MCP event loop) would block that loop — and therefore every
+    other concurrent server connect plus the heartbeat — for the duration of
+    a slow/wedged DNS resolution (#2154). Offload it to the default executor
+    so the lookup runs on a worker thread; any ``ValueError`` it raises
+    propagates unchanged to the awaiter.
+    """
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(None, _validate_mcp_url, url, allow_insecure)
+
+
 # ── Schema conversion ─────────────────────────────────────────────────────────
 
 _JSON_SCHEMA_TYPE_MAP: dict[str, type] = {
@@ -412,8 +427,10 @@ class MCPConnection:
 
         cfg = self._config
         if cfg.url is not None:
-            # Prevent SSRF via admin-controlled MCP config.
-            _validate_mcp_url(cfg.url, allow_insecure=cfg.allow_insecure)
+            # Prevent SSRF via admin-controlled MCP config. Run the validation
+            # (which does a blocking getaddrinfo) off the event loop so a slow
+            # DNS lookup can't stall the MCP loop / heartbeat (#2154).
+            await _validate_mcp_url_off_loop(cfg.url, allow_insecure=cfg.allow_insecure)
             # sse_client(timeout=N) sets the connect/write/pool timeout.
             # sse_client(sse_read_timeout=X) controls how long to wait between
             # 3600s balances two failure modes: the default 300s fires on
@@ -1481,15 +1498,41 @@ class MCPManager:
         """
         log = get_logger()
 
+        # Ensure the background loop exists — restart can be invoked from the
+        # CLI/API at any time, including after a transient teardown. Fail
+        # cleanly (return {}) if the manager is shutting down (#2152).
+        try:
+            self._ensure_loop()
+        except RuntimeError as exc:
+            log.warning("MCP: cannot restart — event loop unavailable: %s", exc)
+            return {}
+
+        if server_name is not None:
+            targets = [server_name] if server_name in self._configs else []
+        else:
+            targets = list(self._configs.keys())
+
+        # The inner per-server connects are bounded by each cfg.timeout
+        # (default 30s). The overall budget must cover them (+ a close
+        # allowance) or the outer wait_for would cancel mid-connect and the
+        # restart would spuriously report a timeout. Honour a larger explicit
+        # caller timeout (#2152).
+        overall_timeout = timeout
+        if targets:
+            overall_timeout = max(
+                timeout,
+                sum(self._configs[t].timeout for t in targets) + 10.0 * len(targets),
+            )
+
         async def _do_restart() -> dict[str, Any]:
-            """Inner async function to run restart with overall timeout."""
-            if server_name is not None:
-                targets = [server_name] if server_name in self._configs else []
-                if not targets:
-                    log.warning("MCP: cannot restart unknown server '%s'", server_name)
-                    return {}
-            else:
-                targets = list(self._configs.keys())
+            """Inner async function — runs ON the MCP event loop, so it awaits
+            connect/close directly. Routing them through ``self._run()`` (which
+            blocks on ``future.result()``) would deadlock the loop thread
+            because the awaited coroutine needs the same loop to progress
+            (#2152)."""
+            if server_name is not None and not targets:
+                log.warning("MCP: cannot restart unknown server '%s'", server_name)
+                return {}
 
             self.tools_ready.clear()
             for name in targets:
@@ -1499,14 +1542,14 @@ class MCPManager:
                 old_conn = self._connections.pop(name, None)
                 if old_conn is not None:
                     try:
-                        self._run(old_conn.close(), timeout=10)
+                        await asyncio.wait_for(old_conn.close(), timeout=10)
                     except Exception as exc:
                         log.warning("MCP: error closing '%s' during restart: %s", name, exc)
 
                 cfg = self._configs[name]
                 new_conn = MCPConnection(cfg)
                 try:
-                    self._run(new_conn.connect(), timeout=cfg.timeout)
+                    await asyncio.wait_for(new_conn.connect(), timeout=cfg.timeout)
                     self._connections[name] = new_conn
                     log.info("MCP: reconnected server '%s' (%d tools)", name, len(new_conn.tools))
                 except Exception as exc:
@@ -1534,11 +1577,11 @@ class MCPManager:
         # Run with overall timeout to prevent hangs
         try:
             future = asyncio.run_coroutine_threadsafe(
-                asyncio.wait_for(_do_restart(), timeout=timeout), self._loop
+                asyncio.wait_for(_do_restart(), timeout=overall_timeout), self._loop
             )
-            return future.result(timeout=timeout + 1.0)  # Slightly more than timeout
+            return future.result(timeout=overall_timeout + 1.0)
         except (TimeoutError, concurrent.futures.TimeoutError):
-            log.error("MCP: restart operation timed out after %.1f seconds", timeout)
+            log.error("MCP: restart operation timed out after %.1f seconds", overall_timeout)
             return {}
 
     def get_langchain_tools(

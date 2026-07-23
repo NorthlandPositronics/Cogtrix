@@ -84,6 +84,11 @@ class GoalStack:
         self._goals: dict[str, Goal] = {}
         # Insertion order for top-level goals only
         self._order: list[str] = []
+        # Re-entrant: mutators hold this while calling save() (which re-acquires),
+        # and add_subgoal() calls push() under it. Guards every read/write of
+        # _goals/_order and the save()/load() body so concurrent goal-tool
+        # mutations and reasoning-prefix reads can't corrupt state (#2158).
+        self._lock = threading.RLock()
 
     # ── Mutations ─────────────────────────────────────────────────────────────
 
@@ -99,79 +104,87 @@ class GoalStack:
             subgoals=[],
             parent_id=parent_id,
         )
-        self._goals[goal_id] = goal
-        if parent_id is None:
-            self._order.append(goal_id)
-        else:
-            parent = self._goals.get(parent_id)
-            if parent is not None:
-                parent.subgoals.append(goal_id)
-        self.save()
+        with self._lock:
+            self._goals[goal_id] = goal
+            if parent_id is None:
+                self._order.append(goal_id)
+            else:
+                parent = self._goals.get(parent_id)
+                if parent is not None:
+                    parent.subgoals.append(goal_id)
+            self.save()
         return goal_id
 
     def complete(self, goal_id: str) -> bool:
         """Mark goal COMPLETED. Returns False if goal_id unknown."""
-        goal = self._goals.get(goal_id)
-        if goal is None:
-            return False
-        goal.status = GoalStatus.COMPLETED
-        goal.completed_at = time.time()
-        self.save()
+        with self._lock:
+            goal = self._goals.get(goal_id)
+            if goal is None:
+                return False
+            goal.status = GoalStatus.COMPLETED
+            goal.completed_at = time.time()
+            self.save()
         return True
 
     def abandon(self, goal_id: str) -> bool:
         """Mark goal ABANDONED. Returns False if goal_id unknown."""
-        goal = self._goals.get(goal_id)
-        if goal is None:
-            return False
-        goal.status = GoalStatus.ABANDONED
-        goal.completed_at = time.time()
-        self.save()
+        with self._lock:
+            goal = self._goals.get(goal_id)
+            if goal is None:
+                return False
+            goal.status = GoalStatus.ABANDONED
+            goal.completed_at = time.time()
+            self.save()
         return True
 
     def add_subgoal(self, parent_id: str, description: str) -> str:
         """Add a child goal under parent_id. Raises KeyError if parent unknown."""
-        if parent_id not in self._goals:
-            raise KeyError(f"Parent goal {parent_id!r} not found")
-        return self.push(description, parent_id=parent_id)
+        with self._lock:
+            if parent_id not in self._goals:
+                raise KeyError(f"Parent goal {parent_id!r} not found")
+            return self.push(description, parent_id=parent_id)
 
     def clear_completed(self) -> int:
         """Remove all COMPLETED and ABANDONED goals; return count removed."""
         terminal = {GoalStatus.COMPLETED, GoalStatus.ABANDONED}
-        to_remove = {gid for gid, g in self._goals.items() if g.status in terminal}
-        if not to_remove:
-            return 0
-        for gid in to_remove:
-            del self._goals[gid]
-        self._order = [gid for gid in self._order if gid not in to_remove]
-        for goal in self._goals.values():
-            goal.subgoals = [s for s in goal.subgoals if s not in to_remove]
-        self.save()
-        return len(to_remove)
+        with self._lock:
+            to_remove = {gid for gid, g in self._goals.items() if g.status in terminal}
+            if not to_remove:
+                return 0
+            for gid in to_remove:
+                del self._goals[gid]
+            self._order = [gid for gid in self._order if gid not in to_remove]
+            for goal in self._goals.values():
+                goal.subgoals = [s for s in goal.subgoals if s not in to_remove]
+            self.save()
+            return len(to_remove)
 
     # ── Queries ───────────────────────────────────────────────────────────────
 
     def get(self, goal_id: str) -> Goal | None:
-        return self._goals.get(goal_id)
+        with self._lock:
+            return self._goals.get(goal_id)
 
     def list_active(self) -> list[Goal]:
         """Return only ACTIVE goals, top-level first then child goals."""
         seen: set[str] = set()
         result: list[Goal] = []
-        # Top-level goals in insertion order
-        for gid in self._order:
-            goal = self._goals.get(gid)
-            if goal and goal.status == GoalStatus.ACTIVE:
-                result.append(goal)
-                seen.add(gid)
-        # Remaining active goals (subgoals not under an active top-level)
-        for goal in self._goals.values():
-            if goal.goal_id not in seen and goal.status == GoalStatus.ACTIVE:
-                result.append(goal)
+        with self._lock:
+            # Top-level goals in insertion order
+            for gid in self._order:
+                goal = self._goals.get(gid)
+                if goal and goal.status == GoalStatus.ACTIVE:
+                    result.append(goal)
+                    seen.add(gid)
+            # Remaining active goals (subgoals not under an active top-level)
+            for goal in self._goals.values():
+                if goal.goal_id not in seen and goal.status == GoalStatus.ACTIVE:
+                    result.append(goal)
         return result
 
     def list_all(self) -> list[Goal]:
-        return list(self._goals.values())
+        with self._lock:
+            return list(self._goals.values())
 
     def to_context_prefix(self) -> str:
         """Return a formatted block for LLM injection; empty string if no active goals.
@@ -183,26 +196,32 @@ class GoalStack:
               [ACTIVE] def67890: Sub-goal description
               [COMPLETED] ghi11111: Another sub-goal
         """
-        active_top = [
-            self._goals[gid]
-            for gid in self._order
-            if gid in self._goals and self._goals[gid].status == GoalStatus.ACTIVE
-        ]
-        if not active_top:
-            return ""
-        lines = ["## Active Goals"]
-        for goal in active_top:
-            lines.append(f"[{goal.status}] {goal.goal_id}: {goal.description}")
-            for sub_id in goal.subgoals:
-                sub = self._goals.get(sub_id)
-                if sub is not None:
-                    lines.append(f"  [{sub.status}] {sub.goal_id}: {sub.description}")
-        return "\n".join(lines)
+        with self._lock:
+            active_top = [
+                self._goals[gid]
+                for gid in self._order
+                if gid in self._goals and self._goals[gid].status == GoalStatus.ACTIVE
+            ]
+            if not active_top:
+                return ""
+            lines = ["## Active Goals"]
+            for goal in active_top:
+                lines.append(f"[{goal.status}] {goal.goal_id}: {goal.description}")
+                for sub_id in goal.subgoals:
+                    sub = self._goals.get(sub_id)
+                    if sub is not None:
+                        lines.append(f"  [{sub.status}] {sub.goal_id}: {sub.description}")
+            return "\n".join(lines)
 
     # ── Persistence ───────────────────────────────────────────────────────────
 
     def save(self) -> None:
-        """Atomically write goal state to {data_dir}/goals/{session_id}.json."""
+        """Atomically write goal state to {data_dir}/goals/{session_id}.json.
+
+        The snapshot-build and the write are held under ``self._lock`` so two
+        concurrent mutations can't race to ``replace()`` (last-writer-wins lost
+        a goal) and a mutation can't change ``_goals`` mid-serialization (#2158).
+        """
         goals_dir = self._data_dir / "goals"
         path = (goals_dir / f"{self._session_id}.json").resolve()
         # Enforce containment — sanitized session_id should never escape data_dir,
@@ -213,24 +232,25 @@ class GoalStack:
             log.error("Goal path %s escaped data_dir — refusing save", path)
             return
         path.parent.mkdir(parents=True, exist_ok=True)
-        payload: dict = {
-            "session_id": self._session_id,
-            "order": self._order,
-            "goals": {
-                gid: {
-                    "goal_id": g.goal_id,
-                    "description": g.description,
-                    "status": str(g.status),
-                    "created_at": g.created_at,
-                    "completed_at": g.completed_at,
-                    "subgoals": g.subgoals,
-                    "parent_id": g.parent_id,
-                }
-                for gid, g in self._goals.items()
-            },
-        }
-        with atomic_write_json(path) as f:
-            json.dump(payload, f)
+        with self._lock:
+            payload: dict = {
+                "session_id": self._session_id,
+                "order": list(self._order),
+                "goals": {
+                    gid: {
+                        "goal_id": g.goal_id,
+                        "description": g.description,
+                        "status": str(g.status),
+                        "created_at": g.created_at,
+                        "completed_at": g.completed_at,
+                        "subgoals": list(g.subgoals),
+                        "parent_id": g.parent_id,
+                    }
+                    for gid, g in self._goals.items()
+                },
+            }
+            with atomic_write_json(path) as f:
+                json.dump(payload, f)
 
     def load(self) -> None:
         """Load goal state from disk; no-op if the file does not exist."""
@@ -245,11 +265,11 @@ class GoalStack:
             return
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
-            self._order = raw.get("order", [])
-            self._goals = {}
+            loaded_order: list[str] = raw.get("order", [])
+            loaded_goals: dict[str, Goal] = {}
             for gid, gdata in raw.get("goals", {}).items():
                 completed_at_raw = gdata.get("completed_at")
-                self._goals[gid] = Goal(
+                loaded_goals[gid] = Goal(
                     goal_id=gdata["goal_id"],
                     description=gdata["description"],
                     status=GoalStatus(gdata["status"]),
@@ -258,6 +278,9 @@ class GoalStack:
                     subgoals=gdata.get("subgoals", []),
                     parent_id=gdata.get("parent_id"),
                 )
+            with self._lock:
+                self._order = loaded_order
+                self._goals = loaded_goals
         except Exception as exc:
             log.warning("Failed to load goals for session %s: %s", self._session_id, exc)
 

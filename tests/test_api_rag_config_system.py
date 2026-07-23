@@ -89,7 +89,7 @@ def _api_client(
         app.state.tool_registry = _make_tool_registry()
         app.state.config = _make_config()
         app.state.session_registry = None
-        app.state.mcp_client = None
+        app.state.mcp_manager = None
         if extra_state:
             for k, v in extra_state.items():
                 setattr(app.state, k, v)

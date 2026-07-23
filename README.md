@@ -28,7 +28,7 @@ ollama pull qwen3:8b            # any GGUF model works
 uv run python cogtrix.py
 ```
 
-That's the whole install. No accounts, no keys, no SaaS. Cogtrix finds Ollama on `localhost:11434` by itself and loads its built-in toolbox — 76 tools, with premium search and messaging activating automatically when you add the relevant keys.
+That's the whole install. No accounts, no keys, no SaaS. Cogtrix finds Ollama on `localhost:11434` by itself and loads its built-in toolbox — 67 tools, with premium search and messaging activating automatically when you add the relevant keys.
 
 Prefer cloud LLMs? `export OPENAI_API_KEY="sk-..." && uv run python cogtrix.py -m gpt-4.1`. Or any of Anthropic, Google, DeepSeek, Groq, Together, vLLM, xAI — anything that speaks the OpenAI API.
 
@@ -74,7 +74,7 @@ Cogtrix spawns three sub-agents in parallel — optionally on three different mo
 |---|---|
 | **Local-first** | Default backend is Ollama. Works offline, no telemetry, no rate limits. |
 | **Multi-provider** | Ollama, OpenAI, Anthropic, Gemini, DeepSeek, plus any OpenAI-compatible endpoint. Switch with `/model`. |
-| **76 built-in tools** | Files, Git, GitHub, shell, Python, HTTP, search (7 providers), text/NLP, math, scheduling, RAG, messaging — full list in [Tools Reference](docs/TOOLS_REFERENCE.md). |
+| **67 built-in tools** | Files, Git, GitHub, shell, Python, HTTP, search (7 providers), text/NLP, math, scheduling, RAG, messaging — full list in [Tools Reference](docs/TOOLS_REFERENCE.md). |
 | **Three memory modes** | `conversation` for chat, `code` for programming (tracks files + errors), `reasoning` for planning (tracks goals + decisions). All modes do hybrid memory — rolling summary plus semantic recall. |
 | **Tool safety** | Sensitive tools (shell, write, patch) ask for confirmation. `-y` to auto-approve in trusted contexts. |
 | **MCP support** | Connect to any Model Context Protocol server — Anthropic's MCP ecosystem works out of the box. |
@@ -295,7 +295,7 @@ Detailed debugging: run with `--debug` (logs every LLM call, tool input/output, 
 | [Configuration](docs/CONFIGURATION.md) | Every option, environment variable, search-provider key |
 | [Providers](docs/PROVIDERS.md) | Step-by-step for Ollama, OpenAI, Anthropic, Google, DeepSeek, xAI, Groq, Together, vLLM |
 | [Memory Modes](docs/MEMORY_MODES.md) | Conversation, code, reasoning + hybrid memory internals |
-| [Tools Reference](docs/TOOLS_REFERENCE.md) | All 76 tools, parameters, examples |
+| [Tools Reference](docs/TOOLS_REFERENCE.md) | All 67 tools, parameters, examples |
 | [WhatsApp Guide](docs/WHATSAPP_GUIDE.md) | Run Cogtrix as a WhatsApp assistant |
 | [Telegram Guide](docs/TELEGRAM_GUIDE.md) | Run Cogtrix as a Telegram bot |
 | [Deep Think](docs/DEEPTHINK.md) | Tree-of-Thought engine internals |

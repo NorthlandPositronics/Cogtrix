@@ -1129,3 +1129,60 @@ class TestDispatchLoopBackoff:
                 except Exception:
                     pass
         assert sched._consecutive_dispatch_errors == 0
+
+
+class TestQuietHoursContactResolution:
+    """#2141 — per-contact quiet hours are keyed by contact NAME, but dispatch
+    only has the chat_id.  The scheduler must reverse-resolve chat_id -> name
+    via the contact_resolver (phonebook) so name-keyed quiet windows actually
+    apply to scheduled sends; previously only the ``_default`` entry worked.
+    """
+
+    def _sched(self, tmp_path: Path, quiet_cfg: dict, resolver: dict | None) -> MessageScheduler:
+        return MessageScheduler(
+            channels={},
+            persist_path=tmp_path / "schedule.json",
+            quiet_hours_cfg=quiet_cfg,
+            contact_resolver=resolver,
+        )
+
+    def test_name_keyed_policy_resolved_via_phonebook(self, tmp_path):
+        """A quiet-hours entry keyed by contact name applies to that contact's
+        chat_id once the phonebook resolver is wired (the regression)."""
+        quiet_cfg = {"Amy": {"quiet_hours": [23, 8], "timezone": "UTC"}}
+        resolver = {"971503308667": "Amy"}  # normalized id -> contact name
+        sched = self._sched(tmp_path, quiet_cfg, resolver)
+
+        policy = sched._get_quiet_policy("whatsapp", "971503308667@c.us")
+        assert isinstance(policy, QuietHoursPolicy)
+        assert (policy.start_hour, policy.end_hour) == (23, 8)
+
+    def test_without_resolver_name_keyed_policy_does_not_match_chat_id(self, tmp_path):
+        """Documents the bug: with no resolver, a name-keyed entry can't be
+        matched from a chat_id, and (absent _default) no policy applies."""
+        quiet_cfg = {"Amy": {"quiet_hours": [23, 8], "timezone": "UTC"}}
+        sched = self._sched(tmp_path, quiet_cfg, resolver=None)
+
+        assert sched._get_quiet_policy("whatsapp", "971503308667@c.us") is None
+
+    def test_default_still_applies_when_no_contact_match(self, tmp_path):
+        """An unknown chat_id falls back to the _default policy."""
+        quiet_cfg = {
+            "Amy": {"quiet_hours": [23, 8], "timezone": "UTC"},
+            "_default": {"quiet_hours": [0, 6], "timezone": "UTC"},
+        }
+        resolver = {"971503308667": "Amy"}
+        sched = self._sched(tmp_path, quiet_cfg, resolver)
+
+        policy = sched._get_quiet_policy("telegram", "99999")
+        assert isinstance(policy, QuietHoursPolicy)
+        assert (policy.start_hour, policy.end_hour) == (0, 6)
+
+    def test_legacy_chat_id_keyed_entry_still_honored(self, tmp_path):
+        """Back-compat: a config still keyed directly by chat_id resolves."""
+        quiet_cfg = {"55555": {"quiet_hours": [1, 5], "timezone": "UTC"}}
+        sched = self._sched(tmp_path, quiet_cfg, resolver={})
+
+        policy = sched._get_quiet_policy("telegram", "55555")
+        assert isinstance(policy, QuietHoursPolicy)
+        assert (policy.start_hour, policy.end_hour) == (1, 5)

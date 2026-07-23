@@ -16,12 +16,17 @@
 >
 > Any in-flight feature branch will need to be rebased onto (or cherry-picked into) the new orphan root before it can be merged.
 
-## [0.4.0](https://github.com/NorthlandPositronics/Cogtrix/compare/v0.3.0...v0.4.0) (2026-06-19)
+## [0.4.1](https://github.com/NorthlandPositronics/Cogtrix/compare/v0.4.0...v0.4.1) (2026-06-21)
 
+### Bug Fixes
+
+- v0.4.1 release ([#2179](https://github.com/NorthlandPositronics/Cogtrix/issues/2179)) ([f29c4be](https://github.com/NorthlandPositronics/Cogtrix/commit/f29c4bed11804af47dcff609908427e83266ca42))
+
+## [0.4.0](https://github.com/NorthlandPositronics/Cogtrix/compare/v0.3.0...v0.4.0) (2026-06-19)
 
 ### Features
 
-* v0.4.0 release ([#2109](https://github.com/NorthlandPositronics/Cogtrix/issues/2109)) ([f5e758a](https://github.com/NorthlandPositronics/Cogtrix/commit/f5e758ab8865687067f6e595eb6d7ff36ba1b6d5))
+- v0.4.0 release ([#2109](https://github.com/NorthlandPositronics/Cogtrix/issues/2109)) ([f5e758a](https://github.com/NorthlandPositronics/Cogtrix/commit/f5e758ab8865687067f6e595eb6d7ff36ba1b6d5))
 
 ## [0.3.0](https://github.com/NorthlandPositronics/Cogtrix/compare/v0.2.13...v0.3.0) (2026-06-06)
 

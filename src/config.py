@@ -43,6 +43,13 @@ YAML example::
         provider: openai
         model: gpt-4.1
         temperature: 0.2
+        # Optional sampling passthrough forwarded to the chat model (#2122);
+        # use it to tune out model repetition loops on OpenAI-compatible
+        # endpoints (LiteLLM/vLLM/qwen3, etc.):
+        model_kwargs:
+          frequency_penalty: 0.3
+          top_p: 0.9
+          extra_body: { repetition_penalty: 1.1 }
       embed-local:
         provider: ollama
         model: nomic-embed-text
@@ -176,6 +183,14 @@ class ModelConfig:
     temperature: float | None = None  # None → DEFAULT_TEMPERATURE (0.5)
     max_tokens: int | None = None  # Max output tokens per LLM call
     timeout: int = 180  # LLM request timeout in seconds (per call, not total)
+    #: Extra keyword arguments forwarded verbatim to the underlying chat-model
+    #: constructor (e.g. ``frequency_penalty``, ``presence_penalty``, ``top_p``,
+    #: or ``extra_body={"repetition_penalty": 1.1}`` for OpenAI-compatible
+    #: endpoints).  Lets operators tune anti-repetition sampling per model from
+    #: ``cogtrix.yaml`` (#2122).  Reserved keys already set explicitly elsewhere
+    #: (model, temperature, max_tokens, api_key, base_url, streaming, …) are
+    #: dropped to avoid duplicate-keyword errors.
+    model_kwargs: dict[str, Any] = field(default_factory=dict)
 
     DEFAULT_TEMPERATURE: float = 0.5
     DEFAULT_CONTEXT_WINDOW: int = 32_768
@@ -194,6 +209,10 @@ class ModelConfig:
             raise ConfigError(f"max_tokens must be >= 1, got {self.max_tokens}")
         if self.timeout < 10:
             raise ConfigError(f"timeout must be >= 10, got {self.timeout}")
+        if not isinstance(self.model_kwargs, dict):
+            raise ConfigError(
+                f"model_kwargs must be a mapping, got {type(self.model_kwargs).__name__}"
+            )
 
 
 @dataclass
@@ -1972,6 +1991,14 @@ def _parse_models_section(config: Config, models_data: dict[str, Any]) -> None:
             raw_temperature = model_data.get("temperature")
             raw_max_tokens = model_data.get("max_tokens")
             raw_timeout = model_data.get("timeout")
+            raw_model_kwargs = model_data.get("model_kwargs")
+            if raw_model_kwargs is not None and not isinstance(raw_model_kwargs, dict):
+                _log.warning(
+                    "models.%s.model_kwargs must be a mapping, ignoring (got %s)",
+                    name,
+                    type(raw_model_kwargs).__name__,
+                )
+                raw_model_kwargs = None
             try:
                 config.models[name] = ModelConfig(
                     provider=provider,
@@ -1996,6 +2023,7 @@ def _parse_models_section(config: Config, models_data: dict[str, Any]) -> None:
                         if raw_timeout is not None
                         else 180
                     ),
+                    model_kwargs=dict(raw_model_kwargs) if raw_model_kwargs else {},
                 )
             except (ConfigError, ValueError, TypeError) as exc:
                 _log.warning("Invalid model config '%s': %s", name, exc)

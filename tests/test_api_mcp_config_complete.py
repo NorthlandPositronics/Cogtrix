@@ -147,7 +147,7 @@ class TestMCPListServers:
     def test_no_mcp_client_returns_empty(self, client, tokens, app_engine):
         app, _ = app_engine
         app.state.config = _make_mock_config()
-        app.state.mcp_client = None
+        app.state.mcp_manager = None
         r = client.get("/api/v1/mcp/servers", headers=_ah(tokens))
         assert r.status_code == 200
         assert r.json()["data"] == []
@@ -165,7 +165,7 @@ class TestMCPListServers:
         app.state.config = cfg
         mcp = MagicMock()
         mcp.get_server_info.return_value = []
-        app.state.mcp_client = mcp
+        app.state.mcp_manager = mcp
 
         r = client.get("/api/v1/mcp/servers", headers=_ah(tokens))
         assert r.status_code == 200
@@ -183,23 +183,52 @@ class TestMCPListServers:
         app.state.config = cfg
         mcp = MagicMock()
         mcp.get_server_info.return_value = []
-        app.state.mcp_client = mcp
+        app.state.mcp_manager = mcp
 
         r = client.get("/api/v1/mcp/servers", headers=_ah(tokens))
         items = r.json()["data"]
         assert any(s["transport"] == "sse" for s in items)
 
+    def test_connected_server_status_via_mcp_manager(self, client, tokens, app_engine):
+        """#2151 — the routes must read app.state.mcp_manager (what the lifespan
+        actually sets), so a connected server's runtime status/tools surface."""
+        app, _ = app_engine
+        cfg = _make_mock_config()
+        cfg.mcp_servers = {
+            "live": {"command": "python", "args": ["-m", "srv"], "requires_confirmation": True}
+        }
+        app.state.config = cfg
+        mcp = MagicMock()
+        mcp.get_server_info.return_value = [
+            {
+                "name": "live",
+                "connected": True,
+                "tool_count": 1,
+                "tools": ["do_thing"],
+                "transport": "stdio",
+                "endpoint": "python",
+            }
+        ]
+        app.state.mcp_manager = mcp
+
+        r = client.get("/api/v1/mcp/servers", headers=_ah(tokens))
+        assert r.status_code == 200
+        item = r.json()["data"][0]
+        assert item["name"] == "live"
+        assert item["status"] == "connected"
+        assert [t["name"] for t in item["tools"]] == ["do_thing"]
+
     def test_requires_auth(self, client, app_engine):
         app, _ = app_engine
         app.state.config = _make_mock_config()
-        app.state.mcp_client = None
+        app.state.mcp_manager = None
         r = client.get("/api/v1/mcp/servers")
         assert r.status_code == 401
 
     def test_non_admin_can_list(self, client, tokens, app_engine):
         app, _ = app_engine
         app.state.config = _make_mock_config()
-        app.state.mcp_client = None
+        app.state.mcp_manager = None
         r = client.get("/api/v1/mcp/servers", headers=_uh(tokens))
         assert r.status_code == 200
 
@@ -210,7 +239,7 @@ class TestMCPAddServer:
         cfg = _make_mock_config()
         cfg.mcp_servers = {}
         app.state.config = cfg
-        app.state.mcp_client = None
+        app.state.mcp_manager = None
 
         with patch("src.api.routes.mcp._persist_mcp_servers"):
             r = client.post(
@@ -247,7 +276,7 @@ class TestMCPAddServer:
         cfg = _make_mock_config()
         cfg.mcp_servers = {}
         app.state.config = cfg
-        app.state.mcp_client = None
+        app.state.mcp_manager = None
 
         with patch(
             "src.api.routes.mcp._persist_mcp_servers",
@@ -288,7 +317,7 @@ class TestMCPGetServer:
         app.state.config = cfg
         mcp = MagicMock()
         mcp.get_server_info.return_value = []
-        app.state.mcp_client = mcp
+        app.state.mcp_manager = mcp
 
     def test_get_existing_server(self, client, tokens):
         r = client.get("/api/v1/mcp/servers/node_server", headers=_ah(tokens))
@@ -305,7 +334,7 @@ class TestMCPGetServer:
     def test_no_mcp_client_404(self, client, tokens, app_engine):
         app, _ = app_engine
         # "any_server" is not in the config (only "node_server" from autouse fixture)
-        app.state.mcp_client = None
+        app.state.mcp_manager = None
         r = client.get("/api/v1/mcp/servers/any_server", headers=_ah(tokens))
         assert r.status_code == 404
 
@@ -326,7 +355,7 @@ class TestMCPRemoveServer:
         app.state.config = cfg
         mcp = MagicMock()
         mcp.get_server_info.return_value = []
-        app.state.mcp_client = mcp
+        app.state.mcp_manager = mcp
 
     def test_remove_existing_returns_204(self, client, tokens):
         with patch("src.api.routes.mcp._persist_mcp_servers"):
@@ -354,7 +383,7 @@ class TestMCPRemoveServer:
             "py_server": {"command": "py", "args": [], "requires_confirmation": True}
         }
         app.state.config = cfg
-        app.state.mcp_client = None
+        app.state.mcp_manager = None
 
         with patch(
             "src.api.routes.mcp._persist_mcp_servers",
@@ -381,7 +410,7 @@ class TestMCPRestartServer:
             mcp.restart_server = MagicMock(return_value=None)
         else:
             mcp.restart_server = MagicMock(side_effect=RuntimeError("fail"))
-        app.state.mcp_client = mcp
+        app.state.mcp_manager = mcp
 
     def test_restart_success(self, client, tokens, app_engine):
         self._setup_mcp_with_restart(app_engine, succeed=True)
@@ -402,7 +431,7 @@ class TestMCPRestartServer:
         app.state.config = cfg
         mcp = MagicMock()
         mcp.get_server_info.return_value = []
-        app.state.mcp_client = mcp
+        app.state.mcp_manager = mcp
         r = client.post("/api/v1/mcp/servers/nope/restart", headers=_ah(tokens))
         assert r.status_code == 404
 
@@ -428,7 +457,7 @@ class TestMCPRestartServer:
         mcp.get_server_info.return_value = []
         restart_mock = MagicMock(return_value=None)
         mcp.restart_server = restart_mock
-        app.state.mcp_client = mcp
+        app.state.mcp_manager = mcp
 
         with patch(
             "src.api.routes.mcp.asyncio.to_thread", new_callable=AsyncMock

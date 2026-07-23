@@ -115,6 +115,22 @@ class UserCancelledRun(Exception):
     """Raised when the user cancels the agent workflow from a tool prompt."""
 
 
+class AgentExecutionError(Exception):
+    """Raised by ``run_agent`` when an agent turn fails irrecoverably.
+
+    Carries a display-ready, already-formatted message (from
+    ``format_agent_error``) so callers can surface it directly without
+    re-deriving one. The original cause is chained via ``__cause__`` (``raise
+    ... from e``). Callers should catch this to distinguish a genuine failure
+    from a normal agent response — e.g. the CLI renders an error panel, the API
+    emits a WS ``error`` frame instead of a 200 with the error as the reply.
+    """
+
+    def __init__(self, user_message: str):
+        super().__init__(user_message)
+        self.user_message = user_message
+
+
 LAST_KEYS: frozenset[str] = frozenset({"content", "body", "text", "code", "data"})
 
 _confirmation_lock = threading.Lock()

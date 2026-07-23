@@ -2489,11 +2489,18 @@ class TestRecoveryCascadeBudget:
         assert state.recovery_firings_this_turn == [0]
         assert state.recovery_firings_turn_marker == [-1]
 
-    def test_max_recovery_firings_constant_is_three(self) -> None:
-        """If the cap is loosened past 3, the #1960 cascade scenario
-        (4 detectors firing on a single refusal) would still hit the
-        runaway path.  Pin the value here so a future tune of the
-        constant is a deliberate change with a test update."""
+    def test_max_recovery_firings_constant_is_four(self) -> None:
+        """The cross-detector cascade backstop is pinned at 4: strictly
+        ABOVE the largest single-detector retry budget (phantom /
+        fabrication / action-intent each cap at 3).  A lone misfiring
+        detector self-terminates with a coherent give-up on its 4th
+        firing; if this cap equalled 3 the backstop would short-circuit
+        to END one firing too early and eat that give-up (the
+        test_phantom_exhaustion regression that surfaced once #2055
+        stopped recovery nudges from resetting the budget).  At 4 the
+        #1960 multi-detector cascade is still bounded.  Pin the value so
+        any future tune is a deliberate change with a test update — do
+        not just bump the literal."""
         import inspect
 
         from cogtrix import _build_agent_graph
@@ -2501,9 +2508,10 @@ class TestRecoveryCascadeBudget:
         # The constant lives inside build_agent_graph's closure scope.
         # Read it out of the source to assert on the literal value.
         src = inspect.getsource(_build_agent_graph)
-        assert "_MAX_RECOVERY_FIRINGS_PER_TURN = 3" in src, (
+        assert "_MAX_RECOVERY_FIRINGS_PER_TURN = 4" in src, (
             "The cascade-budget cap was changed.  Update this test if "
-            "the new value still defends against the #1960 cascade; "
+            "the new value still defends against the #1960 cascade and "
+            "still sits above the largest per-detector retry budget; "
             "do not just bump the literal."
         )
 

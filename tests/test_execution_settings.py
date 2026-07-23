@@ -120,3 +120,39 @@ def test_from_app_config_uses_projected_execution_settings() -> None:
     assert run_cfg.execution_settings.tool_context_limit_pct == 0.55
     assert run_cfg.execution_settings.parallel_tool_execution is False
     assert run_cfg.execution_settings.git_native is True
+
+
+def test_from_app_config_wires_model_timeout() -> None:
+    """#2146 — from_app_config forwards the active model's timeout to
+    AgentRunConfig.llm_timeout (previously the field was dead)."""
+
+    class _FakeModel:
+        timeout = 600
+
+    class _FakeConfig:
+        def resolve_llm_config(self):
+            return (object(), _FakeModel())
+
+    run_cfg = AgentRunConfig.from_app_config(_FakeConfig())
+    assert run_cfg.llm_timeout == 600
+
+
+def test_from_app_config_defaults_timeout_without_resolver() -> None:
+    """A config lacking resolve_llm_config keeps the AgentRunConfig default."""
+
+    class _BareConfig:
+        pass
+
+    run_cfg = AgentRunConfig.from_app_config(_BareConfig())
+    assert run_cfg.llm_timeout == 180
+
+
+def test_from_app_config_timeout_resolution_failure_falls_back() -> None:
+    """If resolve_llm_config raises, llm_timeout falls back to the default."""
+
+    class _BoomConfig:
+        def resolve_llm_config(self):
+            raise RuntimeError("no active model")
+
+    run_cfg = AgentRunConfig.from_app_config(_BoomConfig())
+    assert run_cfg.llm_timeout == 180

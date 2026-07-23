@@ -308,8 +308,12 @@ class RetryableChatModel:
             return True
         if "unauthorized" in error_str:
             return True
-        if "auth" in error_str:
-            return True
+        # NB: deliberately no bare ``"auth" in error_str`` fallback (#2147).
+        # The specific strings above plus the 401/403 status check below cover
+        # genuine auth failures; a bare "auth" substring also matched unrelated
+        # transient errors ("oauth", "author", "authoritative", or a 5xx body
+        # echoing such text), short-circuiting the retry path and surfacing a
+        # retryable failure as a permanent ProviderAuthError.
 
         # Type-checking safe status code check
         status_code = getattr(error, "status_code", None)
@@ -587,6 +591,32 @@ def create_chat_model_from_configs(
     Returns:
         A LangChain chat-model instance wrapped with retry logic.
     """
+    # Per-model sampling passthrough (#2122): forward operator-supplied kwargs
+    # (e.g. frequency_penalty, presence_penalty, top_p, extra_body) to the
+    # underlying chat model.  Strip keys we already pass explicitly so a stray
+    # entry can't raise a duplicate-keyword TypeError; the dedicated config
+    # fields win.
+    _RESERVED = {
+        "model",
+        "api_key",
+        "base_url",
+        "temperature",
+        "num_ctx",
+        "max_tokens",
+        "streaming",
+        "max_retries",
+    }
+    extra_kwargs = {
+        k: v for k, v in (model_config.model_kwargs or {}).items() if k not in _RESERVED
+    }
+    if extra_kwargs.keys() != (model_config.model_kwargs or {}).keys():
+        dropped = sorted(set((model_config.model_kwargs or {}).keys()) - extra_kwargs.keys())
+        _log.warning(
+            "Ignoring reserved key(s) in model_kwargs for model %r: %s "
+            "(set these via the dedicated config fields instead)",
+            model_config.model,
+            ", ".join(dropped),
+        )
     return create_chat_model(
         provider_config.type,
         model=model_config.model,
@@ -605,6 +635,7 @@ def create_chat_model_from_configs(
         max_tokens=model_config.max_tokens,
         streaming=streaming,
         max_retries=max_retries,
+        **extra_kwargs,
     )
 
 

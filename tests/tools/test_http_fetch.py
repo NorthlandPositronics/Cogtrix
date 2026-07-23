@@ -673,3 +673,34 @@ class TestLocksSurviveLoopRecreation:
 
         assert lock_a1 is lock_a2
         assert lock_a1 is not lock_b
+
+
+class TestRegisteredDomainSameOrigin2136F6:
+    """#2136 F6 — the same-domain redirect key must not collapse suffix-less /
+    IP-literal hosts to the bare host. A port change on an IP/bare host is a
+    cross-origin redirect (fail closed); registered-domain hosts are unaffected.
+    """
+
+    def test_ip_host_same_ip_and_port_is_same_origin(self) -> None:
+        rd = _http_fetch._registered_domain
+        assert rd("http://1.2.3.4/a") == rd("http://1.2.3.4/b/c")
+
+    def test_ip_host_port_change_is_cross_origin(self) -> None:
+        """The regression: 1.2.3.4 and 1.2.3.4:8080 must NOT be same-origin."""
+        rd = _http_fetch._registered_domain
+        assert rd("http://1.2.3.4/") != rd("http://1.2.3.4:8080/")
+
+    def test_different_ip_is_cross_origin(self) -> None:
+        rd = _http_fetch._registered_domain
+        assert rd("http://1.2.3.4/") != rd("http://5.6.7.8/")
+
+    def test_suffixless_host_port_change_is_cross_origin(self) -> None:
+        rd = _http_fetch._registered_domain
+        assert rd("http://internalhost/") != rd("http://internalhost:9000/")
+
+    def test_registered_domain_hosts_unaffected(self) -> None:
+        """Normal hosts still compare by registered domain (port-agnostic)."""
+        rd = _http_fetch._registered_domain
+        assert rd("http://example.com/") == rd("http://www.example.com/x")
+        assert rd("https://example.com/") == rd("https://example.com:8443/y")
+        assert rd("http://example.com/") != rd("http://example.org/")

@@ -349,8 +349,23 @@ class AgentRunConfig:
                 ),
             )
 
+        # Per-call LLM timeout comes from the active model's ModelConfig.timeout
+        # (#2146). Without this the field was parsed/validated but never reached
+        # the run, so every call used the hardcoded 180s default regardless of
+        # the operator's config.
+        llm_timeout = cls.__dataclass_fields__["llm_timeout"].default
+        if hasattr(config, "resolve_llm_config"):
+            try:
+                _, _model_cfg = config.resolve_llm_config()
+                _t = getattr(_model_cfg, "timeout", None)
+                if _t:
+                    llm_timeout = int(_t)
+            except Exception:
+                pass
+
         return cls(
             execution_settings=settings,
+            llm_timeout=llm_timeout,
             context_max_tokens=getattr(config, "context_max_tokens", 40_000),
             tool_health_check_interval=getattr(config, "tool_health_check_interval", 20),
             tool_quality_gate_enabled=getattr(config, "tool_quality_gate_enabled", True),

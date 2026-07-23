@@ -220,6 +220,8 @@ def configure_delegate_tool(
 def configure_delegate_tools(
     tools: list,
     available_tools: dict[str, Any] | None = None,
+    denials: frozenset[str] | None = None,
+    deny_all: bool = False,
 ) -> None:
     """Pass all tools (active + on-demand) to the delegate module.
 
@@ -227,12 +229,16 @@ def configure_delegate_tools(
     execute shell commands, read files, etc. without needing to
     request tools dynamically.  Delegation tools and ``deep_think``
     are automatically excluded to prevent recursion.
+
+    #2113: ``denials``/``deny_all`` (from ``SessionState``) are forwarded so the
+    delegate sub-agent also honours the session's runtime denials, not just the
+    static delegate exclusion list.
     """
     log = get_logger()
     try:
         from src.tools.delegate import set_delegate_tools
 
-        set_delegate_tools(tools, available_tools)
+        set_delegate_tools(tools, available_tools, denials=denials, deny_all=deny_all)
     except ModuleNotFoundError:
         pass  # tool module not installed — skip silently
     except ImportError as exc:

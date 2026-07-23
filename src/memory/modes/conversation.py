@@ -174,8 +174,13 @@ class ConversationMemoryManager(BaseMemoryManager):
         if hybrid:
             prefix_parts.append(hybrid)
 
-        # Acquire mode lock for safe reads of mode-specific state
+        # Acquire mode lock for safe reads of mode-specific state. Snapshot the
+        # message list here too (#2131 C3): update() appends to self._messages
+        # under _mode_lock, so reading it unlocked below would race a concurrent
+        # turn and could hand assemble_from_tiers / the cold path a half-mutated
+        # list. Use the snapshot for every read in this method.
         with self._mode_lock:
+            messages_snapshot = list(self._messages)
             if self._entities:
                 entity_str = ", ".join(f"{k}: {v}" for k, v in self._entities.items())
                 prefix_parts.append(f"Known facts: {entity_str}")
@@ -194,7 +199,7 @@ class ConversationMemoryManager(BaseMemoryManager):
 
             assembled, tier_counts = assemble_from_tiers(
                 snapshot=tier_cache,
-                messages=self._messages,
+                messages=messages_snapshot,
                 summary=summary,
                 summary_msg_idx=summary_msg_idx,
             )
@@ -212,7 +217,7 @@ class ConversationMemoryManager(BaseMemoryManager):
                 system_additions=self.get_system_prompt_additions(),
                 context_prefix=context_prefix,
                 mode=self.mode_name,
-                total_messages_stored=len(self._messages),
+                total_messages_stored=len(messages_snapshot),
                 context_messages_count=len(assembled),
                 token_estimate=total_tokens,
                 tier_token_counts=tier_counts,
@@ -230,7 +235,7 @@ class ConversationMemoryManager(BaseMemoryManager):
         # compressed into the summary. Now we let the LLM see all messages;
         # background summarization will compress older messages into the tier
         # cache, and subsequent turns will use the compressed tiers instead.
-        context_messages = list(self._messages) if self._messages else []
+        context_messages = list(messages_snapshot)
 
         # Inject timestamps so the LLM has temporal awareness
         context_messages = self._inject_timestamps(context_messages)
@@ -359,6 +364,9 @@ class ConversationMemoryManager(BaseMemoryManager):
             self._messages = []
             self._entities = {}
             self._topics = []
+        # Remove the pending pre-record file so a cleared session doesn't leak
+        # {id}_pending.json (#2131 C5). discard_prerecord is best-effort.
+        self.discard_prerecord()
 
     def get_message_count(self) -> int:
         """Return total number of messages stored."""

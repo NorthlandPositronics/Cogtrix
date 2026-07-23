@@ -42,6 +42,24 @@ _BLOCKED_HEADERS: frozenset[str] = frozenset(
 )
 
 
+def _numeric_ipv4_to_dotted(host: str) -> str | None:
+    """Return the canonical dotted-quad for an obfuscated numeric IPv4 host.
+
+    ``ipaddress.ip_address`` rejects (raises ``ValueError`` for) the decimal-int,
+    hex, octal, and short numeric IPv4 forms — ``2130706433``, ``0x7f000001``,
+    ``0177.0.0.1``, ``127.1`` — but ``socket.inet_aton`` accepts and normalizes
+    them. Without this, ``_is_blocked_ip`` returned ``False`` for such hosts and
+    the IP-literal SSRF check was skipped, leaving only the platform resolver to
+    catch them (which musl/Alpine and some resolvers do not normalize the same
+    way) — a real bypass (#2136 F3). Returns ``None`` for anything ``inet_aton``
+    does not accept (ordinary hostnames raise ``OSError``).
+    """
+    try:
+        return socket.inet_ntoa(socket.inet_aton(host))
+    except (OSError, UnicodeError):
+        return None
+
+
 def _is_blocked_ip(ip_str: str) -> bool:
     """Return True if *ip_str* represents a non-public IP address.
 
@@ -52,11 +70,18 @@ def _is_blocked_ip(ip_str: str) -> bool:
       - CGNAT (100.64/10)
       - Reserved / unspecified / multicast
       - IPv6-mapped IPv4 addresses (e.g. ::ffff:127.0.0.1)
+      - Obfuscated numeric IPv4 forms (decimal/hex/octal/short) — #2136 F3
     """
     try:
         ip = ipaddress.ip_address(ip_str)
     except ValueError:
-        return False
+        # #2136 F3: ipaddress does NOT accept obfuscated numeric IPv4 forms;
+        # recover the dotted-quad via inet_aton so the checks below still apply.
+        # inet_ntoa always yields a valid dotted-quad, so ip_address won't raise.
+        dotted = _numeric_ipv4_to_dotted(ip_str)
+        if dotted is None:
+            return False
+        ip = ipaddress.ip_address(dotted)
     # Unwrap IPv6-mapped IPv4 addresses so IPv4-space checks apply.
     if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
         ip = ip.ipv4_mapped
@@ -97,6 +122,13 @@ def _validate_url(url: str) -> tuple[bool, str, str | None]:
         if not hostname:
             return False, "Invalid URL format", None
 
+        # #2136 F4: normalize a trailing dot (the FQDN root label) for the
+        # name-blocklist and IP-literal checks so "localhost." /
+        # "169.254.169.254." cannot slip the pre-resolution defence-in-depth
+        # layer. Keep the original `hostname` for DNS resolution / pinning so
+        # the pin key still matches what the HTTP client connects with.
+        check_host = hostname.rstrip(".")
+
         # Defence-in-depth: name-based block list. The IP-level checks
         # below would catch the same hosts via DNS resolution, but a
         # name-based block prevents an attacker from injecting a host
@@ -107,14 +139,16 @@ def _validate_url(url: str) -> tuple[bool, str, str | None]:
             "instance-data",
             "169.254.169.254",
         }  # nosec B104
-        if hostname.lower() in blocked_hosts:
+        if check_host.lower() in blocked_hosts:
             return False, "Requests to localhost or internal hosts are not allowed", None
 
-        # If the hostname is itself an IP literal (including decimal /
-        # hex / octal forms that ipaddress accepts: 2130706433, 0x7f000001,
-        # 0177.0.0.1, ::1, etc.) we don't need a DNS round-trip.
+        # If the hostname is itself an IP literal we don't need a DNS round-trip.
+        # _is_blocked_ip handles canonical IPv4/IPv6 literals AND obfuscated
+        # numeric IPv4 forms (2130706433, 0x7f000001, 0177.0.0.1, 127.1) via
+        # inet_aton — ipaddress alone rejects those, so they used to slip the
+        # literal check and fall through to the resolver (#2136 F3).
         try:
-            if _is_blocked_ip(hostname):
+            if _is_blocked_ip(check_host):
                 return (
                     False,
                     "Requests to localhost or private/reserved IP ranges are not allowed",

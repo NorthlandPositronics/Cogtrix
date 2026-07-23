@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import subprocess
 
-__version__ = "0.4.0"  # x-release-please-version
+__version__ = "0.4.1"  # x-release-please-version
 __copyright__ = "© 2025–2026 Northland Positronics (FZE)"
 
 
