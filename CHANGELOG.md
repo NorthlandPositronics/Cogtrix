@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.1.25](https://github.com/NorthlandPositronics/Cogtrix/compare/v0.1.24...v0.1.25) (2026-03-22)
+
+
+### Bug Fixes
+
+* **docker:** add socket timeout and explicit status check to healthcheck ([#17](https://github.com/NorthlandPositronics/Cogtrix/issues/17)) ([2baea70](https://github.com/NorthlandPositronics/Cogtrix/commit/2baea7075d019f171a0aaa50f2d0d082f28b4e7e))
+* **docker:** healthcheck with 4s socket timeout and explicit status check ([5204cab](https://github.com/NorthlandPositronics/Cogtrix/commit/5204cab6bb5181a786dc9bb230e011d736b213eb))
+* **wizard:** correctly drain escape sequences and read multi-byte UTF-8 in masked input ([4393c54](https://github.com/NorthlandPositronics/Cogtrix/commit/4393c54795538ac03421db8be221bb9ee192f167))
+* **wizard:** correctly drain escape sequences and read multi-byte UTF-8 in masked input ([e104117](https://github.com/NorthlandPositronics/Cogtrix/commit/e1041171d5781751cd08552b1ded887027ee5adb))
+
 ## [0.1.24](https://github.com/NorthlandPositronics/Cogtrix/compare/v0.1.23...v0.1.24) (2026-03-22)
 
 

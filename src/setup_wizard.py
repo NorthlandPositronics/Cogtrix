@@ -1012,10 +1012,14 @@ def _read_masked_input(prompt: str) -> str:
     feedback without the actual characters being echoed.  Falls back to
     ``getpass`` when stdin is not a TTY or ``termios`` is unavailable
     (e.g. Windows or piped input).
+
+    Correctly handles multi-byte UTF-8 characters and ANSI escape sequences
+    of arbitrary length (BUG-228, BUG-235).
     """
     if not sys.stdin.isatty():
         return getpass.getpass(prompt)
     try:
+        import select
         import termios
         import tty
     except ImportError:
@@ -1026,10 +1030,46 @@ def _read_masked_input(prompt: str) -> str:
     chars: list[str] = []
     fd = sys.stdin.fileno()
     old = termios.tcgetattr(fd)
+
+    def _read_byte() -> bytes:
+        return os.read(fd, 1)
+
+    def _read_char() -> str:
+        """Read one complete UTF-8 character from fd."""
+        b0 = _read_byte()
+        if not b0:
+            return ""
+        v = b0[0]
+        if v < 0x80:
+            return b0.decode("utf-8", errors="replace")
+        extra = 1 if v < 0xE0 else (2 if v < 0xF0 else 3)
+        data = b0 + b"".join(_read_byte() for _ in range(extra))
+        return data.decode("utf-8", errors="replace")
+
+    def _drain_escape() -> None:
+        """Consume the remainder of an ANSI/VT escape sequence.
+
+        Uses select with a short timeout so a lone ESC keypress doesn't block.
+        CSI sequences (ESC [) end at the first byte in 0x40–0x7E.
+        SS3 sequences (ESC O, used by F1–F4) have a single final byte.
+        """
+        ready, _, _ = select.select([fd], [], [], 0.05)
+        if not ready:
+            return  # standalone ESC key — nothing more to read
+        nxt = _read_byte()
+        if nxt == b"[":  # CSI — read until final byte (0x40–0x7E)
+            while True:
+                b = _read_byte()
+                if 0x40 <= b[0] <= 0x7E:
+                    break
+        elif nxt == b"O":  # SS3 — one final byte
+            _read_byte()
+        # other two-byte sequences: nxt already consumed
+
     try:
         tty.setcbreak(fd)
         while True:
-            ch = os.read(fd, 1).decode("utf-8", errors="replace")
+            ch = _read_char()
             if ch in ("\r", "\n"):
                 sys.stdout.write("\n")
                 sys.stdout.flush()
@@ -1040,9 +1080,7 @@ def _read_masked_input(prompt: str) -> str:
                     sys.stdout.write("\b \b")
                     sys.stdout.flush()
             elif ch == "\x1b":  # escape sequence (arrow keys etc.) — consume and ignore
-                nxt = os.read(fd, 1)
-                if nxt == b"[":
-                    os.read(fd, 1)
+                _drain_escape()
             elif ch.isprintable():
                 chars.append(ch)
                 sys.stdout.write("*")

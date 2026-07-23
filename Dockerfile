@@ -65,10 +65,11 @@ EXPOSE 8000
 STOPSIGNAL SIGTERM
 
 # Health check for container orchestrators (API mode only).
-# Uses the lightweight /health endpoint; runs as a no-import one-liner
-# to avoid loading the full application on each probe.
+# Uses Python's built-in urllib — no curl/wget required in the slim image.
+# A 4-second socket timeout keeps the probe within Docker's 5-second deadline.
+# Exits 0 on HTTP 200, 1 on any error (connection refused, timeout, non-200).
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-    CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/health')"]
+    CMD ["python", "-c", "import urllib.request, sys; r = urllib.request.urlopen('http://localhost:8000/api/v1/health', timeout=4); sys.exit(0 if r.status == 200 else 1)"]
 
 USER cogtrix
 
