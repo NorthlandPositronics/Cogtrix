@@ -10,6 +10,7 @@ Step-by-step guides for configuring LLM providers. If you're new to Cogtrix, sta
 - [Ollama](#ollama)
 - [Groq](#groq)
 - [Together AI](#together-ai)
+- [xAI (Grok)](#xai-grok)
 - [Local vLLM](#local-vllm)
 - [Anthropic Claude](#anthropic-claude)
 - [Google Gemini](#google-gemini)
@@ -32,7 +33,7 @@ Not sure where to start? Use this table:
 | **Claude models (reasoning, long context)** | **Anthropic** | 2 minutes (need API key) |
 | **Gemini models (multimodal, fast)** | **Google** | 2 minutes (need API key) |
 
-Cogtrix defaults to Ollama on `localhost:11434`. If you already have Ollama running, you don't need to configure anything — just run `python cogtrix.py`.
+Cogtrix defaults to Ollama on `localhost:11434`. If you already have Ollama running, you don't need to configure anything — just run `uv run python cogtrix.py`.
 
 You can configure multiple providers and switch between them at runtime with `/provider <name>`.
 
@@ -66,7 +67,7 @@ Provider type values are case-insensitive (`"OpenAI"`, `"OLLAMA"`, etc. all work
 
 3. Run:
    ```bash
-   python cogtrix.py -p openai
+   uv run python cogtrix.py -p openai
    ```
 
 ### Configuration
@@ -74,7 +75,7 @@ Provider type values are case-insensitive (`"OpenAI"`, `"OLLAMA"`, etc. all work
 **Environment variable only:**
 ```bash
 export OPENAI_API_KEY="sk-..."
-python cogtrix.py -p openai -m gpt-4.1
+uv run python cogtrix.py -p openai -m gpt-4.1
 ```
 
 **Config file:**
@@ -117,8 +118,8 @@ providers:
 
 4. Run:
    ```bash
-   python cogtrix.py           # Ollama is the default provider
-   python cogtrix.py -m qwen3:8b   # use a different model
+   uv run python cogtrix.py           # Ollama is the default provider
+   uv run python cogtrix.py -m qwen3:8b   # use a different model
    ```
 
 No configuration file is needed for local Ollama — Cogtrix connects to `localhost:11434` automatically.
@@ -194,7 +195,7 @@ Fast inference with open-source models.
 
 3. Run:
    ```bash
-   python cogtrix.py -p groq
+   uv run python cogtrix.py -p groq
    ```
 
 ### Available Models
@@ -235,6 +236,30 @@ Wide model selection with competitive pricing.
 | `mistralai/Mixtral-8x7B-Instruct-v0.1` | 8x7B |
 | `Qwen/Qwen2-72B-Instruct` | 72B |
 | `deepseek-ai/deepseek-coder-33b-instruct` | 33B |
+
+---
+
+## xAI (Grok)
+
+xAI uses the OpenAI-compatible API.
+
+### Setup
+
+Export your API key:
+
+```bash
+export XAI_API_KEY=xai-...
+```
+
+### Configuration
+
+```yaml
+providers:
+  xai:
+    type: openai
+    base_url: https://api.x.ai/v1
+    api_key_env: XAI_API_KEY
+```
 
 ---
 
@@ -283,7 +308,7 @@ Run models locally with vLLM server.
 
 3. Run:
    ```bash
-   python cogtrix.py -p anthropic
+   uv run python cogtrix.py -p anthropic
    ```
 
 ### Configuration
@@ -291,7 +316,7 @@ Run models locally with vLLM server.
 **Environment variable only:**
 ```bash
 export ANTHROPIC_API_KEY="sk-ant-..."
-python cogtrix.py -p anthropic -m claude-sonnet-4-5
+uv run python cogtrix.py -p anthropic -m claude-sonnet-4-5
 ```
 
 **Config file:**
@@ -331,7 +356,7 @@ providers:
 
 3. Run:
    ```bash
-   python cogtrix.py -p google
+   uv run python cogtrix.py -p google
    ```
 
 ### Configuration
@@ -339,7 +364,7 @@ providers:
 **Environment variable only:**
 ```bash
 export GEMINI_API_KEY="..."
-python cogtrix.py -p google -m gemini-2.5-flash
+uv run python cogtrix.py -p google -m gemini-2.5-flash
 ```
 
 **Config file:**
@@ -402,16 +427,16 @@ delegate:
 
 ```bash
 # Use local Ollama
-python cogtrix.py -p ollama-local
+uv run python cogtrix.py -p ollama-local
 
 # Use GPU server
-python cogtrix.py -p ollama-gpu
+uv run python cogtrix.py -p ollama-gpu
 
 # Use OpenAI
-python cogtrix.py -p openai
+uv run python cogtrix.py -p openai
 
 # Use Groq
-python cogtrix.py -p groq
+uv run python cogtrix.py -p groq
 ```
 
 **At runtime** (during an interactive session):

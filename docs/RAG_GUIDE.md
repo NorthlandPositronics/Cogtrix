@@ -91,6 +91,7 @@ You: What does the policy say about remote work?
 | Markdown | `.md`, `.markdown` | Plain text with formatting |
 | Text | `.txt` | Plain text files |
 | CSV | `.csv` | Tabular data |
+| DOCX | `.docx` | Microsoft Word documents |
 
 ### Best Practices
 

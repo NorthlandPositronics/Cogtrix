@@ -20,7 +20,7 @@ Cogtrix is a modular LangChain-based AI agent built with a layered architecture:
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │                      CLI Interface Layer                         │
-│        (cogtrix.py ~4300 LOC + src/cli/ + src/ui/)              │
+│        (cogtrix.py ~4500 LOC + src/cli/ + src/ui/)              │
 │  • Interactive & non-interactive modes  • Slash command system   │
 │  • Session management  • Tool management (load/enable/disable)  │
 └─────────────────────────────────┬───────────────────────────────┘
@@ -60,7 +60,7 @@ Cogtrix is a modular LangChain-based AI agent built with a layered architecture:
 ┌───────────────┴───────────────┐ ┌───────────────┴───────────────┐
 │        Memory System          │ │        Tool Modules           │
 │       (src/memory/)           │ │       (src/tools/)            │
-│  • Mode managers              │ │  • 53 built-in tools          │
+│  • Mode managers              │ │  • 52 built-in tools          │
 │  • Context preparation        │ │  • Auto-discovery             │
 │  • JSON persistence           │ │  • Pydantic schemas           │
 └───────────────────────────────┘ └───────────────────────────────┘
@@ -147,6 +147,8 @@ src/
 │   ├── poller.py          # Per-channel polling threads
 │   ├── knowledge.py       # Cross-chat fact extraction + recall
 │   ├── guardrails.py      # Security guardrails (input/output/rate-limit/LLM judge)
+│   ├── deferral.py        # DeferralManager — deferred re-processing passes
+│   ├── scheduler.py       # MessageScheduler — deferred reply delivery
 │   └── service.py         # Main orchestrator (AssistantService)
 ├── rag/
 │   ├── __init__.py        # RAG module
@@ -442,7 +444,7 @@ Summarizes old, large `ToolMessage` objects before each LLM call to reduce token
 |----------|-------|---------|
 | `COMPRESSION_MIN_AGE_CYCLES` | 6 | Minimum `call_model` cycles before a message is eligible |
 | `COMPRESSION_MIN_CHARS` | 2000 | Minimum message length to qualify for compression |
-| `_COMPRESSION_THRESHOLD_RATIO` | 0.50 | Total message size / context window before compression runs |
+| `_COMPRESSION_THRESHOLD_RATIO` | 0.72 | Total message size / context window before compression runs |
 
 **Key Exports:**
 
@@ -948,7 +950,7 @@ Incoming Message (from channel.poll())
 | Per-chat context | Private to each `(channel, chat_id)` | `data/history/{session_key}.json` | Independent conversation history, summarization, vector recall |
 | Shared knowledge | Cross-chat | `data/knowledge/facts.json` + `data/vectordb/knowledge/` | Entity-centric facts recalled when relevant to any chat |
 
-**Default Excluded Tools:** `whatsapp_send`, `whatsapp_check`, `whatsapp_send_image`, `whatsapp_contacts`, `telegram_send`, `telegram_check`, `telegram_send_photo`, `telegram_contacts`, `shell`, `write_file`, `append_file`
+**Default Excluded Tools:** `whatsapp_send`, `whatsapp_check`, `whatsapp_send_image`, `whatsapp_contacts`, `telegram_send`, `telegram_check`, `telegram_send_photo`, `telegram_contacts`, `shell`, `write_file`, `append_file`, `read_file`, `read_pdf`, `list_directory`, `file_info`
 
 **Security Guardrails (`src/assistant/guardrails.py`):**
 

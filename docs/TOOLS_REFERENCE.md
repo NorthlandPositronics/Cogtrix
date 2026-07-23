@@ -1,6 +1,6 @@
 # Cogtrix Tools Reference
 
-Complete documentation of all 53 built-in tools. You don't need to memorize these — the agent picks the right tool automatically based on your request. This page is a reference for when you want to know exactly what's available, what parameters a tool accepts, or how to configure optional providers.
+Complete documentation of all 52 built-in tools. You don't need to memorize these — the agent picks the right tool automatically based on your request. This page is a reference for when you want to know exactly what's available, what parameters a tool accepts, or how to configure optional providers.
 
 **Quick orientation:**
 
@@ -935,7 +935,7 @@ WhatsApp tools enforce contact restrictions before any message is sent or receiv
 | Filter Mode | Behavior |
 |-------------|----------|
 | `none` (default) | All contacts allowed |
-| `whitelist` | Only contacts in the list can send/receive |
+| `allow` | Only contacts in the list can send/receive (legacy value `whitelist` is auto-mapped to `allow`) |
 | `blacklist` | Contacts in the list are blocked |
 
 Phonebook nicknames (e.g. `"alice"`) are resolved to E.164 numbers automatically and are case-insensitive.
@@ -1023,7 +1023,7 @@ Telegram tools enforce contact restrictions before any message is sent or receiv
 | Filter Mode | Behavior |
 |-------------|----------|
 | `none` (default) | All contacts allowed |
-| `whitelist` | Only contacts in the list can send/receive |
+| `allow` | Only contacts in the list can send/receive (legacy value `whitelist` is auto-mapped to `allow`) |
 | `blacklist` | Contacts in the list are blocked |
 
 Phonebook nicknames are resolved to chat IDs automatically and are case-insensitive.
@@ -1061,6 +1061,12 @@ Schedule a reply for delayed delivery instead of sending immediately.
 - Configurable via `services.assistant.response_timing` (quiet hours, per-contact overrides)
 
 **Returns:** Confirmation string telling the agent not to repeat the message.
+
+> **Note:** In assistant mode, additional message management tools are available:
+> `queue_reply`, `edit_last_reply`, `list_scheduled_messages`,
+> `edit_scheduled_message`, `cancel_scheduled_message`, `defer_processing`,
+> and `suppress_reply`. These are injected per-call and documented in the
+> [Architecture Guide](../ARCHITECTURE.md).
 
 ---
 

@@ -98,7 +98,7 @@ This pattern is used by all search providers, weather, and WhatsApp tools.
 The tool is automatically discovered:
 
 ```bash
-python cogtrix.py
+uv run python cogtrix.py
 # ✓ Loaded 35 tool(s):
 #   - my_tool
 ```
@@ -345,7 +345,7 @@ class MemoryFactory:
 ### Step 3: Use the Mode
 
 ```bash
-python cogtrix.py -M custom
+uv run python cogtrix.py -M custom
 ```
 
 ---
@@ -359,7 +359,6 @@ Slash commands are registered in `cogtrix.py` via `_build_slash_commands()`.
 Add a static method to `SlashCommandRegistry`:
 
 ```python
-@staticmethod
 def _cmd_mycommand(self, args: str) -> str:
     """Handler for /mycommand."""
     # self = SlashCommandRegistry instance (has .config, .memory_manager, .tools)
@@ -555,8 +554,18 @@ cogtrix/
 │   │   └── google.py         # Google Gemini
 │   │
 │   ├── agent/
-│   │   ├── core.py           # LangGraph agent setup
+│   │   ├── core.py           # CogtrixState schema, system prompt builder, LLM factory
 │   │   └── safety.py         # Tool confirmation wrapper
+│   │
+│   ├── orchestration/
+│   │   ├── graph.py              # LangGraph StateGraph builder, tool expansion
+│   │   ├── runner.py             # run_agent() entry point
+│   │   ├── phases.py             # post-agent pipeline stages
+│   │   ├── compression.py        # context compression
+│   │   ├── intent.py             # intent detection
+│   │   ├── run_config.py         # AgentRunConfig dataclass
+│   │   ├── session_orchestrator.py  # session switching
+│   │   └── session_state.py      # SessionState dataclass
 │   │
 │   ├── assistant/
 │   │   ├── __init__.py      # Package exports
@@ -584,10 +593,20 @@ cogtrix/
 │   │       ├── code.py          # Code development mode
 │   │       └── reasoning.py     # Planning/reasoning mode
 │   │
+│   ├── api/                      # REST + WebSocket API layer (FastAPI)
+│   │
+│   ├── prompt/
+│   │   └── optimizer.py      # one-shot LLM prompt rewriter
+│   │
+│   ├── utils/
+│   │   └── atomic_write.py   # atomic_write_json context manager
+│   │
+│   ├── mcp_client.py         # MCP server lifecycle and tool discovery
+│   │
 │   ├── rag/
 │   │   └── ingest.py         # Document ingestion
 │   │
-│   └── tools/                # Built-in tool modules (53 tools)
+│   └── tools/                # Built-in tool modules (52 tools)
 │       ├── brave_search.py   # Brave Search API
 │       ├── calculator.py     # Math expressions
 │       ├── datetime_tool.py  # Date/time utilities

@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.18](https://github.com/NorthlandPositronics/Cogtrix/compare/v0.1.17...v0.1.18) (2026-03-05)
+
+
+### Documentation
+
+* holistic documentation audit — fix tool count, accuracy, and completeness ([c106408](https://github.com/NorthlandPositronics/Cogtrix/commit/c106408c4df4bf62cdbb100403ac824eed2f8390))
+
 ## [0.1.17](https://github.com/NorthlandPositronics/Cogtrix/compare/v0.1.16...v0.1.17) (2026-03-05)
 
 
@@ -97,6 +104,21 @@
 * add `api` optional dependency group to `pyproject.toml` (FastAPI, uvicorn, SQLAlchemy async, aiosqlite, alembic, python-jose, passlib)
 * update `Dockerfile` for API mode support (uvicorn, alembic migrations at startup)
 * update `docker-entrypoint.sh` with `api` / `--api` mode that runs `alembic upgrade head` then starts uvicorn
+
+## [0.1.16](https://github.com/NorthlandPositronics/Cogtrix/compare/v0.1.15...v0.1.16) (2026-03-05)
+
+
+### Features
+
+* **api:** REST + WebSocket API layer ([d711932](https://github.com/NorthlandPositronics/Cogtrix/commit/d711932280889996d198f3f26a40430cb06b7d39))
+* **api:** REST + WebSocket API layer with JWT auth, session management, and streaming agent turns ([7e6e4c2](https://github.com/NorthlandPositronics/Cogtrix/commit/7e6e4c2b083879739d7341d392bef930d229f29d))
+
+
+### Bug Fixes
+
+* exclude src/api from pyright — optional deps not in CI base install ([1927383](https://github.com/NorthlandPositronics/Cogtrix/commit/19273830863ef469b57adaf38e395dbd3c8a20d6))
+* resolve CI failures — ruff B008/UP046 ignores, bandit B108, test import guards ([f4d6a5c](https://github.com/NorthlandPositronics/Cogtrix/commit/f4d6a5cc6477dde99f02041da4a79ee793328b79))
+* skip API test files gracefully when fastapi is not installed ([05e8949](https://github.com/NorthlandPositronics/Cogtrix/commit/05e894912fdf52d9fa04f55dc2176ac16f9427c1))
 
 ## [0.1.15](https://github.com/NorthlandPositronics/Cogtrix/compare/v0.1.14...v0.1.15) (2026-03-04)
 

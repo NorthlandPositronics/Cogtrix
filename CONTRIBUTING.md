@@ -29,7 +29,7 @@ See the [LICENSE](LICENSE) file for full terms.
    - Steps to reproduce the problem
    - Expected vs. actual behavior
    - Your environment (OS, Python version, provider, model)
-   - Relevant log output (run with `--log -v` for verbose logs)
+   - Relevant log output (run with `--debug` for verbose logs)
 
 ### Suggesting Features
 
@@ -47,7 +47,7 @@ See the [LICENSE](LICENSE) file for full terms.
 ```bash
 uv run black cogtrix.py src/ tests/
 uv run ruff check cogtrix.py src/ tests/
-uv run pyright src/
+uv run pyright cogtrix.py src/
 uv run pytest tests/ -v
 ```
 
