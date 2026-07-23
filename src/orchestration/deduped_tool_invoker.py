@@ -36,6 +36,8 @@ from src.agent.safety import UserCancelledRun
 from src.api.telemetry import start_span
 from src.logging_config import get_logger
 from src.orchestration.compression import truncate_tool_output
+from src.orchestration.tool_arg_correction import detect_url_tool_misuse
+from src.orchestration.tool_message_kinds import COGTRIX_KIND_KEY, KIND_TOOL_MISUSE_REDIRECT
 
 # Module-level cap on a single tool message before it lands in history.
 # Moved here from graph.py during /forge A4 because the only consumer is
@@ -45,6 +47,33 @@ from src.orchestration.compression import truncate_tool_output
 # injected via the constructor because tests and eval scenarios may want
 # to override them per-graph.
 _HISTORY_TOOL_MESSAGE_CAP_CHARS = 30_000
+
+# #2319: after this many cumulative duplicate-call cache hits in a turn, the soft
+# "do not repeat" note escalates to a forced strategy change. The consecutive-error
+# stuck-break (graph._STUCK_THRESHOLD) misses loops that alternate a failing call
+# with a *successful* re-read (the qwen patch-anchor loop) — those reset the error
+# streak — but duplicate hits catch them.
+_DUPLICATE_ESCALATION_THRESHOLD = 3
+
+
+def duplicate_call_banner(hit_count: int) -> str:
+    """Prefix banner for a duplicate tool call served from cache.
+
+    For the first couple of repeats it is the soft "do not repeat" note; once the
+    model keeps re-issuing identical calls (``hit_count`` past the threshold) it
+    becomes a forceful redirect that names the loop and offers a concrete escape
+    (use ``write_file`` instead of re-patching, or finish) — #2319.
+    """
+    if hit_count < _DUPLICATE_ESCALATION_THRESHOLD:
+        return "[Duplicate call — returning cached result. Do NOT repeat this call.]\n\n"
+    return (
+        f"[You have repeated identical tool calls {hit_count} times this turn and are making "
+        "no progress — you are stuck in a loop. STOP retrying the same call. Do something "
+        "DIFFERENT: re-read the file to see its exact current contents, then make the change "
+        "with write_file (the full new file content) instead of re-attempting the same patch; "
+        "or, if you genuinely cannot proceed, give your best final answer now.]\n\n"
+    )
+
 
 # Fallback recursion budget used to scale the retrieval-tool ceiling when the
 # run config doesn't carry ``recursion_limit``. Mirrors
@@ -172,9 +201,10 @@ class DedupedToolInvoker:
                 cached = self._per_run_state[0].tool_call_history.get(call_key)
                 if cached is not None:
                     self._per_run_state[0].tool_call_history.move_to_end(call_key)
+                    self._per_run_state[0].duplicate_hit_count[0] += 1
                     return ToolMessage(
                         content=(
-                            "[Duplicate call — returning cached result. Do NOT repeat this call.]\n\n"
+                            duplicate_call_banner(self._per_run_state[0].duplicate_hit_count[0])
                             + cached
                         ),
                         tool_call_id=call["id"],
@@ -191,9 +221,10 @@ class DedupedToolInvoker:
                     cached = self._per_run_state[0].tool_call_history.get(call_key)
                     if cached is not None:
                         self._per_run_state[0].tool_call_history.move_to_end(call_key)
+                        self._per_run_state[0].duplicate_hit_count[0] += 1
                         return ToolMessage(
                             content=(
-                                "[Duplicate call — returning cached result. Do NOT repeat this call.]\n\n"
+                                duplicate_call_banner(self._per_run_state[0].duplicate_hit_count[0])
                                 + cached
                             ),
                             tool_call_id=call["id"],
@@ -224,6 +255,26 @@ class DedupedToolInvoker:
                 content=f"Tool '{self._safe_tool_name(tool_name)}' is disabled and cannot be used.",
                 tool_call_id=call["id"],
                 name=tool_name,
+            )
+
+        # ── url-fetch misuse redirect (#2293) ──────────────────────────────
+        # A url-fetch tool (http_get/http_post) called with a search query and no
+        # URL is a web_search confusion. Short-circuit with an actionable redirect
+        # BEFORE the budget/correction/invoke machinery — the call did NOT execute,
+        # so it must not consume the per-tool budget, and the model gets clear
+        # guidance instead of a cryptic Pydantic ``url Field required`` it loops on.
+        _misuse = detect_url_tool_misuse(tool_name, call.get("args", {}))
+        if _misuse is not None:
+            self._release_sentinel(call_key)
+            get_logger().info(
+                "url-fetch tool '%s' called as a search (no url) — redirecting to web_search (#2293)",
+                tool_name,
+            )
+            return ToolMessage(
+                content=_misuse,
+                tool_call_id=call["id"],
+                name=tool_name,
+                additional_kwargs={COGTRIX_KIND_KEY: KIND_TOOL_MISUSE_REDIRECT},
             )
 
         # ── Per-tool call budget ──────────────────────────────────────────
@@ -441,4 +492,8 @@ class DedupedToolInvoker:
             )
 
 
-__all__ = ["DedupedToolInvoker", "_HISTORY_TOOL_MESSAGE_CAP_CHARS"]
+__all__ = [
+    "DedupedToolInvoker",
+    "_HISTORY_TOOL_MESSAGE_CAP_CHARS",
+    "duplicate_call_banner",
+]

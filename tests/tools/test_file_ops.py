@@ -464,6 +464,41 @@ class TestPatchFileLocking:
         result = patch_file("target.txt", "old", "new")
         assert "found 3 times" in result
 
+    def test_tolerates_trailing_whitespace(self, tmp_cwd: Path) -> None:
+        # #2319: the agent's old_str has stray trailing whitespace; exact match
+        # fails but the trailing-whitespace-tolerant match recovers (safe — the
+        # indentation still matches exactly).
+        (tmp_cwd / "t.py").write_text("def f():\n    return 1\n")
+        result = patch_file("t.py", "    return 1   ", "    return 2")
+        assert result.startswith("Patched")
+        assert "ignoring trailing whitespace" in result
+        assert (tmp_cwd / "t.py").read_text() == "def f():\n    return 2\n"
+
+    def test_indentation_mismatch_hints_the_real_region(self, tmp_cwd: Path) -> None:
+        # #2319: wrong indentation in old_str → still "not found" (we don't risk an
+        # auto-reindent in a core tool), but the error shows the EXACT real text so
+        # the agent can fix its anchor instead of looping.
+        (tmp_cwd / "t.py").write_text("class C:\n    def m(self):\n        return 1\n")
+        result = patch_file("t.py", "def m(self):\n    return 1", "def m(self):\n    return 2")
+        assert result.startswith("Error: old_str not found")
+        assert "whitespace/indentation differs" in result
+        assert "        return 1" in result  # the real 8-space-indented line is shown
+        assert (tmp_cwd / "t.py").read_text() == "class C:\n    def m(self):\n        return 1\n"
+
+    def test_not_found_hints_closest_line(self, tmp_cwd: Path) -> None:
+        (tmp_cwd / "t.txt").write_text("the quick brown fox\n")
+        result = patch_file("t.txt", "the quick green fox", "x")
+        assert result.startswith("Error: old_str not found")
+        assert "closest line" in result.lower()
+
+    def test_tolerant_match_stays_unique(self, tmp_cwd: Path) -> None:
+        # two trailing-ws-equal lines → ambiguous under the tolerant match → no
+        # silent edit; falls through to the not-found error.
+        (tmp_cwd / "t.py").write_text("    x = 1\n    x = 1\n")
+        result = patch_file("t.py", "    x = 1 ", "    x = 2")
+        assert result.startswith("Error: old_str not found")
+        assert (tmp_cwd / "t.py").read_text() == "    x = 1\n    x = 1\n"
+
     def test_uses_file_lock(self, tmp_cwd: Path) -> None:
         """patch_file must acquire the per-file lock to prevent lost updates."""
         (tmp_cwd / "target.txt").write_text("hello old world")

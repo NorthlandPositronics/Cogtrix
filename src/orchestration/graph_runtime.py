@@ -183,6 +183,13 @@ class PerRunState:
     last_tool_version: list[int] = field(default_factory=lambda: [-1])
     tool_call_history: OrderedDict[str, str] = field(default_factory=OrderedDict)
     tool_call_counts: dict[str, int] = field(default_factory=dict)
+    # #2319: cumulative count of duplicate tool calls served from cache this turn.
+    # The consecutive-error stuck-break misses a loop that alternates a failing
+    # call with a *successful* re-read (the qwen patch-anchor loop) — those reset
+    # the error streak. Duplicate hits do catch it, so once a model keeps
+    # re-issuing identical calls the "do not repeat" note escalates to a forced
+    # strategy change.
+    duplicate_hit_count: list[int] = field(default_factory=lambda: [0])
 
     # Reflection / health-check pacing
     last_reflection_at: list[int] = field(default_factory=lambda: [0])

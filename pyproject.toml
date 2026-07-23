@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cogtrix"
-version = "0.5.0"
+version = "0.5.1"
 description = "Modular AI assistant with 67 built-in tools, multi-provider LLM support, and hybrid memory"
 readme = "README.md"
 requires-python = "~=3.13.0"
@@ -173,7 +173,13 @@ make-man = "argparse_manpage:main"
 [tool.ruff]
 line-length = 100
 target-version = "py313"
-exclude = ["venv", ".venv", ".git", "__pycache__", "build", "dist"]
+# ``tests/role_swe/project`` is the ledgerlite SUT — a fixture project with its own
+# (deliberately different) conventions and an uninstalled ``ledgerlite`` import. It
+# is exercised by the role_swe harness against per-scenario workspace copies, never
+# linted as Cogtrix source. ``force-exclude`` makes the exclusion hold even when CI
+# passes ``tests/`` explicitly.
+exclude = ["venv", ".venv", ".git", "__pycache__", "build", "dist", "tests/role_swe/project"]
+force-exclude = true
 
 [tool.ruff.lint]
 select = [
@@ -205,6 +211,9 @@ known-first-party = ["src"]
 [tool.black]
 line-length = 100
 target-version = ["py313"]
+# Exclude the ledgerlite SUT fixture (see the ruff note). ``force-exclude`` is a
+# regex applied even when ``tests/`` is passed explicitly on the CLI.
+force-exclude = '/tests/role_swe/project/'
 
 [tool.bandit]
 exclude_dirs = ["tests", "venv", ".venv"]

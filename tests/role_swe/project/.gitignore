@@ -1,0 +1,8 @@
+# Python build / cache artifacts — never part of a change.
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.venv/

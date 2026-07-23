@@ -780,9 +780,17 @@ def build_call_model_node(
             # content rather than via structured tool_calls.  Pull those
             # out before downstream routing reads the message shape.
             # No-op when the response uses standard structured calls.
-            from src.orchestration.phases import normalize_native_tool_calls
+            from src.orchestration.phases import (
+                normalize_native_tool_calls,
+                repair_tool_call_arguments,
+            )
 
             response = normalize_native_tool_calls(response)
+            # #2290: recover tool calls whose arguments are valid JSON + trailing
+            # data (demoted to invalid_tool_calls by LangChain) BEFORE the message
+            # is stored in state and echoed to the provider — strict OpenRouter
+            # providers 400 on the trailing bytes and kill the turn.
+            response = repair_tool_call_arguments(response)
             response = _guard_truncated_tool_calls(response, _model_max_tokens, _graph_log)
 
             if is_trace():

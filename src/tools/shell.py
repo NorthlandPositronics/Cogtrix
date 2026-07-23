@@ -855,26 +855,33 @@ def _communicate_with_cap(
 
     def _drain(pipe: subprocess.PIPE, chunks: list[str]) -> None:  # type: ignore[type-arg]
         nonlocal total, cap_hit
-        while True:
-            chunk = pipe.read(4096)
-            if not chunk:
-                break
-            with lock:
-                if not cap_hit:
-                    chunks.append(chunk)
-                    total += len(chunk)
-                    if total > max_chars:
-                        cap_hit = True
-                        # Stop the producer — kill the whole process group.
-                        try:
-                            os.killpg(proc.pid, signal.SIGKILL)
-                        except OSError:
+        # #2298: never let the drain thread die silently. With lenient decoding
+        # the read no longer raises on non-UTF-8 output, but any unexpected error
+        # (decode edge case, OSError on the pipe) must be logged — not swallowed
+        # by a bare thread that then stops reading and leaves the child blocked.
+        try:
+            while True:
+                chunk = pipe.read(4096)
+                if not chunk:
+                    break
+                with lock:
+                    if not cap_hit:
+                        chunks.append(chunk)
+                        total += len(chunk)
+                        if total > max_chars:
+                            cap_hit = True
+                            # Stop the producer — kill the whole process group.
                             try:
-                                proc.kill()
+                                os.killpg(proc.pid, signal.SIGKILL)
                             except OSError:
-                                pass
-                # After the cap is hit we keep reading (but discard) so the
-                # pipe does not deadlock.
+                                try:
+                                    proc.kill()
+                                except OSError:
+                                    pass
+                    # After the cap is hit we keep reading (but discard) so the
+                    # pipe does not deadlock.
+        except Exception as exc:  # noqa: BLE001 — a drain failure must not be silent
+            print(f"Warning: shell output drain thread failed: {exc}", file=sys.stderr)
 
     t_out = threading.Thread(target=_drain, args=(proc.stdout, stdout_chunks))
     t_err = threading.Thread(target=_drain, args=(proc.stderr, stderr_chunks))
@@ -1028,6 +1035,13 @@ def execute_shell_command(
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
+                # #2298: decode leniently. Arbitrary command output is not
+                # guaranteed UTF-8 (Latin-1 text, binary, non-UTF-8 filenames in
+                # ls/grep). Strict decode raised UnicodeDecodeError in the drain
+                # thread → silent output loss + a dead drain thread. "replace"
+                # substitutes U+FFFD instead of raising.
+                encoding="utf-8",
+                errors="replace",
                 cwd=cwd,
                 shell=True,  # nosec B602
                 start_new_session=True,
@@ -1050,6 +1064,8 @@ def execute_shell_command(
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
+                encoding="utf-8",  # #2298: lenient decode (see shell branch above)
+                errors="replace",
                 cwd=cwd,
                 start_new_session=True,
                 env=_safe_env(),

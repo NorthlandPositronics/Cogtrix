@@ -55,6 +55,27 @@ class TestExecuteShellCommand:
         result = shell.execute_shell_command("echo hello world")
         assert "hello world" in result
 
+    def test_non_utf8_output_is_replaced_not_dropped(self) -> None:
+        """Regression for #2298: non-UTF-8 command output must decode leniently.
+
+        Arbitrary command output is not guaranteed UTF-8 (Latin-1 text, binary,
+        non-UTF-8 filenames from ``ls``/``grep``). Before the fix the strict
+        ``text=True`` decode raised ``UnicodeDecodeError`` inside the drain
+        thread, which silently died → the surrounding output was lost and the
+        child could block. The bytes must come back as U+FFFD, not crash.
+        """
+        cwd = os.getcwd()
+        with tempfile.TemporaryDirectory(dir=cwd) as tmpdir:
+            target = Path(tmpdir) / "nonutf8.bin"
+            # 0xe4 0xe5 are valid Latin-1 but an invalid UTF-8 sequence.
+            target.write_bytes(b"before\xe4\xe5after\n")
+            result = shell.execute_shell_command(f"cat {target}")
+        # Did not raise, the ASCII around the bad bytes survived, and the
+        # undecodable bytes were substituted with the replacement char.
+        assert "before" in result
+        assert "after" in result
+        assert "�" in result
+
     def test_command_with_working_directory(self) -> None:
         """Test command executed in a specific directory (within cwd)."""
         import tempfile

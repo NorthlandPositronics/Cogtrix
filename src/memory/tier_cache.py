@@ -347,18 +347,30 @@ def roll_forward(
     def _get_tool_name(msg: Any) -> str:
         return str(getattr(msg, "name", "") or "")
 
-    # Build a lookup of already-compressed content by tool_call_id.
-    # Priority: current_snapshot tier1 → current_snapshot tier2 → compression_cache.
-    existing_compressed: dict[str, str] = {}
-    if compression_cache:
-        existing_compressed.update(compression_cache)
+    # Build a lookup of already-compressed content keyed by (tool_call_id, tier).
+    # #2270 S1: keying by tool_call_id ALONE let a Tier-1 snapshot entry clobber
+    # the Tier-2 entry for the same tool call (the tier1 loop ran after tier2),
+    # so a Tier-2 lookup could return Tier-1 (longer) text. Keying by (tcid, tier)
+    # keeps the tiers separate. The external ``compression_cache`` param is keyed
+    # by tcid only (its tier is unspecified by contract), so it is kept as a
+    # tier-agnostic fallback — preserving today's behaviour (it is ``None`` in the
+    # only current caller, so this fallback is latent).
+    existing_compressed: dict[tuple[str, int], str] = {}
+    existing_fallback: dict[str, str] = dict(compression_cache) if compression_cache else {}
     if current_snapshot is not None:
         for cm in current_snapshot.tier2_messages:
             if cm.tool_call_id:
-                existing_compressed[cm.tool_call_id] = cm.content
+                existing_compressed[(cm.tool_call_id, 2)] = cm.content
         for cm in current_snapshot.tier1_messages:
             if cm.tool_call_id:
-                existing_compressed[cm.tool_call_id] = cm.content
+                existing_compressed[(cm.tool_call_id, 1)] = cm.content
+
+    def _cached_for(tcid: str | None, tier: int) -> str | None:
+        """Tier-specific cache hit, falling back to the tier-agnostic external cache."""
+        if not tcid:
+            return None
+        hit = existing_compressed.get((tcid, tier))
+        return hit if hit is not None else existing_fallback.get(tcid)
 
     # Step 1 — Determine Tier 0 (verbatim) boundary by scanning newest → oldest.
     tier0_tokens_used = 0
@@ -402,8 +414,9 @@ def roll_forward(
 
         if tier1_tokens < tier1_budget:
             # Assign to Tier 1 (light compression).
-            if tcid and tcid in existing_compressed:
-                compressed_text = existing_compressed[tcid]
+            _t1_cached = _cached_for(tcid, 1)
+            if _t1_cached is not None:
+                compressed_text = _t1_cached
             else:
                 if llm is not None:
                     compressed_text = compress_to_tier(content, tool_name or "tool", 1, llm)
@@ -416,8 +429,9 @@ def roll_forward(
             if tier1_tokens + compressed_tokens > tier1_budget and tier1_messages:
                 # Tier 1 would overflow — push this message to Tier 2 instead.
                 if tier2_tokens < tier2_budget:
-                    if tcid and tcid in existing_compressed:
-                        t2_text = existing_compressed[tcid]
+                    _t2_cached = _cached_for(tcid, 2)
+                    if _t2_cached is not None:
+                        t2_text = _t2_cached
                     elif llm is not None:
                         t2_text = compress_to_tier(content, tool_name or "tool", 2, llm)
                     else:
@@ -447,8 +461,9 @@ def roll_forward(
             # Tier 1 full — try Tier 2 (heavy compression / one-liner).
             if tier2_tokens >= tier2_budget:
                 continue  # Tier 2 also full — drop oldest overflow
-            if tcid and tcid in existing_compressed:
-                t2_text = existing_compressed[tcid]
+            _t2_cached = _cached_for(tcid, 2)
+            if _t2_cached is not None:
+                t2_text = _t2_cached
             elif llm is not None:
                 t2_text = compress_to_tier(content, tool_name or "tool", 2, llm)
             else:

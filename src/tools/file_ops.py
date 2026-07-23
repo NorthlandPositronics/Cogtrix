@@ -574,6 +574,53 @@ class PatchFileInput(BaseModel):
     new_str: str = Field(..., description="Replacement string.")
 
 
+def _locate_blocks(
+    content: str, old_str: str, key: collections.abc.Callable[[str], str]
+) -> list[tuple[int, int]]:
+    """Find contiguous content-line runs matching *old_str*'s lines under *key*.
+
+    Returns the ``(start, end)`` char spans (in *content*) of each run whose lines,
+    transformed by *key* (e.g. ``str.rstrip`` to ignore trailing whitespace, or
+    ``str.strip`` to also ignore indentation), equal *old_str*'s transformed lines.
+    Used to recover from anchor mismatches in :func:`patch_file` (weak models often
+    get whitespace slightly wrong — #2319).
+    """
+    o_lines = old_str.split("\n")
+    if not any(key(x) for x in o_lines):  # all-blank anchor — refuse to fuzzy-match
+        return []
+    c_lines = content.split("\n")
+    c_keyed = [key(x) for x in c_lines]
+    o_keyed = [key(x) for x in o_lines]
+    offsets, pos = [], 0
+    for ln in c_lines:
+        offsets.append(pos)
+        pos += len(ln) + 1  # +1 for the '\n'
+    n = len(o_lines)
+    spans: list[tuple[int, int]] = []
+    for i in range(len(c_lines) - n + 1):
+        if c_keyed[i : i + n] == o_keyed:
+            spans.append((offsets[i], offsets[i + n - 1] + len(c_lines[i + n - 1])))
+    return spans
+
+
+def _patch_hint(content: str, old_str: str) -> str:
+    """A targeted hint when an exact ``old_str`` is not found, so the agent can fix
+    its anchor instead of blindly retrying (the qwen recursion-loop trigger, #2319)."""
+    if "\r" not in content:
+        ind = _locate_blocks(content, old_str, str.strip)  # ignores indentation
+        if len(ind) == 1:
+            s, e = ind[0]
+            return (
+                "\nThe text exists but the whitespace/indentation differs. Copy this "
+                f"region EXACTLY as old_str:\n{content[s:e]}"
+            )
+    import difflib
+
+    first = next((ln for ln in old_str.split("\n") if ln.strip()), old_str)
+    close = difflib.get_close_matches(first, content.split("\n"), n=1, cutoff=0.6)
+    return f"\nThe closest line in the file is:\n{close[0]}" if close else ""
+
+
 def patch_file(path: str, old_str: str, new_str: str) -> str:
     """
     Surgically replace an exact string in a file.
@@ -636,18 +683,32 @@ def patch_file(path: str, old_str: str, new_str: str) -> str:
         except Exception as e:
             return f"Error reading file: {_sanitize_file_error(e)}"
 
+        match_note = ""
         count = content.count(old_str)
-        if count == 0:
-            return (
-                f"Error: old_str not found in {path}. Check for exact whitespace and indentation."
-            )
-        if count > 1:
+        if count == 1:
+            new_content = content.replace(old_str, new_str, 1)
+        elif count > 1:
             return (
                 f"Error: old_str found {count} times in {path} — ambiguous. "
                 "Add more surrounding context to make the match unique."
             )
-
-        new_content = content.replace(old_str, new_str, 1)
+        else:
+            # Exact match failed. Recover from a trailing-whitespace / line-ending
+            # mismatch only — leading indentation must still match exactly, so
+            # new_str applies cleanly (this is SAFE; we do not re-indent #2319).
+            # Restricted to LF files so the matched char offsets are exact.
+            spans = _locate_blocks(content, old_str, str.rstrip) if "\r" not in content else []
+            if len(spans) == 1:
+                s, e = spans[0]
+                new_content = content[:s] + new_str + content[e:]
+                match_note = " (matched ignoring trailing whitespace)"
+            else:
+                # Still not found: give the agent the actual nearby text so it can
+                # fix its anchor instead of blindly retrying (the loop trigger).
+                return (
+                    f"Error: old_str not found in {path}. "
+                    "Check for exact whitespace and indentation." + _patch_hint(content, old_str)
+                )
 
         try:
             from src.utils.atomic_write import atomic_write_json
@@ -665,7 +726,7 @@ def patch_file(path: str, old_str: str, new_str: str) -> str:
     sign = "+" if delta >= 0 else ""
     return (
         f"Patched {path}: {old_lines} → {new_lines} lines ({sign}{delta}), "
-        f"{len(content)} → {len(new_content)} chars."
+        f"{len(content)} → {len(new_content)} chars.{match_note}"
     )
 
 

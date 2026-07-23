@@ -442,7 +442,28 @@ class WhatsAppChannel(Channel):
         self._prefetch_lids([m for m, _ in all_fetched])
 
         for msg, chat in all_fetched:
-            incoming = self._process_message(msg, chat, now)
+            # #2279: isolate per-message failures — a single malformed/unparseable
+            # message must never abort the whole poll cycle (which would silently
+            # take the assistant offline for ALL chats until the message ages out
+            # of the reactivation window). Log, mark seen so it isn't re-fetched
+            # and re-crashed on every subsequent poll, and continue.
+            try:
+                incoming = self._process_message(msg, chat, now)
+            except Exception as exc:
+                log.warning(
+                    "Skipping WhatsApp message %s in chat %s — processing failed: %s",
+                    getattr(msg, "id", "?"),
+                    getattr(chat, "id", "?"),
+                    exc,
+                )
+                _mid = getattr(msg, "id", None)
+                if _mid:
+                    self._seen_ids[_mid] = now
+                    _seen_wall = getattr(self, "_seen_wall", None)
+                    if _seen_wall is not None:
+                        _seen_wall[_mid] = time.time()
+                        self._seen_dirty = True
+                continue
             if incoming is not None:
                 result.append(incoming)
 
@@ -552,7 +573,10 @@ class WhatsAppChannel(Channel):
                 uri = f"data:{mimetype};base64,{base64.b64encode(data).decode()}"
                 images.append(uri)
 
-        if not msg.body.strip() and not images:
+        # #2279: WAHA returns body=None for caption-less media. Guard the strip()
+        # so a captionless photo (especially one whose download_media just failed,
+        # leaving images empty) can't raise AttributeError out of the poll loop.
+        if not (msg.body or "").strip() and not images:
             return None
 
         self._seen_ids[msg.id] = now
@@ -570,7 +594,7 @@ class WhatsAppChannel(Channel):
             message_id=msg.id,
             sender_id=sender,
             sender_name=chat.name,
-            text=msg.body,
+            text=msg.body or "",  # #2279: never propagate a None body downstream
             timestamp=float(msg.timestamp),
             resolved_phone=resolved_phone,
             images=images,

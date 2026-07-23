@@ -49,6 +49,12 @@ KIND_TOOL_NAME_INVALID = "tool_name_invalid"
 #: "'X' is not a valid tool and could not be resolved."
 KIND_TOOL_RESOLUTION_FAILED = "tool_resolution_failed"
 
+#: A url-fetch tool (http_get/http_post) was called with a search query and no
+#: URL — the model confused it with web_search (#2293). Dispatcher short-circuits
+#: with a redirect message instead of letting the call hit a Pydantic
+#: ``url Field required`` error. The tool did NOT execute.
+KIND_TOOL_MISUSE_REDIRECT = "tool_misuse_redirect"
+
 #: Set of kinds that signal a dispatcher-synthesised resolution failure —
 #: the agent's tool call did NOT execute and any "I did it" claim that
 #: follows is fabricated.  Consumers (see
@@ -60,6 +66,7 @@ TOOL_RESOLUTION_FAILURE_KINDS: frozenset[str] = frozenset(
         KIND_TOOL_DISABLED,
         KIND_TOOL_NAME_INVALID,
         KIND_TOOL_RESOLUTION_FAILED,
+        KIND_TOOL_MISUSE_REDIRECT,
     }
 )
 
@@ -84,6 +91,7 @@ __all__ = [
     "KIND_TOOL_DISABLED",
     "KIND_TOOL_NAME_INVALID",
     "KIND_TOOL_RESOLUTION_FAILED",
+    "KIND_TOOL_MISUSE_REDIRECT",
     "TOOL_RESOLUTION_FAILURE_KINDS",
     "is_resolution_failure_message",
 ]

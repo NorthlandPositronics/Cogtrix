@@ -425,6 +425,67 @@ def _safe_tool_name(name: str, max_len: int = 80) -> str:
     return sanitized[:max_len] if sanitized else "<unknown>"
 
 
+# url-fetch tools that take a concrete ``url`` (not a search query).
+_URL_FETCH_TOOLS: frozenset[str] = frozenset({"http_get", "http_post"})
+
+# Argument names a model reaches for when it mistakes a url-fetch tool for a
+# web-search tool. Kept tight (search-intent words) to stay high-precision.
+_QUERY_LIKE_KEYS: tuple[str, ...] = (
+    "query",
+    "q",
+    "search",
+    "search_query",
+    "query_string",
+    "search_terms",
+    "keywords",
+)
+
+# A value that already looks like a URL/host is a field-naming mistake, not
+# search misuse — don't redirect those to web_search.
+_URL_LIKE_RE = re.compile(
+    r"^\s*(?:https?://|ftp://|www\.|[\w-]+\.[a-z]{2,}(?:[/:]|$))", re.IGNORECASE
+)
+
+
+def detect_url_tool_misuse(tool_name: str, args: Any) -> str | None:
+    """Return a redirect message when a url-fetch tool is called as a search (#2293).
+
+    Weaker / open-weight models (qwen3 observed in production v0.4.1 logs, ~1-in-4
+    ``http_get`` calls) treat ``http_get``/``http_post`` like ``web_search`` —
+    passing a natural-language ``query`` with no ``url``. The call then hard-fails
+    Pydantic with a cryptic ``url Field required``; weak models retry the same bad
+    shape and loop. This detector spots the misuse so the dispatcher can return an
+    actionable redirect to ``web_search`` instead.
+
+    Fires ONLY when:
+      * the tool is a url-fetch tool, AND
+      * there is no usable ``url`` (missing / empty / not URL-shaped), AND
+      * a query-like key holds a non-empty string that is NOT itself URL-shaped
+        (a URL-shaped value is a field-naming slip, left to ``_correct_tool_args``).
+
+    Returns the guidance string, or ``None`` when it is not this misuse.
+    """
+    if tool_name not in _URL_FETCH_TOOLS or not isinstance(args, dict):
+        return None
+    url_val = args.get("url")
+    if isinstance(url_val, str) and _URL_LIKE_RE.match(url_val):
+        return None  # a real url is present — normal call
+    for key in _QUERY_LIKE_KEYS:
+        val = args.get(key)
+        if isinstance(val, str) and val.strip() and not _URL_LIKE_RE.match(val):
+            snippet = val.strip()
+            if len(snippet) > 80:
+                snippet = snippet[:77] + "..."
+            return (
+                f"'{_safe_tool_name(tool_name)}' fetches a single web page and needs a "
+                f"concrete 'url' (e.g. https://example.com), not a search query. It did "
+                f'NOT run. To find information about "{snippet}", call '
+                f"web_search(query=...) first, then '{_safe_tool_name(tool_name)}' the "
+                f"specific result URL you want to read."
+            )
+    return None
+
+
 __all__ = [
     "_FUZZY_ARG_BLOCKLIST",
     "_TOOL_ARG_SCHEMA_CACHE_MAX_SIZE",
@@ -433,4 +494,5 @@ __all__ = [
     "_safe_tool_name",
     "_tool_arg_cache_lock",
     "_tool_arg_schema_cache",
+    "detect_url_tool_misuse",
 ]

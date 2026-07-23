@@ -565,12 +565,24 @@ _SANITIZE_MAX_LEN = 500
 
 
 def _sanitize_sdk_error(text: str) -> str:
-    """Truncate and strip SDK-specific internals from a raw exception string."""
+    """Truncate and strip SDK-specific internals from a raw exception string.
+
+    Never returns empty (#2291): when a marker sits at index 0 — e.g. an
+    OpenAI-compatible ``Error code: 400 - {...}`` string — naive truncation
+    collapses the whole message to ``""``, which produces a blank user-facing
+    error frame and an empty operator log (the failure then looks like "no
+    answer"). If truncation empties the message, recover the provider's own
+    ``message`` field, else fall back to a generic non-empty string.
+    """
+    original = text
     for marker in _SDK_MARKERS:
         idx = text.find(marker)
         if idx != -1:
             text = text[:idx].rstrip()
-    return text[:_SANITIZE_MAX_LEN]
+    text = text[:_SANITIZE_MAX_LEN].strip()
+    if not text:
+        text = _extract_api_message(original) or "the model provider rejected the request"
+    return text
 
 
 def _extract_api_message(error_str: str) -> str | None:

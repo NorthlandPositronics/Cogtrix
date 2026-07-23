@@ -68,6 +68,7 @@ EMPTY_RESPONSE_MSG = "**Error:** The model returned an empty response. Please tr
 from src.orchestration.deduped_tool_invoker import (  # noqa: E402, F401
     _HISTORY_TOOL_MESSAGE_CAP_CHARS,
     DedupedToolInvoker,
+    duplicate_call_banner,
 )
 
 # Executors + PerRunState moved to ``src.orchestration.graph_runtime`` in the
@@ -1498,18 +1499,22 @@ def build_agent_graph(
             key = _tool_call_key(call)
         if key is None:
             return None
+        _dup_hits = 0
         with _history_lock:
             cached = _per_run_state[0].tool_call_history.get(key)
             if cached is not None:
                 _per_run_state[0].tool_call_history.move_to_end(key)
+                _per_run_state[0].duplicate_hit_count[0] += 1
+                _dup_hits = _per_run_state[0].duplicate_hit_count[0]
         if cached is None:
             return None
         log = get_logger()
         log.warning("Duplicate tool call detected: %s (returning cached result)", tool_name)
+        # #2319: escalate from a soft "do not repeat" to a forced strategy change
+        # once the model keeps re-issuing identical calls (a loop the
+        # consecutive-error stuck-break misses when successful re-reads interleave).
         return ToolMessage(
-            content=(
-                "[Duplicate call — returning cached result. Do NOT repeat this call.]\n\n" + cached
-            ),
+            content=(duplicate_call_banner(_dup_hits) + cached),
             tool_call_id=call["id"],
             name=tool_name,
         )

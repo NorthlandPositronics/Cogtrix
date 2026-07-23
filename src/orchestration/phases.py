@@ -1188,6 +1188,82 @@ def normalize_native_tool_calls(message: Any) -> Any:
     )
 
 
+def repair_tool_call_arguments(message: Any) -> Any:
+    """Recover tool calls whose ``arguments`` is valid JSON followed by trailing data.
+
+    Some open-weight models (seen via OpenRouter → AtlasCloud/AkashML/Parasail)
+    emit a tool call whose ``arguments`` string is well-formed JSON with **extra
+    bytes appended** (e.g. ``'{"add": ["web_search"]} <junk>'``). LangChain's
+    ``parse_tool_call`` does ``json.loads(arguments)``, which raises
+    ``JSONDecodeError: Extra data``, so the call is demoted to
+    ``invalid_tool_calls`` carrying the **raw string verbatim**. On the next
+    request ``_lc_invalid_tool_call_to_openai_tool_call`` sends that raw string
+    unchanged; strict providers then ``json.loads`` it and reject with HTTP 400
+    ``Extra data: line 1 column N`` — killing the turn (#2290). Tolerant providers
+    accept it, so the failure is intermittent and provider-dependent.
+
+    This re-parses each invalid tool call's ``args`` with
+    ``json.JSONDecoder().raw_decode``, which reads the **first** complete JSON
+    value and ignores the trailing data. When that yields an object, the call is
+    promoted back to a valid structured ``tool_call`` (so it both serialises as
+    clean JSON *and* becomes executable as the model intended). Genuinely
+    unparseable invalid calls are left untouched. Returns the message unchanged
+    when there is nothing to repair.
+    """
+    import json
+
+    try:
+        from langchain_core.messages import AIMessage
+    except ImportError:
+        return message
+    if not isinstance(message, AIMessage):
+        return message
+    invalid_calls = list(getattr(message, "invalid_tool_calls", None) or [])
+    if not invalid_calls:
+        return message
+
+    recovered: list[dict] = []
+    still_invalid: list = []
+    decoder = json.JSONDecoder()
+    for ic in invalid_calls:
+        raw = ic.get("args") if isinstance(ic, dict) else getattr(ic, "args", None)
+        name = ic.get("name") if isinstance(ic, dict) else getattr(ic, "name", None)
+        tcid = ic.get("id") if isinstance(ic, dict) else getattr(ic, "id", None)
+        if isinstance(raw, str) and raw.strip() and name:
+            try:
+                parsed, _ = decoder.raw_decode(raw.strip())
+            except ValueError:
+                parsed = None
+            if isinstance(parsed, dict):
+                recovered.append({"name": name, "args": parsed, "id": tcid, "type": "tool_call"})
+                continue
+        still_invalid.append(ic)
+
+    if not recovered:
+        return message
+
+    existing_calls = list(getattr(message, "tool_calls", None) or [])
+    # Drop additional_kwargs["tool_calls"] so the OpenAI adapter serialises from
+    # the now-clean structured ``tool_calls`` rather than any stale raw copy.
+    extra = dict(getattr(message, "additional_kwargs", None) or {})
+    extra.pop("tool_calls", None)
+    log = get_logger()
+    log.warning(
+        "Repaired %d tool call(s) with trailing data after valid JSON "
+        "(promoted invalid_tool_calls → tool_calls): %s — #2290",
+        len(recovered),
+        ", ".join(str(tc["name"]) for tc in recovered),
+    )
+    return AIMessage(
+        content=getattr(message, "content", ""),
+        tool_calls=existing_calls + recovered,
+        invalid_tool_calls=still_invalid,
+        id=getattr(message, "id", None),
+        response_metadata=getattr(message, "response_metadata", None) or {},
+        additional_kwargs=extra,
+    )
+
+
 def strip_foreign_tool_call_xml(content: Any) -> Any:
     """Strip Qwen3-style XML tool-call markup from message content.
 

@@ -168,6 +168,40 @@ class TestDedupCache:
         # The underlying tool MUST NOT have been invoked.
         assert tool.invoke.call_count == 0
 
+    def test_duplicate_escalates_after_threshold(self):
+        """#2319: repeated identical calls escalate from a soft note to a forced
+        strategy change once the model is clearly looping."""
+        tool = MagicMock()
+        tool.name = "echo_tool"
+        invoker, state, _, _ = _make_invoker(tool=tool)
+        state.tool_call_history['echo_tool:{"text": "hello"}'] = "cached_payload"
+        call = {"name": "echo_tool", "args": {"text": "hello"}, "id": "c"}
+
+        results = [invoker.invoke_one(call, None) for _ in range(3)]
+
+        assert results[0].content.startswith("[Duplicate call")  # soft
+        assert results[1].content.startswith("[Duplicate call")  # soft
+        assert "stuck in a loop" in results[2].content  # escalated
+        assert "write_file" in results[2].content  # offers a concrete escape
+        assert state.duplicate_hit_count[0] == 3
+        assert tool.invoke.call_count == 0
+
+
+class TestDuplicateBanner:
+    def test_banner_escalates_at_threshold(self) -> None:
+        from src.orchestration.deduped_tool_invoker import (
+            _DUPLICATE_ESCALATION_THRESHOLD,
+            duplicate_call_banner,
+        )
+
+        assert duplicate_call_banner(1).startswith("[Duplicate call")
+        assert duplicate_call_banner(_DUPLICATE_ESCALATION_THRESHOLD - 1).startswith(
+            "[Duplicate call"
+        )
+        escalated = duplicate_call_banner(_DUPLICATE_ESCALATION_THRESHOLD)
+        assert escalated.startswith("[You have repeated")
+        assert "write_file" in escalated
+
 
 class TestTOCTOUPendingEventWaitPath:
     """Unit mirror of test_parallel_duplicate_tool_call_with_slow_invoke."""
