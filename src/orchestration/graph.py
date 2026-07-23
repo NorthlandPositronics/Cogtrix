@@ -405,7 +405,7 @@ def build_agent_graph(
             _bound_cache.move_to_end(fingerprint)
         else:
             tool_list = list(active_tools_list) if active_tools_list else []
-            if len(_bound_cache) > 8:
+            if len(_bound_cache) >= 8:
                 _bound_cache.popitem(last=False)
             _bound_cache[fingerprint] = llm.bind_tools(tool_list) if tool_list else llm
         model = _bound_cache[fingerprint]

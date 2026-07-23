@@ -742,6 +742,8 @@ def run_execution_phase(
             exec_config = copy(config)
             if exec_config.available_tools is not None:
                 exec_config.available_tools = dict(exec_config.available_tools)
+            if exec_config.active_tools_list is not None:
+                exec_config.active_tools_list = list(exec_config.active_tools_list)
             result = run_agent(
                 exec_prompt,
                 context_messages,

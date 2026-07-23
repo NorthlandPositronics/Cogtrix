@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.1.11](https://github.com/NorthlandPositronics/Cogtrix/compare/v0.1.10...v0.1.11) (2026-03-02)
+
+
+### Bug Fixes
+
+* cache off-by-one and fd leaks in bound-cache, guardrails, knowledge, and json_store ([191c86f](https://github.com/NorthlandPositronics/Cogtrix/commit/191c86fd9853167a93e7c586c3ab943409ca8e90))
+* deep-copy active_tools_list in run_execution_phase and cap compression fallback at _FALLBACK_MAX_CHARS ([e89e501](https://github.com/NorthlandPositronics/Cogtrix/commit/e89e5016b8a03980f0e2c9b3738b380c10f0ccb1))
+* eliminate orphaned tool-call chains, thread-safe slow-path counter, and LRU cache writeback ordering ([f4b72c0](https://github.com/NorthlandPositronics/Cogtrix/commit/f4b72c005c91259aff3a5e9a5a213b109d9a3ea8))
+* Round 8 bug fixes, documentation revision, and assistant refactor ([38c7a2b](https://github.com/NorthlandPositronics/Cogtrix/commit/38c7a2b8137de6cd30d093b28c02cf6331f57c74))
+
+
+### Documentation
+
+* holistic documentation revision — fix tool count, memory window, changelog gaps ([dc83c57](https://github.com/NorthlandPositronics/Cogtrix/commit/dc83c57ec812d67be696aa9dc3e3fe81778affa4))
+
 ## [0.1.10](https://github.com/NorthlandPositronics/Cogtrix/compare/v0.1.9...v0.1.10) (2026-03-02)
 
 
@@ -21,6 +36,13 @@
 * **scheduler:** recover in-flight messages on restart and add architectural review ([940cfb1](https://github.com/NorthlandPositronics/Cogtrix/commit/940cfb1d28fbec652ae3069c1177a7ca89504a74))
 * **whatsapp:** add session start, LID resolution, and chats overview to client ([c54e8d6](https://github.com/NorthlandPositronics/Cogtrix/commit/c54e8d6d6f3b4480095657627fd419173d3da304))
 * **whatsapp:** fix poll() chatId bug and add [@lid](https://github.com/lid) sender support ([a390e1c](https://github.com/NorthlandPositronics/Cogtrix/commit/a390e1cd5da01c54e8aecd8da61aa4b086b91b78))
+* **orchestration:** fix active_tools_list mutation, compression fallback cap, LRU writeback ordering, and cache off-by-one (BUG-031..035) ([e89e501](https://github.com/NorthlandPositronics/Cogtrix/commit/e89e501), [f4b72c0](https://github.com/NorthlandPositronics/Cogtrix/commit/f4b72c0))
+* **memory:** fix orphaned tool-chain cleanup, thread-safe slow-path counter, and fd leaks in json_store, guardrails, and knowledge (BUG-033,036,038..040) ([191c86f](https://github.com/NorthlandPositronics/Cogtrix/commit/191c86f))
+
+
+### Performance Improvements
+
+* **compression:** raise context compression threshold from 0.50 to 0.72 (PERF-001) ([f4b72c0](https://github.com/NorthlandPositronics/Cogtrix/commit/f4b72c0))
 
 
 ### Documentation

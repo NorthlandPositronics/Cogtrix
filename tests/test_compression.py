@@ -17,11 +17,11 @@ except ImportError:
 
 pytestmark = pytest.mark.skipif(not _HAS_LANGCHAIN, reason="langchain_core not installed")
 
-# Threshold: total_chars >= max_context_tokens * 4 * 0.5
-# With _TRIGGER_CONTEXT = 16_384, threshold = 32_768 chars.
-# Content of _TRIGGER_CHARS bytes (40 K) easily exceeds this.
+# Threshold: total_chars >= max_context_tokens * 4 * 0.72
+# With _TRIGGER_CONTEXT = 16_384, threshold = 47_186 chars.
+# Content of _TRIGGER_CHARS bytes (50 K) easily exceeds this.
 _TRIGGER_CONTEXT = 16_384
-_TRIGGER_CHARS = 40_000
+_TRIGGER_CHARS = 50_000
 
 
 def _make_old_ai_messages(n: int = 5) -> list:

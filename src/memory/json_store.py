@@ -192,6 +192,10 @@ class JsonFileMemoryStore(BaseMemoryStore):
                 self._consecutive_save_failures = 0
             except Exception:
                 try:
+                    os.close(tmp_fd)
+                except OSError:
+                    pass
+                try:
                     os.unlink(tmp_path)
                 except OSError:
                     pass

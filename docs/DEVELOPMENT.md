@@ -587,7 +587,7 @@ cogtrix/
 │   ├── rag/
 │   │   └── ingest.py         # Document ingestion
 │   │
-│   └── tools/                # Built-in tool modules (51 tools)
+│   └── tools/                # Built-in tool modules (52 tools)
 │       ├── brave_search.py   # Brave Search API
 │       ├── calculator.py     # Math expressions
 │       ├── datetime_tool.py  # Date/time utilities

@@ -1,6 +1,6 @@
 # Cogtrix Agent
 
-A modular AI assistant with 51 built-in tools, multi-provider LLM support, and intelligent memory management.
+A modular AI assistant with 52 built-in tools, multi-provider LLM support, and intelligent memory management.
 
 ---
 
@@ -12,7 +12,7 @@ Cogtrix is an **interactive command-line AI assistant** that connects to large l
 
 **Highlights:**
 
-- 51 built-in tools across 6 search providers, file I/O, shell, Python, HTTP, NLP, WhatsApp and Telegram messaging, and more
+- 52 built-in tools across 6 search providers, file I/O, shell, Python, HTTP, NLP, WhatsApp and Telegram messaging, and more
 - Three memory modes optimized for conversation, coding, or strategic reasoning — with hybrid memory (rolling summary + semantic recall)
 - Deep reasoning engine (Tree-of-Thought with iterative reflection) via `/think`
 - Task delegation across multiple LLM models via `/delegate`
@@ -214,7 +214,7 @@ Arrow keys, Home/End, and input history work out of the box (via `readline`).
 
 ---
 
-## Built-in Tools (51)
+## Built-in Tools (52)
 
 | Category | Tools |
 |----------|-------|
@@ -244,7 +244,7 @@ Full parameter reference: **[Tools Reference](docs/TOOLS_REFERENCE.md)**
 |------|----------|----------------|
 | `conversation` (default) | General chat, Q&A, research | 25 messages |
 | `code` | Programming, debugging | 30 messages + file/error tracking |
-| `reasoning` | Planning, architecture decisions | 40 messages + goal/decision tracking |
+| `reasoning` | Planning, architecture decisions | 30 messages + goal/decision tracking |
 
 All modes include **hybrid memory**: older messages are automatically compressed into a rolling summary, and (when an embedding provider is available) stored for semantic recall — so the agent retains awareness of the full conversation even after messages leave the sliding window. Token-aware trimming ensures the context always fits the model's context window.
 
@@ -313,7 +313,7 @@ For detailed debugging, run with `--debug` (logs every LLM call, tool input/outp
 | **[Configuration](docs/CONFIGURATION.md)** | Every config option, environment variables, search providers |
 | **[Providers](docs/PROVIDERS.md)** | Step-by-step: Ollama, OpenAI, Groq, Together, vLLM |
 | **[Memory Modes](docs/MEMORY_MODES.md)** | Conversation, code, and reasoning modes + hybrid memory (summary + recall) |
-| **[Tools Reference](docs/TOOLS_REFERENCE.md)** | All 51 tools with parameters and examples |
+| **[Tools Reference](docs/TOOLS_REFERENCE.md)** | All 52 tools with parameters and examples |
 | **[WhatsApp Guide](docs/WHATSAPP_GUIDE.md)** | Use Cogtrix as a WhatsApp assistant (with Docker Compose) |
 | **[Telegram Guide](docs/TELEGRAM_GUIDE.md)** | Use Cogtrix as a Telegram assistant via a bot |
 | **[Assistant Mode](docs/CONFIGURATION.md#assistant-mode)** | Run Cogtrix as a headless WhatsApp/Telegram messaging daemon |
@@ -326,7 +326,7 @@ For detailed debugging, run with `--debug` (logs every LLM call, tool input/outp
 
 - Want to connect OpenAI, Groq, or another LLM? See [Providers](docs/PROVIDERS.md).
 - Want to customize settings, add search API keys, or set up messaging? See [Configuration](docs/CONFIGURATION.md).
-- Want to know what all 51 tools do? See [Tools Reference](docs/TOOLS_REFERENCE.md).
+- Want to know what all 52 tools do? See [Tools Reference](docs/TOOLS_REFERENCE.md).
 
 ---
 

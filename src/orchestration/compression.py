@@ -23,7 +23,7 @@ except ImportError:
 
 COMPRESSION_MIN_AGE_CYCLES = 3
 COMPRESSION_MIN_CHARS = 2_000
-_COMPRESSION_THRESHOLD_RATIO = 0.50
+_COMPRESSION_THRESHOLD_RATIO = 0.72
 _FALLBACK_MAX_CHARS = 30_000
 
 
@@ -117,7 +117,7 @@ def apply_message_compression(
       1. More than *min_age_cycles* call_model outputs appear after it.
       2. Its content length >= *min_chars*.
 
-    The pass itself only runs when total message chars reach 50 % of the
+    The pass itself only runs when total message chars reach 72 % of the
     context window, and is skipped entirely for providers with fewer than
     16 384 context tokens (where trimming is cheaper).
     """
@@ -186,7 +186,9 @@ def apply_message_compression(
             try:
                 return idx, compress_tool_message(content, tool_name, llm)
             except Exception:
-                return idx, truncate_tool_output(content, len(content) * 3 // 4)
+                return idx, truncate_tool_output(
+                    content, min(len(content) * 3 // 4, _FALLBACK_MAX_CHARS)
+                )
 
         workers = min(len(eligible), 4)
         with concurrent.futures.ThreadPoolExecutor(

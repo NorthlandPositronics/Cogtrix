@@ -35,6 +35,8 @@ except ImportError:  # pragma: no cover
 
 log = logging.getLogger("cogtrix")
 
+TS_DISPLAY_FORMAT = "%Y-%m-%d %H:%M:%S"
+
 # Summarize when at least this many messages have fallen out of the
 # sliding window since the last summary was generated.
 _SUMMARY_BATCH_SIZE = 10
@@ -392,11 +394,13 @@ class BaseMemoryManager(ABC):
         ):
             return
 
-        if self._slow_path_failures >= _SLOW_PATH_MAX_FAILURES:
+        with self._hybrid_lock:
+            slow_path_disabled = self._slow_path_failures >= _SLOW_PATH_MAX_FAILURES
+        if slow_path_disabled:
             log.warning(
                 "Background memory slow-path disabled after %d consecutive failures — "
                 "summarization LLM may be unreachable",
-                self._slow_path_failures,
+                _SLOW_PATH_MAX_FAILURES,
             )
             return
 
@@ -448,9 +452,11 @@ class BaseMemoryManager(ABC):
             self._save_hybrid_meta()
             if self._vector_store is not None:
                 self._vector_store.save()
-            self._slow_path_failures = 0
+            with self._hybrid_lock:
+                self._slow_path_failures = 0
         except Exception as exc:
-            self._slow_path_failures += 1
+            with self._hybrid_lock:
+                self._slow_path_failures += 1
             log.warning("Background memory update failed: %s", exc)
 
     def join_background(self, timeout: float = 60.0) -> None:
@@ -681,6 +687,24 @@ class BaseMemoryManager(ABC):
             # Check standalone AI message with bad content
             if is_ai and _is_bad_ai_content(content):
                 removed += 1
+                while cleaned:
+                    tail = cleaned[-1]
+                    if isinstance(tail, dict):
+                        tail_type = tail.get("type", "")
+                    elif hasattr(tail, "content"):
+                        tail_type = type(tail).__name__.lower()
+                    else:
+                        break
+                    is_tool_tail = tail_type in ("tool", "toolmessage")
+                    is_ai_tc_tail = tail_type in (
+                        "ai",
+                        "aimessage",
+                    ) and BaseMemoryManager._has_tool_calls(tail)
+                    if is_tool_tail or is_ai_tc_tail:
+                        cleaned.pop()
+                        removed += 1
+                    else:
+                        break
                 i += 1
                 continue
 
@@ -766,7 +790,7 @@ class BaseMemoryManager(ABC):
             try:
                 raw = ts.rstrip("Z")
                 dt = datetime.fromisoformat(raw)
-                display = dt.strftime("%Y-%m-%d %H:%M:%S") + " UTC"
+                display = dt.strftime(TS_DISPLAY_FORMAT) + " UTC"
             except (ValueError, TypeError):
                 display = ts
 

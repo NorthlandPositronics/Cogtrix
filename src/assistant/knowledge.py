@@ -194,6 +194,10 @@ class SharedKnowledgeStore:
                 os.replace(tmp_path, self._facts_path)
             except Exception:
                 try:
+                    os.close(tmp_fd)
+                except OSError:
+                    pass
+                try:
                     os.unlink(tmp_path)
                 except OSError:
                     pass
