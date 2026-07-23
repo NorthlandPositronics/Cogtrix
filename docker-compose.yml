@@ -1,7 +1,7 @@
-# Cogtrix + Waha (WhatsApp) Docker Compose
+# Cogtrix + Waha (WhatsApp) + MCP Docker Compose
 #
 # Usage:
-#   docker compose up -d              # start Waha + Cogtrix
+#   docker compose up -d              # start Waha + MCP + Cogtrix
 #   open http://localhost:3000        # scan QR code with your phone
 #   docker compose exec cogtrix python cogtrix.py   # start chatting
 #
@@ -35,6 +35,7 @@ services:
       - waha
     volumes:
       - cogtrix-data:/app/data
+      - mcp-workspace:/app/mcp-data    # shared with mcp-filesystem
       # Or mount a local directory for easy access:
       # - $HOME/.config/cogtrix/data:/app/data
       # Mount your config file (optional):
@@ -73,6 +74,26 @@ services:
       # -- Optional Telegram bot --
       # COGTRIX_TELEGRAM_TOKEN: "123456:ABC-DEF..."
 
+      # -- MCP server (connects to the mcp-filesystem service below) --
+      # Add to your .cogtrix.yaml:
+      #   mcp_servers:
+      #     filesystem:
+      #       url: http://mcp-filesystem:8000/sse
+      #       requires_confirmation: false
+
+  # ── MCP: Filesystem server (SSE bridge via supergateway) ─────
+  mcp-filesystem:
+    image: supercorp/supergateway
+    container_name: mcp-filesystem
+    restart: unless-stopped
+    command: >
+      --stdio "npx -y @modelcontextprotocol/server-filesystem /data"
+      --port 8000
+    volumes:
+      - mcp-workspace:/data
+    expose:
+      - "8000"
+
   # ── Ollama (optional — uncomment to run Ollama in Docker) ─────
   # ollama:
   #   image: ollama/ollama
@@ -92,4 +113,5 @@ services:
 volumes:
   waha-data:
   cogtrix-data:
+  mcp-workspace:
   # ollama-data:

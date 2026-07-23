@@ -36,12 +36,16 @@ You can configure multiple providers and switch between them at runtime with `/p
 
 ## Overview
 
-Cogtrix supports two provider types:
+Cogtrix supports four provider types:
 
 | Type | Protocol | Use For |
 |------|----------|---------|
 | `openai` | OpenAI API | OpenAI, Groq, Together, vLLM, LocalAI |
 | `ollama` | Ollama API | Ollama servers |
+| `anthropic` | Anthropic API | Anthropic Claude (requires `cogtrix[anthropic]`) |
+| `google` | Google Generative AI | Google Gemini (requires `cogtrix[google]`) |
+
+Provider type values are case-insensitive (`"OpenAI"`, `"OLLAMA"`, etc. all work).
 
 ---
 
@@ -72,7 +76,7 @@ python cogtrix.py -p openai -m gpt-4.1
 **Config file:**
 ```yaml
 provider: openai
-inference:
+providers:
   openai:
     type: openai
     model: gpt-4.1
@@ -128,7 +132,7 @@ Or use a config file:
 
 ```yaml
 provider: ollama
-inference:
+providers:
   ollama:
     type: ollama
     base_url: "http://192.168.1.100:11434"
@@ -152,7 +156,7 @@ inference:
 
 ```yaml
 provider: gpu-server
-inference:
+providers:
   gpu-server:
     type: ollama
     base_url: "http://192.168.1.100:11434"
@@ -176,7 +180,7 @@ Fast inference with open-source models.
 2. Configure (`.cogtrix.yaml`):
    ```yaml
    provider: groq
-   inference:
+   providers:
      groq:
        type: openai
        base_url: "https://api.groq.com/openai/v1"
@@ -211,7 +215,7 @@ Wide model selection with competitive pricing.
 2. Configure (`.cogtrix.yaml`):
    ```yaml
    provider: together
-   inference:
+   providers:
      together:
        type: openai
        base_url: "https://api.together.xyz/v1"
@@ -251,7 +255,7 @@ Run models locally with vLLM server.
 3. Configure (`.cogtrix.yaml`):
    ```yaml
    provider: vllm
-   inference:
+   providers:
      vllm:
        type: openai
        base_url: "http://localhost:8000/v1"
@@ -267,7 +271,7 @@ Configure multiple providers for different use cases:
 ```yaml
 provider: ollama-local
 
-inference:
+providers:
   ollama-local:
     type: ollama
     model: qwen3:8b
@@ -284,7 +288,7 @@ inference:
     api_key: "gsk-..."
     model: llama-3.3-70b-versatile
 
-model_aliases:
+models:
   fast: groq/llama-3.3-70b-versatile
   smart: openai/gpt-4.1
   local: ollama-local/qwen3:8b
@@ -417,5 +421,6 @@ Check:
 
 ## See Also
 
-- [CONFIGURATION.md](CONFIGURATION.md) — Full configuration reference
-- [TOOLS_REFERENCE.md](TOOLS_REFERENCE.md) — Delegation tools
+- [Configuration Reference](CONFIGURATION.md) — provider YAML format and all config keys
+- [Architecture Overview](ARCHITECTURE.md) — provider registry internals
+- [Tools Reference](TOOLS_REFERENCE.md) — tools that require provider API keys

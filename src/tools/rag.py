@@ -30,8 +30,9 @@ _DEFAULT_OLLAMA_EMBEDDING_MODEL = os.getenv("OLLAMA_EMBEDDING_MODEL", "nomic-emb
 _rag_config: dict[str, str | None] = {
     "embedding_provider": _DEFAULT_EMBEDDING_PROVIDER,
     "embedding_model": _DEFAULT_OLLAMA_EMBEDDING_MODEL,
-    "ollama_base_url": _DEFAULT_OLLAMA_BASE_URL,
+    "base_url": _DEFAULT_OLLAMA_BASE_URL,
     "api_key": None,
+    "vectordb_dir": str(VECTOR_DIR),
 }
 
 
@@ -45,17 +46,11 @@ def configure_rag(config: dict) -> None:
         config: Dictionary with keys:
             - embedding_provider: "openai", "ollama", or "google"
             - embedding_model: Model name for embeddings
-            - ollama_base_url: Ollama server URL (if using Ollama)
+            - base_url: Ollama server URL (if using Ollama)
             - api_key: Provider API key (for OpenAI/Google; None for Ollama)
+            - vectordb_dir: Path to the FAISS index directory
     """
-    if "embedding_provider" in config:
-        _rag_config["embedding_provider"] = config["embedding_provider"]
-    if "embedding_model" in config:
-        _rag_config["embedding_model"] = config["embedding_model"]
-    if "ollama_base_url" in config:
-        _rag_config["ollama_base_url"] = config["ollama_base_url"]
-    if "api_key" in config:
-        _rag_config["api_key"] = config["api_key"]
+    _rag_config.update(config)
 
 
 class KnowledgeQueryInput(BaseModel):
@@ -74,7 +69,7 @@ def _get_embeddings():
 
     provider = (_rag_config["embedding_provider"] or "ollama").lower()
     model = _rag_config["embedding_model"]
-    base_url = _rag_config["ollama_base_url"]
+    base_url = _rag_config["base_url"]
     api_key = _rag_config["api_key"]
 
     return create_embeddings(provider, model=model, base_url=base_url, api_key=api_key)
@@ -97,7 +92,8 @@ def query_knowledge_base(
     if not FAISS_AVAILABLE:
         return "Error: FAISS not available. Install: pip install faiss-cpu"
 
-    if not VECTOR_DIR.exists():
+    vector_dir = Path(_rag_config["vectordb_dir"] or str(VECTOR_DIR))
+    if not vector_dir.exists():
         return (
             "No knowledge base found. Please build it first.\n\n"
             "Steps:\n"
@@ -115,7 +111,7 @@ def query_knowledge_base(
 
         # Load the vector store
         store = FAISS.load_local(
-            str(VECTOR_DIR),
+            str(vector_dir),
             embeddings,
             allow_dangerous_deserialization=True,
         )
@@ -168,17 +164,18 @@ def get_knowledge_base_info() -> str:
     Returns:
         Information about the vector store or status message
     """
-    if not VECTOR_DIR.exists():
+    vector_dir = Path(_rag_config["vectordb_dir"] or str(VECTOR_DIR))
+    if not vector_dir.exists():
         return "No knowledge base found. Run 'python cogtrix.py --ingest' to create one."
 
     try:
         # Check for index files
-        index_files = list(VECTOR_DIR.glob("*"))
+        index_files = list(vector_dir.glob("*"))
         if not index_files:
             return "Knowledge base directory exists but appears empty."
 
         info = []
-        info.append(f"Knowledge base location: {VECTOR_DIR.absolute()}")
+        info.append(f"Knowledge base location: {vector_dir.absolute()}")
         info.append(f"Index files: {len(index_files)}")
 
         # Show file sizes
@@ -195,7 +192,7 @@ def get_knowledge_base_info() -> str:
         provider = _rag_config["embedding_provider"]
         info.append(f"\nEmbedding provider: {provider}")
         if provider == "ollama":
-            info.append(f"Ollama URL: {_rag_config['ollama_base_url']}")
+            info.append(f"Ollama URL: {_rag_config['base_url']}")
             info.append(f"Ollama model: {_rag_config['embedding_model']}")
 
         return "\n".join(info)

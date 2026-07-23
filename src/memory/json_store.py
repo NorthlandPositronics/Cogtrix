@@ -5,6 +5,8 @@ Saves conversation history to data/history/{session_id}.json.
 
 import json
 import logging
+import os
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -142,8 +144,10 @@ class JsonFileMemoryStore(BaseMemoryStore):
             )
 
     def _session_path(self, session_id: str) -> Path:
-        # Sanitize: replace path separators and collapse traversal attempts
-        safe_id = session_id.replace("/", "_").replace("\\", "_").replace("..", "_")
+        # Sanitize: replace path separators, traversal sequences, and null bytes
+        safe_id = (
+            session_id.replace("\x00", "_").replace("/", "_").replace("\\", "_").replace("..", "_")
+        )
 
         # Enforce a reasonable length (filesystem limit is typically 255)
         if len(safe_id) > 128:
@@ -151,8 +155,10 @@ class JsonFileMemoryStore(BaseMemoryStore):
 
         # Resolve and verify the path stays inside base_path
         full_path = (self.base_path / f"{safe_id}.json").resolve()
-        if not str(full_path).startswith(str(self.base_path.resolve())):
-            raise ValueError(f"Invalid session ID: {session_id}")
+        try:
+            full_path.relative_to(self.base_path.resolve())
+        except ValueError:
+            raise ValueError(f"Invalid session ID: {session_id}") from None
 
         return full_path
 
@@ -177,8 +183,17 @@ class JsonFileMemoryStore(BaseMemoryStore):
         path = self._session_path(session_id)
         serializable = [_message_to_dict(m) for m in messages]
         try:
-            with path.open("w", encoding="utf-8") as f:
-                json.dump(serializable, f, ensure_ascii=False, indent=2)
+            tmp_fd, tmp_path = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
+            try:
+                with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
+                    json.dump(serializable, f, ensure_ascii=False, indent=2)
+                os.replace(tmp_path, path)
+            except Exception:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+                raise
         except OSError as exc:
             self._save_disabled = True
             log.warning("Cannot save history to %s: %s. History will not be saved.", path, exc)

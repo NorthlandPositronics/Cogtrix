@@ -187,6 +187,9 @@ class TestHybridMemoryIntegration:
         for i in range(12):
             mgr.update(f"msg {i}", f"response {i}")
 
+        # Summarization runs in a background thread; wait for it.
+        mgr.join_background()
+
         assert mgr._summary is not None
         assert "Summary" in mgr._summary
 

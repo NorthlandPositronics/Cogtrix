@@ -324,7 +324,7 @@ class CodeDevelopmentMemoryManager(BaseMemoryManager):
 
         # Incrementally summarize messages outside the sliding window
         window_size = self._mode_config["working_memory_size"]
-        self._maybe_summarize(self._messages, window_size)
+        self._schedule_slow_path(self._messages, window_size)
 
         # Extract file references
         if self._mode_config["track_files"]:
@@ -342,11 +342,7 @@ class CodeDevelopmentMemoryManager(BaseMemoryManager):
             "When asked to analyze/modify code: read files, understand context, "
             "make changes or provide complete solutions. "
             "Don't stop to ask what to do — execute the requested work. "
-            "Be concise, show code examples, track file paths and errors.\n\n"
-            "When reviewing or analyzing multiple files, consider using "
-            "`delegate_parallel` to process them concurrently. Use "
-            "`delegate_task` to offload focused subtasks like code review, "
-            "test generation, or documentation writing to a specialized model."
+            "Be concise, show code examples, track file paths and errors."
         )
 
     def clear(self) -> None:

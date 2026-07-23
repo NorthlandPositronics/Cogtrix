@@ -11,6 +11,8 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
+import tempfile
 import threading
 import time
 from copy import copy
@@ -20,8 +22,8 @@ from typing import Any
 
 log = logging.getLogger("cogtrix")
 
-_FACTS_PATH = Path("data/knowledge/facts.json")
-_FAISS_INDEX_DIR = "data/vectordb/knowledge"
+_DEFAULT_FACTS_SUBDIR = "knowledge/facts.json"
+_DEFAULT_FAISS_SUBDIR = "vectordb/knowledge"
 
 _EXTRACT_FACTS_SYSTEM = """Extract durable factual knowledge from this conversation exchange.
 
@@ -78,17 +80,29 @@ class SharedKnowledgeStore:
         know_cfg: dict[str, Any] = asst_cfg.get("knowledge", {})
         self._max_facts: int = int(know_cfg.get("max_facts", 10000))
 
+        data_dir = Path(know_cfg.get("data_dir", "data")).resolve()
+        self._facts_path: Path = data_dir / _DEFAULT_FACTS_SUBDIR
+        self._faiss_index_dir: str = str(data_dir / _DEFAULT_FAISS_SUBDIR)
+
         self._facts: list[Fact] = []
         self._fact_hashes: set[str] = set()
         self._lock = threading.Lock()
+        self._index_lock = threading.Lock()
 
         self._vectorstore: Any = None
         self._embedding_fn: Any = None
         self._embedding_tag: str | None = None
 
-        _FACTS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        self._facts_path.parent.mkdir(parents=True, exist_ok=True)
         self._load()
-        self._setup_embeddings()
+
+        self._embeddings_ready = threading.Event()
+        self._embedding_thread = threading.Thread(
+            target=self._setup_embeddings_background,
+            name="knowledge-embeddings",
+            daemon=True,
+        )
+        self._embedding_thread.start()
 
     # ------------------------------------------------------------------
     # Public API
@@ -132,8 +146,9 @@ class SharedKnowledgeStore:
                 self._fact_hashes.add(fhash)
                 added.append(fact)
 
+            if added:
+                log.debug("Knowledge store: added %d new fact(s)", len(added))
         if added:
-            log.debug("Knowledge store: added %d new fact(s)", len(added))
             self._index_facts(added)
 
     def recall(self, query: str, k: int = 5) -> str | None:
@@ -147,8 +162,8 @@ class SharedKnowledgeStore:
         if not facts_snapshot:
             return None
 
-        if self._vectorstore is not None:
-            results = self._recall_semantic(query, k)
+        if self._vectorstore is not None and self._embeddings_ready.is_set():
+            results = self._recall_semantic(query, k, facts_snapshot)
         else:
             results = self._recall_keyword(query, k, facts_snapshot)
 
@@ -165,14 +180,28 @@ class SharedKnowledgeStore:
 
         try:
             data = [asdict(f) for f in facts_snapshot]
-            _FACTS_PATH.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
-            log.debug("Knowledge store: saved %d facts to %s", len(facts_snapshot), _FACTS_PATH)
+            tmp_fd, tmp_path = tempfile.mkstemp(dir=str(self._facts_path.parent), suffix=".tmp")
+            try:
+                with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
+                    json.dump(data, f, ensure_ascii=False, indent=2)
+                os.replace(tmp_path, self._facts_path)
+            except Exception:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+                raise
+            log.debug(
+                "Knowledge store: saved %d facts to %s",
+                len(facts_snapshot),
+                self._facts_path,
+            )
         except Exception as exc:
             log.warning("Knowledge store: save failed: %s", exc)
 
-        if self._vectorstore is not None:
+        if self._vectorstore is not None and self._embeddings_ready.is_set():
             try:
-                idx_dir = Path(_FAISS_INDEX_DIR)
+                idx_dir = Path(self._faiss_index_dir)
                 idx_dir.mkdir(parents=True, exist_ok=True)
                 self._vectorstore.save_local(str(idx_dir))
                 meta = {"embedding_model": self._embedding_tag}
@@ -221,18 +250,17 @@ class SharedKnowledgeStore:
     # Recall helpers
     # ------------------------------------------------------------------
 
-    def _recall_semantic(self, query: str, k: int) -> list[Fact]:
+    def _recall_semantic(self, query: str, k: int, facts_snapshot: list[Fact]) -> list[Fact]:
         """Semantic recall via FAISS."""
-        try:
-            results = self._vectorstore.similarity_search(query, k=k)
-        except Exception as exc:
-            log.debug("FAISS recall failed: %s", exc)
-            return self._recall_keyword(query, k, self._facts)
+        with self._index_lock:
+            try:
+                results = self._vectorstore.similarity_search(query, k=k)
+            except Exception as exc:
+                log.debug("FAISS recall failed: %s", exc)
+                return self._recall_keyword(query, k, facts_snapshot)
 
+        hash_to_fact = {f.fact_hash: f for f in facts_snapshot}
         matched: list[Fact] = []
-        with self._lock:
-            hash_to_fact = {f.fact_hash: f for f in self._facts}
-
         for doc in results:
             fhash = doc.metadata.get("fact_hash")
             if fhash and fhash in hash_to_fact:
@@ -259,6 +287,15 @@ class SharedKnowledgeStore:
     # ------------------------------------------------------------------
     # FAISS index
     # ------------------------------------------------------------------
+
+    def _setup_embeddings_background(self) -> None:
+        """Initialise embeddings in a background thread."""
+        try:
+            self._setup_embeddings()
+        except Exception as exc:
+            log.debug("Knowledge store: background embedding setup failed: %s", exc)
+        finally:
+            self._embeddings_ready.set()
 
     def _setup_embeddings(self) -> None:
         """Initialise the embedding function and load or create a FAISS index."""
@@ -317,7 +354,7 @@ class SharedKnowledgeStore:
 
     def _load_or_create_index(self) -> None:
         """Load an existing FAISS index or build one from stored facts."""
-        idx_dir = Path(_FAISS_INDEX_DIR)
+        idx_dir = Path(self._faiss_index_dir)
         meta_path = idx_dir / "meta.json"
 
         if meta_path.exists():
@@ -358,24 +395,25 @@ class SharedKnowledgeStore:
         if self._embedding_fn is None:
             return
 
-        try:
-            from langchain_community.vectorstores import FAISS
-            from langchain_core.documents import Document
+        with self._index_lock:
+            try:
+                from langchain_community.vectorstores import FAISS
+                from langchain_core.documents import Document
 
-            docs = [
-                Document(
-                    page_content=f"{f.entity}: {f.fact}",
-                    metadata={"fact_hash": f.fact_hash},
-                )
-                for f in facts
-            ]
+                docs = [
+                    Document(
+                        page_content=f"{f.entity}: {f.fact}",
+                        metadata={"fact_hash": f.fact_hash},
+                    )
+                    for f in facts
+                ]
 
-            if self._vectorstore is None:
-                self._vectorstore = FAISS.from_documents(docs, self._embedding_fn)
-            else:
-                self._vectorstore.add_documents(docs)
-        except Exception as exc:
-            log.debug("Knowledge store: FAISS indexing failed: %s", exc)
+                if self._vectorstore is None:
+                    self._vectorstore = FAISS.from_documents(docs, self._embedding_fn)
+                else:
+                    self._vectorstore.add_documents(docs)
+            except Exception as exc:
+                log.debug("Knowledge store: FAISS indexing failed: %s", exc)
 
     # ------------------------------------------------------------------
     # Persistence helpers
@@ -383,17 +421,17 @@ class SharedKnowledgeStore:
 
     def _load(self) -> None:
         """Load facts from disk."""
-        if not _FACTS_PATH.exists():
+        if not self._facts_path.exists():
             return
 
         try:
-            raw = json.loads(_FACTS_PATH.read_text(encoding="utf-8"))
+            raw = json.loads(self._facts_path.read_text(encoding="utf-8"))
         except Exception as exc:
             log.warning("Knowledge store: failed to load facts: %s", exc)
             return
 
         if not isinstance(raw, list):
-            log.warning("Knowledge store: unexpected format in %s", _FACTS_PATH)
+            log.warning("Knowledge store: unexpected format in %s", self._facts_path)
             return
 
         for item in raw:
@@ -413,7 +451,7 @@ class SharedKnowledgeStore:
             except (KeyError, TypeError, ValueError) as exc:
                 log.debug("Knowledge store: skipping malformed fact entry: %s", exc)
 
-        log.debug("Knowledge store: loaded %d facts from %s", len(self._facts), _FACTS_PATH)
+        log.debug("Knowledge store: loaded %d facts from %s", len(self._facts), self._facts_path)
 
 
 # ------------------------------------------------------------------
@@ -430,20 +468,23 @@ def create_extraction_llm(model_ref: str, config: Any) -> Any | None:
     try:
         from src.agent.core import create_llm_from_provider_config
 
-        aliases = getattr(config, "model_aliases", None) or {}
+        models = getattr(config, "models", None) or {}
         provider_name: str | None = None
         model_name: str | None = None
 
-        if model_ref in aliases:
-            alias_value = aliases[model_ref]
-            if isinstance(alias_value, dict):
-                provider_name = alias_value.get("provider", config.provider)
-                model_name = alias_value.get("model")
-            elif isinstance(alias_value, str) and "/" in alias_value:
-                provider_name, model_name = alias_value.split("/", 1)
+        if model_ref in models:
+            model_entry = models[model_ref]
+            if hasattr(model_entry, "provider"):
+                provider_name = model_entry.provider
+                model_name = model_entry.model
+            elif isinstance(model_entry, dict):
+                provider_name = model_entry.get("provider", config.provider)
+                model_name = model_entry.get("model")
+            elif isinstance(model_entry, str) and "/" in model_entry:
+                provider_name, model_name = model_entry.split("/", 1)
             else:
                 provider_name = config.provider
-                model_name = str(alias_value)
+                model_name = str(model_entry)
         elif "/" in model_ref:
             provider_name, model_name = model_ref.split("/", 1)
         else:

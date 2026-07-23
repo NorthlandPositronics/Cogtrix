@@ -487,7 +487,7 @@ class TestCodeTimestamps:
             datetime.fromisoformat(ts)
 
     def test_prepare_context_injects_timestamps(self):
-        """Test that prepare_context prepends timestamps to message content."""
+        """Timestamps are prepended to HumanMessages only (not AI — the LLM mimics them)."""
         manager = CodeDevelopmentMemoryManager(MockStore(), "test")
         manager.load()
         manager.update("Fix the bug", "Done.")
@@ -496,7 +496,8 @@ class TestCodeTimestamps:
 
         for msg in context.messages:
             content = msg.content if hasattr(msg, "content") else msg["content"]
-            assert content.startswith("[")
+            if type(msg).__name__ == "HumanMessage":
+                assert content.startswith("[")
 
     def test_to_dict_preserves_timestamps(self):
         """Test that serialization includes timestamps."""

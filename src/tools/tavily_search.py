@@ -309,7 +309,11 @@ TOOL_CONFIGS = [
             "unavailable or for quick, low-stakes lookups.\n"
             "\n"
             "Output includes: AI summary (optional), title, URL, relevance "
-            "score, and extracted page content per result."
+            "score, and extracted page content per result.\n"
+            "\n"
+            "If results for one query are insufficient, issue a follow-up "
+            "search with a different angle or more specific terms before "
+            "drawing conclusions."
         ),
         "input_schema": TavilySearchInput,
         "function": tavily_search,

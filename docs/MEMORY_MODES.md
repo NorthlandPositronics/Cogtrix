@@ -38,7 +38,7 @@ Cogtrix uses a pluggable memory system that optimizes context management for dif
         ▼                     ▼                     ▼
 ┌───────────────┐     ┌───────────────┐     ┌───────────────┐
 │ Conversation  │     │     Code      │     │   Reasoning   │
-│   (25 msgs)   │     │  (30 msgs)    │     │  (40 msgs)    │
+│   (25 msgs)   │     │  (30 msgs)    │     │  (30 msgs)    │
 └───────┬───────┘     └───────┬───────┘     └───────┬───────┘
         │                     │                     │
         └─────────────────────┼─────────────────────┘
@@ -87,7 +87,7 @@ What the LLM actually sees on each turn:
 │  User: How should I structure the database schema?      │
 │  Assistant: For your e-commerce project, I recommend... │
 ├─────────────────────────────────────────────────────────┤
-│  [Sliding window: last 25/30/40 messages verbatim]      │
+│  [Sliding window: last 25/30 messages verbatim]      │
 │  [2026-02-14 15:23:05 UTC] Human: "..."                 │
 │  [2026-02-14 15:23:12 UTC] AI: "..."                    │
 │  Human: "..." ← Current input                           │
@@ -124,7 +124,7 @@ This allows the agent to recall specific details from much earlier in the conver
 
 **Graceful degradation:** If no embedding provider is available, vector recall is simply skipped. The sliding window and rolling summary still function normally.
 
-**Configuring embeddings:** To explicitly set the embedding provider and model, use the [`embedding` section](CONFIGURATION.md#embedding-section) in your config file. If not configured, Cogtrix auto-detects an embedding provider at startup (tries Ollama first, then OpenAI).
+**Configuring embeddings:** Cogtrix auto-detects an embedding provider at startup (tries Ollama first, then OpenAI). To explicitly control which embedding model is used for hybrid memory, define a model entry in the [`models` registry](CONFIGURATION.md#models) and configure `rag.model` to reference it — the same model is used for both RAG ingestion and memory vector recall.
 
 **Embedding model tracking:** The embedding model name is stored alongside the FAISS index. If you switch embedding models between sessions, the stale index is automatically discarded and rebuilt from scratch.
 
@@ -144,7 +144,7 @@ memory:
       summarization: true
       vector_recall_k: 3
     reasoning:
-      working_memory_size: 40
+      working_memory_size: 30
       summarization: true
       vector_recall_k: 3
 ```
@@ -191,7 +191,7 @@ This gives the model a sense of time: it can see how long a response took, how m
 
 | Aspect | Conversation | Code | Reasoning |
 |--------|--------------|------|-----------|
-| **Working Memory** | 25 messages | 30 messages | 40 messages |
+| **Working Memory** | 25 messages | 30 messages | 30 messages |
 | **Best For** | General chat, Q&A | Programming, debugging | Planning, decisions |
 | **Tracks** | Topics, entities | Files, errors, changes | Goals, decisions, constraints |
 | **Context Focus** | Conversation flow | Current code + task | Problem + objectives |
@@ -398,11 +398,11 @@ Designed for deep thinking with goal and decision tracking:
 │  │  Related: [recalled constraint discussion]               │  │
 │  └──────────────────────────────────────────────────────────┘  │
 │                                                                │
-│  Working Memory (Last 40 messages, timestamped)                │
+│  Working Memory (Last 30 messages, timestamped)                │
 │  ┌──────────────────────────────────────────────────────────┐  │
 │  │  [09:00:15 UTC] Human: "Should we use microservices?"   │  │
 │  │  [09:01:03 UTC] AI: "Let me analyze the trade-offs..."  │  │
-│  │  ... (up to 40 messages)                                 │  │
+│  │  ... (up to 30 messages)                                 │  │
 │  └──────────────────────────────────────────────────────────┘  │
 │                                                                │
 │  Goal Hierarchy                                                │
@@ -456,7 +456,7 @@ What gets sent to the LLM:
 │ Recent Decisions                       │
 │ "#1: Use event-driven - Rationale:..." │
 ├────────────────────────────────────────┤
-│ Working Memory (Last 40 messages)      │
+│ Working Memory (Last 30 messages)      │
 │   [09:00:15 UTC] Human: "..."          │
 │   [09:01:03 UTC] AI: "..."             │
 └────────────────────────────────────────┘
@@ -477,7 +477,7 @@ memory:
   mode: reasoning
   modes:
     reasoning:
-      working_memory_size: 40
+      working_memory_size: 30
       max_decisions: 20
       max_goals: 10
       summarization: true
@@ -486,7 +486,7 @@ memory:
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `working_memory_size` | 40 | Number of messages to keep |
+| `working_memory_size` | 30 | Number of messages to keep |
 | `max_decisions` | 20 | Maximum decisions to track |
 | `max_goals` | 10 | Maximum goals to track |
 | `summarization` | `true` | Enable rolling summary of older messages |
@@ -511,7 +511,7 @@ memory:
       summarization: true
       vector_recall_k: 3
     reasoning:
-      working_memory_size: 40
+      working_memory_size: 30
       summarization: true
       vector_recall_k: 3
 ```
@@ -624,5 +624,5 @@ The `max_tokens` parameter sent to the LLM is also dynamically calculated to avo
 
 ## See Also
 
-- [CONFIGURATION.md](CONFIGURATION.md) — Full configuration reference
-- [ARCHITECTURE.md](ARCHITECTURE.md) — System internals
+- [Configuration Reference](CONFIGURATION.md) — memory and summarization settings
+- [Architecture Overview](ARCHITECTURE.md) — how memory fits in the execution pipeline

@@ -64,7 +64,8 @@ def configure_exa(config: dict[str, Any]) -> None:
     Expected keys:
         api_key  - Exa API key (or read from EXA_API_KEY env var)
     """
-    _exa_config.update(config)
+    global _exa_config
+    _exa_config = {**_exa_config, **config}
 
 
 def _get_api_key() -> str | None:
@@ -322,25 +323,9 @@ TOOL_CONFIGS = [
     {
         "name": "exa_search",
         "description": (
-            "Search the web using Exa, an AI-native semantic search engine. "
-            "Exa uses neural embeddings to understand the meaning of queries "
-            "(not just keywords) and returns extracted page content.\n"
-            "\n"
-            "Three search modes:\n"
-            "- 'auto'    — Exa picks neural or keyword automatically\n"
-            "- 'neural'  — semantic/meaning-based ranking (best for "
-            "conceptual queries)\n"
-            "- 'keyword' — traditional keyword matching\n"
-            "\n"
-            "USE THIS TOOL WHEN:\n"
-            "- Exact keywords are unclear and you need semantic understanding\n"
-            "- Searching for niche, technical, or academic content\n"
-            "- You want full extracted page text alongside results "
-            "(set include_text=True)\n"
-            "- You need meaning-based ranking rather than popularity-based\n"
-            "\n"
-            "Output includes: title, URL, relevance score, and extracted "
-            "page text (when include_text=True, up to 2000 chars per result)."
+            "Semantic web search using Exa's neural embeddings. "
+            "Use search_type='neural' for conceptual queries, 'keyword' for exact matches. "
+            "Set include_text=True to get extracted page content."
         ),
         "input_schema": ExaSearchInput,
         "function": exa_search,
@@ -349,18 +334,8 @@ TOOL_CONFIGS = [
     {
         "name": "exa_find_similar",
         "description": (
-            "Find web pages similar to a given URL using Exa's neural "
-            "embeddings. Provide a reference URL and Exa returns pages "
-            "with similar content and meaning.\n"
-            "\n"
-            "USE THIS TOOL WHEN:\n"
-            "- You found a good article and want more like it\n"
-            "- Discovering related research, alternative sources, or "
-            "competitor pages\n"
-            "- Exploring a topic by starting from a known reference\n"
-            "\n"
-            "Output includes: title, URL, relevance score, and extracted "
-            "page text (when include_text=True)."
+            "Find web pages similar to a given URL using Exa's neural embeddings. "
+            "Returns pages with similar content and meaning."
         ),
         "input_schema": ExaFindSimilarInput,
         "function": exa_find_similar,
@@ -369,17 +344,8 @@ TOOL_CONFIGS = [
     {
         "name": "exa_get_contents",
         "description": (
-            "Extract clean text content from one or more web pages using "
-            "Exa. Returns readable, structured text from each URL.\n"
-            "\n"
-            "USE THIS TOOL WHEN:\n"
-            "- You have specific URLs and need their full text content\n"
-            "- Reading documentation, articles, or blog posts\n"
-            "- You need content from pages found via exa_search or "
-            "exa_find_similar\n"
-            "\n"
-            "Accepts up to 20 URLs per call.  Content is truncated at "
-            "8 000 characters per page."
+            "Extract clean text content from one or more URLs. "
+            "Accepts up to 20 URLs per call, truncated at 8000 chars per page."
         ),
         "input_schema": ExaGetContentsInput,
         "function": exa_get_contents,

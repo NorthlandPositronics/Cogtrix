@@ -36,11 +36,14 @@ The CONVERGE phase performs:
     Evaluate → Cross-pollinate → Synthesize → Decide
 """
 
+import copy
 import json
 import logging
 import re
 import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import TimeoutError as FuturesTimeoutError
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -58,6 +61,17 @@ def _escape_braces(s: str) -> str:
 
 _config: dict[str, Any] = {}
 
+# Progress callback injected by the CLI layer.
+# Signature: (message: str) -> None
+# Default: plain print to stdout.
+_progress_callback: Callable[[str], None] | None = None
+
+
+def set_progress_callback(callback: Callable[[str], None]) -> None:
+    """Set the progress reporting callback for deep think operations."""
+    global _progress_callback
+    _progress_callback = callback
+
 
 def configure_deep_think(config: dict[str, Any]) -> None:
     """
@@ -68,7 +82,8 @@ def configure_deep_think(config: dict[str, Any]) -> None:
         default_provider – name of the active provider
         default_model    – model name
     """
-    _config.update(config)
+    global _config
+    _config = {**_config, **config}
 
 
 # ── Data structures ─────────────────────────────────────────────────────
@@ -144,20 +159,27 @@ def _call_llm(llm: Any, prompt: str, timeout: int = 180) -> str:
     """Invoke *llm* with a single human message; returns text."""
     from langchain_core.messages import HumanMessage
 
+    # Use a thread so we can enforce a wall-clock timeout — explicit executor
+    # management prevents executor.__exit__(wait=True) from blocking on timeout.
+    pool = ThreadPoolExecutor(max_workers=1)
     try:
-        # Use a thread so we can enforce a wall-clock timeout
-        with ThreadPoolExecutor(max_workers=1) as pool:
-            future = pool.submit(llm.invoke, [HumanMessage(content=prompt)])
+        future = pool.submit(llm.invoke, [HumanMessage(content=prompt)])
+        try:
             result = future.result(timeout=timeout)
+        except FuturesTimeoutError:
+            future.cancel()
+            log.warning("deep_think LLM call timed out after %ds", timeout)
+            return f"[Timeout after {timeout}s]"
 
         content = result.content
         if isinstance(content, list):
-            # Multimodal fallback
             content = " ".join(str(c.get("text", c) if isinstance(c, dict) else c) for c in content)
         return str(content) if content else ""
     except Exception as exc:  # noqa: BLE001 — best-effort; caller handles empty
         log.warning("deep_think LLM call failed: %s", exc)
         return ""
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
 
 
 def _call_llm_parallel(llm: Any, prompts: list[str], timeout: int = 180) -> list[str]:
@@ -168,7 +190,8 @@ def _call_llm_parallel(llm: Any, prompts: list[str], timeout: int = 180) -> list
 
     def _invoke(idx: int, prompt: str) -> tuple:
         try:
-            res = llm.invoke([HumanMessage(content=prompt)])
+            thread_llm = copy.copy(llm)
+            res = thread_llm.invoke([HumanMessage(content=prompt)])
             content = res.content
             if isinstance(content, list):
                 content = " ".join(
@@ -179,8 +202,11 @@ def _call_llm_parallel(llm: Any, prompts: list[str], timeout: int = 180) -> list
             log.warning("deep_think parallel call %d failed: %s", idx, exc)
             return idx, ""
 
+    # Explicit executor management prevents executor.__exit__(wait=True) from
+    # blocking when as_completed() exhausts its timeout.
     workers = min(len(prompts), 5)
-    with ThreadPoolExecutor(max_workers=workers) as pool:
+    pool = ThreadPoolExecutor(max_workers=workers)
+    try:
         futures = {pool.submit(_invoke, i, p): i for i, p in enumerate(prompts)}
         for future in as_completed(futures, timeout=timeout * 2):
             try:
@@ -188,6 +214,10 @@ def _call_llm_parallel(llm: Any, prompts: list[str], timeout: int = 180) -> list
                 results[idx] = text
             except Exception:  # noqa: BLE001  # nosec B110
                 pass
+    except Exception:  # noqa: BLE001 — as_completed timeout or other error
+        pass
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
 
     return results
 
@@ -255,10 +285,16 @@ def _parse_json(text: str) -> Any:
     # 3. Find first balanced { … } or [ … ]
     # Tracks whether we're inside a JSON string to avoid counting
     # braces that appear inside quoted values.
-    for open_ch, close_ch in ("{", "}"), ("[", "]"):
-        start = text.find(open_ch)
-        if start == -1:
-            continue
+    brace_pos = text.find("{")
+    bracket_pos = text.find("[")
+    attempts: list[tuple[int, str, str]] = []
+    if brace_pos != -1:
+        attempts.append((brace_pos, "{", "}"))
+    if bracket_pos != -1:
+        attempts.append((bracket_pos, "[", "]"))
+    attempts.sort(key=lambda x: x[0])
+
+    for start, open_ch, close_ch in attempts:
         depth = 0
         in_string = False
         escape = False
@@ -292,31 +328,11 @@ def _parse_json(text: str) -> Any:
 
 
 def _progress(msg: str) -> None:
-    """Print a visible progress line to stdout.
-
-    Temporarily pauses the global activity spinner (if running) so the
-    progress line is not garbled by the spinner's carriage-return rewriting.
-    """
-    import sys
-
-    try:
-        from cogtrix import _spinner
-
-        _spinner.pause()
-    except Exception:  # noqa: BLE001
-        pass  # nosec B110
-
-    # Clear any leftover spinner characters on the current line
-    sys.stdout.write("\033[2K\r")
-    sys.stdout.flush()
+    """Print a visible progress line to stdout."""
+    if _progress_callback is not None:
+        _progress_callback(msg)
+        return
     print(f"  [think] {msg}")
-
-    try:
-        from cogtrix import _spinner
-
-        _spinner.resume()
-    except Exception:  # noqa: BLE001
-        pass  # nosec B110
 
 
 # ── Prompt templates ────────────────────────────────────────────────────

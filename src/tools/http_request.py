@@ -3,9 +3,15 @@ HTTP request tool - Make HTTP GET and POST requests.
 POST requests require user confirmation for safety.
 """
 
+import ipaddress
 import json
 import re
-from urllib.parse import urlparse
+import socket
+import threading
+import time
+from contextlib import contextmanager, nullcontext
+from typing import Any
+from urllib.parse import urljoin, urlparse
 
 from pydantic import BaseModel, Field
 
@@ -17,6 +23,13 @@ try:
 except ImportError:
     requests = None  # type: ignore[assignment]
     REQUESTS_AVAILABLE = False
+
+MAX_REDIRECTS = 5
+_MAX_TIMEOUT = 120  # seconds
+_MAX_RESPONSE_BYTES = 512_000  # 512 KB — more than enough for 10 K char truncation
+
+# RFC 6598 Shared Address Space (CGNAT) — not classified as private by ipaddress module
+_CGNAT_NETWORK = ipaddress.ip_network("100.64.0.0/10")
 
 
 class HttpGetInput(BaseModel):
@@ -42,39 +55,131 @@ class HttpPostInput(BaseModel):
     timeout: int = Field(default=30, description="Request timeout in seconds")
 
 
-def _validate_url(url: str) -> tuple[bool, str]:
-    """Validate URL for safety."""
+# ── DNS-pinned connections (BUG-074: eliminate TOCTOU) ──────────────
+# urllib3 resolves hostnames inside create_connection().  We intercept
+# that function and replace the hostname with a pre-validated IP so
+# the same address used for SSRF checks is the one actually connected.
+_dns_pins: threading.local = threading.local()
+_dns_pin_installed: bool = False
+_dns_pin_lock = threading.Lock()
+
+
+def _install_dns_pin_hook() -> None:
+    """Monkey-patch urllib3's create_connection once to honour thread-local pins."""
+    global _dns_pin_installed
+    if _dns_pin_installed:
+        return
+    with _dns_pin_lock:
+        if _dns_pin_installed:
+            return
+        try:
+            import urllib3.util.connection as _uc  # type: ignore[import-not-found]
+        except ImportError:
+            return
+        _orig = _uc.create_connection
+
+        def _pinned_create_connection(address, *args, **kwargs):  # type: ignore[no-untyped-def]
+            host, port = address
+            pin_map = getattr(_dns_pins, "map", None)
+            if pin_map and host in pin_map:
+                address = (pin_map[host], port)
+            return _orig(address, *args, **kwargs)
+
+        _uc.create_connection = _pinned_create_connection  # type: ignore[assignment]
+        _dns_pin_installed = True
+
+
+@contextmanager
+def _pin_dns(hostname: str, ip: str):  # type: ignore[no-untyped-def]
+    """Context manager: pin *hostname* -> *ip* for the calling thread."""
+    pin_map = getattr(_dns_pins, "map", None)
+    if pin_map is None:
+        _dns_pins.map = {}
+        pin_map = _dns_pins.map
+    pin_map[hostname] = ip
+    try:
+        yield
+    finally:
+        pin_map.pop(hostname, None)
+
+
+def _is_blocked_ip(ip_str: str) -> bool:
+    """Return True if ip_str represents a non-public IP address."""
+    try:
+        ip = ipaddress.ip_address(ip_str)
+    except ValueError:
+        return False
+    # Unwrap IPv6-mapped IPv4 addresses (e.g. ::ffff:127.0.0.1) so that all
+    # IPv4-space checks (CGNAT, loopback, private, …) apply correctly.
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        ip = ip.ipv4_mapped
+    if ip in _CGNAT_NETWORK:
+        return True
+    return (
+        ip.is_loopback or ip.is_private or ip.is_link_local or ip.is_reserved or ip.is_unspecified
+    )
+
+
+def _validate_url(url: str) -> tuple[bool, str, str | None]:
+    """Validate URL for safety. Returns (is_valid, error, resolved_ip)."""
     try:
         parsed = urlparse(url)
 
         # Must have scheme and netloc
         if not parsed.scheme or not parsed.netloc:
-            return False, "Invalid URL format"
+            return False, "Invalid URL format", None
 
         # Only allow http and https
         if parsed.scheme not in ("http", "https"):
-            return False, f"Unsupported scheme: {parsed.scheme}"
+            return False, f"Unsupported scheme: {parsed.scheme}", None
 
-        # Block localhost/internal IPs (basic SSRF protection)
         hostname = parsed.hostname or ""
-        blocked_hosts = ["localhost", "127.0.0.1", "0.0.0.0", "::1"]  # nosec B104
-        if hostname in blocked_hosts:
-            return False, "Requests to localhost are not allowed"
+        if not hostname:
+            return False, "Invalid URL format", None
 
-        # Block private IP ranges (RFC 1918)
-        if hostname.startswith("10.") or hostname.startswith("192.168."):
-            return False, "Requests to private IP ranges are not allowed"
-        # 172.16.0.0/12 covers 172.16.* through 172.31.*
-        if hostname.startswith("172."):
-            parts = hostname.split(".")
-            if len(parts) >= 2 and parts[1].isdigit():
-                second_octet = int(parts[1])
-                if 16 <= second_octet <= 31:
-                    return False, "Requests to private IP ranges are not allowed"
+        # Defense-in-depth: block well-known internal hostnames by name
+        blocked_hosts = {
+            "localhost",
+            "metadata.google.internal",
+            "instance-data",
+            "169.254.169.254",
+        }  # nosec B104
+        if hostname.lower() in blocked_hosts:
+            return False, "Requests to localhost or internal hosts are not allowed", None
 
-        return True, ""
+        # If the hostname is a raw IP literal (including decimal/hex/octal forms),
+        # ipaddress.ip_address() will parse it directly — catches 2130706433,
+        # 0x7f000001, 0177.0.0.1, 127.0.0.2, ::1, etc.
+        try:
+            if _is_blocked_ip(hostname):
+                return (
+                    False,
+                    "Requests to localhost or private/reserved IP ranges are not allowed",
+                    None,
+                )
+        except Exception:
+            pass
+
+        # Resolve hostname via DNS and check every returned address
+        resolved_ip: str | None = None
+        try:
+            addrinfo = socket.getaddrinfo(hostname, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
+            for _family, _type, _proto, _canonname, sockaddr in addrinfo:
+                ip_str = str(sockaddr[0])
+                if _is_blocked_ip(ip_str):
+                    return (
+                        False,
+                        "Requests to localhost or private/reserved IP ranges are not allowed",
+                        None,
+                    )
+                if resolved_ip is None:
+                    resolved_ip = ip_str
+        except socket.gaierror:
+            return False, "DNS resolution failed for hostname", None
+
+        return True, "", resolved_ip
     except Exception as e:
-        return False, f"URL validation error: {e}"
+        return False, f"URL validation error: {e}", None
 
 
 def _parse_headers(headers_str: str | None) -> tuple[dict, str | None]:
@@ -91,11 +196,120 @@ def _parse_headers(headers_str: str | None) -> tuple[dict, str | None]:
         return {}, f"Invalid headers JSON: {e}"
 
 
+# ── Recent failure tracker ──────────────────────────────────────────
+# Prevents the model from retrying URLs that just timed out or refused
+# connection, saving 30+ seconds per avoided retry.
+_recent_failures: dict[str, float] = {}
+_recent_failures_lock = threading.Lock()
+_FAILURE_COOLDOWN = 60  # seconds
+
+
+def _check_recent_failure(url: str) -> str | None:
+    """Return an error message if *url* failed recently, else ``None``."""
+    with _recent_failures_lock:
+        last_fail = _recent_failures.get(url)
+        if last_fail is None:
+            return None
+        if (time.time() - last_fail) < _FAILURE_COOLDOWN:
+            ago = int(time.time() - last_fail)
+            return (
+                f"Error: This URL failed {ago}s ago (timeout/connection error). "
+                "Try a different source or a web reader proxy like r.jina.ai."
+            )
+    return None
+
+
+def _record_failure(url: str) -> None:
+    """Record a failure timestamp for *url*."""
+    now = time.time()
+    with _recent_failures_lock:
+        _recent_failures[url] = now
+        stale = [k for k, v in _recent_failures.items() if (now - v) >= _FAILURE_COOLDOWN]
+        for k in stale:
+            del _recent_failures[k]
+
+
 def _truncate_response(text: str, max_length: int = 10000) -> str:
     """Truncate long responses."""
     if len(text) <= max_length:
         return text
     return text[:max_length] + f"\n\n... (truncated, {len(text)} total characters)"
+
+
+def _read_bounded_response(response: "Any") -> tuple[bytes, bool]:
+    """
+    Read at most _MAX_RESPONSE_BYTES from a streaming response.
+
+    Returns (raw_bytes, was_truncated).  The caller is responsible for
+    closing the response connection.
+    """
+    chunks: list[bytes] = []
+    total = 0
+    try:
+        for chunk in response.iter_content(chunk_size=8192):
+            if chunk:
+                chunks.append(chunk)
+                total += len(chunk)
+                if total > _MAX_RESPONSE_BYTES:
+                    break
+    except Exception:
+        # Network error mid-stream — return what we have, marked truncated
+        raw = b"".join(chunks)
+        return raw[:_MAX_RESPONSE_BYTES], True
+    raw = b"".join(chunks)
+    if len(raw) > _MAX_RESPONSE_BYTES:
+        return raw[:_MAX_RESPONSE_BYTES], True
+    return raw, False
+
+
+def _follow_redirects(
+    session: "Any",
+    method: str,
+    url: str,
+    *,
+    pinned_ip: str | None = None,
+    **kwargs: "Any",
+) -> "Any":
+    """
+    Follow HTTP redirects manually, validating each redirect target against SSRF rules.
+    Uses DNS pinning to prevent rebinding between validation and connection.
+
+    Raises ValueError if a redirect target fails SSRF validation or the redirect
+    limit is exceeded.
+    """
+    _install_dns_pin_hook()
+    for _ in range(MAX_REDIRECTS + 1):
+        parsed = urlparse(url)
+        hostname = parsed.hostname or ""
+
+        if pinned_ip and hostname:
+            pin_ctx = _pin_dns(hostname, pinned_ip)
+        else:
+            pin_ctx = nullcontext()
+
+        with pin_ctx:
+            response = session.request(method, url, allow_redirects=False, stream=True, **kwargs)
+
+        if response.status_code not in (301, 302, 303, 307, 308):
+            return response
+
+        location = response.headers.get("Location", "")
+        if not location:
+            return response
+
+        # Resolve relative Location URLs against the current request URL
+        redirect_url = urljoin(url, location)
+
+        is_valid, error, pinned_ip = _validate_url(redirect_url)
+        if not is_valid:
+            response.close()
+            raise ValueError(f"Redirect to private/internal address blocked: {error}")
+
+        response.close()
+        url = redirect_url
+
+    response.close()
+    raise ValueError(f"Too many redirects (limit: {MAX_REDIRECTS})")
 
 
 def _extract_text_from_html(html: str) -> str:
@@ -154,10 +368,18 @@ def http_get(url: str, headers: str | None = None, timeout: int = 30) -> str:
     if not REQUESTS_AVAILABLE:
         return "Error: requests library not available. Install it with: pip install requests"
 
-    # Validate URL
-    is_valid, error = _validate_url(url)
+    timeout = min(max(1, timeout), _MAX_TIMEOUT)
+
+    # Validate URL and resolve DNS once (pins the IP to prevent TOCTOU rebinding)
+    _install_dns_pin_hook()
+    is_valid, error, pinned_ip = _validate_url(url)
     if not is_valid:
         return f"Error: {error}"
+
+    # Skip URLs that failed recently (timeout/connection)
+    recent_err = _check_recent_failure(url)
+    if recent_err:
+        return recent_err
 
     # Parse headers
     parsed_headers, header_error = _parse_headers(headers)
@@ -165,41 +387,56 @@ def http_get(url: str, headers: str | None = None, timeout: int = 30) -> str:
         return f"Error: {header_error}"
 
     try:
-        response = requests.get(
-            url,
-            headers=parsed_headers,
-            timeout=timeout,
-            allow_redirects=True,
-        )
+        with requests.Session() as session:
+            response = _follow_redirects(
+                session,
+                "GET",
+                url,
+                pinned_ip=pinned_ip,
+                headers=parsed_headers,
+                timeout=timeout,
+            )
+            try:
+                raw_bytes, body_truncated = _read_bounded_response(response)
+            finally:
+                response.close()
+
+        encoding = response.encoding or "utf-8"
+        text = raw_bytes.decode(encoding, errors="replace")
 
         # Build response info
         result = []
         result.append(f"Status: {response.status_code} {response.reason}")
         result.append(f"Content-Type: {response.headers.get('Content-Type', 'unknown')}")
-        result.append(f"Content-Length: {len(response.content)} bytes")
+        reported_bytes = len(raw_bytes)
+        size_note = " (read limit reached)" if body_truncated else ""
+        result.append(f"Content-Length: {reported_bytes} bytes{size_note}")
         result.append("")
 
         # Try to parse as JSON for better formatting
         try:
-            json_data = response.json()
+            json_data = json.loads(text)
             result.append("Response (JSON):")
             result.append(json.dumps(json_data, indent=2, ensure_ascii=False))
         except (json.JSONDecodeError, ValueError):
             content_type = response.headers.get("Content-Type", "")
             if "html" in content_type.lower():
-                # Extract readable text from HTML (raw markup is useless for the LLM)
-                extracted = _extract_text_from_html(response.text)
+                extracted = _extract_text_from_html(text)
                 result.append("Response (text extracted from HTML):")
                 result.append(_truncate_response(extracted))
             else:
                 result.append("Response:")
-                result.append(_truncate_response(response.text))
+                result.append(_truncate_response(text))
 
         return "\n".join(result)
 
+    except ValueError as e:
+        return f"Error: {e}"
     except requests.exceptions.Timeout:
+        _record_failure(url)
         return f"Error: Request timed out after {timeout} seconds"
     except requests.exceptions.ConnectionError as e:
+        _record_failure(url)
         return f"Error: Connection failed - {e}"
     except requests.exceptions.RequestException as e:
         return f"Error: Request failed - {e}"
@@ -229,10 +466,18 @@ def http_post(
     if not REQUESTS_AVAILABLE:
         return "Error: requests library not available. Install it with: pip install requests"
 
-    # Validate URL
-    is_valid, error = _validate_url(url)
+    timeout = min(max(1, timeout), _MAX_TIMEOUT)
+
+    # Validate URL and resolve DNS once (pins the IP to prevent TOCTOU rebinding)
+    _install_dns_pin_hook()
+    is_valid, error, pinned_ip = _validate_url(url)
     if not is_valid:
         return f"Error: {error}"
+
+    # Skip URLs that failed recently (timeout/connection)
+    recent_err = _check_recent_failure(url)
+    if recent_err:
+        return recent_err
 
     # Parse headers
     parsed_headers, header_error = _parse_headers(headers)
@@ -250,41 +495,57 @@ def http_post(
         parsed_headers["Content-Type"] = "application/json"
 
     try:
-        response = requests.post(
-            url,
-            json=json_data,
-            headers=parsed_headers,
-            timeout=timeout,
-            allow_redirects=True,
-        )
+        with requests.Session() as session:
+            response = _follow_redirects(
+                session,
+                "POST",
+                url,
+                pinned_ip=pinned_ip,
+                json=json_data,
+                headers=parsed_headers,
+                timeout=timeout,
+            )
+            try:
+                raw_bytes, body_truncated = _read_bounded_response(response)
+            finally:
+                response.close()
+
+        encoding = response.encoding or "utf-8"
+        text = raw_bytes.decode(encoding, errors="replace")
 
         # Build response info
         result = []
         result.append(f"Status: {response.status_code} {response.reason}")
         result.append(f"Content-Type: {response.headers.get('Content-Type', 'unknown')}")
-        result.append(f"Content-Length: {len(response.content)} bytes")
+        reported_bytes = len(raw_bytes)
+        size_note = " (read limit reached)" if body_truncated else ""
+        result.append(f"Content-Length: {reported_bytes} bytes{size_note}")
         result.append("")
 
         # Try to parse as JSON for better formatting
         try:
-            json_response = response.json()
+            json_response = json.loads(text)
             result.append("Response (JSON):")
             result.append(json.dumps(json_response, indent=2, ensure_ascii=False))
         except (json.JSONDecodeError, ValueError):
             content_type = response.headers.get("Content-Type", "")
             if "html" in content_type.lower():
-                extracted = _extract_text_from_html(response.text)
+                extracted = _extract_text_from_html(text)
                 result.append("Response (text extracted from HTML):")
                 result.append(_truncate_response(extracted))
             else:
                 result.append("Response:")
-                result.append(_truncate_response(response.text))
+                result.append(_truncate_response(text))
 
         return "\n".join(result)
 
+    except ValueError as e:
+        return f"Error: {e}"
     except requests.exceptions.Timeout:
+        _record_failure(url)
         return f"Error: Request timed out after {timeout} seconds"
     except requests.exceptions.ConnectionError as e:
+        _record_failure(url)
         return f"Error: Connection failed - {e}"
     except requests.exceptions.RequestException as e:
         return f"Error: Request failed - {e}"
@@ -297,7 +558,11 @@ TOOL_CONFIGS = [
     {
         "name": "http_get",
         "description": (
-            "Make an HTTP GET request to a URL. " "Returns status, headers, and response body."
+            "Make an HTTP GET request to a URL. "
+            "Returns status, headers, and response body. "
+            "Use this to read full page content when a search snippet is too short. "
+            "If the page does not contain the information you need, return to the "
+            "search results and try another URL."
         ),
         "input_schema": HttpGetInput,
         "requires_confirmation": False,

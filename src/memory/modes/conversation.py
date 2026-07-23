@@ -212,7 +212,7 @@ class ConversationMemoryManager(BaseMemoryManager):
 
         # Incrementally summarize messages outside the sliding window
         window_size = self._mode_config["working_memory_size"]
-        self._maybe_summarize(self._messages, window_size)
+        self._schedule_slow_path(self._messages, window_size)
 
     def get_system_prompt_additions(self) -> str | None:
         """Return conversation-mode system prompt additions."""

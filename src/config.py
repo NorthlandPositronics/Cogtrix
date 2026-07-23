@@ -19,90 +19,38 @@ Config file search order (first found wins):
     6. ``~/.config/cogtrix/cogtrix.json``
     7. ``~/.config/cogtrix/cogtrix.yml``  or ``~/.config/cogtrix/cogtrix.yaml``
 
-JSON example::
+YAML example::
 
-    {
-      "provider": "spark-cluster",
-      "session": "default",
+    provider: ollama
+    model: fast
 
-      "inference": {
-        "spark-cluster": {
-          "type": "openai",
-          "base_url": "http://192.168.70.254:8080/v1",
-          "model": "gpt-oss",
-          "api_key": "sk-...",
-          "num_ctx": 32768,
-          "temperature": 0.7
-        },
-        "openai": { "type": "openai", "model": "gpt-4.1", "api_key": "sk-..." }
-      },
-
-      "embedding": { "provider": "ollama", "model": "nomic-embed-text-v2-moe" },
-
-      "services": {
-        "openweather": { "api_key": "..." },
-        "tavily":      { "api_key": "..." },
-        "exa":         { "api_key": "..." },
-        "brave":       { "api_key": "..." },
-        "serpapi":     { "api_key": "..." },
-        "google":      { "api_key": "...", "cse_id": "..." }
-      },
-
-      "model_aliases": {
-        "fast": "spark-cluster/nemotron-nano",
-        "reasoning": {
-          "provider": "spark-cluster", "model": "gpt-oss",
-          "timeout": 400, "temperature": 0.3
-        }
-      },
-
-      "delegate": { ... },
-      "memory":   { ... },
-      "rag":      { ... }
-    }
-
-YAML equivalent::
-
-    provider: spark-cluster
-    session: default
-
-    inference:
-      spark-cluster:
-        type: openai
-        base_url: "http://192.168.70.254:8080/v1"
-        model: gpt-oss
-        api_key: "sk-..."
-        num_ctx: 32768
-        temperature: 0.7
+    providers:
+      ollama:
+        type: ollama
+        base_url: http://localhost:11434
+        model: qwen3:8b
       openai:
         type: openai
-        model: gpt-4.1
-        api_key: "sk-..."
+        api_key: sk-...
+        model: gpt-4.1-mini
 
-    embedding:
-      provider: ollama
-      model: nomic-embed-text-v2-moe
-
-    services:
-      openweather:
-        api_key: "..."
-      tavily:
-        api_key: "..."
-
-    model_aliases:
-      fast: spark-cluster/nemotron-nano
+    models:
+      fast:
+        provider: ollama
+        model: qwen3:8b
+        num_ctx: 32768
       reasoning:
-        provider: spark-cluster
-        model: gpt-oss
-        timeout: 400
-        temperature: 0.3
+        provider: openai
+        model: gpt-4.1
+        temperature: 0.2
+      embed-local:
+        provider: ollama
+        model: nomic-embed-text
 
-Backward compatibility:
-    - ``"providers": {...}`` is accepted as an alias for ``"inference"``
-    - Top-level ``"openweather": {"api_key": ...}`` etc. still work
-    - ``"delegate": {"model_aliases": ...}`` still works (merged with
-      top-level ``"model_aliases"``; top-level takes priority)
-    - Legacy ``"openai": {...}`` / ``"ollama": {...}`` sections still work
+    rag:
+      model: embed-local
+      chunk_size: 2000
+      chunk_overlap: 200
 """
 
 import json
@@ -115,6 +63,40 @@ from typing import Any
 import yaml
 
 _log = logging.getLogger("cogtrix")
+
+
+def _safe_int(value: Any, field_name: str, default: int | None = None) -> int | None:
+    """Safely coerce a config value to int, logging a warning on failure."""
+    if isinstance(value, bool):
+        _log.warning(
+            "Invalid integer for %s: %r (bool is not a valid integer), skipping", field_name, value
+        )
+        return default
+    try:
+        return int(value)
+    except (ValueError, TypeError):
+        if default is not None:
+            _log.warning("Invalid integer for %s: %r, using default %d", field_name, value, default)
+            return default
+        _log.warning("Invalid integer for %s: %r, skipping", field_name, value)
+        return None
+
+
+def _safe_float(value: Any, field_name: str, default: float | None = None) -> float | None:
+    """Safely coerce a config value to float, logging a warning on failure."""
+    if isinstance(value, bool):
+        _log.warning(
+            "Invalid float for %s: %r (bool is not a valid float), skipping", field_name, value
+        )
+        return default
+    try:
+        return float(value)
+    except (ValueError, TypeError):
+        if default is not None:
+            _log.warning("Invalid float for %s: %r, using default %g", field_name, value, default)
+            return default
+        _log.warning("Invalid float for %s: %r, skipping", field_name, value)
+        return None
 
 
 class ConfigError(Exception):
@@ -139,16 +121,32 @@ class ProviderConfig:
     base_url: str | None = None
     model: str | None = None
     api_key: str | None = None
+    # Provider-level defaults; overridden by model-level settings from ModelConfig
     temperature: float | None = None
     num_ctx: int | None = None  # Context window size (tokens) for any provider
+    max_tokens: int | None = None  # Max output tokens per LLM call
     tool_instructions: str | None = None
 
     def __post_init__(self) -> None:
-        """Validate fields after initialisation."""
         if self.temperature is not None and not (0.0 <= self.temperature <= 2.0):
-            raise ValueError(f"Temperature must be between 0.0 and 2.0, got {self.temperature}")
+            raise ConfigError(
+                f"providers.{self.name}.temperature must be between 0.0 and 2.0, "
+                f"got {self.temperature}"
+            )
         if self.num_ctx is not None and self.num_ctx < 256:
-            raise ValueError(f"Context window (num_ctx) must be >= 256, got {self.num_ctx}")
+            raise ConfigError(f"providers.{self.name}.num_ctx must be >= 256, got {self.num_ctx}")
+        if self.max_tokens is not None and self.max_tokens <= 0:
+            raise ConfigError(
+                f"providers.{self.name}.max_tokens must be > 0, got {self.max_tokens}"
+            )
+        if self.type:
+            from src.providers import PROVIDER_TYPES
+
+            if self.type not in PROVIDER_TYPES:
+                raise ConfigError(
+                    f"providers.{self.name}.type '{self.type}' is not a recognized provider type. "
+                    f"Supported: {', '.join(sorted(PROVIDER_TYPES))}"
+                )
 
     def get_base_url(self) -> str | None:
         """Get base URL with defaults for known types."""
@@ -176,8 +174,28 @@ class ProviderConfig:
             "api_key": "***" if self.api_key else None,  # Don't expose key
             "temperature": self.temperature,
             "num_ctx": self.num_ctx,
+            "max_tokens": self.max_tokens,
             "tool_instructions": self.tool_instructions,
         }
+
+
+@dataclass
+class ModelConfig:
+    """Configuration for a named model in the models registry."""
+
+    provider: str  # references a key in Config.providers
+    model: str  # actual model name at the provider
+    num_ctx: int | None = None
+    temperature: float | None = None
+    max_tokens: int | None = None  # Max output tokens per LLM call
+
+    def __post_init__(self) -> None:
+        if self.temperature is not None and not (0.0 <= self.temperature <= 2.0):
+            raise ConfigError(f"Temperature must be between 0.0 and 2.0, got {self.temperature}")
+        if self.num_ctx is not None and self.num_ctx < 256:
+            raise ConfigError(f"Context window (num_ctx) must be >= 256, got {self.num_ctx}")
+        if self.max_tokens is not None and self.max_tokens < 1:
+            raise ConfigError(f"max_tokens must be >= 1, got {self.max_tokens}")
 
 
 @dataclass
@@ -186,18 +204,16 @@ class RAGConfig:
 
     docs_dir: str = "docs"
     vectordb_dir: str = "data/vectordb"
-    chunk_size: int = 1200
+    chunk_size: int = 2000
     chunk_overlap: int = 200
-    embedding_provider: str = "ollama"
-    embedding_model: str | None = None
+    model: str | None = None  # references a key in Config.models for embedding
 
-
-@dataclass
-class EmbeddingConfig:
-    """Configuration for the embedding subsystem."""
-
-    provider: str = "ollama"
-    model: str | None = None
+    def __post_init__(self) -> None:
+        if self.chunk_overlap >= self.chunk_size:
+            raise ConfigError(
+                f"rag.chunk_overlap ({self.chunk_overlap}) must be less than "
+                f"rag.chunk_size ({self.chunk_size})"
+            )
 
 
 @dataclass
@@ -210,31 +226,19 @@ class Config:
     session: str = "default"
 
     # Inference providers (LLM backends)
-    # Populated from "inference" (preferred) or "providers" (backward compat)
+    # Populated from "providers" (preferred) or "inference" (alias)
     providers: dict[str, ProviderConfig] = field(default_factory=dict)
 
-    # Embedding configuration
-    embedding: EmbeddingConfig = field(default_factory=EmbeddingConfig)
+    # Models registry — named model configurations
+    models: dict[str, ModelConfig] = field(default_factory=dict)
 
     # External services — flat dict of {service_name: {config...}}
-    # Populated from "services" section or legacy top-level keys
     services: dict[str, dict[str, Any]] = field(default_factory=dict)
-
-    # Legacy OpenAI settings (for backward compatibility)
-    openai_api_key: str | None = None
-    openai_model: str = "gpt-4.1-mini"
-
-    # Legacy Ollama settings (for backward compatibility)
-    ollama_base_url: str = "http://localhost:11434"
-    ollama_model: str = "qwen3:8b"
 
     # Memory settings
     memory_mode: str = "conversation"
     memory_config: dict[str, Any] | None = field(default=None)
     memory_modes: dict[str, dict[str, Any]] = field(default_factory=dict)
-
-    # Model aliases (top-level; also read from delegate.model_aliases for compat)
-    model_aliases: dict[str, Any] | None = field(default=None)
 
     # Delegate tool settings
     delegate_enabled: bool = True
@@ -249,7 +253,7 @@ class Config:
     context_compression: bool = True
     context_compression_min_age: int = 6
     context_compression_min_chars: int = 2000
-    context_compression_model: str | None = None  # model alias or "provider/model"
+    context_compression_model: str | None = None  # model name or "provider/model"
 
     # MCP server configurations
     mcp_servers: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -264,6 +268,21 @@ class Config:
 
     # Track where config was loaded from (for display)
     config_file_path: Path | None = None
+
+    # Internal: resolved model config from the models registry (set by _resolve_model)
+    _active_model: "ModelConfig | None" = field(default=None, repr=False)
+
+    # Internal: True when --provider was explicitly passed via CLI
+    _cli_provider_override: bool = field(default=False, repr=False)
+
+    # Embedding overrides populated from env vars (read by cogtrix.py)
+    embedding_provider_override: str | None = None
+    embedding_model_override: str | None = None
+
+    # Research delegate settings
+    research_delegate_enabled: bool = True
+    research_delegate_timeout: int = 300
+    research_delegate_cap_ratio: float = 0.85
 
     # ── Service key accessors ─────────────────────────────────────
     # These provide a clean API for tool configuration code, reading
@@ -313,8 +332,7 @@ class Config:
         return self.services.get("assistant", {})
 
     def get_provider_config(self, name: str | None = None) -> ProviderConfig:
-        """
-        Get configuration for a provider by name.
+        """Get configuration for a provider by name.
 
         Args:
             name: Provider name (uses self.provider if None)
@@ -326,41 +344,85 @@ class Config:
             ValueError: If provider is not configured
         """
         provider_name = name or self.provider
-
-        # Check named providers first
         if provider_name in self.providers:
             return self.providers[provider_name]
-
-        # Fallback to legacy built-in providers
-        if provider_name == "openai":
-            return ProviderConfig(
-                name="openai",
-                type="openai",
-                model=self.openai_model,
-                api_key=self.openai_api_key,
-            )
-        elif provider_name == "ollama":
-            return ProviderConfig(
-                name="ollama",
-                type="ollama",
-                base_url=self.ollama_base_url,
-                model=self.ollama_model,
-            )
-
-        raise ValueError(
-            f"Unknown provider: '{provider_name}'. " f"Available: {self.list_providers()}"
-        )
+        raise ValueError(f"Unknown provider: '{provider_name}'. Available: {self.list_providers()}")
 
     def list_providers(self) -> list[str]:
         """List all available provider names."""
-        # Start with named providers
-        names = list(self.providers.keys())
-        # Add legacy providers if not overridden
-        if "openai" not in names:
-            names.append("openai")
-        if "ollama" not in names:
-            names.append("ollama")
-        return sorted(names)
+        return sorted(self.providers.keys())
+
+    def get_model_config(self, name: str | None = None) -> ModelConfig | None:
+        """Look up a model in the models registry. Returns None if not found."""
+        model_name = name or self.model
+        if model_name and model_name in self.models:
+            return self.models[model_name]
+        return None
+
+    def resolve_embedding_config(self) -> tuple[str, str | None, str | None, str | None]:
+        """Resolve RAG embedding model to (provider_type, model, base_url, api_key).
+
+        Looks up rag.model in the models registry, then resolves provider
+        connection details. Falls back to the active provider if rag.model
+        is not set or not found.
+        """
+        model_name = self.rag.model
+        if model_name and model_name in self.models:
+            mc = self.models[model_name]
+            pc = self.providers.get(mc.provider)
+            if pc:
+                return pc.type, mc.model, pc.get_base_url(), pc.api_key
+            import logging
+
+            logging.getLogger("cogtrix").warning(
+                "rag.model '%s' references provider '%s' which is not configured; "
+                "falling back to active provider",
+                model_name,
+                mc.provider,
+            )
+        pc = self.get_provider_config()
+        return pc.type, None, pc.get_base_url(), pc.api_key
+
+    def find_model_entry(self, target: str) -> "tuple[str | None, ModelConfig | None]":
+        """Resolve *target* to a (canonical_alias, ModelConfig) pair.
+
+        Resolution order:
+        1. Exact alias key in self.models.
+        2. Scan self.models values for .model == target (first match).
+        3. Scan self.providers values for .model == target (synthesize ModelConfig).
+
+        Returns (alias_or_None, ModelConfig_or_None). Both are None when not found.
+        """
+        if target in self.models:
+            return target, self.models[target]
+        for alias, mc in self.models.items():
+            if mc.model == target:
+                return alias, mc
+        for pname, pc in self.providers.items():
+            if pc.model == target:
+                return None, ModelConfig(provider=pname, model=target)
+        return None, None
+
+    def resolve_provider_config(self) -> "ProviderConfig":
+        """Get provider config with active model params merged.
+
+        Returns a **clone** of the provider config so the original in
+        ``self.providers`` is never mutated.  Model-specific ``num_ctx``
+        and ``temperature`` from the active ``ModelConfig`` are merged
+        into the clone.
+        """
+        from copy import copy
+
+        pc = copy(self.get_provider_config())
+        pc.model = self.model or pc.model
+        if self._active_model:
+            if self._active_model.num_ctx is not None:
+                pc.num_ctx = self._active_model.num_ctx
+            if self._active_model.temperature is not None:
+                pc.temperature = self._active_model.temperature
+            if self._active_model.max_tokens is not None:
+                pc.max_tokens = self._active_model.max_tokens
+        return pc
 
 
 def find_config_file() -> Path | None:
@@ -441,8 +503,8 @@ def load_config(cli_args=None) -> Config:
     if cli_args:
         _apply_cli_args(config, cli_args)
 
-    # 5. Resolve model alias if -m matches an alias name
-    _resolve_model_alias(config)
+    # 5. Resolve model name against the models registry
+    _resolve_model(config)
 
     # 6. Resolve final model based on provider if not explicitly set
     if config.model is None:
@@ -450,76 +512,35 @@ def load_config(cli_args=None) -> Config:
             provider_cfg = config.get_provider_config()
             config.model = provider_cfg.get_model()
         except ValueError:
-            # Fallback for unknown provider — match the default (ollama)
-            config.model = "qwen3:8b"
+            # Provider not configured — leave model as None; it will be
+            # resolved from the provider's default when the LLM is created.
+            pass
 
     return config
 
 
-def _resolve_model_alias(config: Config) -> None:
-    """
-    Resolve model alias if config.model matches an alias name.
+def _resolve_model(config: Config) -> None:
+    """Resolve model name against the models registry.
 
-    Model aliases from ``model_aliases`` (or legacy ``delegate.model_aliases``)
-    can be used with the ``-m`` flag.  If matched, updates both
-    ``config.provider`` and ``config.model``.  If not matched, the value
-    is treated as a literal model name.
-
-    Alias formats supported:
-    - String: "provider/model" or just "model"
-    - Object: {"provider": "...", "model": "...", "num_ctx": ..., ...}
+    If config.model matches a key in config.models, update config.provider
+    and store the resolved ModelConfig.  If not found, treat as a literal
+    model name on the current provider.
     """
     if not config.model:
+        config._active_model = None
         return
 
-    aliases = config.model_aliases or {}
-
-    # Check if it's an alias
-    if config.model not in aliases:
-        # Not an alias - treat as literal model name
-        # Update the provider config to use this model
-        if config.provider and config.provider in config.providers:
-            config.providers[config.provider].model = config.model
+    mc = config.get_model_config()
+    if mc is None:
+        # Literal model name — no ModelConfig to merge
+        config._active_model = None
         return
 
-    alias_value = aliases[config.model]
-
-    # Object format: {"provider": "...", "model": "...", ...}
-    if isinstance(alias_value, dict):
-        resolved_provider = alias_value.get("provider", config.provider)
-        resolved_model = alias_value.get("model")
-
-        config.provider = resolved_provider
-        if resolved_model:
-            config.model = resolved_model
-
-        # Update provider config with alias settings (model, num_ctx, temperature)
-        if config.provider in config.providers:
-            prov_cfg = config.providers[config.provider]
-            # Override model in provider config
-            if resolved_model:
-                prov_cfg.model = resolved_model
-            if "num_ctx" in alias_value and alias_value["num_ctx"] is not None:
-                prov_cfg.num_ctx = int(alias_value["num_ctx"])
-            if "temperature" in alias_value and alias_value["temperature"] is not None:
-                prov_cfg.temperature = float(alias_value["temperature"])
-        return
-
-    # String format: "provider/model" or just "model"
-    if isinstance(alias_value, str):
-        if "/" in alias_value:
-            parts = alias_value.split("/", 1)
-            config.provider = parts[0]
-            config.model = parts[1]
-            # Update provider config model
-            if config.provider in config.providers:
-                config.providers[config.provider].model = parts[1]
-        else:
-            # Just model name, keep current provider
-            config.model = alias_value
-            # Update provider config model
-            if config.provider in config.providers:
-                config.providers[config.provider].model = alias_value
+    # Resolve from models registry — skip provider override when CLI --provider was used
+    if not config._cli_provider_override:
+        config.provider = mc.provider
+    config.model = mc.model
+    config._active_model = mc
 
 
 def _is_yaml_file(path: Path) -> bool:
@@ -638,12 +659,7 @@ def _parse_yaml(content: str, path: Path) -> dict[str, Any]:
 
 
 def _apply_config_file(config: Config, path: Path) -> None:
-    """
-    Apply settings from configuration file (JSON or YAML).
-
-    Supports the current structure (``inference``, ``embedding``,
-    ``services``, ``model_aliases``) as well as all legacy formats
-    (``providers``, top-level service keys, ``delegate.model_aliases``).
+    """Apply settings from configuration file (JSON or YAML).
 
     Raises:
         ConfigError: If the config file has invalid syntax.
@@ -658,48 +674,29 @@ def _apply_config_file(config: Config, path: Path) -> None:
     if "session" in data:
         config.session = data["session"]
 
-    # ── Inference providers ────────────────────────────────────────
-    # Preferred key: "inference"; backward-compat: "providers"
-    inference_data = data.get("inference") if "inference" in data else data.get("providers")
-    if isinstance(inference_data, dict):
-        _parse_providers_section(config, inference_data)
+    # ── Providers ──────────────────────────────────────────────────
+    # Preferred key: "providers"; alias: "inference"
+    if "providers" in data and "inference" in data:
+        _log.warning("Config has both 'providers' and 'inference' keys; using 'providers'")
+    providers_data = data.get("providers") if "providers" in data else data.get("inference")
+    if isinstance(providers_data, dict):
+        _parse_providers_section(config, providers_data)
 
-    # Legacy top-level "openai" / "ollama" sections
-    if "openai" in data and isinstance(data["openai"], dict):
-        openai_cfg = data["openai"]
-        if "api_key" in openai_cfg:
-            config.openai_api_key = openai_cfg["api_key"]
-        if "model" in openai_cfg:
-            config.openai_model = openai_cfg["model"]
-        if "openai" not in config.providers:
-            _add_legacy_provider(config, "openai", openai_cfg)
-
-    if "ollama" in data and isinstance(data["ollama"], dict):
-        ollama_cfg = data["ollama"]
-        if "base_url" in ollama_cfg:
-            config.ollama_base_url = ollama_cfg["base_url"]
-        if "model" in ollama_cfg:
-            config.ollama_model = ollama_cfg["model"]
-        if "ollama" not in config.providers:
-            _add_legacy_provider(config, "ollama", ollama_cfg)
-
-    # ── Embedding ──────────────────────────────────────────────────
-    if "embedding" in data and isinstance(data["embedding"], dict):
-        emb_cfg = data["embedding"]
-        if "provider" in emb_cfg:
-            config.embedding.provider = emb_cfg["provider"]
-        if "model" in emb_cfg:
-            config.embedding.model = emb_cfg["model"]
+    # ── Models registry ────────────────────────────────────────────
+    # Preferred key: "models"; alias: "model_aliases"
+    if "models" in data and "model_aliases" in data:
+        _log.warning("Config has both 'models' and 'model_aliases' keys; using 'models'")
+    models_data = data.get("models") if "models" in data else data.get("model_aliases")
+    if isinstance(models_data, dict):
+        _parse_models_section(config, models_data)
 
     # ── Services (external APIs) ──────────────────────────────────
-    # New format: consolidated "services" section
     if "services" in data and isinstance(data["services"], dict):
         for svc_name, svc_cfg in data["services"].items():
             if isinstance(svc_cfg, dict):
                 config.services[svc_name] = svc_cfg
 
     # Legacy format: top-level keys like "openweather", "tavily", etc.
-    # These are merged into services (services section takes priority).
     _LEGACY_SERVICE_KEYS = (
         "openweather",
         "tavily",
@@ -713,18 +710,12 @@ def _apply_config_file(config: Config, path: Path) -> None:
             if key not in config.services:
                 config.services[key] = data[key]
 
-    # ── Model aliases ─────────────────────────────────────────────
-    # Top-level "model_aliases" is the preferred location.
-    if "model_aliases" in data and isinstance(data["model_aliases"], dict):
-        config.model_aliases = data["model_aliases"]
-
     # ── Memory settings ───────────────────────────────────────────
     if "memory" in data and isinstance(data["memory"], dict):
         memory_cfg = data["memory"]
         if "mode" in memory_cfg:
             config.memory_mode = memory_cfg["mode"]
         if "modes" in memory_cfg and isinstance(memory_cfg["modes"], dict):
-            # Store all mode configs for live mode switching
             config.memory_modes = dict(memory_cfg["modes"])
             mode = config.memory_mode
             if mode in memory_cfg["modes"]:
@@ -735,16 +726,22 @@ def _apply_config_file(config: Config, path: Path) -> None:
         delegate_cfg = data["delegate"]
         if "enabled" in delegate_cfg:
             config.delegate_enabled = bool(delegate_cfg["enabled"])
-        # "max_depth" is accepted for backward compat but not used
         if "default_timeout" in delegate_cfg:
-            config.delegate_default_timeout = int(delegate_cfg["default_timeout"])
+            val = _safe_int(delegate_cfg["default_timeout"], "delegate.default_timeout")
+            if val is not None and val > 0:
+                config.delegate_default_timeout = val
+            elif val is not None:
+                _log.warning(
+                    "delegate.default_timeout must be > 0, using default %d",
+                    config.delegate_default_timeout,
+                )
         if "allowed_providers" in delegate_cfg:
             config.delegate_allowed_providers = delegate_cfg["allowed_providers"]
         if "allowed_models" in delegate_cfg:
             config.delegate_allowed_models = delegate_cfg["allowed_models"]
-        # Backward compat: delegate.model_aliases → config.model_aliases
-        if "model_aliases" in delegate_cfg and config.model_aliases is None:
-            config.model_aliases = delegate_cfg["model_aliases"]
+        # Backward compat: delegate.model_aliases → config.models (only if models not set yet)
+        if "model_aliases" in delegate_cfg and not config.models:
+            _parse_models_section(config, delegate_cfg["model_aliases"])
 
     # ── Prompt optimizer ─────────────────────────────────────────
     if "prompt_optimizer" in data:
@@ -756,9 +753,23 @@ def _apply_config_file(config: Config, path: Path) -> None:
         if isinstance(cc, dict):
             config.context_compression = bool(cc.get("enabled", True))
             if "min_age" in cc:
-                config.context_compression_min_age = int(cc["min_age"])
+                val = _safe_int(cc["min_age"], "context_compression.min_age")
+                if val is not None and val >= 0:
+                    config.context_compression_min_age = val
+                elif val is not None:
+                    _log.warning(
+                        "context_compression.min_age must be >= 0, using default %d",
+                        config.context_compression_min_age,
+                    )
             if "min_chars" in cc:
-                config.context_compression_min_chars = int(cc["min_chars"])
+                val = _safe_int(cc["min_chars"], "context_compression.min_chars")
+                if val is not None and val >= 0:
+                    config.context_compression_min_chars = val
+                elif val is not None:
+                    _log.warning(
+                        "context_compression.min_chars must be >= 0, using default %d",
+                        config.context_compression_min_chars,
+                    )
             if "model" in cc:
                 config.context_compression_model = str(cc["model"])
         else:
@@ -776,23 +787,43 @@ def _apply_config_file(config: Config, path: Path) -> None:
         if "vectordb_dir" in rag_cfg:
             config.rag.vectordb_dir = rag_cfg["vectordb_dir"]
         if "chunk_size" in rag_cfg:
-            config.rag.chunk_size = int(rag_cfg["chunk_size"])
+            val = _safe_int(rag_cfg["chunk_size"], "rag.chunk_size")
+            if val is not None and val > 0:
+                config.rag.chunk_size = val
+            elif val is not None:
+                _log.warning(
+                    "rag.chunk_size must be > 0, using default %d",
+                    config.rag.chunk_size,
+                )
         if "chunk_overlap" in rag_cfg:
-            config.rag.chunk_overlap = int(rag_cfg["chunk_overlap"])
-        if "embedding_provider" in rag_cfg:
-            config.rag.embedding_provider = rag_cfg["embedding_provider"]
-        if "embedding_model" in rag_cfg:
-            config.rag.embedding_model = rag_cfg["embedding_model"]
+            val = _safe_int(rag_cfg["chunk_overlap"], "rag.chunk_overlap")
+            if val is not None and val >= 0:
+                config.rag.chunk_overlap = val
+            elif val is not None:
+                _log.warning(
+                    "rag.chunk_overlap must be >= 0, using default %d",
+                    config.rag.chunk_overlap,
+                )
+        if "model" in rag_cfg:
+            config.rag.model = rag_cfg["model"]
 
-    # ── Sync embedding into RAG if RAG hasn't overridden ──────────
-    # The "embedding" section is the source of truth; if rag.embedding_*
-    # were not explicitly set, inherit from the embedding section.
-    if "embedding" in data and isinstance(data["embedding"], dict):
-        rag_section = data.get("rag", {})
-        if "embedding_provider" not in rag_section:
-            config.rag.embedding_provider = config.embedding.provider
-        if "embedding_model" not in rag_section:
-            config.rag.embedding_model = config.embedding.model
+    # ── Research delegate ─────────────────────────────────────────
+    if "research_delegate" in data and isinstance(data["research_delegate"], dict):
+        rd = data["research_delegate"]
+        if "enabled" in rd:
+            config.research_delegate_enabled = bool(rd["enabled"])
+        if "timeout" in rd:
+            val = _safe_int(rd["timeout"], "research_delegate.timeout")
+            if val is not None and val > 0:
+                config.research_delegate_timeout = val
+            elif val is not None:
+                _log.warning("research_delegate.timeout must be > 0, using default")
+        if "cap_ratio" in rd:
+            fval = _safe_float(rd["cap_ratio"], "research_delegate.cap_ratio")
+            if fval is not None and 0 < fval <= 1:
+                config.research_delegate_cap_ratio = fval
+            elif fval is not None:
+                _log.warning("research_delegate.cap_ratio must be in (0, 1], using default")
 
 
 def _parse_providers_section(config: Config, providers_data: dict[str, Any]) -> None:
@@ -807,6 +838,8 @@ def _parse_providers_section(config: Config, providers_data: dict[str, Any]) -> 
             _log.warning("Provider '%s' missing required 'type' field", name)
             continue
 
+        provider_type = str(provider_type).lower()
+
         from src.providers import PROVIDER_TYPES
 
         if provider_type not in PROVIDER_TYPES:
@@ -818,32 +851,76 @@ def _parse_providers_section(config: Config, providers_data: dict[str, Any]) -> 
             )
             continue
 
+        raw_temperature = provider_data.get("temperature")
+        raw_num_ctx = provider_data.get("num_ctx")
+        raw_max_tokens = provider_data.get("max_tokens")
         config.providers[name] = ProviderConfig(
             name=name,
             type=provider_type,
             base_url=provider_data.get("base_url"),
             model=provider_data.get("model"),
             api_key=provider_data.get("api_key"),
-            temperature=provider_data.get("temperature"),
-            num_ctx=provider_data.get("num_ctx"),
             tool_instructions=provider_data.get("tool_instructions"),
+            temperature=(
+                _safe_float(raw_temperature, f"providers.{name}.temperature")
+                if raw_temperature is not None
+                else None
+            ),
+            num_ctx=(
+                _safe_int(raw_num_ctx, f"providers.{name}.num_ctx")
+                if raw_num_ctx is not None
+                else None
+            ),
+            max_tokens=(
+                _safe_int(raw_max_tokens, f"providers.{name}.max_tokens")
+                if raw_max_tokens is not None
+                else None
+            ),
         )
 
 
-def _add_legacy_provider(config: Config, name: str, legacy_data: dict[str, Any]) -> None:
-    """Convert legacy provider config to new ProviderConfig format.
-
-    ``name`` is always ``"openai"`` or ``"ollama"`` — legacy configs
-    don't carry an explicit ``type`` field, so the section name doubles
-    as the provider type.
-    """
-    config.providers[name] = ProviderConfig(
-        name=name,
-        type=name,
-        base_url=legacy_data.get("base_url"),
-        model=legacy_data.get("model"),
-        api_key=legacy_data.get("api_key"),
-    )
+def _parse_models_section(config: Config, models_data: dict[str, Any]) -> None:
+    """Parse the models section into ModelConfig objects."""
+    for name, model_data in models_data.items():
+        if isinstance(model_data, dict):
+            provider = model_data.get("provider")
+            model = model_data.get("model")
+            if not provider or not model:
+                _log.warning("Model '%s' missing required 'provider' or 'model' field", name)
+                continue
+            raw_num_ctx = model_data.get("num_ctx")
+            raw_temperature = model_data.get("temperature")
+            raw_max_tokens = model_data.get("max_tokens")
+            try:
+                config.models[name] = ModelConfig(
+                    provider=provider,
+                    model=model,
+                    num_ctx=(
+                        _safe_int(raw_num_ctx, f"models.{name}.num_ctx")
+                        if raw_num_ctx is not None
+                        else None
+                    ),
+                    temperature=(
+                        _safe_float(raw_temperature, f"models.{name}.temperature")
+                        if raw_temperature is not None
+                        else None
+                    ),
+                    max_tokens=(
+                        _safe_int(raw_max_tokens, f"models.{name}.max_tokens")
+                        if raw_max_tokens is not None
+                        else None
+                    ),
+                )
+            except (ConfigError, ValueError, TypeError) as exc:
+                _log.warning("Invalid model config '%s': %s", name, exc)
+        elif isinstance(model_data, str):
+            # String format: "provider/model" or just "model"
+            if "/" in model_data:
+                parts = model_data.split("/", 1)
+                config.models[name] = ModelConfig(provider=parts[0], model=parts[1])
+            else:
+                # Just model name — use current provider
+                config.models[name] = ModelConfig(provider=config.provider, model=model_data)
 
 
 def _set_service(config: Config, name: str, key: str, value: str) -> None:
@@ -871,9 +948,14 @@ def _set_provider_key(config: Config, name: str, api_key: str) -> None:
                 model=preset["model"],
             )
         else:
+            from src.providers import PROVIDER_TYPES
+
+            ptype = name if name in PROVIDER_TYPES else "openai"
+            if ptype != name:
+                _log.warning("Unknown provider type '%s', defaulting to openai", name)
             config.providers[name] = ProviderConfig(
                 name=name,
-                type=name,
+                type=ptype,
                 api_key=api_key,
             )
 
@@ -895,6 +977,9 @@ def _parse_ollama_address(value: str) -> str:
     value = value.strip()
     if value.startswith(("http://", "https://")):
         return value
+    # Already bracketed without port: [::1] or [2001:db8::1]
+    if value.startswith("[") and value.endswith("]"):
+        return f"http://{value}:{_OLLAMA_DEFAULT_PORT}"
     if ":" in value:
         # Exactly one colon → host:port; multiple colons → IPv6 address.
         # Bracketed IPv6 like [::1]:8080 is fine — rsplit on the last ":"
@@ -903,7 +988,17 @@ def _parse_ollama_address(value: str) -> str:
             host, port = value.rsplit(":", 1)
             if port.isdigit():
                 return f"http://{host}:{port}"
-        # Multiple colons without brackets — bare IPv6; treat as hostname
+            # Bracketed host with non-numeric port — ignore the port part
+            if host.startswith("[") and host.endswith("]"):
+                _log.warning(
+                    "Non-numeric port '%s' in Ollama address '%s', using default %s",
+                    port,
+                    value,
+                    _OLLAMA_DEFAULT_PORT,
+                )
+                return f"http://{host}:{_OLLAMA_DEFAULT_PORT}"
+        # Multiple colons without brackets — bare IPv6; wrap in brackets
+        return f"http://[{value}]:{_OLLAMA_DEFAULT_PORT}"
     return f"http://{value}:{_OLLAMA_DEFAULT_PORT}"
 
 
@@ -917,9 +1012,9 @@ def _apply_env_vars(config: Config) -> None:
     if env_val := os.getenv("COGTRIX_SESSION"):
         config.session = env_val
 
-    # LLM provider API keys
+    # LLM provider API keys — via named providers
     if env_val := os.getenv("OPENAI_API_KEY"):
-        config.openai_api_key = env_val
+        _set_provider_key(config, "openai", env_val)
     if env_val := os.getenv("ANTHROPIC_API_KEY"):
         _set_provider_key(config, "anthropic", env_val)
     if env_val := os.getenv("GEMINI_API_KEY"):
@@ -927,14 +1022,22 @@ def _apply_env_vars(config: Config) -> None:
     if env_val := os.getenv("XAI_API_KEY"):
         _set_provider_key(config, "xai", env_val)
 
-    # Ollama settings
-    # COGTRIX_OLLAMA accepts "host:port" or just "host" (default port: 11434)
+    # Ollama settings — update or create ollama provider entry
+    ollama_url: str | None = None
     if env_val := os.getenv("COGTRIX_OLLAMA"):
-        config.ollama_base_url = _parse_ollama_address(env_val)
-    # Legacy env var (full URL) — overridden by COGTRIX_OLLAMA if both set
-    if env_val := os.getenv("OLLAMA_BASE_URL"):
-        if not os.getenv("COGTRIX_OLLAMA"):
-            config.ollama_base_url = env_val
+        ollama_url = _parse_ollama_address(env_val)
+    elif env_val := os.getenv("OLLAMA_BASE_URL"):
+        ollama_url = env_val
+
+    if ollama_url:
+        if "ollama" in config.providers:
+            config.providers["ollama"].base_url = ollama_url
+        else:
+            config.providers["ollama"] = ProviderConfig(
+                name="ollama",
+                type="ollama",
+                base_url=ollama_url,
+            )
 
     # Service API keys → services dict
     if env_val := os.getenv("OPENWEATHER_API_KEY"):
@@ -956,11 +1059,37 @@ def _apply_env_vars(config: Config) -> None:
     if env_val := os.getenv("COGTRIX_MEMORY_MODE"):
         config.memory_mode = env_val
 
+    # Embedding overrides
+    if env_val := os.getenv("COGTRIX_EMBEDDING_PROVIDER"):
+        config.embedding_provider_override = env_val
+    if env_val := os.getenv("OLLAMA_EMBEDDING_MODEL"):
+        config.embedding_model_override = env_val
+
+    # WhatsApp env vars
+    wa_url = os.environ.get("COGTRIX_WHATSAPP_URL")
+    wa_key = os.environ.get("COGTRIX_WHATSAPP_API_KEY")
+    wa_session = os.environ.get("COGTRIX_WHATSAPP_SESSION")
+    if wa_url or wa_key or wa_session:
+        wa = config.services.setdefault("whatsapp", {})
+        if wa_url:
+            wa["url"] = wa_url
+        if wa_key:
+            wa["api_key"] = wa_key
+        if wa_session:
+            wa["session"] = wa_session
+
+    # Telegram env vars
+    tg_token = os.environ.get("COGTRIX_TELEGRAM_TOKEN")
+    if tg_token:
+        tg = config.services.setdefault("telegram", {})
+        tg["token"] = tg_token
+
 
 def _apply_cli_args(config: Config, args) -> None:
     """Apply settings from command line arguments."""
     if hasattr(args, "provider") and args.provider:
         config.provider = args.provider
+        config._cli_provider_override = True
     if hasattr(args, "model") and args.model:
         config.model = args.model
     if hasattr(args, "session") and args.session:

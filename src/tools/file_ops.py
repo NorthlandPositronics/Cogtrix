@@ -3,6 +3,8 @@ File operations tool - Read, write, and manage files.
 Write operations require user confirmation for safety.
 """
 
+import os
+import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -55,7 +57,7 @@ class FileInfoInput(BaseModel):
     path: str = Field(description="Path to the file or directory")
 
 
-def _validate_path(path: str) -> tuple[bool, str, Path | None]:
+def _validate_path(path: str, is_write: bool = False) -> tuple[bool, str, Path | None]:
     """
     Validate a file path for safety.
 
@@ -73,13 +75,13 @@ def _validate_path(path: str) -> tuple[bool, str, Path | None]:
             except ValueError:
                 return False, "Path traversal not allowed", None
 
-        # Relative paths must resolve within cwd (catches symlink traversal)
-        if not Path(path).is_absolute():
-            cwd = Path.cwd().resolve()
-            try:
-                p.relative_to(cwd)
-            except ValueError:
-                return False, "Path traversal via symlink not allowed", None
+        # ALL paths must resolve within cwd — blocks absolute paths outside
+        # the working directory and symlink-based traversal.
+        cwd = Path.cwd().resolve()
+        try:
+            p.relative_to(cwd)
+        except ValueError:
+            return False, "Path must be within the working directory", None
 
         return True, "", p
     except Exception as e:
@@ -111,28 +113,18 @@ def read_file(
     if resolved is None:
         return "Error: Could not resolve path"
 
-    if not resolved.exists():
-        return f"Error: File not found: {path}"
-
-    if not resolved.is_file():
-        return f"Error: Not a file: {path}"
-
-    # Pre-check file size to avoid loading huge files into memory
-    try:
-        file_size = resolved.stat().st_size
-    except OSError as e:
-        return f"Error: Cannot stat file: {e}"
-    _MAX_READ_BYTES = 100 * 1024 * 1024  # 100 MB
-    if file_size > _MAX_READ_BYTES:
-        return (
-            f"Error: File too large ({file_size / (1024 * 1024):.1f} MB). "
-            f"Maximum readable size is {_MAX_READ_BYTES // (1024 * 1024)} MB."
-        )
-
     if start_line < 0:
         return "Error: start_line must be >= 0"
 
     try:
+        file_size = resolved.stat().st_size
+        _MAX_READ_BYTES = 100 * 1024 * 1024  # 100 MB
+        if file_size > _MAX_READ_BYTES:
+            return (
+                f"Error: File too large ({file_size / (1024 * 1024):.1f} MB). "
+                f"Maximum readable size is {_MAX_READ_BYTES // (1024 * 1024)} MB."
+            )
+
         with open(resolved, encoding=encoding) as f:
             all_lines = f.readlines()
         total_lines = len(all_lines)
@@ -167,10 +159,16 @@ def read_file(
                     f"{content[-half:]}"
                 )
             return content
+    except FileNotFoundError:
+        return f"Error: File not found: {path}"
+    except IsADirectoryError:
+        return f"Error: Not a file: {path}"
     except UnicodeDecodeError:
         return f"Error: Could not decode file with encoding '{encoding}'. Try a different encoding."
     except PermissionError:
         return f"Error: Permission denied: {path}"
+    except OSError as e:
+        return f"Error reading file: {e}"
     except Exception as e:
         return f"Error reading file: {e}"
 
@@ -188,7 +186,7 @@ def write_file(path: str, content: str, encoding: str = "utf-8") -> str:
     Returns:
         Success or error message
     """
-    is_valid, error, resolved = _validate_path(path)
+    is_valid, error, resolved = _validate_path(path, is_write=True)
     if not is_valid:
         return f"Error: {error}"
 
@@ -199,8 +197,18 @@ def write_file(path: str, content: str, encoding: str = "utf-8") -> str:
         # Create parent directories if they don't exist
         resolved.parent.mkdir(parents=True, exist_ok=True)
 
-        with open(resolved, "w", encoding=encoding) as f:
-            f.write(content)
+        dir_path = os.path.dirname(resolved)
+        fd, tmp_path = tempfile.mkstemp(dir=dir_path, suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding=encoding) as f:
+                f.write(content)
+            os.replace(tmp_path, str(resolved))
+        except BaseException:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
 
         return f"Successfully wrote {len(content)} characters to {path}"
     except PermissionError:
@@ -221,7 +229,7 @@ def append_file(path: str, content: str, encoding: str = "utf-8") -> str:
     Returns:
         Success or error message
     """
-    is_valid, error, resolved = _validate_path(path)
+    is_valid, error, resolved = _validate_path(path, is_write=True)
     if not is_valid:
         return f"Error: {error}"
 

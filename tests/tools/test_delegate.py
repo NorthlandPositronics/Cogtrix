@@ -1,8 +1,10 @@
 """Tests for the delegate tool."""
 
+import threading
 from unittest.mock import MagicMock, patch
 
 from src.tools.delegate import (
+    _MAX_CIRCUIT_BREAKERS,
     TOOL_CONFIGS,
     DelegateInput,
     DelegateParallelInput,
@@ -10,9 +12,10 @@ from src.tools.delegate import (
     ModelCircuitBreaker,
     _build_prompt,
     _check_allowed_model,
+    _circuit_breaker_lock,
+    _evict_stale_breakers,
     _extract_content,
-    _resolve_defaults,
-    _resolve_model_alias,
+    _get_circuit_breaker,
     _validate_json_response,
     configure_delegate,
     delegate_parallel,
@@ -20,6 +23,12 @@ from src.tools.delegate import (
     get_model_status,
     reset_model_status,
     set_delegate_tools,
+)
+from src.tools.delegate import (
+    resolve_delegate_defaults as _resolve_defaults,
+)
+from src.tools.delegate import (
+    resolve_model_alias as _resolve_model_alias,
 )
 
 
@@ -32,7 +41,7 @@ class TestConfiguration:
             {
                 "enabled": False,
                 "default_provider": "openai",
-                "model_aliases": {"fast": "ollama/gemma3:12b"},
+                "models": {"fast": "ollama/gemma3:12b"},
             }
         )
 
@@ -45,7 +54,7 @@ class TestConfiguration:
         """Test resolving alias with provider/model format."""
         configure_delegate(
             {
-                "model_aliases": {
+                "models": {
                     "smart": "openai/gpt-4",
                     "code": "ollama/qwen3-coder:30b-a3b",
                 }
@@ -64,7 +73,7 @@ class TestConfiguration:
         """Test resolving alias that's just a model name."""
         configure_delegate(
             {
-                "model_aliases": {
+                "models": {
                     "default": "gemma3:12b",
                 }
             }
@@ -260,7 +269,7 @@ class TestDelegateTaskWithMock:
             }
         )
 
-    @patch("src.tools.delegate._create_llm")
+    @patch("src.tools.delegate.create_delegate_llm")
     def test_delegate_task_success(self, mock_create_llm):
         """Test successful task delegation."""
         # Mock LLM
@@ -282,7 +291,7 @@ class TestDelegateTaskWithMock:
         assert "Response:" in result
         assert "This is the summary." in result
 
-    @patch("src.tools.delegate._create_llm")
+    @patch("src.tools.delegate.create_delegate_llm")
     def test_delegate_task_json_valid(self, mock_create_llm):
         """Test delegation with valid JSON response."""
         mock_llm = MagicMock()
@@ -299,7 +308,7 @@ class TestDelegateTaskWithMock:
 
         assert "JSON Valid:** ✓" in result
 
-    @patch("src.tools.delegate._create_llm")
+    @patch("src.tools.delegate.create_delegate_llm")
     def test_delegate_task_json_invalid(self, mock_create_llm):
         """Test delegation with invalid JSON response."""
         mock_llm = MagicMock()
@@ -334,7 +343,7 @@ class TestDelegateTaskWithMock:
         result = delegate_task(task="Summarize", use_tools=False, context="   \n  ")
         assert "rejected" in result.lower()
 
-    @patch("src.tools.delegate._create_llm")
+    @patch("src.tools.delegate.create_delegate_llm")
     def test_delegate_task_allows_empty_context_with_tools(self, mock_create_llm):
         """Test that tool-capable delegation with empty context is allowed."""
         mock_llm = MagicMock()
@@ -353,7 +362,7 @@ class TestDelegateTaskWithMock:
         assert "rejected" not in result.lower()
         assert "Found results" in result
 
-    @patch("src.tools.delegate._create_llm")
+    @patch("src.tools.delegate.create_delegate_llm")
     def test_delegate_task_error_handling(self, mock_create_llm):
         """Test error handling in delegation."""
         mock_create_llm.side_effect = Exception("Connection failed")
@@ -375,7 +384,7 @@ class TestDelegateParallelWithMock:
             }
         )
 
-    @patch("src.tools.delegate._create_llm")
+    @patch("src.tools.delegate.create_delegate_llm")
     def test_parallel_delegation(self, mock_create_llm):
         """Test parallel task delegation."""
         mock_llm = MagicMock()
@@ -503,7 +512,7 @@ class TestCircuitBreaker:
         status = get_model_status()
         assert status == {}
 
-    @patch("src.tools.delegate._create_llm")
+    @patch("src.tools.delegate.create_delegate_llm")
     def test_delegate_records_failure_in_circuit_breaker(self, mock_create_llm):
         """Test that delegate_task records failures."""
         reset_model_status()
@@ -519,7 +528,7 @@ class TestCircuitBreaker:
         assert status["ollama/test-model"]["available"] is False
         assert status["ollama/test-model"]["consecutive_failures"] == 5
 
-    @patch("src.tools.delegate._create_llm")
+    @patch("src.tools.delegate.create_delegate_llm")
     def test_delegate_blocked_when_unavailable(self, mock_create_llm):
         """Test that delegate_task is blocked when model is unavailable."""
         reset_model_status()
@@ -543,7 +552,7 @@ class TestCircuitBreaker:
         assert "unavailable" in result.lower()
         assert "consecutive failures" in result.lower()
 
-    @patch("src.tools.delegate._create_llm")
+    @patch("src.tools.delegate.create_delegate_llm")
     def test_delegate_success_resets_circuit_breaker(self, mock_create_llm):
         """Test that successful delegation resets circuit breaker."""
         reset_model_status()
@@ -572,6 +581,82 @@ class TestCircuitBreaker:
         status = get_model_status()
         assert status["ollama/recover-model"]["consecutive_failures"] == 0
         assert status["ollama/recover-model"]["available"] is True
+
+
+class TestCircuitBreakerEviction:
+    """Tests for the circuit breaker eviction mechanism."""
+
+    def setup_method(self):
+        reset_model_status()
+
+    def teardown_method(self):
+        reset_model_status()
+
+    def test_eviction_trims_dict_when_over_cap(self):
+        """Creating more than _MAX_CIRCUIT_BREAKERS entries should trigger eviction."""
+        import src.tools.delegate as mod
+
+        reset_model_status()
+        for i in range(_MAX_CIRCUIT_BREAKERS + 5):
+            _get_circuit_breaker("provider", f"model-{i}")
+
+        assert len(mod._circuit_breakers) <= _MAX_CIRCUIT_BREAKERS
+
+    def test_eviction_removes_stale_idle_entries(self):
+        """Entries with zero failures and old last_used should be evicted first."""
+        import time
+
+        import src.tools.delegate as mod
+
+        reset_model_status()
+        old_ts = time.time() - 7200.0  # 2 hours ago — beyond the idle window
+
+        for i in range(10):
+            mod._circuit_breakers[f"stale/model-{i}"] = ModelCircuitBreaker(last_used=old_ts)
+
+        hot_key = "hot/model"
+        mod._circuit_breakers[hot_key] = ModelCircuitBreaker(
+            consecutive_failures=3, last_used=time.time()
+        )
+
+        _evict_stale_breakers()
+
+        assert hot_key in mod._circuit_breakers
+        for i in range(10):
+            assert f"stale/model-{i}" not in mod._circuit_breakers
+
+    def test_eviction_keeps_entries_with_active_failures(self):
+        """Entries with non-zero consecutive failures must not be evicted by idle pass."""
+        import time
+
+        import src.tools.delegate as mod
+
+        reset_model_status()
+        old_ts = time.time() - 7200.0
+
+        failing_key = "failing/model"
+        mod._circuit_breakers[failing_key] = ModelCircuitBreaker(
+            consecutive_failures=3, last_used=old_ts
+        )
+
+        _evict_stale_breakers()
+
+        assert failing_key in mod._circuit_breakers
+
+    def test_last_used_updated_on_repeated_access(self):
+        """Accessing an existing breaker should update its last_used timestamp."""
+        import time
+
+        import src.tools.delegate as mod
+
+        reset_model_status()
+        breaker = _get_circuit_breaker("p", "m")
+        first_ts = breaker.last_used
+
+        time.sleep(0.01)
+        _get_circuit_breaker("p", "m")
+
+        assert mod._circuit_breakers["p/m"].last_used >= first_ts
 
 
 class TestCheckAllowedModel:
@@ -780,3 +865,67 @@ class TestExtractContent:
         msg.content = []
         result = _extract_content(msg)
         assert result == "[]"
+
+
+class TestCircuitBreakerThreadSafety:
+    """Tests for thread-safe access to _circuit_breakers."""
+
+    def setup_method(self):
+        reset_model_status()
+
+    def teardown_method(self):
+        reset_model_status()
+
+    def test_circuit_breaker_lock_is_lock(self):
+        """_circuit_breaker_lock is a reentrant lock (RLock)."""
+        assert isinstance(_circuit_breaker_lock, type(threading.RLock()))
+
+    def test_get_circuit_breaker_concurrent_no_crash(self):
+        """Concurrent _get_circuit_breaker calls must not raise or corrupt state."""
+        errors: list[Exception] = []
+
+        def worker(idx: int) -> None:
+            try:
+                for j in range(20):
+                    _get_circuit_breaker("provider", f"model-{idx}-{j}")
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=worker, args=(i,)) for i in range(10)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert errors == [], f"Thread errors: {errors}"
+
+    def test_reset_model_status_concurrent_no_crash(self):
+        """Concurrent reset_model_status calls must not raise."""
+        for i in range(50):
+            _get_circuit_breaker("p", f"m-{i}")
+
+        errors: list[Exception] = []
+
+        def resetter() -> None:
+            try:
+                for _ in range(10):
+                    reset_model_status()
+            except Exception as exc:
+                errors.append(exc)
+
+        def getter() -> None:
+            try:
+                for i in range(10):
+                    _get_circuit_breaker("p", f"m-{i}")
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=resetter) for _ in range(5)] + [
+            threading.Thread(target=getter) for _ in range(5)
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert errors == [], f"Thread errors: {errors}"

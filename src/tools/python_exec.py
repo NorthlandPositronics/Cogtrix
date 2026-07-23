@@ -16,7 +16,9 @@ Requires user confirmation for safety.
 import ast
 import io
 import multiprocessing as mp
+import threading
 import traceback
+from collections import OrderedDict
 from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -49,6 +51,10 @@ class PythonExecInput(BaseModel):
         default=True,
         description="Persist variables between calls (default: True)",
     )
+    session_id: str = Field(
+        default="default",
+        description="Session ID for isolating persistent state between users/chats",
+    )
 
 
 @dataclass
@@ -69,25 +75,45 @@ class SessionState:
     history: list[ExecutionRecord] = field(default_factory=list)
 
 
-# Session execution contexts (persistent variables and history)
-_session_states: dict[str, SessionState] = {}
+_MAX_SESSIONS = 1000
 
-# Current session ID (set by cogtrix.py or defaults to "default")
+# Session execution contexts (persistent variables and history); LRU-evicted at _MAX_SESSIONS
+_session_states: OrderedDict[str, SessionState] = OrderedDict()
+_session_states_lock: threading.RLock = threading.RLock()
+
+# Current session ID for interactive (single-threaded) mode.
+# WARNING: not thread-safe — do not rely on this in concurrent (assistant) contexts.
+# In assistant mode, pass session_id explicitly via the tool input schema instead.
 _current_session: str = "default"
 
 
 def set_session(session_id: str) -> None:
-    """Set the current session for persistent state."""
+    """Set the current session for persistent state.
+
+    For backward compatibility in interactive (single-threaded) mode only.
+    Not thread-safe — do not use in concurrent contexts such as assistant mode.
+    """
     global _current_session
     _current_session = session_id
 
 
 def _get_session_state(session_id: str | None = None) -> SessionState:
-    """Get or create session state."""
-    sid = session_id or _current_session
-    if sid not in _session_states:
+    """Get or create session state for the given session_id.
+
+    Falls back to "default" (never to the global _current_session) so that
+    concurrent callers without an explicit session_id cannot interfere with each other.
+
+    Applies LRU eviction when the number of sessions reaches _MAX_SESSIONS.
+    """
+    sid = session_id if session_id is not None else "default"
+    with _session_states_lock:
+        if sid in _session_states:
+            _session_states.move_to_end(sid)
+            return _session_states[sid]
+        if len(_session_states) >= _MAX_SESSIONS:
+            _session_states.popitem(last=False)
         _session_states[sid] = SessionState()
-    return _session_states[sid]
+        return _session_states[sid]
 
 
 def get_context(session_id: str | None = None) -> dict[str, Any]:
@@ -102,11 +128,11 @@ def get_history(session_id: str | None = None) -> list[ExecutionRecord]:
 
 def add_to_history(code: str, success: bool, output: str, session_id: str | None = None) -> None:
     """Add an execution record to history."""
-    state = _get_session_state(session_id)
-    state.history.append(ExecutionRecord(code=code, success=success, output=output))
-    # Trim history if too long
-    if len(state.history) > MAX_HISTORY_SIZE:
-        state.history = state.history[-MAX_HISTORY_SIZE:]
+    with _session_states_lock:
+        state = _get_session_state(session_id)
+        state.history.append(ExecutionRecord(code=code, success=success, output=output))
+        if len(state.history) > MAX_HISTORY_SIZE:
+            state.history = state.history[-MAX_HISTORY_SIZE:]
 
 
 def clear_context(session_id: str | None = None) -> None:
@@ -119,6 +145,141 @@ def clear_history(session_id: str | None = None) -> None:
     """Clear execution history for a session."""
     state = _get_session_state(session_id)
     state.history.clear()
+
+
+# Module names to block via AST Import/ImportFrom node inspection.
+# These are checked structurally so that the name appearing in a string
+# literal, comment, or variable name does NOT trigger a false positive.
+_BLOCKED_MODULES: frozenset[str] = frozenset(
+    {
+        "os",
+        "sys",
+        "subprocess",
+        "shutil",
+        "pathlib",
+        "importlib",
+        "pickle",
+        "marshal",
+        "shelve",
+        "socket",
+        "urllib",
+        "requests",
+        "http",
+        "ftplib",
+        "smtplib",
+        "telnetlib",
+        "ctypes",
+        "multiprocessing",
+        "threading",
+        "asyncio",
+        "concurrent",
+        "signal",
+        "pty",
+        "tty",
+        "fcntl",
+        "termios",
+        "resource",
+        "sysconfig",
+        "platform",
+        "tempfile",
+        "glob",
+        "fnmatch",
+    }
+)
+
+# Non-module patterns that remain as substring checks because they represent
+# function calls, attribute accesses, or built-in names — not import targets.
+_DANGEROUS_CALL_PATTERNS: list[str] = [
+    "__import__",
+    "eval(",
+    "exec(",
+    "compile(",
+    "open(",
+    "file(",
+    "__builtins__",
+    "__class__",
+    "__bases__",
+    "__subclasses__",
+    "__mro__",
+    "__globals__",
+    "__code__",
+    "__reduce__",
+    "__getstate__",
+    "__setstate__",
+]
+
+# Keep DANGEROUS_PATTERNS as a combined list for backward compatibility
+DANGEROUS_PATTERNS: list[str] = list(_DANGEROUS_CALL_PATTERNS) + sorted(_BLOCKED_MODULES)
+
+
+# Dangerous attribute names that could be used for sandbox escape
+DANGEROUS_ATTRS = {
+    "__class__",
+    "__bases__",
+    "__subclasses__",
+    "__mro__",
+    "__globals__",
+    "__code__",
+    "__builtins__",
+    "__import__",
+    "__loader__",
+    "__spec__",
+    "__reduce__",
+    "__reduce_ex__",
+    "__getstate__",
+    "__setstate__",
+    "__init_subclass__",
+    "__set_name__",
+    "__class_getitem__",
+    "__dict__",
+    "gi_frame",
+    "gi_code",
+    "f_globals",
+    "f_locals",
+    "f_builtins",
+    "co_code",
+    "func_globals",
+    "func_code",
+    "tb_frame",
+    "tb_next",
+    "tb_lasti",
+    "tb_lineno",
+    "__traceback__",
+}
+
+
+def _safe_getattr(obj: Any, name: str, *args: Any) -> Any:
+    """getattr wrapper that blocks access to dangerous attributes at runtime."""
+    if not isinstance(name, str):
+        raise TypeError(f"attribute name must be string, not '{type(name).__name__}'")
+    if name in DANGEROUS_ATTRS:
+        raise AttributeError(f"Access to attribute '{name}' is blocked in sandbox")
+    return getattr(obj, name, *args)
+
+
+def _safe_hasattr(obj: Any, name: str) -> bool:
+    """Safe hasattr that respects attribute restrictions."""
+    try:
+        _safe_getattr(obj, name)
+        return True
+    except (AttributeError, RuntimeError):
+        return False
+
+
+def _safe_setattr(obj: Any, name: str, value: Any) -> None:
+    """setattr wrapper that blocks assignment to dangerous attributes at runtime."""
+    if not isinstance(name, str):
+        raise TypeError(f"attribute name must be string, not '{type(name).__name__}'")
+    if name in DANGEROUS_ATTRS:
+        raise AttributeError(f"Access to attribute '{name}' is blocked in sandbox")
+    setattr(obj, name, value)
+
+
+def _safe_type(*args: Any) -> Any:
+    """Restricted type() — single-arg form only; 3-arg metaclass form is blocked."""
+    if len(args) == 1:
+        return type(args[0])
+    raise TypeError("type() with 3 arguments is not allowed in sandbox")
 
 
 # Safe built-in functions (restricted set)
@@ -137,7 +298,7 @@ SAFE_BUILTINS = {
     "bytearray": bytearray,
     "complex": complex,
     "object": object,
-    "type": type,
+    "type": _safe_type,
     "slice": slice,
     # Functions
     "abs": abs,
@@ -151,8 +312,8 @@ SAFE_BUILTINS = {
     "enumerate": enumerate,
     "filter": filter,
     "format": format,
-    "getattr": getattr,
-    "hasattr": hasattr,
+    "getattr": _safe_getattr,
+    "hasattr": _safe_hasattr,
     "hash": hash,
     "hex": hex,
     "id": id,
@@ -173,7 +334,7 @@ SAFE_BUILTINS = {
     "repr": repr,
     "reversed": reversed,
     "round": round,
-    "setattr": setattr,
+    "setattr": _safe_setattr,
     "sorted": sorted,
     "sum": sum,
     "zip": zip,
@@ -226,7 +387,6 @@ SAFE_MODULES = {
     "fractions",
     "textwrap",
     "unicodedata",
-    "base64",
     "hashlib",
     "hmac",
     "copy",
@@ -265,89 +425,6 @@ for _mod_name in OPTIONAL_MODULES:
 def get_available_modules() -> dict[str, bool]:
     """Return dict of optional modules and their availability."""
     return _AVAILABLE_OPTIONAL.copy()
-
-
-# Dangerous patterns to block
-DANGEROUS_PATTERNS = [
-    "__import__",
-    "eval(",
-    "exec(",
-    "compile(",
-    "open(",
-    "file(",
-    "__builtins__",
-    "__class__",
-    "__bases__",
-    "__subclasses__",
-    "__mro__",
-    "__globals__",
-    "__code__",
-    "__reduce__",
-    "__getstate__",
-    "__setstate__",
-    "os.",
-    "sys.",
-    "subprocess",
-    "shutil",
-    "pathlib",
-    "importlib",
-    "pickle",
-    "marshal",
-    "shelve",
-    "socket",
-    "urllib",
-    "requests",
-    "http.",
-    "ftplib",
-    "smtplib",
-    "telnetlib",
-    "ctypes",
-    "multiprocessing",
-    "threading",
-    "asyncio",
-    "concurrent",
-    "signal",
-    "pty",
-    "tty",
-    "fcntl",
-    "termios",
-    "resource",
-    "sysconfig",
-    "platform",
-    "tempfile",
-    "glob",
-    "fnmatch",
-]
-
-
-# Dangerous attribute names that could be used for sandbox escape
-DANGEROUS_ATTRS = {
-    "__class__",
-    "__bases__",
-    "__subclasses__",
-    "__mro__",
-    "__globals__",
-    "__code__",
-    "__builtins__",
-    "__import__",
-    "__loader__",
-    "__spec__",
-    "__reduce__",
-    "__reduce_ex__",
-    "__getstate__",
-    "__setstate__",
-    "__init_subclass__",
-    "__set_name__",
-    "__class_getitem__",
-    "gi_frame",
-    "gi_code",
-    "f_globals",
-    "f_locals",
-    "f_builtins",
-    "co_code",
-    "func_globals",
-    "func_code",
-}
 
 
 def _check_ast_security(tree: ast.AST) -> tuple[bool, str]:
@@ -408,7 +485,6 @@ def _check_ast_security(tree: ast.AST) -> tuple[bool, str]:
                     "__del__",
                     "__name__",
                     "__doc__",
-                    "__dict__",
                     "__slots__",
                 }
                 if attr_name not in safe_dunders:
@@ -434,6 +510,37 @@ def _check_ast_security(tree: ast.AST) -> tuple[bool, str]:
     return True, ""
 
 
+def _check_ast_imports(tree: ast.Module) -> tuple[bool, str]:
+    """Walk the AST for Import/ImportFrom nodes and reject blocked module names.
+
+    Returns:
+        Tuple of (is_safe, error_message)
+    """
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                top = alias.name.split(".")[0]
+                if top in _BLOCKED_MODULES:
+                    return False, f"Blocked: Import of '{top}' is not allowed"
+                if top not in SAFE_MODULES:
+                    return (
+                        False,
+                        f"Blocked: Import of '{top}' is not allowed. "
+                        f"Allowed: {', '.join(sorted(SAFE_MODULES))}",
+                    )
+        elif isinstance(node, ast.ImportFrom):
+            top = (node.module or "").split(".")[0]
+            if top in _BLOCKED_MODULES:
+                return False, f"Blocked: Import from '{top}' is not allowed"
+            if top not in SAFE_MODULES:
+                return (
+                    False,
+                    f"Blocked: Import from '{top}' is not allowed. "
+                    f"Allowed: {', '.join(sorted(SAFE_MODULES))}",
+                )
+    return True, ""
+
+
 def _check_code_safety(code: str) -> tuple[bool, str]:
     """
     Check if code contains dangerous patterns.
@@ -445,8 +552,8 @@ def _check_code_safety(code: str) -> tuple[bool, str]:
     """
     code_lower = code.lower()
 
-    # Check for dangerous patterns (string-based)
-    for pattern in DANGEROUS_PATTERNS:
+    # Check non-module patterns via substring matching
+    for pattern in _DANGEROUS_CALL_PATTERNS:
         if pattern.lower() in code_lower:
             return (
                 False,
@@ -459,27 +566,10 @@ def _check_code_safety(code: str) -> tuple[bool, str]:
     except SyntaxError as e:
         return False, f"Syntax error: {e}"
 
-    # Check for import statements
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.Import, ast.ImportFrom)):
-            # Get module name
-            if isinstance(node, ast.Import):
-                for alias in node.names:
-                    module = alias.name.split(".")[0]
-                    if module not in SAFE_MODULES:
-                        return (
-                            False,
-                            f"Blocked: Import of '{module}' is not allowed. "
-                            f"Allowed: {', '.join(sorted(SAFE_MODULES))}",
-                        )
-            else:  # ImportFrom
-                module = (node.module or "").split(".")[0]
-                if module not in SAFE_MODULES:
-                    return (
-                        False,
-                        f"Blocked: Import from '{module}' is not allowed. "
-                        f"Allowed: {', '.join(sorted(SAFE_MODULES))}",
-                    )
+    # Check import statements via AST (avoids false positives from string literals)
+    is_safe, error = _check_ast_imports(tree)
+    if not is_safe:
+        return False, error
 
     # Deep AST security analysis
     is_safe, error = _check_ast_security(tree)
@@ -711,7 +801,9 @@ def _format_error_with_context(error: Exception, code: str, error_type: str) -> 
     return "\n".join(result_parts)
 
 
-def _handle_special_command(code: str, context: dict[str, Any]) -> str | None:
+def _handle_special_command(
+    code: str, context: dict[str, Any], session_id: str | None = None
+) -> str | None:
     """
     Handle special % commands.
 
@@ -744,7 +836,7 @@ def _handle_special_command(code: str, context: dict[str, Any]) -> str | None:
         return "Context cleared. All variables removed."
 
     if cmd == "%history":
-        history = get_history()
+        history = get_history(session_id)
         if not history:
             return "No execution history."
         # Show last N entries (default 10, or specified)
@@ -1057,6 +1149,7 @@ def _worker_process(
 
         # Filter context to only serializable values
         serializable_context: dict[str, Any] = {}
+        dropped_vars: list[str] = []
         for k, v in context.items():
             try:
                 import pickle  # nosec B403
@@ -1064,10 +1157,12 @@ def _worker_process(
                 pickle.dumps(v)
                 serializable_context[k] = v
             except Exception:  # noqa: BLE001  # nosec B110
-                pass
+                dropped_vars.append(k)
 
         # Include updated context in result
         result["context"] = serializable_context
+        if dropped_vars:
+            result["dropped_vars"] = dropped_vars
 
         # Ensure result itself is serializable
         if result.get("result") is not None:
@@ -1084,7 +1179,9 @@ def _worker_process(
         result_queue.put({"success": False, "error": f"Worker error: {e}\n{tb}"})
 
 
-def execute_python(code: str, timeout: int = 30, persistent: bool = True) -> str:
+def execute_python(
+    code: str, timeout: int = 30, persistent: bool = True, session_id: str = "default"
+) -> str:
     """
     Execute Python code in a restricted environment with persistent state.
 
@@ -1109,6 +1206,7 @@ def execute_python(code: str, timeout: int = 30, persistent: bool = True) -> str
         code: Python code to execute
         timeout: Execution timeout in seconds (max 60)
         persistent: Whether to persist variables between calls
+        session_id: Session ID for isolating state between users/chats
 
     Returns:
         Output from the code execution or error message
@@ -1116,12 +1214,12 @@ def execute_python(code: str, timeout: int = 30, persistent: bool = True) -> str
     # Validate timeout
     timeout = min(max(1, timeout), 60)
 
-    # Get context
-    context = get_context() if persistent else {}
+    # Get context scoped to the explicit session_id (never falls back to global)
+    context = get_context(session_id) if persistent else {}
 
     # Handle special commands directly (no subprocess needed)
     if code.strip().startswith("%"):
-        special_result = _handle_special_command(code, context)
+        special_result = _handle_special_command(code, context, session_id=session_id)
         if special_result is not None:
             return special_result
 
@@ -1163,16 +1261,20 @@ def execute_python(code: str, timeout: int = 30, persistent: bool = True) -> str
             return "Error: No result from execution (queue empty)"
 
         # Update context from result
+        dropped_vars: list[str] = result.get("dropped_vars", [])
         if persistent and "context" in result:
-            context.clear()
-            context.update(result.get("context", {}))
+            with _session_states_lock:
+                context.clear()
+                context.update(result.get("context", {}))
 
         # Format output
         if not result.get("success"):
             error_output = result.get("error", "Unknown error")
             # Record failed execution in history
             if persistent:
-                add_to_history(code, success=False, output=error_output[:100])
+                add_to_history(
+                    code, success=False, output=error_output[:100], session_id=session_id
+                )
             return error_output
 
         output_parts = []
@@ -1209,6 +1311,15 @@ def execute_python(code: str, timeout: int = 30, persistent: bool = True) -> str
                 output_parts.append("")
             output_parts.append(f"[Variables: {', '.join(sorted(variables))}]")
 
+        # Warn about non-picklable variables lost during IPC
+        if dropped_vars and persistent:
+            if output_parts:
+                output_parts.append("")
+            output_parts.append(
+                f"Warning: {len(dropped_vars)} variable(s) could not be persisted "
+                f"(not picklable): {', '.join(sorted(dropped_vars))}"
+            )
+
         if not output_parts:
             final_output = "Code executed successfully (no output)"
         else:
@@ -1219,7 +1330,7 @@ def execute_python(code: str, timeout: int = 30, persistent: bool = True) -> str
             output_preview = final_output[:100]
             if len(final_output) > 100:
                 output_preview += "..."
-            add_to_history(code, success=True, output=output_preview)
+            add_to_history(code, success=True, output=output_preview, session_id=session_id)
 
         return final_output
 
@@ -1229,6 +1340,9 @@ def execute_python(code: str, timeout: int = 30, persistent: bool = True) -> str
         # Ensure process is cleaned up
         if process.is_alive():
             process.terminate()
+            process.join(timeout=1)
+            if process.is_alive():
+                process.kill()
 
 
 # Build dynamic description based on available modules

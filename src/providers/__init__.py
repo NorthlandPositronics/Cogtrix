@@ -37,6 +37,7 @@ __all__ = [
     "create_chat_model",
     "create_chat_model_from_config",
     "create_embeddings",
+    "create_embeddings_from_config",
     "get_default_model",
     "get_default_embedding_model",
     "get_default_base_url",
@@ -114,6 +115,7 @@ def create_chat_model(
     base_url: str | None = None,
     temperature: float = 0,
     num_ctx: int | None = None,
+    max_tokens: int | None = None,
     **kwargs: Any,
 ) -> Any:
     """Create a chat model for *provider_type*.
@@ -129,6 +131,7 @@ def create_chat_model(
         base_url: Custom endpoint.
         temperature: Sampling temperature.
         num_ctx: Context window size (Ollama only).
+        max_tokens: Max output tokens (``None`` → API default).
         **kwargs: Extra arguments forwarded to the provider module.
 
     Returns:
@@ -146,6 +149,14 @@ def create_chat_model(
         kw["base_url"] = base_url
     if num_ctx is not None and provider_type == "ollama":
         kw["num_ctx"] = num_ctx
+    if max_tokens is not None:
+        # Each provider uses a different kwarg name for output token limits
+        if provider_type == "ollama":
+            kw["num_predict"] = max_tokens
+        elif provider_type == "google":
+            kw["max_output_tokens"] = max_tokens
+        else:  # openai, anthropic
+            kw["max_tokens"] = max_tokens
     return mod.create_chat_model(**kw)
 
 
@@ -166,8 +177,9 @@ def create_chat_model_from_config(provider_config: ProviderConfig) -> Any:
         model=provider_config.get_model(),
         api_key=provider_config.api_key,
         base_url=provider_config.get_base_url(),
-        temperature=provider_config.temperature or 0,
-        num_ctx=provider_config.num_ctx,
+        temperature=provider_config.temperature if provider_config.temperature is not None else 0,
+        num_ctx=provider_config.num_ctx if provider_config.type == "ollama" else None,
+        max_tokens=provider_config.max_tokens,
     )
 
 
@@ -206,3 +218,36 @@ def create_embeddings(
     if base_url is not None:
         kw["base_url"] = base_url
     return mod.create_embeddings(**kw)
+
+
+def create_embeddings_from_config(
+    provider_type: str,
+    model: str | None = None,
+    base_url: str | None = None,
+    api_key: str | None = None,
+) -> tuple[Any, str]:
+    """Create an embeddings instance from resolved embedding config.
+
+    This is the **high-level** factory for embeddings, parallel to
+    :func:`create_chat_model_from_config` for chat models.  Accepts the
+    fields returned by ``Config.resolve_embedding_config()``.
+
+    Returns:
+        A ``(embeddings_instance, tag)`` tuple.  The *tag* is a
+        human-readable string like ``"ollama/nomic-embed-text"`` suitable
+        for logging and vector-store metadata.
+
+    Raises:
+        ValueError: If *provider_type* is unknown.
+        ImportError: If the required LangChain package is missing.
+        NotImplementedError: If the provider has no embedding support.
+    """
+    fn = create_embeddings(
+        provider_type,
+        model=model,
+        base_url=base_url,
+        api_key=api_key,
+    )
+    resolved_model = model or get_default_embedding_model(provider_type) or "unknown"
+    tag = f"{provider_type}/{resolved_model}"
+    return fn, tag

@@ -6,6 +6,7 @@ supporting parallel execution, structured JSON responses, and timeouts.
 """
 
 import json
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeoutError
@@ -34,11 +35,8 @@ _delegate_config: dict[str, Any] = {
     "default_provider": "ollama",
     "default_model": None,
     "allowed_providers": ["openai", "ollama", "anthropic", "google"],
-    "model_aliases": {},
+    "models": {},
     "providers": {},  # Named provider configurations
-    # Legacy fallbacks
-    "openai_api_key": None,
-    "ollama_base_url": "http://localhost:11434",
     "max_consecutive_failures": 5,
     "circuit_breaker_cooldown": 300,  # seconds before retry
 }
@@ -46,7 +44,14 @@ _delegate_config: dict[str, Any] = {
 # Tools available to delegate agents.  Set by the host application
 # via ``set_delegate_tools()``.  When non-empty, delegates can run
 # as full ReAct agents with tool access instead of plain LLM calls.
-_delegate_tools: list[Any] = []
+# Stored per-thread so concurrent assistant-mode sessions don't overwrite each other.
+_delegate_tools_tls: threading.local = threading.local()
+
+
+def get_delegate_tools() -> list[Any]:
+    """Return the delegate tool list for the current thread."""
+    return getattr(_delegate_tools_tls, "tools", [])
+
 
 # Names excluded from the delegate tool set to prevent recursion
 # and keep delegate execution fast.
@@ -82,8 +87,6 @@ def set_delegate_tools(
         On-demand tools not yet active in the main agent.  Merged into
         the delegate toolset so delegates have full capabilities.
     """
-    global _delegate_tools
-
     seen: set[str] = set()
     merged: list[Any] = []
 
@@ -99,7 +102,7 @@ def set_delegate_tools(
                 merged.append(t)
                 seen.add(name)
 
-    _delegate_tools = merged
+    _delegate_tools_tls.tools = merged
 
 
 # Optional callback for real-time delegation status messages.
@@ -107,19 +110,23 @@ def set_delegate_tools(
 # Set by the host application (e.g. cogtrix.py) to display delegation
 # activity in the UI while the spinner is running.
 _status_callback: Any = None
+_status_callback_lock = threading.Lock()
 
 
 def set_status_callback(callback) -> None:
     """Register a callback that receives delegation status messages."""
     global _status_callback
-    _status_callback = callback
+    with _status_callback_lock:
+        _status_callback = callback
 
 
 def _emit_status(message: str) -> None:
     """Emit a status message if a callback is registered."""
-    if _status_callback is not None:
+    with _status_callback_lock:
+        cb = _status_callback
+    if cb is not None:
         try:
-            _status_callback(message)
+            cb(message)
         except Exception:
             pass
 
@@ -132,14 +139,20 @@ class ModelCircuitBreaker:
     is_unavailable: bool = False
     last_failure_time: float = 0.0
     last_error: str = ""
+    last_used: float = 0.0
 
-    def record_failure(self, error: str, max_failures: int = 5) -> None:
-        """Record a failure and potentially mark model as unavailable."""
+    def record_failure(self, error: str, max_failures: int = 5) -> bool:
+        """Record a failure and potentially mark model as unavailable.
+
+        Returns True if the circuit breaker just tripped (model now unavailable).
+        """
         self.consecutive_failures += 1
         self.last_failure_time = time.time()
         self.last_error = error
         if self.consecutive_failures >= max_failures:
             self.is_unavailable = True
+            return True
+        return False
 
     def record_success(self) -> None:
         """Record a success and reset failure count."""
@@ -154,35 +167,71 @@ class ModelCircuitBreaker:
         Returns:
             Tuple of (is_available, reason_if_unavailable)
         """
-        if not self.is_unavailable:
-            return True, None
+        with _circuit_breaker_lock:
+            if not self.is_unavailable:
+                return True, None
 
-        # Check if cooldown period has passed
-        elapsed = time.time() - self.last_failure_time
-        if elapsed >= cooldown:
-            # Reset and allow retry
-            self.is_unavailable = False
-            self.consecutive_failures = 0
-            return True, None
+            elapsed = time.time() - self.last_failure_time
+            if elapsed >= cooldown:
+                self.is_unavailable = False
+                self.consecutive_failures = 0
+                return True, None
 
-        remaining = int(cooldown - elapsed)
-        return False, (
-            f"Model marked unavailable after {self.consecutive_failures} "
-            f"consecutive failures. Last error: {self.last_error}. "
-            f"Will retry in {remaining}s."
-        )
+            remaining = int(cooldown - elapsed)
+            return False, (
+                f"Model marked unavailable after {self.consecutive_failures} "
+                f"consecutive failures. Last error: {self.last_error}. "
+                f"Will retry in {remaining}s."
+            )
 
 
 # Circuit breaker registry: tracks failures per "provider/model" key
 _circuit_breakers: dict[str, ModelCircuitBreaker] = {}
+_circuit_breaker_lock = threading.RLock()
+
+_MAX_CIRCUIT_BREAKERS = 200
+
+_CIRCUIT_BREAKER_IDLE_SECONDS = 3600.0  # 1 hour
+
+
+def _evict_stale_breakers() -> None:
+    """Remove stale entries from the circuit breaker registry.
+
+    Two-pass eviction:
+    1. Remove entries with zero consecutive failures that haven't been used
+       within the idle window — they carry no state worth keeping.
+    2. If the registry still exceeds the cap, remove the oldest entries by
+       ``last_used`` timestamp until it fits within the limit.
+    """
+    now = time.time()
+    idle_cutoff = now - _CIRCUIT_BREAKER_IDLE_SECONDS
+
+    stale_keys = [
+        k
+        for k, b in _circuit_breakers.items()
+        if b.consecutive_failures == 0 and b.last_used < idle_cutoff
+    ]
+    for k in stale_keys:
+        del _circuit_breakers[k]
+
+    if len(_circuit_breakers) >= _MAX_CIRCUIT_BREAKERS:
+        sorted_keys = sorted(_circuit_breakers, key=lambda k: _circuit_breakers[k].last_used)
+        excess = len(_circuit_breakers) - _MAX_CIRCUIT_BREAKERS + 1
+        for k in sorted_keys[:excess]:
+            del _circuit_breakers[k]
 
 
 def _get_circuit_breaker(provider: str, model: str) -> ModelCircuitBreaker:
     """Get or create circuit breaker for a provider/model combination."""
     key = f"{provider}/{model}"
-    if key not in _circuit_breakers:
-        _circuit_breakers[key] = ModelCircuitBreaker()
-    return _circuit_breakers[key]
+    with _circuit_breaker_lock:
+        if key not in _circuit_breakers:
+            if len(_circuit_breakers) >= _MAX_CIRCUIT_BREAKERS:
+                _evict_stale_breakers()
+            _circuit_breakers[key] = ModelCircuitBreaker(last_used=time.time())
+        else:
+            _circuit_breakers[key].last_used = time.time()
+        return _circuit_breakers[key]
 
 
 def get_model_status() -> dict[str, Any]:
@@ -192,11 +241,14 @@ def get_model_status() -> dict[str, Any]:
     Returns:
         Dictionary with model availability status.
     """
-    status = {}
     cooldown = _delegate_config.get("circuit_breaker_cooldown", 300)
+    with _circuit_breaker_lock:
+        snapshot = list(_circuit_breakers.items())
 
-    for key, breaker in _circuit_breakers.items():
-        available, reason = breaker.check_availability(cooldown)
+    status = {}
+    for key, breaker in snapshot:
+        with _circuit_breaker_lock:
+            available, reason = breaker.check_availability(cooldown)
         status[key] = {
             "available": available,
             "consecutive_failures": breaker.consecutive_failures,
@@ -214,12 +266,13 @@ def reset_model_status(provider: str | None = None, model: str | None = None):
         provider: Provider name (if None with model=None, resets all)
         model: Model name
     """
-    if provider is None and model is None:
-        _circuit_breakers.clear()
-    elif provider and model:
-        key = f"{provider}/{model}"
-        if key in _circuit_breakers:
-            _circuit_breakers[key] = ModelCircuitBreaker()
+    with _circuit_breaker_lock:
+        if provider is None and model is None:
+            _circuit_breakers.clear()
+        elif provider and model:
+            key = f"{provider}/{model}"
+            if key in _circuit_breakers:
+                _circuit_breakers[key] = ModelCircuitBreaker()
 
 
 def configure_delegate(config: dict[str, Any]) -> None:
@@ -322,7 +375,7 @@ class DelegateParallelInput(BaseModel):
     )
 
 
-def _resolve_model_alias(provider: str | None, model: str | None) -> tuple:
+def resolve_model_alias(provider: str | None, model: str | None) -> tuple:
     """
     Resolve model aliases from configuration.
 
@@ -334,7 +387,7 @@ def _resolve_model_alias(provider: str | None, model: str | None) -> tuple:
         Tuple of (resolved_provider, resolved_model, alias_config)
         where alias_config is a dict with optional 'timeout', 'temperature', 'num_ctx' overrides
     """
-    aliases = _delegate_config.get("model_aliases", {})
+    aliases = _delegate_config.get("models", {})
     alias_config: dict[str, Any] = {}
 
     def _extract_alias_config(alias_value: dict) -> None:
@@ -386,7 +439,7 @@ def _resolve_model_alias(provider: str | None, model: str | None) -> tuple:
     return provider, model, alias_config
 
 
-def _create_llm(
+def create_delegate_llm(
     provider: str,
     model: str | None = None,
     temperature: float = 0.7,
@@ -434,21 +487,10 @@ def _create_llm(
             num_ctx=final_num_ctx,
         )
 
-    # Legacy fallback for built-in provider names
-    legacy_api_key = _delegate_config.get("openai_api_key") if provider == "openai" else None
-    legacy_base_url = (
-        _delegate_config.get("ollama_base_url", "http://localhost:11434")
-        if provider == "ollama"
-        else None
-    )
-
-    return create_chat_model(
-        provider,
-        model=model,
-        api_key=legacy_api_key,
-        base_url=legacy_base_url,
-        temperature=temperature,
-        num_ctx=num_ctx,
+    # Provider not in named config — raise a clear error
+    raise ValueError(
+        f"Provider '{provider}' is not configured. "
+        f"Add it to the 'providers' section of your config file."
     )
 
 
@@ -524,7 +566,7 @@ def _validate_json_response(response: str) -> tuple:
         return False, None
 
 
-def _resolve_defaults(
+def resolve_delegate_defaults(
     provider: str | None,
     model: str | None,
 ) -> tuple[str, str]:
@@ -596,11 +638,11 @@ def _extract_content(result: Any) -> str:
     return str(result)
 
 
-def _run_delegate_agent(
+def run_delegate_agent(
     llm: Any,
     task: str,
     context: str,
-    tools: list[Any],
+    tools_override: list[Any] | None = None,
 ) -> str:
     """Run a delegate as a full ReAct agent with tool access.
 
@@ -609,6 +651,8 @@ def _run_delegate_agent(
     the model does not support tool calling.
     """
     log = get_logger()
+
+    use_tools = tools_override if tools_override is not None else get_delegate_tools()
 
     try:
         from langgraph.prebuilt import create_react_agent
@@ -623,7 +667,7 @@ def _run_delegate_agent(
     try:
         agent = create_react_agent(
             model=llm,
-            tools=tools,
+            tools=use_tools,
             prompt=prompt,
         )
     except Exception as exc:
@@ -676,8 +720,8 @@ def _execute_single_task(
     it falls back to a plain LLM call.
 
     **Callers must resolve aliases and defaults before calling this
-    function.**  Use ``_resolve_model_alias`` followed by
-    ``_resolve_defaults`` to prepare the arguments.
+    function.**  Use ``resolve_model_alias`` followed by
+    ``resolve_delegate_defaults`` to prepare the arguments.
 
     Includes circuit breaker logic to prevent repeated calls to failing
     models.
@@ -695,7 +739,8 @@ def _execute_single_task(
     # Check circuit breaker status
     circuit_breaker = _get_circuit_breaker(provider, model)
     cooldown = _delegate_config.get("circuit_breaker_cooldown", 300)
-    is_available, unavailable_reason = circuit_breaker.check_availability(cooldown)
+    with _circuit_breaker_lock:
+        is_available, unavailable_reason = circuit_breaker.check_availability(cooldown)
 
     if not is_available:
         log.info(f"Delegation blocked: {target_model} - circuit breaker open")
@@ -712,15 +757,15 @@ def _execute_single_task(
 
     try:
         # Create LLM
-        llm = _create_llm(provider, model, temperature, num_ctx)
+        llm = create_delegate_llm(provider, model, temperature, num_ctx)
 
         # ── Agent mode: run as full ReAct agent with tools ──────
         response_text = ""
-        if use_tools and _delegate_tools:
+        if use_tools and get_delegate_tools():
             log.debug(
-                f"Running delegate agent with {len(_delegate_tools)} tools: " f"{target_model}"
+                f"Running delegate agent with {len(get_delegate_tools())} tools: " f"{target_model}"
             )
-            response_text = _run_delegate_agent(llm, task, context, _delegate_tools)
+            response_text = run_delegate_agent(llm, task, context)
 
         # ── Fallback: plain LLM call ────────────────────────────
         if not response_text:
@@ -742,7 +787,8 @@ def _execute_single_task(
         model_name = model or (llm.model if hasattr(llm, "model") else "unknown")
 
         # Record success - reset circuit breaker
-        circuit_breaker.record_success()
+        with _circuit_breaker_lock:
+            circuit_breaker.record_success()
 
         # Log successful delegation
         log_delegation(
@@ -770,13 +816,15 @@ def _execute_single_task(
 
         # Record failure in circuit breaker
         max_failures = _delegate_config.get("max_consecutive_failures", 5)
-        circuit_breaker.record_failure(error_msg, max_failures)
+        with _circuit_breaker_lock:
+            tripped = circuit_breaker.record_failure(error_msg, max_failures)
+            failure_count = circuit_breaker.consecutive_failures
 
         # Add circuit breaker status to error if model is now unavailable
-        if circuit_breaker.is_unavailable:
+        if tripped:
             error_msg = (
                 f"{error_msg} | Model marked unavailable after "
-                f"{circuit_breaker.consecutive_failures} consecutive failures."
+                f"{failure_count} consecutive failures."
             )
 
         # Log failed delegation
@@ -850,7 +898,7 @@ def delegate_task(
         return f"**Delegation blocked:** {error}"
 
     # Resolve aliases first to get any timeout/temperature/num_ctx overrides
-    resolved_provider, resolved_model, alias_config = _resolve_model_alias(provider, model)
+    resolved_provider, resolved_model, alias_config = resolve_model_alias(provider, model)
 
     # Apply alias overrides (alias config takes precedence over parameters)
     if "timeout" in alias_config:
@@ -860,7 +908,7 @@ def delegate_task(
     num_ctx = alias_config.get("num_ctx")
 
     # Fill in defaults for anything still None after alias resolution
-    resolved_provider, resolved_model = _resolve_defaults(resolved_provider, resolved_model)
+    resolved_provider, resolved_model = resolve_delegate_defaults(resolved_provider, resolved_model)
 
     # Clamp timeout and temperature to valid ranges
     timeout = max(10, min(600, timeout))  # Allow up to 600s for reasoning models
@@ -868,11 +916,13 @@ def delegate_task(
 
     # Show delegation activity to the user
     alias_hint = f" (alias: {model})" if model and model != resolved_model else ""
-    mode_hint = " (with tools)" if use_tools and _delegate_tools else ""
+    mode_hint = " (with tools)" if use_tools and get_delegate_tools() else ""
     _emit_status(f"→ Delegating to {resolved_provider}/{resolved_model}" f"{alias_hint}{mode_hint}")
 
-    # Execute with timeout
-    with ThreadPoolExecutor(max_workers=1) as executor:
+    # Execute with timeout — use explicit executor management so that
+    # a timeout does not block in executor.__exit__(wait=True).
+    executor = ThreadPoolExecutor(max_workers=1)
+    try:
         future = executor.submit(
             _execute_single_task,
             task=task,
@@ -889,8 +939,11 @@ def delegate_task(
         try:
             result = future.result(timeout=timeout)
         except FuturesTimeoutError:
+            future.cancel()
             _emit_status(f"✗ Delegation timed out after {timeout}s")
             return f"**Delegation timed out** after {timeout}s.\n\n" f"Task: {task[:100]}..."
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
 
     # Format output
     if result.success:
@@ -964,10 +1017,10 @@ def delegate_parallel(
     # Build summary of delegation targets for the status message
     target_summaries = []
     for task_def in tasks:
-        prov_peek, mdl_peek, _ = _resolve_model_alias(
+        prov_peek, mdl_peek, _ = resolve_model_alias(
             task_def.get("provider"), task_def.get("model")
         )
-        prov_peek, mdl_peek = _resolve_defaults(prov_peek, mdl_peek)
+        prov_peek, mdl_peek = resolve_delegate_defaults(prov_peek, mdl_peek)
         label = task_def.get("model") or mdl_peek
         target_summaries.append(f"{prov_peek}/{label}")
     _emit_status(f"→ Delegating {len(tasks)} tasks in parallel: {', '.join(target_summaries)}")
@@ -977,7 +1030,7 @@ def delegate_parallel(
 
     def execute_indexed(index: int, task_def: dict[str, Any]) -> tuple:
         """Execute task and return with index for ordering."""
-        prov, mdl, alias_cfg = _resolve_model_alias(
+        prov, mdl, alias_cfg = resolve_model_alias(
             task_def.get("provider"),
             task_def.get("model"),
         )
@@ -987,7 +1040,7 @@ def delegate_parallel(
         temp = max(0.0, min(2.0, temp))
         num_ctx = alias_cfg.get("num_ctx")
 
-        prov, mdl = _resolve_defaults(prov, mdl)
+        prov, mdl = resolve_delegate_defaults(prov, mdl)
 
         result = _execute_single_task(
             task=task_def.get("task", ""),
@@ -1002,8 +1055,10 @@ def delegate_parallel(
         )
         return (index, result)
 
-    # Execute all tasks in parallel
-    with ThreadPoolExecutor(max_workers=min(len(tasks), 10)) as executor:
+    # Execute all tasks in parallel — use explicit executor management so that
+    # a timeout does not block in executor.__exit__(wait=True).
+    executor = ThreadPoolExecutor(max_workers=min(len(tasks), 10))
+    try:
         futures = [
             executor.submit(execute_indexed, i, task_def) for i, task_def in enumerate(tasks)
         ]
@@ -1033,6 +1088,7 @@ def delegate_parallel(
                 else:
                     results.append(future.result(timeout=remaining))
             except FuturesTimeoutError:
+                future.cancel()
                 results.append(
                     (
                         i,
@@ -1048,6 +1104,8 @@ def delegate_parallel(
                         ),
                     )
                 )
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
 
     # Sort by original index
     results.sort(key=lambda x: x[0])
@@ -1107,7 +1165,10 @@ TOOL_CONFIGS = [
             "RULES:\n"
             "- NEVER use use_tools=False with empty context\n"
             "- Provide context when possible to avoid redundant work\n"
-            "- Delegates cannot see your conversation history"
+            "- Delegates cannot see your conversation history\n"
+            "\n"
+            "Use for: specialized work (code, research), second opinions, verification, "
+            "text analysis (use_tools=False with context parameter)."
         ),
         "input_schema": DelegateInput,
         "function": delegate_task,
@@ -1128,7 +1189,10 @@ TOOL_CONFIGS = [
             "\n"
             "Set use_tools=False per task for pure text analysis "
             "(requires non-empty context). Delegates cannot see "
-            "your conversation history — pass relevant data in context."
+            "your conversation history — pass relevant data in context.\n"
+            "\n"
+            "Use for: independent subtasks (fan out), large-scale processing, "
+            "batch analysis, summarization of multiple sources."
         ),
         "input_schema": DelegateParallelInput,
         "function": delegate_parallel,
@@ -1148,11 +1212,33 @@ __all__ = [
     "DelegateParallelInput",
     "DelegateResult",
     "ModelCircuitBreaker",
+    # Public helpers (renamed from private)
+    "create_delegate_llm",
+    "get_delegate_tools",
+    "resolve_delegate_defaults",
+    "resolve_model_alias",
+    "run_delegate_agent",
+    # Other helpers
     "_build_prompt",
     "_check_allowed_model",
-    "_resolve_defaults",
-    "_resolve_model_alias",
+    "_circuit_breaker_lock",
+    "_evict_stale_breakers",
+    "_get_circuit_breaker",
+    "_MAX_CIRCUIT_BREAKERS",
     "_validate_json_response",
     "_extract_content",
     "TOOL_CONFIGS",
 ]
+
+# Backward-compatible aliases for the renamed functions
+_create_llm = create_delegate_llm
+_get_delegate_tools = get_delegate_tools
+_resolve_defaults = resolve_delegate_defaults
+_resolve_model_alias = resolve_model_alias
+_run_delegate_agent = run_delegate_agent
+
+
+def __getattr__(name: str) -> Any:
+    if name == "_delegate_tools":
+        return get_delegate_tools()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

@@ -5,7 +5,7 @@ import pytest
 from src.memory.base import BaseMemoryStore
 from src.memory.context import MemoryContext
 from src.memory.factory import MemoryFactory
-from src.memory.manager import BaseMemoryManager
+from src.memory.manager import BaseMemoryManager, _sanitize_session_id
 
 
 class MockStore(BaseMemoryStore):
@@ -361,3 +361,112 @@ class TestIntegration:
         # Create new manager and restore
         manager2 = MemoryFactory.create("mock", store, "workflow-test")
         manager2.from_dict(data)
+
+
+class TestSanitizeSessionId:
+    """Tests for _sanitize_session_id path-traversal prevention."""
+
+    def test_normal_session_id_passes_through(self):
+        assert _sanitize_session_id("my-session-123") == "my-session-123"
+
+    def test_forward_slash_replaced(self):
+        result = _sanitize_session_id("user/session")
+        assert "/" not in result
+        assert result == "user_session"
+
+    def test_backslash_replaced(self):
+        result = _sanitize_session_id("user\\session")
+        assert "\\" not in result
+        assert result == "user_session"
+
+    def test_double_dot_replaced(self):
+        result = _sanitize_session_id("../secrets")
+        assert ".." not in result
+        assert "/" not in result
+
+    def test_complex_traversal_replaced(self):
+        result = _sanitize_session_id("../../etc/passwd")
+        assert ".." not in result
+        assert "/" not in result
+
+    def test_null_bytes_replaced(self):
+        result = _sanitize_session_id("session\x00evil")
+        assert "\x00" not in result
+        assert result == "session_evil"
+
+    def test_length_capped_at_200(self):
+        long_id = "a" * 300
+        result = _sanitize_session_id(long_id)
+        assert len(result) == 200
+
+    def test_combined_attack_sanitized(self):
+        result = _sanitize_session_id("..\\..\\windows\\system32")
+        assert ".." not in result
+        assert "\\" not in result
+
+
+class TestHybridMetaPathTraversal:
+    """Tests that _hybrid_meta_path() stays within the base directory."""
+
+    def test_normal_session_id_within_base(self, tmp_path):
+        store = MockStore()
+        store.base_path = tmp_path  # type: ignore[attr-defined]
+        manager = MockMemoryManager(store, "normal-session")
+        path = manager._hybrid_meta_path()
+        assert str(path).startswith(str(tmp_path.resolve()))
+
+    def test_dotdot_session_id_sanitized(self, tmp_path):
+        store = MockStore()
+        store.base_path = tmp_path  # type: ignore[attr-defined]
+        manager = MockMemoryManager(store, "../secrets")
+        path = manager._hybrid_meta_path()
+        assert str(path).startswith(str(tmp_path.resolve()))
+
+    def test_slash_session_id_sanitized(self, tmp_path):
+        store = MockStore()
+        store.base_path = tmp_path  # type: ignore[attr-defined]
+        manager = MockMemoryManager(store, "sub/dir/session")
+        path = manager._hybrid_meta_path()
+        assert str(path).startswith(str(tmp_path.resolve()))
+
+    def test_backslash_session_id_sanitized(self, tmp_path):
+        store = MockStore()
+        store.base_path = tmp_path  # type: ignore[attr-defined]
+        manager = MockMemoryManager(store, "sub\\dir\\session")
+        path = manager._hybrid_meta_path()
+        assert str(path).startswith(str(tmp_path.resolve()))
+
+
+class TestSessionVectorStoreTraversal:
+    """Tests that SessionVectorStore rejects path-traversal session IDs."""
+
+    def test_normal_session_id_accepted(self, tmp_path):
+        from src.memory.recall import SessionVectorStore
+
+        store = SessionVectorStore("my-session", storage_dir=str(tmp_path))
+        assert str(store._index_dir).startswith(str(tmp_path.resolve()))
+
+    def test_dotdot_session_id_sanitized(self, tmp_path):
+        from src.memory.recall import SessionVectorStore
+
+        store = SessionVectorStore("../outside", storage_dir=str(tmp_path))
+        assert str(store._index_dir).startswith(str(tmp_path.resolve()))
+
+    def test_slash_session_id_sanitized(self, tmp_path):
+        from src.memory.recall import SessionVectorStore
+
+        store = SessionVectorStore("sub/dir", storage_dir=str(tmp_path))
+        assert str(store._index_dir).startswith(str(tmp_path.resolve()))
+
+    def test_backslash_session_id_sanitized(self, tmp_path):
+        from src.memory.recall import SessionVectorStore
+
+        store = SessionVectorStore("sub\\dir", storage_dir=str(tmp_path))
+        assert str(store._index_dir).startswith(str(tmp_path.resolve()))
+
+    def test_null_byte_session_id_sanitized(self, tmp_path):
+        from src.memory.recall import SessionVectorStore
+
+        store = SessionVectorStore("session\x00evil", storage_dir=str(tmp_path))
+        assert "\x00" not in str(store._index_dir)
+        assert str(store._index_dir).startswith(str(tmp_path.resolve()))

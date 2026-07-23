@@ -12,7 +12,7 @@ import asyncio
 import re
 import threading
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Optional
 
 from src.logging_config import get_logger
 
@@ -79,6 +79,7 @@ _JSON_SCHEMA_TYPE_MAP: dict[str, type] = {
     "boolean": bool,
     "array": list,
     "object": dict,
+    "null": type(None),
 }
 
 
@@ -106,14 +107,30 @@ def json_schema_to_pydantic(name: str, schema: dict[str, Any]) -> type:
     field_definitions: dict[str, Any] = {}
     for prop_name, prop_schema in properties.items():
         raw_type = prop_schema.get("type", "string")
-        python_type = _JSON_SCHEMA_TYPE_MAP.get(raw_type, str)
+        has_null = False
+        if isinstance(raw_type, list):
+            non_null = [t for t in raw_type if t != "null"]
+            python_type = _JSON_SCHEMA_TYPE_MAP.get(non_null[0] if non_null else "string", str)
+            if "null" in raw_type:
+                has_null = True
+                python_type = Optional[python_type]  # noqa: UP045
+        elif "anyOf" in prop_schema or "oneOf" in prop_schema:
+            variants = prop_schema.get("anyOf") or prop_schema.get("oneOf") or []
+            non_null = [v for v in variants if v.get("type") != "null"]
+            has_null = len(non_null) < len(variants)
+            first_type = non_null[0].get("type", "string") if non_null else "string"
+            python_type = _JSON_SCHEMA_TYPE_MAP.get(first_type, str)
+            if has_null:
+                python_type = Optional[python_type]  # noqa: UP045
+        else:
+            python_type = _JSON_SCHEMA_TYPE_MAP.get(raw_type, str)
         description = prop_schema.get("description", "")
 
-        if prop_name in required_fields:
+        if prop_name in required_fields and not has_null:
             field_definitions[prop_name] = (python_type, PydanticField(description=description))
         else:
             field_definitions[prop_name] = (
-                python_type | None,
+                Optional[python_type],  # noqa: UP045
                 PydanticField(default=None, description=description),
             )
 
@@ -344,7 +361,11 @@ class MCPManager:
 
     # ── Public API ────────────────────────────────────────────────────────────
 
-    def connect_all(self, configs: list[MCPServerConfig]) -> dict[str, Any]:
+    def connect_all(
+        self,
+        configs: list[MCPServerConfig],
+        builtin_tool_names: set[str] | None = None,
+    ) -> dict[str, Any]:
         """
         Connect to all configured MCP servers and return LangChain tools.
 
@@ -353,6 +374,8 @@ class MCPManager:
 
         Args:
             configs: List of MCPServerConfig objects.
+            builtin_tool_names: Optional set of built-in tool names to check for
+                collisions against, in addition to other MCP tools.
 
         Returns:
             Dict mapping tool name → LangChain StructuredTool for every tool
@@ -382,7 +405,9 @@ class MCPManager:
                 original_name: str = mcp_tool.name
                 tool_name = original_name
 
-                if tool_name in all_tools:
+                if tool_name in all_tools or (
+                    builtin_tool_names and tool_name in builtin_tool_names
+                ):
                     prefixed = f"{cfg.name}_{tool_name}"
                     if prefixed in all_tools:
                         log.error(
@@ -476,19 +501,23 @@ class MCPManager:
             self._loop.close()
         self._loop = None
 
-    def restart(self, server_name: str | None = None) -> None:
+    def restart(self, server_name: str | None = None) -> dict[str, Any]:
         """
-        Reconnect one or all MCP servers.
+        Reconnect one or all MCP servers and return rebuilt LangChain tools.
 
         Args:
             server_name: If given, reconnect only this server. Otherwise restart all.
+
+        Returns:
+            Dict mapping tool name to LangChain StructuredTool for every tool
+            available on the restarted servers.
         """
         log = get_logger()
         if server_name is not None:
             targets = [server_name] if server_name in self._configs else []
             if not targets:
                 log.warning("MCP: cannot restart unknown server '%s'", server_name)
-                return
+                return {}
         else:
             targets = list(self._configs.keys())
 
@@ -511,6 +540,13 @@ class MCPManager:
                 log.info("MCP: reconnected server '%s' (%d tools)", name, len(new_conn.tools))
             except Exception as exc:
                 log.warning("MCP: restart of server '%s' failed: %s", name, exc)
+
+        new_tools: dict[str, Any] = {}
+        for name in targets:
+            if name in self._connections:
+                server_tools = self.get_langchain_tools(server_name=name)
+                new_tools.update(server_tools)
+        return new_tools
 
     def get_langchain_tools(self, server_name: str | None = None) -> dict[str, Any]:
         """

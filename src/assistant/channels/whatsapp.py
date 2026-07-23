@@ -8,6 +8,7 @@ Contact filtering mirrors the logic in src/tools/whatsapp.py.
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any
 
 from src.assistant.channel import Channel, IncomingMessage
@@ -50,7 +51,8 @@ class WhatsAppChannel(Channel):
         self._filter_mode: str = config.get("filter_mode", "none")
         self._contacts: list[str] = config.get("contacts", [])
         self._last_seen_timestamp: int = 0
-        self._seen_ids: set[str] = set()
+        self._seen_ids: dict[str, float] = {}
+        self._SEEN_TTL: float = 600.0
 
     @property
     def name(self) -> str:
@@ -63,8 +65,6 @@ class WhatsAppChannel(Channel):
         for msg in raw_messages:
             if msg.from_me:
                 continue
-            if msg.id in self._seen_ids:
-                continue
             if msg.timestamp < self._last_seen_timestamp:
                 continue
             if not _check_receive_contact(msg.from_number, self._filter_mode, self._contacts):
@@ -72,7 +72,13 @@ class WhatsAppChannel(Channel):
             if not msg.body.strip():
                 continue
 
-            self._seen_ids.add(msg.id)
+            now = time.monotonic()
+            if len(self._seen_ids) > 100:
+                cutoff = now - self._SEEN_TTL
+                self._seen_ids = {k: v for k, v in self._seen_ids.items() if v > cutoff}
+            if msg.id in self._seen_ids:
+                continue
+            self._seen_ids[msg.id] = now
             if msg.timestamp > self._last_seen_timestamp:
                 self._last_seen_timestamp = msg.timestamp
 

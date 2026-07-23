@@ -39,7 +39,7 @@ _SENSITIVE_RE = _re.compile(
 )
 _BEARER_RE = _re.compile(r"Bearer\s+[A-Za-z0-9_\-/.]{8,}", _re.IGNORECASE)
 _SK_RE = _re.compile(r"sk-[A-Za-z0-9]{8,}")
-_KEY_LIKE_RE = _re.compile(r"(?:exa-|tvly-|BSA)[A-Za-z0-9_\-]{6,}")
+_KEY_LIKE_RE = _re.compile(r"(?:xai-|exa-|tvly-|BSA)[A-Za-z0-9_\-]{6,}")
 
 
 def _scrub_secrets(text: str) -> str:
@@ -332,6 +332,7 @@ try:
 
         def _log(self, level: str, message: str) -> None:
             """Log a message at the specified level."""
+            message = _scrub_secrets(message)
             log = get_logger()
             if level == "debug":
                 log.debug(message)
@@ -344,6 +345,7 @@ try:
 
         def _format_content(self, content: str, max_len: int = 500) -> str:
             """Format content with optional truncation."""
+            content = _scrub_secrets(content)
             if self.verbose or len(content) <= max_len:
                 return content
             return content[:max_len] + "..."
@@ -496,9 +498,10 @@ try:
                                 for tc in msg.tool_calls:
                                     tool_name = tc.get("name", "unknown")
                                     tool_args = tc.get("args", {})
+                                    args_str = _scrub_secrets(str(tool_args))
                                     self._log(
                                         "info",
-                                        f"LLM_TOOL_CALL: {tool_name} args={tool_args}",
+                                        f"LLM_TOOL_CALL: {tool_name} args={args_str}",
                                     )
 
                             # Log additional kwargs (may contain thinking, reasoning)
@@ -556,10 +559,14 @@ try:
             """Called when a tool starts executing."""
             tool_name = serialized.get("name", "unknown")
             self._log("info", f"TOOL_START: {tool_name}")
-            self._log("debug", f"TOOL_INPUT: {self._format_content(input_str, 1000)}")
+            self._log(
+                "debug", f"TOOL_INPUT: {self._format_content(_scrub_secrets(input_str), 1000)}"
+            )
 
-        def on_tool_end(self, output: str, **kwargs: Any) -> None:
+        def on_tool_end(self, output: Any, **kwargs: Any) -> None:
             """Called when a tool finishes executing."""
+            if not isinstance(output, str):
+                output = getattr(output, "content", None) or str(output)
             self._log("debug", f"TOOL_OUTPUT: {self._format_content(output, 1000)}")
 
         def on_tool_error(self, error: BaseException, **kwargs: Any) -> None:

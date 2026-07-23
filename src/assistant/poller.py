@@ -90,8 +90,8 @@ class ChannelPoller:
         while not self._stop_event.is_set():
             try:
                 self._session_mgr.evict_idle()
-            except Exception:
-                pass
+            except Exception as exc:
+                log.error("Session eviction failed: %s", exc)
             self._stop_event.wait(timeout=60)
 
     def _get_poll_interval(self, channel_name: str) -> float:

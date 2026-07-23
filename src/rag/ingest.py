@@ -18,11 +18,11 @@ class IngestConfig:
 
     docs_dir: Path
     vectordb_dir: Path
-    chunk_size: int = 1200
+    chunk_size: int = 2000
     chunk_overlap: int = 200
     embedding_provider: str = "ollama"
     embedding_model: str | None = None
-    ollama_base_url: str | None = None
+    base_url: str | None = None
     api_key: str | None = None
 
 
@@ -96,20 +96,21 @@ def _load_documents(docs_dir: Path) -> tuple[list[Document], list[str]]:
         errors.append(f"Not a directory: {docs_dir}")
         return documents, errors
 
-    for path in sorted(docs_dir.iterdir()):
-        if path.is_dir():
+    for path in sorted(docs_dir.rglob("*")):
+        if not path.is_file():
             continue
 
         loader = _get_loader(path)
+        rel = path.relative_to(docs_dir)
         if loader is None:
-            errors.append(f"Skipped unsupported file: {path.name}")
+            errors.append(f"Skipped unsupported file: {rel}")
             continue
 
         try:
             docs = loader.load()
             documents.extend(docs)
         except Exception as e:
-            errors.append(f"Failed to load {path.name}: {e}")
+            errors.append(f"Failed to load {rel}: {e}")
 
     return documents, errors
 
@@ -134,7 +135,7 @@ def _create_embeddings(config: IngestConfig):
     return create_embeddings(
         config.embedding_provider,
         model=config.embedding_model,
-        base_url=config.ollama_base_url,
+        base_url=config.base_url,
         api_key=config.api_key,
     )
 

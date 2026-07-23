@@ -125,6 +125,23 @@ class TestExtractYaml:
         result = _extract_yaml(text)
         assert result == "provider: ollama"
 
+    def test_nested_backticks_greedy_fallback(self):
+        # YAML content contains triple backticks; the non-greedy regex terminates
+        # early at the nested ```, so the greedy fallback must recover the full block.
+        text = (
+            "```yaml\n"
+            "provider: ollama\n"
+            "example: |\n"
+            "  ```\n"
+            "  some nested code\n"
+            "  ```\n"
+            "model: qwen3:8b\n"
+            "```"
+        )
+        result = _extract_yaml(text)
+        assert "provider: ollama" in result
+        assert "model: qwen3:8b" in result
+
 
 class TestInjectBootstrap:
     def test_injects_api_key(self):
@@ -137,8 +154,8 @@ class TestInjectBootstrap:
             "type": "openai",
         }
         _inject_bootstrap(data, bootstrap)
-        assert data["inference"]["openai"]["api_key"] == "sk-real-key"
-        assert data["inference"]["openai"]["model"] == "gpt-4.1-mini"
+        assert data["providers"]["openai"]["api_key"] == "sk-real-key"
+        assert data["providers"]["openai"]["model"] == "gpt-4.1-mini"
 
     def test_injects_ollama_base_url(self):
         data = {}
@@ -151,10 +168,10 @@ class TestInjectBootstrap:
         }
         _inject_bootstrap(data, bootstrap)
         assert data["provider"] == "ollama"
-        assert data["inference"]["ollama"]["base_url"] == "http://localhost:11434"
+        assert data["providers"]["ollama"]["base_url"] == "http://localhost:11434"
 
-    def test_preserves_existing_inference(self):
-        data = {"inference": {"other_provider": {"type": "openai", "model": "gpt-4.1"}}}
+    def test_preserves_existing_providers(self):
+        data = {"providers": {"other_provider": {"type": "openai", "model": "gpt-4.1"}}}
         bootstrap = {
             "provider": "ollama",
             "model": "qwen3:8b",
@@ -163,8 +180,8 @@ class TestInjectBootstrap:
             "type": "ollama",
         }
         _inject_bootstrap(data, bootstrap)
-        assert "other_provider" in data["inference"]
-        assert "ollama" in data["inference"]
+        assert "other_provider" in data["providers"]
+        assert "ollama" in data["providers"]
 
     def test_no_api_key_when_none(self):
         data = {}
@@ -176,7 +193,37 @@ class TestInjectBootstrap:
             "type": "ollama",
         }
         _inject_bootstrap(data, bootstrap)
-        assert "api_key" not in data["inference"]["ollama"]
+        assert "api_key" not in data["providers"]["ollama"]
+
+    def test_creates_models_registry_entry(self):
+        data = {}
+        bootstrap = {
+            "provider": "openai",
+            "model": "gpt-4.1-mini",
+            "api_key": "sk-key",
+            "base_url": None,
+            "type": "openai",
+        }
+        _inject_bootstrap(data, bootstrap)
+        assert "models" in data
+        assert "default" in data["models"]
+        assert data["models"]["default"]["provider"] == "openai"
+        assert data["models"]["default"]["model"] == "gpt-4.1-mini"
+        assert data["model"] == "default"
+
+    def test_does_not_overwrite_existing_default_model(self):
+        data = {"models": {"default": {"provider": "ollama", "model": "existing-model"}}}
+        bootstrap = {
+            "provider": "openai",
+            "model": "gpt-4.1-mini",
+            "api_key": "sk-key",
+            "base_url": None,
+            "type": "openai",
+        }
+        _inject_bootstrap(data, bootstrap)
+        # Existing "default" model entry is preserved
+        assert data["models"]["default"]["provider"] == "ollama"
+        assert data["models"]["default"]["model"] == "existing-model"
 
 
 class TestMaskSecrets:

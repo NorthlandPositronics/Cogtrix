@@ -1,6 +1,6 @@
 # Cogtrix Architecture
 
-This document describes how Cogtrix is built: the layers, components, and data flows that make everything work. It's aimed at developers who want to understand the internals, extend the system, or contribute code. For user-facing guides, see the [README](../README.md) and [Configuration](CONFIGURATION.md).
+This document describes how Cogtrix is built: the layers, components, and data flows that make everything work. It's aimed at developers who want to understand the internals, extend the system, or contribute code. For user-facing guides, see the [README](../README.md) and [Configuration](CONFIGURATION.md). For a full documentation index including ADRs and internal docs, see [docs/INDEX.md](INDEX.md).
 
 ## Table of Contents
 
@@ -20,7 +20,7 @@ Cogtrix is a modular LangChain-based AI agent built with a layered architecture:
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │                      CLI Interface Layer                         │
-│                      (cogtrix.py ~9000 LOC)                        │
+│                      (cogtrix.py ~4300 LOC)                        │
 │  • Interactive & non-interactive modes  • Slash command system   │
 │  • Session management  • Tool management (load/enable/disable)  │
 └─────────────────────────────────┬───────────────────────────────┘
@@ -168,13 +168,18 @@ class ProviderConfig:
     base_url: Optional[str]
     model: Optional[str]
     api_key: Optional[str]
+    # Runtime-only fields — NOT parsed from the providers section.
+    # Populated by _resolve_model() when a ModelConfig is applied.
     temperature: Optional[float]
-    num_ctx: Optional[int]  # Context window size (Ollama only)
+    num_ctx: Optional[int]
+    tool_instructions: Optional[str]
 
 @dataclass
-class EmbeddingConfig:
-    provider: str              # "openai", "ollama", or a named provider
-    model: Optional[str]
+class ModelConfig:
+    provider: str              # references a key in Config.providers
+    model: str                 # actual model name at the provider
+    num_ctx: Optional[int]
+    temperature: Optional[float]
 
 @dataclass
 class Config:
@@ -182,7 +187,7 @@ class Config:
     model: Optional[str]
     session: str
     providers: Dict[str, ProviderConfig]
-    embedding: EmbeddingConfig
+    models: Dict[str, ModelConfig]
     memory_mode: str
     rag: RAGConfig
     debug: bool
@@ -199,6 +204,7 @@ class Config:
 | `find_config_file()` | Locate `.cogtrix.{json,yml,yaml}` in cwd, home, or `~/.config/cogtrix/` |
 | `Config.get_provider_config(name)` | Get provider configuration by name |
 | `Config.list_providers()` | List all available provider names |
+| `Config.resolve_embedding_config()` | Resolve `rag.model` via the `models` registry to `(provider_type, model, base_url, api_key)` |
 
 ### 2. CLI Interface (`cogtrix.py`)
 
@@ -220,7 +226,7 @@ User Input
     │
     ├── Starts with "/"  → SlashCommandRegistry.dispatch()
     │                        ├── /help, /info, /tools, /mode, /model, /provider
-    │                        ├── /session, /debug, /verbose, /approve, /optimizer, /clear
+    │                        ├── /session, /setup, /debug, /verbose, /approve, /optimizer, /clear
     │                        ├── /think <task> → deep_think() directly
     │                        ├── /delegate <task> → forced delegation pipeline
     │                        ├── /paste → multi-line input mode
@@ -244,6 +250,7 @@ User Input
 | `/model` | `/m` | Show / switch LLM model |
 | `/provider` | `/p` | Show / switch LLM provider |
 | `/session` | `/s` | Show / switch session |
+| `/setup` | | Launch the interactive setup wizard |
 | `/approve` | `/a` | Auto-approve all tool confirmations |
 | `/optimizer` | `/o` | Toggle prompt optimizer |
 | `/debug` | `/D` | Toggle debug mode |
@@ -399,6 +406,8 @@ Convert each MCP Tool → LangChain StructuredTool
 Register in ToolRegistry → available_tools pool (on-demand)
 ```
 
+**Name collision handling:** When an MCP tool has the same name as a built-in tool (e.g., `read_file`), it is automatically prefixed with the server name to prevent shadowing.
+
 **Configuration:** `mcp_servers` section in config file. Transport is auto-detected: `command` → stdio, `url` → SSE. Optional dependency: `mcp` package (`uv pip install "cogtrix[mcp]"`).
 
 ### 7. Memory System (`src/memory/`)
@@ -484,7 +493,7 @@ Documents (docs/)
          │
          ▼
 ┌─────────────────┐
-│  Text           │  chunk_size: 1200
+│  Text           │  chunk_size: 2000
 │  Splitter       │  chunk_overlap: 200
 └────────┬────────┘
          │
@@ -643,7 +652,7 @@ independent components:
 
 | Component | What it does |
 |-----------|-------------|
-| `ViolationTracker` | Tracks security violations per chat. Auto-blacklists a chat after N violations within a sliding time window. Rate limit violations are excluded from the violation count. |
+| `ViolationTracker` | Tracks security violations per chat. Auto-blacklists a chat after N violations within a sliding time window. Rate limit violations are excluded from the violation count. Blacklist state is persisted to `data/assistant/violations.json` and survives restarts. |
 | `ChatRateLimiter` | Per-chat sliding window (per-minute + per-hour). Thread-safe deque scan. |
 | `InputGuard` | Length limit, Unicode steganography detection, 15 pre-compiled injection regex patterns, optional custom patterns. |
 | `EncodingDetectionGuard` | Detects encoding-based bypass attempts (Morse code, Base64, hex, leetspeak/ROT13). Scores each message with four sub-detectors (0–1 each); blocks when max score exceeds configurable threshold (default 0.6). |

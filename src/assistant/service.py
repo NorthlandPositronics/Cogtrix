@@ -13,12 +13,14 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
+from src.agent.core import AgentRunner
 from src.assistant.channel import Channel
 from src.assistant.guardrails import GuardrailPipeline
 from src.assistant.handler import MessageHandler
 from src.assistant.knowledge import SharedKnowledgeStore, create_extraction_llm
 from src.assistant.poller import ChannelPoller
 from src.assistant.session import ChatSessionManager
+from src.orchestration.session_state import SessionState
 
 log = logging.getLogger("cogtrix")
 
@@ -57,6 +59,7 @@ class AssistantService:
         max_context_tokens: int | None = None,
         compression_llm: Any = None,
         cli_system_prompt: str | None = None,
+        agent_runner: AgentRunner | None = None,
     ) -> None:
         self._config = config
         asst_cfg: dict[str, Any] = (
@@ -98,6 +101,11 @@ class AssistantService:
             idle_timeout=float(asst_cfg.get("idle_timeout", 3600.0)),
         )
 
+        if agent_runner is None:
+            from src.orchestration.runner import run_agent
+
+            agent_runner = run_agent
+        _asst_session_state = SessionState(no_confirm=True)
         self._handler = MessageHandler(
             session_mgr=self._session_mgr,
             config=asst_cfg,
@@ -111,6 +119,8 @@ class AssistantService:
             compression_llm=compression_llm,
             knowledge_store=self._knowledge_store,
             guardrails=guardrails,
+            agent_runner=agent_runner,
+            session_state=_asst_session_state,
         )
 
         self._executor = ThreadPoolExecutor(max_workers=max_concurrent)

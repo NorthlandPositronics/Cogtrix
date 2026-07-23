@@ -28,6 +28,11 @@ if TYPE_CHECKING:
 from src.agent.safety import create_safe_tool
 
 
+def _func_to_schema_name(func_name: str) -> str:
+    """Convert 'foo_bar' to 'FooBarInput'."""
+    return "".join(word.capitalize() for word in func_name.split("_")) + "Input"
+
+
 class ToolRegistry:
     """
     Registry for dynamically loading and managing LangChain tools.
@@ -162,6 +167,11 @@ class ToolRegistry:
 
         # Fallback: Look for functions with matching Pydantic schemas
         if not results:
+            log = get_logger()
+            log.warning(
+                "Module %s has no TOOL_CONFIG/TOOL_CONFIGS — using fallback discovery",
+                module.__name__,
+            )
             input_schemas = {}
             for attr_name, attr_obj in inspect.getmembers(module, inspect.isclass):
                 if (
@@ -174,18 +184,17 @@ class ToolRegistry:
             for name, func in inspect.getmembers(module, inspect.isfunction):
                 if name.startswith("_") or not func.__doc__:
                     continue
-
-                for _, schema_class in input_schemas.items():
-                    config = {
-                        "name": name,
-                        "description": (
-                            func.__doc__.split("\n\n")[0].strip() if func.__doc__ else ""
-                        ),
-                        "input_schema": schema_class,
-                        "requires_confirmation": False,
-                    }
-                    results.append((func, config))
-                    break  # Only one config per function
+                expected_schema = _func_to_schema_name(name)
+                schema_class = input_schemas.get(expected_schema)
+                if schema_class is None:
+                    continue
+                config = {
+                    "name": name,
+                    "description": (func.__doc__.split("\n\n")[0].strip() if func.__doc__ else ""),
+                    "input_schema": schema_class,
+                    "requires_confirmation": False,
+                }
+                results.append((func, config))
 
         return results
 

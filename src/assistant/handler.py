@@ -12,8 +12,10 @@ import logging
 import time
 from typing import Any
 
+from src.agent.core import AgentRunner
 from src.assistant.channel import Channel, IncomingMessage
 from src.assistant.guardrails import _BLOCKED_RESPONSE, GuardrailPipeline
+from src.orchestration.session_state import SessionState
 
 log = logging.getLogger("cogtrix")
 
@@ -27,7 +29,8 @@ _DEFAULT_EXCLUDED: frozenset[str] = frozenset(
         "telegram_check",
         "telegram_send_photo",
         "telegram_contacts",
-        "shell",
+        "execute_shell_command",
+        "execute_python",
         "write_file",
         "append_file",
     }
@@ -61,10 +64,13 @@ class MessageHandler:
         approvals: set[str],
         available_tools: dict[str, Any],
         active_tools: list[Any],
+        *,
         max_context_tokens: int | None = None,
         compression_llm: Any = None,
         knowledge_store: Any = None,
         guardrails: Any = None,
+        agent_runner: AgentRunner,
+        session_state: SessionState | None = None,
     ) -> None:
         self._session_mgr = session_mgr
         self._llm = llm
@@ -75,6 +81,8 @@ class MessageHandler:
         self._compression_llm = compression_llm
         self._knowledge_store = knowledge_store
         self._guardrails = guardrails if guardrails is not None else GuardrailPipeline({})
+        self._agent_runner: AgentRunner = agent_runner
+        self._session_state = session_state
         self._max_response_length: int = config.get("max_response_length", 4000)
 
         excluded = _DEFAULT_EXCLUDED | set(config.get("excluded_tools", []))
@@ -117,9 +125,9 @@ class MessageHandler:
                     log.debug("Knowledge recall failed: %s", exc)
 
             try:
-                from cogtrix import run_agent
-
-                response = run_agent(
+                runner = self._agent_runner
+                call_session_state = SessionState(no_confirm=True)
+                response = runner(
                     user_input=msg.text,
                     history_messages=context.messages,
                     context_prefix=combined_prefix,
@@ -127,30 +135,18 @@ class MessageHandler:
                     system_prompt=self._system_prompt,
                     registry=self._registry,
                     approvals=self._approvals,
-                    available_tools=self._available_tools,
-                    active_tools_list=self._active_tools,
+                    available_tools=dict(self._available_tools),
+                    active_tools_list=list(self._active_tools),
                     max_context_tokens=self._max_context_tokens,
                     compression_llm=self._compression_llm,
                     tool_call_guard=self._guardrails.check_tool_call,
+                    session_state=call_session_state,
                 )
             except Exception as exc:
                 log.error("Agent error for session %s: %s", session.session_key, exc)
                 response = "I encountered an error processing your message. Please try again."
 
-            self._guardrails.record_message(msg.chat_id)
             response = self._guardrails.sanitize_output(response)
-
-            try:
-                session.memory_manager.update(msg.text, response)
-                session.memory_manager.save()
-            except Exception as exc:
-                log.warning("Failed to update memory for session %s: %s", session.session_key, exc)
-
-            if self._knowledge_store:
-                try:
-                    self._knowledge_store.extract_and_store(msg.text, response)
-                except Exception:
-                    pass
 
             if len(response) > self._max_response_length:
                 response = response[: self._max_response_length - 3] + "..."
@@ -158,3 +154,15 @@ class MessageHandler:
             sent = channel.send(msg.chat_id, response)
             if not sent:
                 log.warning("Failed to send reply to %s via %s", msg.chat_id, channel.name)
+
+            if self._knowledge_store:
+                try:
+                    self._knowledge_store.extract_and_store(msg.text, response)
+                except Exception:
+                    pass
+
+            try:
+                session.memory_manager.update(msg.text, response)
+                session.memory_manager.save()
+            except Exception as exc:
+                log.warning("Failed to update memory for session %s: %s", session.session_key, exc)

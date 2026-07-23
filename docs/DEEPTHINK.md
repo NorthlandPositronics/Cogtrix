@@ -491,6 +491,6 @@ The DEVELOP phase runs up to 5 parallel LLM calls. For Ollama providers, actual 
 
 ## See Also
 
-- [TOOLS_REFERENCE.md](TOOLS_REFERENCE.md#deep-reasoning) — Parameter reference table
-- [CONFIGURATION.md](CONFIGURATION.md#interactive-commands) — `/think` slash command reference
-- [ARCHITECTURE.md](ARCHITECTURE.md) — System architecture overview
+- [Configuration Reference](CONFIGURATION.md) — `research_delegate` and deep thinking settings
+- [Tools Reference](TOOLS_REFERENCE.md) — `deep_think` and `delegate_task` tool parameters
+- [Architecture Overview](ARCHITECTURE.md) — research delegate pipeline

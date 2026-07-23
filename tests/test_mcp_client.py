@@ -207,6 +207,61 @@ class TestJsonSchemaToPydantic:
         assert model.model_fields["req"].is_required()
         assert not model.model_fields["opt"].is_required()
 
+    def test_nullable_list_type_string_null(self):
+        import typing
+
+        schema = {
+            "type": "object",
+            "properties": {"name": {"type": ["string", "null"]}},
+            "required": ["name"],
+        }
+        model = json_schema_to_pydantic("nullable_tool", schema)
+        annotation = model.model_fields["name"].annotation
+        args = typing.get_args(annotation)
+        assert str in args
+        assert type(None) in args
+
+    def test_nullable_list_type_integer_null(self):
+        import typing
+
+        schema = {
+            "type": "object",
+            "properties": {"count": {"type": ["integer", "null"]}},
+            "required": ["count"],
+        }
+        model = json_schema_to_pydantic("nullable_int_tool", schema)
+        annotation = model.model_fields["count"].annotation
+        args = typing.get_args(annotation)
+        assert int in args
+        assert type(None) in args
+
+    def test_anyof_picks_first_variant_type(self):
+        schema = {
+            "type": "object",
+            "properties": {"value": {"anyOf": [{"type": "integer"}, {"type": "string"}]}},
+            "required": ["value"],
+        }
+        model = json_schema_to_pydantic("anyof_tool", schema)
+        assert model.model_fields["value"].annotation is int
+
+    def test_oneof_picks_first_variant_type(self):
+        schema = {
+            "type": "object",
+            "properties": {"flag": {"oneOf": [{"type": "boolean"}, {"type": "string"}]}},
+            "required": ["flag"],
+        }
+        model = json_schema_to_pydantic("oneof_tool", schema)
+        assert model.model_fields["flag"].annotation is bool
+
+    def test_anyof_empty_variants_defaults_to_str(self):
+        schema = {
+            "type": "object",
+            "properties": {"x": {"anyOf": []}},
+            "required": ["x"],
+        }
+        model = json_schema_to_pydantic("anyof_empty", schema)
+        assert model.model_fields["x"].annotation is str
+
 
 # ── _result_to_str ─────────────────────────────────────────────────────────────
 
@@ -537,6 +592,54 @@ class TestMCPManager:
         assert manager._thread is thread1
         manager._loop.call_soon_threadsafe(manager._loop.stop)
         manager._thread.join(timeout=2)
+
+    def test_connect_all_builtin_collision_prefixed(self):
+        manager = MCPManager()
+        cfg = MCPServerConfig(name="myserver", command="cmd")
+        mock_tool = _make_mock_tool("read_file", "MCP read file tool")
+
+        async def fake_connect(self_conn: MCPConnection) -> None:
+            self_conn._tools = [mock_tool]
+
+        builtin_names = {"read_file", "write_file", "shell"}
+
+        with patch("src.mcp_client.MCP_AVAILABLE", True):
+            with patch.object(MCPConnection, "connect", fake_connect):
+                tools = manager.connect_all([cfg], builtin_tool_names=builtin_names)
+
+        manager.close_all()
+        assert "read_file" not in tools
+        assert "myserver_read_file" in tools
+
+    def test_connect_all_no_builtin_names_no_prefix(self):
+        manager = MCPManager()
+        cfg = MCPServerConfig(name="myserver", command="cmd")
+        mock_tool = _make_mock_tool("read_file", "MCP read file tool")
+
+        async def fake_connect(self_conn: MCPConnection) -> None:
+            self_conn._tools = [mock_tool]
+
+        with patch("src.mcp_client.MCP_AVAILABLE", True):
+            with patch.object(MCPConnection, "connect", fake_connect):
+                tools = manager.connect_all([cfg])
+
+        manager.close_all()
+        assert "read_file" in tools
+
+    def test_connect_all_builtin_names_none_no_prefix(self):
+        manager = MCPManager()
+        cfg = MCPServerConfig(name="myserver", command="cmd")
+        mock_tool = _make_mock_tool("read_file", "MCP read file tool")
+
+        async def fake_connect(self_conn: MCPConnection) -> None:
+            self_conn._tools = [mock_tool]
+
+        with patch("src.mcp_client.MCP_AVAILABLE", True):
+            with patch.object(MCPConnection, "connect", fake_connect):
+                tools = manager.connect_all([cfg], builtin_tool_names=None)
+
+        manager.close_all()
+        assert "read_file" in tools
 
 
 # ── _create_mcp_tool_wrapper ───────────────────────────────────────────────────

@@ -5,9 +5,10 @@ Supports multiple LLM providers: OpenAI, Ollama, and OpenAI-compatible APIs.
 """
 
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Annotated, Any, TypedDict
+from typing import TYPE_CHECKING, Annotated, Any, Protocol, TypedDict, runtime_checkable
 
 from src.logging_config import get_logger
+from src.orchestration.run_config import AgentRunConfig
 
 if TYPE_CHECKING:
     from src.config import ProviderConfig
@@ -88,13 +89,22 @@ first:
 
 1. Read the catalog inside `request_tools` to see what is available.
 2. Call `request_tools(add=["tool_a", "tool_b"])` to load what you need.
-3. The requested tools become available on your **next** turn — do NOT
-   attempt to call them in the same turn you requested them.
+3. The requested tools become available **immediately** — you can use them
+   as soon as the system confirms they have been loaded.
 4. When you no longer need a tool, release it with
    `request_tools(remove=["tool_a"])` to keep your toolkit lean.
 
 Request only the tools relevant to the current task.  Don't load tools
 speculatively.
+
+## Search and Research Persistence
+
+When a task requires gathering information from the web:
+- Issue at least three searches with varied queries before synthesising a final answer. A single search rarely captures the full picture.
+- If initial results are sparse, ambiguous, or contradict each other, search again with a rephrased or more specific query.
+- Prefer to confirm facts from two independent sources when accuracy matters.
+- Only stop searching when you have enough evidence to answer with confidence, or when repeated searches return no new information.
+- When search snippets are insufficient, use `http_get` to fetch the full content of the most promising URLs. Do not rely solely on snippets — they often omit the specific data you need; fetch at least the top 2–3 most relevant pages.
 
 ## Context Budget
 
@@ -107,55 +117,7 @@ You have a **limited context window**.  Every tool output consumes part of it.
 - If output shows "[truncated]", read only the needed section instead of
   re-reading everything.
 - Delegate independent subtasks to free up your own context.
-
-## Deep Reasoning
-
-When the user asks for deep or thorough analysis, invoke the `deep_think`
-tool.  It explores multiple solution paths in parallel using Tree-of-Thought
-reasoning.  Use it for architecture decisions, strategy, complex debugging,
-or multi-angle analysis.  You may combine it with prior tool calls.
-
-CRITICAL: `deep_think` runs in ISOLATION — it cannot see conversation history
-or previous tool results.  You MUST copy the FULL text of all relevant data
-into the `context` parameter.  Do NOT pass references like "see above" —
-pass the actual text, or the tool will hallucinate.
-
-Do not use `deep_think` for simple factual or straightforward tasks.
-
-## Task Delegation
-
-Use `delegate_task` and `delegate_parallel` for:
-- Independent subtasks (fan out with `delegate_parallel`)
-- Specialized work (code, research, etc.)
-- Second opinions or verification
-- Large-scale processing, summarization, batch analysis
-- Pure text analysis (`use_tools=False` — must provide `context`)
-
-Rules:
-- Delegates have the same tools you do (except delegation and deep_think).
-- Delegates cannot see conversation history — include relevant findings
-  in `context`.
-- Never leave `context` empty when `use_tools=False`.
-- In parallel calls, assign different model aliases to spread load.
-- After receiving results, synthesize into one polished response — don't
-  just list raw outputs.
-
-Do not delegate simple questions or tasks requiring conversation memory.
 """
-
-DEFAULT_TOOL_INSTRUCTIONS = (
-    "When a tool is needed, output ONLY a valid tool call in the exact "
-    "OpenAI format.\n"
-    "NEVER add explanations, thoughts, markdown, or extra text outside "
-    "the JSON.\n"
-    "The arguments MUST be valid JSON \u2014 escape quotes, no trailing "
-    "commas, correct types.\n\n"
-    "Example of correct output when calling a tool:\n"
-    '{"name": "get_weather", "arguments": '
-    '"{\\"location\\": \\"Dubai\\", \\"unit\\": \\"celsius\\"}"}\n\n'
-    "For final answers (no tool needed), just respond normally.\n\n"
-    "Repeat: Output tool calls as pure JSON only \u2014 nothing else."
-)
 
 
 def build_agent_executor(
@@ -223,16 +185,26 @@ def build_agent_executor(
     return agent_executor
 
 
-def _format_alias_detail(value: Any) -> str:
-    """Return a human-readable description of one alias value."""
+def _format_model_detail(value: Any) -> str:
+    """Return a human-readable description of one model entry."""
+    from src.config import ModelConfig
+
+    if isinstance(value, ModelConfig):
+        extras: list[str] = []
+        if value.temperature is not None:
+            extras.append(f"temp={value.temperature}")
+        if value.num_ctx is not None:
+            extras.append(f"ctx={value.num_ctx}")
+        detail = f"{value.provider}/{value.model}"
+        if extras:
+            detail += f" ({', '.join(extras)})"
+        return detail
     if isinstance(value, dict):
         provider = value.get("provider", "?")
         model = value.get("model", "?")
-        extras: list[str] = []
+        extras = []
         if "temperature" in value:
             extras.append(f"temp={value['temperature']}")
-        if "timeout" in value:
-            extras.append(f"timeout={value['timeout']}s")
         if "num_ctx" in value:
             extras.append(f"ctx={value['num_ctx']}")
         detail = f"{provider}/{model}"
@@ -244,50 +216,48 @@ def _format_alias_detail(value: Any) -> str:
     return str(value)
 
 
-def _format_alias_table(
-    model_aliases: dict[str, Any],
+def _format_models_table(
+    models: dict[str, Any],
     delegation_models: list[str] | None = None,
 ) -> str:
-    """Format model aliases into a readable table for the system prompt.
+    """Format models registry into a readable table for the system prompt.
 
     If *delegation_models* is provided, the table is split into two
-    groups: aliases that are allowed for delegation (highlighted) and
-    the remaining aliases which are only available via ``/model``.
+    groups: models allowed for delegation (highlighted) and the remaining
+    models which are only available via ``/model``.
 
-    Returns an empty string when there are no aliases to show.
+    Returns an empty string when there are no models to show.
     """
-    if not model_aliases:
+    if not models:
         return ""
 
-    lines: list[str] = ["## Available Model Aliases", ""]
+    lines: list[str] = ["## Available Models", ""]
 
     if delegation_models:
-        # Show delegation targets prominently
         lines.append("### Delegation targets (use with `delegate_task` / `delegate_parallel`):")
         lines.append("")
-        for alias in delegation_models:
-            if alias in model_aliases:
-                detail = _format_alias_detail(model_aliases[alias])
-                lines.append(f"- **{alias}** → `{detail}`")
+        for name in delegation_models:
+            if name in models:
+                detail = _format_model_detail(models[name])
+                lines.append(f"- **{name}** → `{detail}`")
         lines.append("")
 
-        # Show remaining aliases
-        others = {k: v for k, v in model_aliases.items() if k not in delegation_models}
+        others = {k: v for k, v in models.items() if k not in delegation_models}
         if others:
-            lines.append("### Other aliases (available via `/model` command):")
+            lines.append("### Other models (available via `/model` command):")
             lines.append("")
-            for alias, value in others.items():
-                detail = _format_alias_detail(value)
-                lines.append(f"- **{alias}** → `{detail}`")
+            for name, value in others.items():
+                detail = _format_model_detail(value)
+                lines.append(f"- **{name}** → `{detail}`")
             lines.append("")
     else:
         lines.append(
             "Use these names as the `model` parameter in `delegate_task` / `delegate_parallel`:"
         )
         lines.append("")
-        for alias, value in model_aliases.items():
-            detail = _format_alias_detail(value)
-            lines.append(f"- **{alias}** → `{detail}`")
+        for name, value in models.items():
+            detail = _format_model_detail(value)
+            lines.append(f"- **{name}** → `{detail}`")
         lines.append("")
 
     return "\n".join(lines)
@@ -296,7 +266,7 @@ def _format_alias_table(
 def build_system_prompt(
     base_prompt: str | None = None,
     mode_additions: str | None = None,
-    model_aliases: dict[str, Any] | None = None,
+    models: dict[str, Any] | None = None,
     delegation_models: list[str] | None = None,
     tool_instructions: str | None = None,
 ) -> str:
@@ -306,9 +276,9 @@ def build_system_prompt(
     Args:
         base_prompt: Base system prompt (uses default if None)
         mode_additions: Additional instructions from memory mode
-        model_aliases: User-defined model aliases to expose to the agent
-        delegation_models: Subset of alias names allowed for delegation
-            (``None`` means all aliases are allowed)
+        models: Named models registry to expose to the agent
+        delegation_models: Subset of model names allowed for delegation
+            (``None`` means all models are allowed)
         tool_instructions: Optional tool-call formatting instructions to
             append.  Defaults to ``None`` (no instructions), since
             LangGraph ``bind_tools()`` handles tool-call formatting at the
@@ -323,13 +293,12 @@ def build_system_prompt(
 
     parts = [base]
 
-    # Inject alias table so the agent knows what models are available
-    alias_section = _format_alias_table(
-        model_aliases or {},
+    models_section = _format_models_table(
+        models or {},
         delegation_models=delegation_models,
     )
-    if alias_section:
-        parts.append(alias_section)
+    if models_section:
+        parts.append(models_section)
 
     if mode_additions:
         parts.append(mode_additions)
@@ -376,6 +345,19 @@ def _truncate_content(content: str, max_tokens: int) -> str:
         content[:half] + f"\n\n[... truncated: {len(content) - max_chars} chars removed "
         f"to fit context window ...]\n\n" + content[-half:]
     )
+
+
+def _copy_with_content(msg: Any, content: str) -> Any:
+    """Create a message copy with updated content, Pydantic v1/v2 safe."""
+    if hasattr(msg, "model_copy"):
+        return msg.model_copy(update={"content": content})
+    if hasattr(msg, "copy"):
+        return msg.copy(update={"content": content})
+    from copy import copy as _shallow_copy
+
+    clone = _shallow_copy(msg)
+    clone.content = content
+    return clone
 
 
 def _trim_to_token_budget(
@@ -432,8 +414,8 @@ def _trim_to_token_budget(
                     trimmed = _truncate_content(content, max_fixed_single)
                     if isinstance(msg, dict):
                         bucket[idx] = {**msg, "content": trimmed}
-                    elif hasattr(msg, "copy"):
-                        bucket[idx] = msg.copy(update={"content": trimmed})
+                    else:
+                        bucket[idx] = _copy_with_content(msg, trimmed)
 
     fixed_cost = sum(_estimate_msg_tokens(m) for m in fixed_head + fixed_tail)
 
@@ -461,26 +443,18 @@ def _trim_to_token_budget(
                 trimmed = _truncate_content(content, _MAX_SINGLE_MESSAGE_TOKENS)
                 if isinstance(msg, dict):
                     history[idx] = {**msg, "content": trimmed}
-                elif hasattr(msg, "copy"):
-                    clone = msg.copy(update={"content": trimmed})
-                    history[idx] = clone
                 else:
-                    try:
-                        from copy import copy as _shallow_copy
-
-                        clone = _shallow_copy(msg)
-                        clone.content = trimmed
-                        history[idx] = clone
-                    except Exception:
-                        pass
+                    history[idx] = _copy_with_content(msg, trimmed)
 
     # Drop oldest history messages until we fit
-    total_history = sum(_estimate_msg_tokens(m) for m in history)
-    dropped = 0
-    while history and total_history > history_budget:
-        removed = history.pop(0)
-        total_history -= _estimate_msg_tokens(removed)
-        dropped += 1
+    token_costs = [_estimate_msg_tokens(m) for m in history]
+    total_history = sum(token_costs)
+    drop_count = 0
+    while drop_count < len(history) and total_history > history_budget:
+        total_history -= token_costs[drop_count]
+        drop_count += 1
+    history = history[drop_count:]
+    dropped = drop_count
 
     # Remove orphaned ToolMessages at the head of the trimmed history.
     # A ToolMessage is orphaned if no preceding AIMessage carries its tool_call_id.
@@ -490,10 +464,13 @@ def _trim_to_token_budget(
         _ToolMessage = None  # type: ignore[assignment, misc]
 
     if _ToolMessage is not None and AIMessage is not None:
-        while history and isinstance(history[0], _ToolMessage):
-            removed = history.pop(0)
-            total_history -= _estimate_msg_tokens(removed)
-            dropped += 1
+        orphan_count = 0
+        while orphan_count < len(history) and isinstance(history[orphan_count], _ToolMessage):
+            total_history -= _estimate_msg_tokens(history[orphan_count])
+            orphan_count += 1
+        if orphan_count:
+            history = history[orphan_count:]
+            dropped += orphan_count
 
     if dropped:
         _log.info(
@@ -656,3 +633,36 @@ def ensure_base_messages(history: list[Any]) -> list[Any]:
                     kwargs_h["additional_kwargs"] = additional
                 converted.append(HumanMessage(**kwargs_h))
     return converted
+
+
+@runtime_checkable
+class AgentRunner(Protocol):
+    """Protocol that decouples assistant handler from the concrete run_agent implementation."""
+
+    def __call__(
+        self,
+        user_input: str,
+        history_messages: list,
+        registry: Any,
+        approvals: set,
+        context_prefix: str | None = None,
+        recursion_limit: int | None = None,
+        callbacks: list | None = None,
+        result_messages: list | None = None,
+        *,
+        config: AgentRunConfig | None = None,
+        llm: Any = None,
+        system_prompt: str | None = None,
+        available_tools: dict | None = None,
+        active_tools_list: list | None = None,
+        max_context_tokens: int | None = None,
+        preset_tools: set[str] | None = None,
+        context_compression: bool = True,
+        compression_min_age: int | None = None,
+        compression_min_chars: int | None = None,
+        compression_llm: Any = None,
+        tool_call_guard: Any | None = None,
+        session_state: Any = None,
+        confirmation_ui: Any | None = None,
+        on_tool_expansion: Any | None = None,
+    ) -> str: ...

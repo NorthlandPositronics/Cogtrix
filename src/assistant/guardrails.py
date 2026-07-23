@@ -8,16 +8,21 @@ jailbreak attempts, data exfiltration, and resource exhaustion.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
+import tempfile
 import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 log = logging.getLogger("cogtrix")
+
+_MONO_OFFSET: float = time.monotonic() - time.time()
 
 _INJECTION_PATTERNS: list[re.Pattern[str]] = [
     re.compile(p, re.IGNORECASE)
@@ -48,7 +53,7 @@ _DANGEROUS_CODEPOINTS: frozenset[int] = frozenset(
         0x200E,
         0x200F,
         *range(0x202A, 0x202F),
-        *range(0x2060, 0x2065),
+        *range(0x2060, 0x206A),
         0xFEFF,
         0xFFF9,
         0xFFFA,
@@ -82,6 +87,61 @@ _LEET_MAP: dict[str, str] = {
     "@": "a",
     "$": "s",
 }
+_LEET_DIGITS: frozenset[str] = frozenset("01345678")
+
+_CONFUSABLE_MAP: dict[str, str] = {
+    # Cyrillic -> Latin
+    "\u0430": "a",
+    "\u0410": "A",  # а/А
+    "\u0441": "c",
+    "\u0421": "C",  # с/С
+    "\u0435": "e",
+    "\u0415": "E",  # е/Е
+    "\u043d": "h",
+    "\u041d": "H",  # н/Н
+    "\u0456": "i",
+    "\u0406": "I",  # і/І
+    "\u0458": "j",  # ј
+    "\u043e": "o",
+    "\u041e": "O",  # о/О
+    "\u0440": "p",
+    "\u0420": "P",  # р/Р
+    "\u0455": "s",  # ѕ
+    "\u0443": "y",  # у
+    "\u0445": "x",
+    "\u0425": "X",  # х/Х
+    "\u0412": "B",  # В
+    "\u041a": "K",  # К
+    "\u041c": "M",  # М
+    "\u0422": "T",  # Т
+    # Greek -> Latin
+    "\u03b1": "a",
+    "\u0391": "A",  # α/Α
+    "\u03b5": "e",
+    "\u0395": "E",  # ε/Ε
+    "\u03bf": "o",
+    "\u039f": "O",  # ο/Ο
+    "\u0392": "B",
+    "\u0397": "H",
+    "\u0399": "I",
+    "\u039a": "K",
+    "\u039c": "M",
+    "\u039d": "N",
+    "\u03a1": "P",
+    "\u03a4": "T",
+    "\u03a7": "X",
+    "\u03a5": "Y",
+    "\u0396": "Z",
+}
+
+
+def _skeleton(text: str) -> str:
+    """Reduce text to a Latin skeleton for confusable-resistant matching."""
+    import unicodedata
+
+    text = unicodedata.normalize("NFKC", text)
+    return "".join(_CONFUSABLE_MAP.get(ch, ch) for ch in text)
+
 
 # ── Tool-call guard ──────────────────────────────────────────────────
 _SENSITIVE_PATH_PREFIXES: tuple[str, ...] = (
@@ -200,8 +260,9 @@ class InputGuard:
                         guard_name="input_unicode",
                     )
 
+        normalized = _skeleton(text)
         for pattern in self._patterns:
-            if pattern.search(text):
+            if pattern.search(normalized):
                 return GuardrailResult(
                     is_safe=False,
                     reason=f"Matched injection pattern: {pattern.pattern}",
@@ -277,8 +338,17 @@ class EncodingDetectionGuard:
             return 0.0
         if not any(c in text for c in _LEET_MAP):
             return 0.0
-        original_alpha = sum(1 for c in text if c.isalpha())
-        subst_count = sum(1 for c in text if c in _LEET_MAP)
+        original_alpha = 0
+        subst_count = 0
+        for word in words:
+            has_alpha = any(c.isalpha() for c in word)
+            for c in word:
+                if c.isalpha():
+                    original_alpha += 1
+                elif c in _LEET_MAP:
+                    if c in _LEET_DIGITS and not has_alpha:
+                        continue
+                    subst_count += 1
         total = original_alpha + subst_count
         if total == 0:
             return 0.0
@@ -372,6 +442,41 @@ class ChatRateLimiter:
 
             return GuardrailResult(is_safe=True)
 
+    def check_and_record(self, chat_id: str) -> GuardrailResult:
+        """Check rate limits and record the message atomically under a single lock."""
+        with self._lock:
+            if len(self._windows) > 1000:
+                self._cleanup_stale()
+
+            window = self._windows.get(chat_id)
+            if window is None:
+                self._windows[chat_id] = _ChatWindow()
+                self._windows[chat_id].timestamps.append(time.monotonic())
+                return GuardrailResult(is_safe=True)
+
+            now = time.monotonic()
+
+            while window.timestamps and (now - window.timestamps[0]) > 3600.0:
+                window.timestamps.popleft()
+
+            minute_count = sum(1 for ts in window.timestamps if (now - ts) <= 60.0)
+            if minute_count >= self._per_minute:
+                return GuardrailResult(
+                    is_safe=False,
+                    reason=f"Rate limit: {self._per_minute}/min exceeded",
+                    guard_name="rate_limit",
+                )
+
+            if len(window.timestamps) >= self._per_hour:
+                return GuardrailResult(
+                    is_safe=False,
+                    reason=f"Rate limit: {self._per_hour}/hour exceeded",
+                    guard_name="rate_limit",
+                )
+
+            window.timestamps.append(now)
+            return GuardrailResult(is_safe=True)
+
     def record(self, chat_id: str) -> None:
         with self._lock:
             if chat_id not in self._windows:
@@ -392,13 +497,17 @@ class ChatRateLimiter:
 class ViolationTracker:
     """Track guardrail violations per chat and auto-blacklist repeat offenders."""
 
-    def __init__(self, config: dict[str, Any]) -> None:
+    def __init__(self, config: dict[str, Any], persist_path: Path | None = None) -> None:
         bl_cfg = config.get("auto_blacklist", {})
         self._enabled: bool = bl_cfg.get("enabled", True)
         self._max_violations: int = bl_cfg.get("max_violations", 2)
         self._window_seconds: float = bl_cfg.get("window_minutes", 30) * 60.0
         self._violations: dict[str, deque[float]] = {}
         self._lock = threading.Lock()
+        self._persist_path: Path | None = persist_path
+        if self._persist_path is not None:
+            with self._lock:
+                self._load()
 
     def is_blacklisted(self, chat_id: str) -> GuardrailResult:
         if not self._enabled:
@@ -430,6 +539,11 @@ class ViolationTracker:
             if chat_id not in self._violations:
                 self._violations[chat_id] = deque()
             self._violations[chat_id].append(time.monotonic())
+            snapshot = {
+                cid: [ts - _MONO_OFFSET for ts in timestamps]
+                for cid, timestamps in self._violations.items()
+            }
+        self._save_snapshot(snapshot)
 
     def _cleanup_stale(self) -> None:
         now = time.monotonic()
@@ -437,6 +551,56 @@ class ViolationTracker:
         stale = [cid for cid, ts in self._violations.items() if not ts or (now - ts[-1]) > cutoff]
         for cid in stale:
             del self._violations[cid]
+
+    def _save_snapshot(self, data: dict[str, list[float]]) -> None:
+        if self._persist_path is None:
+            return
+        try:
+            self._persist_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp_fd, tmp_path = tempfile.mkstemp(dir=str(self._persist_path.parent), suffix=".tmp")
+            try:
+                with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
+                    json.dump(data, f, ensure_ascii=False, indent=2)
+                os.replace(tmp_path, self._persist_path)
+            except Exception:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+                raise
+        except Exception as exc:
+            log.debug("ViolationTracker: failed to persist state: %s", exc)
+
+    def _save(self) -> None:
+        if self._persist_path is None:
+            return
+        with self._lock:
+            snapshot = {
+                cid: [ts - _MONO_OFFSET for ts in timestamps]
+                for cid, timestamps in self._violations.items()
+            }
+        self._save_snapshot(snapshot)
+
+    def save(self) -> None:
+        self._save()
+
+    def _load(self) -> None:
+        if self._persist_path is None or not self._persist_path.exists():
+            return
+        try:
+            raw = json.loads(self._persist_path.read_text())
+            now = time.monotonic()
+            cutoff = now - self._window_seconds
+            for chat_id, timestamps in raw.items():
+                valid = [
+                    ts + _MONO_OFFSET
+                    for ts in timestamps
+                    if isinstance(ts, (int, float)) and (ts + _MONO_OFFSET) >= cutoff
+                ]
+                if valid:
+                    self._violations[chat_id] = deque(valid)
+        except Exception as exc:
+            log.debug("ViolationTracker: failed to load persisted state: %s", exc)
 
 
 class LLMJudge:
@@ -502,8 +666,9 @@ class ToolCallGuard:
         for key, value in tool_args.items():
             if not isinstance(value, str):
                 continue
+            normalized = _skeleton(value)
             for pattern in _INJECTION_PATTERNS:
-                if pattern.search(value):
+                if pattern.search(normalized):
                     return GuardrailResult(
                         is_safe=False,
                         reason=f"Injection pattern in {tool_name}.{key}",
@@ -511,21 +676,46 @@ class ToolCallGuard:
                     )
         return GuardrailResult(is_safe=True)
 
+    @staticmethod
+    def _normalize_path(raw: str) -> str:
+        """Collapse traversal components and redundant separators in a path.
+
+        Leading ``//`` is collapsed to ``/`` before normpath so that the POSIX
+        implementation-defined double-slash cannot bypass prefix checks.
+        """
+        s = raw.replace("\\", "/")
+        # POSIX allows // at the start as implementation-defined; treat as /
+        s = re.sub(r"^/+", "/", s)
+        return os.path.normpath(s)
+
+    @staticmethod
+    def _prefix_matches(normalized_path: str, prefix: str) -> bool:
+        """Return True when *normalized_path* falls inside *prefix* after normalization.
+
+        Adding a trailing separator prevents ``/etcfoo`` from matching ``/etc/``.
+        Both arguments are normalized via the same rules as ``_normalize_path``.
+        """
+        norm_prefix = os.path.normpath(re.sub(r"^/+", "/", prefix.replace("\\", "/")))
+        # Ensure /etc matches /etc/passwd and /etc itself, but not /etcfoo
+        candidate_dir = normalized_path.rstrip("/") + "/"
+        prefix_dir = norm_prefix.rstrip("/") + "/"
+        return candidate_dir.startswith(prefix_dir)
+
     def _check_paths(self, tool_name: str, tool_args: dict[str, Any]) -> GuardrailResult:
         for key in _PATH_ARG_KEYS:
             path_val = tool_args.get(key)
             if not isinstance(path_val, str):
                 continue
-            normalized = path_val.replace("\\", "/")
+            normalized = self._normalize_path(path_val)
             for prefix in _SENSITIVE_PATH_PREFIXES:
-                if normalized.startswith(prefix):
+                if self._prefix_matches(normalized, prefix):
                     return GuardrailResult(
                         is_safe=False,
                         reason=f"Sensitive path in {tool_name}.{key}: {prefix}",
                         guard_name="tool_call_path",
                     )
             for prefix in self._extra_sensitive_paths:
-                if normalized.startswith(prefix):
+                if self._prefix_matches(normalized, prefix):
                     return GuardrailResult(
                         is_safe=False,
                         reason=f"Blocked path in {tool_name}.{key}: {prefix}",
@@ -578,7 +768,9 @@ class GuardrailPipeline:
         self._input_guard = InputGuard(guardrail_cfg)
         self._output_guard = OutputGuard(guardrail_cfg)
         self._rate_limiter = ChatRateLimiter(guardrail_cfg)
-        self._violation_tracker = ViolationTracker(guardrail_cfg)
+        path_str = guardrail_cfg.get("violations_persist_path", "data/assistant/violations.json")
+        persist_path = Path(path_str) if path_str else None
+        self._violation_tracker = ViolationTracker(guardrail_cfg, persist_path=persist_path)
         self._encoding_guard = EncodingDetectionGuard(guardrail_cfg)
         self._tool_call_guard = ToolCallGuard(guardrail_cfg)
 
@@ -595,7 +787,7 @@ class GuardrailPipeline:
         if not result.is_safe:
             return result
 
-        result = self._rate_limiter.check(chat_id)
+        result = self._rate_limiter.check_and_record(chat_id)
         if not result.is_safe:
             return result
 
@@ -633,3 +825,7 @@ class GuardrailPipeline:
         if actions:
             log.debug("Output sanitized: %s", ", ".join(actions))
         return sanitized
+
+    def save(self) -> None:
+        """Persist violation state to disk."""
+        self._violation_tracker.save()

@@ -13,8 +13,12 @@ discarded).
 import json
 import logging
 import shutil
+import threading
+import time
 from pathlib import Path
 from typing import Any
+
+from src.memory.manager import _sanitize_session_id
 
 log = logging.getLogger("cogtrix")
 
@@ -33,8 +37,16 @@ class SessionVectorStore:
     def __init__(self, session_id: str, storage_dir: str = "data/vectordb/sessions"):
         self._session_id = session_id
         self._storage_dir = Path(storage_dir)
-        self._index_dir = self._storage_dir / session_id.replace("/", "_")
+        safe_id = _sanitize_session_id(session_id)
+        candidate = (self._storage_dir / safe_id).resolve()
+        base_resolved = self._storage_dir.resolve()
+        try:
+            candidate.relative_to(base_resolved)
+        except ValueError:
+            raise ValueError(f"Path traversal detected in session_id: {session_id!r}") from None
+        self._index_dir = candidate
 
+        self._lock = threading.RLock()
         self._embedding_fn: Any = None
         self._embedding_model: str | None = None
         self._vectorstore: Any = None
@@ -50,11 +62,12 @@ class SessionVectorStore:
         If the model tag differs from what was previously persisted,
         the existing index is discarded automatically.
         """
-        self._embedding_fn = embedding_fn
-        self._embedding_model = embedding_model
+        with self._lock:
+            self._embedding_fn = embedding_fn
+            self._embedding_model = embedding_model
 
-        # Load existing index (if compatible)
-        self._load_or_reset()
+            # Load existing index (if compatible)
+            self._load_or_reset()
 
     @property
     def ready(self) -> bool:
@@ -70,24 +83,28 @@ class SessionVectorStore:
         Messages are paired into human/AI exchanges.  Tool messages
         and intermediate steps are collapsed into the nearest AI text.
         """
-        if not self._ready or not self._embedding_fn:
-            return
+        with self._lock:
+            if not self._ready or not self._embedding_fn:
+                return
 
-        texts = self._messages_to_texts(messages)
-        if not texts:
-            return
+            texts = self._messages_to_texts(messages)
+            if not texts:
+                return
 
-        try:
-            from langchain_community.vectorstores import FAISS
-            from langchain_core.documents import Document
+            t0 = time.monotonic()
+            log.debug("Vector recall: embedding %d texts", len(texts))
+            try:
+                from langchain_community.vectorstores import FAISS
+                from langchain_core.documents import Document
 
-            docs = [Document(page_content=t) for t in texts]
-            if self._vectorstore is None:
-                self._vectorstore = FAISS.from_documents(docs, self._embedding_fn)
-            else:
-                self._vectorstore.add_documents(docs)
-        except Exception as exc:
-            log.warning("Vector recall: failed to add messages: %s", exc)
+                docs = [Document(page_content=t) for t in texts]
+                if self._vectorstore is None:
+                    self._vectorstore = FAISS.from_documents(docs, self._embedding_fn)
+                else:
+                    self._vectorstore.add_documents(docs)
+                log.debug("Vector recall: add_messages completed in %.2fs", time.monotonic() - t0)
+            except Exception as exc:
+                log.warning("Vector recall: failed to add messages: %s", exc)
 
     # ------------------------------------------------------------------
     # Recall
@@ -95,15 +112,16 @@ class SessionVectorStore:
 
     def recall(self, query: str, k: int = 3) -> list[str]:
         """Return top-k relevant past exchanges for *query*."""
-        if not self._ready or self._vectorstore is None:
-            return []
+        with self._lock:
+            if not self._ready or self._vectorstore is None:
+                return []
 
-        try:
-            results = self._vectorstore.similarity_search(query, k=k)
-            return [doc.page_content for doc in results]
-        except Exception as exc:
-            log.warning("Vector recall: search failed: %s", exc)
-            return []
+            try:
+                results = self._vectorstore.similarity_search(query, k=k)
+                return [doc.page_content for doc in results]
+            except Exception as exc:
+                log.warning("Vector recall: search failed: %s", exc)
+                return []
 
     # ------------------------------------------------------------------
     # Persistence
@@ -111,18 +129,19 @@ class SessionVectorStore:
 
     def save(self) -> None:
         """Persist the FAISS index and metadata to disk."""
-        if self._vectorstore is None or not self._ready:
-            return
+        with self._lock:
+            if self._vectorstore is None or not self._ready:
+                return
 
-        try:
-            self._index_dir.mkdir(parents=True, exist_ok=True)
-            self._vectorstore.save_local(str(self._index_dir))
+            try:
+                self._index_dir.mkdir(parents=True, exist_ok=True)
+                self._vectorstore.save_local(str(self._index_dir))
 
-            meta = {"embedding_model": self._embedding_model}
-            meta_path = self._index_dir / "meta.json"
-            meta_path.write_text(json.dumps(meta), encoding="utf-8")
-        except Exception as exc:
-            log.warning("Vector recall: save failed: %s", exc)
+                meta = {"embedding_model": self._embedding_model}
+                meta_path = self._index_dir / "meta.json"
+                meta_path.write_text(json.dumps(meta), encoding="utf-8")
+            except Exception as exc:
+                log.warning("Vector recall: save failed: %s", exc)
 
     def _load_or_reset(self) -> None:
         """Load a persisted index if it exists and is compatible."""
@@ -175,7 +194,8 @@ class SessionVectorStore:
 
     def clear(self) -> None:
         """Remove all stored embeddings."""
-        self._reset_index()
+        with self._lock:
+            self._reset_index()
 
     # ------------------------------------------------------------------
     # Helpers

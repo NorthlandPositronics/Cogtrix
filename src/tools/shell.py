@@ -103,11 +103,11 @@ def execute_shell_command(
                 + output[-half:]
             )
 
-        return (
-            output
-            if output.strip()
-            else f"Command executed successfully (exit code: {result.returncode})"
-        )
+        if output.strip():
+            return output
+        if result.returncode != 0:
+            return f"Command failed with no output (exit code: {result.returncode})"
+        return f"Command executed successfully (exit code: {result.returncode})"
 
     except subprocess.TimeoutExpired:
         return f"Error: Command execution timed out after {timeout} seconds"

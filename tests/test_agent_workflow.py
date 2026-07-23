@@ -166,7 +166,7 @@ def _resolve_provider_config(
         return config.providers[model_or_alias]
 
     # Case 2: model alias → resolve
-    aliases = config.model_aliases or {}
+    aliases = config.models or {}
     if model_or_alias in aliases:
         alias_val = aliases[model_or_alias]
         if isinstance(alias_val, dict):

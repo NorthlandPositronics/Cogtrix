@@ -132,7 +132,7 @@ Cogtrix works with zero configuration when Ollama is running on localhost. For a
 ```yaml
 provider: my-server
 
-inference:
+providers:
   my-server:
     type: ollama
     base_url: "http://192.168.1.100:11434"
@@ -145,7 +145,7 @@ services:
   tavily:
     api_key: "tvly-..."
 
-model_aliases:
+models:
   fast: my-server/qwen3:8b
   smart: openai/gpt-4.1
 ```
@@ -155,7 +155,7 @@ model_aliases:
 ```json
 {
   "provider": "my-server",
-  "inference": {
+  "providers": {
     "my-server": {
       "type": "ollama",
       "base_url": "http://192.168.1.100:11434",
@@ -169,7 +169,7 @@ model_aliases:
   "services": {
     "tavily": { "api_key": "tvly-..." }
   },
-  "model_aliases": {
+  "models": {
     "fast": "my-server/qwen3:8b",
     "smart": "openai/gpt-4.1"
   }

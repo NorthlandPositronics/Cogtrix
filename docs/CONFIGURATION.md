@@ -13,7 +13,6 @@ This page covers every way to configure Cogtrix — from the simplest environmen
   - [Tool Loading](#tool-loading)
   - [Assistant Mode](#assistant-mode)
   - [Assistant Guardrails](#assistant-guardrails)
-- [Embedding Section](#embedding-section)
 - [Environment Variables](#environment-variables)
 - [Command Line Arguments](#command-line-arguments)
   - [Setup Wizard](#setup-wizard)
@@ -60,12 +59,12 @@ session: default
 | `model` | string | Provider-specific | Model to use (overrides provider default) |
 | `session` | string | `"default"` | Session ID for memory persistence |
 
-### Inference Section
+### Providers Section
 
 Define named LLM providers with custom configurations:
 
 ```yaml
-inference:
+providers:
   my-ollama:
     type: ollama
     base_url: "http://192.168.1.100:11434"
@@ -81,18 +80,16 @@ inference:
     model: llama-3.3-70b-versatile
 ```
 
-> **Note:** The key `"inference"` is preferred. The legacy key `"providers"` still works for backward compatibility.
+> **Note:** The key `"providers"` is preferred. The legacy key `"inference"` still works as an alias for backward compatibility.
 
 #### Provider Options
 
 | Option | Type | Required | Description |
 |--------|------|----------|-------------|
-| `type` | string | Yes | Provider type: `"openai"`, `"ollama"`, `"anthropic"`, or `"google"` |
+| `type` | string | Yes | Provider type: `"openai"`, `"ollama"`, `"anthropic"`, or `"google"` (case-insensitive) |
 | `base_url` | string | No | API endpoint URL |
 | `model` | string | No | Default model for this provider |
 | `api_key` | string | No | API key (all providers except Ollama) |
-| `temperature` | float | No | Response temperature (0.0-2.0) |
-| `num_ctx` | int | No | Context window size (Ollama only) |
 | `tool_instructions` | string | No | Custom tool-call formatting instructions appended to the system prompt. Not injected by default — `bind_tools()` handles formatting at the API level. Set a non-empty string only for providers that need explicit guidance. |
 
 #### Provider Types
@@ -107,42 +104,6 @@ inference:
 **xAI (Grok)** uses `type: openai` with `base_url: "https://api.x.ai/v1"`. The setup wizard offers it as a named choice.
 
 Optional dependencies: `langchain-anthropic` (`uv pip install "cogtrix[anthropic]"`), `langchain-google-genai` (`uv pip install "cogtrix[google]"`).
-
-### Legacy Provider Formats
-
-For backward compatibility, both of these older formats still work:
-
-**Legacy `"providers"` key** (same structure, different key name):
-
-```json
-{
-  "provider": "ollama",
-  "providers": {
-    "ollama": {
-      "type": "ollama",
-      "model": "qwen3:8b"
-    }
-  }
-}
-```
-
-**Top-level provider blocks** (oldest format):
-
-```json
-{
-  "provider": "ollama",
-  "openai": {
-    "api_key": "sk-...",
-    "model": "gpt-4.1-mini"
-  },
-  "ollama": {
-    "base_url": "http://localhost:11434",
-    "model": "qwen3:8b"
-  }
-}
-```
-
-The `"inference"` section takes priority when multiple formats are present.
 
 ### Memory Section
 
@@ -162,7 +123,7 @@ memory:
       summarization: true
       vector_recall_k: 3
     reasoning:
-      working_memory_size: 40
+      working_memory_size: 30
       max_decisions: 20
       summarization: true
       vector_recall_k: 3
@@ -194,66 +155,36 @@ Configure document ingestion for knowledge base:
 rag:
   docs_dir: docs
   vectordb_dir: data/vectordb
-  chunk_size: 1200
+  chunk_size: 2000
   chunk_overlap: 200
-  embedding_provider: ollama
-  embedding_model: nomic-embed-text
+  model: embed-local
 ```
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `docs_dir` | string | `"docs"` | Source documents directory |
 | `vectordb_dir` | string | `"data/vectordb"` | Vector database output directory |
-| `chunk_size` | int | `1200` | Text chunk size in characters |
+| `chunk_size` | int | `2000` | Text chunk size in characters |
 | `chunk_overlap` | int | `200` | Overlap between chunks |
-| `embedding_provider` | string | `"ollama"` | Embedding provider: `"openai"`, `"ollama"`, `"google"`, or a named provider |
-| `embedding_model` | string | Auto | Embedding model name |
+| `model` | string | `null` | Model name from the `models` registry to use for embeddings. Falls back to the active provider when not set. |
 
-**Note:** You can use a named provider (e.g., `"gpu-server"`) as `embedding_provider`. It will resolve to the provider's type and base_url. For non-Ollama providers (OpenAI, Google), the API key is resolved automatically from the matching named provider config — you do not need to specify it separately in the `rag` section.
+**Note:** The `model` field references a named entry in the top-level `models` registry. Define an embedding model there and point `rag.model` at it. The provider connection details (type, base_url, api_key) are resolved automatically from the matching provider config.
 
 See [RAG_GUIDE.md](RAG_GUIDE.md) for detailed setup instructions.
 
-### Embedding Section
+### Models
 
-The `embedding` section configures the embedding provider and model used for **hybrid memory** (vector recall) and as the default for **RAG** ingestion. This is a standalone, top-level section that applies globally:
+The `models` registry gives short names to `provider/model` combinations. They are used by:
 
-```yaml
-embedding:
-  provider: ollama
-  model: nomic-embed-text
-```
-
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `provider` | string | `"ollama"` | Embedding provider: `"openai"`, `"ollama"`, `"google"`, or a named inference provider |
-| `model` | string | Auto-detected | Embedding model name (e.g. `nomic-embed-text`, `text-embedding-3-small`) |
-
-When the `embedding` section is present, its values become the default for `rag.embedding_provider` and `rag.embedding_model` (unless those are explicitly set in the `rag` section). This means you only need to configure embeddings once:
-
-```yaml
-embedding:
-  provider: ollama
-  model: nomic-embed-text
-
-rag:
-  docs_dir: docs
-  # embedding_provider and embedding_model inherit from the embedding section
-```
-
-If you don't configure this section at all, Cogtrix auto-detects an embedding provider at startup: it tries Ollama's `nomic-embed-text` first, then falls back to OpenAI if `OPENAI_API_KEY` is set. If neither is available, vector recall is silently disabled while summarization continues to work.
-
-### Model Aliases
-
-Model aliases give short names to `provider/model` combinations. They are used by:
-
-- The **`-m` CLI flag** — start Cogtrix with any alias: `python cogtrix.py -m fast`
+- The **`-m` CLI flag** — start Cogtrix with any model name: `python cogtrix.py -m fast`
 - The **`/model` command** — switch at runtime: `/model coder`
-- The **delegation tools** — the agent uses aliases to pick the best model for a subtask
+- The **delegation tools** — the agent uses model names to pick the best model for a subtask
+- The **`rag.model` field** — reference an embedding model by name
 
-Define aliases at the **top level** of your config (preferred) or inside `delegate` for backward compatibility:
+Define models at the **top level** of your config (preferred) or inside `delegate` for backward compatibility:
 
 ```yaml
-model_aliases:
+models:
   fast: my-server/qwen3:8b
   smart: openai/gpt-4.1
   coder:
@@ -261,13 +192,18 @@ model_aliases:
     model: qwen3-coder
     temperature: 0.3
   reasoning:
-    provider: openai
-    model: gpt-4.1
-    timeout: 400
+    provider: local-gpu
+    model: qwen3:32b
+    num_ctx: 32768
     temperature: 0.3
+  embed-local:
+    provider: local-gpu
+    model: nomic-embed-text
 ```
 
-#### Alias Formats
+> **Backward compatibility:** The key `model_aliases` still works in config files as an alias for `models`. New configs should use `models`.
+
+#### Model Entry Formats
 
 **String format** — `"provider/model"` or just `"model"`:
 
@@ -285,7 +221,11 @@ coder:
   timeout: 300
 ```
 
-#### Using Aliases
+The object format fields `num_ctx` and `temperature` are model-level settings. They are applied at resolution time and override any defaults from the provider config. The `provider` field references a key in the `providers` section.
+
+> **Note:** `num_ctx` is only effective for Ollama-type providers. It is silently ignored for OpenAI, Anthropic, and Google providers (which manage context windows via their own API parameters).
+
+#### Using Models
 
 ```bash
 python cogtrix.py -m fast       # Resolves to my-server/qwen3:8b
@@ -316,13 +256,13 @@ delegate:
 |--------|------|---------|-------------|
 | `enabled` | bool | `true` | Enable/disable delegation |
 | `default_timeout` | int | `60` | Default timeout in seconds |
-| `allowed_models` | array | All aliases | Model alias names the agent may delegate to |
+| `allowed_models` | array | All models | Model names from the `models` registry the agent may delegate to |
 | `allowed_providers` | array | All providers | Provider names allowed for delegation |
 
-**`allowed_models`** restricts which model aliases the agent may use when delegating. If omitted, all aliases are available. This is the recommended way to control delegation scope — configure a broad set of aliases in `model_aliases`, then whitelist a subset in `allowed_models`:
+**`allowed_models`** restricts which model names the agent may use when delegating. If omitted, all entries in the `models` registry are available. This is the recommended way to control delegation scope — configure a broad set of models in `models`, then whitelist a subset in `allowed_models`:
 
 ```yaml
-model_aliases:
+models:
   fast: my-server/qwen3:8b
   smart: openai/gpt-4.1
   coder: my-server/qwen3-coder
@@ -334,13 +274,9 @@ delegate:
 
 **`allowed_providers`** restricts by provider name and is an additional guard. Both checks must pass for delegation to proceed.
 
-> **Legacy note:** `delegate.model_aliases` still works for backward compatibility. If both top-level `model_aliases` and `delegate.model_aliases` are present, the top-level definition takes priority.
+> **Backward compatibility:** `delegate.models` still works for defining models scoped to the delegate section. If both top-level `models` and `delegate.models` are present, the top-level definition takes priority. The older `delegate.model_aliases` key is also still recognized.
 
 ### Research Delegate Section
-
-> **Note:** These fields are not yet read from the config file. The runtime
-> defaults are hardcoded in `cogtrix.py`; config-file overrides will be added
-> in a future release.
 
 When the user requests deep reasoning (via `/think` or "think deeply" in a prompt) and the agent has used web tools during its initial research, Cogtrix can spawn a **research delegate** — a sub-agent that re-fetches the same URLs with a much larger context budget and extracts structured, verbatim specifications instead of lossy summaries. The extracted content is then fed into the `deep_think` engine as high-fidelity context.
 
@@ -408,7 +344,7 @@ context_compression:
   enabled: true
   model: fast
   min_age: 8       # call_model cycles before eligible (default: 6)
-  min_chars: 3000  # minimum content length to qualify (default: 2000)
+  min_chars: 6000  # minimum content length to qualify (default: 2000)
 ```
 
 | Option | Type | Default | Description |
@@ -420,11 +356,11 @@ context_compression:
 
 **How it works:**
 
-1. On each `call_model` cycle, the compression pass checks whether total message size exceeds 60% of the context window.
+1. On each `call_model` cycle, the compression pass checks whether total message size exceeds 72% of the context window.
 2. ToolMessages that are both old enough (age >= `min_age`) and large enough (length >= `min_chars`) are compressed. Multiple eligible messages are compressed in parallel (up to 4 concurrent LLM calls).
 3. The LLM preserves file paths, error messages, stack traces, line numbers, schemas, exact values, and code snippets while removing verbose prose and boilerplate.
 4. When `model` is set, a dedicated LLM is used for compression instead of the main agent model — a smaller/faster model reduces latency.
-5. Compressed messages are prefixed with `[compressed]` and cached by `tool_call_id` to avoid re-summarizing.
+5. Compressed messages are cached by `tool_call_id` to avoid re-summarizing.
 6. Compression operates on a copy of the message list — graph state is never mutated.
 7. On LLM failure, the compressor falls back to middle-truncation (`_truncate_tool_output`).
 
@@ -475,6 +411,35 @@ MCP tools are registered into the on-demand pool and loaded by the agent via `re
 **Prerequisite:** Install the MCP SDK: `uv pip install "cogtrix[mcp]"` (or `pip install mcp`). If the package is not installed and `mcp_servers` is configured, a warning is logged and servers are skipped.
 
 Use `/mcp` to list connected servers and their tools. Use `/mcp restart [name]` to reconnect.
+
+#### Docker Compose (SSE via supergateway)
+
+When running Cogtrix in Docker, stdio MCP servers can't be spawned directly because each service runs in its own container. Use [supergateway](https://github.com/supercorp-ai/supergateway) to bridge stdio servers to SSE:
+
+```yaml
+# docker-compose.yml (excerpt)
+mcp-filesystem:
+  image: supercorp/supergateway
+  command: >
+    --stdio "npx -y @modelcontextprotocol/server-filesystem /data"
+    --port 8000
+  volumes:
+    - mcp-workspace:/data
+  expose:
+    - "8000"
+```
+
+Then configure Cogtrix to connect via SSE:
+
+```yaml
+# .cogtrix.yaml
+mcp_servers:
+  filesystem:
+    url: http://mcp-filesystem:8000/sse
+    requires_confirmation: false
+```
+
+The shared `mcp-workspace` volume is mounted at `/data` in the MCP server and at `/app/mcp-data` in the Cogtrix container, giving both services read/write access to the same files. See the included `docker-compose.yml` for the full working setup.
 
 ### Tool Loading
 
@@ -821,7 +786,7 @@ Rate limit violations are recorded but do not increment the security violation c
 
 **Auto-blacklist:**
 
-`ViolationTracker` maintains a per-chat sliding window of security violation timestamps. When a chat's violation count within the last `window_minutes` minutes reaches `max_violations`, all subsequent messages from that chat are rejected immediately (before any other check) with a blacklist reason. The blacklist state is in-memory and resets when the assistant restarts.
+`ViolationTracker` maintains a per-chat sliding window of security violation timestamps. When a chat's violation count within the last `window_minutes` minutes reaches `max_violations`, all subsequent messages from that chat are rejected immediately (before any other check) with a blacklist reason. The blacklist state is persisted to `data/assistant/violations.json` and survives assistant restarts. Expired violations (older than the sliding window) are pruned on load.
 
 **Output sanitization:**
 
@@ -847,6 +812,9 @@ Rate limit violations are recorded but do not increment the security violation c
 | `COGTRIX_MEMORY_MODE` | Memory mode | `code` |
 | `COGTRIX_OLLAMA` | Ollama server address (`host` or `host:port`) | `192.168.1.100` or `192.168.1.100:8080` |
 | `OPENAI_API_KEY` | OpenAI API key | `sk-...` |
+| `ANTHROPIC_API_KEY` | Anthropic API key | `sk-ant-...` |
+| `GEMINI_API_KEY` | Google Gemini API key | `AIza...` |
+| `XAI_API_KEY` | xAI (Grok) API key | `xai-...` |
 | `OLLAMA_BASE_URL` | Ollama server URL (legacy, full URL) | `http://192.168.1.100:11434` |
 | `OPENWEATHER_API_KEY` | OpenWeather API key | `abc123` |
 | `COGTRIX_EMBEDDING_PROVIDER` | RAG embedding provider | `openai` |
@@ -978,13 +946,11 @@ provider: my-server
 session: default
 
 # ─── LLM Providers ──────────────────────────────────────────────
-inference:
+providers:
   my-server:
     type: ollama
     base_url: "http://192.168.1.100:11434"
     model: qwen3:8b
-    temperature: 0.7
-    num_ctx: 32768
   openai:
     type: openai
     model: gpt-4.1
@@ -1021,14 +987,17 @@ services:
     phonebook:
       alice: "123456789"
 
-# ─── Model Aliases ──────────────────────────────────────────────
-model_aliases:
+# ─── Models (chat + embedding) ───────────────────────────────────
+models:
   fast: my-server/qwen3:8b
   smart: openai/gpt-4.1
   coder:
     provider: local-gpu
     model: qwen3-coder:30b-a3b
     temperature: 0.3
+  embed-local:
+    provider: local-gpu
+    model: nomic-embed-text
 
 # ─── Memory ─────────────────────────────────────────────────────
 memory:
@@ -1044,21 +1013,16 @@ memory:
       summarization: true
       vector_recall_k: 3
     reasoning:
-      working_memory_size: 40
+      working_memory_size: 30
       max_decisions: 20
       summarization: true
       vector_recall_k: 3
-
-# ─── Embedding (used by hybrid memory + RAG) ────────────────────
-embedding:
-  provider: local-gpu
-  model: nomic-embed-text
 
 # ─── RAG ────────────────────────────────────────────────────────
 rag:
   docs_dir: docs
   vectordb_dir: data/vectordb
-  # embedding_provider and embedding_model inherited from the embedding section
+  model: embed-local
 
 # ─── Delegation ─────────────────────────────────────────────────
 delegate:
@@ -1134,13 +1098,11 @@ mcp_servers:
   "provider": "my-server",
   "session": "default",
 
-  "inference": {
+  "providers": {
     "my-server": {
       "type": "ollama",
       "base_url": "http://192.168.1.100:11434",
-      "model": "qwen3:8b",
-      "temperature": 0.7,
-      "num_ctx": 32768
+      "model": "qwen3:8b"
     },
     "openai": {
       "type": "openai",
@@ -1213,13 +1175,17 @@ mcp_servers:
     }
   },
 
-  "model_aliases": {
+  "models": {
     "fast": "my-server/qwen3:8b",
     "smart": "openai/gpt-4.1",
     "coder": {
       "provider": "local-gpu",
       "model": "qwen3-coder:30b-a3b",
       "temperature": 0.3
+    },
+    "embed-local": {
+      "provider": "local-gpu",
+      "model": "nomic-embed-text"
     }
   },
 
@@ -1228,18 +1194,14 @@ mcp_servers:
     "modes": {
       "conversation": { "working_memory_size": 25, "summarization": true, "vector_recall_k": 3 },
       "code": { "working_memory_size": 30, "max_files": 20, "summarization": true, "vector_recall_k": 3 },
-      "reasoning": { "working_memory_size": 40, "max_decisions": 20, "summarization": true, "vector_recall_k": 3 }
+      "reasoning": { "working_memory_size": 30, "max_decisions": 20, "summarization": true, "vector_recall_k": 3 }
     }
-  },
-
-  "embedding": {
-    "provider": "local-gpu",
-    "model": "nomic-embed-text"
   },
 
   "rag": {
     "docs_dir": "docs",
-    "vectordb_dir": "data/vectordb"
+    "vectordb_dir": "data/vectordb",
+    "model": "embed-local"
   },
 
   "delegate": {
@@ -1275,7 +1237,7 @@ mcp_servers:
 }
 ```
 
-> **Note:** Both examples use `"inference"` (preferred). The legacy key `"providers"` still works.
+> **Note:** Both examples use `"providers"` (preferred). The legacy key `"inference"` still works as an alias.
 
 ---
 

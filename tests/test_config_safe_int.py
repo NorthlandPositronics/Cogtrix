@@ -1,0 +1,144 @@
+"""Tests for _safe_int, _safe_float helpers and non-numeric config resilience."""
+
+from pathlib import Path
+
+from src.config import Config, _apply_config_file, _safe_float, _safe_int
+
+
+class TestSafeInt:
+    def test_valid_int(self):
+        assert _safe_int(42, "field") == 42
+
+    def test_valid_string(self):
+        assert _safe_int("42", "field") == 42
+
+    def test_invalid_string_no_default(self):
+        assert _safe_int("abc", "field") is None
+
+    def test_invalid_string_with_default(self):
+        assert _safe_int("abc", "field", default=10) == 10
+
+    def test_none_value_no_default(self):
+        assert _safe_int(None, "field") is None
+
+    def test_none_value_with_default(self):
+        assert _safe_int(None, "field", default=5) == 5
+
+    def test_float_truncates(self):
+        assert _safe_int(3.9, "field") == 3
+
+    def test_negative_int(self):
+        assert _safe_int(-1, "field") == -1
+
+
+class TestSafeFloat:
+    def test_valid_float(self):
+        assert _safe_float(0.5, "field") == 0.5
+
+    def test_valid_string(self):
+        assert _safe_float("0.5", "field") == 0.5
+
+    def test_invalid_string_no_default(self):
+        assert _safe_float("abc", "field") is None
+
+    def test_invalid_string_with_default(self):
+        assert _safe_float("abc", "field", default=1.0) == 1.0
+
+    def test_none_value_no_default(self):
+        assert _safe_float(None, "field") is None
+
+    def test_int_coerced(self):
+        assert _safe_float(2, "field") == 2.0
+
+
+class TestApplyConfigFileNonNumeric:
+    """_apply_config_file must not crash on non-numeric values in numeric fields."""
+
+    def _write_yaml(self, tmp_path: Path, content: str) -> Path:
+        cfg_file = tmp_path / ".cogtrix.yaml"
+        cfg_file.write_text(content)
+        return cfg_file
+
+    def test_delegate_timeout_non_numeric(self, tmp_path):
+        cfg_file = self._write_yaml(
+            tmp_path,
+            "delegate:\n  default_timeout: abc\n",
+        )
+        config = Config()
+        _apply_config_file(config, cfg_file)
+        # Should not crash; default_timeout stays unchanged
+
+    def test_context_compression_min_age_non_numeric(self, tmp_path):
+        cfg_file = self._write_yaml(
+            tmp_path,
+            "context_compression:\n  min_age: xyz\n",
+        )
+        config = Config()
+        _apply_config_file(config, cfg_file)
+
+    def test_context_compression_min_chars_non_numeric(self, tmp_path):
+        cfg_file = self._write_yaml(
+            tmp_path,
+            "context_compression:\n  min_chars: xyz\n",
+        )
+        config = Config()
+        _apply_config_file(config, cfg_file)
+
+    def test_rag_chunk_size_non_numeric(self, tmp_path):
+        cfg_file = self._write_yaml(
+            tmp_path,
+            "rag:\n  chunk_size: notanumber\n",
+        )
+        config = Config()
+        _apply_config_file(config, cfg_file)
+
+    def test_rag_chunk_overlap_non_numeric(self, tmp_path):
+        cfg_file = self._write_yaml(
+            tmp_path,
+            "rag:\n  chunk_overlap: notanumber\n",
+        )
+        config = Config()
+        _apply_config_file(config, cfg_file)
+
+    def test_research_delegate_timeout_non_numeric(self, tmp_path):
+        cfg_file = self._write_yaml(
+            tmp_path,
+            "research_delegate:\n  timeout: nope\n",
+        )
+        config = Config()
+        _apply_config_file(config, cfg_file)
+
+    def test_research_delegate_cap_ratio_non_numeric(self, tmp_path):
+        cfg_file = self._write_yaml(
+            tmp_path,
+            "research_delegate:\n  cap_ratio: nope\n",
+        )
+        config = Config()
+        _apply_config_file(config, cfg_file)
+
+    def test_provider_num_ctx_non_numeric(self, tmp_path):
+        cfg_file = self._write_yaml(
+            tmp_path,
+            "providers:\n  my_ollama:\n    type: ollama\n    num_ctx: abc\n",
+        )
+        config = Config()
+        _apply_config_file(config, cfg_file)
+        assert config.providers["my_ollama"].num_ctx is None
+
+    def test_provider_temperature_non_numeric(self, tmp_path):
+        cfg_file = self._write_yaml(
+            tmp_path,
+            "providers:\n  my_openai:\n    type: openai\n    temperature: hot\n",
+        )
+        config = Config()
+        _apply_config_file(config, cfg_file)
+        assert config.providers["my_openai"].temperature is None
+
+    def test_provider_max_tokens_non_numeric(self, tmp_path):
+        cfg_file = self._write_yaml(
+            tmp_path,
+            "providers:\n  my_openai:\n    type: openai\n    max_tokens: many\n",
+        )
+        config = Config()
+        _apply_config_file(config, cfg_file)
+        assert config.providers["my_openai"].max_tokens is None

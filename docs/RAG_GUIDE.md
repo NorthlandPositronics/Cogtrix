@@ -202,13 +202,12 @@ You: Search the knowledge base for "vacation policy"
 |-----------|---------|-------------|
 | `question` | Required | Search query |
 | `k` | 4 | Number of chunks to retrieve (1-10) |
-| `embedding_provider` | From config | Override embedding provider |
 
 ---
 
 ## Embedding Providers
 
-The default embedding provider is `ollama` (local, no API key required). OpenAI and Google are also supported.
+The default embedding provider is `ollama` (local, no API key required). OpenAI is also supported via `--embedding-provider openai`.
 
 ### Ollama Embeddings (default)
 
@@ -242,12 +241,14 @@ python cogtrix.py --ingest --embedding-provider openai
 
 ### Google Embeddings
 
+> **Note:** Google embeddings are supported via the config file (`rag.model` referencing a Google provider) but are NOT available via the `--embedding-provider` CLI flag.
+
 **Pros:** High quality
 **Cons:** Requires API key (`GEMINI_API_KEY`)
 
 ```bash
 export GEMINI_API_KEY="..."
-python cogtrix.py --ingest --embedding-provider google
+# Configure Google embeddings via .cogtrix.yaml (see "Using Named Providers" below)
 ```
 
 **Default model:** `text-embedding-004`
@@ -256,28 +257,30 @@ Requires `langchain-google-genai`: `uv pip install "cogtrix[google]"`
 
 ### Using Named Providers
 
-You can use any named provider from your config for embeddings. The API key is resolved automatically from the provider config, so you do not need to set it separately.
+You can reference any named provider from your config for embeddings by defining a model entry in the `models` registry and pointing `rag.model` at it. The provider connection details (type, base_url, api_key) are resolved automatically.
 
 ```yaml
-inference:
+providers:
   gpu-server:
     type: ollama
     base_url: "http://192.168.1.100:11434"
-    model: qwen3:8b
   cloud-openai:
     type: openai
     api_key: "sk-..."
 
-rag:
-  # Ollama on a remote server
-  embedding_provider: gpu-server
-  embedding_model: nomic-embed-text
+models:
+  embed-local:
+    provider: gpu-server
+    model: nomic-embed-text
+  embed-cloud:
+    provider: cloud-openai
+    model: text-embedding-3-small
 
-  # Or OpenAI — API key comes from the cloud-openai provider config
-  # embedding_provider: cloud-openai
+rag:
+  model: embed-local
 ```
 
-The embedding provider resolves to the named provider's type and base_url.
+Switch between embedding providers by changing the `rag.model` value — no need to touch the provider entries themselves.
 
 ### Available Ollama Embedding Models
 
@@ -298,10 +301,9 @@ The embedding provider resolves to the named provider's type and base_url.
 rag:
   docs_dir: docs
   vectordb_dir: data/vectordb
-  chunk_size: 1200
+  chunk_size: 2000
   chunk_overlap: 200
-  embedding_provider: ollama
-  embedding_model: nomic-embed-text
+  model: embed-local
 ```
 
 ### Configuration Options
@@ -310,12 +312,9 @@ rag:
 |--------|---------|-------------|
 | `docs_dir` | `"docs"` | Source documents directory |
 | `vectordb_dir` | `"data/vectordb"` | Vector database output |
-| `chunk_size` | `1200` | Characters per chunk |
+| `chunk_size` | `2000` | Characters per chunk |
 | `chunk_overlap` | `200` | Overlap between chunks |
-| `embedding_provider` | `"ollama"` | `"openai"`, `"ollama"`, `"google"`, or named provider |
-| `embedding_model` | Auto | Embedding model name |
-
-**Tip:** If you define a global [`embedding` section](CONFIGURATION.md#embedding-section) in your config, its `provider` and `model` automatically become the defaults for RAG — so you only configure embeddings once.
+| `model` | `null` | Model name from the `models` registry for embeddings. Falls back to the active provider when not set. |
 
 ### Chunk Size Guidelines
 
@@ -363,9 +362,8 @@ Solutions:
   export OPENAI_API_KEY="sk-..."
   python cogtrix.py --ingest --embedding-provider openai
 
-  # For Google
-  export GEMINI_API_KEY="..."
-  python cogtrix.py --ingest --embedding-provider google
+  # For Google (config file only — not available via --embedding-provider)
+  # See "Google Embeddings" section above for config-based setup
 
   # Use Ollama (default, no API key needed)
   python cogtrix.py --ingest

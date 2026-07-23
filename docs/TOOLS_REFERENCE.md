@@ -103,6 +103,7 @@ Execute Python code in a restricted environment with persistent state.
 | `code` | string | Yes | — | Python code to execute |
 | `timeout` | int | No | 30 | Timeout in seconds (max: 60) |
 | `persistent` | bool | No | true | Persist variables between calls |
+| `session_id` | string | No | `"default"` | Session identifier for state isolation |
 
 **Special Commands:**
 
@@ -563,7 +564,7 @@ Search the web using DuckDuckGo (no API key needed).
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `query` | string | Yes | Search query |
-| `max_results` | int | No | Maximum results (default: 5) |
+| `num_results` | int | No | Maximum results (default: 5) |
 
 **Returns:** List of results with title, URL, and snippet
 
@@ -578,7 +579,7 @@ Search recent news using DuckDuckGo.
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `query` | string | Yes | Search query |
-| `max_results` | int | No | Maximum results (default: 5) |
+| `num_results` | int | No | Maximum results (default: 5) |
 
 **Returns:** List of news articles with title, URL, date, and source
 
@@ -743,7 +744,7 @@ Make HTTP GET requests.
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `url` | string | Yes | URL to request |
-| `headers` | object | No | Request headers |
+| `headers` | string | No | Request headers as JSON string |
 | `timeout` | int | No | Timeout in seconds (default: 30) |
 
 **Returns:** Response body and status code
@@ -761,8 +762,8 @@ Make HTTP POST requests with JSON data.
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `url` | string | Yes | URL to request |
-| `data` | object | Yes | JSON data to send |
-| `headers` | object | No | Request headers |
+| `data` | string | Yes | Request body as JSON string |
+| `headers` | string | No | Request headers as JSON string |
 | `timeout` | int | No | Timeout in seconds (default: 30) |
 
 ---
@@ -1072,7 +1073,7 @@ model: "ollama/qwen3:8b"         → Direct provider/model
 model: "openai/gpt-4.1"           → Direct provider/model
 ```
 
-Object aliases can override `num_ctx`, `temperature`, and `timeout` per delegation call. See [CONFIGURATION.md](CONFIGURATION.md#model-aliases) for alias format details and [Delegate Section](CONFIGURATION.md#delegate-section) for `allowed_models` restrictions.
+Object entries can override `num_ctx`, `temperature`, and `timeout` per model. Note: `num_ctx` is only effective for Ollama-type providers and is silently ignored for others. See [CONFIGURATION.md](CONFIGURATION.md#models) for model entry format details and [Delegate Section](CONFIGURATION.md#delegate-section) for `allowed_models` restrictions.
 
 ---
 

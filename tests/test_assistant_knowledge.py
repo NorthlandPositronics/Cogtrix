@@ -27,20 +27,29 @@ def _make_config(max_facts: int = 10000) -> MagicMock:
     return config
 
 
-def _make_store(config: MagicMock | None = None, max_facts: int = 10000) -> SharedKnowledgeStore:
+def _make_store(
+    config: MagicMock | None = None,
+    max_facts: int = 10000,
+    tmp_path: Path | None = None,
+) -> SharedKnowledgeStore:
     """Create a SharedKnowledgeStore with all external I/O patched out."""
     if config is None:
         config = _make_config(max_facts=max_facts)
+
+    if tmp_path is not None:
+        config.services["assistant"]["knowledge"]["data_dir"] = str(tmp_path)
 
     llm = MagicMock()
     with (
         patch.object(SharedKnowledgeStore, "_load", return_value=None),
         patch.object(SharedKnowledgeStore, "_setup_embeddings", return_value=None),
-        patch("src.assistant.knowledge._FACTS_PATH") as mock_path,
+        patch("src.assistant.knowledge.threading.Thread") as mock_thread_cls,
     ):
-        mock_path.parent.mkdir.return_value = None
+        mock_thread = MagicMock()
+        mock_thread_cls.return_value = mock_thread
         store = SharedKnowledgeStore(config=config, llm=llm)
 
+    store._embeddings_ready.set()
     return store
 
 
@@ -353,81 +362,138 @@ class TestSaveLoad:
 
     def test_save_writes_json_file(self, tmp_path: Path):
         """save() writes a valid JSON file to the facts path."""
-        store = _make_store()
+        store = _make_store(tmp_path=tmp_path)
         _add_fact(store, "Alice", "Is a vet")
 
-        facts_file = tmp_path / "facts.json"
+        store.save()
 
-        with patch("src.assistant.knowledge._FACTS_PATH", facts_file):
-            store.save()
-
-        assert facts_file.exists()
-        data = json.loads(facts_file.read_text(encoding="utf-8"))
+        assert store._facts_path.exists()
+        data = json.loads(store._facts_path.read_text(encoding="utf-8"))
         assert isinstance(data, list)
         assert len(data) == 1
         assert data[0]["entity"] == "Alice"
 
     def test_save_multiple_facts(self, tmp_path: Path):
         """save() correctly serialises multiple facts."""
-        store = _make_store()
+        store = _make_store(tmp_path=tmp_path)
         _add_fact(store, "Alice", "Is a vet")
         _add_fact(store, "Bob", "Is an engineer")
 
-        facts_file = tmp_path / "facts.json"
+        store.save()
 
-        with patch("src.assistant.knowledge._FACTS_PATH", facts_file):
-            store.save()
-
-        data = json.loads(facts_file.read_text(encoding="utf-8"))
+        data = json.loads(store._facts_path.read_text(encoding="utf-8"))
         assert len(data) == 2
 
     def test_save_does_not_include_private_source_session(self, tmp_path: Path):
         """source_session field value is not a privacy leak (it's stored blank)."""
-        store = _make_store()
+        store = _make_store(tmp_path=tmp_path)
         fact = _add_fact(store, "Alice", "Is a vet")
         # source_session is always stored as "" per implementation
         assert fact.source_session == "session::test"
 
-        facts_file = tmp_path / "facts.json"
-        with patch("src.assistant.knowledge._FACTS_PATH", facts_file):
-            store.save()
+        store.save()
 
-        data = json.loads(facts_file.read_text(encoding="utf-8"))
+        data = json.loads(store._facts_path.read_text(encoding="utf-8"))
         # The field exists in the serialised form but its value comes from Fact.source_session
         assert "source_session" in data[0]
 
     def test_load_reads_persisted_facts(self, tmp_path: Path):
         """_load() correctly restores facts saved by save()."""
-        store = _make_store()
+        store = _make_store(tmp_path=tmp_path)
         _add_fact(store, "Charlie", "Is a designer")
 
-        facts_file = tmp_path / "facts.json"
-        with patch("src.assistant.knowledge._FACTS_PATH", facts_file):
-            store.save()
+        store.save()
 
-        # Create a fresh store and load the file
-        store2 = _make_store()
-        with patch("src.assistant.knowledge._FACTS_PATH", facts_file):
-            store2._load()
+        # Create a fresh store pointing at the same data_dir and load
+        store2 = _make_store(tmp_path=tmp_path)
+        store2._load()
 
         assert len(store2._facts) == 1
         assert store2._facts[0].entity == "Charlie"
 
-    def test_load_skips_nonexistent_file(self):
+    def test_load_skips_nonexistent_file(self, tmp_path: Path):
         """_load() is a no-op when the facts file does not exist."""
-        store = _make_store()
-        nonexistent = Path("/tmp/__nonexistent_cogtrix_test__.json")
+        store = _make_store(tmp_path=tmp_path)
+        store._facts_path = tmp_path / "nonexistent.json"
 
-        with patch("src.assistant.knowledge._FACTS_PATH", nonexistent):
-            store._load()
+        store._load()
 
         assert len(store._facts) == 0
 
     def test_save_no_vectorstore_does_not_raise(self, tmp_path: Path):
         """save() with no vectorstore set does not crash."""
-        store = _make_store()
+        store = _make_store(tmp_path=tmp_path)
         assert store._vectorstore is None
 
-        facts_file = tmp_path / "facts.json"
-        with patch("src.assistant.knowledge._FACTS_PATH", facts_file):
-            store.save()  # should not raise
+        store.save()  # should not raise
+
+
+# ---------------------------------------------------------------------------
+# TestIndexFactsLockBehavior (BUG-028)
+# ---------------------------------------------------------------------------
+
+
+class TestIndexFactsLockBehavior:
+    """Tests that _index_facts is called outside the store lock.
+
+    BUG-028: FAISS indexing (potentially slow due to embedding network calls)
+    was previously done inside `with self._lock:`, blocking concurrent recall()
+    calls.  After the fix, _index_facts must be invoked after the lock releases.
+    """
+
+    def test_index_facts_called_outside_lock(self):
+        """_index_facts is invoked when the store lock is NOT held."""
+        store = _make_store()
+
+        mock_response = MagicMock()
+        mock_response.content = json.dumps(
+            [{"entity": "Alice", "fact": "Is a veterinarian in Portland"}]
+        )
+        store._extraction_llm.invoke.return_value = mock_response
+
+        lock_held_during_index: list[bool] = []
+
+        original_index = store._index_facts
+
+        def _spy_index_facts(facts: list) -> None:
+            # Check whether the lock is held by the current thread when called.
+            # threading.Lock.acquire(blocking=False) returns False if already locked.
+            acquired = store._lock.acquire(blocking=False)
+            if acquired:
+                store._lock.release()
+                lock_held_during_index.append(False)
+            else:
+                lock_held_during_index.append(True)
+            original_index(facts)
+
+        store._index_facts = _spy_index_facts
+
+        store.extract_and_store(
+            "Alice is a vet.", "Yes, Alice works as a veterinarian in Portland."
+        )
+
+        assert len(lock_held_during_index) == 1, "_index_facts should have been called once"
+        assert (
+            lock_held_during_index[0] is False
+        ), "_index_facts was called while the lock was held (BUG-028 not fixed)"
+
+    def test_index_facts_not_called_when_no_new_facts(self):
+        """_index_facts is not called when no new facts are added."""
+        store = _make_store()
+
+        mock_response = MagicMock()
+        mock_response.content = "[]"
+        store._extraction_llm.invoke.return_value = mock_response
+
+        index_call_count: list[int] = [0]
+        original_index = store._index_facts
+
+        def _spy_index_facts(facts: list) -> None:
+            index_call_count[0] += 1
+            original_index(facts)
+
+        store._index_facts = _spy_index_facts
+
+        store.extract_and_store("Nothing here.", "Indeed.")
+
+        assert index_call_count[0] == 0, "_index_facts should not be called when no facts added"

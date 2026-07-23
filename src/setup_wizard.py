@@ -27,6 +27,8 @@ from typing import Any
 
 import yaml
 
+from src.cli.args import color_enabled
+
 # Optional Rich imports for markdown rendering in wizard output
 try:
     from rich.console import Console as _RichConsole
@@ -42,54 +44,47 @@ except ImportError:
 
 log = logging.getLogger("cogtrix")
 
-
 # ── ANSI helpers ─────────────────────────────────────────────────────
-# Duplicate the color-support logic from cogtrix.py because importing
-# from there would create a circular dependency.
-
-
-def _color_ok() -> bool:
-    """Check if ANSI color output is supported."""
-    if os.environ.get("NO_COLOR") is not None:
-        return False
-    if os.environ.get("FORCE_COLOR") is not None:
-        return True
-    return hasattr(sys.stdout, "isatty") and sys.stdout.isatty()
 
 
 def _B(t: str) -> str:
     """Bold."""
-    return f"\033[1m{t}\033[0m" if _color_ok() else t
+    return f"\033[1m{t}\033[0m" if color_enabled() else t
 
 
 def _D(t: str) -> str:
     """Dim."""
-    return f"\033[2m{t}\033[0m" if _color_ok() else t
+    return f"\033[2m{t}\033[0m" if color_enabled() else t
 
 
 def _G(t: str) -> str:
     """Green."""
-    return f"\033[32m{t}\033[0m" if _color_ok() else t
+    return f"\033[32m{t}\033[0m" if color_enabled() else t
 
 
 def _R(t: str) -> str:
     """Red."""
-    return f"\033[31m{t}\033[0m" if _color_ok() else t
+    return f"\033[31m{t}\033[0m" if color_enabled() else t
+
+
+def _DM(t: str) -> str:
+    """Dim magenta."""
+    return f"\033[2;35m{t}\033[0m" if color_enabled() else t
 
 
 def _C(t: str) -> str:
     """Cyan."""
-    return f"\033[36m{t}\033[0m" if _color_ok() else t
+    return f"\033[36m{t}\033[0m" if color_enabled() else t
 
 
 def _BC(t: str) -> str:
     """Bold cyan."""
-    return f"\033[1;36m{t}\033[0m" if _color_ok() else t
+    return f"\033[1;36m{t}\033[0m" if color_enabled() else t
 
 
 def _BG(t: str) -> str:
     """Bold green."""
-    return f"\033[1;32m{t}\033[0m" if _color_ok() else t
+    return f"\033[1;32m{t}\033[0m" if color_enabled() else t
 
 
 # ── Spinner ──────────────────────────────────────────────────────────
@@ -181,6 +176,7 @@ def _step(n: int, label: str) -> None:
 # ── Constants ────────────────────────────────────────────────────────
 
 _DOCS_PATH = Path(__file__).resolve().parent.parent / "docs" / "CONFIGURATION.md"
+_MAX_DOC_SIZE = 10 * 1024 * 1024  # 10 MB
 _DEFAULT_OUTPUT_PATH = Path.home() / ".cogtrix.yaml"
 
 _WIZARD_SYSTEM_PROMPT = """\
@@ -205,6 +201,8 @@ Include this as the primary provider in the generated config.
 
 ## Instructions
 
+- Be direct and professional. Do not use filler words like "Sure!", "Great!", \
+"Awesome!", "Absolutely!" or similar. Just ask the question.
 - Ask ONE question at a time. Wait for the user's response before asking the next.
 - Start by asking what the user wants to use Cogtrix for (interactive assistant, \
 WhatsApp bot, Telegram bot, research tool, etc.)
@@ -307,13 +305,12 @@ def _detect_environment() -> dict[str, Any]:
     if xai_key:
         env["xai_key"] = xai_key
 
-    # COGTRIX_OLLAMA accepts "host", "host:port", or full URL
+    # COGTRIX_OLLAMA accepts "host", "host:port", IPv6, or full URL
+    from src.config import _parse_ollama_address
+
     cogtrix_ollama = os.environ.get("COGTRIX_OLLAMA")
     if cogtrix_ollama:
-        v = cogtrix_ollama.strip()
-        if not v.startswith(("http://", "https://")):
-            v = f"http://{v}" if ":" in v else f"http://{v}:11434"
-        ollama_url = v
+        ollama_url = _parse_ollama_address(cogtrix_ollama.strip())
     else:
         ollama_url = os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
     try:
@@ -358,10 +355,10 @@ def _extract_config_info(yaml_content: str) -> dict[str, Any]:
         model = data.get("model")
         if model:
             info["model"] = model
-        # Try to get type and model from inference section
-        inference = data.get("inference", data.get("providers", {}))
-        if isinstance(inference, dict) and provider_name and provider_name in inference:
-            pcfg = inference[provider_name]
+        # Try to get type and model from providers section
+        providers = data.get("providers", data.get("inference", {}))
+        if isinstance(providers, dict) and provider_name and provider_name in providers:
+            pcfg = providers[provider_name]
             if isinstance(pcfg, dict):
                 info["type"] = pcfg.get("type", "openai")
                 if not model:
@@ -497,7 +494,9 @@ def _bootstrap_llm(
                 api_key = env["openai_key"]
             elif existing_info.get("api_key"):
                 existing_key = existing_info["api_key"]
-                masked = existing_key[:4] + "***" + existing_key[-4:]
+                masked = (
+                    existing_key[:4] + "***" + existing_key[-4:] if len(existing_key) > 8 else "***"
+                )
                 entered = _ask_input("API key", default=masked, secret=True)
                 api_key = existing_key if entered == masked else entered
             else:
@@ -525,7 +524,9 @@ def _bootstrap_llm(
                 api_key = env["anthropic_key"]
             elif existing_info.get("api_key") and existing_info.get("type") == "anthropic":
                 existing_key = existing_info["api_key"]
-                masked = existing_key[:4] + "***" + existing_key[-4:]
+                masked = (
+                    existing_key[:4] + "***" + existing_key[-4:] if len(existing_key) > 8 else "***"
+                )
                 entered = _ask_input("API key", default=masked, secret=True)
                 api_key = existing_key if entered == masked else entered
             else:
@@ -541,7 +542,9 @@ def _bootstrap_llm(
                 api_key = env["gemini_key"]
             elif existing_info.get("api_key") and existing_info.get("type") == "google":
                 existing_key = existing_info["api_key"]
-                masked = existing_key[:4] + "***" + existing_key[-4:]
+                masked = (
+                    existing_key[:4] + "***" + existing_key[-4:] if len(existing_key) > 8 else "***"
+                )
                 entered = _ask_input("API key", default=masked, secret=True)
                 api_key = existing_key if entered == masked else entered
             else:
@@ -561,7 +564,9 @@ def _bootstrap_llm(
                 and existing_info.get("provider") == "xai"
             ):
                 existing_key = existing_info["api_key"]
-                masked = existing_key[:4] + "***" + existing_key[-4:]
+                masked = (
+                    existing_key[:4] + "***" + existing_key[-4:] if len(existing_key) > 8 else "***"
+                )
                 entered = _ask_input("API key", default=masked, secret=True)
                 api_key = existing_key if entered == masked else entered
             else:
@@ -605,10 +610,17 @@ def _load_docs(url: str | None = None) -> str:
         try:
             req = urllib.request.Request(url)
             with urllib.request.urlopen(req, timeout=15) as resp:  # nosec B310
-                content = resp.read().decode("utf-8", errors="replace")
-                if content.strip():
-                    log.debug("Loaded docs from URL: %s", url)
-                    return content
+                raw = resp.read(_MAX_DOC_SIZE + 1)
+                if len(raw) > _MAX_DOC_SIZE:
+                    log.warning(
+                        "Docs URL response exceeded %d bytes, using embedded docs",
+                        _MAX_DOC_SIZE,
+                    )
+                else:
+                    content = raw.decode("utf-8", errors="replace")
+                    if content.strip():
+                        log.debug("Loaded docs from URL: %s", url)
+                        return content
         except Exception as exc:
             log.debug("Failed to fetch docs from %s: %s (using embedded)", url, exc)
 
@@ -668,7 +680,18 @@ def _run_conversation(llm: Any, system_prompt: str) -> str:
             )
             if confirm == "yes":
                 return ai_text
-            messages.append(HumanMessage(content="I'd like to make changes to the config."))
+            # Let the user describe what to change or ask a question
+            try:
+                user_input = input(f"\n  {_DM('\u25cb')} ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                raise SystemExit(0) from None
+            if not user_input:
+                user_input = "I'd like to make changes to the config."
+            if user_input.lower() in ("quit", "exit", "cancel"):
+                print(f"  {_D('Setup cancelled.')}")
+                raise SystemExit(0)
+            messages.append(HumanMessage(content=user_input))
             with _spinner("Thinking"):
                 response = llm.invoke(messages)
             ai_text = response.content if hasattr(response, "content") else str(response)
@@ -677,7 +700,7 @@ def _run_conversation(llm: Any, system_prompt: str) -> str:
             continue
 
         try:
-            user_input = input(f"\n  {_B('You:')} ").strip()
+            user_input = input(f"\n  {_DM('\u25cb')} ").strip()
         except (EOFError, KeyboardInterrupt):
             print()
             raise SystemExit(0) from None
@@ -733,11 +756,25 @@ def _extract_yaml(text: str) -> str:
     Raises:
         ValueError: If no ```yaml``` block is found.
     """
+    # Non-greedy first: handles clean cases without nested backticks
     pattern = re.compile(r"```yaml\s*\n(.*?)```", re.DOTALL)
-    matches = pattern.findall(text)
-    if not matches:
-        raise ValueError("No ```yaml``` block found in LLM response")
-    return matches[-1].strip()
+    iter_matches = list(pattern.finditer(text))
+    if not iter_matches:
+        # Greedy fallback: from first ```yaml to last ```
+        greedy = re.compile(r"```yaml\s*\n(.*)```", re.DOTALL)
+        greedy_matches = greedy.findall(text)
+        if not greedy_matches:
+            raise ValueError("No ```yaml``` block found in LLM response")
+        return greedy_matches[-1].strip()
+    last = iter_matches[-1]
+    if "```" in text[last.end() :]:
+        # Non-greedy terminated early at a nested ``` inside the block; use greedy
+        # to span from the first ```yaml opener to the last ``` in the text.
+        greedy = re.compile(r"```yaml\s*\n(.*)```", re.DOTALL)
+        greedy_matches = greedy.findall(text)
+        if greedy_matches:
+            return greedy_matches[-1].strip()
+    return last.group(1).strip()
 
 
 # ── Phase 3: validate & write ────────────────────────────────────────
@@ -782,8 +819,8 @@ def _validate_and_write(
     finally:
         if tmp_path is not None:
             try:
-                tmp_path.unlink()
-            except Exception:
+                tmp_path.unlink(missing_ok=True)
+            except OSError:
                 pass
 
     # Serialize the bootstrap-injected data (not the original LLM text)
@@ -803,6 +840,7 @@ def _validate_and_write(
         f"# Generated by Cogtrix setup wizard\n{final_yaml}",
         encoding="utf-8",
     )
+    output_path.chmod(0o600)
 
 
 def _inject_bootstrap(data: dict[str, Any], bootstrap_info: dict[str, Any]) -> None:
@@ -812,9 +850,9 @@ def _inject_bootstrap(data: dict[str, Any], bootstrap_info: dict[str, Any]) -> N
     model = bootstrap_info["model"]
     base_url = bootstrap_info.get("base_url")
 
-    inference = data.setdefault("inference", {})
-    provider_cfg = inference.setdefault(provider, {})
-    provider_cfg.setdefault("type", bootstrap_info["type"])
+    providers = data.setdefault("providers", {})
+    provider_cfg = providers.setdefault(provider, {})
+    provider_cfg["type"] = bootstrap_info["type"]
     provider_cfg["model"] = model
     if api_key:
         provider_cfg["api_key"] = api_key
@@ -822,6 +860,16 @@ def _inject_bootstrap(data: dict[str, Any], bootstrap_info: dict[str, Any]) -> N
         provider_cfg["base_url"] = base_url
 
     data["provider"] = provider
+
+    # Create a default model entry in the models registry
+    models = data.setdefault("models", {})
+    if "default" not in models:
+        models["default"] = {
+            "provider": provider,
+            "model": model,
+        }
+    if "model" not in data:
+        data["model"] = "default"
 
 
 def _mask_secrets(yaml_text: str) -> str:

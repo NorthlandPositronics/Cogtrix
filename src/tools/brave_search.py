@@ -58,7 +58,8 @@ def configure_brave(config: dict[str, Any]) -> None:
     Expected keys:
         api_key  - Brave Search API key (or read from BRAVE_API_KEY env var)
     """
-    _brave_config.update(config)
+    global _brave_config
+    _brave_config = {**_brave_config, **config}
 
 
 def _get_api_key() -> str | None:

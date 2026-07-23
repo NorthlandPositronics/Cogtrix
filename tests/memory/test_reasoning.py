@@ -49,7 +49,7 @@ class TestReasoningMemoryManager:
     def test_default_config(self):
         """Test default configuration values."""
         manager = ReasoningMemoryManager(MockStore(), "test")
-        assert manager._mode_config["working_memory_size"] == 40
+        assert manager._mode_config["working_memory_size"] == 30
         assert manager._mode_config["track_reasoning"] is True
         assert manager._mode_config["track_decisions"] is True
         assert manager._mode_config["max_decisions"] == 20
@@ -537,7 +537,7 @@ class TestReasoningTimestamps:
             datetime.fromisoformat(ts)
 
     def test_prepare_context_injects_timestamps(self):
-        """Test that prepare_context prepends timestamps to message content."""
+        """Timestamps are prepended to HumanMessages only (not AI — the LLM mimics them)."""
         manager = ReasoningMemoryManager(MockStore(), "test")
         manager.load()
         manager.update("Question", "Answer")
@@ -546,7 +546,8 @@ class TestReasoningTimestamps:
 
         for msg in context.messages:
             content = msg.content if hasattr(msg, "content") else msg["content"]
-            assert content.startswith("[")
+            if type(msg).__name__ == "HumanMessage":
+                assert content.startswith("[")
 
     def test_to_dict_from_dict_roundtrip(self):
         """Test that timestamps survive to_dict / from_dict round-trip."""

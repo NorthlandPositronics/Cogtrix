@@ -69,12 +69,13 @@ class ReasoningMemoryManager(BaseMemoryManager):
     """
 
     DEFAULT_CONFIG: dict[str, Any] = {
-        "working_memory_size": 40,
+        "working_memory_size": 30,
         "track_reasoning": True,
         "track_decisions": True,
         "track_goals": True,
         "max_decisions": 20,
         "max_alternatives": 10,
+        "prefix_max_stale_turns": 3,
     }
 
     def __init__(
@@ -115,27 +116,51 @@ class ReasoningMemoryManager(BaseMemoryManager):
             "non_negotiables": [],
         }
 
+        # Turn counter and section-freshness tracking for prefix gating (F5).
+        # Each section records the turn when it was last modified.
+        # Sections older than _prefix_max_stale_turns are omitted from the prefix.
+        self._turn_count: int = 0
+        self._prefix_max_stale_turns: int = self._mode_config.get("prefix_max_stale_turns", 3)
+        self._section_ts: dict[str, int] = {}
+
     @property
     def mode_name(self) -> str:
         return "reasoning"
+
+    # --- Section freshness helpers (F5 prefix gating) ---
+
+    def _touch_section(self, section: str) -> None:
+        """Record that *section* was modified on the current turn."""
+        self._section_ts[section] = self._turn_count
+
+    def _is_section_fresh(self, section: str) -> bool:
+        """Return True if *section* was modified within the staleness window."""
+        ts = self._section_ts.get(section)
+        if ts is None:
+            return False
+        return (self._turn_count - ts) <= self._prefix_max_stale_turns
 
     # --- Public API for reasoning context ---
 
     def set_problem(self, problem: str) -> None:
         """Define the current problem being analyzed."""
         self._current_problem = problem
+        self._touch_section("problem")
 
     def set_hypothesis(self, hypothesis: str) -> None:
         """Set the active hypothesis under consideration."""
         self._active_hypothesis = hypothesis
+        self._touch_section("hypothesis")
 
     def add_reasoning_step(self, step: str) -> None:
         """Add a step to the reasoning chain."""
         self._reasoning_chain.append(step)
+        self._touch_section("reasoning_chain")
 
     def add_question(self, question: str) -> None:
         """Add an open question."""
         self._open_questions.append(question)
+        self._touch_section("open_questions")
 
     def clear_reasoning_chain(self) -> None:
         """Clear the reasoning chain for a new problem."""
@@ -154,6 +179,7 @@ class ReasoningMemoryManager(BaseMemoryManager):
                 oldest_key = next(iter(self._alternatives))
                 del self._alternatives[oldest_key]
         self._alternatives[name] = status
+        self._touch_section("alternatives")
 
     def update_alternative(self, name: str, status: str) -> None:
         """Update status of an alternative."""
@@ -167,16 +193,19 @@ class ReasoningMemoryManager(BaseMemoryManager):
         for key in list(self._alternatives.keys()):
             if key.lower() in description.lower():
                 self._alternatives[key] = "dead_end"
+        self._touch_section("dead_ends")
 
     def add_assumption(self, assumption: str) -> None:
         """Record an assumption being made."""
         self._assumptions.append(assumption)
+        self._touch_section("assumptions")
 
     # --- Goal tracking ---
 
     def set_objective(self, objective: str) -> None:
         """Set the primary objective (North Star)."""
         self._primary_objective = objective
+        self._touch_section("objective")
 
     def add_goal(
         self,
@@ -193,6 +222,7 @@ class ReasoningMemoryManager(BaseMemoryManager):
             success_criteria=success_criteria or [],
         )
         self._goals.append(goal)
+        self._touch_section("goals")
 
     def update_goal_status(self, goal_id: str, status: str) -> None:
         """Update a goal's status."""
@@ -200,10 +230,12 @@ class ReasoningMemoryManager(BaseMemoryManager):
             if goal.id == goal_id:
                 goal.status = status
                 break
+        self._touch_section("goals")
 
     def set_current_phase(self, phase: str) -> None:
         """Set the current phase of the plan."""
         self._current_phase = phase
+        self._touch_section("phase")
 
     # --- Decision logging ---
 
@@ -230,6 +262,7 @@ class ReasoningMemoryManager(BaseMemoryManager):
         max_dec = self._mode_config["max_decisions"]
         if len(self._decisions) > max_dec:
             self._decisions = self._decisions[-max_dec:]
+        self._touch_section("decisions")
 
     def get_decisions(self) -> list[Decision]:
         """Get all logged decisions."""
@@ -241,6 +274,7 @@ class ReasoningMemoryManager(BaseMemoryManager):
         """Add a constraint (business, technical, non_negotiables)."""
         if category in self._constraints:
             self._constraints[category].append(constraint)
+            self._touch_section("constraints")
 
     def get_constraints(self, category: str | None = None) -> dict[str, list[str]]:
         """Get constraints, optionally filtered by category."""
@@ -281,12 +315,12 @@ class ReasoningMemoryManager(BaseMemoryManager):
         if hybrid:
             prefix_parts.append(hybrid)
 
-        # Primary objective
+        # Primary objective — always include (small, essential)
         if self._primary_objective:
             prefix_parts.append(f"🎯 **OBJECTIVE:** {self._primary_objective}")
 
-        # Current phase and goals
-        if self._goals:
+        # Goals — gate by freshness
+        if self._goals and self._is_section_fresh("goals"):
             status_icons = {
                 "pending": "○",
                 "in_progress": "◐",
@@ -300,11 +334,12 @@ class ReasoningMemoryManager(BaseMemoryManager):
             goals_text = "\n".join(goals_lines)
             prefix_parts.append(f"**Goals:**\n{goals_text}")
 
-        if self._current_phase:
+        # Phase — gate by freshness
+        if self._current_phase and self._is_section_fresh("phase"):
             prefix_parts.append(f"**Current Phase:** {self._current_phase}")
 
-        # Constraints
-        if any(self._constraints.values()):
+        # Constraints — gate by freshness
+        if any(self._constraints.values()) and self._is_section_fresh("constraints"):
             constraint_lines = []
             for cat, items in self._constraints.items():
                 if items:
@@ -314,41 +349,43 @@ class ReasoningMemoryManager(BaseMemoryManager):
                 constraints_text = "\n".join(constraint_lines)
                 prefix_parts.append(f"**Constraints:**\n{constraints_text}")
 
-        # Active reasoning state
-        if self._current_problem:
+        # Problem — gate by freshness
+        if self._current_problem and self._is_section_fresh("problem"):
             prefix_parts.append(f"**Problem:** {self._current_problem}")
 
-        if self._active_hypothesis:
+        # Hypothesis — gate by freshness
+        if self._active_hypothesis and self._is_section_fresh("hypothesis"):
             prefix_parts.append(f"**Hypothesis:** {self._active_hypothesis}")
 
-        if self._reasoning_chain:
+        # Reasoning chain — gate by freshness
+        if self._reasoning_chain and self._is_section_fresh("reasoning_chain"):
             chain_lines = []
             for i, step in enumerate(self._reasoning_chain[-5:], 1):
                 chain_lines.append(f"  {i}. {step}")
             chain_text = "\n".join(chain_lines)
             prefix_parts.append(f"**Reasoning Chain:**\n{chain_text}")
 
-        # Alternatives
-        if self._alternatives:
+        # Alternatives — gate by freshness
+        if self._alternatives and self._is_section_fresh("alternatives"):
             alt_lines = []
             for name, status in list(self._alternatives.items())[-5:]:
                 alt_lines.append(f"  [{status}] {name}")
             alt_text = "\n".join(alt_lines)
             prefix_parts.append(f"**Alternatives:**\n{alt_text}")
 
-        # Dead ends
-        if self._dead_ends:
+        # Dead ends — gate by freshness
+        if self._dead_ends and self._is_section_fresh("dead_ends"):
             dead_lines = [f"  ✗ {d}" for d in self._dead_ends[-3:]]
             dead_text = "\n".join(dead_lines)
             prefix_parts.append(f"**Dead Ends (avoid):**\n{dead_text}")
 
-        # Assumptions
-        if self._assumptions:
+        # Assumptions — gate by freshness
+        if self._assumptions and self._is_section_fresh("assumptions"):
             assumption_text = ", ".join(self._assumptions[-3:])
             prefix_parts.append(f"**Assumptions:** {assumption_text}")
 
-        # Recent decisions
-        if self._decisions:
+        # Decisions — gate by freshness
+        if self._decisions and self._is_section_fresh("decisions"):
             dec_lines = []
             for d in self._decisions[-3:]:
                 rationale_short = d.rationale[:50] + "..." if len(d.rationale) > 50 else d.rationale
@@ -356,8 +393,8 @@ class ReasoningMemoryManager(BaseMemoryManager):
             dec_text = "\n".join(dec_lines)
             prefix_parts.append(f"**Recent Decisions:**\n{dec_text}")
 
-        # Open questions
-        if self._open_questions:
+        # Open questions — gate by freshness
+        if self._open_questions and self._is_section_fresh("open_questions"):
             questions_lines = [f"  ? {q}" for q in self._open_questions[-3:]]
             questions_text = "\n".join(questions_lines)
             prefix_parts.append(f"**Open Questions:**\n{questions_text}")
@@ -389,6 +426,7 @@ class ReasoningMemoryManager(BaseMemoryManager):
         agent_messages: list[Any] | None = None,
     ) -> None:
         """Update memory with new turn (full chain if available)."""
+        self._turn_count += 1
         # --- Build the human message --------------------------------
         if HumanMessage is not None:
             human_msg: Any = HumanMessage(content=user_input)
@@ -416,7 +454,7 @@ class ReasoningMemoryManager(BaseMemoryManager):
 
         # Incrementally summarize messages outside the sliding window
         window_size = self._mode_config["working_memory_size"]
-        self._maybe_summarize(self._messages, window_size)
+        self._schedule_slow_path(self._messages, window_size)
 
     def get_system_prompt_additions(self) -> str | None:
         """Return reasoning-mode system prompt additions."""
@@ -426,14 +464,7 @@ class ReasoningMemoryManager(BaseMemoryManager):
             "Think step-by-step, document reasoning and decisions. "
             "When given a multi-step task: break it down, execute each part, "
             "then synthesize results into a complete deliverable. "
-            "Flag assumptions but keep working toward the goal.\n\n"
-            "Use `deep_think` for decisions with significant trade-offs, "
-            "complex strategy questions, or problems that benefit from exploring "
-            "multiple approaches.\n\n"
-            "When a task involves multiple independent research or analysis "
-            "subtasks, use `delegate_parallel` to run them concurrently. "
-            "Use `delegate_task` to get a second opinion from another model "
-            "or to offload routine subtasks while you focus on synthesis."
+            "Flag assumptions but keep working toward the goal."
         )
 
     def clear(self) -> None:

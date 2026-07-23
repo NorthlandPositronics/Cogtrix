@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import threading
 from collections import deque
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -836,6 +838,74 @@ class TestToolCallGuardPaths:
 
 
 # ---------------------------------------------------------------------------
+# TestToolCallGuardPathNormalization  (BUG-076)
+# ---------------------------------------------------------------------------
+
+
+class TestToolCallGuardPathNormalization:
+    """Verify that unnormalized path variants cannot bypass the path guard."""
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "/./etc/passwd",
+            "//etc/passwd",
+            "/foo/../etc/passwd",
+            "/etc/./shadow",
+            "/etc/../etc/passwd",
+            "/proc/./self/environ",
+            "/sys/../sys/class/net",
+        ],
+    )
+    def test_traversal_variants_of_etc_blocked(self, path: str):
+        guard = ToolCallGuard({})
+        result = guard.check("read_file", {"path": path})
+        assert not result.is_safe, f"Expected {path!r} to be blocked"
+        assert result.guard_name == "tool_call_path"
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "/home/user/./notes.txt",
+            "/home/user/../user/notes.txt",
+            "/home/./user/notes.txt",
+        ],
+    )
+    def test_traversal_that_resolves_to_safe_path_passes(self, path: str):
+        guard = ToolCallGuard({})
+        result = guard.check("read_file", {"path": path})
+        assert result.is_safe, f"Expected {path!r} to pass"
+
+    def test_double_slash_etc_blocked(self):
+        guard = ToolCallGuard({})
+        result = guard.check("read_file", {"path": "//etc/shadow"})
+        assert not result.is_safe
+        assert result.guard_name == "tool_call_path"
+
+    def test_dotdot_into_etc_via_working_directory_blocked(self):
+        guard = ToolCallGuard({})
+        result = guard.check("read_file", {"working_directory": "/tmp/../etc"})
+        assert not result.is_safe
+        assert result.guard_name == "tool_call_path"
+
+    def test_extra_sensitive_path_traversal_bypass_blocked(self):
+        guard = ToolCallGuard({"tool_call_guard": {"sensitive_paths": ["/custom/secret/"]}})
+        result = guard.check("read_file", {"path": "/custom/./secret/data.txt"})
+        assert not result.is_safe
+
+    def test_normalize_path_staticmethod(self):
+        assert ToolCallGuard._normalize_path("/./etc/passwd") == "/etc/passwd"
+        assert ToolCallGuard._normalize_path("//etc/shadow") == "/etc/shadow"
+        assert ToolCallGuard._normalize_path("/foo/../etc/passwd") == "/etc/passwd"
+
+    def test_prefix_matches_staticmethod_blocks_traversal(self):
+        assert ToolCallGuard._prefix_matches("/etc/passwd", "/etc/")
+        assert ToolCallGuard._prefix_matches("/etc", "/etc/")
+        assert not ToolCallGuard._prefix_matches("/etcfoo/bar", "/etc/")
+        assert not ToolCallGuard._prefix_matches("/home/user/notes.txt", "/etc/")
+
+
+# ---------------------------------------------------------------------------
 # TestToolCallGuardExfiltration
 # ---------------------------------------------------------------------------
 
@@ -970,6 +1040,105 @@ class TestViolationTracker:
 
 
 # ---------------------------------------------------------------------------
+# TestViolationTrackerPersistence
+# ---------------------------------------------------------------------------
+
+
+class TestViolationTrackerPersistence:
+    def _tracker(
+        self,
+        persist_path: Path,
+        max_violations: int = 2,
+        window_minutes: int = 30,
+    ) -> ViolationTracker:
+        return ViolationTracker(
+            {
+                "auto_blacklist": {
+                    "max_violations": max_violations,
+                    "window_minutes": window_minutes,
+                }
+            },
+            persist_path=persist_path,
+        )
+
+    def test_violations_survive_round_trip(self, tmp_path: Path):
+        path = tmp_path / "violations.json"
+        tracker1 = self._tracker(path)
+        tracker1.record_violation("chat1")
+        tracker1.record_violation("chat1")
+
+        tracker2 = self._tracker(path)
+        result = tracker2.is_blacklisted("chat1")
+        assert not result.is_safe
+        assert result.guard_name == "blacklist"
+
+    def test_persist_file_created_on_first_violation(self, tmp_path: Path):
+        path = tmp_path / "sub" / "violations.json"
+        tracker = self._tracker(path)
+        assert not path.exists()
+        tracker.record_violation("chat1")
+        assert path.exists()
+
+    def test_parent_dirs_created_automatically(self, tmp_path: Path):
+        path = tmp_path / "a" / "b" / "c" / "violations.json"
+        tracker = self._tracker(path)
+        tracker.record_violation("chat1")
+        assert path.exists()
+
+    def test_expired_violations_not_loaded(self, tmp_path: Path):
+        path = tmp_path / "violations.json"
+        past_ts = 1000.0
+        path.write_text(json.dumps({"chat1": [past_ts]}))
+
+        # Patch _MONO_OFFSET to 0 so wall-clock values in JSON map 1:1 to monotonic.
+        # Mock monotonic to return "1 hour after past_ts" — outside the 30-min window.
+        with (
+            patch("src.assistant.guardrails._MONO_OFFSET", 0.0),
+            patch("src.assistant.guardrails.time.monotonic", return_value=past_ts + 3600),
+        ):
+            tracker = self._tracker(path, window_minutes=30)
+        assert tracker.is_blacklisted("chat1").is_safe
+
+    def test_valid_violations_loaded_correctly(self, tmp_path: Path):
+        path = tmp_path / "violations.json"
+        now = 1_700_000_000.0
+        path.write_text(json.dumps({"chat1": [now - 60, now - 30]}))
+
+        # Patch _MONO_OFFSET to 0 so wall-clock values in JSON map 1:1 to monotonic.
+        # Mock monotonic to return 'now' so the 60s/30s-old violations are within
+        # the 30-min window and is_blacklisted sees them as current.
+        with (
+            patch("src.assistant.guardrails._MONO_OFFSET", 0.0),
+            patch("src.assistant.guardrails.time.monotonic", return_value=now),
+        ):
+            tracker = self._tracker(path, max_violations=2, window_minutes=30)
+            result = tracker.is_blacklisted("chat1")
+        assert not result.is_safe
+
+    def test_no_persist_path_works_without_file(self, tmp_path: Path):
+        tracker = ViolationTracker({"auto_blacklist": {}}, persist_path=None)
+        tracker.record_violation("chat1")
+        assert tracker.is_blacklisted("chat1").is_safe
+
+    def test_corrupt_json_handled_gracefully(self, tmp_path: Path):
+        path = tmp_path / "violations.json"
+        path.write_text("{not valid json")
+        tracker = self._tracker(path)
+        assert tracker.is_blacklisted("chat1").is_safe
+
+    def test_multiple_chats_persisted_and_loaded(self, tmp_path: Path):
+        path = tmp_path / "violations.json"
+        tracker1 = self._tracker(path, max_violations=2)
+        tracker1.record_violation("chatA")
+        tracker1.record_violation("chatA")
+        tracker1.record_violation("chatB")
+
+        tracker2 = self._tracker(path, max_violations=2)
+        assert not tracker2.is_blacklisted("chatA").is_safe
+        assert tracker2.is_blacklisted("chatB").is_safe
+
+
+# ---------------------------------------------------------------------------
 # TestGuardrailPipeline
 # ---------------------------------------------------------------------------
 
@@ -979,6 +1148,7 @@ class TestGuardrailPipeline:
         self, extra_cfg: dict | None = None, llm: object | None = None
     ) -> GuardrailPipeline:
         cfg: dict = {"guardrails": extra_cfg or {}}
+        cfg["guardrails"].setdefault("violations_persist_path", None)
         return GuardrailPipeline(cfg, llm=llm)
 
     def test_clean_input_passes(self):
