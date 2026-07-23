@@ -85,3 +85,16 @@ class UserUpdateRequest(BaseModel):
         description="New role for the user: 'admin' or 'user'.",
         examples=["admin"],
     )
+
+
+class PasswordResetRequest(BaseModel):
+    """Request body for POST /api/v1/users/{user_id}/reset-password (admin, #2065)."""
+
+    new_password: str = Field(
+        ...,
+        min_length=8,
+        max_length=128,
+        description="New password for the user (8–128 chars; lowercase, uppercase, digit and special required).",
+    )
+
+    _new_password_complexity = field_validator("new_password")(validate_password_complexity)

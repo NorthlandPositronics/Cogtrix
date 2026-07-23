@@ -84,6 +84,7 @@ README.md
 # Docs: keep user-facing docs/*.md and API reference; exclude dev-only subdirs and binaries
 docs/adr
 docs/bugs
+docs/optional
 docs/prompts
 docs/testing
 docs/ux

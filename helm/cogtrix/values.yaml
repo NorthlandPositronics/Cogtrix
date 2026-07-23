@@ -55,6 +55,11 @@ service:
   type: ClusterIP
   port: 8000
   annotations: {}
+  # Session affinity (#2062). "None" (default) round-robins; "ClientIP" pins a
+  # client to one pod. Auto-forced to ClientIP when autoscaling.enabled=true so
+  # a returning user keeps hitting the pod that owns their PVC (SQLite + FAISS).
+  # Leave as "None" for single-replica or when external shared state is wired.
+  sessionAffinity: "None"
 
 resources:
   limits:
@@ -122,10 +127,14 @@ readinessProbe:
   httpGet:
     path: /api/v1/health/ready
     port: http
-  initialDelaySeconds: 10
+  # #2062: on a fresh PVC, `alembic upgrade head` runs before uvicorn. On
+  # network-attached storage / large migration sets this can exceed the old
+  # ~30s tolerance, repeatedly marking the pod unready and killing it
+  # mid-migration. Widened to ~120s; the startupProbe (300s) is the outer bound.
+  initialDelaySeconds: 20
   periodSeconds: 10
   timeoutSeconds: 5
-  failureThreshold: 3
+  failureThreshold: 6
   successThreshold: 1
 
 startupProbe:
@@ -184,6 +193,10 @@ config:
 env:
   COGTRIX_DATA_DIR: "/data"
   COGTRIX_ALLOWED_WRITE_PATHS: "/tmp,/data/output,/data/log"
+  # Browser origins allowed to call the API (#2059). Comma-separated, exact
+  # match. Defaults to localhost only — set your real web UI origin(s) for any
+  # non-local deployment, e.g. "https://cogtrix.ai,https://www.cogtrix.ai".
+  COGTRIX_CORS_ORIGINS: "http://localhost:5173,http://localhost:3000"
   TZ: "UTC"
   PYTHONUNBUFFERED: "1"
   PYTHONDONTWRITEBYTECODE: "1"
@@ -278,6 +291,10 @@ initContainer:
   image:
     repository: busybox
     tag: "1.37"
+    # Digest-pinned for supply-chain reproducibility (#2062), matching the
+    # digest-pinned main image. This is the busybox:1.37 multi-arch index digest;
+    # update tag + digest together when bumping. Set digest: "" to pin by tag only.
+    digest: "sha256:9532d8c39891ca2ecde4d30d7710e01fb739c87a8b9299685c63704296b16028"
     pullPolicy: IfNotPresent
   resources:
     limits:
@@ -301,6 +318,20 @@ waha:
     pullPolicy: IfNotPresent
   service:
     port: 3000
+  # Sidecar hardening (#2062). Without this the WAHA container inherited K8s
+  # defaults (root, no cap drop, no seccomp) while the main container is fully
+  # hardened. readOnlyRootFilesystem is intentionally false: the WEBJS/Chromium
+  # engine needs a writable FS. If your WAHA image cannot run non-root, override
+  # this block (e.g. set runAsNonRoot: false) when enabling the sidecar.
+  securityContext:
+    runAsNonRoot: true
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: false
+    capabilities:
+      drop:
+        - ALL
+    seccompProfile:
+      type: RuntimeDefault
   resources:
     limits:
       cpu: 500m

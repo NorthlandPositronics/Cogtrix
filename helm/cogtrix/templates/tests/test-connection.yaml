@@ -9,7 +9,9 @@ metadata:
 spec:
   containers:
     - name: wget
-      image: busybox:1.37
+      # Reuse the digest-pinned init image (busybox) for supply-chain
+      # consistency (#2062) instead of a mutable tag.
+      image: {{ include "cogtrix.initImage" . }}
       command:
         - wget
         - -qO-

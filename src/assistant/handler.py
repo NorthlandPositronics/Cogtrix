@@ -45,12 +45,43 @@ from src.assistant.scheduler import (
     create_queue_reply_tool,
     create_schedule_reply_tool,
 )
+from src.orchestration.phases import RECOVERY_FAILED_MESSAGE as _RECOVERY_FAILED_MESSAGE
 from src.orchestration.session_state import SessionState
 
 log = logging.getLogger("cogtrix")
 
 _UNSET: object = object()
 _PR_REF_RE = re.compile(r"\bPR\s*#(\d+)\b", re.IGNORECASE)
+
+# Prefix of the internal error string returned by _run_agent's exception
+# handler. Recognized so it is never delivered to an external contact in
+# assistant/messaging mode (#2052).
+_AGENT_ERROR_PREFIX = "I encountered a"
+
+
+def _is_non_deliverable(response: Any) -> bool:
+    """True when *response* is an internal control/error message that must
+    NOT be delivered to an external messaging contact (#2052).
+
+    Covers: empty/blank output (silence), the recovery-failed sentinel
+    ("say continue…"), the agent-error string, and provider auth failures.
+    In CLI mode these are shown to the operator; on a WhatsApp/Telegram
+    channel they are meaningless or alarming to the contact and leak
+    operational detail, so they are suppressed — the turn is dropped from
+    memory so the agent recovers cleanly on the contact's next message.
+    """
+    if not isinstance(response, str):
+        return not bool(response)
+    stripped = response.strip()
+    if not stripped:
+        return True
+    if stripped == _RECOVERY_FAILED_MESSAGE.strip():
+        return True
+    if stripped.startswith(_AGENT_ERROR_PREFIX):
+        return True
+    if stripped.lower().startswith(("authentication failed", "**authentication failed")):
+        return True
+    return False
 
 
 def _load_prompt_value(value: str, allowed_roots: list[Path] | None = None) -> str:
@@ -436,7 +467,7 @@ class MessageHandler:
             return "", set()
         except Exception as exc:
             log.error("Agent error for session %s: %s", session.session_key, exc)
-            response = f"I encountered a {type(exc).__name__} error. Please try again or contact the administrator."
+            response = f"{_AGENT_ERROR_PREFIX} {type(exc).__name__} error. Please try again or contact the administrator."
             return response, set()
 
         return response, call_session_state.loaded_tools
@@ -762,6 +793,21 @@ class MessageHandler:
                     deferral_depth,
                 )
                 self._deferral_mgr.defer(msg, defer_state.delay_seconds, depth=deferral_depth)
+                session.memory_manager.discard_prerecord()
+                return
+
+            # #2052: never deliver an internal control/error message (empty
+            # output, the recovery-failed sentinel, the agent-error string, or
+            # a provider auth failure) to an external messaging contact. These
+            # read as the agent being broken — or leak operational detail — to
+            # a real contact. Stay silent and drop the turn from memory so the
+            # agent recovers on the contact's next message.
+            if _is_non_deliverable(response):
+                log.warning(
+                    "Non-deliverable agent response for %s — staying silent "
+                    "(internal control/error message not sent to contact)",
+                    msg.chat_id,
+                )
                 session.memory_manager.discard_prerecord()
                 return
 

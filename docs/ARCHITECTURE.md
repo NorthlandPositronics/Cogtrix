@@ -64,7 +64,7 @@ Cogtrix is a modular LangChain-based AI agent built with a layered architecture:
 ┌───────────────┴───────────────┐ ┌───────────────┴───────────────┐
 │        Memory System          │ │        Tool Modules           │
 │       (src/memory/)           │ │       (src/tools/)            │
-│  • Mode managers              │ │  • 67 built-in tools          │
+│  • Mode managers              │ │  • 76 built-in tools          │
 │  • Context preparation        │ │  • Auto-discovery             │
 │  • JSON persistence           │ │  • Pydantic schemas           │
 └───────────────────────────────┘ └───────────────────────────────┘
@@ -375,8 +375,8 @@ The entry point handles both interactive and non-interactive modes. CLI utility 
 
 | Component | Location | Purpose |
 |-----------|----------|---------|
-| `SlashCommandRegistry` | `cogtrix.py` | Registers, resolves, and dispatches `/commands` |
-| `SlashCommand` | `cogtrix.py` | Dataclass: name, handler, help text, aliases |
+| `SlashCommandRegistry` | `src/cli/commands.py` | Registers, resolves, and dispatches `/commands` |
+| `SlashCommand` | `src/cli/commands.py` | Dataclass: name, handler, help text, aliases |
 | `parse_arguments()` | `src/cli/args.py` | CLI argument parsing |
 | `ColorHelpFormatter` | `src/cli/args.py` | Argparse formatter with bold headers |
 | `color_enabled()`, `bold()`, `dim()` | `src/cli/args.py` | ANSI color helpers |
@@ -1307,8 +1307,8 @@ disconnections. Server message types include `token`, `tool_start`, `tool_end`,
 `COGTRIX_DB_URL`. ORM models: `User`, `Organization`, `Team`, `Workspace`, `WorkspaceMembership`,
 `Plan`, `UsageRecord`, `ApiSessionRecord`, `Message`, `RefreshToken`, `ApiKey`. All access goes
 through repository classes in `db/repositories/`. Schema migrations use Alembic (`alembic upgrade
-head`); 11 migrations ship with the project (0001–0011) covering the full schema including the
-enterprise multi-tenancy layer and Stripe billing fields.
+head`); 18 migrations ship with the project (0001–0018) covering the full schema including the
+enterprise multi-tenancy layer, Stripe billing fields, and the API session workspace columns.
 
 **Key patterns:**
 

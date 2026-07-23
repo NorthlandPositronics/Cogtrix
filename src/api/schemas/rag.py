@@ -82,6 +82,15 @@ class RAGSearchRequest(BaseModel):
         default=None,
         description="Restrict search to specific document IDs; null searches all documents.",
     )
+    score_threshold: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Minimum similarity (0–1) a chunk must meet to be returned; "
+            "null returns the top-k without a floor."
+        ),
+    )
 
 
 class RAGChunkOut(BaseModel):

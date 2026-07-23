@@ -124,6 +124,23 @@ class LogoutAllRequest(BaseModel):
     )
 
 
+class ChangePasswordRequest(BaseModel):
+    """Request body for POST /api/v1/auth/change-password (self-service, #2065)."""
+
+    current_password: str = Field(
+        ...,
+        description="The caller's current password, required to authorize the change.",
+    )
+    new_password: str = Field(
+        ...,
+        min_length=8,
+        max_length=128,
+        description="New password (8–128 chars; lowercase, uppercase, digit and special required).",
+    )
+
+    _new_password_complexity = field_validator("new_password")(validate_password_complexity)
+
+
 # ---------------------------------------------------------------------------
 # Current user
 # ---------------------------------------------------------------------------

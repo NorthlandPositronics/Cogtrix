@@ -62,6 +62,15 @@ def _run_ingest(doc_id: str, file_path: Path) -> tuple[bool, int, str | None]:
             "base_url": emb_base_url,
             "api_key": emb_api_key,
         }
+        # #2071: also honor the operator's chunk settings (previously dropped,
+        # so rag.chunk_size / rag.chunk_overlap overrides were ignored on the
+        # API ingest path, diverging from the CLI).
+        rag_cfg = getattr(cfg, "rag", None)
+        if rag_cfg is not None:
+            if getattr(rag_cfg, "chunk_size", None) is not None:
+                emb_kwargs["chunk_size"] = rag_cfg.chunk_size
+            if getattr(rag_cfg, "chunk_overlap", None) is not None:
+                emb_kwargs["chunk_overlap"] = rag_cfg.chunk_overlap
     except Exception as exc:  # noqa: BLE001
         log.warning("Could not resolve embedding config; using defaults: %s", exc)
 

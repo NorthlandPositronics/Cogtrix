@@ -10,6 +10,19 @@ metadata:
   {{- end }}
 spec:
   type: {{ .Values.service.type }}
+  {{- /*
+  Session affinity (#2062): each replica owns its own ReadWriteOnce PVC
+  (separate SQLite + FAISS), so round-robining a returning user across pods
+  loses their history/vector DB. Pin a client to one pod when HPA is on (or
+  when explicitly requested) until external shared state (Postgres + Redis) is
+  configured. Auto-enables under autoscaling so `--set autoscaling.enabled=true`
+  can't silently split-brain.
+  */}}
+  {{- if or .Values.autoscaling.enabled (eq (default "None" .Values.service.sessionAffinity) "ClientIP") }}
+  sessionAffinity: ClientIP
+  {{- else if .Values.service.sessionAffinity }}
+  sessionAffinity: {{ .Values.service.sessionAffinity }}
+  {{- end }}
   ports:
     - port: {{ .Values.service.port }}
       targetPort: http

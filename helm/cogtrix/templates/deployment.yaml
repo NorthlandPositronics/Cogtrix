@@ -42,7 +42,7 @@ spec:
       {{- if .Values.initContainer.enabled }}
       initContainers:
         - name: init-data
-          image: "{{ .Values.initContainer.image.repository }}:{{ .Values.initContainer.image.tag }}"
+          image: {{ include "cogtrix.initImage" . }}
           imagePullPolicy: {{ .Values.initContainer.image.pullPolicy }}
           command:
             - sh
@@ -184,6 +184,10 @@ spec:
         - name: waha
           image: {{ include "cogtrix.wahaImage" . }}
           imagePullPolicy: {{ .Values.waha.image.pullPolicy }}
+          {{- with .Values.waha.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           env:
             - name: WHATSAPP_DEFAULT_ENGINE
               value: "WEBJS"

@@ -112,6 +112,37 @@ When a trusted CIDR list is configured, `_client_key` walks the
 hops can't spoof their way into a fresh bucket — see the comment block
 on `src/api/rate_limit.py:_client_key` for the full algorithm rationale.
 
+## Allowed CORS origins
+
+The browser origins the API answers cross-origin requests for resolve through
+the same `api:` config block, honouring the standard precedence
+(env `COGTRIX_CORS_ORIGINS` → `api.cors_origins` config file → default). The
+default is **localhost-only** on purpose — a production deployment must set its
+real origin(s) so a misconfigured prod fails loudly (the browser blocks the
+request) rather than silently half-allowing a placeholder host (#2059).
+
+### YAML
+
+```yaml
+api:
+  cors_origins:
+    - "https://cogtrix.ai"
+    - "https://www.cogtrix.ai"
+```
+
+### Environment variable
+
+```bash
+export COGTRIX_CORS_ORIGINS="https://cogtrix.ai,https://www.cogtrix.ai"
+```
+
+### Helm
+
+```yaml
+env:
+  COGTRIX_CORS_ORIGINS: "https://cogtrix.ai,https://www.cogtrix.ai"
+```
+
 ## Multi-replica deployments — opt-in Redis backend
 
 The default rate limiter keeps its sliding window in **per-process memory**.

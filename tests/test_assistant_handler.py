@@ -632,35 +632,30 @@ class TestKnowledgeRecall:
 
 
 class TestAgentErrorHandling:
-    """Tests for agent error recovery and channel.send() call."""
+    """#2052: when the agent errors, the internal error string ("I encountered a
+    … error") is NOT delivered to an external contact — the handler stays silent
+    (no channel.send) so the agent recovers on the contact's next message."""
 
-    def test_agent_error_sends_fallback_message(self):
-        """When run_agent raises, a fallback error message is sent via channel."""
+    def test_agent_error_stays_silent(self):
+        """When run_agent raises, the internal error string is not sent to the contact."""
         channel = MagicMock()
         mock_runner = MagicMock(side_effect=RuntimeError("LLM down"))
         handler, _ = _make_handler(agent_runner=mock_runner)
 
         handler.handle(_make_msg(), channel)
 
-        channel.send.assert_called_once()
-        sent_text = channel.send.call_args[0][1]
-        assert (
-            sent_text
-            == "I encountered a RuntimeError error. Please try again or contact the administrator."
-        )
+        channel.send.assert_not_called()
 
-    def test_agent_error_includes_exception_type_name(self):
-        """Regression: exception type name is included in the fallback message."""
+    def test_agent_error_does_not_crash_handler(self):
+        """Regression: an agent exception is handled cleanly — no raise, no send (#2052)."""
         channel = MagicMock()
         mock_runner = MagicMock(side_effect=ValueError("bad config"))
         handler, _ = _make_handler(agent_runner=mock_runner)
 
+        # Must not raise.
         handler.handle(_make_msg(), channel)
 
-        channel.send.assert_called_once()
-        sent_text = channel.send.call_args[0][1]
-        assert "ValueError" in sent_text
-        assert "Please try again or contact the administrator." in sent_text
+        channel.send.assert_not_called()
 
     def test_failed_send_logged_but_does_not_raise(self):
         """When channel.send() returns False, handle() logs and does not raise."""
@@ -677,8 +672,10 @@ class TestAgentErrorHandling:
 class TestUserCancelledRunPath:
     """Test the UserCancelledRun exception path in _run_agent()."""
 
-    def test_user_cancelled_run_sends_empty_response(self):
-        """When UserCancelledRun is raised, handler sends empty response and updates memory."""
+    def test_user_cancelled_run_stays_silent(self):
+        """When UserCancelledRun is raised the response is empty; #2052 treats empty
+        output as non-deliverable — the handler stays silent (no channel.send) and
+        discards the turn rather than sending an empty message or recording it."""
         channel = MagicMock()
         channel.send.return_value = SendResult(ok=True, message_id="m2")
         mock_runner = MagicMock(side_effect=UserCancelledRun())
@@ -686,15 +683,13 @@ class TestUserCancelledRunPath:
 
         handler.handle(_make_msg(), channel)
 
-        # Empty response IS sent (so memory records it properly)
-        channel.send.assert_called_once()
-        sent_text = channel.send.call_args[0][1]
-        assert sent_text == ""
+        # Empty/cancelled output is NOT delivered to the contact.
+        channel.send.assert_not_called()
 
-        # Memory is updated with empty response
-        handler._session_mgr.get_or_create.assert_called_once()
+        # The turn is discarded, not recorded as an empty exchange.
         session = handler._session_mgr.get_or_create()
-        session.memory_manager.update.assert_called_once_with("Hello", "")
+        session.memory_manager.update.assert_not_called()
+        session.memory_manager.discard_prerecord.assert_called_once()
 
     def test_successful_response_sent_via_channel(self):
         """channel.send() is called with the agent's response."""

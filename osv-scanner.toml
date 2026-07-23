@@ -12,7 +12,7 @@
 # within each group; quote the OSV text or upstream link that proves
 # the false positive.
 #
-# Last reviewed: 2026-05-22
+# Last reviewed: 2026-06-19
 # Next review due: see ignoreUntil per entry (≤6 months out by policy).
 
 # As of 2026-05-22 there are no active ignores — every previously-
@@ -35,3 +35,12 @@
 #   - PYSEC-2025-183 — pyjwt "weak encryption" DISPUTED by upstream
 #     maintainer. Advisory withdrawn / no longer indexed against our
 #     pyjwt pin.
+
+# ── torch ──────────────────────────────────────────────────────
+# Added 2026-06-19. The other 21 OSV findings in this batch were fixed by
+# version bumps (aiohttp, cryptography, langchain-anthropic, pypdf,
+# python-multipart, starlette); this one has no upstream fix.
+[[IgnoredVulns]]
+id = "GHSA-rrmf-rvhw-rf47"
+ignoreUntil = 2026-09-19
+reason = "torch 2.12.0 — CVSS 5.3 (Medium); NO fixed version published upstream (OSV 'FIXED VERSION: --' as of 2026-06-19). torch is transitive, pulled only by the optional sentence-transformers cross-encoder re-ranker extra (#1952), and is NOT installed in the default/API image builds. Re-review on 2026-09-19; replace with a version bump once a fixed torch ships."

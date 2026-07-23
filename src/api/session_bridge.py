@@ -36,6 +36,22 @@ _DEFAULT_MAX_IDLE_AGE = 1800  # 30 minutes
 # How often the background eviction task runs.
 _EVICTION_INTERVAL = 300  # 5 minutes
 
+# #2050: Tools denied on API sessions unless ``api_dangerous_tools`` is enabled.
+# This MUST list the agent-CALLABLE tool names (``execute_shell_command`` /
+# ``execute_python``) because ``SessionState.is_denied()`` matches on the
+# canonical tool name, not the module name. The original list used the module
+# names (``shell`` / ``python_exec``), which never matched the names the deny is
+# enforced against in process_tools.py / safety.py — so the deny was a silent
+# no-op and shell/python remained loadable via ``request_tools`` (RCE on the API
+# host). The module/alias names are kept as defence-in-depth.
+_API_DENIED_DANGEROUS_TOOLS: tuple[str, ...] = (
+    "execute_shell_command",
+    "execute_python",
+    "shell",
+    "bash",
+    "python_exec",
+)
+
 
 # ---------------------------------------------------------------------------
 # ApiSession dataclass
@@ -119,7 +135,7 @@ async def warm_session(record: ApiSessionRecord, app_state: Any) -> ApiSession:
         # Deny shell/exec tools unless explicitly enabled in config
         app_config = getattr(app_state, "config", None)
         if not getattr(app_config, "api_dangerous_tools", False):
-            for _t in ("shell", "bash", "python_exec"):
+            for _t in _API_DENIED_DANGEROUS_TOOLS:
                 session_state.deny_tool(_t)
 
         # 3 & 4. Build memory manager and LLM concurrently — both are I/O-bound and independent.

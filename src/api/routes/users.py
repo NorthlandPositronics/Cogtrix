@@ -4,6 +4,7 @@ Endpoints:
     GET    /api/v1/users              — list all users
     POST   /api/v1/users              — create a user
     PATCH  /api/v1/users/{user_id}   — update user role
+    POST   /api/v1/users/{user_id}/reset-password — reset a user's password (admin)
     DELETE /api/v1/users/{user_id}   — delete a user
 """
 
@@ -19,11 +20,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.api.auth import TokenData, get_current_user, hash_password
 from src.api.db import get_db
 from src.api.db.models import User
+from src.api.db.repositories.tokens import RefreshTokenRepository
 from src.api.db.repositories.users import UserRepository
 from src.api.org_context import OrgContext, get_org_context
 from src.api.quota import _quota_config_from_app_config, get_user_quota_status
 from src.api.schemas.common import APIResponse
-from src.api.schemas.user import UserCreateRequest, UserOut, UserUpdateRequest
+from src.api.schemas.user import (
+    PasswordResetRequest,
+    UserCreateRequest,
+    UserOut,
+    UserUpdateRequest,
+)
 from src.audit import record_user_action
 from src.auth.middleware import require
 from src.auth.permissions import Permission
@@ -225,6 +232,58 @@ async def update_user(
     )
 
     return APIResponse(data=_user_to_out(user))
+
+
+@router.post(
+    "/{user_id}/reset-password",
+    summary="Reset a user's password (admin)",
+    description=(
+        "Set a new password for any user in the caller's organization and revoke all of "
+        "that user's refresh tokens, forcing re-authentication. Admin only."
+    ),
+    response_model=APIResponse[UserOut],
+    responses={
+        200: {"description": "Password reset; the target user's sessions revoked."},
+        401: {"description": "Not authenticated."},
+        403: {"description": "Admin required (FORBIDDEN)."},
+        404: {"description": "User not found (NOT_FOUND)."},
+        422: {"description": "Validation error (VALIDATION_ERROR)."},
+    },
+)
+async def reset_user_password(
+    user_id: str,
+    body: PasswordResetRequest,
+    ctx: OrgContext = Depends(get_org_context),
+    db: AsyncSession = Depends(get_db),
+    current_user: TokenData = Depends(require(Permission.USERS_UPDATE)),
+) -> APIResponse[UserOut]:
+    """Reset a user's password and revoke their sessions (admin only, same org).
+
+    Auth: admin bearer token required.
+    Error codes: UNAUTHORIZED, TOKEN_EXPIRED, FORBIDDEN, NOT_FOUND, VALIDATION_ERROR.
+    """
+    repo = UserRepository(db)
+    user = await repo.get_by_id(user_id)
+    if user is None or user.org_id != ctx.org_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "NOT_FOUND", "message": f"User '{user_id}' not found."},
+        )
+
+    updated = await repo.update_password(user_id, hash_password(body.new_password))
+    await RefreshTokenRepository(db).revoke_all_for_user(user_id)
+    await db.commit()
+    if updated is not None:
+        await db.refresh(updated)
+
+    record_user_action(
+        "reset_user_password",
+        actor=current_user.user_id,
+        status="ok",
+        detail={"org_id": ctx.org_id, "user_id": user_id},
+    )
+
+    return APIResponse(data=_user_to_out(updated or user))
 
 
 @router.delete(

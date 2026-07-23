@@ -389,10 +389,20 @@ def configure_python_exec_tool(config: Config) -> None:
 
 
 def configure_file_ops_tool(config: Config) -> None:
-    """Configure file operations tool with allowed write directories."""
+    """Configure file operations tool with allowed write directories.
+
+    #2060: only apply the config value when it is non-empty. A config file
+    without an ``allowed_write_paths`` key resolves to an empty list, and
+    calling ``set_allowed_write_dirs([])`` would clear the directories already
+    wired from ``COGTRIX_ALLOWED_WRITE_PATHS`` at import time — silently
+    revoking the agent's env-configured write dirs (e.g. on container deploys
+    where cwd is read-only and writes rely on the env-provided paths). When the
+    config specifies paths, they take over as the explicit source of truth.
+    """
     from src.tools.file_ops import set_allowed_write_dirs
 
-    set_allowed_write_dirs(config.allowed_write_paths)
+    if config.allowed_write_paths:
+        set_allowed_write_dirs(config.allowed_write_paths)
 
 
 def configure_file_read_dirs(config: Config) -> None:

@@ -72,6 +72,17 @@ class UserRepository:
         result = await self._db.execute(stmt)
         return result.scalar_one_or_none()
 
+    async def update_password(self, user_id: str, password_hash: str) -> User | None:
+        """Set a user's password hash and return the updated row (#2065)."""
+        stmt = (
+            update(User)
+            .where(User.id == user_id)
+            .values(password_hash=password_hash)
+            .returning(User)
+        )
+        result = await self._db.execute(stmt)
+        return result.scalar_one_or_none()
+
     async def create_with_role_election(
         self,
         *,

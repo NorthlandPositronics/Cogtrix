@@ -215,3 +215,46 @@ class TestActiveToolsIsolation:
         handler.handle(_make_msg(), MagicMock())
 
         assert captured_id[0] != id(handler._active_tools)
+
+
+class TestNonDeliverableSilence:
+    """#2052: internal control/error messages must never be sent to a contact.
+
+    When the agent returns an internal sentinel (empty output, the
+    recovery-failed message, an agent-error string, or a provider auth
+    failure), the handler must stay silent — no channel.send, no schedule.
+    """
+
+    def _silent_check(self, runner_response: str) -> bool:
+        """Run handler with a runner that returns *runner_response*; return
+        True if NOTHING was delivered (silent)."""
+        channel = MagicMock()
+        channel.send.return_value = MagicMock(ok=True, message_id="x")
+
+        handler, _ = _make_handler(agent_runner=MagicMock(return_value=runner_response))
+        handler.handle(_make_msg(), channel)
+        return not channel.send.called
+
+    def test_empty_response_is_silent(self):
+        assert self._silent_check("")
+        assert self._silent_check("   \n  ")
+
+    def test_recovery_failed_sentinel_is_silent(self):
+        from src.orchestration.phases import RECOVERY_FAILED_MESSAGE
+
+        assert self._silent_check(RECOVERY_FAILED_MESSAGE)
+
+    def test_agent_error_string_is_silent(self):
+        assert self._silent_check("I encountered a TimeoutError error. Please try again.")
+
+    def test_auth_failure_is_silent(self):
+        assert self._silent_check("**Authentication failed:** check your API key.")
+
+    def test_real_reply_is_delivered(self):
+        channel = MagicMock()
+        channel.send.return_value = MagicMock(ok=True, message_id="x")
+        handler, _ = _make_handler(
+            agent_runner=MagicMock(return_value="Sure, what's the building name?")
+        )
+        handler.handle(_make_msg(), channel)
+        assert channel.send.called

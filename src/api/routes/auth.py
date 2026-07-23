@@ -6,6 +6,7 @@ Endpoints:
     POST /api/v1/auth/refresh           — silently renew an access token
     POST /api/v1/auth/logout            — invalidate one refresh token supplied in the body
     POST /api/v1/auth/logout-all        — invalidate all refresh tokens after password confirmation
+    POST /api/v1/auth/change-password   — change own password (revokes all sessions)
     GET  /api/v1/auth/me                — retrieve the current user's profile
     GET  /api/v1/auth/api-keys          — list the current user's API keys
     POST /api/v1/auth/api-keys          — create a new API key
@@ -42,6 +43,7 @@ from src.api.rate_limit import per_route_rate_limit_for
 from src.api.schemas.auth import (
     APIKeyCreateRequest,
     APIKeyOut,
+    ChangePasswordRequest,
     LoginRequest,
     LogoutAllRequest,
     LogoutRequest,
@@ -368,6 +370,54 @@ async def logout_all(
 
     token_repo = RefreshTokenRepository(db)
     await token_repo.revoke_all_for_user(current_user.user_id)
+    await db.commit()
+    return APIResponse(data=None)
+
+
+@router.post(
+    "/change-password",
+    summary="Change the current user's password",
+    description=(
+        "Change the authenticated user's password after confirming the current one. "
+        "On success every refresh token for the user is revoked, signing out all other "
+        "sessions. There is no unauthenticated password reset."
+    ),
+    response_model=APIResponse[None],
+    responses={
+        200: {"description": "Password changed; all sessions revoked."},
+        401: {"description": "Current password incorrect or not authenticated."},
+        422: {"description": "New password fails complexity rules (VALIDATION_ERROR)."},
+    },
+)
+async def change_password(
+    body: ChangePasswordRequest,
+    current_user: TokenData = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> APIResponse[None]:
+    """Change the current user's password after verifying the current one.
+
+    Auth: bearer token required. All of the user's refresh tokens are revoked
+    on success so other sessions must re-authenticate.
+    Error codes: UNAUTHORIZED, TOKEN_EXPIRED, VALIDATION_ERROR.
+    """
+    user_repo = UserRepository(db)
+    user = await user_repo.get_by_id(current_user.user_id)
+    # Constant-time check guards against the record being deleted between the
+    # get_current_user dependency and this lookup; the to_thread offload keeps
+    # the ~95 ms bcrypt verify off the event loop (mirrors logout-all).
+    candidate_hash = user.password_hash if user is not None else None
+    password_ok = await asyncio.to_thread(
+        verify_password_constant_time, body.current_password, candidate_hash
+    )
+    if user is None or not password_ok:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={"code": "UNAUTHORIZED", "message": "Current password is incorrect."},
+        )
+
+    new_hash = await asyncio.to_thread(hash_password, body.new_password)
+    await user_repo.update_password(current_user.user_id, new_hash)
+    await RefreshTokenRepository(db).revoke_all_for_user(current_user.user_id)
     await db.commit()
     return APIResponse(data=None)
 

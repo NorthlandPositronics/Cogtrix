@@ -43,6 +43,7 @@ from src.api.rag_index import load_faiss_store
 from src.api.schemas.common import APIResponse, CursorPage
 from src.api.schemas.rag import DocumentOut, RAGChunkOut, RAGSearchRequest, RAGSearchResponse
 from src.api.tasks.rag import ingest_document_task
+from src.rag.scoring import l2_to_similarity
 
 log = logging.getLogger("cogtrix.api.rag")
 
@@ -497,7 +498,7 @@ async def search_rag(
 
     try:
         chunks, docs_searched = await asyncio.to_thread(
-            _search_faiss, body.query, body.top_k, indexed_docs
+            _search_faiss, body.query, body.top_k, indexed_docs, body.score_threshold
         )
     except Exception as exc:
         log.warning("rag_search: search failed, returning empty results: %s", exc)
@@ -520,6 +521,7 @@ def _search_faiss(
     query: str,
     top_k: int,
     indexed_docs: list[Any],
+    score_threshold: float | None = None,
 ) -> tuple[list[RAGChunkOut], int]:
     """Search per-document FAISS indexes and return ranked chunks.
 
@@ -548,8 +550,11 @@ def _search_faiss(
             results = store.similarity_search_with_score(query, k=top_k)
             docs_searched += 1
             for chunk_idx, (langchain_doc, score) in enumerate(results):
-                # FAISS returns L2 distance; convert to a 0–1 similarity score
-                similarity = float(max(0.0, 1.0 - score / 2.0))
+                # FAISS returns L2 distance; convert to a 0–1 similarity via the
+                # shared helper so the API and agent use one formula (#2072).
+                similarity = l2_to_similarity(score)
+                if score_threshold is not None and similarity < score_threshold:
+                    continue
                 all_chunks.append(
                     (
                         similarity,

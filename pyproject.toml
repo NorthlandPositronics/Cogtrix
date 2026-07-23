@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cogtrix"
-version = "0.3.0"
+version = "0.4.0"
 description = "Modular AI assistant with 67 built-in tools, multi-provider LLM support, and hybrid memory"
 readme = "README.md"
 requires-python = "~=3.13.0"
@@ -24,12 +24,12 @@ dependencies = [
     # LangChain Ecosystem
     "langchain-core>=1.3.3",
     "langchain-ollama~=1.1.0",
-    "langchain-openai~=1.2.2",
+    "langchain-openai~=1.3.2",
     "langchain-text-splitters~=1.1.0",
     "langchain-community~=0.4.2",
-    "langgraph~=1.2.1",
+    "langgraph~=1.2.6",
     # LLM Providers
-    "openai~=2.38.0",
+    "openai~=2.41.0",
     # Data Validation
     "pydantic~=2.13.4",
     # CLI & Display
@@ -58,7 +58,7 @@ dependencies = [
 
 [project.optional-dependencies]
 rag = [
-    "faiss-cpu~=1.13.0",
+    "faiss-cpu~=1.14.2",
     "pypdf>=6.12.2",
     # BM25 sparse retrieval for the hybrid query path (#1981).  Pure
     # Python, only requires numpy which is already a transitive dep.
@@ -106,15 +106,15 @@ dev = [
     "pytest-xdist~=3.8.0",
     "coverage~=7.14.1",
     "black~=26.5.1",
-    "ruff~=0.15.15",
+    "ruff~=0.15.16",
     "bandit~=1.9.4",
-    "pyright~=1.1.409",
+    "pyright~=1.1.410",
     "tavily-python~=0.7.25",
     "exa-py~=2.12.1",
     "google-search-results~=2.4.2",
     "mcp~=1.27.2",
     "langchain-anthropic~=1.4.4",
-    "langchain-google-genai~=4.2.1",
+    "langchain-google-genai~=4.2.4",
     "argparse-manpage>=4",
     # #1879 Slice B — Redis rate-limit backend tests. fakeredis ships
     # the Lua extra (``lupa``) because ``limits`` uses EVALSHA in its
@@ -139,14 +139,14 @@ anthropic = [
     "langchain-anthropic~=1.4.4",
 ]
 google = [
-    "langchain-google-genai~=4.2.1",
-    "google-api-python-client>=2.0",
+    "langchain-google-genai~=4.2.4",
+    "google-api-python-client>=2.197.0",
     "google-auth-oauthlib>=1.4.0",
     "google-auth-httplib2>=0.2",
 ]
 api = [
     "fastapi~=0.135.2",
-    "uvicorn[standard]~=0.48.0",
+    "uvicorn[standard]~=0.49.0",
     "sqlalchemy[asyncio]~=2.0.0",
     "aiosqlite~=0.22.0",
     "alembic~=1.18.0",
@@ -256,15 +256,15 @@ dev = [
     "pytest-xdist~=3.8.0",
     "coverage~=7.14.1",
     "black~=26.5.1",
-    "ruff~=0.15.15",
+    "ruff~=0.15.16",
     "bandit~=1.9.4",
-    "pyright~=1.1.409",
+    "pyright~=1.1.410",
     "tavily-python~=0.7.25",
     "exa-py~=2.12.1",
     "google-search-results~=2.4.2",
     "mcp~=1.27.2",
     "langchain-anthropic~=1.4.4",
-    "langchain-google-genai~=4.2.1",
+    "langchain-google-genai~=4.2.4",
     "argparse-manpage>=4",
     # #1879 Slice B — Redis rate-limit backend tests. fakeredis ships
     # the Lua extra (``lupa``) because ``limits`` uses EVALSHA in its

@@ -90,7 +90,14 @@ def _get_append_lock(path: str) -> _RefLock:
 
 
 def set_allowed_write_dirs(dirs: list[str] | None) -> None:
-    """Configure additional directories where file write operations are allowed."""
+    """Configure additional directories where file write operations are allowed.
+
+    An empty/None list clears the extra dirs (and is the canonical reset).
+    NOTE (#2060): callers must NOT pass an empty/None config value when they only
+    mean "config didn't specify paths" — that would wipe the dirs wired from
+    ``COGTRIX_ALLOWED_WRITE_PATHS`` at import. The guard lives at the call site
+    (``configure_file_ops_tool``), which only calls this with a non-empty list.
+    """
     global _extra_write_dirs
     _extra_write_dirs = [Path(d).resolve() for d in (dirs or [])]
 

@@ -1331,7 +1331,7 @@ to avoid adding 500ms–2s to every request.
 | `COGTRIX_SLACK_BOT_TOKEN` | Slack bot token for `cogtrix_slack_post_message` tool. Overrides `services.slack.bot_token` from the config file when set to a non-empty value. | `xoxb-...` |
 | `COGTRIX_JWT_SECRET` | JWT signing secret for API mode (min 32 chars, required) | `your-secret-key-at-least-32-chars` |
 | `COGTRIX_DB_URL` | Database URL for API mode (default: SQLite `aiosqlite`) | `postgresql+asyncpg://user:pass@host/db` |
-| `COGTRIX_CORS_ORIGINS` | Comma-separated CORS allowed origins for API mode | `http://localhost:5173,https://app.example.com` |
+| `COGTRIX_CORS_ORIGINS` | Comma-separated CORS allowed origins for API mode. Overrides the `api.cors_origins` config key; default is localhost-only | `https://cogtrix.ai,https://www.cogtrix.ai` |
 | `COGTRIX_API_HOST` | API server bind host (default `0.0.0.0`) | `127.0.0.1` |
 | `COGTRIX_API_PORT` | API server bind port (default `8000`) | `3001` |
 | `COGTRIX_API_WORKERS` | Number of uvicorn workers (default `1`) | `4` |

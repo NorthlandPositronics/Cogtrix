@@ -13,6 +13,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from src.api.rag_index import load_faiss_store_safe, save_faiss_store
+from src.rag.scoring import l2_to_similarity
 from src.tools.delegate import register_tool_categories
 
 # Try to import required modules
@@ -530,7 +531,8 @@ def query_knowledge_base(
         # so the same sort key works uniformly).
         scored_docs.sort(key=lambda x: x[1])
 
-        # Apply score_threshold: convert L2 distance to similarity = 1/(1+d)
+        # Apply score_threshold: convert L2 distance to similarity via the
+        # shared helper (#2072) so the API and agent use one formula.
         effective_threshold = (
             score_threshold
             if score_threshold is not None
@@ -540,7 +542,7 @@ def query_knowledge_base(
             scored_docs = [
                 (doc, dist)
                 for doc, dist in scored_docs
-                if 1.0 / (1.0 + dist) >= effective_threshold
+                if l2_to_similarity(dist) >= effective_threshold
             ]
             if not scored_docs:
                 return (
@@ -755,6 +757,17 @@ def rag_ingest(paths: str) -> str:
         docs_dir=Path(path_list[0]).parent,
         vectordb_dir=Path(str(vectordb_dir)),
         embedding_provider=str(_rag_config.get("embedding_provider") or "ollama"),
+        # #2071: thread the SAME embedding model / endpoint / key that the
+        # query side uses (see _get_embeddings) so the agent-built index is
+        # readable by query_knowledge_base. Previously these were dropped, so on
+        # OpenAI/Google providers the agent ingested with the default embedding
+        # model and no API key — producing an index in a different embedding
+        # space than the query side reads (or a hard failure).
+        embedding_model=_rag_config.get("embedding_model"),
+        base_url=_rag_config.get("base_url"),
+        api_key=_rag_config.get("api_key"),
+        chunk_size=int(_rag_config.get("chunk_size") or 800),
+        chunk_overlap=int(_rag_config.get("chunk_overlap") or 100),
         # #1981: mirror the operator's hybrid intent.  When the
         # operator has flipped ``use_bm25_hybrid`` on, build the
         # sidecar on this ingestion call so the next query can fuse.

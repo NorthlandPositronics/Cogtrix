@@ -36,6 +36,19 @@ STEP_LIMIT_PHRASES = (
     "couldn't finish in the allotted",
 )
 
+# Last-resort message returned when every recovery attempt fails to produce
+# usable content. Exposed as a named sentinel so downstream consumers (e.g.
+# the assistant handler) can recognize it and decide whether to deliver it.
+# In interactive/CLI use it's shown to the user ("say continue"); in
+# assistant/messaging mode it must NOT be sent to an external contact — it
+# is an internal control message, not a reply (#2052).
+RECOVERY_FAILED_MESSAGE = (
+    "I was unable to complete this task in the allotted steps. "
+    "The query may require many tool calls.\n\n"
+    "You can say **continue** and I will pick up where I left off, "
+    "or you can rephrase / break the question into smaller parts."
+)
+
 # Minimum context length (chars) to consider a deep_think call
 # "well-grounded".  Below this, the agent likely passed references
 # ("search result 1,2,3") rather than actual data.
@@ -1437,9 +1450,4 @@ def recover_from_step_limit(
     #    (Ralph Loop).  The message deliberately avoids error
     #    error prefixes to pass _is_valid_response(). ──
     log.error("All recovery attempts failed — no usable content")
-    return (
-        "I was unable to complete this task in the allotted steps. "
-        "The query may require many tool calls.\n\n"
-        "You can say **continue** and I will pick up where I left off, "
-        "or you can rephrase / break the question into smaller parts."
-    )
+    return RECOVERY_FAILED_MESSAGE

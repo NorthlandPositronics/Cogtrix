@@ -88,7 +88,7 @@ The response includes an access token and a refresh token. Use the access token 
 |----------|----------|---------|-------------|
 | `COGTRIX_JWT_SECRET` | **yes** | — | JWT signing secret. Minimum 32 characters. Generate with `python -c "import secrets; print(secrets.token_hex(32))"`. |
 | `COGTRIX_DB_URL` | no | `sqlite+aiosqlite:///data/api/cogtrix.db` | Database URL. Use `postgresql+asyncpg://` for PostgreSQL in production. |
-| `COGTRIX_CORS_ORIGINS` | no | `localhost:5173, localhost:3000, app.cogtrix.ai` | Comma-separated allowed CORS origins. |
+| `COGTRIX_CORS_ORIGINS` | no | `http://localhost:5173, http://localhost:3000` | Comma-separated allowed CORS origins. Also settable via the `api.cors_origins` config key or a Helm value (env var wins). The default is localhost-only — set your real web UI origin(s) for any non-local deployment, e.g. `https://cogtrix.ai,https://www.cogtrix.ai`. |
 | `COGTRIX_API_HOST` | no | `0.0.0.0` | Bind host. |
 | `COGTRIX_API_PORT` | no | `8000` | Bind port. |
 | `COGTRIX_API_WORKERS` | no | `1` | Number of uvicorn workers. |

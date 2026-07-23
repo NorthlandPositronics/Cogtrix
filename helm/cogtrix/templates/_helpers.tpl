@@ -83,3 +83,14 @@ Return the proper WAHA sidecar image name
 {{- printf "%s:%s" .Values.waha.image.repository .Values.waha.image.tag -}}
 {{- end -}}
 {{- end }}
+
+{{/*
+Return the proper init-container image name (digest-pinned when provided)
+*/}}
+{{- define "cogtrix.initImage" -}}
+{{- if .Values.initContainer.image.digest -}}
+{{- printf "%s@%s" .Values.initContainer.image.repository .Values.initContainer.image.digest -}}
+{{- else -}}
+{{- printf "%s:%s" .Values.initContainer.image.repository .Values.initContainer.image.tag -}}
+{{- end -}}
+{{- end }}

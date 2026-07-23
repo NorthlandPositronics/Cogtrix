@@ -160,22 +160,32 @@ def _register_sigterm_handler() -> None:
 # Allowed CORS origins
 # ---------------------------------------------------------------------------
 
+# Localhost-only fallback used when Config cannot be loaded. A production
+# origin is NOT shipped here on purpose (#2059): a misconfigured prod must
+# fail loudly (browser blocks) rather than silently half-allow a placeholder.
+# Real origins are set via api.cors_origins / COGTRIX_CORS_ORIGINS / Helm.
 _DEFAULT_CORS_ORIGINS: list[str] = [
     "http://localhost:5173",  # Vite React dev server
     "http://localhost:3000",  # Create-React-App dev server (fallback)
-    "https://app.cogtrix.ai",  # Production origin placeholder — update before deploy
 ]
 
 
 def _get_cors_origins() -> list[str]:
-    """Return the list of allowed CORS origins.
+    """Return the list of allowed CORS origins via the Config hierarchy (#2059).
 
-    Reads COGTRIX_CORS_ORIGINS from the environment if set (comma-separated);
-    falls back to _DEFAULT_CORS_ORIGINS.
+    Origins resolve through ``Config`` (CLI → env ``COGTRIX_CORS_ORIGINS`` →
+    ``api.cors_origins`` config file → default), honouring the documented
+    precedence instead of reading ``os.environ`` directly. Falls back to the
+    localhost-only default if Config cannot be loaded.
     """
-    raw = os.environ.get("COGTRIX_CORS_ORIGINS", "").strip()
-    if raw:
-        return [origin.strip() for origin in raw.split(",") if origin.strip()]
+    try:
+        from src.config import load_config
+
+        origins = load_config().api.cors_origins
+        if origins:
+            return list(origins)
+    except Exception:  # noqa: BLE001 — never let config failure break CORS setup
+        log.warning("Failed to resolve CORS origins from Config; using localhost default")
     return _DEFAULT_CORS_ORIGINS
 
 

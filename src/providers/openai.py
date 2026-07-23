@@ -313,5 +313,11 @@ def create_embeddings(
         emb_kwargs["api_key"] = api_key
     if base_url:
         emb_kwargs["openai_api_base"] = base_url
-    emb_kwargs.update(kwargs)
+        # #2067: many OpenAI-compatible endpoints (OpenRouter, vLLM, …) reject
+        # langchain's default token-ID embedding input (check_embedding_ctx_length=True),
+        # returning an empty ``data`` array and breaking RAG ingestion ("No embedding
+        # data received"). Sending raw text works across providers; native OpenAI
+        # (no custom base_url) keeps the default behaviour.
+        emb_kwargs["check_embedding_ctx_length"] = False
+    emb_kwargs.update(kwargs)  # explicit kwargs win (incl. check_embedding_ctx_length)
     return OpenAIEmbeddings(**emb_kwargs)

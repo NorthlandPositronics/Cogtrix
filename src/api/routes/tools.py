@@ -24,6 +24,7 @@ from src.api.db.engine import get_db
 from src.api.pagination import decode_cursor, encode_cursor
 from src.api.schemas.common import APIResponse, CursorPage
 from src.api.schemas.tool import ToolActionRequest, ToolOut, ToolParameterSchema, ToolSummary
+from src.api.session_bridge import _API_DENIED_DANGEROUS_TOOLS
 
 log = logging.getLogger("cogtrix.api.tools")
 
@@ -373,6 +374,29 @@ async def patch_session_tools(
                 detail={
                     "code": "TOOL_NOT_FOUND",
                     "message": f"Tool '{name}' does not exist in the registry.",
+                },
+            )
+
+    # #2070/#2050: while api_dangerous_tools is disabled, the tools route must
+    # not re-open the denied exec tools — `load` would activate them and
+    # `enable` (allow_tool) would delete the warm-time denial. Reject up-front so
+    # no partial state is applied. (DedupedToolInvoker also enforces is_denied at
+    # execution as a backstop.)
+    app_config = getattr(request.app.state, "config", None)
+    if not getattr(app_config, "api_dangerous_tools", False):
+        _blocked = (set(body.load or []) | set(body.enable or [])) & set(
+            _API_DENIED_DANGEROUS_TOOLS
+        )
+        if _blocked:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={
+                    "code": "FORBIDDEN",
+                    "message": (
+                        "Cannot load or enable dangerous tools ("
+                        + ", ".join(sorted(_blocked))
+                        + ") while api_dangerous_tools is disabled."
+                    ),
                 },
             )
 

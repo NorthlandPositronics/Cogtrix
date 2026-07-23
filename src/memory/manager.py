@@ -827,29 +827,40 @@ class BaseMemoryManager(ABC):
             )
             return
 
-        if self._bg_future is not None and not self._bg_future.done():
-            elapsed = time.monotonic() - self._bg_submitted_at
-            if elapsed > _BG_JOB_TIMEOUT_SECONDS:
-                log.warning(
-                    "Background memory summarization has been running for %.0fs "
-                    "(limit %ds) — treating as stuck and allowing a fresh job. "
-                    "The original thread will continue until it finishes naturally.",
-                    elapsed,
-                    _BG_JOB_TIMEOUT_SECONDS,
-                )
-                # Fall through and submit a fresh job; old thread runs to completion.
-            else:
-                if is_verbose():
-                    log.debug("Background memory job still running — skipping")
-                return
-
         batch = [_shallow_copy(m) for m in messages[unsummarized_start:unsummarized_end]]
         unsummarized_end_snapshot = unsummarized_end
 
-        self._bg_future = _get_summarization_pool().submit(
-            self._run_slow_path, batch, unsummarized_end_snapshot
-        )
-        self._bg_submitted_at = time.monotonic()
+        # #2061: the single-flight guard (is a job already running?) and the
+        # submit must be atomic under _hybrid_lock. Previously they ran outside
+        # the lock, so two concurrent _schedule_slow_path callers could both
+        # observe no in-flight future and both submit; the duplicate jobs then
+        # raced on _summary_msg_idx (last-writer-wins could rewind the summary
+        # boundary). The lock only spans the cheap check + pool.submit — the
+        # actual summarization runs on the worker thread, off-lock.
+        with self._hybrid_lock:
+            if self._bg_future is not None and not self._bg_future.done():
+                elapsed = time.monotonic() - self._bg_submitted_at
+                if elapsed > _BG_JOB_TIMEOUT_SECONDS:
+                    log.warning(
+                        "Background memory summarization has been running for %.0fs "
+                        "(limit %ds) — treating as stuck and allowing a fresh job. "
+                        "The original thread will continue until it finishes naturally.",
+                        elapsed,
+                        _BG_JOB_TIMEOUT_SECONDS,
+                    )
+                    # Fall through and submit a fresh job; old thread runs to completion.
+                else:
+                    if is_verbose():
+                        log.debug("Background memory job still running — skipping")
+                    return
+            # A just-completed job may have already advanced the summary past
+            # this batch — don't submit a job that would rewind the boundary.
+            if unsummarized_end_snapshot <= self._summary_msg_idx:
+                return
+            self._bg_future = _get_summarization_pool().submit(
+                self._run_slow_path, batch, unsummarized_end_snapshot
+            )
+            self._bg_submitted_at = time.monotonic()
 
     def schedule_tier_roll_forward(
         self,

@@ -301,6 +301,20 @@ class APIConfig:
     # value at runtime.
     redis_url: str | None = None
 
+    # Allowed CORS origins for the browser-facing API (#2059). Exact-match
+    # origins the API answers cross-origin requests for. The default is
+    # localhost-only on purpose: a production deployment MUST set its real
+    # origin(s) (via ``COGTRIX_CORS_ORIGINS``, the ``api.cors_origins`` config
+    # key, or a Helm value) so a misconfigured prod fails loudly rather than
+    # silently half-allowing a placeholder host. ``COGTRIX_CORS_ORIGINS``
+    # (comma-separated) overrides this at runtime per the config hierarchy.
+    cors_origins: list[str] = field(
+        default_factory=lambda: [
+            "http://localhost:5173",  # Vite React dev server
+            "http://localhost:3000",  # Create-React-App dev server (fallback)
+        ]
+    )
+
     def __post_init__(self) -> None:
         for name, spec in self.rate_limits.items():
             if not _RATE_LIMIT_SPEC_RE.match(spec):
@@ -321,6 +335,14 @@ class APIConfig:
                 ipaddress.ip_network(cidr, strict=False)
             except ValueError as exc:
                 raise ConfigError(f"api.trusted_proxy_cidrs: invalid CIDR {cidr!r}: {exc}") from exc
+
+        if not isinstance(self.cors_origins, list) or not all(
+            isinstance(o, str) and o.strip() for o in self.cors_origins
+        ):
+            raise ConfigError(
+                "api.cors_origins must be a list of non-empty origin strings "
+                "(e.g. ['https://cogtrix.ai'])"
+            )
 
 
 @dataclass
@@ -792,31 +814,66 @@ class Config:
             ConfigError: If no models are configured.
             ValueError: If the active provider is not configured.
         """
+        import logging
+
+        _log = logging.getLogger("cogtrix")
         model_name = self.rag.model
         if model_name and model_name in self.models:
             mc = self.models[model_name]
             pc = self.providers.get(mc.provider)
             if pc:
+                self._warn_if_not_embedding_capable(
+                    pc.type, source=f"rag.model '{model_name}' (provider '{mc.provider}')"
+                )
                 return pc.type, mc.model, pc.get_base_url(), pc.api_key
-            import logging
-
-            logging.getLogger("cogtrix").warning(
+            _log.warning(
                 "rag.model '%s' references provider '%s' which is not configured; "
                 "falling back to active provider",
                 model_name,
                 mc.provider,
             )
+        elif model_name:
+            # #2066: rag.model is set but not defined in the models registry. The
+            # silent fallback hides the typo, so surface it explicitly.
+            _log.warning(
+                "rag.model '%s' is not defined in the models registry; falling back to the "
+                "active provider for embeddings. Define the embedding alias or fix the name.",
+                model_name,
+            )
         # Check if there's an active provider before calling get_active_provider()
         # to provide a clearer error message
         try:
             pc = self.get_active_provider()
-            return pc.type, None, pc.get_base_url(), pc.api_key
         except (ConfigError, ValueError) as e:
             # Re-raise with more context
             raise type(e)(
                 f"Cannot resolve embedding config: {e}. "
                 "Ensure at least one model and provider are configured via /setup or the config file."
             ) from e
+        self._warn_if_not_embedding_capable(pc.type, source="the active provider")
+        return pc.type, None, pc.get_base_url(), pc.api_key
+
+    def _warn_if_not_embedding_capable(self, provider_type: str, *, source: str) -> None:
+        """#2066: warn clearly when the resolved provider cannot produce embeddings.
+
+        Non-fatal — resolution still returns the config — but it turns the
+        otherwise-opaque downstream failure (e.g. Anthropic's NotImplementedError,
+        or a 404 from a chat-only endpoint) into an actionable startup/ingest log.
+        """
+        try:
+            from src.providers import is_embeddings_available
+        except Exception:  # pragma: no cover - defensive
+            return
+        if not is_embeddings_available(provider_type):
+            import logging
+
+            logging.getLogger("cogtrix").warning(
+                "RAG embeddings: %s resolves to provider type '%s', which does not support "
+                "embeddings (or its package is not installed); ingestion will fail. Point "
+                "rag.model at an OpenAI/Ollama/Google embedding model.",
+                source,
+                provider_type,
+            )
 
     def find_model_entry(self, target: str) -> "tuple[str | None, ModelConfig | None]":
         """Resolve *target* to a (canonical_alias, ModelConfig) pair.
@@ -1649,6 +1706,20 @@ def _apply_config_file(config: Config, path: Path) -> None:
                     "api.redis_url must be a string (got %s); ignoring",
                     type(raw_url).__name__,
                 )
+        # Allowed CORS origins (#2059) — accepts a YAML list or a
+        # comma-separated string, mirroring trusted_proxy_cidrs.
+        if "cors_origins" in api_cfg:
+            raw_origins = api_cfg["cors_origins"]
+            if isinstance(raw_origins, list):
+                config.api.cors_origins = [str(o).strip() for o in raw_origins if str(o).strip()]
+            elif isinstance(raw_origins, str):
+                config.api.cors_origins = [o.strip() for o in raw_origins.split(",") if o.strip()]
+            else:
+                _log.warning(
+                    "api.cors_origins must be a list or comma-separated string "
+                    "(got %s); ignoring",
+                    type(raw_origins).__name__,
+                )
         # Re-validate the merged APIConfig so invalid specs / CIDRs raise
         # ``ConfigError`` with the same diagnostic as a freshly-constructed
         # instance.
@@ -2138,6 +2209,12 @@ def _apply_env_vars(config: Config) -> None:
     if tg_token:
         tg = config.services.setdefault("telegram", {})
         tg["bot_token"] = tg_token
+
+    # Allowed CORS origins — comma-separated; overrides api.cors_origins (#2059).
+    if env_val := os.getenv("COGTRIX_CORS_ORIGINS"):
+        origins = [o.strip() for o in env_val.split(",") if o.strip()]
+        if origins:
+            config.api.cors_origins = origins
 
     # Allowed write paths — comma-separated to match file_ops.py runtime parser.
     if env_val := os.getenv("COGTRIX_ALLOWED_WRITE_PATHS"):

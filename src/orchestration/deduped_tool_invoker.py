@@ -166,6 +166,22 @@ class DedupedToolInvoker:
 
         tool_name = call["name"]
 
+        # ── Denial enforcement (#2070 / #2050 hardening) ───────────────────
+        # is_denied() is the single source of truth for blocked tools (the API
+        # ``api_dangerous_tools`` deny, ``/tools disable``, deny-all, budget
+        # deny). Enforce it here at the execution chokepoint so a denial holds
+        # regardless of how a tool reached the active set — e.g. PATCH
+        # /sessions/{id}/tools ``load``, which bypasses the activation-time
+        # gates, or any future activation path. For API sessions the safety
+        # wrapper's is_denied check is skipped (no_confirm=True), so this is the
+        # only guaranteed enforcement point.
+        if self._session_state is not None and self._session_state.is_denied(tool_name):
+            return ToolMessage(
+                content=f"Tool '{self._safe_tool_name(tool_name)}' is disabled and cannot be used.",
+                tool_call_id=call["id"],
+                name=tool_name,
+            )
+
         # ── Per-tool call budget ──────────────────────────────────────────
         # Prevents runaway search loops where the model calls the same tool
         # 10+ times with diminishing returns.  Exempt tools (request_tools,
