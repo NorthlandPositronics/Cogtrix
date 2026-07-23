@@ -301,7 +301,7 @@ class TestCreateChatModelFromConfigs:
                 streaming=False,
             )
 
-    def test_temperature_defaults_to_zero_when_none(self) -> None:
+    def test_temperature_defaults_to_half_when_none(self) -> None:
         from src.providers import create_chat_model_from_configs
 
         pc = ProviderConfig(name="openai", type="openai", api_key="sk-openai")
@@ -311,7 +311,7 @@ class TestCreateChatModelFromConfigs:
             mock_create.return_value = MagicMock()
             create_chat_model_from_configs(pc, mc)
             _, call_kwargs = mock_create.call_args
-            assert call_kwargs["temperature"] == 0
+            assert call_kwargs["temperature"] == 0.5
 
     def test_num_ctx_passed_only_for_ollama_provider(self) -> None:
         from src.providers import create_chat_model_from_configs

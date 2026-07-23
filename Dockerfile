@@ -49,7 +49,8 @@ WORKDIR /app
 ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONPATH="/app" \
     PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1
+    PYTHONDONTWRITEBYTECODE=1 \
+    COGTRIX_ALLOWED_WRITE_PATHS="/tmp"
 
 # Virtual environment from builder — --link enables independent layer caching
 COPY --from=builder --link --chown=cogtrix:cogtrix /app/.venv /app/.venv

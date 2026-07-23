@@ -462,7 +462,7 @@ def resolve_model_alias(provider: str | None, model: str | None) -> tuple:
 def create_delegate_llm(
     provider: str,
     model: str | None = None,
-    temperature: float = 0.7,
+    temperature: float = 0.5,
     num_ctx: int | None = None,
 ) -> Any:
     """
@@ -755,7 +755,7 @@ def _execute_single_task(
     json_schema: str | None = None,
     provider: str = "ollama",
     model: str = "default",
-    temperature: float = 0.7,
+    temperature: float = 0.5,
     num_ctx: int | None = None,
     use_tools: bool = True,
 ) -> DelegateResult:
@@ -907,7 +907,7 @@ def delegate_task(
     provider: str | None = None,
     model: str | None = None,
     timeout: int = 60,
-    temperature: float = 0.7,
+    temperature: float = 0.5,
 ) -> str:
     """
     Delegate a task to another LLM model.
@@ -1083,9 +1083,11 @@ def delegate_parallel(
             task_def.get("provider"),
             task_def.get("model"),
         )
-        temp = task_def.get("temperature", 0.7)
-        if "temperature" in alias_cfg:
+        temp = task_def.get("temperature", 0.5)
+        if "temperature" in alias_cfg and alias_cfg["temperature"] is not None:
             temp = alias_cfg["temperature"]
+        if temp is None:
+            temp = 0.5
         temp = max(0.0, min(2.0, temp))
         num_ctx = alias_cfg.get("context_window") or alias_cfg.get("num_ctx")
 

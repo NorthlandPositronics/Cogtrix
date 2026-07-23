@@ -4,6 +4,7 @@ Write operations require user confirmation for safety.
 """
 
 import collections
+import os
 import threading
 from datetime import UTC, datetime
 from pathlib import Path
@@ -15,6 +16,16 @@ from pydantic import BaseModel, Field
 _APP_DIR: Path = Path(__file__).resolve().parent.parent.parent
 
 _extra_write_dirs: list[Path] = []
+
+# Wire COGTRIX_ALLOWED_WRITE_PATHS env var at import time.
+# Comma-separated list of directories where write operations are allowed
+# in addition to cwd.  Typically set in Dockerfile for container deployments
+# where cwd (/app) is read-only but /tmp is writable.
+_env_write_paths = os.environ.get("COGTRIX_ALLOWED_WRITE_PATHS", "")
+if _env_write_paths:
+    _extra_write_dirs = [
+        Path(d.strip()).resolve() for d in _env_write_paths.split(",") if d.strip()
+    ]
 
 
 class _RefLock:
@@ -79,7 +90,9 @@ def set_allowed_write_dirs(dirs: list[str] | None) -> None:
 class ReadFileInput(BaseModel):
     """Input schema for reading files."""
 
-    path: str = Field(description="Path to the file to read")
+    path: str = Field(description="Path to the file to read", alias="file_path")
+
+    model_config = {"populate_by_name": True}  # accept both "path" and "file_path"
     encoding: str = Field(default="utf-8", description="File encoding (default: utf-8)")
     start_line: int = Field(
         default=0,

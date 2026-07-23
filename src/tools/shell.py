@@ -15,8 +15,8 @@ from pydantic import BaseModel, Field
 class ShellCommandInput(BaseModel):
     """Input schema for shell command execution."""
 
-    cmd: str = Field(
-        description="The shell command to execute (e.g., 'ls -la', 'pwd', 'cat file.txt')"
+    command: str = Field(
+        description="The shell command to execute (e.g., 'ls -la', 'pwd', 'cat file.txt')",
     )
     working_directory: str | None = Field(
         default=None,
@@ -29,7 +29,7 @@ class ShellCommandInput(BaseModel):
 
 
 def execute_shell_command(
-    cmd: str,
+    command: str,
     working_directory: str | None = None,
     timeout: int = 30,
 ) -> str:
@@ -40,14 +40,14 @@ def execute_shell_command(
     user confirmation before execution (handled by the safety layer).
 
     Args:
-        cmd: The shell command to execute
+        command: The shell command to execute
         working_directory: Directory to execute the command in (default: current directory)
         timeout: Command timeout in seconds (default: 30, max: 300)
 
     Returns:
         Command output (stdout) or error message (stderr)
     """
-    if not cmd or not cmd.strip():
+    if not command or not command.strip():
         return "Error: No command provided."
 
     # Validate and clamp timeout
@@ -65,13 +65,13 @@ def execute_shell_command(
         # Detect shell metacharacters that require a real shell to interpret
         # (pipes, redirects, chaining, subshells, globs, env vars, etc.)
         _shell_meta = {"|", ">", "<", "&", ";", "`", "$", "(", ")", "*", "?", "{", "}"}
-        needs_shell = any(ch in cmd for ch in _shell_meta)
+        needs_shell = any(ch in command for ch in _shell_meta)
 
         if needs_shell:
             # Use shell=True so pipes, redirects, etc. work correctly.
             # Safety is enforced by the confirmation prompt (requires_confirmation=True).
             proc = subprocess.Popen(  # nosec B602
-                cmd,
+                command,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
@@ -81,7 +81,7 @@ def execute_shell_command(
             )
         else:
             # Simple command — use shlex.split for cleaner execution
-            cmd_parts = shlex.split(cmd)
+            cmd_parts = shlex.split(command)
             proc = subprocess.Popen(  # nosec B603
                 cmd_parts,
                 stdout=subprocess.PIPE,
@@ -127,7 +127,7 @@ def execute_shell_command(
         return f"Command executed successfully (exit code: {proc.returncode})"
 
     except FileNotFoundError:
-        cmd_name = cmd.split()[0] if cmd.split() else cmd
+        cmd_name = command.split()[0] if command.split() else command
         return f"Error: Command not found: {cmd_name}"
     except PermissionError:
         return "Error: Permission denied executing command"
@@ -141,7 +141,10 @@ TOOL_CONFIG = {
     "description": (
         "Execute a shell command on the system. Use this to run terminal commands like "
         "'ls', 'pwd', 'cat file.txt', 'git status', etc. "
-        "Supports custom working directory and timeout."
+        "Set timeout appropriately for the command: quick commands ~10s, "
+        "downloads/builds/installs 120–300s. Default is 30s — commands that "
+        "exceed it are killed. Do NOT retry a timed-out command with the same "
+        "timeout; increase it instead."
     ),
     "input_schema": ShellCommandInput,
     "requires_confirmation": True,  # Flagged as sensitive

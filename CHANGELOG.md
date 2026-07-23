@@ -1,5 +1,79 @@
 # Changelog
 
+## [0.2.4](https://github.com/NorthlandPositronics/Cogtrix/compare/v0.2.3...v0.2.4) (2026-04-06)
+
+
+### Features
+
+* agent complexity awareness — checkpoints, stuck detection, work cycle, metrics ([e6a700c](https://github.com/NorthlandPositronics/Cogtrix/commit/e6a700c9dc0cb9a895e8709deed1b25020fb7572))
+* agent complexity awareness — checkpoints, stuck detection, work cycle, metrics ([#326](https://github.com/NorthlandPositronics/Cogtrix/issues/326)) ([e6a700c](https://github.com/NorthlandPositronics/Cogtrix/commit/e6a700c9dc0cb9a895e8709deed1b25020fb7572))
+* checkpoint tool and periodic reflection for complex tasks ([badb9c8](https://github.com/NorthlandPositronics/Cogtrix/commit/badb9c83413a23445d26a28e4b26b2961061e780))
+* checkpoint-based stuck detection — force thinking break after 15 rounds without progress ([0e4fa06](https://github.com/NorthlandPositronics/Cogtrix/commit/0e4fa06388754792201fc15065e724bc29b52846))
+* configurable per-model LLM request timeout ([ecefd18](https://github.com/NorthlandPositronics/Cogtrix/commit/ecefd18f81eb17b3e95b2226fcb1e19ee73bd60e))
+* context-aware periodic reflection — debug mode vs work cycle ([269f84f](https://github.com/NorthlandPositronics/Cogtrix/commit/269f84f43803102fd98c51e1308bef2ee46921da))
+* debugging guidance — isolate, diagnose, search, change one thing ([7959f71](https://github.com/NorthlandPositronics/Cogtrix/commit/7959f71165c5d397a53c00ea78d4633fcc117b64))
+* scale stuck threshold, checkpoint nudge, rewrite detection ([ac4566c](https://github.com/NorthlandPositronics/Cogtrix/commit/ac4566c1af68c82d2b3f9862179742b5f37e4ce8))
+* structured work cycle (RESEARCH→ANALYZE→ACT→EVALUATE→PIVOT) ([8c45950](https://github.com/NorthlandPositronics/Cogtrix/commit/8c45950c5a04ea3bfa27889e715c700f06937906))
+* stuck detection with forced thinking break ([5712d56](https://github.com/NorthlandPositronics/Cogtrix/commit/5712d56ab824060f2d07055882cab8c8832e72f4))
+* task complexity awareness with adaptive execution strategy ([1b034e3](https://github.com/NorthlandPositronics/Cogtrix/commit/1b034e3f09537e5fcbc94b2785d83f14457a13fb))
+* **ui:** redesign tool confirmation panel per UX spec ([b3a843f](https://github.com/NorthlandPositronics/Cogtrix/commit/b3a843f902b5afb775f4f72f72c5089443b579b7))
+
+
+### Bug Fixes
+
+* add DEFAULT_CONTEXT_WINDOW = 32768 to ModelConfig ([d6a882c](https://github.com/NorthlandPositronics/Cogtrix/commit/d6a882c9d7c9c99defcadb5fc4ef2a1749b1d118))
+* add INFO logging for checkpoint nudge, confirm it was firing ([3f68aee](https://github.com/NorthlandPositronics/Cogtrix/commit/3f68aeefb6a5aee1726009512bd78f9b1c82571a))
+* address code quality review — remove dead code, document empty excepts ([fea7a0b](https://github.com/NorthlandPositronics/Cogtrix/commit/fea7a0b80032c7d6bd2bb9fd9a2704708976613a))
+* address code quality review from PR [#327](https://github.com/NorthlandPositronics/Cogtrix/issues/327) ([983ac95](https://github.com/NorthlandPositronics/Cogtrix/commit/983ac95123ef60aa578d67fec322b341268cf6d3))
+* address code quality review from PR [#327](https://github.com/NorthlandPositronics/Cogtrix/issues/327) ([#328](https://github.com/NorthlandPositronics/Cogtrix/issues/328)) ([983ac95](https://github.com/NorthlandPositronics/Cogtrix/commit/983ac95123ef60aa578d67fec322b341268cf6d3))
+* auto-load search_web, heredoc rewrite detection, debug isolation ([0322f8d](https://github.com/NorthlandPositronics/Cogtrix/commit/0322f8db873f9d0cc84be3d43c7dbcca6dc649bd))
+* broaden stuck detection error indicators and add success check ([5c09a99](https://github.com/NorthlandPositronics/Cogtrix/commit/5c09a99406900e9158020d1f377a1502751d9f58))
+* budget-disabled tools added to denials; accept command/file_path aliases ([cc868a4](https://github.com/NorthlandPositronics/Cogtrix/commit/cc868a43a00cfd06b7741dc41e76527ac16d8a55))
+* checkpoint nudge ordering, debug oscillation guidance ([933eea3](https://github.com/NorthlandPositronics/Cogtrix/commit/933eea3fbf1f3188dda44d648af5b60cb11f4b9a))
+* confirmation panel — bright underlined choices, action description ([ae459ed](https://github.com/NorthlandPositronics/Cogtrix/commit/ae459ed0def1026d911aa8837e82b47aa9b5e5b1))
+* CONFIRMED ABSENT checkpoint pattern, raise MODERATE threshold 15→20 ([671ed9f](https://github.com/NorthlandPositronics/Cogtrix/commit/671ed9f65789b1ccf42caa2bf88754e4e5ebbbc1))
+* debug reflection scans recent messages instead of consecutive counter ([48a265b](https://github.com/NorthlandPositronics/Cogtrix/commit/48a265b77d41d65d0682e890634abc43d9cc4504))
+* exempt action tools from budget, improve denied-tool messaging ([0da8c3f](https://github.com/NorthlandPositronics/Cogtrix/commit/0da8c3f92f824efb9469d2e29ccdaf692f815312))
+* guard None temperature in delegate_parallel ([9bf0094](https://github.com/NorthlandPositronics/Cogtrix/commit/9bf0094071a8cedb79327df37329b5bb95b9939f))
+* guard None temperature in delegate_parallel to prevent TypeError ([94972b4](https://github.com/NorthlandPositronics/Cogtrix/commit/94972b4213176e155b88610bc98cff6f09b3038b))
+* guard None temperature in delegate_parallel, unify defaults to 0.5 ([#325](https://github.com/NorthlandPositronics/Cogtrix/issues/325)) ([9bf0094](https://github.com/NorthlandPositronics/Cogtrix/commit/9bf0094071a8cedb79327df37329b5bb95b9939f))
+* LLM call timeout prevents indefinite hangs on backend disconnect ([dd36dc5](https://github.com/NorthlandPositronics/Cogtrix/commit/dd36dc50323ca8aadc669f456e2c850249cfa059))
+* lower reflection interval to 10, checkpoint both successes and failures ([726741a](https://github.com/NorthlandPositronics/Cogtrix/commit/726741a7c033d13c4e84e7cac3ba5737a35e8e26))
+* move ModelConfig import to top of file (ruff E402) ([ed42602](https://github.com/NorthlandPositronics/Cogtrix/commit/ed4260220d9bb25d1dfc7c3e8b4c99d9d51e1ce8))
+* raise COMPLEX_ACTION stuck threshold, checkpoint exact commands ([2e24958](https://github.com/NorthlandPositronics/Cogtrix/commit/2e24958b9e3a9d685f7ec0f3010a5e53399a072a))
+* RBA forcing, pivot quality, rewrite threshold — from metrics analysis ([9cbd235](https://github.com/NorthlandPositronics/Cogtrix/commit/9cbd235aa3b9474a8a86aacbbd5f3c95b6131966))
+* remove extend_run from always-active tools — caused tool confusion ([d7f997d](https://github.com/NorthlandPositronics/Cogtrix/commit/d7f997d5e493607b2629da335da3c0c57e7d23ca))
+* remove square brackets from confirmation choices, fix logging indent ([3ee7164](https://github.com/NorthlandPositronics/Cogtrix/commit/3ee71648219227b9f157212331b309af85c23baa))
+* remove test-case-specific examples from system prompt and tool descriptions ([7988522](https://github.com/NorthlandPositronics/Cogtrix/commit/798852204e3f1cba801e1aa3a761c25439d5434e))
+* RESEARCH step must use web search, not guess URLs ([237b1b8](https://github.com/NorthlandPositronics/Cogtrix/commit/237b1b8b92820c82a731ccb724bc35c3cb441d53))
+* resolve LazyToolProxy before auto-loading search_web ([ded35f7](https://github.com/NorthlandPositronics/Cogtrix/commit/ded35f7ddf6e0d8bd8cc33cb4fdb0f682a6542aa))
+* shell tool confirmation panel showed "(no parameters)" ([19054f3](https://github.com/NorthlandPositronics/Cogtrix/commit/19054f3f1c652346b012b3a5bb2f6f9afe215599))
+* skip forced delegation when model already produced substantial response ([0886668](https://github.com/NorthlandPositronics/Cogtrix/commit/0886668a67f4f8084bad7d7e9ae9f4a51b6e3fa8))
+* skip forced delegation when model already produced substantial response ([429e6eb](https://github.com/NorthlandPositronics/Cogtrix/commit/429e6ebbe2c165916599349c6ed6b98afbfbaa8e))
+* system prompt efficiency guidance — batch scripts, no re-checking, read errors ([56f5ae0](https://github.com/NorthlandPositronics/Cogtrix/commit/56f5ae0460bccd5e2bef916e3bd3644b7f7f3ccf))
+* tighten COMPLEX_RESEARCH classifier — remove enumeration pattern ([edb1993](https://github.com/NorthlandPositronics/Cogtrix/commit/edb19932a1a4a04aee27e02dfc7c8604329382ba))
+* **tools:** shell tool description — guide model to set correct timeout ([3bde70e](https://github.com/NorthlandPositronics/Cogtrix/commit/3bde70e5606d2592627bd6ca555920f14ba663ec))
+* unify default temperature to 0.5 across all code paths ([3af0bfc](https://github.com/NorthlandPositronics/Cogtrix/commit/3af0bfc5fd584ec774eb5923353c19cb34d9bc2d))
+* **ux:** hide tool_call metadata from confirmation panel; remove prompt indent ([e1ecdf9](https://github.com/NorthlandPositronics/Cogtrix/commit/e1ecdf9831dc40546e014009b465d0096e44c655))
+* **ux:** move choices inside panel, inline highlighted key letters ([9f75ba8](https://github.com/NorthlandPositronics/Cogtrix/commit/9f75ba812f5b4c9154794f57cd53585b4be975d0))
+* **ux:** remove leading spaces from 'Logging to:' line ([61353c0](https://github.com/NorthlandPositronics/Cogtrix/commit/61353c0b2b43525adcff2f1cedd28f3b55f5730b))
+* **ux:** unwrap LangChain tool_call envelope in confirmation panel ([2d4c710](https://github.com/NorthlandPositronics/Cogtrix/commit/2d4c7109d5cea500103fbcbe0e3707418ff4b7f8))
+* work cycle ACT step reminds agent to load execution tools ([7556627](https://github.com/NorthlandPositronics/Cogtrix/commit/7556627f9d23dd396c6aa8c5a7e4b2563f6a469d))
+* write_file /tmp access, parameter remaps, CoT research cycle ([72471c8](https://github.com/NorthlandPositronics/Cogtrix/commit/72471c8a173c9145f44f57ec20ac429c67e773c2))
+
+
+### Documentation
+
+* 10 agent effectiveness metrics with baselines and targets ([b0b0607](https://github.com/NorthlandPositronics/Cogtrix/commit/b0b0607b62d19636ccac02f51cf6e81d886b1909))
+* comprehensive test run documentation for agent complexity work ([633c271](https://github.com/NorthlandPositronics/Cogtrix/commit/633c271aad3684f661975047f99d4d522446b0ff))
+* document timeout architecture in CLAUDE.md ([cfb1cc4](https://github.com/NorthlandPositronics/Cogtrix/commit/cfb1cc46249d2d7d6555c6fd5ca633fdd7eb98f0))
+* parallel run 4 metrics scorecard — all 10 metrics applied ([711fbe4](https://github.com/NorthlandPositronics/Cogtrix/commit/711fbe45bd528e7525b216cc038ad0a03ecec28f))
+* parallel run 5 metrics — composite 64→71, 7/10 metrics at target ([063a8f6](https://github.com/NorthlandPositronics/Cogtrix/commit/063a8f653033a1faae19356bbd8c298d0854b5c0))
+* parallel run 6 metrics — RBA 53→74%, 8/10 at target ([3c34a06](https://github.com/NorthlandPositronics/Cogtrix/commit/3c34a0603d27294db01f96e4e9e288d58cc32183))
+* parallel run 7 — composite 77, TCR 85%, 4/5 complete (best ever) ([1b7352a](https://github.com/NorthlandPositronics/Cogtrix/commit/1b7352a55ac5eb71b79584cc7a3c801c0dc5ccea))
+* parallel run 8 — composite 80, 9/10 metrics at target, DLE passes ([4025c49](https://github.com/NorthlandPositronics/Cogtrix/commit/4025c490859908e0a32a759caf9f8612fe4a5520))
+* update CLAUDE.md with task complexity, checkpoint, stuck detection ([7fd30f0](https://github.com/NorthlandPositronics/Cogtrix/commit/7fd30f04d4f6ae3975c7a27b58cc03ec01fd40b2))
+
 ## [0.2.3](https://github.com/NorthlandPositronics/Cogtrix/compare/v0.2.2...v0.2.3) (2026-04-03)
 
 

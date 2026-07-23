@@ -599,6 +599,7 @@ def create_request_tools_tool(
     active_names: set[str] | None = None,
     protected_names: set[str] | None = None,
     tool_index: Any = None,
+    denials: set[str] | None = None,
 ) -> Any:
     """
     Create the ``request_tools`` meta-tool.
@@ -699,11 +700,18 @@ def create_request_tools_tool(
                 f"Tools loaded: {', '.join(loaded_parts)}. They are now active and ready to use."
             )
         if invalid_add:
+            _denials = denials or set()
             already_active = [n for n in invalid_add if n in _active]
-            truly_unknown = [n for n in invalid_add if n not in _active]
+            disabled = [n for n in invalid_add if n not in _active and n in _denials]
+            truly_unknown = [n for n in invalid_add if n not in _active and n not in _denials]
             if already_active:
                 parts.append(
                     f"Already active: {', '.join(already_active)}. You can use them directly."
+                )
+            if disabled:
+                parts.append(
+                    f"Disabled tools: {', '.join(disabled)}. "
+                    "These were disabled during this session and cannot be re-loaded."
                 )
             if truly_unknown:
                 parts.append(

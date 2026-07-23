@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from enum import Enum, auto
 from typing import Any
 
 from src.logging_config import get_logger
@@ -1298,3 +1299,95 @@ def prompt_requests_action(prompt: str) -> bool:
     # Require verb and target within 80 chars to avoid false positives
     # like "analyze the code changes" matching "chang" + "code"
     return abs(verb_match.start() - target_match.start()) < 80
+
+
+# ── Task complexity classification ────────────────────────────────────────
+
+
+class TaskComplexity(Enum):
+    SIMPLE = auto()
+    MODERATE = auto()
+    COMPLEX_ACTION = auto()
+    COMPLEX_RESEARCH = auto()
+
+
+# Action verbs that signal expensive build/install/deploy work.
+_COMPLEX_ACTION_VERBS = re.compile(
+    r"\b(?:build|compile|install|deploy|set\s+up|configure|scaffold|provision"
+    r"|migrate|bootstrap|assemble)\b",
+    re.IGNORECASE,
+)
+
+# High-cost targets that together with an action verb flag COMPLEX_ACTION.
+_COMPLEX_ACTION_TARGETS = re.compile(
+    r"\b(?:from\s+source|container|docker|binutils|toolchain|compiler|binary"
+    r"|binaries|cmake|makefile|autoconf|database|schema\s+migration|ci/cd"
+    r"|pipeline|server|locally)\b",
+    re.IGNORECASE,
+)
+
+# Research-depth language that flags COMPLEX_RESEARCH.
+_COMPLEX_RESEARCH_PATTERNS = re.compile(
+    r"""
+    \b(?:
+        holistic
+      | comprehensive\s+(?:\w+\s+)?(?:analysis|research|review|comparison|overview|study|report)
+      | from\s+(?:multiple|different|various)\s+(?:angles|perspectives|viewpoints)
+      | in-depth\s+(?:analysis|research|review|study)
+      | all\s+aspects
+      | thorough\s+(?:analysis|research|review|investigation)
+      | compare\s+and\s+contrast
+      | pros\s+and\s+cons\s+of\s+\d+
+    )\b
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
+# Simple action-verb words for the SIMPLE gate (reuses existing ACTION_VERBS stems).
+_SIMPLE_ACTION_GATE = re.compile(
+    r"\b(?:build|compile|install|deploy|set\s+up|configure|scaffold|provision"
+    r"|migrate|bootstrap|assemble|creat|writ|generat|implement|produc|sav"
+    r"|mak|configur|adapt|prepar|fix|updat|modif|chang|patch|refactor"
+    r"|append|insert|replac|search|read|summar|explain|list|analyz|analys"
+    r"|find|look|fetch|show|run|execut|check|review|test|debug|compar"
+    r"|translat|convert|calculat|evaluat|describ|summar)\w*\b",
+    re.IGNORECASE,
+)
+
+# Research keywords for the SIMPLE gate.
+_SIMPLE_RESEARCH_GATE = re.compile(
+    r"\b(?:holistic|comprehensive|in-depth|thorough|all\s+aspects)\b",
+    re.IGNORECASE,
+)
+
+
+def classify_task_complexity(prompt: str) -> TaskComplexity:
+    """Classify prompt complexity for adaptive execution strategy.
+
+    Returns:
+        COMPLEX_ACTION   — build/install/deploy task with a high-cost target
+                           within 80 chars (raises step limit).
+        COMPLEX_RESEARCH — multi-angle holistic research language
+                           (auto-triggers delegation).
+        SIMPLE           — very short prompt with no action verb or research
+                           keyword (fast-path; skip delegation/step bump).
+        MODERATE         — everything else.
+    """
+    verb_match = _COMPLEX_ACTION_VERBS.search(prompt)
+    if verb_match:
+        target_match = _COMPLEX_ACTION_TARGETS.search(prompt)
+        if target_match and abs(verb_match.start() - target_match.start()) < 80:
+            return TaskComplexity.COMPLEX_ACTION
+
+    if _COMPLEX_RESEARCH_PATTERNS.search(prompt):
+        return TaskComplexity.COMPLEX_RESEARCH
+
+    words = prompt.split()
+    if (
+        len(words) <= 12
+        and not _SIMPLE_ACTION_GATE.search(prompt)
+        and not _SIMPLE_RESEARCH_GATE.search(prompt)
+    ):
+        return TaskComplexity.SIMPLE
+
+    return TaskComplexity.MODERATE

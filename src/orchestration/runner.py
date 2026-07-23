@@ -21,7 +21,9 @@ from src.orchestration.compression import (
     apply_message_compression,
 )
 from src.orchestration.graph import DEFAULT_RECURSION_LIMIT, build_agent_graph
+from src.orchestration.intent import TaskComplexity, classify_task_complexity
 from src.orchestration.run_config import AgentRunConfig
+from src.tools.extend_run import ExtendRunState
 
 # Persistent caches that survive across graph rebuilds.
 # _persistent_bound_cache stores LLM bind_tools() results (expensive to recreate).
@@ -522,6 +524,143 @@ def log_tool_calls_from_result(result: dict, prior_count: int = 0) -> None:
                     _tool_logger.on_tool_end(tool_name, output_str, call_id=tool_call_id)
 
 
+_EXTEND_CONTINUE_LIMIT = 300  # step budget for continuation after extend_run(mode="continue")
+_EXTEND_DELEGATE_LIMIT = 50  # small budget for synthesis after delegation results arrive
+
+
+def _handle_extend_run(
+    extend_state: ExtendRunState,
+    graph: Any,
+    result: dict,
+    input_messages: list,
+    invoke_config: dict,
+    config: Any,
+    callbacks: list | None,
+    log: Any,
+) -> str:
+    """Handle mid-run extension requests from the extend_run tool.
+
+    Two modes:
+    - **continue**: re-invoke the graph with a higher step limit so the agent
+      can keep working sequentially.
+    - **delegate**: run the requested subtasks via ``delegate_parallel``, then
+      re-invoke the graph with the combined results so the agent synthesizes.
+    """
+    from src.orchestration.phases import force_delegation
+
+    mode = extend_state.mode
+    log.info(
+        "Mid-run extension requested: mode=%s, subtasks=%d, reason=%s",
+        mode,
+        len(extend_state.subtasks),
+        extend_state.reason,
+    )
+
+    messages_so_far = list(result.get("messages", input_messages))
+
+    if mode == "delegate" and extend_state.subtasks:
+        # ── Delegation mode: run subtasks in parallel, then synthesize ──
+        try:
+            # Build context from what the agent has done so far
+            agent_context = extract_response(result, log) or ""
+            tool_context = build_tool_results_response(result) or ""
+
+            # Use force_delegation with subtask hints baked into the prompt
+            subtask_list = "\n".join(
+                f"  {i + 1}. {task}" for i, task in enumerate(extend_state.subtasks)
+            )
+            delegation_prompt = (
+                f"The agent has been working on a complex task and identified these "
+                f"independent subtasks that should run in parallel:\n\n{subtask_list}\n\n"
+                f"Context from the agent's work so far:\n{agent_context[:2000]}"
+            )
+            delegation_result = force_delegation(
+                delegation_prompt,
+                agent_context,
+                tool_context,
+                config,
+                log,
+                llm=config.llm,
+            )
+            if delegation_result and delegation_result.strip():
+                log.info("Delegation produced %d chars of results", len(delegation_result))
+                # Feed delegation results back to the agent for synthesis
+                try:
+                    from langchain_core.messages import HumanMessage as HM
+
+                    messages_so_far.append(
+                        HM(
+                            content=(
+                                f"Sub-agent delegation results:\n\n{delegation_result}\n\n"
+                                "Please synthesize these results into a complete, coherent "
+                                "response. Combine the findings and provide your final answer."
+                            )
+                        )
+                    )
+                except ImportError:
+                    pass  # langchain_core not installed — skip delegation context injection
+
+                # Re-invoke with a small budget for synthesis
+                synth_config = dict(invoke_config)
+                synth_config["recursion_limit"] = _EXTEND_DELEGATE_LIMIT
+                try:
+                    synth_result: dict = {"messages": messages_so_far}
+                    for chunk in graph.stream(
+                        {"messages": messages_so_far},
+                        config=synth_config,
+                        stream_mode="values",
+                    ):
+                        if isinstance(chunk, dict) and "messages" in chunk:
+                            synth_result = chunk
+                    synth_response = extract_response(synth_result, log)
+                    if synth_response:
+                        return synth_response
+                except RecursionError:
+                    log.warning("Recursion limit during delegation synthesis; using raw results")
+                # Fallback: return the raw delegation results
+                return delegation_result
+        except Exception as e:
+            log.warning("Delegation in extend_run failed: %s", e, exc_info=True)
+            # Fall through to continuation mode
+
+    # ── Continue mode: re-invoke with a higher step limit ──────────
+    log.info("Continuing with extended step limit of %d", _EXTEND_CONTINUE_LIMIT)
+    try:
+        from langchain_core.messages import HumanMessage as HM
+
+        messages_so_far.append(
+            HM(content="Your step budget has been extended. Continue working on the task.")
+        )
+    except ImportError:
+        pass  # langchain_core not installed — skip extension message
+
+    continue_config = dict(invoke_config)
+    continue_config["recursion_limit"] = _EXTEND_CONTINUE_LIMIT
+    if callbacks:
+        continue_config["callbacks"] = callbacks
+
+    try:
+        continue_result: dict = {"messages": messages_so_far}
+        for chunk in graph.stream(
+            {"messages": messages_so_far},
+            config=continue_config,
+            stream_mode="values",
+        ):
+            if isinstance(chunk, dict) and "messages" in chunk:
+                continue_result = chunk
+
+        response = extract_response(continue_result, log)
+        if response:
+            return response
+    except RecursionError:
+        log.warning("Extended run also hit recursion limit")
+
+    # Final fallback
+    from src.orchestration.phases import recover_from_step_limit
+
+    return recover_from_step_limit(graph, result, input_messages, invoke_config, log)
+
+
 def run_agent(
     user_input: str,
     history_messages: list,
@@ -606,7 +745,43 @@ def run_agent(
     _compression_min_chars = config.compression_min_chars
 
     if recursion_limit is None:
-        recursion_limit = DEFAULT_RECURSION_LIMIT
+        _complexity = classify_task_complexity(user_input)
+        if _complexity == TaskComplexity.COMPLEX_ACTION:
+            recursion_limit = 300  # ~150 tool-call cycles for builds/installs
+            get_logger().info(
+                "Complex action task detected — raising step limit to %d", recursion_limit
+            )
+        elif _complexity == TaskComplexity.COMPLEX_RESEARCH:
+            recursion_limit = 200  # research tasks may need extra rounds too
+            get_logger().info(
+                "Complex research task detected — raising step limit to %d", recursion_limit
+            )
+        else:
+            recursion_limit = DEFAULT_RECURSION_LIMIT
+
+        # Auto-load search_web for complex tasks so the agent has web
+        # search available from the first round without needing to call
+        # request_tools.  Addresses RBA (Research-Before-Action) gap where
+        # agents skip loading search when they're confident in training data.
+        if _complexity in (TaskComplexity.COMPLEX_ACTION, TaskComplexity.COMPLEX_RESEARCH):
+            _avail = config.available_tools
+            _active = config.active_tools_list
+            if _avail and _active is not None and "search_web" in _avail:
+                _active_names_set = {getattr(t, "name", "") for t in _active}
+                if "search_web" not in _active_names_set:
+                    _search_tool = _avail.pop("search_web")
+                    # Resolve LazyToolProxy before adding to active tools —
+                    # bind_tools() requires real StructuredTool objects.
+                    if hasattr(_search_tool, "_resolve"):
+                        try:
+                            _search_tool = _search_tool._resolve()
+                        except Exception:
+                            # Resolution failed — put it back and skip
+                            _avail["search_web"] = _search_tool
+                            _search_tool = None
+                    if _search_tool is not None:
+                        _active.append(_search_tool)
+                        get_logger().info("Auto-loaded search_web for complex task")
     if _compression_min_age is None:
         _compression_min_age = COMPRESSION_MIN_AGE_CYCLES
     if _compression_min_chars is None:
@@ -640,6 +815,10 @@ def run_agent(
                 elif isinstance(msg, dict) and "content" in msg:
                     content = msg["content"]
                 log.debug("  [%d] %s: %s", i, msg_type, content)
+
+        # Mid-run self-extension is handled automatically by stuck detection
+        # and checkpoint-based detection in the graph (no agent-facing tool needed).
+        _extend_state = ExtendRunState()
 
         invoke_config: dict[str, Any] = {"recursion_limit": recursion_limit}
         if callbacks:
@@ -790,6 +969,18 @@ def run_agent(
                 result_messages.extend(result.get("messages", []))
 
             if hit_recursion_limit:
+                # ── Mid-run extension: continue or delegate ──────────────
+                if _extend_state.requested:
+                    return _handle_extend_run(
+                        _extend_state,
+                        graph,
+                        result,
+                        input_messages,
+                        invoke_config,
+                        config,
+                        callbacks,
+                        log,
+                    )
                 return recover_from_step_limit(graph, result, input_messages, invoke_config, log)
 
             response = extract_response(result, log, prior_count=prior_msg_count)

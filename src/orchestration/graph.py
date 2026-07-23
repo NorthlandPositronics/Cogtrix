@@ -424,6 +424,54 @@ def _correct_tool_args(tool: Any, args: dict) -> dict:
 
     corrected = dict(args)
 
+    # --- Alias resolution -------------------------------------------------
+    # Pydantic aliases (Field(alias=...)) are not visible as field names.
+    # Map known aliases to their canonical field name so LLMs that send the
+    # alias (e.g. "cmd" instead of "command") get corrected before fuzzy match.
+    alias_map: dict[str, str] = {}
+    for fname, finfo in expected.items():
+        _alias = getattr(finfo, "alias", None)
+        if _alias and _alias != fname:
+            alias_map[_alias] = fname
+        # Also check validation_alias (Pydantic v2)
+        _valias = getattr(finfo, "validation_alias", None)
+        if isinstance(_valias, str) and _valias != fname:
+            alias_map[_valias] = fname
+
+    for alias_key, canonical in alias_map.items():
+        if alias_key in corrected and canonical not in corrected:
+            corrected[canonical] = corrected.pop(alias_key)
+            log = get_logger()
+            log.info("Tool arg alias resolved: '%s' → '%s'", alias_key, canonical)
+
+    # --- Well-known parameter variations ────────────────────────────
+    # LLMs frequently use common synonyms that fall below the fuzzy
+    # threshold (0.75).  Explicit remaps for the most common cases.
+    _WELL_KNOWN_REMAPS: dict[str, str] = {
+        "filename": "path",
+        "file_path": "path",
+        "filepath": "path",
+        "file_name": "path",
+        "file_content": "content",
+        "text": "content",
+        "body": "content",
+        "cmd": "command",
+        "query_string": "query",
+        "search_query": "query",
+        "dir": "path",
+        "directory": "path",
+    }
+    for provided_key in list(corrected.keys()):
+        if provided_key in expected_names:
+            continue  # already matches a field — skip
+        canonical = _WELL_KNOWN_REMAPS.get(provided_key)
+        if canonical and canonical in expected_names and canonical not in corrected:
+            corrected[canonical] = corrected.pop(provided_key)
+            log = get_logger()
+            log.info("Tool arg well-known remap: '%s' → '%s'", provided_key, canonical)
+
+    provided_names = set(corrected.keys())
+
     # --- Name remapping ---------------------------------------------------
     unknown = provided_names - expected_names
     missing = expected_names - provided_names
@@ -531,6 +579,8 @@ def build_agent_graph(
     from langchain_core.runnables import RunnableConfig
     from langgraph.graph import END, StateGraph
 
+    _model_timeout = 180  # default LLM request timeout (seconds)
+
     if config is not None:
         if config.llm is not None:
             llm = config.llm
@@ -555,6 +605,7 @@ def build_agent_graph(
         parallel_tool_execution = config.parallel_tool_execution
         git_native = config.git_native
         context_compression = config.context_compression
+        _model_timeout = getattr(config, "llm_timeout", 180)
         if config.compression_llm is not None:
             compression_llm = config.compression_llm
         if config.compression_min_age is not None:
@@ -606,6 +657,16 @@ def build_agent_graph(
         "cancel_scheduled_message",
         "defer_processing",
         "suppress_reply",
+        # Action tools that naturally require many sequential calls for
+        # complex tasks (building software, multi-file edits, etc.).
+        # The budget is designed to prevent runaway *search* loops, not
+        # to throttle legitimate action sequences.
+        "execute_shell_command",
+        "write_file",
+        "append_file",
+        "patch_file",
+        # Progress tracking — must always be callable.
+        "checkpoint",
     }
     _DUPLICATE_EXEMPT = {
         "request_tools",
@@ -630,6 +691,26 @@ def build_agent_graph(
     _bound_cache_lock = threading.Lock()
     _tool_version = [0]
     _last_tool_version = [-1]
+    _REFLECTION_INTERVAL = 10  # inject reflection every N call_model cycles
+    _last_reflection_at = [0]
+
+    # ── Stuck detection ───────────────────────────────────────────────
+    # Tracks consecutive tool calls that produce errors.  When the count
+    # reaches _STUCK_THRESHOLD, the next call_model invokes the LLM
+    # WITHOUT tools (forced thinking break) so the model must produce
+    # a text-only Chain-of-Thought response before it can resume tool use.
+    _STUCK_THRESHOLD = 5  # consecutive error results before forcing a break
+    _STUCK_NO_CHECKPOINT_THRESHOLD = [15]  # mutable — scaled on first call_model
+    _STUCK_THRESHOLD_CALIBRATED = [False]
+    _consecutive_errors = [0]
+    _force_thinking_break = [False]
+    _last_checkpoint_count = [0]
+    _rounds_since_checkpoint = [0]
+    _calls_since_last_checkpoint = [0]  # tool calls since last checkpoint
+    _CHECKPOINT_NUDGE_INTERVAL = 8  # nudge after N tool calls without checkpoint
+    _same_file_writes: dict[str, int] = {}  # track repeated writes to same file
+    _REWRITE_SEARCH_THRESHOLD = 2  # search reminder after N writes to same file
+
     _cached_fingerprint: list[tuple[str, ...]] = [()]
     output_cap = (
         compute_tool_output_cap(max_context_tokens)
@@ -648,6 +729,18 @@ def build_agent_graph(
     _compression_cache: dict[str, str] = (
         compression_cache_in if compression_cache_in is not None else {}
     )
+
+    # ── Checkpoint store ──────────────────────────────────────────────
+    from src.tools.checkpoint import CheckpointStore, create_checkpoint_tool
+
+    _checkpoint_store: CheckpointStore = CheckpointStore()
+    _checkpoint_tool = create_checkpoint_tool(_checkpoint_store)
+    if _checkpoint_tool is not None and active_tools_list is not None:
+        _existing_names = {getattr(t, "name", "") for t in active_tools_list}
+        if "checkpoint" not in _existing_names:
+            active_tools_list.append(_checkpoint_tool)
+            _active_names.add("checkpoint")
+            _tool_lookup["checkpoint"] = _checkpoint_tool
 
     _graph_log = get_logger()
 
@@ -705,6 +798,33 @@ def build_agent_graph(
             actual_input_tokens=last_tokens,
         )
 
+    # ── LLM call with timeout ─────────────────────────────────────
+    # Prevents indefinite hangs when the LLM backend disconnects.
+    _LLM_RETRY_TIMEOUT = 300  # seconds — retry timeout after first attempt fails
+
+    def _invoke_with_timeout(_model: Any, _messages: list, _cfg: Any, _timeout: int) -> Any:
+        import concurrent.futures as _cf
+
+        with _cf.ThreadPoolExecutor(max_workers=1) as _pool:
+            _fut = _pool.submit(_model.invoke, _messages, _cfg)
+            try:
+                return _fut.result(timeout=_timeout)
+            except _cf.TimeoutError:
+                _graph_log.warning(
+                    "LLM call timed out after %ds — retrying with %ds timeout",
+                    _timeout,
+                    _LLM_RETRY_TIMEOUT,
+                )
+                _fut2 = _pool.submit(_model.invoke, _messages, _cfg)
+                try:
+                    return _fut2.result(timeout=_LLM_RETRY_TIMEOUT)
+                except _cf.TimeoutError as _te:
+                    raise RuntimeError(
+                        f"LLM backend not responding (timed out after "
+                        f"{_timeout}s + {_LLM_RETRY_TIMEOUT}s retry). "
+                        "Check the model server connection."
+                    ) from _te
+
     def call_model(state: CogtrixState, config: RunnableConfig) -> dict:
         if llm is None:
             raise RuntimeError(
@@ -737,10 +857,181 @@ def build_agent_graph(
         # before every model.invoke() — catches mid-turn context growth that
         # the previous token-based check (using stale _last_input_tokens) would miss.
         msgs = _maybe_compress(msgs)
+
+        # ── Calibrate stuck threshold on first call ─────────────────
+        # Scale the checkpoint-based stuck threshold based on the user's
+        # prompt complexity.  COMPLEX_ACTION tasks need more room.
+        if not _STUCK_THRESHOLD_CALIBRATED[0] and call_count[0] == 1:
+            _STUCK_THRESHOLD_CALIBRATED[0] = True
+            from src.orchestration.intent import (
+                TaskComplexity as _TC,
+            )
+            from src.orchestration.intent import (
+                classify_task_complexity as _classify_tc,
+            )
+
+            _user_text = ""
+            for _m in msgs:
+                if hasattr(_m, "type") and _m.type == "human":
+                    _user_text = getattr(_m, "content", "")
+                    break
+            _tc = _classify_tc(_user_text)
+            if _tc == _TC.COMPLEX_ACTION:
+                _STUCK_NO_CHECKPOINT_THRESHOLD[0] = 35
+            elif _tc == _TC.COMPLEX_RESEARCH:
+                _STUCK_NO_CHECKPOINT_THRESHOLD[0] = 20
+            else:
+                _STUCK_NO_CHECKPOINT_THRESHOLD[0] = 20
+            _graph_log.debug(
+                "Stuck threshold calibrated to %d (complexity=%s)",
+                _STUCK_NO_CHECKPOINT_THRESHOLD[0],
+                _tc.name,
+            )
+
+        # ── Checkpoint nudge ──────────────────────────────────────────
+        # Check BEFORE checkpoint injection/reset so the counter
+        # reflects the state since the LAST checkpoint, not after reset.
+        if _calls_since_last_checkpoint[0] >= _CHECKPOINT_NUDGE_INTERVAL and call_count[0] > 3:
+            _graph_log.info(
+                "Checkpoint nudge fired (calls_since=%d, round=%d)",
+                _calls_since_last_checkpoint[0],
+                call_count[0],
+            )
+            msgs.append(
+                HumanMessage(
+                    content=(
+                        "[Checkpoint reminder] You've made several actions without "
+                        "recording a checkpoint. Use the checkpoint tool now to record "
+                        "what you've accomplished or learned since your last checkpoint."
+                    )
+                )
+            )
+            _calls_since_last_checkpoint[0] = 0  # reset after nudge
+
+        # ── Checkpoint injection ──────────────────────────────────────
+        # Prepend recorded findings so the LLM always sees them,
+        # regardless of context compression.
+        if _checkpoint_store is not None and len(_checkpoint_store) > 0:
+            _ckpt_summary = _checkpoint_store.summary()
+            if _ckpt_summary:
+                msgs.append(HumanMessage(content=_ckpt_summary))
+
+        # ── Checkpoint-based stuck detection ──────────────────────────
+        # If the agent goes _STUCK_NO_CHECKPOINT_THRESHOLD rounds without
+        # recording a new checkpoint, it's likely stuck in a loop.
+        if _checkpoint_store is not None:
+            current_ckpt_count = len(_checkpoint_store)
+            if current_ckpt_count > _last_checkpoint_count[0]:
+                _last_checkpoint_count[0] = current_ckpt_count
+                _rounds_since_checkpoint[0] = 0
+                _calls_since_last_checkpoint[0] = 0
+            else:
+                _rounds_since_checkpoint[0] += 1
+                _threshold = _STUCK_NO_CHECKPOINT_THRESHOLD[0]
+                if _rounds_since_checkpoint[0] >= _threshold and call_count[0] > _threshold:
+                    _force_thinking_break[0] = True
+                    _rounds_since_checkpoint[0] = 0
+                    _graph_log.info(
+                        "No new checkpoints in %d rounds — forcing thinking break",
+                        _threshold,
+                    )
+
+        # ── Forced thinking break (stuck detection) ───────────────────
+        # When the agent has produced _STUCK_THRESHOLD consecutive error
+        # results OR gone too long without a checkpoint, strip all tools
+        # for one LLM round so the model MUST produce a text-only
+        # Chain-of-Thought response.
+        if _force_thinking_break[0]:
+            _force_thinking_break[0] = False
+            _consecutive_errors[0] = 0
+            _graph_log.info("Stuck detected — forcing thinking break (no tools for this round)")
+            msgs.append(
+                HumanMessage(
+                    content=(
+                        "[THINKING BREAK — tools temporarily disabled]\n"
+                        "You have been repeating similar actions that keep failing. "
+                        "STOP and think carefully:\n\n"
+                        "1. Review your checkpoints — what has actually WORKED so far?\n"
+                        "2. What approaches have FAILED and WHY? List each failed category.\n"
+                        "3. Have you SEARCHED THE WEB? If not, your first action after this "
+                        'break MUST be: request_tools(add=["search_web"]) then search.\n'
+                        "4. List exactly THREE categorically different strategies you "
+                        "haven't tried. 'Different category' means a completely different "
+                        "method — not the same method with a different URL or version.\n\n"
+                        "Write out your analysis and pick ONE of your three strategies. "
+                        "Do NOT guess URLs — search for real ones. "
+                        "Your tools will be restored after this response."
+                    )
+                )
+            )
+            # Call LLM WITHOUT tools — forces a text-only response
+            think_messages = [_sys_msg, *msgs] if _sys_msg is not None else list(msgs)
+            _cm_t1 = time.monotonic()
+            try:
+                response = _invoke_with_timeout(llm, think_messages, config, 180)
+            except RuntimeError:
+                _graph_log.warning("LLM timed out during thinking break")
+                return {"messages": []}
+            if is_trace():
+                _graph_log.debug(
+                    "⏱ call_model thinking_break: %.0fms",
+                    (time.monotonic() - _cm_t1) * 1000,
+                )
+            return {"messages": [response]}
+
+        # ── Periodic reflection (Chain of Thought) ────────────────────
+        # Every _REFLECTION_INTERVAL tool-call cycles, inject a prompt
+        # asking the agent to assess progress and plan next steps.
+        # Context-aware: if recent errors detected, use debug-specific prompt.
+        if (
+            call_count[0] > 1
+            and call_count[0] % _REFLECTION_INTERVAL == 0
+            and call_count[0] != _last_reflection_at[0]
+        ):
+            _last_reflection_at[0] = call_count[0]
+            if _consecutive_errors[0] >= 2:
+                # Debug-mode reflection
+                msgs.append(
+                    HumanMessage(
+                        content=(
+                            "[Debug cycle check] You've had recent errors. Before continuing:\n"
+                            "1. Read the EXACT error message from your last failed attempt.\n"
+                            "2. What SPECIFIC line or issue does it point to?\n"
+                            "3. Have you searched the web for that specific error or for a "
+                            "working reference implementation?\n"
+                            "4. Run ONLY the failing test case in isolation, not the full suite.\n"
+                            "5. Fix the ONE thing the error message identifies. Don't rewrite "
+                            "the whole file."
+                        )
+                    )
+                )
+            else:
+                msgs.append(
+                    HumanMessage(
+                        content=(
+                            "[Work cycle check] Before continuing:\n"
+                            "1. EVALUATE: What did your last actions achieve? "
+                            "Checkpoint any new findings.\n"
+                            "2. PLAN: What specific information do you still need? "
+                            "Write it out clearly.\n"
+                            "3. RESEARCH: Search for that specific information. After getting "
+                            "results, ask: do I have a SPECIFIC URL/command/answer, or just "
+                            "general info? If general → refine query and search again.\n"
+                            "4. ACT only when you have actionable specifics from research.\n"
+                            "Do NOT guess URLs or fill in details from memory — "
+                            "search until you have concrete answers."
+                        )
+                    )
+                )
+
         full_messages = [_sys_msg, *msgs] if _sys_msg is not None else list(msgs)
         _cm_t1 = time.monotonic()
+
+        # First call gets extra time for prompt eval; subsequent calls use model timeout
+        _LLM_TIMEOUT = _model_timeout if call_count[0] > 1 else max(_model_timeout, 300)
+
         try:
-            response = model.invoke(full_messages, config)
+            response = _invoke_with_timeout(model, full_messages, config, _LLM_TIMEOUT)
         except Exception as _invoke_exc:
             if not _is_context_overflow_error(_invoke_exc):
                 raise
@@ -761,7 +1052,7 @@ def build_agent_graph(
             )
             full_messages = [_sys_msg, *msgs] if _sys_msg is not None else list(msgs)
             try:
-                response = model.invoke(full_messages, config)
+                response = _invoke_with_timeout(model, full_messages, config, _LLM_RETRY_TIMEOUT)
             except Exception as _retry_exc:
                 raise RuntimeError(
                     f"Context overflow: unable to fit conversation into model context window "
@@ -932,9 +1223,11 @@ def build_agent_graph(
             count = _tool_call_counts.get(tool_name, 0) + 1
             _tool_call_counts[tool_name] = count
             if count > _TOOL_BUDGET_HARD:
-                # Remove from active set so the model can't call it again
+                # Remove from active set AND add to denials so the model
+                # can't re-load it via request_tools(add=[...])
                 _tool_lookup.pop(tool_name, None)
                 _active_names.discard(tool_name)
+                session_state.denials.add(tool_name)
                 _tool_version[0] += 1  # force bind_tools refresh
                 return ToolMessage(
                     content=(
@@ -1418,6 +1711,7 @@ def build_agent_graph(
                     tool_catalog,
                     active_names=active_names_ref,
                     protected_names=protected,
+                    denials=session_state.denials,
                 )
                 if rt:
                     active_tools_list.append(rt)
@@ -1459,6 +1753,109 @@ def build_agent_graph(
             result_msgs.append(
                 HumanMessage(content=" ".join(guidance_lines) + " Continue with your task.")
             )
+
+        # ── Track tool calls since last checkpoint ─────────────────
+        _calls_since_last_checkpoint[0] += len(
+            [m for m in result_msgs if isinstance(m, ToolMessage)]
+        )
+
+        # ── Repeated file-write detection ─────────────────────────────
+        # If the agent writes to the same file 3+ times, suggest
+        # searching for a working reference before rewriting again.
+        for call in getattr(state["messages"][-1], "tool_calls", None) or []:
+            _tname = call.get("name", "")
+            if _tname in ("write_file", "append_file"):
+                _fpath = call.get("args", {}).get("path", "")
+                if _fpath:
+                    _same_file_writes[_fpath] = _same_file_writes.get(_fpath, 0) + 1
+                    if _same_file_writes[_fpath] == _REWRITE_SEARCH_THRESHOLD:
+                        result_msgs.append(
+                            HumanMessage(
+                                content=(
+                                    f"[Rewrite detected] You've written to '{_fpath}' "
+                                    f"{_REWRITE_SEARCH_THRESHOLD} times. Before rewriting "
+                                    "again, search the web for a WORKING reference "
+                                    "implementation and adapt it instead of guessing."
+                                )
+                            )
+                        )
+            # Also detect shell-based file writes: heredocs, python open(), tee
+            if _tname == "execute_shell_command":
+                import re as _re
+
+                _cmd = call.get("args", {}).get("command", "")
+                _write_paths: list[str] = []
+                # cat > file, cat >> file
+                for _wm in _re.finditer(r"cat\s*>>?\s*(\S+)", _cmd):
+                    _write_paths.append(_wm.group(1))
+                # tee file, tee -a file
+                for _wm in _re.finditer(r"tee\s+(?:-a\s+)?(\S+)", _cmd):
+                    _write_paths.append(_wm.group(1))
+                # python open('file', 'w')
+                for _wm in _re.finditer(r"open\(['\"]([^'\"]+)['\"],\s*['\"]w", _cmd):
+                    _write_paths.append(_wm.group(1))
+                for _fpath in _write_paths:
+                    _same_file_writes[_fpath] = _same_file_writes.get(_fpath, 0) + 1
+                    if _same_file_writes[_fpath] == _REWRITE_SEARCH_THRESHOLD:
+                        result_msgs.append(
+                            HumanMessage(
+                                content=(
+                                    f"[Rewrite detected] You've written to '{_fpath}' "
+                                    f"{_REWRITE_SEARCH_THRESHOLD} times. Before "
+                                    "rewriting again: 1) Read the ERROR message from "
+                                    "your last attempt carefully. 2) Search the web for "
+                                    "a working reference. 3) Fix the SPECIFIC issue."
+                                )
+                            )
+                        )
+
+        # ── Stuck detection: count consecutive error results ──────────
+        _error_indicators = (
+            "Error",
+            "Failed",
+            "HTTP Error",
+            "404",
+            "not found",
+            "timed out",
+            "Traceback",
+            "exit code:",
+            "=> not found",
+            "Permission denied",
+            "No such file",
+            "cannot open",
+        )
+        _has_error = False
+        _has_success = False
+        for msg in result_msgs:
+            if isinstance(msg, ToolMessage):
+                content = msg.content if isinstance(msg.content, str) else ""
+                content_lower = content.lower()
+                if any(ind.lower() in content_lower for ind in _error_indicators):
+                    _has_error = True
+                # Detect genuine progress: file creation, version output, etc.
+                _success_indicators = (
+                    "success",
+                    "saved to",
+                    "extracted",
+                    "version",
+                    "checkpoint #",
+                    "confirmed working",
+                )
+                if any(si in content_lower for si in _success_indicators):
+                    _has_success = True
+        # Only count as stuck if there are errors AND no successes in
+        # this round — a round with mixed results is making progress.
+        if _has_error and not _has_success:
+            _consecutive_errors[0] += 1
+            if _consecutive_errors[0] >= _STUCK_THRESHOLD:
+                _force_thinking_break[0] = True
+                _graph_log.info(
+                    "Stuck threshold reached (%d consecutive errors) — "
+                    "will force thinking break on next call_model",
+                    _consecutive_errors[0],
+                )
+        else:
+            _consecutive_errors[0] = 0
 
         return {"messages": result_msgs}
 
@@ -1517,6 +1914,16 @@ def build_agent_graph(
         call_count[0] = 0
         _last_input_tokens[0] = 0
         request_tools_noop_count[0] = 0
+        _consecutive_errors[0] = 0
+        _force_thinking_break[0] = False
+        _last_reflection_at[0] = 0
+        _rounds_since_checkpoint[0] = 0
+        _last_checkpoint_count[0] = 0
+        _calls_since_last_checkpoint[0] = 0
+        _STUCK_THRESHOLD_CALIBRATED[0] = False
+        _STUCK_NO_CHECKPOINT_THRESHOLD[0] = 15
+        _same_file_writes.clear()
+        _checkpoint_store.clear()
         _tool_call_counts.clear()
         with _history_lock:
             _tool_call_history.clear()

@@ -122,7 +122,7 @@ def create_chat_model(
     model: str | None = None,
     api_key: str | None = None,
     base_url: str | None = None,
-    temperature: float = 0,
+    temperature: float = 0.5,
     num_ctx: int | None = None,
     max_tokens: int | None = None,
     **kwargs: Any,
@@ -193,8 +193,16 @@ def create_chat_model_from_configs(
         model=model_config.model,
         api_key=provider_config.api_key,
         base_url=provider_config.get_base_url(),
-        temperature=model_config.temperature if model_config.temperature is not None else 0,
-        num_ctx=model_config.context_window if provider_config.type == "ollama" else None,
+        temperature=(
+            model_config.temperature
+            if model_config.temperature is not None
+            else model_config.DEFAULT_TEMPERATURE
+        ),
+        num_ctx=(
+            (model_config.context_window or model_config.DEFAULT_CONTEXT_WINDOW)
+            if provider_config.type == "ollama"
+            else None
+        ),
         max_tokens=model_config.max_tokens,
         streaming=streaming,
     )

@@ -68,7 +68,9 @@ from src.orchestration.intent import (  # noqa: F401
     DELEGATION_TRIGGERS,
     THINK_CATEGORIES,
     THINK_DEFAULT_CATEGORY,
+    TaskComplexity,
     ThinkCategory,
+    classify_task_complexity,
     classify_think_task,
     prompt_requests_action,
     user_wants_deep_think,
@@ -538,6 +540,10 @@ _active_milestones: list = []
 class _RichConfirmationUI:
     """ConfirmationUI implementation using Rich panels and stdin."""
 
+    # Keys hidden from the confirmation panel: LangChain tool_call envelope
+    # metadata and default-valued parameters that add noise.
+    _HIDDEN_KEYS = frozenset({"timeout", "type", "name", "id"})
+
     def render_prompt(
         self, tool_name: str, tool_input: dict, last_keys: frozenset[str], preview_limit: int
     ) -> None:
@@ -547,8 +553,23 @@ class _RichConfirmationUI:
                 return s
             return s[:preview_limit] + f"… ({len(s)} chars total)"
 
+        def _is_hidden(key: str, value: object) -> bool:
+            if key in self._HIDDEN_KEYS:
+                return True
+            if value is None or str(value).strip() in ("", "None"):
+                return True
+            return False
+
+        # Unwrap LangChain tool_call envelope if present
+        if (
+            isinstance(tool_input, dict)
+            and "args" in tool_input
+            and isinstance(tool_input["args"], dict)
+        ):
+            tool_input = tool_input["args"]
+
         if console:
-            params_lines = []
+            visible: list[tuple[str, object]] = []
             if isinstance(tool_input, dict) and tool_input:
                 sorted_keys = sorted(
                     tool_input.keys(),
@@ -556,47 +577,69 @@ class _RichConfirmationUI:
                 )
                 for key in sorted_keys:
                     value = tool_input[key]
-                    line = f"  [cyan]{key}:[/cyan] {_preview(value).replace('[', chr(92) + '[')}"
-                    params_lines.append(line)
-                params_text = "\n".join(params_lines)
-            elif tool_input:
-                params_text = f"  {_preview(tool_input).replace('[', chr(92) + '[')}"
-            else:
-                params_text = "  (none)"
+                    if not _is_hidden(key, value):
+                        visible.append((key, value))
 
-            warn = "[bold bright_yellow]WARNING:[/bold bright_yellow] "
-            exec_msg = f"Agent wants to execute: [bold]{tool_name}[/bold]\n\n"
-            params_msg = f"[dim]Parameters:[/dim]\n{params_text}\n"
+            if len(visible) == 1:
+                _, value = visible[0]
+                val_str = _preview(value).replace("[", chr(92) + "[")
+                params_text = f"  {val_str}"
+            elif visible:
+                lines = []
+                for key, value in visible:
+                    val_str = _preview(value).replace("[", chr(92) + "[")
+                    lines.append(f"  [dim cyan]{key:<18s}[/dim cyan] {val_str}")
+                params_text = "\n".join(lines)
+            else:
+                params_text = "  [dim](no parameters)[/dim]"
+
+            panel_title = Text()
+            panel_title.append(tool_name, style="bold cyan")
+            action_msg = "[bold white]Agent wants to execute:[/bold white]"
             hint_msg = (
-                "\n[dim]"
-                "[[bold white]y[/bold white]] allow once  "
-                "[[bold white]n[/bold white]] deny  "
-                "[[bold yellow]a[/bold yellow]] allow always  "
-                "[[bold red]d[/bold red]] disable tool  "
-                "[[bold red]f[/bold red]] forbid all  "
-                "[[bold white]c[/bold white]] cancel"
-                "[/dim]\n"
+                "[bright_green underline]Y[/bright_green underline][white]es[/white]  "
+                "[bright_red underline]N[/bright_red underline][white]o[/white]  "
+                "[bright_yellow underline]A[/bright_yellow underline][white]llow all[/white]  "
+                "[bright_red underline]D[/bright_red underline][white]isable[/white]  "
+                "[bright_red underline]F[/bright_red underline][white]orbid all[/white]  "
+                "[bright_red underline]C[/bright_red underline][white]ancel[/white]"
             )
-            markup = f"{warn}{exec_msg}{params_msg}{hint_msg}"
-            content = Text.from_markup(markup)
-            console.print(Panel(content, title="Tool Execution Request", border_style="yellow"))
+            full_body = action_msg + "\n\n" + params_text + "\n\n" + hint_msg
+            console.print()
+            console.print(
+                Panel(
+                    Text.from_markup(full_body),
+                    title=panel_title,
+                    border_style="cyan",
+                    padding=(1, 2),
+                )
+            )
         else:
-            print(f"\nWARNING: Agent wants to execute: {tool_name}")
-            if isinstance(tool_input, dict):
+            print(f"\n--- {tool_name} ---")
+            if isinstance(tool_input, dict) and tool_input:
                 sorted_keys_p = sorted(
                     tool_input.keys(),
                     key=lambda k: (k in last_keys, len(str(tool_input[k]))),
                 )
-                for key in sorted_keys_p:
-                    print(f"  {key}: {_preview(tool_input[key])}")
+                visible_p = [
+                    (k, tool_input[k]) for k in sorted_keys_p if not _is_hidden(k, tool_input[k])
+                ]
+                if len(visible_p) == 1:
+                    _, value = visible_p[0]
+                    print(f"  {_preview(value)}")
+                elif visible_p:
+                    for key, value in visible_p:
+                        print(f"  {key:<18s} {_preview(value)}")
+                else:
+                    print("  (no parameters)")
+            elif tool_input:
+                print(f"  {_preview(tool_input)}")
             else:
-                print(f"Input: {_preview(tool_input)}")
-            print(
-                "  [y] allow once  [n] deny  [a] allow always  [d] disable tool  [f] forbid all  [c] cancel"
-            )
+                print("  (no parameters)")
+            print("  Yes  No  Allow all  Disable  Forbid all  Cancel")
 
     def read_choice(self) -> str:
-        return input("  Choice [y/n/a/d/f/c]: ")
+        return input("> ")
 
     def show_message(self, message: str, style: str) -> None:
         if console:
@@ -4792,9 +4835,12 @@ def run_single_prompt(
                         _spinner.stop()
 
         # ── Enforce delegation when the query warrants it ────────
+        # Skip if the model already produced a substantial response.
+        _resp_substantial = len(output or "") > 500
         if (
             not wants_deep
             and output
+            and not _resp_substantial
             and config is not None
             and getattr(config, "delegate_enabled", False)
             and user_wants_delegation(original_input)
@@ -5092,9 +5138,9 @@ def main():
         log_file_display = config.log_file or "cogtrix.log"
         debug_str = " (debug)" if config.debug else ""
         if console is not None:
-            console.print(f"  [dim]Logging to: {log_file_display}{debug_str}[/dim]")
+            console.print(f"[dim]Logging to: {log_file_display}{debug_str}[/dim]")
         else:
-            print(f"  Logging to: {log_file_display}{debug_str}")
+            print(f"Logging to: {log_file_display}{debug_str}")
 
     # Dump full resolved config at DEBUG level
     config.dump_debug(log)
@@ -6800,6 +6846,23 @@ def main():
                 )
 
                 wants_deep = user_wants_deep_think(original_input)
+                _task_complexity_i = classify_task_complexity(original_input)
+
+                # Auto-promote COMPLEX_RESEARCH to delegation when user has not
+                # already requested deep thinking or explicit delegation.
+                if (
+                    not wants_deep
+                    and not user_wants_delegation(original_input)
+                    and _task_complexity_i == TaskComplexity.COMPLEX_RESEARCH
+                ):
+                    log.info("Complex research task detected — auto-promoting to delegation")
+                    # Delegate pipeline is triggered via the post-run check that
+                    # calls force_delegation when user_wants_delegation returns True.
+                    # Override original_input delegation signal by mutating the flag
+                    # directly in the post-run condition via a closure variable.
+                    _auto_delegation_i = True
+                else:
+                    _auto_delegation_i = False
 
                 # Auto model routing: use fast LLM for simple queries
                 _routed_llm = llm
@@ -6960,10 +7023,13 @@ def main():
                                 _spinner.stop()
 
                 # ── Enforce delegation when the query warrants it ──
+                # Skip if the model already produced a substantial response.
+                _resp_substantial_i = len(output or "") > 500
                 if (
                     not wants_deep
                     and output
-                    and user_wants_delegation(original_input)
+                    and not _resp_substantial_i
+                    and (user_wants_delegation(original_input) or _auto_delegation_i)
                     and not was_delegation_called(agent_msgs)
                     and config.delegate_enabled
                 ):

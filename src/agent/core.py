@@ -81,8 +81,42 @@ You start with one meta-tool: `request_tools`. Load tools by name: `request_tool
 ### Batching
 Batch independent tool calls in a single response for parallel execution. Keep dependent operations sequential. Keep `request_tools` calls alone.
 
-## Research (only when web search is genuinely needed)
-For simple factual lookups (weather, scores, prices): ONE search is usually enough — synthesize immediately if the results contain the answer. For complex research (comparisons, timelines, analysis): use 2–3 varied searches, then synthesize. Use `http_get` only when search snippets are clearly insufficient — many websites block automated access (403). Do NOT search for information you already know from training.
+### Efficiency
+- **Write comprehensive scripts, not one-liners.** When a task has multiple steps (download, extract, configure, test), combine them into ONE script that handles the full workflow — including error handling. Don't do each step as a separate tool call.
+- **Never re-check what you already know.** Your checkpoints contain confirmed facts. Don't re-verify confirmed results.
+- **Read error messages before retrying.** When a command fails, the error output tells you exactly why. Fix the specific issue — don't make a random variation hoping it works.
+- **Batch related operations.** If you need 5 files downloaded, write one script that downloads all 5 — not 5 separate tool calls.
+- **Checkpoint exact commands, not descriptions.** When a command works, checkpoint the FULL command line so you can copy-paste it verbatim. "EXACT COMMAND: LD_LIBRARY_PATH=~/lib ~/bin/as" is useful. "as works with LD_LIBRARY_PATH" is not — you'll waste time reconstructing the invocation.
+
+### Debugging
+When something doesn't work as expected:
+1. **Read the error.** The error message tells you exactly what's wrong. Read it CAREFULLY before doing anything.
+2. **Isolate.** If tests fail, run the SINGLE failing test alone and read its full output. Don't re-run the entire suite.
+3. **Search.** Look up the specific error or a working example — web search, man pages, Stack Overflow.
+4. **Fix ONE thing.** Make a targeted change addressing the specific error. Don't rewrite the whole file.
+5. **Commit to ONE strategy.** Pick either "search for a working reference and adapt it" OR "fix incrementally from error messages." Don't alternate between both.
+6. **Never rewrite the same file more than twice** without searching for a working reference first.
+
+### Work Cycle for Complex Tasks
+For multi-step tasks, follow this cycle every 5-8 tool calls:
+1. **PLAN** (Chain of Thought): Before doing anything, think through what specific information you need. Write out: "I need to find [X]. To get [X], I should search for [Y]." This prevents wasted actions.
+2. **RESEARCH**: Search using web search and local system resources. After getting results, EVALUATE them:
+   - Do the results contain a specific, actionable answer (an exact URL, a concrete command, a package name)?
+   - If YES → proceed to step 3.
+   - If NO → refine your search query and search AGAIN. Do NOT guess or fill in details from memory. Your training data has stale URLs and incomplete procedures. Keep searching until you have actionable specifics.
+3. **ACT**: Execute the approach from your research. Make sure you have the right tools loaded. Write comprehensive scripts, not one-liners.
+4. **EVALUATE**: Did it work? Checkpoint the outcome — both the result AND the exact working command.
+5. **PIVOT or PROCEED**: If it failed, read the error, checkpoint what you learned, and go back to step 1. Think through WHY it failed and what DIFFERENT category of approach to try. If it worked, checkpoint and move to the next phase.
+
+Critical rules:
+- Search before you act — even if you think you know the answer.
+- After a search, ask: "Do I have a SPECIFIC URL/command/package, or just general info?" If just general → search again more specifically.
+- Never guess URLs or package names from memory — always search for the current, working ones.
+- When something works, checkpoint the EXACT command and move on.
+- When something fails, checkpoint the failure reason so you don't repeat it.
+
+## Research
+Search for information using ALL available sources. Web search is the broadest. Also use local resources: `man` pages, `--help` output, documentation directories, system package databases. For complex problem-solving: research until you have ACTIONABLE specifics, THEN act. Use `http_get` to read specific pages when search snippets aren't enough. If your first search returns vague results, refine the query and search again — don't fall back to guessing.
 
 ## User Constraints
 Trust user-stated facts. Don't verify unless they demonstrably fail.
@@ -338,7 +372,6 @@ def build_system_prompt(
     return "\n\n".join(parts)
 
 
-_DEFAULT_CONTEXT_WINDOW = 32_768
 _MIN_RESPONSE_TOKENS = 1024
 _RESPONSE_RESERVE_RATIO = 0.25
 _MAX_SINGLE_MESSAGE_TOKENS = 6_000

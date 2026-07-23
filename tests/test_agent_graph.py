@@ -97,7 +97,11 @@ class TestBuildAgentGraph:
         )
         graph.invoke({"messages": [HumanMessage(content="hi")]})
 
-        mock_llm.bind_tools.assert_called_once_with([mock_tool])
+        # The graph auto-injects the checkpoint tool, so check the original
+        # tool is present alongside any auto-injected tools.
+        mock_llm.bind_tools.assert_called_once()
+        bound_tools = mock_llm.bind_tools.call_args[0][0]
+        assert mock_tool in bound_tools
 
     def test_normal_response_flow(self):
         """LLM returning a plain AIMessage exits at END with that message."""
@@ -669,6 +673,46 @@ class TestCorrectToolArgs:
         tool = MagicMock()
         tool.args_schema = _ShellSchema
         assert _correct_tool_args(tool, {}) == {}
+
+    def test_alias_resolution(self):
+        """Pydantic alias is resolved to canonical field name before fuzzy match."""
+
+        class _AliasSchema(BaseModel):
+            command: str = Field(description="Command", alias="cmd")
+            timeout: int = Field(default=30)
+
+            model_config = {"populate_by_name": True}
+
+        tool = MagicMock()
+        tool.args_schema = _AliasSchema
+        result = _correct_tool_args(tool, {"cmd": "ls -la", "timeout": 10})
+        assert result == {"command": "ls -la", "timeout": 10}
+
+    def test_alias_no_conflict(self):
+        """Alias is not applied when the canonical name is already present."""
+
+        class _AliasSchema(BaseModel):
+            command: str = Field(description="Command", alias="cmd")
+
+            model_config = {"populate_by_name": True}
+
+        tool = MagicMock()
+        tool.args_schema = _AliasSchema
+        result = _correct_tool_args(tool, {"command": "ls", "cmd": "pwd"})
+        # canonical already present — alias key stays unchanged
+        assert result["command"] == "ls"
+        assert result["cmd"] == "pwd"
+
+    def test_validation_alias_resolution(self):
+        """Pydantic validation_alias is resolved to canonical field name."""
+
+        class _ValAliasSchema(BaseModel):
+            command: str = Field(description="Command", validation_alias="cmd")
+
+        tool = MagicMock()
+        tool.args_schema = _ValAliasSchema
+        result = _correct_tool_args(tool, {"cmd": "ls -la"})
+        assert result == {"command": "ls -la"}
 
 
 # ---------------------------------------------------------------------------

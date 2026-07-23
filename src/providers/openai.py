@@ -29,7 +29,7 @@ def create_chat_model(
     model: str | None = None,
     api_key: str | None = None,
     base_url: str | None = None,
-    temperature: float = 0,
+    temperature: float = 0.5,
     **kwargs: Any,
 ) -> Any:
     """Create an OpenAI (or compatible) chat model.

@@ -43,5 +43,6 @@ class AgentRunConfig:
     git_native: bool = False
     tool_context_limit_pct: float = 0.80
     tier_cache_enabled: bool = True
+    llm_timeout: int = 180  # per-call LLM request timeout (seconds)
     bound_cache: OrderedDict | None = field(default=None, compare=False, repr=False)
     compression_cache: OrderedDict | None = field(default=None, compare=False, repr=False)

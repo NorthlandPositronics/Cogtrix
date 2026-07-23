@@ -157,9 +157,18 @@ class ModelConfig:
 
     provider: str  # references a key in Config.providers
     model: str  # actual model name at the provider
-    context_window: int | None = None
-    temperature: float | None = None
+    context_window: int | None = None  # None → DEFAULT_CONTEXT_WINDOW (32768)
+    temperature: float | None = None  # None → DEFAULT_TEMPERATURE (0.5)
     max_tokens: int | None = None  # Max output tokens per LLM call
+    timeout: int = 180  # LLM request timeout in seconds (per call, not total)
+
+    DEFAULT_TEMPERATURE: float = 0.5
+    DEFAULT_CONTEXT_WINDOW: int = 32_768
+
+    #: Default context window applied when no explicit value is set in config.
+    DEFAULT_CONTEXT_WINDOW: int = 32_768
+    #: Default temperature applied when no explicit value is set in config.
+    DEFAULT_TEMPERATURE: float = 0.5
 
     def __post_init__(self) -> None:
         if self.temperature is not None and not (0.0 <= self.temperature <= 2.0):
@@ -168,6 +177,8 @@ class ModelConfig:
             raise ConfigError(f"context_window must be >= 256, got {self.context_window}")
         if self.max_tokens is not None and self.max_tokens < 1:
             raise ConfigError(f"max_tokens must be >= 1, got {self.max_tokens}")
+        if self.timeout < 10:
+            raise ConfigError(f"timeout must be >= 10, got {self.timeout}")
 
 
 @dataclass
@@ -1375,6 +1386,7 @@ def _parse_models_section(config: Config, models_data: dict[str, Any]) -> None:
             )
             raw_temperature = model_data.get("temperature")
             raw_max_tokens = model_data.get("max_tokens")
+            raw_timeout = model_data.get("timeout")
             try:
                 config.models[name] = ModelConfig(
                     provider=provider,
@@ -1393,6 +1405,11 @@ def _parse_models_section(config: Config, models_data: dict[str, Any]) -> None:
                         _safe_int(raw_max_tokens, f"models.{name}.max_tokens")
                         if raw_max_tokens is not None
                         else None
+                    ),
+                    timeout=(
+                        _safe_int(raw_timeout, f"models.{name}.timeout") or 180
+                        if raw_timeout is not None
+                        else 180
                     ),
                 )
             except (ConfigError, ValueError, TypeError) as exc:

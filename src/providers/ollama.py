@@ -28,7 +28,7 @@ except ImportError:
 def create_chat_model(
     model: str | None = None,
     base_url: str | None = None,
-    temperature: float = 0,
+    temperature: float = 0.5,
     num_ctx: int | None = None,
     **kwargs: Any,
 ) -> Any:

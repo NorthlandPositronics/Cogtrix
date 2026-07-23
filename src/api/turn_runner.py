@@ -308,6 +308,16 @@ async def run_message_turn(
         log.warning("run_message_turn: unknown mode %r — treating as 'normal'", mode)
         mode = "normal"
 
+    # Auto-promote COMPLEX_RESEARCH tasks to delegation when the caller did not
+    # explicitly request a mode.  This mirrors the interactive-loop promotion in
+    # cogtrix.py so API sessions benefit from the same adaptive strategy.
+    if mode == "normal":
+        from src.orchestration.intent import TaskComplexity, classify_task_complexity
+
+        if classify_task_complexity(text) == TaskComplexity.COMPLEX_RESEARCH:
+            log.info("Complex research task detected — auto-promoting API turn to delegate mode")
+            mode = "delegate"
+
     async with session.turn_lock:
         await _run_message_turn_inner(session, text, mode, db, app_state)
 
