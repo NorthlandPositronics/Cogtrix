@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.1.31](https://github.com/NorthlandPositronics/Cogtrix/compare/v0.1.30...v0.1.31) (2026-03-23)
+
+
+### Features
+
+* **api:** route --debug logs to stdout/stderr instead of file ([d8778ba](https://github.com/NorthlandPositronics/Cogtrix/commit/d8778ba41792abd428273784bcb1e5a27675e604))
+* **api:** route --debug logs to stdout/stderr instead of file ([cbb12cc](https://github.com/NorthlandPositronics/Cogtrix/commit/cbb12cc1741026cfe139c8984399386fcd206293))
+* **api:** route --debug logs to stdout/stderr instead of file ([#75](https://github.com/NorthlandPositronics/Cogtrix/issues/75)) ([d8778ba](https://github.com/NorthlandPositronics/Cogtrix/commit/d8778ba41792abd428273784bcb1e5a27675e604))
+
 ## [0.1.30](https://github.com/NorthlandPositronics/Cogtrix/compare/v0.1.29...v0.1.30) (2026-03-23)
 
 

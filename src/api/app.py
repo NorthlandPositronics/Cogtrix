@@ -105,7 +105,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
 
         log_file = os.environ.get("COGTRIX_API_LOG_FILE")
         debug = bool(os.environ.get("COGTRIX_DEBUG"))
-        if log_file is not None or debug:
+        stream_output = bool(os.environ.get("COGTRIX_LOG_STREAM"))
+        if stream_output and log_file is None:
+            # --debug without --log-file: route DEBUG/INFO→stdout, WARNING+→stderr
+            setup_logging(log_file=None, debug=debug, verbose=debug, stream_output=True)
+        elif log_file is not None or debug:
             if log_file is None:
                 log_file = "cogtrix-api.log"
             setup_logging(log_file=log_file, debug=debug, console_output=True, verbose=debug)

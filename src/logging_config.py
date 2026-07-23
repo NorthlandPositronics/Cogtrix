@@ -92,21 +92,36 @@ class CogtrixLoggerAdapter(logging.LoggerAdapter):  # type: ignore[type-arg]
         return msg, kwargs
 
 
+class _MaxLevelFilter(logging.Filter):
+    """Passes only records strictly below a given level (used to split stdout/stderr)."""
+
+    def __init__(self, max_level: int) -> None:
+        super().__init__()
+        self.max_level = max_level
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return record.levelno < self.max_level
+
+
 def setup_logging(
     log_file: str | None = None,
     debug: bool = False,
     console_output: bool = False,
     verbose: bool = True,
+    stream_output: bool = False,
 ) -> logging.Logger:
     """
     Configure logging for Cogtrix application.
 
     Args:
-        log_file: Path to log file. If None, logging is disabled.
-                  If empty string, uses DEFAULT_LOG_FILE.
+        log_file: Path to log file. If None and stream_output is False, logging
+                  is disabled. If empty string, uses DEFAULT_LOG_FILE.
         debug: Enable debug level logging with verbose output.
         console_output: Also output logs to console (stderr).
         verbose: Log full message content without truncation (default: True).
+        stream_output: Route logs to stdout/stderr instead of a file.
+                       DEBUG/INFO → stdout; WARNING/ERROR/CRITICAL → stderr.
+                       Ignored when log_file is explicitly provided.
 
     Returns:
         Configured logger instance.
@@ -118,9 +133,27 @@ def setup_logging(
     logger.handlers.clear()
     logger.setLevel(logging.DEBUG if debug else logging.INFO)
 
+    # --log-file always takes priority; stream_output only applies when no file is given
+    if log_file is None and stream_output:
+        fmt = CogtrixFormatter(debug=debug)
+        level = logging.DEBUG if debug else logging.INFO
+
+        stdout_handler = logging.StreamHandler(sys.stdout)
+        stdout_handler.setLevel(level)
+        stdout_handler.addFilter(_MaxLevelFilter(logging.WARNING))
+        stdout_handler.setFormatter(fmt)
+        logger.addHandler(stdout_handler)
+
+        stderr_handler = logging.StreamHandler(sys.stderr)
+        stderr_handler.setLevel(logging.WARNING)
+        stderr_handler.setFormatter(fmt)
+        logger.addHandler(stderr_handler)
+
+        logger.info("Logging initialized: stdout/stderr (debug=%s)", debug)
+        return logger
+
     # If no log file specified, return logger without handlers (no-op logging)
     if log_file is None:
-        # Add null handler to prevent "no handlers" warning
         logger.addHandler(logging.NullHandler())
         return logger
 
@@ -150,7 +183,7 @@ def setup_logging(
         logger.addHandler(console_handler)
 
     # Log initial message
-    logger.info(f"Logging initialized: {log_file} (debug={debug})")
+    logger.info("Logging initialized: %s (debug=%s)", log_file, debug)
 
     return logger
 

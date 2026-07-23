@@ -2,7 +2,7 @@
 
 Usage:
     python -m src.api                          # defaults
-    python -m src.api --debug                  # debug logging to cogtrix-api.log
+    python -m src.api --debug                  # debug logging to stdout/stderr
     python -m src.api --log                    # info logging to cogtrix-api.log
     python -m src.api --log-file /tmp/api.log  # custom log file
     python -m src.api --config-file prod.yaml  # explicit config
@@ -72,14 +72,19 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    # Resolve log file: --debug implies --log, --log-file overrides --log
+    # Resolve log destination:
+    #   --log-file <path>          → file (highest priority)
+    #   --log [<path>]             → file (default: cogtrix-api.log)
+    #   --debug (no --log-file)    → stdout (DEBUG/INFO) + stderr (WARNING+)
+    #   (nothing)                  → logging disabled
     log_file: str | None = None
+    stream_output: bool = False
     if args.log_file is not None:
         log_file = args.log_file
     elif args.log is not None:
         log_file = args.log or "cogtrix-api.log"
     elif args.debug:
-        log_file = "cogtrix-api.log"
+        stream_output = True  # --debug without explicit file → split streams
 
     # Propagate config file via env var so app.py lifespan picks it up
     if args.config_file:
@@ -90,6 +95,8 @@ def main() -> None:
         os.environ["COGTRIX_API_LOG_FILE"] = log_file
     if args.debug:
         os.environ["COGTRIX_DEBUG"] = "1"
+    if stream_output:
+        os.environ["COGTRIX_LOG_STREAM"] = "1"
 
     # Set up Cogtrix logging before uvicorn starts
     try:
@@ -100,6 +107,7 @@ def main() -> None:
             debug=args.debug,
             console_output=True,
             verbose=args.debug,
+            stream_output=stream_output,
         )
     except Exception as exc:
         print(f"Warning: could not initialize logging: {exc}", file=sys.stderr)
