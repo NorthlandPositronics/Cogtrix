@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cogtrix"
-version = "0.2.13"
+version = "0.3.0"
 description = "Modular AI assistant with 67 built-in tools, multi-provider LLM support, and hybrid memory"
 readme = "README.md"
 requires-python = "~=3.13.0"
@@ -26,12 +26,12 @@ dependencies = [
     "langchain-ollama~=1.1.0",
     "langchain-openai~=1.2.2",
     "langchain-text-splitters~=1.1.0",
-    "langchain-community~=0.4.1",
+    "langchain-community~=0.4.2",
     "langgraph~=1.2.1",
     # LLM Providers
     "openai~=2.38.0",
     # Data Validation
-    "pydantic~=2.12.0",
+    "pydantic~=2.13.4",
     # CLI & Display
     "rich~=15.0.0",
     # Utilities
@@ -60,9 +60,30 @@ dependencies = [
 rag = [
     "faiss-cpu~=1.13.0",
     "pypdf>=6.12.2",
+    # BM25 sparse retrieval for the hybrid query path (#1981).  Pure
+    # Python, only requires numpy which is already a transitive dep.
+    # Sidecar is opt-in via ``IngestConfig.build_bm25_sidecar`` and the
+    # ``configure_rag({"use_bm25_hybrid": True})`` query flag, so this
+    # adds zero runtime cost when not enabled.
+    "rank-bm25~=0.2.2",
+]
+# Cross-encoder re-ranker for RAG (#1952).  Adds a second-pass scoring
+# stage after FAISS top-K retrieval that compares the query against each
+# candidate chunk pairwise — addresses the discriminative-power gap on
+# qwen3-embedding for numeric / generic-keyword queries (#1952 Regimes
+# B and C).  Default off; opt in via
+# ``configure_rag({"use_cross_encoder_rerank": True})``.
+#
+# Separated from ``[rag]`` because ``sentence-transformers`` transitively
+# pulls in ``torch`` and ``transformers`` (~hundreds of MB).  Users who
+# only want FAISS + BM25 should NOT pay that cost.  The first query
+# after opt-in downloads the default ~80 MB CE model
+# (``cross-encoder/ms-marco-MiniLM-L-6-v2``) into the HuggingFace cache.
+rag-rerank = [
+    "sentence-transformers>=4.1.0,<6",
 ]
 search = [
-    "tavily-python~=0.7.24",
+    "tavily-python~=0.7.25",
     "exa-py~=2.12.1",
     "google-search-results~=2.4.2",
 ]
@@ -83,23 +104,23 @@ dev = [
     "pytest-cov~=7.1.0",
     "pytest-timeout~=2.4.0",
     "pytest-xdist~=3.8.0",
-    "coverage~=7.14.0",
-    "black~=26.3.0",
-    "ruff~=0.15.12",
+    "coverage~=7.14.1",
+    "black~=26.5.1",
+    "ruff~=0.15.15",
     "bandit~=1.9.4",
     "pyright~=1.1.409",
-    "tavily-python~=0.7.24",
+    "tavily-python~=0.7.25",
     "exa-py~=2.12.1",
     "google-search-results~=2.4.2",
-    "mcp~=1.27.0",
-    "langchain-anthropic~=1.4.0",
+    "mcp~=1.27.2",
+    "langchain-anthropic~=1.4.4",
     "langchain-google-genai~=4.2.1",
     "argparse-manpage>=4",
     # #1879 Slice B — Redis rate-limit backend tests. fakeredis ships
     # the Lua extra (``lupa``) because ``limits`` uses EVALSHA in its
     # Redis storage; without it the test server raises
     # ``ResponseError: unknown command 'evalsha'``.
-    "redis>=5,<7",
+    "redis>=8.0.0,<9",
     "fakeredis[lua]>=2.30,<3",
 ]
 science = [
@@ -112,10 +133,10 @@ slack = [
     "slack-sdk>=3.42.0",
 ]
 mcp = [
-    "mcp~=1.27.0",
+    "mcp~=1.27.2",
 ]
 anthropic = [
-    "langchain-anthropic~=1.4.0",
+    "langchain-anthropic~=1.4.4",
 ]
 google = [
     "langchain-google-genai~=4.2.1",
@@ -129,7 +150,7 @@ api = [
     "sqlalchemy[asyncio]~=2.0.0",
     "aiosqlite~=0.22.0",
     "alembic~=1.18.0",
-    "pyjwt[crypto]~=2.12.0",
+    "pyjwt[crypto]~=2.13.0",
     "bcrypt~=5.0.0",
     "email-validator~=2.3.0",
     "stripe>=12.0.0",
@@ -140,7 +161,7 @@ redis = [
     # sliding-window counter across pods. Without this extra, the
     # rate limiter runs in-memory per process (correct for single-node
     # only). Install with:  pip install cogtrix[api,redis]
-    "redis>=5,<7",
+    "redis>=8.0.0,<9",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -233,22 +254,22 @@ dev = [
     "pytest-cov~=7.1.0",
     "pytest-timeout~=2.4.0",
     "pytest-xdist~=3.8.0",
-    "coverage~=7.14.0",
-    "black~=26.3.0",
-    "ruff~=0.15.12",
+    "coverage~=7.14.1",
+    "black~=26.5.1",
+    "ruff~=0.15.15",
     "bandit~=1.9.4",
     "pyright~=1.1.409",
-    "tavily-python~=0.7.24",
+    "tavily-python~=0.7.25",
     "exa-py~=2.12.1",
     "google-search-results~=2.4.2",
-    "mcp~=1.27.0",
-    "langchain-anthropic~=1.4.0",
+    "mcp~=1.27.2",
+    "langchain-anthropic~=1.4.4",
     "langchain-google-genai~=4.2.1",
     "argparse-manpage>=4",
     # #1879 Slice B — Redis rate-limit backend tests. fakeredis ships
     # the Lua extra (``lupa``) because ``limits`` uses EVALSHA in its
     # Redis storage; without it the test server raises
     # ``ResponseError: unknown command 'evalsha'``.
-    "redis>=5,<7",
+    "redis>=8.0.0,<9",
     "fakeredis[lua]>=2.30,<3",
 ]

@@ -17,7 +17,11 @@ from opentelemetry.trace import Status, StatusCode
 from src.agent.core import CogtrixState
 from src.api.telemetry import start_span
 from src.logging_config import get_logger, is_trace
-from src.orchestration.compression import apply_message_compression
+from src.orchestration.compression import (
+    _CHARS_PER_TOKEN,
+    _content_len,
+    apply_message_compression,
+)
 
 # ``_TOPIC_SWITCH_NUDGE`` and ``_should_reset_summary_for_topic_switch``
 # are re-exported here purely for the test-patching contract: tests do
@@ -139,7 +143,11 @@ class CallModelContext:
     da_enabled: bool
     da_report_uncertainty: bool
     da_min_confidence: float
-    apply_context_message_cap: Callable[[list[Any], int, int], list[Any]]
+    # ``apply_context_message_cap`` accepts an optional ``evicted_summary``
+    # kwarg (#1943 PR #3) so the eviction marker can embed the memory
+    # layer's rolling summary.  Older callers that pass only the first
+    # three positional args remain wire-compatible.
+    apply_context_message_cap: Callable[..., list[Any]]
     maybe_compress: Callable[[list[Any]], list[Any]]
     invoke_with_timeout: Callable[[Any, list[Any], Any, int], Any]
     all_tool_results_substanceless: Callable[[list[Any]], bool]
@@ -660,6 +668,77 @@ def build_call_model_node(
             full_messages = [_sys_msg, *msgs] if _sys_msg is not None else list(msgs)
             _cm_t1 = time.monotonic()
             _LLM_TIMEOUT = _model_timeout if call_count[0] > 1 else max(_model_timeout, 300)
+
+            # #1943 PR #2 — Pre-flight token-size guard.
+            #
+            # Some providers (qwen3-coder via Spark observed in the
+            # #1943 reproducer, others suspected) silently TRUNCATE
+            # over-budget input instead of raising an explicit
+            # context-overflow error.  The post-invoke ``except
+            # _is_context_overflow_error`` path below only fires on an
+            # explicit exception — silent-truncation providers slip
+            # through, the model receives a chopped context, and the
+            # response is built from whatever made it through (often
+            # filled in from training-data knowledge → fabrication, the
+            # #1943 failure mode).
+            #
+            # The guard estimates the to-be-sent token count from char
+            # length, compares against the model's window scaled by
+            # ``tool_context_limit_pct`` (default 0.80), and forces
+            # emergency compression BEFORE the invoke if we're over.
+            # This catches the silent-truncation class without
+            # depending on the provider screaming.
+            #
+            # No-op when the message list fits comfortably.
+            _pre_flight_chars = sum(_content_len(m) for m in full_messages)
+            _pre_flight_tokens_est = _pre_flight_chars // _CHARS_PER_TOKEN
+            # Prefer the strictest of the available window signals.  The
+            # operator-facing ``max_context_tokens`` (compression cap) and
+            # ``model_max_tokens`` (provider window) are both upper bounds on
+            # what the model can safely receive; using ``min`` of the
+            # non-zero values keeps the guard honest when the operator has
+            # configured a tighter compression cap than the raw provider
+            # window.
+            _candidate_windows = [
+                w
+                for w in (_model_max_tokens, _max_context_tokens, _context_max_tokens)
+                # Real positive ints only — guards against MagicMock LLMs
+                # in tests where ``getattr(llm, "max_tokens", None)`` returns
+                # a MagicMock instead of None.
+                if isinstance(w, int) and not isinstance(w, bool) and w > 0
+            ]
+            _safety_window = min(_candidate_windows) if _candidate_windows else 0
+            if _safety_window > 0 and _tool_context_limit_pct > 0:
+                _safety_threshold = int(_safety_window * _tool_context_limit_pct)
+                if _pre_flight_tokens_est > _safety_threshold:
+                    _graph_log.warning(
+                        "Pre-flight token guard: ~%d est tokens > %d threshold "
+                        "(window=%d × pct=%.2f) — forcing compression before invoke",
+                        _pre_flight_tokens_est,
+                        _safety_threshold,
+                        _safety_window,
+                        _tool_context_limit_pct,
+                    )
+                    msgs = apply_message_compression(
+                        msgs,
+                        call_count=call_count[0],
+                        compression_cache=_compression_cache,
+                        llm=_comp_llm,
+                        max_context_tokens=_max_context_tokens
+                        or _context_max_tokens
+                        or _safety_window,
+                        min_age_cycles=0,
+                        min_chars=0,
+                        emergency_threshold=0.0,
+                        actual_input_tokens=_pre_flight_tokens_est,
+                        # We've already decided to compress; bypass the
+                        # internal token-pressure threshold (else
+                        # apply_message_compression's own gate may
+                        # return the messages untouched).
+                        min_age_override=0,
+                    )
+                    msgs = _repair_tool_message_pairs(msgs)
+                    full_messages = [_sys_msg, *msgs] if _sys_msg is not None else list(msgs)
 
             try:
                 response = _invoke_with_timeout(model, full_messages, config, _LLM_TIMEOUT)

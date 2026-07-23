@@ -67,6 +67,12 @@ uv run pytest tests/ -v
 5. Submit a pull request targeting `release/next` with:
    - A clear description of what the change does and why
    - Reference to any related issues
+   - A [conventional-commit](https://www.conventionalcommits.org/en/v1.0.0/)-style
+     title (`feat:`, `fix:`, `refactor:`, `ci:`, …). The integration PR that later
+     promotes `release/next` to `production` will squash-merge under a title that
+     determines the version bump; see
+     [docs/VERSIONING.md §6a](docs/VERSIONING.md#6a-release-bump-rules--the-precise-policy)
+     for the bump rules and escape hatches (`!`, `Release-As:`).
 
 > **Branch policy:** `production` is release-only. All pull requests must target `release/next`. The CI enforces this — PRs directly to `production` from non-release branches are blocked.
 

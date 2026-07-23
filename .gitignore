@@ -140,3 +140,11 @@ GEMINI.md
 # Amazon Q Developer
 .amazonq/
 .qdeveloper/
+
+# PM role-test harness runtime artefacts (#1948)
+# (Moved from tests/evaluation/scenarios/role_pm/ to tests/role_pm/
+# so Gate 2's load_all_scenarios() rglob doesn't trip on the harness's
+# system_prompt_file YAML field.)
+tests/role_pm/rag/
+tests/role_pm/_local_spark_runner.py
+logs/

@@ -860,6 +860,98 @@ class TestProcessToolsSanitization:
         assert malicious_name not in tool_msgs[0].content
 
 
+class TestHarmonyTokenStripping:
+    """#2023 Track A — strip gpt-oss harmony channel markers from
+    ``tool_call["name"]`` at dispatch entry so they don't surface as
+    invented tool-name false positives downstream.
+    """
+
+    def test_strip_helper_removes_channel_commentary_suffix(self) -> None:
+        from src.orchestration.nodes.process_tools import _strip_harmony_tokens
+
+        assert (
+            _strip_harmony_tokens("query_risk_register<|channel|>commentary")
+            == "query_risk_register"
+        )
+
+    def test_strip_helper_removes_channel_final_suffix(self) -> None:
+        from src.orchestration.nodes.process_tools import _strip_harmony_tokens
+
+        assert (
+            _strip_harmony_tokens("query_knowledge_base<|channel|>final") == "query_knowledge_base"
+        )
+
+    def test_strip_helper_handles_chained_markers(self) -> None:
+        from src.orchestration.nodes.process_tools import _strip_harmony_tokens
+
+        # Chained markers (planning channel + end token) — strip greedily.
+        assert _strip_harmony_tokens("foo<|channel|>commentary<|end|>") == "foo"
+        assert _strip_harmony_tokens("foo<|start|>blah<|end|>") == "foo"
+
+    def test_strip_helper_passes_clean_name_through(self) -> None:
+        from src.orchestration.nodes.process_tools import _strip_harmony_tokens
+
+        assert _strip_harmony_tokens("query_knowledge_base") == "query_knowledge_base"
+        assert _strip_harmony_tokens("checkpoint") == "checkpoint"
+
+    def test_strip_helper_handles_empty_input(self) -> None:
+        from src.orchestration.nodes.process_tools import _strip_harmony_tokens
+
+        assert _strip_harmony_tokens("") == ""
+
+    def test_sanitize_mutates_tool_call_dicts_in_place(self) -> None:
+        from src.orchestration.nodes.process_tools import _sanitize_tool_call_names
+
+        calls = [
+            {"name": "query_knowledge_base", "args": {}, "id": "tc1"},
+            {"name": "query_risk_register<|channel|>commentary", "args": {}, "id": "tc2"},
+            {"name": "checkpoint<|end|>", "args": {}, "id": "tc3"},
+        ]
+        _sanitize_tool_call_names(calls)
+        assert calls[0]["name"] == "query_knowledge_base"
+        assert calls[1]["name"] == "query_risk_register"
+        assert calls[2]["name"] == "checkpoint"
+
+    def test_dispatch_resolves_after_harmony_strip(self) -> None:
+        """End-to-end: a tool call with a harmony suffix should resolve
+        to the underlying registered tool, NOT fall through to the
+        not-a-valid-tool branch.  Verifies that the in-place sanitiser
+        runs BEFORE the lookup so dispatch sees the clean name."""
+        invoke_one = MagicMock(
+            return_value=ToolMessage(content="ok", tool_call_id="tc1", name="query_knowledge_base")
+        )
+        node = _make_node(
+            _invoke_one=invoke_one,
+            _tool_lookup={"query_knowledge_base": MagicMock(name="query_knowledge_base")},
+            _active_names={"query_knowledge_base"},
+            _safe_tool_name=_safe_tool_name,
+        )
+        # Model emits the harmony-leaked name; dispatch should sanitise
+        # and successfully invoke the underlying tool.
+        ai_msg = _make_ai_msg(
+            [
+                {
+                    "name": "query_knowledge_base<|channel|>commentary",
+                    "args": {"query": "x"},
+                    "id": "tc1",
+                }
+            ]
+        )
+        state = _make_state(ai_msg)
+
+        result = node(state, RunnableConfig())
+
+        # The sanitiser must mutate the AIMessage's tool_calls in place
+        # so the cleaned name is what dispatch (and any downstream
+        # checks) see.
+        assert ai_msg.tool_calls[0]["name"] == "query_knowledge_base"
+        # And dispatch invoked the real tool — not the rejection path.
+        invoke_one.assert_called_once()
+        tool_msgs = [m for m in result["messages"] if isinstance(m, ToolMessage)]
+        assert len(tool_msgs) == 1
+        assert "not a valid tool" not in tool_msgs[0].content
+
+
 class TestProcessToolsLockDiscipline:
     """Regression tests for issue #1091: _tool_lookup mutations must hold _tool_budget_lock."""
 

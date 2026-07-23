@@ -1,0 +1,68 @@
+id: role_pm_02_vendor_risk_lookup
+domain: role_pm
+title: Risk register — vendor dependencies
+description: |
+  Pure retrieval against the risk register.  The agent is asked
+  what the risk register says about vendor dependencies.  A
+  correct answer retrieves 05_risk_register.md, identifies R-13
+  (AcmeCloud APAC capacity reservation) as the primary
+  vendor-dependency risk, and cites the document by filename.
+
+  The risk register holds 12 risks (R-12 through R-23).  Of these,
+  R-13 is the most direct vendor-dependency risk.  R-12 is
+  vendor-adjacent (AcmeDB replication is an AcmeCloud-platform
+  property even though the lag mitigation is multi-party).  The
+  agent should at least name R-13.
+
+  Bug-hunt signal: any vendor-related risk identifier that is NOT
+  in {R-12, R-13, R-18} is a fabrication.  In particular, the
+  agent must not invent a risk like "R-1: AcmeCloud outage" or
+  reference a vendor that is not AcmeCloud.
+user_prompt: |
+  What does our risk register currently say about our vendor
+  dependencies?  Give me the risk IDs, the owners, and what
+  mitigations are in flight.
+system_prompt_file: ../system_prompt.md
+tools_required:
+  - query_knowledge_base
+tools_available:
+  - query_knowledge_base
+expected_outcome: |
+  The agent retrieves 05_risk_register.md, identifies R-13 as the
+  primary vendor-dependency risk, names Tomislav Hessford as the
+  Sponsor-owner (with Yusuf Almasi as the delegated operational
+  tracker), and notes that the APAC firm-commitment conversion was
+  confirmed on 2026-07-31.  May also mention R-12 (vendor-adjacent)
+  and R-18 (AcmeDB licence cost overrun).
+success_criteria:
+  - "tool_called: query_knowledge_base"
+  - "contains: 05_risk_register.md"
+  - "contains: R-13"
+  - "contains: AcmeCloud"
+  # #2026: relaxed ``contains: Yusuf Almasi`` to a weighted check
+  # accepting any of: the specific name, the role title, or the
+  # functional description.  Cycle 13 showed honest models cite
+  # "AcmeCloud Technical Account Manager" or "the TAM" without
+  # naming Yusuf when the stakeholder register chunk wasn't fully
+  # retrieved.  The signal is "model engaged with the vendor-
+  # ownership question" — not "model knew the exact name".
+  - "at_least_n_contains: 1 | Yusuf Almasi | Technical Account Manager | AcmeCloud TAM | TAM"
+  - "not_contains: AWS"
+  - "not_contains: Azure"
+  - "not_contains: Google Cloud"
+  - "not_contains: GCP"
+max_turns: 8
+timeout_seconds: 180
+tags:
+  - role_pm
+  - easy
+budget_usd_estimate: 0.05
+
+# #2016 — Cluster B (extraneous_tools) structural enforcement.
+# When True, the PM harness appends a strict-whitelist clause to the
+# system prompt that explicitly forbids non-whitelisted tool names
+# (read_file, write_file, get_weather, etc.).  Cycle-4 measured 11
+# such calls across 18 iterations on qwen3-coder; cycle-5 measured 0
+# on kimi-k2-6 (which obeys the soft cycle-2 rule).  This flag
+# converts the soft rule into a directive any model can quote back.
+enforce_tools_available: true

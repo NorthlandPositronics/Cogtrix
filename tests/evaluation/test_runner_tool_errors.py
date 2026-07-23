@@ -378,3 +378,140 @@ class TestCollectToolErrorsWithRecovery:
         all_errors, unrecovered = _collect_tool_errors_with_recovery(msgs)
         assert all_errors == _collect_tool_errors(msgs)
         assert unrecovered == []
+
+
+class TestSignalTwoArgsAwareRecovery:
+    """#1993: the new args-aware recovery signal.
+
+    The #1787 baseline rule recovers an error iff the same tool
+    produced a non-error ToolMessage later in the classified stream.
+    But in PR #1990's gpt-4o failure, the second ``create_po`` call's
+    outcome was bundled into a parallel batch that the position-based
+    forward-look did not reach, so the error stayed unrecovered even
+    though the agent demonstrably retried.
+
+    The args-aware signal recovers the error when a LATER AIMessage
+    tool_call exists for the same tool with materially-different args,
+    regardless of whether the dispatcher produced a separately-
+    classifiable ToolMessage for that retry.  Same-args repeats are
+    still NOT recovered — that's an actual loop.
+    """
+
+    def test_retry_with_different_args_recovers_via_signal_2(self) -> None:
+        """gpt-4o pattern: first ``create_po`` call missing required fields
+        produces a validation error; second call with full args also exists
+        in the AIMessage stream but the dispatcher dropped its ToolMessage
+        (cap, dedupe, parallel-batch).  Without signal #2 this stays
+        unrecovered; with signal #2 it's recovered."""
+        msgs = [
+            HumanMessage(content="create a PO for 50 widgets"),
+            AIMessage(
+                content="",
+                tool_calls=[{"name": "create_po", "args": {"unit_price": 9.75}, "id": "c1"}],
+            ),
+            ToolMessage(
+                content=(
+                    "Error executing create_po: 2 validation errors for "
+                    "CreatePoInput vendor Field required total_amount Field required"
+                ),
+                tool_call_id="c1",
+                name="create_po",
+            ),
+            # Retry with FULL args — the dispatcher does NOT produce a
+            # separately-named ToolMessage for this batch (gpt-4o
+            # parallel-call shape).  Only signal #2 catches this.
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "create_po",
+                        "args": {
+                            "vendor": "Acme Supplies",
+                            "unit_price": 9.75,
+                            "total_amount": 487.50,
+                        },
+                        "id": "c2",
+                    }
+                ],
+            ),
+            # Final response asserts task completed (no ToolMessage for c2 here)
+            AIMessage(content="PO-516f2b29 has been created and routed."),
+        ]
+        all_errors, unrecovered = _collect_tool_errors_with_recovery(msgs)
+        assert len(all_errors) == 1
+        assert unrecovered == [], (
+            "Args-aware retry must mark the original validation error as "
+            "recovered even when the second call's ToolMessage is absent"
+        )
+
+    def test_retry_with_identical_args_stays_unrecovered(self) -> None:
+        """Repeating the SAME failed call is a loop, not a recovery."""
+        msgs = [
+            HumanMessage(content="x"),
+            AIMessage(
+                content="",
+                tool_calls=[{"name": "create_po", "args": {"unit_price": 9.75}, "id": "c1"}],
+            ),
+            ToolMessage(
+                content="Error executing create_po: validation error",
+                tool_call_id="c1",
+                name="create_po",
+            ),
+            # Byte-identical args — not a recovery attempt.
+            AIMessage(
+                content="",
+                tool_calls=[{"name": "create_po", "args": {"unit_price": 9.75}, "id": "c2"}],
+            ),
+        ]
+        all_errors, unrecovered = _collect_tool_errors_with_recovery(msgs)
+        assert len(all_errors) == 1
+        assert len(unrecovered) == 1, "Same-args repeat is a loop, must NOT be marked as recovered"
+
+    def test_signal_1_and_signal_2_compose(self) -> None:
+        """When BOTH a same-tool success AND a retry-with-different-args
+        appear, the error is recovered (no double-counting; just don't
+        crash)."""
+        msgs = [
+            HumanMessage(content="x"),
+            AIMessage(
+                content="",
+                tool_calls=[{"name": "t", "args": {"a": 1}, "id": "c1"}],
+            ),
+            ToolMessage(content="Error executing t: a missing", tool_call_id="c1", name="t"),
+            AIMessage(
+                content="",
+                tool_calls=[{"name": "t", "args": {"a": 1, "b": 2}, "id": "c2"}],
+            ),
+            ToolMessage(content="ok", tool_call_id="c2", name="t"),
+        ]
+        all_errors, unrecovered = _collect_tool_errors_with_recovery(msgs)
+        assert len(all_errors) == 1
+        assert unrecovered == []
+
+    def test_only_different_tool_called_later_stays_unrecovered(self) -> None:
+        """When the agent gives up on the failed tool and calls a DIFFERENT
+        tool entirely, the error stays unrecovered (the original task
+        wasn't accomplished via the failing tool)."""
+        msgs = [
+            HumanMessage(content="x"),
+            AIMessage(
+                content="",
+                tool_calls=[{"name": "create_po", "args": {"unit_price": 9.75}, "id": "c1"}],
+            ),
+            ToolMessage(
+                content="Error executing create_po: validation error",
+                tool_call_id="c1",
+                name="create_po",
+            ),
+            # Agent pivoted to a completely different tool.
+            AIMessage(
+                content="",
+                tool_calls=[{"name": "checkpoint", "args": {"note": "PO failed"}, "id": "c2"}],
+            ),
+            ToolMessage(content="checkpoint saved", tool_call_id="c2", name="checkpoint"),
+        ]
+        all_errors, unrecovered = _collect_tool_errors_with_recovery(msgs)
+        assert len(all_errors) == 1
+        assert (
+            len(unrecovered) == 1
+        ), "Pivoting to a different tool does NOT recover the original error"

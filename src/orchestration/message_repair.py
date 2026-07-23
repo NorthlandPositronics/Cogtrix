@@ -231,6 +231,7 @@ def _apply_context_message_cap(
     messages: list,
     max_messages: int | None,
     max_tokens: int | None = None,
+    evicted_summary: str | None = None,
 ) -> list:
     """Trim oldest message pairs when history exceeds the configured cap(s).
 
@@ -238,6 +239,15 @@ def _apply_context_message_cap(
     chunk so tool-call pairs are never split.  Oldest chunks are dropped until
     both the message-count and token budgets fit.  The newest chunk is always
     preserved even if it exceeds the configured budget on its own.
+
+    *evicted_summary* (#1943 PR #3): an optional rolling summary string from
+    the memory layer covering the messages that may be evicted.  When provided
+    and non-empty, the ``[CONTEXT NOTICE]`` marker prepended after eviction
+    embeds the summary text — giving the agent a semantic anchor to honestly
+    acknowledge what was lost, rather than just being told ``data was lost``
+    and (often) fabricating from training-data knowledge instead.  Pass
+    ``None`` or an empty string when no summary is available; the marker
+    falls back to the PR #1 prose unchanged.
     """
     if (not max_messages or max_messages <= 0) and (not max_tokens or max_tokens <= 0):
         return messages
@@ -321,6 +331,59 @@ def _apply_context_message_cap(
             max_tokens if max_tokens is not None else 0,
             dropped,
         )
+        # #1943 PR #1: emit a SystemMessage marker so the agent has a
+        # recoverable signal that data was lost.  Without this marker the
+        # agent sees a normal-looking message history with no indication
+        # that earlier turns were dropped — and may confidently produce a
+        # "synthesis" that references the dropped content from training-
+        # data knowledge instead of recognising the data is gone.
+        # See #1943 for the verify-1919 reproducer.
+        #
+        # The marker is prepended (not appended) so it appears at the
+        # OLDEST surviving position, mimicking where the dropped span
+        # used to live in the conversation order.  It carries
+        # ``additional_kwargs["cogtrix.kind"] = "context_evicted"`` so
+        # downstream detectors (PR #4 in the #1943 roadmap) can route on
+        # the kind rather than substring-matching the prose.
+        from langchain_core.messages import SystemMessage as _SystemMessage
+
+        _base_prose = (
+            f"[CONTEXT NOTICE] {dropped} older message(s) were removed "
+            f"from this conversation because the configured limits "
+            f"(max_messages={max_messages or 'unset'}, "
+            f"max_tokens={max_tokens or 'unset'}) were exceeded.  "
+        )
+        # #1943 PR #3: when the memory layer has a rolling summary covering
+        # the evicted span, embed it.  The agent gets a semantic anchor to
+        # answer honestly about what was lost instead of either fabricating
+        # specifics or returning an unhelpful refusal.  The anti-fabrication
+        # nudge from PR #1 stays — the summary is broad-strokes context,
+        # never a substitute for the verbatim originals.
+        if evicted_summary and evicted_summary.strip():
+            _marker_content = (
+                _base_prose + "Rolling summary of older context (from memory layer; "
+                "broad-strokes only, not verbatim):\n"
+                + evicted_summary.strip()
+                + "\n\nThe original messages are gone — do NOT invent "
+                "specifics not in the summary above (names, quotes, "
+                "numbers, file paths).  If your current task depends on "
+                "verbatim detail, request a re-read or tell the user the "
+                "relevant context was lost."
+            )
+        else:
+            _marker_content = (
+                _base_prose + "The dropped content is gone — do NOT claim or "
+                "summarise anything that was in those messages from "
+                "memory.  If your current task depends on the dropped "
+                "content, request a re-read or tell the user the relevant "
+                "context was lost."
+            )
+
+        marker = _SystemMessage(
+            content=_marker_content,
+            additional_kwargs={"cogtrix.kind": "context_evicted"},
+        )
+        truncated.insert(0, marker)
     return truncated
 
 

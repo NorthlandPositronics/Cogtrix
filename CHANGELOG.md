@@ -16,6 +16,12 @@
 >
 > Any in-flight feature branch will need to be rebased onto (or cherry-picked into) the new orphan root before it can be merged.
 
+## [0.3.0](https://github.com/NorthlandPositronics/Cogtrix/compare/v0.2.13...v0.3.0) (2026-06-06)
+
+### Features
+
+- v0.3.0 release ([#2036](https://github.com/NorthlandPositronics/Cogtrix/issues/2036)) ([ed033f8](https://github.com/NorthlandPositronics/Cogtrix/commit/ed033f8c79c8ffae292999bdb5364b6e53dcd3f9))
+
 ## [0.2.13](https://github.com/NorthlandPositronics/Cogtrix/compare/v0.2.12...v0.2.13) (2026-05-31)
 
 ### Features

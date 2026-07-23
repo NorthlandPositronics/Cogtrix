@@ -202,10 +202,35 @@ class RAGConfig:
 
     docs_dir: str = "docs"
     vectordb_dir: str = "vectordb"
-    chunk_size: int = 2000
-    chunk_overlap: int = 200
+    # #1952 Option C: lowered from 2000/200 → 800/100.  See
+    # ``src/rag/ingest.py:IngestConfig`` docstring for the rationale.
+    # Operators with explicit ``rag.chunk_size`` / ``rag.chunk_overlap``
+    # in ``~/.cogtrix.yaml`` keep their override values; operators on
+    # defaults get the new behaviour after re-running ``--ingest``.
+    chunk_size: int = 800
+    chunk_overlap: int = 100
     model: str | None = None  # references a key in Config.models for embedding
     score_threshold: float = 0.0  # minimum similarity score for RAG retrieval (M4.3)
+    # #1981: opt-in BM25 hybrid retrieval.  Both flags default OFF —
+    # existing pure-vector pipelines see zero behavioural change until
+    # the operator enables them.
+    #
+    # ``build_bm25_sidecar`` is honoured at ingest time: when True,
+    # ``python cogtrix.py --ingest`` writes a ``bm25.pkl`` next to
+    # ``index.faiss``.  Inexpensive (~5% of ingest wall-clock for
+    # typical corpora) so flipping this on is low-cost even if the
+    # query side hasn't enabled hybrid yet.
+    #
+    # ``use_bm25_hybrid`` is honoured at query time: when True AND a
+    # sidecar exists, the query path fuses vector + BM25 ranks via
+    # Reciprocal Rank Fusion.  Operators with the regime-B (monetary
+    # tokens) or regime-C (one document dominates) problems from
+    # #1952 should set BOTH flags and re-ingest.
+    build_bm25_sidecar: bool = False
+    use_bm25_hybrid: bool = False
+    # RRF tuning constant — Cormack et al. 2009's standard value is 60.
+    # Operators normally should not need to tune this.
+    bm25_rrf_k: int = 60
 
     def __post_init__(self) -> None:
         if self.chunk_overlap >= self.chunk_size:
@@ -217,6 +242,8 @@ class RAGConfig:
             raise ConfigError(
                 f"rag.score_threshold must be in [0.0, 1.0], got {self.score_threshold}"
             )
+        if self.bm25_rrf_k <= 0:
+            raise ConfigError(f"rag.bm25_rrf_k must be positive, got {self.bm25_rrf_k}")
 
 
 # SlowAPI-style rate-limit spec: ``<N>/<window>`` where window is one of
@@ -1545,6 +1572,20 @@ def _apply_config_file(config: Config, path: Path) -> None:
                 config.rag.score_threshold = fval
             elif fval is not None:
                 _log.warning("rag.score_threshold must be in [0.0, 1.0], using default")
+        # #1981: BM25 hybrid retrieval flags.
+        if "build_bm25_sidecar" in rag_cfg:
+            config.rag.build_bm25_sidecar = bool(rag_cfg["build_bm25_sidecar"])
+        if "use_bm25_hybrid" in rag_cfg:
+            config.rag.use_bm25_hybrid = bool(rag_cfg["use_bm25_hybrid"])
+        if "bm25_rrf_k" in rag_cfg:
+            kval = _safe_int(rag_cfg["bm25_rrf_k"], "rag.bm25_rrf_k")
+            if kval is not None and kval > 0:
+                config.rag.bm25_rrf_k = kval
+            elif kval is not None:
+                _log.warning(
+                    "rag.bm25_rrf_k must be > 0, using default %d",
+                    config.rag.bm25_rrf_k,
+                )
         if config.rag.chunk_overlap >= config.rag.chunk_size:
             _log.warning(
                 "rag.chunk_overlap (%d) must be less than rag.chunk_size (%d); "

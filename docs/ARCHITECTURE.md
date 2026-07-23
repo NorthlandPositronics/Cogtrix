@@ -1042,8 +1042,8 @@ Documents (docs/)
          │
          ▼
 ┌─────────────────┐
-│  Text           │  chunk_size: 2000
-│  Splitter       │  chunk_overlap: 200
+│  Text           │  chunk_size: 800
+│  Splitter       │  chunk_overlap: 100
 └────────┬────────┘
          │
          ▼

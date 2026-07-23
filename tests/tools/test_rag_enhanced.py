@@ -79,7 +79,9 @@ class TestIngestMany:
         assert all(result.values())
         assert mock_prepare.call_count == 3
         mock_faiss.assert_called_once()
-        mock_save_store.assert_called_once_with(mock_store, config.vectordb_dir / "faiss_index")
+        # Post-#1951: ingest writes directly to ``config.vectordb_dir``;
+        # no implicit ``/faiss_index`` suffix is appended.
+        mock_save_store.assert_called_once_with(mock_store, config.vectordb_dir)
 
     def test_partial_failure(self, tmp_path: Path):
         """When some files fail, successes and failures are reported correctly."""
@@ -110,7 +112,9 @@ class TestIngestMany:
         failures = len(result) - successes
         assert successes == 2
         assert failures == 2
-        mock_save_store.assert_called_once_with(mock_store, config.vectordb_dir / "faiss_index")
+        # Post-#1951: ingest writes directly to ``config.vectordb_dir``;
+        # no implicit ``/faiss_index`` suffix is appended.
+        mock_save_store.assert_called_once_with(mock_store, config.vectordb_dir)
 
     def test_builds_single_index_from_all_chunks(self, tmp_path: Path):
         from src.rag.ingest import ingest_many
@@ -135,7 +139,9 @@ class TestIngestMany:
         mock_faiss.assert_called_once()
         docs_arg, _embeddings_arg = mock_faiss.call_args.args
         assert len(docs_arg) == 2
-        mock_save_store.assert_called_once_with(mock_store, config.vectordb_dir / "faiss_index")
+        # Post-#1951: ingest writes directly to ``config.vectordb_dir``;
+        # no implicit ``/faiss_index`` suffix is appended.
+        mock_save_store.assert_called_once_with(mock_store, config.vectordb_dir)
 
     def test_worker_cap_at_eight(self, tmp_path: Path):
         """Workers are capped at min(len(paths), workers, 8)."""

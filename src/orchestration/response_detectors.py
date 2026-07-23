@@ -331,6 +331,22 @@ def _is_refusal(message: Any) -> bool:
     return bool(_REFUSAL_RE.search(content))
 
 
+def text_is_refusal(text: str) -> bool:
+    """String-form companion to :func:`_is_refusal`.
+
+    Returns True when *text* contains a deliberate decline/refusal
+    pattern (``I cannot pay``, ``I am not authorized``, ``approval is
+    required``, etc.).  Used by the response-content detectors in
+    ``src/orchestration/verification.py`` to short-circuit on refusals
+    — see #1960.  A correctly-formed safety refusal is NOT a
+    fabrication / unverified-entity / unsupported-attribution case;
+    the recovery layer must let it pass.
+    """
+    if not text or not isinstance(text, str):
+        return False
+    return bool(_REFUSAL_RE.search(text))
+
+
 # ── _has_incompleteness_signal ────────────────────────────────────────
 
 # Phrases that signal a multi-step task is incomplete — the model used
@@ -899,6 +915,18 @@ def _looks_like_fabricated_tool_error_quote(
     if not isinstance(content, str) or not content.strip():
         return False
 
+    # NOTE: deliberately NO refusal short-circuit here — Q15
+    # (#1871) is a fabricated tool-error quote that OPENS with a
+    # refusal pattern (``I cannot read the file because ...``)
+    # then fabricates a verbatim error quote.  Adding _is_refusal
+    # here would silently disable the detector on the exact
+    # failure mode it was designed for.  The #1960 false-positive
+    # cascade against safety_refuse_unauthorized_payment is
+    # addressed in the THREE content-claim detectors in
+    # verification.py instead; the fabricated_tool_error_quote
+    # detector below is precise enough on its own (requires both
+    # a lead-in match AND an extractable quoted span).
+
     lead_match = _TOOL_ERROR_QUOTE_LEAD_RE.search(content)
     if not lead_match:
         return False
@@ -977,6 +1005,14 @@ def _looks_like_fabricated_action_success_without_tool_call(
     if not _ACTION_COMPLETION_CLAIM_RE.search(content):
         return False
     if _NEGATED_ACTION_CLAIM_RE.search(content):
+        return False
+
+    # #1960: a refusal commonly carries clauses the action-completion
+    # regex matches (``I cannot pay invoice ... before approval`` may
+    # contain a verb form that overlaps the regex's surface).  A
+    # refusal is NOT a fabricated success claim — it's the opposite.
+    # Short-circuit here, matching #1851's precedent for action_intent.
+    if _is_refusal(last_message):
         return False
 
     # Walk backward to the most recent ``HumanMessage`` boundary. If any

@@ -459,6 +459,239 @@ def test_try_run_with_key_retries_on_transient_error_in_result(monkeypatch) -> N
     assert any("RETRY" in line for line in logs), f"Expected RETRY log; logs={logs}"
 
 
+# ── Issue #1994: per-model retry backoff ─────────────────────────────────────
+
+
+def _model_with_backoff(seconds: int) -> ModelConfig:
+    """Mock model that opts in to a non-zero ``retry_backoff_seconds``.
+
+    Used to exercise the issue #1994 backoff path without depending on
+    kimi-k2-5's specific YAML row.
+    """
+    return ModelConfig(
+        id="mock-backoff",
+        provider="anthropic",
+        display_name="Mock (backoff)",
+        tier="smoke",
+        smoke=True,
+        env_key="ANTHROPIC_API_KEY",
+        model_id="mock-backoff-model",
+        openrouter_model_id="anthropic/mock-backoff-model",
+        retry_backoff_seconds=seconds,
+    )
+
+
+def test_backoff_sleeps_between_attempts_on_empty_response(monkeypatch) -> None:
+    """Issue #1994: when a model opts in to ``retry_backoff_seconds``, an
+    empty-response retry must pause for that many seconds before the
+    second attempt so the upstream capacity window has time to clear.
+
+    Without the pause, the immediate retry hits the same closed window
+    every time and burns the retry budget without ever recovering.
+    """
+    from tests.evaluation.ci_gate2 import _try_run_with_key
+
+    call_count = {"n": 0}
+
+    def fake_run_scenario(scenario, model, active_key=None):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            # Empty-response flake: no tools, no content, no error.
+            return EvalResult(
+                scenario_id=scenario.id,
+                model_id=model.id,
+                model_display_name=model.display_name,
+                passed=False,
+                tool_calls_made=[],
+                tool_calls_required=list(scenario.tools_required),
+                turns_used=1,
+                elapsed_seconds=0.3,
+                final_response="",
+                error=None,
+                task_completion=False,
+                tool_selection_rate=0.0,
+            )
+        return _result(passed=True, task_completion=True)
+
+    monkeypatch.setattr("tests.evaluation.ci_gate2.run_scenario", fake_run_scenario)
+
+    sleeps: list[float] = []
+    logs: list[str] = []
+    result = _try_run_with_key(
+        _scenario(),
+        _model_with_backoff(60),
+        ("OPENROUTER_API_KEY", "or-test"),
+        emit=logs.append,
+        sleep=sleeps.append,
+    )
+
+    assert call_count["n"] == 2, f"Expected 2 attempts, got {call_count['n']}"
+    assert sleeps == [
+        60
+    ], f"Expected one 60s backoff before retry; got sleeps={sleeps}. Logs={logs}"
+    assert result is not None and result.passed is True
+    assert any(
+        "BACKOFF" in line and "mock-backoff" in line and "empty_response" in line for line in logs
+    ), f"Expected BACKOFF diagnostic in logs: {logs}"
+
+
+def test_backoff_sleeps_between_attempts_on_transient_error(monkeypatch) -> None:
+    """Backoff must apply on transient-error retries too — a 429 from the
+    same OpenRouter route benefits from the same wait as an empty-response
+    flake, since both indicate the upstream window is closed.
+    """
+    from tests.evaluation.ci_gate2 import _try_run_with_key
+
+    call_count = {"n": 0}
+
+    def fake_run_scenario(scenario, model, active_key=None):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            return _result(
+                passed=False,
+                error="429 Too Many Requests",
+            )
+        return _result(passed=True)
+
+    monkeypatch.setattr("tests.evaluation.ci_gate2.run_scenario", fake_run_scenario)
+
+    sleeps: list[float] = []
+    logs: list[str] = []
+    result = _try_run_with_key(
+        _scenario(),
+        _model_with_backoff(45),
+        ("OPENROUTER_API_KEY", "or-test"),
+        emit=logs.append,
+        sleep=sleeps.append,
+    )
+
+    assert call_count["n"] == 2
+    assert sleeps == [45], f"Expected one 45s backoff; got {sleeps}. Logs={logs}"
+    assert result is not None and result.passed is True
+    assert any(
+        "BACKOFF" in line and "transient_error" in line for line in logs
+    ), f"Expected transient_error BACKOFF diagnostic: {logs}"
+
+
+def test_backoff_sleeps_between_attempts_on_transient_exception(monkeypatch) -> None:
+    """The exception path (run_scenario raises rather than returning an
+    error-stuffed result) must also honour the configured backoff.
+    """
+    from tests.evaluation.ci_gate2 import _try_run_with_key
+
+    call_count = {"n": 0}
+
+    def fake_run_scenario(scenario, model, active_key=None):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            raise TimeoutError("Connection timed out after 30s")
+        return _result(passed=True)
+
+    monkeypatch.setattr("tests.evaluation.ci_gate2.run_scenario", fake_run_scenario)
+
+    sleeps: list[float] = []
+    logs: list[str] = []
+    result = _try_run_with_key(
+        _scenario(),
+        _model_with_backoff(30),
+        ("OPENROUTER_API_KEY", "or-test"),
+        emit=logs.append,
+        sleep=sleeps.append,
+    )
+
+    assert call_count["n"] == 2
+    assert sleeps == [30], f"Expected one 30s backoff; got {sleeps}. Logs={logs}"
+    assert result is not None and result.passed is True
+    assert any(
+        "BACKOFF" in line and "transient_exception" in line for line in logs
+    ), f"Expected transient_exception BACKOFF diagnostic: {logs}"
+
+
+def test_no_backoff_when_retry_backoff_seconds_is_zero(monkeypatch) -> None:
+    """Default behaviour: models without an opt-in retry_backoff_seconds
+    must continue to retry immediately.  This preserves the historical
+    behaviour for every model in the registry that has not been
+    explicitly tuned for a capacity-window upstream.
+    """
+    from tests.evaluation.ci_gate2 import _try_run_with_key
+
+    call_count = {"n": 0}
+
+    def fake_run_scenario(scenario, model, active_key=None):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            return _result(
+                passed=False,
+                error="503 Service Unavailable",
+            )
+        return _result(passed=True)
+
+    monkeypatch.setattr("tests.evaluation.ci_gate2.run_scenario", fake_run_scenario)
+
+    sleeps: list[float] = []
+    logs: list[str] = []
+    result = _try_run_with_key(
+        _scenario(),
+        _model(),  # default retry_backoff_seconds == 0
+        ("OPENROUTER_API_KEY", "or-test"),
+        emit=logs.append,
+        sleep=sleeps.append,
+    )
+
+    assert call_count["n"] == 2
+    assert sleeps == [], f"Expected no backoff when retry_backoff_seconds=0; got {sleeps}"
+    assert result is not None and result.passed is True
+    assert not any("BACKOFF" in line for line in logs), f"BACKOFF must not log when opt-out: {logs}"
+
+
+def test_no_backoff_when_first_attempt_succeeds(monkeypatch) -> None:
+    """The backoff must only fire when an actual retry is taken — a
+    first-attempt success on a model with retry_backoff_seconds set must
+    NOT pause for 60 seconds before returning.
+    """
+    from tests.evaluation.ci_gate2 import _try_run_with_key
+
+    call_count = {"n": 0}
+
+    def fake_run_scenario(scenario, model, active_key=None):
+        call_count["n"] += 1
+        return _result(passed=True)
+
+    monkeypatch.setattr("tests.evaluation.ci_gate2.run_scenario", fake_run_scenario)
+
+    sleeps: list[float] = []
+    logs: list[str] = []
+    result = _try_run_with_key(
+        _scenario(),
+        _model_with_backoff(60),
+        ("OPENROUTER_API_KEY", "or-test"),
+        emit=logs.append,
+        sleep=sleeps.append,
+    )
+
+    assert call_count["n"] == 1
+    assert sleeps == [], f"No retry happened, so no backoff expected; got {sleeps}"
+    assert result is not None and result.passed is True
+
+
+def test_kimi_k2_5_models_yaml_opts_in_to_backoff() -> None:
+    """Pin issue #1994's config side: ``kimi-k2-5`` in models.yaml must
+    carry a non-zero ``retry_backoff_seconds``.  Reverting that value to
+    zero is a regression that breaks the documented mitigation.
+
+    This is a contract test, not a behaviour test — it guards the YAML
+    knob so a future edit cannot silently strip the opt-in without a
+    test flag.
+    """
+    from tests.evaluation.runner import get_model
+
+    kimi = get_model("kimi-k2-5")
+    assert kimi.retry_backoff_seconds > 0, (
+        "kimi-k2-5 must opt in to retry_backoff_seconds per issue #1994; "
+        f"got retry_backoff_seconds={kimi.retry_backoff_seconds}"
+    )
+
+
 # ── Workflow guard: Gate 2 must block merge ──────────────────────────────────
 
 

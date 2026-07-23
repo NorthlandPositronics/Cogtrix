@@ -221,8 +221,99 @@ Conventional commit prefixes used in this project:
 |--------|-------------|
 | `fix:` | PATCH |
 | `feat:` | MINOR |
-| `feat!:` or `BREAKING CHANGE:` footer | MAJOR |
+| `feat!:` or `BREAKING CHANGE:` footer | MAJOR (capped to MINOR pre-1.0 — see §6a) |
 | `refactor:`, `test:`, `docs:`, `chore:` | no bump (PATCH on release) |
+
+---
+
+## 6a. Release bump rules — the precise policy
+
+The bump-rule mapping above describes the intent. The mechanics — which
+release-please applies on every cut — depend on whether the project is
+pre-1.0 or post-1.0.
+
+### Two release-please flags govern pre-1.0 behavior
+
+`.github/release/release-please-config.json`:
+
+```json
+{
+  "bump-minor-pre-major": true,
+  "bump-patch-for-minor-pre-major": false
+}
+```
+
+`bump-minor-pre-major: true` caps `feat!:` and `BREAKING CHANGE:` at a
+**minor** bump while the project is on `0.x.y`. Without it, breaking
+changes would force a major bump (`1.0.0`) before the API surface is
+considered stable — undesirable in the production-stability track.
+
+`bump-patch-for-minor-pre-major: false` means `feat:` produces a **minor**
+bump (standard semver), not a patch bump. This is the standard pre-1.0
+posture for most projects; the inverse setting (`true`) is for projects
+that want to defer every minor bump until they explicitly cross 1.0.
+
+### Effective bump table
+
+| Commit type on `production` | While 0.x.y | After 1.0.0 |
+|---|---|---|
+| `fix:` (or `fix(scope):`) | PATCH | PATCH |
+| `feat:` (or `feat(scope):`) | **MINOR** | MINOR |
+| `feat!:` / `BREAKING CHANGE:` in body | MINOR (capped) | MAJOR |
+| `Release-As: X.Y.Z` directive in body | exact `X.Y.Z` | exact `X.Y.Z` |
+| `refactor:`, `test:`, `docs:`, `chore:`, `ci:`, `build:` | no bump, PATCH on next release | same |
+
+### Where the commit comes from
+
+Integration PRs (`release/next` → `production`) **squash-merge** into a
+single production commit. The PR title becomes the squash commit's
+subject; the PR body becomes the squash commit's body. release-please
+scans only commits on `production`, so:
+
+- **PR title determines bump type** for the integration cut.
+- **PR body** is where `BREAKING CHANGE:` or `Release-As:` directives
+  must live to take effect.
+
+The title-guard at `.github/scripts/release-title-guard.sh` enforces
+that PRs targeting `production` carry a release-triggering type
+(`feat|fix|deps|docs`). A non-release-triggering title (`chore:`,
+`refactor:`, `ci:`) silently produces NO release — the failure mode
+behind #1852.
+
+### Escape hatches for the integration PR
+
+| Want | Title pattern + body |
+|---|---|
+| **Patch bump** | Title: `fix(scope): …` |
+| **Minor bump** | Title: `feat(scope): …` |
+| **Major bump** (post-1.0 only) | Title: `feat!: …` OR body contains `BREAKING CHANGE: …` |
+| **Exact version** (cut a specific number — e.g., crossing to 1.0.0) | Body contains `Release-As: 1.0.0` on its own line |
+
+`Release-As:` is the bluntest tool — overrides every other heuristic.
+Use it for milestone cuts (1.0.0, 2.0.0, RC tags) where the auto-bump
+arithmetic doesn't match intent.
+
+### Worked examples
+
+- PR titled `feat: v0.3.0 release — resolver hardening …` while project is `0.2.12` → release-please cuts **`v0.3.0`** (feat → minor pre-1.0).
+- PR titled `fix(api): timeout regression on /sessions` while project is `0.3.0` → cuts **`v0.3.1`**.
+- PR titled `feat!: drop /v0 REST routes` with `BREAKING CHANGE: existing v0 clients must migrate to /v1` in body, project is `0.5.2` → cuts **`v0.6.0`** (breaking, but capped to minor pre-1.0).
+- PR with `Release-As: 1.0.0` in body, project is `0.7.4` → cuts **`v1.0.0`** exactly.
+
+### What happens after the release-please PR merges
+
+1. release-please's bot opens a `chore(production): release X.Y.Z` PR
+   against `production` whenever new conventional commits land there.
+   That PR carries the version bumps (`pyproject.toml`,
+   `src/_version.py`, `.github/release/release-please-manifest.json`)
+   plus the auto-generated `CHANGELOG.md` entry.
+2. Merging that PR tags `vX.Y.Z` on the merge commit and triggers
+   `release.yml` + `docker-publish.yml`.
+3. The version bumps live only on `production`. They MUST be back-merged
+   to `release/next` before the next integration cut, otherwise the next
+   `release/next` → `production` PR conflicts on those same files. The
+   back-merge is automated by `.github/workflows/release-back-merge.yml`
+   (see #1940); a manual sync PR is the fallback when automation breaks.
 
 ---
 

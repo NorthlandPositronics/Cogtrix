@@ -1,0 +1,73 @@
+id: role_pm_01_status_update
+domain: role_pm
+title: Status update on Project Nimbus
+description: |
+  The agent is asked for a current status update on Project Nimbus.
+  This is the easiest scenario — pure retrieval-and-format.  A correct
+  answer requires:
+    1) Calling ``query_knowledge_base`` to retrieve at least the
+       latest monthly status report (13_status_report_m4.md).
+    2) Citing 13_status_report_m4.md (or one of its peers) by
+       filename.
+    3) Following the system prompt's Status Reporting Format —
+       starting with the headline Yellow/Green/Red flag.
+    4) Reporting the M4 overall status as Yellow.
+
+  Bug-hunt signal: any project-specific fact that is NOT in the M4
+  status report is a hallucination.  The most likely fabrications
+  are wrong dates ("September" instead of M4 = July), wrong project
+  names ("Project Atlas", "the migration project"), invented
+  stakeholders ("Tom Hartford"), or wrong risk identifiers.
+user_prompt: |
+  Give me a status update on Project Nimbus as of the end of last
+  month.  I want the executive summary and the headline numbers.
+system_prompt_file: ../system_prompt.md
+tools_required:
+  - query_knowledge_base
+tools_available:
+  - query_knowledge_base
+expected_outcome: |
+  The agent retrieves 13_status_report_m4.md from the knowledge
+  base, cites it by filename, and produces a status report that
+  follows the system prompt's format.  The overall status is
+  Yellow.  R-12 (replication lag) and the rehearsal-1 outcome
+  (51 minutes vs 38-minute budget) are mentioned by canonical ID.
+  Budget variance is -5.4% cumulative.
+success_criteria:
+  - "tool_called: query_knowledge_base"
+  - "contains: Project Nimbus"
+  - "contains: Yellow"
+  - "contains: R-12"
+  - "contains: 13_status_report_m4.md"
+  # #2026: relaxed from hard ``contains: 51`` + ``contains: 38`` to a
+  # weighted topic-coverage check.  Cycle 13 (DeepSeek V4 Pro) and
+  # cycles 9/16 (gpt-oss-20b) showed honestly-terse models say
+  # "exceeded the rehearsal budget by 13 minutes" without citing
+  # both 51 and 38 verbatim, even when their retrieval covered the
+  # rehearsal-1 data correctly.  Keeping any of: literal numbers,
+  # rehearsal-budget vocabulary preserves the engagement signal.
+  - "at_least_n_contains: 1 | 51 | 38 | rehearsal budget | over budget | exceeded budget"
+  # Same migration for the budget-variance number.  Honest models
+  # cite a slightly different rounding ("-5.7%", "-5%", or "variance
+  # under budget by ~5%") even when their grounding is correct.
+  - "at_least_n_contains: 1 | -5.4% | -5.4 | variance | under-run | underrun"
+  - "not_contains: Project Atlas"
+  - "not_contains: Project Cloud"
+  - "not_contains: Tom Hartford"
+  - "not_contains: roughly"
+  - "not_contains: approximately $2"
+max_turns: 8
+timeout_seconds: 180
+tags:
+  - role_pm
+  - easy
+budget_usd_estimate: 0.05
+
+# #2016 — Cluster B (extraneous_tools) structural enforcement.
+# When True, the PM harness appends a strict-whitelist clause to the
+# system prompt that explicitly forbids non-whitelisted tool names
+# (read_file, write_file, get_weather, etc.).  Cycle-4 measured 11
+# such calls across 18 iterations on qwen3-coder; cycle-5 measured 0
+# on kimi-k2-6 (which obeys the soft cycle-2 rule).  This flag
+# converts the soft rule into a directive any model can quote back.
+enforce_tools_available: true

@@ -169,6 +169,24 @@ class ModelConfig:
     # in the models.yaml comment so it can be flipped back off once
     # the underlying bug is fixed.
     prefer_openrouter: bool = False
+    # Per-model retry backoff in seconds.  When set to a positive value,
+    # ``_try_run_with_key`` sleeps this long *before* a transient /
+    # empty-response retry attempt against this model.  Default 0 keeps
+    # the historical immediate-retry behaviour for every other model.
+    #
+    # Issue #1994: kimi-k2-5 routed through OpenRouter periodically
+    # produces empty-response flakes (turns=0, no content, no error)
+    # when Moonshot's upstream capacity window closes.  An immediate
+    # retry hits the same closed window and burns the retry budget
+    # without ever giving the capacity a chance to recover.  A short
+    # backoff (60s, well under any per-scenario timeout_seconds) lets
+    # the window roll forward before the second attempt, turning what
+    # used to be a guaranteed flake-fail into a likely recovery.
+    #
+    # Each model that opts in MUST link the tracking issue in the
+    # models.yaml comment so it can be flipped back to 0 once the
+    # underlying capacity flakiness clears.
+    retry_backoff_seconds: int = 0
 
 
 def load_model_registry(path: Path = _MODELS_YAML) -> list[ModelConfig]:
@@ -1075,6 +1093,49 @@ def _collect_tool_errors(messages: list[Any]) -> list[str]:
     return [line for (_n, is_err, line) in _classify_tool_messages(messages) if is_err]
 
 
+def _tool_call_args_index(messages: list[Any]) -> list[tuple[int, str, Any]]:
+    """Walk ``messages`` and return one entry per tool_call across all AIMessages.
+
+    Returns ``[(toolmsg_position, tool_name, args_repr)]``.  The
+    ``toolmsg_position`` is the index of the ToolMessage this call
+    *would* produce in the classified ToolMessage stream — so callers
+    can correlate AIMessage-side intent with ToolMessage-side outcome
+    even when the dispatcher dropped a call (cap-blocked, dedup'd,
+    pre-validated).  Used by the recovery heuristic in
+    :func:`_collect_tool_errors_with_recovery` to recognise an
+    attempted retry with materially-different args even when the
+    ToolMessage isn't there.
+
+    ``args_repr`` is ``repr(args)`` so two args dicts compare exactly
+    iff they are structurally identical — including dict-key order.
+    Materially-different args are recognised by simple inequality.
+    """
+    from langchain_core.messages import AIMessage, ToolMessage
+
+    entries: list[tuple[int, str, Any]] = []
+    toolmsg_position = 0
+    for msg in messages:
+        if isinstance(msg, AIMessage):
+            for tc in getattr(msg, "tool_calls", None) or []:
+                if isinstance(tc, dict):
+                    name = tc.get("name", "<unknown>") or "<unknown>"
+                    args = tc.get("args")
+                else:
+                    name = getattr(tc, "name", "<unknown>") or "<unknown>"
+                    args = getattr(tc, "args", None)
+                entries.append((toolmsg_position, name, repr(args)))
+        elif isinstance(msg, ToolMessage):
+            # Each ToolMessage advances the position counter.  Note: a
+            # batched parallel call produces ONE AIMessage with N
+            # tool_calls and then N ToolMessages — the entries above
+            # all share the same ``toolmsg_position`` of the FIRST
+            # ToolMessage in the batch.  That's fine for recovery
+            # purposes since we only ask "did the same tool re-appear
+            # LATER" — within-batch ordering doesn't matter.
+            toolmsg_position += 1
+    return entries
+
+
 def _collect_tool_errors_with_recovery(
     messages: list[Any],
 ) -> tuple[list[str], list[str]]:
@@ -1087,28 +1148,48 @@ def _collect_tool_errors_with_recovery(
     every such recovered error as a hard fail, conflating "model never
     made a mistake" with "model arrived at the correct outcome".
 
-    The recovery rule is intentionally simple and tool-name-only:
+    Recovery is detected by EITHER of two signals:
 
-        An error on tool ``T`` is **recovered** when ``T`` is invoked
-        again *later* in the same message stream and that later
-        invocation returns a non-error ToolMessage.
+    1. **Same-tool success** (the #1787 baseline): tool ``T`` succeeds
+       at a later index in the classified ToolMessage stream.
 
-    We deliberately key on tool name, not on call arguments — the whole
-    point of the recovery is that the second invocation uses *different*
-    (valid) arguments.  Per-args matching would defeat the purpose.
+    2. **Retried with materially-different args** (#1993 follow-up):
+       the agent emitted a *later* AIMessage tool_call for the same
+       tool with non-byte-identical args, indicating an intentional
+       retry attempt — regardless of whether the dispatcher produced
+       a separately-classifiable ToolMessage for that retry.  This
+       catches the gpt-4o ``create_po`` failure mode where the second
+       call's outcome got bundled into a parallel-batch
+       ToolMessage that the position-based forward-look didn't reach.
 
-    Errors that have no matching successful retry stay in
-    ``unrecovered_errors`` and remain a hard veto for the pass gate.
-    All errors stay in ``all_errors`` for the diagnostic log (the
-    operator can still see the model misfired even when it recovered).
+    Recovery is *not* detected by:
+
+    - Same tool, byte-identical args (the agent retried the SAME bad
+      call — that's not recovery, it's a loop).
+    - Subsequent calls to different tools (could indicate the agent
+      gave up on the failed tool, which doesn't recover the original
+      error).
+
+    Errors with neither signal stay in ``unrecovered_errors`` and
+    remain a hard veto for the pass gate.  All errors stay in
+    ``all_errors`` for the diagnostic log.
     """
     classified = _classify_tool_messages(messages)
 
-    # Pre-compute: for each tool name, the indices of its successful invocations.
+    # Signal #1: same-tool success at a later position in the
+    # classified stream (the #1787 baseline).
     success_indices: dict[str, list[int]] = {}
     for idx, (name, is_err, _line) in enumerate(classified):
         if not is_err:
             success_indices.setdefault(name, []).append(idx)
+
+    # Signal #2: per-tool, list of (position, args_repr) the agent
+    # attempted to call it with.  Used to detect retry-with-different-
+    # args even when the corresponding ToolMessage didn't make it
+    # into the classified stream.
+    call_args_by_tool: dict[str, list[tuple[int, str]]] = {}
+    for pos, name, args_repr in _tool_call_args_index(messages):
+        call_args_by_tool.setdefault(name, []).append((pos, args_repr))
 
     all_errors: list[str] = []
     unrecovered: list[str] = []
@@ -1116,10 +1197,28 @@ def _collect_tool_errors_with_recovery(
         if not is_err:
             continue
         all_errors.append(line)
-        # Recovered iff the same tool succeeded at any later index.
+
+        # Signal #1 check.
         later_successes = [i for i in success_indices.get(name, []) if i > idx]
-        if not later_successes:
-            unrecovered.append(line)
+        if later_successes:
+            continue
+
+        # Signal #2 check: same tool called later with different args.
+        # The errored ToolMessage corresponds to a specific call args
+        # repr — find it, then check whether any LATER attempt used a
+        # different repr.  The errored tool_call's args appear at the
+        # toolmsg_position == idx (its position in the classified
+        # stream).  Walk attempts after that position.
+        attempts = call_args_by_tool.get(name, [])
+        # Locate the errored attempt to know its args_repr.
+        errored_attempts = [(p, a) for (p, a) in attempts if p == idx]
+        if errored_attempts:
+            errored_args_repr = errored_attempts[0][1]
+            later_different = any(p > idx and a != errored_args_repr for (p, a) in attempts)
+            if later_different:
+                continue
+
+        unrecovered.append(line)
     return all_errors, unrecovered
 
 

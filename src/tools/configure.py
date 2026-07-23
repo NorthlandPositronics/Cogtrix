@@ -505,6 +505,14 @@ def configure_rag_tool(config: Config) -> None:
         # Score threshold (M4.3)
         rag_config["score_threshold"] = config.rag.score_threshold  # type: ignore[assignment]
 
+        # #1981: BM25 hybrid retrieval — both flags pass through so the
+        # query path (``src.tools.rag.query_knowledge_base``) can see
+        # them.  ``build_bm25_sidecar`` is the ingest-time flag and
+        # isn't consumed by the query side; it lives in the same dict
+        # for discoverability / future use.
+        rag_config["use_bm25_hybrid"] = config.rag.use_bm25_hybrid  # type: ignore[assignment]
+        rag_config["bm25_rrf_k"] = config.rag.bm25_rrf_k  # type: ignore[assignment]
+
         configure_rag(rag_config)
 
         # Update tool description with live index stats so the LLM

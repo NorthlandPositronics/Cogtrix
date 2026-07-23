@@ -2453,3 +2453,177 @@ class TestSafeToolName:
         assert "\n" not in safe
         assert "\r" not in safe
         assert "<" not in safe  # no HTML injection chars either
+
+
+# ── #1960 follow-up: recovery cascade budget ─────────────────────────
+
+
+class TestRecoveryCascadeBudget:
+    """The route_after_model wrapper enforces a per-turn cap on
+    ``handle_*`` decisions.  Once the cap is reached, the router
+    short-circuits to END regardless of what the detectors say.
+
+    This is the architectural kill switch added after #1960 — the
+    detector layer's missing contract is patched at the router so
+    a runaway cascade (correct refusal misclassified by multiple
+    detectors, each regenerating, exhausting the wall) can never
+    eat the agent's response on a slow model again.
+    """
+
+    def _make_llm(self) -> Any:
+        """Minimal LLM stub — returns one final-answer AIMessage."""
+        llm = MagicMock()
+        llm.bind_tools.return_value = llm
+        llm.invoke.return_value = AIMessage(content="hello")
+        return llm
+
+    def test_per_run_state_has_budget_fields(self) -> None:
+        """The cascade-budget counters must exist on PerRunState — if
+        they're ever removed, the route_after_model wrapper falls
+        through to a NoneType error and a Gate-2-sized regression."""
+        from src.orchestration.graph_runtime import PerRunState
+
+        state = PerRunState()
+        assert hasattr(state, "recovery_firings_this_turn")
+        assert hasattr(state, "recovery_firings_turn_marker")
+        assert state.recovery_firings_this_turn == [0]
+        assert state.recovery_firings_turn_marker == [-1]
+
+    def test_max_recovery_firings_constant_is_three(self) -> None:
+        """If the cap is loosened past 3, the #1960 cascade scenario
+        (4 detectors firing on a single refusal) would still hit the
+        runaway path.  Pin the value here so a future tune of the
+        constant is a deliberate change with a test update."""
+        import inspect
+
+        from cogtrix import _build_agent_graph
+
+        # The constant lives inside build_agent_graph's closure scope.
+        # Read it out of the source to assert on the literal value.
+        src = inspect.getsource(_build_agent_graph)
+        assert "_MAX_RECOVERY_FIRINGS_PER_TURN = 3" in src, (
+            "The cascade-budget cap was changed.  Update this test if "
+            "the new value still defends against the #1960 cascade; "
+            "do not just bump the literal."
+        )
+
+    def test_budget_short_circuits_to_end_when_exceeded(self) -> None:
+        """When the per-turn counter is at or above the cap and the
+        turn marker matches the current most-recent HumanMessage, the
+        next route_after_model call must return END without invoking
+        the detector chain — the kill switch."""
+        from langgraph.graph import END as _END
+
+        llm = self._make_llm()
+        graph = _build_agent_graph(
+            llm=llm,
+            system_prompt="",
+            active_tools_list=[],
+            available_tools={},
+            registry=None,
+            approvals=set(),
+        )
+
+        # Pre-populate the per-run state to simulate "already burnt 4
+        # recovery firings this turn".  The turn marker points at the
+        # ONE HumanMessage we'll invoke with — so the wrapper sees
+        # "same turn, budget exhausted, exit".
+        runtime = graph._per_run_state[0]
+        runtime.recovery_firings_this_turn[0] = 5
+        runtime.recovery_firings_turn_marker[0] = 0
+
+        # Invoke once.  The agent gets to produce its single response
+        # (the LLM stub's "hello").  After that, route_after_model
+        # fires — sees budget exhausted, returns END.
+        result = graph.invoke({"messages": [HumanMessage(content="hi")]})
+
+        # Smoke: we should NOT have looped back through any recovery
+        # node.  The accumulated messages should be just the input
+        # HumanMessage + the agent's single AIMessage.
+        ai_messages = [m for m in result["messages"] if isinstance(m, AIMessage)]
+        assert len(ai_messages) >= 1
+        # Importantly: the budget counter stayed where we set it (no
+        # routing decision incremented it on this short-circuit path).
+        assert runtime.recovery_firings_this_turn[0] == 5
+        # And the sentinel END from langgraph is what closed the graph.
+        del _END  # imported for documentation; runtime behaviour above is the assertion
+
+    def test_budget_resets_on_new_turn(self) -> None:
+        """When a fresh HumanMessage arrives (new turn), the budget
+        counter resets — recovery is available again."""
+        llm = self._make_llm()
+        graph = _build_agent_graph(
+            llm=llm,
+            system_prompt="",
+            active_tools_list=[],
+            available_tools={},
+            registry=None,
+            approvals=set(),
+        )
+
+        runtime = graph._per_run_state[0]
+        # Pretend the PREVIOUS turn burnt the entire budget.
+        runtime.recovery_firings_this_turn[0] = 5
+        runtime.recovery_firings_turn_marker[0] = 0  # was anchored to msg index 0
+
+        # Now invoke with a FRESH HumanMessage (different turn).  The
+        # wrapper sees turn-marker mismatch → resets the counter.
+        graph.invoke(
+            {
+                "messages": [
+                    HumanMessage(content="turn 1 question", id="h1"),
+                    AIMessage(content="ok"),
+                    HumanMessage(content="turn 2 question", id="h2"),
+                ]
+            }
+        )
+
+        # The counter was reset at the start of route_after_model on
+        # entry.  The LLM stub's response doesn't trigger any handle_*
+        # detector (plain "hello" content), so the counter stays at 0.
+        assert runtime.recovery_firings_this_turn[0] == 0
+        # And the turn marker advanced to the index of the new
+        # HumanMessage.
+        assert runtime.recovery_firings_turn_marker[0] > 0
+
+    def test_per_run_state_has_firing_history_field(self) -> None:
+        """#1964 Item D — per-turn firing-history list must exist on
+        PerRunState so the cascade-budget log can carry the payload."""
+        from src.orchestration.graph_runtime import PerRunState
+
+        state = PerRunState()
+        assert hasattr(state, "recovery_firings_history")
+        assert state.recovery_firings_history == [[]]
+
+    def test_firing_history_resets_on_new_turn(self) -> None:
+        """When the turn marker advances, both the counter AND the
+        history list reset.  Tested via direct state manipulation so
+        the assertion is on the runtime fields, not on log output."""
+        llm = self._make_llm()
+        graph = _build_agent_graph(
+            llm=llm,
+            system_prompt="",
+            active_tools_list=[],
+            available_tools={},
+            registry=None,
+            approvals=set(),
+        )
+
+        runtime = graph._per_run_state[0]
+        runtime.recovery_firings_this_turn[0] = 3
+        runtime.recovery_firings_history[0] = ["fake_detector_a", "fake_detector_b"]
+        runtime.recovery_firings_turn_marker[0] = 0
+
+        graph.invoke(
+            {
+                "messages": [
+                    HumanMessage(content="turn 1", id="h1"),
+                    AIMessage(content="ok"),
+                    HumanMessage(content="turn 2", id="h2"),
+                ]
+            }
+        )
+
+        # New turn detected → both fields reset.
+        assert runtime.recovery_firings_this_turn[0] == 0
+        assert runtime.recovery_firings_history[0] == []

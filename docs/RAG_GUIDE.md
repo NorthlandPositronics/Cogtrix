@@ -229,11 +229,78 @@ Saved notes go to the dedicated agent-notes sub-index when FAISS is available. I
 | `question` | Required | Search query |
 | `k` | 4 | Number of chunks to retrieve (1-10) |
 
+### Hybrid Retrieval (BM25 + Vector)
+
+Cogtrix supports an opt-in **hybrid retrieval** path that combines pure vector (dense) ranking with BM25 sparse ranking via Reciprocal Rank Fusion (RRF). This addresses two well-known weaknesses of pure-vector retrieval (catalogued in issue #1952):
+
+- **Numeric / monetary token queries** — embedding models smooth tokens like `$2,400,000` toward generic semantics, so the document that actually contains the amount can fall out of the top-K. BM25 treats the amount as a distinct term and pins the right document.
+- **One "central" document dominates unrelated queries** — when a corpus has a single dense reference document (a stakeholder register, a glossary), embeddings often pull every query toward its chunks. BM25's IDF weighting downweights such terms.
+
+Hybrid is **off by default** — every existing pure-vector pipeline keeps working unchanged. Flip both flags in your `~/.cogtrix.yaml` to enable:
+
+```yaml
+rag:
+  build_bm25_sidecar: true   # write bm25.pkl alongside the FAISS index at ingest time
+  use_bm25_hybrid:    true   # fuse vector + BM25 ranks at query time
+  bm25_rrf_k:         60     # RRF tuning constant (Cormack et al. 2009 standard)
+```
+
+Then re-ingest to build the BM25 sidecar:
+
+```bash
+python cogtrix.py --ingest
+```
+
+The sidecar (`bm25.pkl`) lives alongside `index.faiss`. The query path looks for it automatically:
+
+- If both the flag is on AND the sidecar exists → hybrid retrieval runs.
+- If the flag is on but no sidecar exists → graceful fallback to pure-vector.
+- If the flag is off → pure-vector (regardless of sidecar presence).
+
+**Cost:** the sidecar adds ~5-10% to ingest wall-clock time and a small additional disk file (tokens + chunk text). Hybrid queries add one extra in-memory BM25 scoring pass per index — typically < 10 ms for corpora under 10k chunks. `rank-bm25` is pure Python with only `numpy` as a dependency (already in the base install), so no native compilation is required.
+
 ---
 
 ## Embedding Providers
 
 The default embedding provider is `ollama` (local, no API key required). OpenAI is also supported via `--embedding-provider openai`.
+
+### Picking a model for retrieval quality (#1952 Option D)
+
+The embedding model is the single biggest lever on retrieval quality.
+A weaker model produces *diffuse* vectors — chunks on different topics
+land near each other in vector space, and queries pull toward whichever
+document happens to sit at the corpus centroid (typically a dense
+stakeholder register or glossary).  A stronger model spreads the
+corpus out and gives discriminative ranking even on hard queries
+(numeric tokens, generic role words).
+
+If you're seeing symptoms like:
+
+- Exact-text queries fail to surface the document containing the
+  text (e.g. searching for an amount that appears verbatim in one
+  document and getting back unrelated chunks);
+- Generic role-word queries (*"budget memo"*, *"schedule slip"*)
+  consistently return chunks from a single dense reference document
+  regardless of topic;
+
+…the most leveraged single change is to switch to a more discriminative
+embedding model.  Suggested upgrade path:
+
+| If you're on… | Try… | Notes |
+|---|---|---|
+| Ollama `nomic-embed-text` (default) | Ollama `mxbai-embed-large` | Same provider; larger model with stronger discrimination.  `ollama pull mxbai-embed-large` then re-ingest. |
+| OpenAI `text-embedding-3-small` (default) | OpenAI `text-embedding-3-large` | Same provider; ~3× the dimensionality.  Noticeably better on short-token / monetary-token queries.  Costs more per token but typical RAG corpora are small. |
+| Any small open-model embedding | A bge-large / qwen3-embedding sized model | Larger open models that ship via Ollama or vLLM (set `provider.type: openai` with the appropriate `base_url`). |
+
+After switching, run `python cogtrix.py --ingest` to rebuild the
+FAISS index with the new vectors.  Existing chunks must be
+re-embedded — the index is not portable across models.
+
+This is the lightest-touch option for #1952's regime-B (monetary
+tokens) and regime-C (one document dominates) failure modes.  Combine
+with the BM25 hybrid path (above) and the lowered chunk-size defaults
+(`chunk_size: 800`, `chunk_overlap: 100`) for compound effect.
 
 ### Ollama Embeddings (default)
 
@@ -327,8 +394,8 @@ Switch between embedding providers by changing the `rag.model` value — no need
 rag:
   docs_dir: docs
   vectordb_dir: vectordb
-  chunk_size: 2000
-  chunk_overlap: 200
+  chunk_size: 800
+  chunk_overlap: 100
   model: embed-local
 ```
 
@@ -338,18 +405,26 @@ rag:
 |--------|---------|-------------|
 | `docs_dir` | `"docs"` | Source documents directory |
 | `vectordb_dir` | `"vectordb"` | Vector database output |
-| `chunk_size` | `2000` | Characters per chunk |
-| `chunk_overlap` | `200` | Overlap between chunks |
+| `chunk_size` | `800` | Characters per chunk |
+| `chunk_overlap` | `100` | Overlap between chunks |
 | `model` | `null` | Model name from the `models` registry for embeddings. Falls back to the active provider when not set. |
+
+> **Default changed (#1952 Option C):** `chunk_size` lowered from `2000` → `800`,
+> `chunk_overlap` from `200` → `100`.  Larger chunks span multiple topics and dilute
+> the per-chunk semantic vector — the smaller defaults give each chunk tighter
+> focus, partially relieving the *"one document dominates"* retrieval failure mode
+> catalogued in #1952.  Operators with explicit values in `~/.cogtrix.yaml` keep
+> their overrides; operators on defaults will see the new behaviour after
+> re-running `python cogtrix.py --ingest`.
 
 ### Chunk Size Guidelines
 
 | Document Type | Recommended Size | Overlap |
 |---------------|------------------|---------|
-| Technical docs | 1000-1500 | 150-200 |
+| Technical docs | 600-1000 | 80-150 |
 | Legal documents | 800-1200 | 200-300 |
-| General text | 1200-1500 | 150-200 |
-| Short FAQs | 500-800 | 100-150 |
+| General text | 800-1200 | 100-150 |
+| Short FAQs | 400-700 | 50-100 |
 
 Smaller chunks = more precise retrieval, larger context window usage  
 Larger chunks = more context per chunk, fewer chunks needed
@@ -457,10 +532,16 @@ All available indexes (global CLI index and per-document API indexes) are search
 from src.rag import ingest_documents, IngestConfig
 from pathlib import Path
 
+# ``vectordb_dir`` is the EXACT directory where ``index.faiss`` will be
+# written.  The default CLI / query-side convention nests the index under
+# a ``faiss_index/`` segment, so callers that want to mirror that layout
+# should include the segment explicitly:
+#     vectordb_dir=Path("./my-vectordb/faiss_index")
+
 # Using Ollama (default)
 config = IngestConfig(
     docs_dir=Path("./my-docs"),
-    vectordb_dir=Path("./my-vectordb"),
+    vectordb_dir=Path("./my-vectordb/faiss_index"),
     embedding_provider="ollama",
     embedding_model="nomic-embed-text",
 )
@@ -468,7 +549,7 @@ config = IngestConfig(
 # Using OpenAI or Google — pass the api_key explicitly
 # config = IngestConfig(
 #     docs_dir=Path("./my-docs"),
-#     vectordb_dir=Path("./my-vectordb"),
+#     vectordb_dir=Path("./my-vectordb/faiss_index"),
 #     embedding_provider="openai",
 #     embedding_model="text-embedding-3-small",
 #     api_key="sk-...",

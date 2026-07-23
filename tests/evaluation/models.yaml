@@ -111,11 +111,87 @@ models:
     input_price_per_1m: 0.30
     output_price_per_1m: 1.00
 
+  # Local Spark-cluster qwen3-coder.  Used by tests/role_pm (#1948 PM
+  # role-test harness).  ``smoke: false`` so this entry does NOT
+  # participate in the Gate 2 smoke matrix — it is only consumed when
+  # an operator invokes ``python -m tests.role_pm.run --model
+  # qwen3-coder`` (or a sibling cycle-N runner).
+  #
+  # ``base_url`` is set to the upstream Spark cluster of the original
+  # cycle-1..cycle-3 runs (#1948 / #1987 / cycle-3).  Operators running
+  # the harness against a different vLLM / OpenAI-compatible endpoint
+  # MUST edit this entry's ``base_url`` to match their environment;
+  # there is no env-var override at present (revisit if a second
+  # operator hits this).  The matching API key is read from
+  # ``VLLM_LOCAL_API_KEY`` — set that env var before running.
+  - id: qwen3-coder
+    provider: openai_compatible
+    display_name: "Qwen3 Coder (Spark)"
+    tier: B
+    smoke: false
+    env_key: VLLM_LOCAL_API_KEY
+    model_id: qwen3-coder
+    base_url: http://192.168.70.254:8080/v1
+
+  # Local-test entries for the #2006 cycle-12-18 cross-model PM run.
+  # All routed via OpenRouter (so env_key=OPENROUTER_API_KEY satisfies
+  # the wildcard and provider=openai_compatible + base_url cover the
+  # PM harness's _build_llm(model, active_key=...) path).  smoke=false
+  # so none participate in the Gate 2 matrix; only consumed when an
+  # operator runs ``python -m tests.role_pm.run --model <id>``.
+  - id: kimi-k2-6
+    provider: openai_compatible
+    display_name: "Kimi K2.6"
+    tier: B
+    smoke: false
+    env_key: OPENROUTER_API_KEY
+    model_id: moonshotai/kimi-k2.6
+    base_url: https://openrouter.ai/api/v1
+    openrouter_model_id: moonshotai/kimi-k2.6
+
+  - id: deepseek-v4-pro
+    provider: openai_compatible
+    display_name: "DeepSeek V4 Pro"
+    tier: B
+    smoke: false
+    env_key: OPENROUTER_API_KEY
+    model_id: deepseek/deepseek-v4-pro
+    base_url: https://openrouter.ai/api/v1
+    openrouter_model_id: deepseek/deepseek-v4-pro
+
+  - id: qwen3-8b
+    provider: openai_compatible
+    display_name: "Qwen3 8B"
+    tier: B
+    smoke: false
+    env_key: OPENROUTER_API_KEY
+    model_id: qwen/qwen3-8b
+    base_url: https://openrouter.ai/api/v1
+    openrouter_model_id: qwen/qwen3-8b
+
+  - id: gemma-4-26b
+    provider: openai_compatible
+    display_name: "Gemma 4 26B"
+    tier: B
+    smoke: false
+    env_key: OPENROUTER_API_KEY
+    model_id: google/gemma-4-26b-a4b-it
+    base_url: https://openrouter.ai/api/v1
+    openrouter_model_id: google/gemma-4-26b-a4b-it
+
   # ── Moonshot ───────────────────────────────────────────────────────────────
   # Kimi K2.5 — second strict-schema canary alongside DeepSeek-V3 for the
   # stub-tool registry.  Moonshot retired K1.5 from public offering;
   # OpenRouter routes moonshotai/kimi-k2.5 at $0.40 / $1.98 per 1M tokens
   # (262K context).  Smoke=true so Gate 2 evaluates it on every run.
+  #
+  # Re-enabled by closing #2000 after the 2026-06-03 capacity flake.  The
+  # PR that closes #2000 IS the first validation pass — its CI run is a
+  # full Gate 2 evaluation against kimi-k2-5 across all four shards.
+  # Subsequent release/next CI runs serve as the additional validation
+  # passes the issue's re-enable criteria called for.  The PR #1997
+  # retry-backoff infrastructure remains the front-line defence for any
+  # smaller future capacity wobbles.
   - id: kimi-k2-5
     provider: openai_compatible
     display_name: "Kimi K2.5"
@@ -127,6 +203,12 @@ models:
     openrouter_model_id: moonshotai/kimi-k2.5
     input_price_per_1m: 0.40
     output_price_per_1m: 1.98
+    # Issue #1994: kimi-k2-5 via OpenRouter regularly hits Moonshot
+    # capacity-exhaustion windows that surface as empty-response flakes
+    # (turns=0, no content, no error).  An immediate retry hits the
+    # same closed window; a 60s pause lets it roll forward.  Flip back
+    # to 0 once the underlying capacity behaviour stabilises.
+    retry_backoff_seconds: 60
 
   # ── Google ─────────────────────────────────────────────────────────────────
   - id: gemini-2-5-pro

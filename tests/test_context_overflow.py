@@ -11,7 +11,7 @@ from __future__ import annotations
 from unittest.mock import MagicMock
 
 import pytest
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
 # ---------------------------------------------------------------------------
 # Layer 1 — Pure unit tests: _is_context_overflow_error
@@ -193,13 +193,19 @@ class TestContextMessageCapInvocation:
 
         assert len(seen_messages) == 1
         invoked = seen_messages[0]
-        assert len(invoked) == 3
-        assert isinstance(invoked[0], AIMessage)
-        assert invoked[0].tool_calls[0]["id"] == "call_1"
-        assert isinstance(invoked[1], ToolMessage)
-        assert invoked[1].tool_call_id == "call_1"
-        assert isinstance(invoked[2], HumanMessage)
-        assert invoked[2].content == "latest"
+        # #1943 PR #1: eviction prepends a SystemMessage marker
+        # ("[CONTEXT NOTICE] N older message(s) were removed").  The cap
+        # budget still applies to actual conversation content; the
+        # marker is metadata.  Filter it out before asserting on the
+        # surviving content.
+        content = [m for m in invoked if not isinstance(m, SystemMessage)]
+        assert len(content) == 3
+        assert isinstance(content[0], AIMessage)
+        assert content[0].tool_calls[0]["id"] == "call_1"
+        assert isinstance(content[1], ToolMessage)
+        assert content[1].tool_call_id == "call_1"
+        assert isinstance(content[2], HumanMessage)
+        assert content[2].content == "latest"
 
     def test_cap_uses_configured_token_budget(self):
         from src.orchestration.graph import build_agent_graph
@@ -239,9 +245,12 @@ class TestContextMessageCapInvocation:
 
         assert len(seen_messages) == 1
         invoked = seen_messages[0]
-        assert len(invoked) == 1
-        assert isinstance(invoked[0], HumanMessage)
-        assert invoked[0].content == "latest"
+        # #1943 PR #1: filter the eviction-marker SystemMessage (see
+        # sibling test above for rationale).
+        content = [m for m in invoked if not isinstance(m, SystemMessage)]
+        assert len(content) == 1
+        assert isinstance(content[0], HumanMessage)
+        assert content[0].content == "latest"
 
 
 # ---------------------------------------------------------------------------
@@ -630,3 +639,194 @@ class TestMidTurnCompressionThreshold:
             "ToolMessage was not compressed — min_age_override did not bypass "
             "the internal threshold check"
         )
+
+
+# ---------------------------------------------------------------------------
+# #1943 PR #2 — Pre-flight token-size guard
+# ---------------------------------------------------------------------------
+
+
+class SilentTruncationLLM:
+    """Fake LLM that simulates the qwen3-coder failure mode: silently
+    truncates over-budget input and returns an empty/no-op response
+    without raising any exception.
+
+    The pre-flight guard in call_model.py must force compression
+    BEFORE the invoke even reaches this provider — otherwise the
+    over-budget input gets dropped silently and the agent fabricates
+    a response from training-data knowledge (the #1943 failure mode).
+    """
+
+    def __init__(self, max_chars: int = 50_000):
+        self.max_chars = max_chars
+        self.invoke_count = 0
+        self.invocation_sizes: list[int] = []
+
+    def _is_compression_call(self, messages) -> bool:
+        # Matches the prompt produced by ``compress_tool_message`` in
+        # src/orchestration/compression.py — it self-identifies as a
+        # "context compressor" and asks to condense tool output.
+        markers = ("context compressor", "summarized", "summarise", "condense")
+        if isinstance(messages, str):
+            lower = messages.lower()
+            return any(m in lower for m in markers)
+        return any(
+            any(m in str(getattr(msg, "content", "")).lower() for m in markers) for msg in messages
+        )
+
+    def _total_chars(self, messages) -> int:
+        if isinstance(messages, str):
+            return len(messages)
+        return sum(len(str(getattr(m, "content", ""))) for m in messages)
+
+    def invoke(self, messages, config=None, **kwargs):
+        self.invoke_count += 1
+        if self._is_compression_call(messages):
+            return AIMessage(content="[compressed summary]")
+        total = self._total_chars(messages)
+        self.invocation_sizes.append(total)
+        # Silently return empty if over budget — NO exception.
+        # This is the qwen3-coder pattern from the #1943 reproducer.
+        if total > self.max_chars:
+            return AIMessage(content="")
+        return AIMessage(content="ok")
+
+    def bind_tools(self, tools):
+        return self
+
+
+class TestPreFlightTokenGuard:
+    """#1943 PR #2: pre-flight token-size guard at the dispatcher.
+
+    Catches silent-truncation providers (qwen3-coder via Spark
+    observed) that drop over-budget input WITHOUT raising — bypassing
+    the post-invoke ``_is_context_overflow_error`` retry path.
+    """
+
+    def test_pre_flight_compression_fires_on_silent_truncation_provider(self):
+        """With model_max_tokens=16384 and tool_context_limit_pct=0.80,
+        the threshold is 13107 tokens (~52428 chars).  A history
+        well over that should force pre-flight compression — the
+        silent-truncation provider never sees the over-budget input."""
+        from src.orchestration.graph import build_agent_graph
+
+        # Provider that silently drops calls > 30000 chars.  Below the
+        # pre-flight threshold (52428 chars), so the guard fires first
+        # and provider never sees the over-budget call.
+        silent_llm = SilentTruncationLLM(max_chars=30_000)
+
+        graph = build_agent_graph(
+            llm=silent_llm,
+            system_prompt="",
+            active_tools_list=[],
+            available_tools={},
+            max_context_tokens=16_384,
+            context_compression=True,
+            # Disable the eviction cap so we isolate the pre-flight
+            # guard's behaviour.
+            context_max_messages=0,
+        )
+
+        # History weighing ~60000 chars — over the 52428 pre-flight
+        # threshold AND over the silent-truncation LLM's 30000 max.
+        history: list = [
+            HumanMessage(content="initial query"),
+        ]
+        for i in range(3):
+            history.append(
+                AIMessage(content="", tool_calls=[{"name": "t", "args": {}, "id": f"c{i}"}])
+            )
+            history.append(
+                ToolMessage(content="x" * 20_000, tool_call_id=f"c{i}", name="some_tool")
+            )
+        history.append(HumanMessage(content="Final question"))
+
+        result = graph.invoke({"messages": history})
+        messages = result.get("messages", [])
+        ai_messages = [m for m in messages if isinstance(m, AIMessage) and m.content]
+
+        # The invoke that actually reached the provider must have been
+        # under the silent-truncation threshold — otherwise the guard
+        # didn't fire and the provider would have returned empty.
+        non_compress_invokes = [s for s in silent_llm.invocation_sizes if s > 0]
+        assert non_compress_invokes, "Provider was never invoked"
+        for size in non_compress_invokes:
+            assert size <= silent_llm.max_chars, (
+                f"Pre-flight guard did not fire — provider received {size} "
+                f"chars > silent-truncation threshold {silent_llm.max_chars}"
+            )
+
+        # And the agent produced a real response (not the empty
+        # silent-truncation response).
+        assert any(m.content == "ok" for m in ai_messages), (
+            "Provider returned empty response — pre-flight guard did not " "compress sufficiently"
+        )
+
+    def test_pre_flight_no_op_when_under_threshold(self):
+        """When the message list fits comfortably under the pre-flight
+        threshold, no compression fires and the provider sees the
+        original messages verbatim."""
+        from src.orchestration.graph import build_agent_graph
+
+        silent_llm = SilentTruncationLLM(max_chars=100_000)  # generous
+
+        graph = build_agent_graph(
+            llm=silent_llm,
+            system_prompt="",
+            active_tools_list=[],
+            available_tools={},
+            max_context_tokens=16_384,
+            context_compression=True,
+            context_max_messages=0,
+        )
+
+        # Small history — well under any threshold.
+        history = [
+            HumanMessage(content="hi"),
+            AIMessage(content="hello"),
+            HumanMessage(content="anything new?"),
+        ]
+
+        result = graph.invoke({"messages": history})
+        messages = result.get("messages", [])
+        ai_messages = [m for m in messages if isinstance(m, AIMessage) and m.content]
+
+        # Agent completed normally.
+        assert any(m.content == "ok" for m in ai_messages)
+        # Provider was invoked exactly once with the original-ish input
+        # (no pre-flight compression cycle).
+        non_compress_invokes = [s for s in silent_llm.invocation_sizes if s > 0]
+        assert (
+            len(non_compress_invokes) == 1
+        ), f"Expected exactly 1 non-compression invoke; got {non_compress_invokes}"
+
+    def test_pre_flight_disabled_when_no_window_configured(self):
+        """When neither ``model_max_tokens`` nor ``context_max_tokens``
+        is set, the guard short-circuits (no window to reason about)
+        rather than guessing.  Falls back to the existing post-invoke
+        overflow-error path."""
+        from src.orchestration.graph import build_agent_graph
+
+        # Provider that DOES raise on overflow — verifies fallback
+        # works when pre-flight is disabled.
+        tiny_llm = TinyContextLLM(max_chars=50_000)
+
+        graph = build_agent_graph(
+            llm=tiny_llm,
+            system_prompt="",
+            active_tools_list=[],
+            available_tools={},
+            max_context_tokens=0,  # disables both pre-flight and mid-turn compression triggers
+            context_compression=False,
+            context_max_messages=0,
+        )
+
+        history = [HumanMessage(content="hi")]
+        result = graph.invoke({"messages": history})
+        messages = result.get("messages", [])
+        ai_messages = [m for m in messages if isinstance(m, AIMessage) and m.content]
+
+        # Worked normally — no pre-flight compression fired, no overflow.
+        assert any(m.content == "ok" for m in ai_messages)
+        # Provider got 1 invoke.
+        assert tiny_llm.invoke_count == 1

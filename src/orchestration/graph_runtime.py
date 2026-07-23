@@ -107,6 +107,28 @@ class PerRunState:
     # #1860: attributed-prose-claim guard (a source/authority is credited
     # for content not in any tool result this turn).
     unsupported_attribution_count: list[int] = field(default_factory=lambda: [0])
+    # #1988 (post-mortem #1987 Cluster A): entity-owner mismatch guard
+    # (<entity-id> + <stakeholder-name> co-mentioned in the response
+    # without that pair appearing in any tool result or system prompt
+    # this turn — agent stitched a plausible-but-wrong owner onto a
+    # structured ID).
+    entity_owner_mismatch_count: list[int] = field(default_factory=lambda: [0])
+    # #2015 (post-mortem #2006 Cluster A root-cause): corpus-aware
+    # attribution mismatch guard.  Stricter than the entity-owner sibling
+    # above — uses a curated ``{entity_id → {valid_owner_names}}`` index
+    # supplied by the caller (only the PM harness today) so it catches
+    # cases where the wrongly-attached stakeholder name DOES co-occur
+    # in retrieved chunks (which fools the grounding-based detector)
+    # but is still attached to the wrong entity per the corpus.  Only
+    # runs when ``build_agent_graph`` is given a non-None
+    # ``corpus_attribution_detector`` callable.
+    corpus_attribution_mismatch_count: list[int] = field(default_factory=lambda: [0])
+    # #1989 (post-mortem #1987 Cluster C): topic-substitution guard.
+    # User asks about subject X (e.g. "CompactSync codebase tech debt");
+    # agent silently retitles to in-corpus subject Y ("Project Nimbus
+    # Technical Debt Risks") and answers Y instead of acknowledging
+    # out-of-scope.  Counter bounds retries.
+    topic_substitution_count: list[int] = field(default_factory=lambda: [0])
     # #1713: sycophantic-prefix guard ("You're right" / "I apologize"
     # validation prefix preceding a final answer). Bounded retries.
     sycophancy_count: list[int] = field(default_factory=lambda: [0])
@@ -124,6 +146,31 @@ class PerRunState:
     # github.com/<owner>/<repo> URL with authoritative recommendation
     # framing.
     noncanonical_fork_count: list[int] = field(default_factory=lambda: [0])
+    # #1943 PR #4: synthesis-after-eviction guard. Counts how many times
+    # the model emitted a substantive response after a ``context_evicted``
+    # marker without grounding or acknowledging the eviction.  Bounded
+    # retries — see ``_MAX_SYNTHESIS_AFTER_EVICTION_RETRIES``.
+    synthesis_after_eviction_count: list[int] = field(default_factory=lambda: [0])
+    # #1960 follow-up: per-turn recovery-firing budget.  Counts every
+    # ``handle_*`` decision from ``route_after_model`` since the most
+    # recent ``HumanMessage``.  When the count exceeds the cap, the
+    # router short-circuits to END so a runaway recovery cascade can't
+    # exhaust the scenario timeout.  ``recovery_firings_turn_marker``
+    # stores the index of the HumanMessage that opened the current
+    # turn — when route_after_model sees a NEWER HumanMessage, it
+    # resets the counter.  Independent safety net at the routing
+    # layer; works regardless of which detector misfires.
+    recovery_firings_this_turn: list[int] = field(default_factory=lambda: [0])
+    recovery_firings_turn_marker: list[int] = field(default_factory=lambda: [-1])
+    # #1964 Item D — observability for the cascade budget.  Per-turn
+    # ordered history of which ``handle_*`` decisions fired since the
+    # most recent ``HumanMessage``.  When the budget kicks in, the
+    # router logs this list so an operator can see "in this turn:
+    # detector X fired first, then Y, then budget killed at Z".
+    # Helps diagnose cascade pathologies in production rather than
+    # just CI.  Same reset semantics as the counter: cleared when
+    # ``recovery_firings_turn_marker`` advances.
+    recovery_firings_history: list[list[str]] = field(default_factory=lambda: [[]])
     incompleteness_nudge_given: list[int] = field(default_factory=lambda: [0])
     expansion_count: list[int] = field(default_factory=lambda: [0])
     auto_expansion_count: list[int] = field(default_factory=lambda: [0])

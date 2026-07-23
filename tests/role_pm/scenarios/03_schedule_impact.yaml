@@ -1,0 +1,77 @@
+id: role_pm_03_schedule_impact
+domain: role_pm
+title: Schedule slip impact analysis
+description: |
+  Medium-difficulty cross-document reasoning.  The user announces
+  a hypothetical 2-week slip in engineering work and asks for the
+  downstream impact.  A correct answer requires the agent to:
+    1) Retrieve 04_schedule_milestones.md AND 03_work_breakdown_structure.md
+       to understand the dependency structure.
+    2) Identify that the critical path runs through M-DB-R then
+       M-DB-X then M-CUT then M-CLEAN → M-DERACK.
+    3) Determine which of the upcoming milestones a 2-week
+       engineering-side slip would actually delay (depends on
+       whether engineering work is on the critical path; the
+       remaining engineering-critical work is D-09).
+    4) Cross-reference R-16 in the risk register (engineering
+       bandwidth around D-09).
+    5) Quantify the downstream impact: with M-DB-R having no
+       remaining slack post-rehearsal 1, a 2-week engineering slip
+       on D-09 would push M-CUT or compress the 5-week canary
+       observation window.
+
+  Bug-hunt signal: invented dependencies, wrong milestone IDs,
+  invented buffer/float numbers, claims of "no impact" when
+  there is clear downstream pressure.
+user_prompt: |
+  Engineering came to me this morning and said they need two more
+  weeks to finish their bit of the migration work.  What's the
+  downstream impact on the schedule?  Give me the specifics — which
+  milestones move, which risks get worse, and what I need to escalate.
+system_prompt_file: ../system_prompt.md
+tools_required:
+  - query_knowledge_base
+tools_available:
+  - query_knowledge_base
+expected_outcome: |
+  The agent retrieves multiple corpus documents (at minimum the
+  schedule, the WBS, and the risk register) and produces a
+  structured impact analysis.  It identifies that the critical-path
+  milestone (M-DB-R) already has no slack, so a 2-week engineering
+  slip on D-09 either pushes M-CUT (2026-11-20) or compresses the
+  5-week canary observation window between M-DB-X and M-CUT.  It
+  flags R-16 (engineering bandwidth) and R-19 (Helmsdale acceptance
+  window) as the risks most affected.
+success_criteria:
+  - "tool_called: query_knowledge_base"
+  - "contains: M-DB"
+  # qwen3-coder writes "critical-path milestone" (hyphenated); other
+  # models may write "critical path" (space) — both are correct PM
+  # terminology, so accept either.
+  - "any_contains: critical path | critical-path"
+  # #2026: relaxed both R-IDs to a single weighted check.  Cycle 13
+  # showed honest models cite ONE of the two risks when their
+  # retrieval pulls one chunk strongly; both-required was too strict.
+  # Verbose models still cite both and pass.
+  - "at_least_n_contains: 1 | R-16 | R-19"
+  - "contains: D-09"
+  # Relaxed: model may name the customer ("Helmsdale Logistics") or
+  # the acceptance-window topic; either confirms engagement.
+  - "at_least_n_contains: 1 | Helmsdale | acceptance window | acceptance-window"
+  - "not_contains: Project Atlas"
+  - "not_contains: no impact"
+max_turns: 12
+timeout_seconds: 240
+tags:
+  - role_pm
+  - medium
+budget_usd_estimate: 0.08
+
+# #2016 — Cluster B (extraneous_tools) structural enforcement.
+# When True, the PM harness appends a strict-whitelist clause to the
+# system prompt that explicitly forbids non-whitelisted tool names
+# (read_file, write_file, get_weather, etc.).  Cycle-4 measured 11
+# such calls across 18 iterations on qwen3-coder; cycle-5 measured 0
+# on kimi-k2-6 (which obeys the soft cycle-2 rule).  This flag
+# converts the soft rule into a directive any model can quote back.
+enforce_tools_available: true

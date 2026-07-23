@@ -31,6 +31,50 @@ from src.tools.configure import (
 from src.tools.resolver import resolve_tool_name as _resolve_tool_name
 from src.tools.resolver import top_k_candidates as _top_k_candidates
 
+# #2023: gpt-oss harmony-format channel markers (``<|channel|>commentary``,
+# ``<|channel|>final``, ``<|start|>``, ``<|end|>``) occasionally leak into
+# the ``tool_call["name"]`` field returned by the OpenRouter / Cerebras
+# inference endpoints for gpt-oss-class models.  When this happens the
+# name looks like ``query_risk_register<|channel|>commentary`` and the
+# downstream lookup + resolver both fail, the call gets rejected with a
+# KIND_TOOL_NAME_INVALID nudge, and the model retries — but the original
+# attempt counts against the PM scorecard's ``extraneous_tool_calls``
+# metric anyway (see #2023 Track B for the metric-side fix).  Stripping
+# the channel suffix at dispatch entry recovers the underlying tool name
+# in nearly every observed case.
+#
+# Matches: any ``<|...|>`` token (the gpt-oss harmony token alphabet)
+# followed by optional trailing junk.  Strips greedily from the FIRST
+# occurrence to end-of-string so a chain like
+# ``foo<|channel|>commentary<|end|>`` resolves to ``foo`` cleanly.
+_HARMONY_TOKEN_RE = re.compile(r"<\|[^|]*\|>.*$")
+
+
+def _strip_harmony_tokens(name: str) -> str:
+    """Return ``name`` with any trailing gpt-oss harmony channel marker
+    stripped.  Returns the original string when no marker is present.
+    """
+    if "<|" not in name:
+        return name
+    return _HARMONY_TOKEN_RE.sub("", name).strip()
+
+
+def _sanitize_tool_call_names(tool_calls: list[Any]) -> None:
+    """In-place sanitisation of ``tool_call["name"]`` fields on the list
+    of LangChain ``ToolCall`` TypedDicts.  Currently strips gpt-oss
+    harmony channel markers; future provider-specific name corruption
+    can plug in here without touching every dispatch read site.
+
+    Annotated ``list[Any]`` because ``ToolCall`` is an invariant
+    TypedDict and pyright rejects ``list[dict]`` from a
+    ``list[ToolCall]`` callsite; at runtime both behave identically.
+    """
+    for call in tool_calls:
+        raw = call.get("name", "") or ""
+        cleaned = _strip_harmony_tokens(raw)
+        if cleaned != raw:
+            call["name"] = cleaned
+
 
 def _activate_available_tool(
     name: str,
@@ -300,6 +344,12 @@ def build_process_tools_node(
 
         if not (isinstance(last, AIMessage) and last.tool_calls):
             return {"messages": []}
+
+        # #2023: strip gpt-oss harmony channel markers from tool-call
+        # names before any downstream lookup / resolver / dispatch read.
+        # Mutates ``last.tool_calls`` in place so every site below sees
+        # the sanitised name without per-site changes.
+        _sanitize_tool_call_names(last.tool_calls)
 
         tool_lookup_ref = _tool_lookup
         active_names_ref = _active_names

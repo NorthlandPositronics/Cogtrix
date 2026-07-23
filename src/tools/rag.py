@@ -43,6 +43,38 @@ _rag_config: dict[str, Any] = {
     "api_uploads_dir": None,
     "entity_index_path": None,
     "score_threshold": 0.0,
+    # #1981: opt-in BM25 hybrid retrieval.  When ``True``, the query path
+    # looks for a ``bm25.pkl`` sidecar next to each FAISS index and fuses
+    # its results with the vector results via Reciprocal Rank Fusion.
+    # Falls back to pure-vector when the sidecar is missing.
+    "use_bm25_hybrid": False,
+    # RRF tuning constant — Cormack et al. 2009 standard value is 60.
+    # Higher values flatten the rank-1-vs-rank-K contribution gap; lower
+    # values give the top hit relatively more weight.
+    "bm25_rrf_k": 60,
+    # #1952 Option A — opt-in cross-encoder re-ranker.  When ``True``,
+    # ``_retrieve_from_index`` over-fetches the FAISS / hybrid pool by
+    # ``rerank_over_k_multiplier`` and re-scores it against the query
+    # with a small CE model before the top-K cut.  Default off — the
+    # ``sentence-transformers`` library lives behind the ``[rag-rerank]``
+    # extra and the first query pays the model load + weight download.
+    "use_cross_encoder_rerank": False,
+    # HuggingFace model id for the CE pass.  The default is small
+    # (~80 MB) and CPU-friendly.  Override only when the deployment has
+    # a heavier model available (e.g. ``BAAI/bge-reranker-large``) and
+    # the latency tradeoff is acceptable.
+    "rerank_model": "cross-encoder/ms-marco-MiniLM-L-6-v2",
+    # Optional torch device override (``"cpu"`` / ``"cuda"`` /
+    # ``"cuda:0"`` / ``"mps"``).  ``None`` lets sentence-transformers
+    # auto-select.
+    "rerank_device": None,
+    # How many candidates per FAISS index to drag through the CE pass.
+    # ``effective_pool = max(k * rerank_over_k_multiplier, k + 4)``.
+    # 3 × is a deliberate middle ground: large enough to recover from
+    # the regime-B / regime-C miss patterns described in #1952, small
+    # enough that the CE forward pass stays under ~100 ms on CPU for
+    # typical k≤10 queries.
+    "rerank_over_k_multiplier": 3,
 }
 
 
@@ -253,6 +285,172 @@ def _collect_faiss_dirs() -> list[Path]:
     return sorted(dirs)
 
 
+def _apply_cross_encoder_rerank(
+    *,
+    question: str,
+    pool_pairs: list[tuple[Any, float]],
+    k: int,
+) -> list[tuple[Any, float]]:
+    """Re-rank a candidate pool with the CE pass (#1952) and emit top-K.
+
+    Input is ``[(Document, ascending_score)]`` — the upstream FAISS /
+    hybrid output.  Output is the same shape so the caller's sort and
+    score-threshold logic stays uniform.
+
+    When the CE library is unavailable or the call fails, falls back
+    to the input order (sliced to ``k``).  See ``src.rag.reranker``
+    for the per-failure-mode contract.
+    """
+    if not pool_pairs:
+        return []
+
+    try:
+        from src.rag.reranker import rerank as _ce_rerank
+    except ImportError:
+        # ``src.rag.reranker`` is in-repo; an ImportError here is
+        # pathological (truncated install).  Fall back to the
+        # pre-rerank order so retrieval still functions.
+        return pool_pairs[:k]
+
+    pool_docs = [doc for doc, _ in pool_pairs]
+    reranked_docs = _ce_rerank(
+        question,
+        pool_docs,
+        k,
+        model_name=str(_rag_config.get("rerank_model") or ""),
+        device=_rag_config.get("rerank_device"),
+    )
+
+    # Re-pack with synthetic ascending scores keyed by rank so the
+    # downstream sort-by-distance logic still produces the expected
+    # order.  ``rank / 1000`` matches the hybrid path's pattern and
+    # leaves enough headroom for the score_threshold conversion
+    # (``1 / (1 + d)``) to stay above any reasonable threshold setting.
+    return [(doc, float(rank) / 1000.0) for rank, doc in enumerate(reranked_docs, start=1)]
+
+
+def _retrieve_from_index(
+    *,
+    store: Any,
+    vector_dir: Path,
+    question: str,
+    k: int,
+    use_hybrid: bool,
+) -> list[tuple[Any, float]]:
+    """Fetch top-K results from one FAISS index, optionally fused with BM25
+    and optionally re-ranked by a cross-encoder.
+
+    Returns ``[(Document, ascending_score)]`` so the existing caller's
+    sort-ascending logic stays unchanged.
+
+    Pure-vector path: forwards to ``store.similarity_search_with_score``
+    — L2 distance, lower is better.
+
+    Hybrid path (#1981): over-fetches both retrievers, fuses via
+    Reciprocal Rank Fusion, and projects the fused ranking into
+    ascending synthetic scores (``rank / 1000``) so the downstream sort
+    works without special-casing.
+
+    Cross-encoder re-rank (#1952): when
+    ``configure_rag({"use_cross_encoder_rerank": True})`` is set, the
+    retrieval pool is over-fetched by ``rerank_over_k_multiplier`` (3×
+    by default) and re-scored by ``src.rag.reranker.rerank`` before the
+    top-K cut.  Composes with both the pure-vector and hybrid paths.
+    Graceful fallback to the un-re-ranked order when the CE library is
+    unavailable or scoring fails — retrieval is never *worse* than the
+    baseline.
+    """
+    use_rerank = bool(_rag_config.get("use_cross_encoder_rerank"))
+    rerank_multiplier = max(1, int(_rag_config.get("rerank_over_k_multiplier") or 3))
+
+    # When the CE pass is on, every upstream retriever over-fetches so
+    # the CE has a wider pool to re-score.  When it's off, the original
+    # k applies (pure-vector path) or the hybrid path's existing 2× over-
+    # fetch applies — both are unchanged by this addition.
+    rerank_pool_k = max(k * rerank_multiplier, k + 4)
+
+    # Pure-vector path — unchanged when use_rerank is False.
+    if not use_hybrid:
+        fetch_k = rerank_pool_k if use_rerank else k
+        vector_pairs = list(store.similarity_search_with_score(question, k=fetch_k))
+        if use_rerank:
+            return _apply_cross_encoder_rerank(question=question, pool_pairs=vector_pairs, k=k)
+        return vector_pairs
+
+    # Hybrid path — attempt BM25 sidecar load; fall back to vector-only
+    # on any failure so retrieval is never WORSE than the pure-vector
+    # baseline.
+    try:
+        from src.rag.bm25 import load_sidecar, query_sidecar, reciprocal_rank_fusion
+    except ImportError:
+        fetch_k = rerank_pool_k if use_rerank else k
+        vector_pairs = list(store.similarity_search_with_score(question, k=fetch_k))
+        if use_rerank:
+            return _apply_cross_encoder_rerank(question=question, pool_pairs=vector_pairs, k=k)
+        return vector_pairs
+
+    sidecar = load_sidecar(vector_dir)
+    if sidecar is None:
+        # No sidecar (operator never built one, or schema mismatch) —
+        # pure-vector path keeps working.
+        fetch_k = rerank_pool_k if use_rerank else k
+        vector_pairs = list(store.similarity_search_with_score(question, k=fetch_k))
+        if use_rerank:
+            return _apply_cross_encoder_rerank(question=question, pool_pairs=vector_pairs, k=k)
+        return vector_pairs
+
+    # Over-fetch both retrievers so fusion has a wider pool — strict
+    # top-K on each side combined with strict top-K post-fusion drops
+    # otherwise-recoverable correct chunks.  The CE pass (when enabled)
+    # supersedes the 2× hybrid over-fetch with its own larger pool.
+    over_k = rerank_pool_k if use_rerank else max(k * 2, k + 4)
+
+    vector_pairs = list(store.similarity_search_with_score(question, k=over_k))
+    bm25_hits = query_sidecar(sidecar, question, k=over_k)
+
+    # Project BM25 hits into Document objects using the sidecar's
+    # parallel arrays.  Imported lazily so the langchain Document
+    # symbol doesn't have to be at module load (matches the pattern
+    # elsewhere in this file).
+    from langchain_core.documents import Document
+
+    bm25_docs: list[Any] = [
+        Document(
+            page_content=sidecar.chunk_texts[idx],
+            metadata=dict(sidecar.chunk_metadata[idx]),
+        )
+        for idx, _score in bm25_hits
+    ]
+    vector_docs = [doc for doc, _ in vector_pairs]
+
+    # RRF fuse — key by stripped page_content prefix so the same
+    # chunk appearing on both sides (the desired outcome) is treated
+    # as one item and gets the additive boost.  240 chars is wide
+    # enough to disambiguate near-identical chunks but tight enough
+    # to not blow up the dict for long documents.
+    def _identity(doc: Any) -> str:
+        content = getattr(doc, "page_content", "") or ""
+        return content.strip()[:240]
+
+    k_constant = int(_rag_config.get("bm25_rrf_k") or 60)
+    fused = reciprocal_rank_fusion([vector_docs, bm25_docs], k_constant=k_constant, key=_identity)
+
+    # When the CE re-rank is enabled, hand the full fused pool (up to
+    # ``over_k``) to the CE; otherwise emit the top-K fused directly.
+    if use_rerank:
+        fused_pairs: list[tuple[Any, float]] = [
+            (doc, float(rank) / 1000.0)
+            for rank, (doc, _score) in enumerate(fused[:over_k], start=1)
+        ]
+        return _apply_cross_encoder_rerank(question=question, pool_pairs=fused_pairs, k=k)
+
+    # Project back into the (Document, ascending_score) shape the
+    # caller already sorts by — a tiny constant denominator keeps the
+    # synthetic scores distinct so the downstream stable-sort is
+    # deterministic.
+    return [(doc, float(rank) / 1000.0) for rank, (doc, _score) in enumerate(fused[:k], start=1)]
+
+
 def query_knowledge_base(
     question: str,
     k: int = 4,
@@ -288,6 +486,13 @@ def query_knowledge_base(
         # Get embeddings from environment/config
         embeddings = _get_embeddings()
 
+        # #1981: when ``use_bm25_hybrid`` is enabled AND a BM25 sidecar
+        # exists alongside the FAISS index, fuse vector + BM25 ranks
+        # via Reciprocal Rank Fusion.  Falls back to pure-vector when
+        # the sidecar is absent, the lib isn't installed, or the flag
+        # is off — graceful degradation is the documented contract.
+        use_hybrid = bool(_rag_config.get("use_bm25_hybrid"))
+
         # Search all available FAISS indexes and merge results.
         # Use similarity_search_with_score for cross-index relevance
         # ranking (BUG-193) — FAISS L2 distance: lower = more similar.
@@ -299,7 +504,14 @@ def query_knowledge_base(
                 if store is None:
                     errors.append(f"{vector_dir}: index not loadable")
                     continue
-                pairs = store.similarity_search_with_score(question, k=k)
+
+                pairs = _retrieve_from_index(
+                    store=store,
+                    vector_dir=vector_dir,
+                    question=question,
+                    k=k,
+                    use_hybrid=use_hybrid,
+                )
                 scored_docs.extend(pairs)
             except Exception as exc:
                 errors.append(f"{vector_dir}: {exc}")
@@ -313,7 +525,9 @@ def query_knowledge_base(
                 )
             return "No relevant documents found for your question."
 
-        # Sort by score ascending (lower L2 distance = more relevant)
+        # Sort by score ascending (lower L2 distance = more relevant
+        # for vector hits; hybrid path emits synthetic ascending scores
+        # so the same sort key works uniformly).
         scored_docs.sort(key=lambda x: x[1])
 
         # Apply score_threshold: convert L2 distance to similarity = 1/(1+d)
@@ -541,6 +755,10 @@ def rag_ingest(paths: str) -> str:
         docs_dir=Path(path_list[0]).parent,
         vectordb_dir=Path(str(vectordb_dir)),
         embedding_provider=str(_rag_config.get("embedding_provider") or "ollama"),
+        # #1981: mirror the operator's hybrid intent.  When the
+        # operator has flipped ``use_bm25_hybrid`` on, build the
+        # sidecar on this ingestion call so the next query can fuse.
+        build_bm25_sidecar=bool(_rag_config.get("use_bm25_hybrid")),
     )
     results = ingest_many([Path(p) for p in path_list], ingest_config)
     success = sum(1 for v in results.values() if v)

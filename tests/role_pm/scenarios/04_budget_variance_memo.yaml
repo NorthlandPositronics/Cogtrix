@@ -1,0 +1,80 @@
+id: role_pm_04_budget_variance_memo
+domain: role_pm
+title: Draft a budget variance memo for the steering committee
+description: |
+  Medium-difficulty synthesis under format constraint.  The user
+  asks for a budget variance memo addressed to the steering
+  committee.  A correct answer requires:
+    1) Retrieve 07_budget.md.
+    2) State the actuals: M1-M4 cumulative spend $1,106,500 against
+       $1,170,000 plan = -5.4% variance (favourable).
+    3) State the end-of-programme forecast: $2,041,500 against the
+       $2,400,000 envelope = 85.1% draw.
+    4) Identify the line items driving variance: L-01 (+$15,000)
+       and L-04 (+$7,000) on the forecast side; L-11 (buffer)
+       released to absorb both.
+    5) Follow the system prompt's standard response format with
+       Executive Summary, Current Assessment, Detailed Analysis,
+       Recommendation, Risks and Mitigations, References.
+
+  Bug-hunt signal: any dollar amount NOT in 07_budget.md is a
+  fabrication.  The model is prone to round numbers ("roughly $2M",
+  "approximately on budget") which the success criteria explicitly
+  forbid.
+user_prompt: |
+  Draft a budget variance memo for the next steering committee
+  meeting.  I want actuals through end of last month, the
+  end-of-programme forecast, and the line items driving the
+  variance — with concrete numbers and concrete line IDs.  Address
+  the memo to the steering committee.
+system_prompt_file: ../system_prompt.md
+tools_required:
+  - query_knowledge_base
+tools_available:
+  - query_knowledge_base
+expected_outcome: |
+  The agent retrieves 07_budget.md and produces a memo following
+  the system prompt's format.  The memo states $1,106,500 cumulative
+  spend, -5.4% variance, $2,041,500 forecast at programme end (85.1%
+  envelope draw), and identifies L-01 + L-04 as the variance drivers
+  with L-11 (buffer) absorbing them.  References include
+  07_budget.md.
+success_criteria:
+  - "tool_called: query_knowledge_base"
+  - "contains: 07_budget.md"
+  - "contains: Executive Summary"
+  # #2026: relaxed exact-dollar-amount checks to weighted thresholds.
+  # Cycle 13 showed honest models cite reconciled totals with
+  # different rounding ("$1.1M", "$2.04M") or alternate breakdowns
+  # ("L-01 through L-08 actuals: $1,097,100") that are arithmetically
+  # consistent but don't match the canonical-form literal.  At-least-
+  # one keeps the engagement signal without rewarding format
+  # adherence over honesty.
+  - "at_least_n_contains: 1 | $1,106,500 | $1,097,100 | $1.1 | 1,106 | actuals"
+  - "at_least_n_contains: 1 | $2,400,000 | $2,400 | $2.4 | envelope | approved budget"
+  - "at_least_n_contains: 1 | -5.4% | -5.4 | variance | under-run | underrun"
+  - "at_least_n_contains: 1 | $2,041,500 | $2,041 | $2.04 | forecast"
+  - "at_least_n_contains: 1 | 85.1% | 85.1 | 85% | envelope draw"
+  # Line item references — keep ``at_least_n`` weighted across the
+  # specific lines so a model citing any 2 of L-01/L-04/L-11 passes
+  # rather than requiring all three by literal ID.  Names of the
+  # variance drivers are the load-bearing signal.
+  - "at_least_n_contains: 2 | L-01 | L-04 | L-11 | L-08"
+  - "not_contains: approximately $2"
+  - "not_contains: roughly $1"
+  - "not_contains: about $2 million"
+max_turns: 12
+timeout_seconds: 240
+tags:
+  - role_pm
+  - medium
+budget_usd_estimate: 0.08
+
+# #2016 — Cluster B (extraneous_tools) structural enforcement.
+# When True, the PM harness appends a strict-whitelist clause to the
+# system prompt that explicitly forbids non-whitelisted tool names
+# (read_file, write_file, get_weather, etc.).  Cycle-4 measured 11
+# such calls across 18 iterations on qwen3-coder; cycle-5 measured 0
+# on kimi-k2-6 (which obeys the soft cycle-2 rule).  This flag
+# converts the soft rule into a directive any model can quote back.
+enforce_tools_available: true

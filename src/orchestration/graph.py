@@ -10,6 +10,7 @@ import json as _json
 import threading
 import time
 from collections import OrderedDict
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, fields, is_dataclass
 from typing import Any
 
@@ -30,11 +31,15 @@ from src.orchestration.nodes.process_tools import (
 )
 from src.orchestration.nodes.recovery import (
     build_handle_action_intent_node,
+    build_handle_corpus_attribution_mismatch_node,
+    build_handle_entity_owner_mismatch_node,
     build_handle_fabricated_action_node,
     build_handle_fabricated_quote_node,
     build_handle_noncanonical_fork_node,
     build_handle_phantom_node,
     build_handle_sycophancy_node,
+    build_handle_synthesis_after_eviction_node,
+    build_handle_topic_substitution_node,
     build_handle_unsupported_attribution_node,
     build_handle_unsupported_quote_node,
     build_handle_unverified_claim_node,
@@ -515,6 +520,7 @@ def build_agent_graph(
     bound_cache: OrderedDict | None = None,
     compression_cache_in: dict[str, str] | None = None,
     checkpoint_store: Any | None = None,
+    corpus_attribution_detector: Callable[[str], list[str]] | None = None,
 ) -> Any:
     """Build a custom LangGraph StateGraph for the Cogtrix agent.
 
@@ -664,15 +670,40 @@ def build_agent_graph(
     # repeating unverified identifiers after the nudge it is
     # actively ignoring the guard, not unlucky.
     _MAX_UNVERIFIED_ENTITY_RETRIES = 1
-    # #1841: output-fidelity guard. One revision attempt — a model still
-    # fabricating quotes after the nudge is ignoring the guard, not unlucky.
-    _MAX_UNSUPPORTED_QUOTE_RETRIES = 1
+    # #1841: output-fidelity guard.  Issue #2007 bumped 1 → 2 after PM
+    # cycle 3 showed that on the user-facing prose-fidelity detectors,
+    # the model often needs TWO attempts to converge: attempt 1 fixes
+    # the first quote but introduces another; attempt 2 cleans both.
+    # The "model still ignoring the guard" assumption from the original
+    # comment block was empirically wrong for qwen3-coder × PM scenarios.
+    _MAX_UNSUPPORTED_QUOTE_RETRIES = 2
     # #1843: version-scope-collapse guard. One revision attempt — same
     # rationale as the fidelity guard it composes with.
     _MAX_VERSION_SCOPE_RETRIES = 1
-    # #1860: attributed-prose-claim guard. One revision attempt — same
-    # rationale as the sibling fidelity guards.
-    _MAX_UNSUPPORTED_ATTRIBUTION_RETRIES = 1
+    # #1860: attributed-prose-claim guard.  Bumped to 2 alongside the
+    # quote/owner/topic siblings (#2007) — same empirical observation.
+    _MAX_UNSUPPORTED_ATTRIBUTION_RETRIES = 2
+    # #1988 (post-mortem #1987 Cluster A): entity-owner mismatch guard.
+    # Bumped to 2 by #2007 — cycle-3 PM run showed the model often
+    # swaps one attribution but introduces another on the first revision;
+    # a second attempt is needed for clean convergence.  Cost ceiling:
+    # one extra LLM call per affected scenario per detector firing.
+    _MAX_ENTITY_OWNER_MISMATCH_RETRIES = 2
+    # #2015 (post-mortem #2006 Cluster A root-cause): corpus-aware
+    # attribution mismatch guard.  Bumped to 3 by #2006 cycle-10
+    # post-mortem — log analysis showed the detector firing at
+    # attempt 1/2 and the model re-emitting the SAME wrong attribution
+    # at attempt 2/2 before the response shipped.  The nudge already
+    # names the corpus-canonical owner verbatim; giving one more
+    # attempt costs ~1 extra LLM call per affected scenario and
+    # historically converts borderline retries to clean shipments.
+    # Cycle-10 evidence: 4 of 6 surviving cluster A mismatches were
+    # detector-flagged but not repaired in the 2-retry budget.
+    _MAX_CORPUS_ATTRIBUTION_MISMATCH_RETRIES = 3
+    # #1989 (post-mortem #1987 Cluster C): topic-substitution guard.
+    # Bumped to 2 alongside the entity-owner / quote / attribution
+    # siblings (#2007) — same empirical reasoning.
+    _MAX_TOPIC_SUBSTITUTION_RETRIES = 2
     # #1713: sycophantic-prefix guard. One revision attempt; the
     # existing logging-only path retains visibility after the budget.
     _MAX_SYCOPHANCY_RETRIES = 1
@@ -690,6 +721,29 @@ def build_agent_graph(
     # recommends a project + cites a github.com URL whose owner is not
     # canonical AND the surrounding context frames it as authoritative.
     _MAX_NONCANONICAL_FORK_RETRIES = 1
+    # #1943 PR #4: synthesis-after-eviction guard. One revision attempt.
+    # Fires when the response makes substantive claims AFTER a
+    # ``context_evicted`` SystemMessage marker (PR #1 #1944) is in the
+    # visible context AND the current turn ran NO new tool calls AND the
+    # response lacks any compliant-acknowledgement phrase.  Closes the
+    # residual fabrication path that PRs #1-#3 of the cascade narrowed
+    # but could not fully prevent.
+    _MAX_SYNTHESIS_AFTER_EVICTION_RETRIES = 1
+    # #1960 follow-up: total recovery-firing budget PER TURN.  Each
+    # ``handle_*`` decision from ``route_after_model`` counts as one
+    # firing; the counter resets when a new ``HumanMessage`` arrives.
+    # When the count exceeds this cap, the router short-circuits to
+    # END to ship whatever response the agent has rather than spin
+    # the recovery cascade past the scenario timeout.  Independent of
+    # any specific detector's behaviour — works as a kill switch
+    # regardless of which combination of detectors misfires.
+    #
+    # The #1960 reproducer hit 4 firings in a single turn (one per
+    # detector).  Cap of 3 stops at the 4th and lets the agent's
+    # response ship.  Per-detector retry counters (one revision each)
+    # mean the cap is reached only when MULTIPLE detectors fire on
+    # the same response — i.e. exactly the runaway-cascade case.
+    _MAX_RECOVERY_FIRINGS_PER_TURN = 3
     # After the 3 standard action-intent nudges are exhausted, the model
     # gets exactly one more chance if the response contains incompleteness
     # language ("first", "to start", "step 1") — a stronger nudge that
@@ -896,7 +950,19 @@ def build_agent_graph(
         _comp_llm = compression_llm or llm
         if not context_compression or _comp_llm is None:
             return msgs
-        if max_context_tokens is None or max_context_tokens < 16_384:
+        # #1943 PR #1: previously bailed when ``max_context_tokens <
+        # 16_384`` on the rationale that simple truncation would be
+        # cheaper than running a compression LLM.  That rationale was a
+        # performance heuristic, but in practice the "simple truncation"
+        # is the destructive cap in ``_apply_context_message_cap`` —
+        # which drops data permanently.  Keeping the rationale meant
+        # operators running tight-window models (or the reproducer in
+        # #1943 with context_max_tokens=6000) got NO compression at all
+        # and the cap dropped tool outputs the agent later fabricated
+        # synthesis around.  The minimum sensible threshold is now just
+        # "context_max_tokens > 0" — if the operator configured a
+        # budget, compression should try to fit within it.
+        if max_context_tokens is None or max_context_tokens <= 0:
             return msgs
         total_chars = sum(_content_len(m) for m in msgs)
         context_chars = max_context_tokens * _CHARS_PER_TOKEN
@@ -1156,6 +1222,28 @@ def build_agent_graph(
         unsupported_attribution_count=_per_run_state[0].unsupported_attribution_count,
         max_retries=_MAX_UNSUPPORTED_ATTRIBUTION_RETRIES,
     )
+    handle_entity_owner_mismatch = build_handle_entity_owner_mismatch_node(
+        entity_owner_mismatch_count=_per_run_state[0].entity_owner_mismatch_count,
+        max_retries=_MAX_ENTITY_OWNER_MISMATCH_RETRIES,
+    )
+    # #2015 — only instantiated when a caller-supplied corpus
+    # attribution detector was provided.  Stays ``None`` for every
+    # production / Gate 2 caller; the PM harness sets it via the
+    # ``corpus_attribution_detector`` parameter.  Routing logic below
+    # checks ``corpus_attribution_detector is not None`` before
+    # consulting it, so the recovery node only ever runs in PM-like
+    # deployments.
+    handle_corpus_attribution_mismatch: Any = None
+    if corpus_attribution_detector is not None:
+        handle_corpus_attribution_mismatch = build_handle_corpus_attribution_mismatch_node(
+            corpus_attribution_mismatch_count=(_per_run_state[0].corpus_attribution_mismatch_count),
+            max_retries=_MAX_CORPUS_ATTRIBUTION_MISMATCH_RETRIES,
+            corpus_attribution_detector=corpus_attribution_detector,
+        )
+    handle_topic_substitution = build_handle_topic_substitution_node(
+        topic_substitution_count=_per_run_state[0].topic_substitution_count,
+        max_retries=_MAX_TOPIC_SUBSTITUTION_RETRIES,
+    )
     handle_sycophancy = build_handle_sycophancy_node(
         sycophancy_count=_per_run_state[0].sycophancy_count,
         max_retries=_MAX_SYCOPHANCY_RETRIES,
@@ -1171,6 +1259,10 @@ def build_agent_graph(
     handle_noncanonical_fork = build_handle_noncanonical_fork_node(
         noncanonical_fork_count=_per_run_state[0].noncanonical_fork_count,
         max_retries=_MAX_NONCANONICAL_FORK_RETRIES,
+    )
+    handle_synthesis_after_eviction = build_handle_synthesis_after_eviction_node(
+        synthesis_after_eviction_count=_per_run_state[0].synthesis_after_eviction_count,
+        max_retries=_MAX_SYNTHESIS_AFTER_EVICTION_RETRIES,
     )
 
     def handle_fabrication(state: CogtrixState) -> dict:
@@ -1461,7 +1553,17 @@ def build_agent_graph(
         tool_trust=config.tool_trust if config is not None else None,
     )
 
-    def route_after_model(state: CogtrixState) -> str:
+    def _last_human_msg_idx(msgs: list[Any]) -> int:
+        """Return the index of the most recent ``HumanMessage`` in *msgs*,
+        or -1 if none.  Used by the cascade-budget bookkeeping in
+        ``route_after_model`` to detect turn boundaries.
+        """
+        for i in range(len(msgs) - 1, -1, -1):
+            if isinstance(msgs[i], HumanMessage):
+                return i
+        return -1
+
+    def _route_after_model_decision(state: CogtrixState) -> str:
         msgs = state["messages"]
         if not msgs:
             return END
@@ -1567,6 +1669,7 @@ def build_agent_graph(
             # src/orchestration/verification.py for the rule registry.
             if has_content and isinstance(content, str):
                 from src.orchestration.verification import (
+                    collect_grounded_sources,
                     collect_tool_message_contents,
                     collect_tool_names_this_turn,
                     detect_noncanonical_fork_recommendation,
@@ -1587,19 +1690,20 @@ def build_agent_graph(
                     if _per_run_state[0].unverified_claim_count[0] <= _MAX_UNVERIFIED_CLAIM_RETRIES:
                         return "handle_unverified_claim"
 
+                # #1964 Item C: bundle the grounding sources — tool results,
+                # user prompt, AND system prompt — into one value object the
+                # detectors can consume uniformly.  Threading the system
+                # prompt in is the structural fix for the #1960 class of
+                # false fires (refusals quoting the persona's own policy).
+                _sources = collect_grounded_sources(msgs, _turn_start)
+
                 # cogtrix47 Issues 5+6: user-supplied specific
                 # identifiers (SKUs, store names, multi-word product
                 # names) the agent echoed without any tool result
                 # confirming them. Route to the entity-recovery node
                 # that nudges the model to cite evidence, hedge, or
                 # substitute the verified alternative.
-                _user_prompt = ""
-                if _turn_start < len(msgs):
-                    _up = getattr(msgs[_turn_start], "content", "") or ""
-                    if isinstance(_up, str):
-                        _user_prompt = _up
-                _tool_contents = collect_tool_message_contents(msgs, _turn_start)
-                if detect_unverified_entities(content, _user_prompt, _tool_contents):
+                if detect_unverified_entities(content, sources=_sources):
                     if (
                         _per_run_state[0].unverified_entity_count[0]
                         <= _MAX_UNVERIFIED_ENTITY_RETRIES
@@ -1607,9 +1711,10 @@ def build_agent_graph(
                         return "handle_unverified_entity"
 
                 # #1841: output-fidelity guard. A verbatim quote or explicit
-                # attribution in the response that appears in no tool result
-                # this turn is a fabricated quote / fabricated citation.
-                if detect_unsupported_quote(content, _tool_contents, _user_prompt):
+                # attribution in the response that appears in no grounding
+                # source (tool results, user prompt, system prompt) is a
+                # fabricated quote / fabricated citation.
+                if detect_unsupported_quote(content, sources=_sources):
                     if (
                         _per_run_state[0].unsupported_quote_count[0]
                         <= _MAX_UNSUPPORTED_QUOTE_RETRIES
@@ -1633,12 +1738,80 @@ def build_agent_graph(
                 # "according to …", "officially …") for content whose
                 # distinctive tokens are absent from the grounded blob is
                 # fabricating the citation itself.
-                if detect_unsupported_attribution(content, _tool_contents, _user_prompt):
+                if detect_unsupported_attribution(content, sources=_sources):
                     if (
                         _per_run_state[0].unsupported_attribution_count[0]
                         <= _MAX_UNSUPPORTED_ATTRIBUTION_RETRIES
                     ):
                         return "handle_unsupported_attribution"
+
+                # #1988 (post-mortem #1987 Cluster A): entity-owner
+                # mismatch guard.  Catches a (entity-ID, stakeholder-name)
+                # co-mention in the response that is NOT present in any
+                # tool result or system prompt this turn — the
+                # plausibility-substitution failure mode where the agent
+                # labels R-13's owner "Migration Squad" because the
+                # entity topic is migration.  Sister to
+                # ``unsupported_attribution`` but specialised for
+                # structured-identifier corpora.
+                from src.orchestration.verification import (
+                    detect_entity_owner_mismatch,
+                )
+
+                # #2015 — corpus-aware attribution mismatch guard.
+                # Runs BEFORE the grounding-based sibling because it's
+                # the stricter, higher-signal check: it consults a
+                # caller-supplied curated owner index and catches the
+                # cases where the wrongly-attached name DOES co-occur
+                # in retrieved chunks (which fools the grounding check
+                # below).  Only fires when the caller passed a
+                # ``corpus_attribution_detector`` to build_agent_graph;
+                # for every other deployment the closure is None and
+                # this branch short-circuits.
+                #
+                # #2006 cycle-8 post-mortem: this check was briefly
+                # moved to the TOP of the cascade by PR #2019 to give
+                # it full retry budget on every response.  Cycles 7+8
+                # against qwen3-coder showed that reorder cost ~8
+                # genuine Cluster A mismatches and 3 clean iterations
+                # vs the cycle-6 peak — running attribution FIRST
+                # robbed the upstream grounding / entity / quote
+                # detectors of their retry windows, and many would-be-
+                # clean responses regressed.  Position restored here.
+                if corpus_attribution_detector is not None:
+                    try:
+                        _corpus_mismatches = corpus_attribution_detector(content)
+                    except Exception:  # noqa: BLE001 — detector must not crash routing
+                        _corpus_mismatches = []
+                    if _corpus_mismatches:
+                        if (
+                            _per_run_state[0].corpus_attribution_mismatch_count[0]
+                            <= _MAX_CORPUS_ATTRIBUTION_MISMATCH_RETRIES
+                        ):
+                            return "handle_corpus_attribution_mismatch"
+
+                if detect_entity_owner_mismatch(content, sources=_sources):
+                    if (
+                        _per_run_state[0].entity_owner_mismatch_count[0]
+                        <= _MAX_ENTITY_OWNER_MISMATCH_RETRIES
+                    ):
+                        return "handle_entity_owner_mismatch"
+
+                # #1989 (post-mortem #1987 Cluster C): topic-substitution
+                # guard.  When the user's distinctive subject terms are
+                # absent from the response, every tool result this turn,
+                # and the system prompt — yet the response is
+                # substantive — the agent silently switched topic.
+                from src.orchestration.verification import (
+                    detect_topic_substitution,
+                )
+
+                if detect_topic_substitution(content, sources=_sources):
+                    if (
+                        _per_run_state[0].topic_substitution_count[0]
+                        <= _MAX_TOPIC_SUBSTITUTION_RETRIES
+                    ):
+                        return "handle_topic_substitution"
 
                 # #1868: non-canonical GitHub-fork-recommendation guard.
                 # The agent surfaces a non-canonical fork URL and presents
@@ -1651,11 +1824,104 @@ def build_agent_graph(
                 if _per_run_state[0].noncanonical_fork_count[
                     0
                 ] <= _MAX_NONCANONICAL_FORK_RETRIES and detect_noncanonical_fork_recommendation(
-                    content, user_prompt=_user_prompt
+                    content, user_prompt=_sources.user_prompt
                 ):
                     return "handle_noncanonical_fork"
 
+                # #1943 PR #4: synthesis-after-eviction guard.  Routed
+                # LAST among the response-content detectors because it
+                # uses the broadest signal set (eviction marker present,
+                # substantive final answer, zero fresh tool calls this
+                # turn, no compliant acknowledgement) — every
+                # more-specific guard above gets first pick.  This
+                # ordering means a fabricated quote AFTER eviction is
+                # routed to ``handle_unsupported_quote`` (more
+                # actionable nudge), and only "fabricated everything
+                # else" trips this guard.
+                from src.orchestration.verification import (
+                    detect_synthesis_after_eviction,
+                )
+
+                if _per_run_state[0].synthesis_after_eviction_count[
+                    0
+                ] <= _MAX_SYNTHESIS_AFTER_EVICTION_RETRIES and detect_synthesis_after_eviction(
+                    content, list(msgs), _turn_start
+                ):
+                    return "handle_synthesis_after_eviction"
+
         return END
+
+    def route_after_model(state: CogtrixState) -> str:
+        """Routing wrapper that enforces the per-turn recovery-firing budget.
+
+        Delegates to :func:`_route_after_model_decision` for the actual
+        routing logic.  Adds an independent safety net at the router:
+
+        * Detects a new turn by tracking the index of the most recent
+          ``HumanMessage`` (``recovery_firings_turn_marker``); resets
+          the budget counter when the index advances.
+        * If the count is already at the cap on entry, short-circuits
+          to END without calling the inner router — every detector
+          already had its budget within this turn.
+        * If the inner router decides on a ``handle_*`` destination,
+          increments the counter for the next call.
+
+        Closes the runaway-cascade failure mode #1960 documents.
+        Works as a kill switch regardless of which detector misfires;
+        also works if a future detector lands without its own
+        refusal-awareness guard (the same architectural blunder).
+        """
+        msgs = state["messages"]
+        if not msgs:
+            return END
+
+        runtime = _per_run_state[0]
+        current_turn_idx = _last_human_msg_idx(list(msgs))
+
+        # New turn → reset the per-turn budget + the firing history.
+        if runtime.recovery_firings_turn_marker[0] != current_turn_idx:
+            runtime.recovery_firings_turn_marker[0] = current_turn_idx
+            runtime.recovery_firings_this_turn[0] = 0
+            runtime.recovery_firings_history[0] = []
+
+        # Already past the cap → emergency exit BEFORE running the
+        # detector chain again.  Saves the wall-clock cost of the
+        # detector regex sweep on a response we've already decided
+        # not to recover from.  Carries the firing history in the log
+        # payload so an operator can see WHICH detectors fired and in
+        # what order — #1964 Item D.
+        if runtime.recovery_firings_this_turn[0] >= _MAX_RECOVERY_FIRINGS_PER_TURN:
+            get_logger().warning(
+                "Recovery cascade budget exceeded (%d firings this turn ≥ cap %d) — "
+                "short-circuiting to END to ship the agent's response rather than "
+                "spin further.  This is the #1960 kill switch.  "
+                "firing_history=%s",
+                runtime.recovery_firings_this_turn[0],
+                _MAX_RECOVERY_FIRINGS_PER_TURN,
+                runtime.recovery_firings_history[0],
+            )
+            return END
+
+        decision = _route_after_model_decision(state)
+
+        if decision.startswith("handle_"):
+            runtime.recovery_firings_this_turn[0] += 1
+            # Strip the ``handle_`` prefix for readability in the log
+            # payload — the detector's natural name is the suffix.
+            runtime.recovery_firings_history[0].append(decision[len("handle_") :])
+            if runtime.recovery_firings_this_turn[0] > _MAX_RECOVERY_FIRINGS_PER_TURN:
+                get_logger().warning(
+                    "Recovery cascade budget exceeded on routing decision "
+                    "(%d → cap %d, attempted destination=%s) — overriding to END.  "
+                    "firing_history=%s",
+                    runtime.recovery_firings_this_turn[0],
+                    _MAX_RECOVERY_FIRINGS_PER_TURN,
+                    decision,
+                    runtime.recovery_firings_history[0],
+                )
+                return END
+
+        return decision
 
     def route_after_phantom(state: CogtrixState) -> str:
         if _per_run_state[0].phantom_count[0] > _MAX_PHANTOM_RETRIES:
@@ -1728,6 +1994,36 @@ def build_agent_graph(
             return END
         return "call_model"
 
+    def route_after_entity_owner_mismatch(state: CogtrixState) -> str:  # noqa: ARG001
+        # #1988 (post-mortem #1987): same shape as the other fidelity
+        # guards.  One revision attempt; accept-and-ship after
+        # exhaustion (warning log retains visibility for triage).
+        if _per_run_state[0].entity_owner_mismatch_count[0] > _MAX_ENTITY_OWNER_MISMATCH_RETRIES:
+            return END
+        return "call_model"
+
+    def route_after_corpus_attribution_mismatch(state: CogtrixState) -> str:  # noqa: ARG001
+        # #2015: corpus-aware sibling of the entity_owner_mismatch
+        # route.  Same shape — accept-and-ship after the budget so the
+        # model produces SOMETHING rather than spinning forever on
+        # mismatches it can't seem to fix even with the structurally
+        # specific nudge.
+        if (
+            _per_run_state[0].corpus_attribution_mismatch_count[0]
+            > _MAX_CORPUS_ATTRIBUTION_MISMATCH_RETRIES
+        ):
+            return END
+        return "call_model"
+
+    def route_after_topic_substitution(state: CogtrixState) -> str:  # noqa: ARG001
+        # #1989: same shape as the other fidelity guards.  One revision
+        # attempt; accept-and-ship after exhaustion so the agent ships
+        # SOMETHING rather than spinning forever on a model that keeps
+        # substituting topic.
+        if _per_run_state[0].topic_substitution_count[0] > _MAX_TOPIC_SUBSTITUTION_RETRIES:
+            return END
+        return "call_model"
+
     def route_after_sycophancy(state: CogtrixState) -> str:  # noqa: ARG001
         # Same shape as the other recovery guards: one revision attempt,
         # then accept-and-ship rather than loop on a model that keeps
@@ -1756,6 +2052,19 @@ def build_agent_graph(
         # attempt; accept-and-ship after exhaustion (the warning log
         # retains visibility).
         if _per_run_state[0].noncanonical_fork_count[0] > _MAX_NONCANONICAL_FORK_RETRIES:
+            return END
+        return "call_model"
+
+    def route_after_synthesis_after_eviction(state: CogtrixState) -> str:  # noqa: ARG001
+        # #1943 PR #4: same shape as the other fidelity guards. One
+        # revision attempt; accept-and-ship after exhaustion so the
+        # operator-facing warning log retains visibility but the agent
+        # cannot loop on a stubborn model that keeps re-emitting the
+        # post-eviction synthesis.
+        if (
+            _per_run_state[0].synthesis_after_eviction_count[0]
+            > _MAX_SYNTHESIS_AFTER_EVICTION_RETRIES
+        ):
             return END
         return "call_model"
 
@@ -1824,32 +2133,56 @@ def build_agent_graph(
     graph.add_node("handle_unsupported_quote", handle_unsupported_quote)
     graph.add_node("handle_version_scope", handle_version_scope)
     graph.add_node("handle_unsupported_attribution", handle_unsupported_attribution)
+    graph.add_node("handle_entity_owner_mismatch", handle_entity_owner_mismatch)
+    # #2015 — only registered when a corpus attribution detector was
+    # supplied.  If absent, the routing check above also short-circuits
+    # so the node label never appears in the conditional-edges map.
+    if handle_corpus_attribution_mismatch is not None:
+        graph.add_node(
+            "handle_corpus_attribution_mismatch",
+            handle_corpus_attribution_mismatch,
+        )
+    graph.add_node("handle_topic_substitution", handle_topic_substitution)
     graph.add_node("handle_sycophancy", handle_sycophancy)
     graph.add_node("handle_fabricated_action", handle_fabricated_action)
     graph.add_node("handle_fabricated_quote", handle_fabricated_quote)
     graph.add_node("handle_noncanonical_fork", handle_noncanonical_fork)
+    graph.add_node("handle_synthesis_after_eviction", handle_synthesis_after_eviction)
     graph.add_node("process_tools", process_tools)
     graph.set_entry_point("call_model")
+    # #2015 — include the corpus-aware mismatch destination only when
+    # the node was registered above; otherwise langgraph's compile
+    # step rejects a destination label whose target node does not
+    # exist.  ``route_after_model`` only returns this label when the
+    # detector closure is non-None (gated by the same condition).
+    _call_model_destinations: dict = {
+        "process_tools": "process_tools",
+        "handle_phantom": "handle_phantom",
+        "handle_fabrication": "handle_fabrication",
+        "handle_action_intent": "handle_action_intent",
+        "handle_incompleteness": "handle_incompleteness",
+        "handle_unverified_claim": "handle_unverified_claim",
+        "handle_unverified_entity": "handle_unverified_entity",
+        "handle_unsupported_quote": "handle_unsupported_quote",
+        "handle_version_scope": "handle_version_scope",
+        "handle_unsupported_attribution": "handle_unsupported_attribution",
+        "handle_entity_owner_mismatch": "handle_entity_owner_mismatch",
+        "handle_topic_substitution": "handle_topic_substitution",
+        "handle_sycophancy": "handle_sycophancy",
+        "handle_fabricated_action": "handle_fabricated_action",
+        "handle_fabricated_quote": "handle_fabricated_quote",
+        "handle_noncanonical_fork": "handle_noncanonical_fork",
+        "handle_synthesis_after_eviction": "handle_synthesis_after_eviction",
+        END: END,
+    }
+    if handle_corpus_attribution_mismatch is not None:
+        _call_model_destinations["handle_corpus_attribution_mismatch"] = (
+            "handle_corpus_attribution_mismatch"
+        )
     graph.add_conditional_edges(
         "call_model",
         route_after_model,
-        {
-            "process_tools": "process_tools",
-            "handle_phantom": "handle_phantom",
-            "handle_fabrication": "handle_fabrication",
-            "handle_action_intent": "handle_action_intent",
-            "handle_incompleteness": "handle_incompleteness",
-            "handle_unverified_claim": "handle_unverified_claim",
-            "handle_unverified_entity": "handle_unverified_entity",
-            "handle_unsupported_quote": "handle_unsupported_quote",
-            "handle_version_scope": "handle_version_scope",
-            "handle_unsupported_attribution": "handle_unsupported_attribution",
-            "handle_sycophancy": "handle_sycophancy",
-            "handle_fabricated_action": "handle_fabricated_action",
-            "handle_fabricated_quote": "handle_fabricated_quote",
-            "handle_noncanonical_fork": "handle_noncanonical_fork",
-            END: END,
-        },
+        _call_model_destinations,
     )
     graph.add_edge("process_tools", "call_model")
     graph.add_conditional_edges(
@@ -1896,6 +2229,22 @@ def build_agent_graph(
         {"call_model": "call_model", END: END},
     )
     graph.add_conditional_edges(
+        "handle_entity_owner_mismatch",
+        route_after_entity_owner_mismatch,
+        {"call_model": "call_model", END: END},
+    )
+    if handle_corpus_attribution_mismatch is not None:
+        graph.add_conditional_edges(
+            "handle_corpus_attribution_mismatch",
+            route_after_corpus_attribution_mismatch,
+            {"call_model": "call_model", END: END},
+        )
+    graph.add_conditional_edges(
+        "handle_topic_substitution",
+        route_after_topic_substitution,
+        {"call_model": "call_model", END: END},
+    )
+    graph.add_conditional_edges(
         "handle_sycophancy",
         route_after_sycophancy,
         {"call_model": "call_model", END: END},
@@ -1913,6 +2262,11 @@ def build_agent_graph(
     graph.add_conditional_edges(
         "handle_noncanonical_fork",
         route_after_noncanonical_fork,
+        {"call_model": "call_model", END: END},
+    )
+    graph.add_conditional_edges(
+        "handle_synthesis_after_eviction",
+        route_after_synthesis_after_eviction,
         {"call_model": "call_model", END: END},
     )
     compiled = graph.compile()

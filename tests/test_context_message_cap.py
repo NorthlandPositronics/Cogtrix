@@ -6,7 +6,12 @@ import os
 
 os.environ.setdefault("COGTRIX_DB_URL", "sqlite+aiosqlite:///:memory:")
 
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage  # noqa: E402
+from langchain_core.messages import (  # noqa: E402
+    AIMessage,
+    HumanMessage,
+    SystemMessage,
+    ToolMessage,
+)
 
 from src.orchestration.graph import _apply_context_message_cap  # noqa: E402
 
@@ -33,12 +38,16 @@ class TestContextMessageCap:
 
         result = _apply_context_message_cap(msgs, 3)
 
-        assert len(result) == 3
-        assert isinstance(result[0], AIMessage)
-        assert result[0].tool_calls[0]["id"] == "call_1"
-        assert isinstance(result[1], ToolMessage)
-        assert result[1].tool_call_id == "call_1"
-        assert result[2].content == "latest"
+        # #1943 PR #1: eviction prepends a SystemMessage marker.  The
+        # cap budget still applies to actual conversation content; the
+        # marker is metadata.
+        content = [m for m in result if not isinstance(m, SystemMessage)]
+        assert len(content) == 3
+        assert isinstance(content[0], AIMessage)
+        assert content[0].tool_calls[0]["id"] == "call_1"
+        assert isinstance(content[1], ToolMessage)
+        assert content[1].tool_call_id == "call_1"
+        assert content[2].content == "latest"
 
     def test_truncation_logs_warning(self, caplog) -> None:
         msgs = [
@@ -69,7 +78,8 @@ class TestContextMessageCap:
 
         result = _apply_context_message_cap(msgs, max_messages=10, max_tokens=3)
 
-        assert result == [msgs[-1]]
+        content = [m for m in result if not isinstance(m, SystemMessage)]
+        assert content == [msgs[-1]]
 
     def test_combined_caps_use_stricter_limit(self) -> None:
         msgs = [
@@ -80,7 +90,8 @@ class TestContextMessageCap:
 
         result = _apply_context_message_cap(msgs, max_messages=2, max_tokens=100)
 
-        assert result == msgs[-2:]
+        content = [m for m in result if not isinstance(m, SystemMessage)]
+        assert content == msgs[-2:]
 
     def test_oversized_latest_message_is_preserved(self) -> None:
         msgs = [
@@ -90,7 +101,8 @@ class TestContextMessageCap:
 
         result = _apply_context_message_cap(msgs, max_messages=10, max_tokens=1)
 
-        assert result == [msgs[-1]]
+        content = [m for m in result if not isinstance(m, SystemMessage)]
+        assert content == [msgs[-1]]
 
     def test_history_at_1_5x_max_tokens_preserves_latest_user_question_and_tool_pair(
         self,
@@ -194,3 +206,132 @@ class TestContextMessageCap:
         idx_ai = result.index(latest_ai)
         idx_tool = result.index(latest_tool)
         assert idx_tool == idx_ai + 1, "AI+tool pair was split by the cap"
+
+
+class TestEvictionMarker:
+    """#1943 PR #1: when the cap evicts messages, prepend a SystemMessage
+    marker so the agent has a recoverable signal that data was lost.
+    Without the marker the agent sees a normal-looking message history
+    and may confidently synthesise content from training-data knowledge
+    instead of recognising the eviction (the failure mode in #1943).
+    """
+
+    def test_marker_prepended_when_messages_dropped(self) -> None:
+        msgs = [
+            HumanMessage(content="oldest"),
+            _ai("c1"),
+            _tool("c1"),
+            HumanMessage(content="middle"),
+            _ai("c2"),
+            _tool("c2"),
+            HumanMessage(content="newest"),
+        ]
+        result = _apply_context_message_cap(msgs, max_messages=2)
+        # First element MUST be the marker; the newest content follows.
+        assert isinstance(result[0], SystemMessage)
+        assert "CONTEXT NOTICE" in result[0].content
+        assert "removed" in result[0].content
+
+    def test_marker_carries_cogtrix_kind_metadata(self) -> None:
+        msgs = [HumanMessage(content="oldest"), HumanMessage(content="newest")]
+        result = _apply_context_message_cap(msgs, max_messages=1)
+        assert isinstance(result[0], SystemMessage)
+        # Same convention as the #1923 cogtrix.kind metadata family so
+        # downstream detectors can route on the kind rather than on the
+        # prose.
+        assert result[0].additional_kwargs.get("cogtrix.kind") == "context_evicted"
+
+    def test_marker_quotes_actual_dropped_count(self) -> None:
+        msgs = [HumanMessage(content=f"m{i}") for i in range(10)]
+        result = _apply_context_message_cap(msgs, max_messages=3)
+        # 10 input, kept the newest 3 → 7 dropped (but the marker takes
+        # one slot, so the user-facing budget honours max_messages=3 for
+        # the actual conversational content).
+        marker = result[0]
+        assert isinstance(marker, SystemMessage)
+        # Exact dropped count must appear in the marker prose for the
+        # operator-debugging view.
+        assert "7" in marker.content
+
+    def test_no_marker_when_nothing_dropped(self) -> None:
+        msgs = [HumanMessage(content="m1"), HumanMessage(content="m2")]
+        result = _apply_context_message_cap(msgs, max_messages=5)
+        # Cap larger than input → no eviction, no marker.
+        assert all(not isinstance(m, SystemMessage) for m in result)
+        assert result == msgs
+
+    def test_marker_mentions_recovery_advice(self) -> None:
+        """The marker prose should tell the agent what to do — re-read
+        or surface the loss — not just announce the eviction."""
+        msgs = [HumanMessage(content=f"m{i}") for i in range(10)]
+        result = _apply_context_message_cap(msgs, max_messages=2)
+        marker_content = result[0].content
+        assert "re-read" in marker_content or "request a re-read" in marker_content
+        assert "do NOT claim" in marker_content or "do not claim" in marker_content.lower()
+
+
+class TestEvictionMarkerWithRollingSummary:
+    """#1943 PR #3: when the memory layer has a rolling summary covering
+    the evicted span, the marker embeds it as a semantic anchor.  Without
+    a summary the marker falls back to the PR #1 prose unchanged — never
+    regresses the existing eviction-marker contract.
+    """
+
+    def test_marker_embeds_summary_when_provided(self) -> None:
+        msgs = [HumanMessage(content=f"m{i}") for i in range(10)]
+        summary = (
+            "Earlier the user asked about deploying the new cogtrix release; "
+            "we discussed CI gates and the Dockerfile non-root hardening."
+        )
+        result = _apply_context_message_cap(msgs, max_messages=2, evicted_summary=summary)
+        marker_content = result[0].content
+        assert summary in marker_content
+        # Anti-fabrication guard from PR #1 must remain — the summary is
+        # broad-strokes context, never licence to invent specifics.
+        assert "do NOT invent specifics" in marker_content
+
+    def test_marker_falls_back_to_pr1_prose_when_summary_is_none(self) -> None:
+        msgs = [HumanMessage(content=f"m{i}") for i in range(10)]
+        result_none = _apply_context_message_cap(msgs, max_messages=2, evicted_summary=None)
+        result_default = _apply_context_message_cap(msgs, max_messages=2)
+        # When no summary is available the marker is byte-identical to the
+        # PR #1 fallback (which is exercised by the existing
+        # TestEvictionMarker class above).
+        assert result_none[0].content == result_default[0].content
+
+    def test_marker_falls_back_to_pr1_prose_when_summary_is_empty(self) -> None:
+        msgs = [HumanMessage(content=f"m{i}") for i in range(10)]
+        result_empty = _apply_context_message_cap(msgs, max_messages=2, evicted_summary="")
+        result_default = _apply_context_message_cap(msgs, max_messages=2)
+        assert result_empty[0].content == result_default[0].content
+
+    def test_marker_falls_back_when_summary_is_whitespace_only(self) -> None:
+        """A summary that's just whitespace conveys nothing — fall back to
+        the no-summary prose rather than embedding a blank block."""
+        msgs = [HumanMessage(content=f"m{i}") for i in range(10)]
+        result_ws = _apply_context_message_cap(msgs, max_messages=2, evicted_summary="   \n\t  \n")
+        result_default = _apply_context_message_cap(msgs, max_messages=2)
+        assert result_ws[0].content == result_default[0].content
+
+    def test_marker_kind_metadata_unchanged_with_summary(self) -> None:
+        """``cogtrix.kind`` metadata must remain ``context_evicted``
+        regardless of whether a summary was embedded — downstream
+        detectors (planned PR #4) route on this kind."""
+        msgs = [HumanMessage(content=f"m{i}") for i in range(10)]
+        result = _apply_context_message_cap(
+            msgs, max_messages=2, evicted_summary="some summary text"
+        )
+        marker = result[0]
+        assert marker.additional_kwargs.get("cogtrix.kind") == "context_evicted"
+
+    def test_marker_with_summary_still_quotes_dropped_count(self) -> None:
+        """Summary embedding must not replace the dropped-count
+        statistics — operators rely on the count for debugging."""
+        msgs = [HumanMessage(content=f"m{i}") for i in range(10)]
+        result = _apply_context_message_cap(
+            msgs, max_messages=3, evicted_summary="brief earlier context"
+        )
+        marker_content = result[0].content
+        # 10 input, kept 3, marker takes 1 slot → 7 dropped (same
+        # arithmetic as test_marker_quotes_actual_dropped_count above).
+        assert "7" in marker_content

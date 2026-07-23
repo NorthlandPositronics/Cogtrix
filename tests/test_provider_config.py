@@ -1018,7 +1018,10 @@ class TestNegativeValueValidation:
     """Tests for range validation of integer config fields (Bug m1)."""
 
     def test_negative_chunk_size_uses_default(self):
-        """chunk_size: -1 in config should be rejected and default 2000 retained."""
+        """chunk_size: -1 in config should be rejected and default retained.
+
+        Default lowered 2000 → 800 in #1952 Option C.
+        """
         import tempfile
         from pathlib import Path
 
@@ -1032,12 +1035,15 @@ class TestNegativeValueValidation:
         try:
             config = Config()
             _apply_config_file(config, Path(config_path))
-            assert config.rag.chunk_size == 2000
+            assert config.rag.chunk_size == 800
         finally:
             Path(config_path).unlink()
 
     def test_zero_chunk_size_uses_default(self):
-        """chunk_size: 0 must be rejected (must be > 0) and default 2000 retained."""
+        """chunk_size: 0 must be rejected (must be > 0) and default retained.
+
+        Default lowered 2000 → 800 in #1952 Option C.
+        """
         import tempfile
         from pathlib import Path
 
@@ -1051,12 +1057,15 @@ class TestNegativeValueValidation:
         try:
             config = Config()
             _apply_config_file(config, Path(config_path))
-            assert config.rag.chunk_size == 2000
+            assert config.rag.chunk_size == 800
         finally:
             Path(config_path).unlink()
 
     def test_negative_chunk_overlap_uses_default(self):
-        """chunk_overlap: -1 should be rejected and default 200 retained."""
+        """chunk_overlap: -1 should be rejected and default retained.
+
+        Default lowered 200 → 100 in #1952 Option C.
+        """
         import tempfile
         from pathlib import Path
 
@@ -1070,7 +1079,7 @@ class TestNegativeValueValidation:
         try:
             config = Config()
             _apply_config_file(config, Path(config_path))
-            assert config.rag.chunk_overlap == 200
+            assert config.rag.chunk_overlap == 100
         finally:
             Path(config_path).unlink()
 

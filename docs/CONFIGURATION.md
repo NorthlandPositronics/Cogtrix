@@ -182,8 +182,8 @@ Configure document ingestion for knowledge base:
 rag:
   docs_dir: docs
   vectordb_dir: vectordb
-  chunk_size: 2000
-  chunk_overlap: 200
+  chunk_size: 800
+  chunk_overlap: 100
   model: embed-local
 ```
 
@@ -191,8 +191,8 @@ rag:
 |--------|------|---------|-------------|
 | `docs_dir` | string | `"docs"` | Source documents directory |
 | `vectordb_dir` | string | `"vectordb"` | Vector database output directory |
-| `chunk_size` | int | `2000` | Text chunk size in characters |
-| `chunk_overlap` | int | `200` | Overlap between chunks |
+| `chunk_size` | int | `800` | Text chunk size in characters (lowered from `2000` in #1952 Option C) |
+| `chunk_overlap` | int | `100` | Overlap between chunks (lowered from `200` in #1952 Option C) |
 | `model` | string | `null` | Model name from the `models` registry to use for embeddings. Falls back to the active provider when not set. |
 
 **Note:** The `model` field references a named entry in the top-level `models` registry. Define an embedding model there and point `rag.model` at it. The provider connection details (type, base_url, api_key) are resolved automatically from the matching provider config.

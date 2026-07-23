@@ -62,7 +62,16 @@ success_criteria:
   - "response_not_contains: <tool_call>"
 
 max_turns: 5
-timeout_seconds: 60
+# Bumped 60 → 120 because the original 60s budget was sized for the
+# DeepSeek-V3 regression this scenario was written for, and is now too
+# tight for kimi-k2-5 when Moonshot's upstream capacity window is
+# exhausted.  Even with PR #1997's 60s retry backoff, a 60s scenario
+# timeout leaves no room for the second attempt to start a turn before
+# the per-scenario timeout fires, producing the turns=0 PARTIAL_COMPLETION
+# pattern observed on PR #1999 CI run 26882307295.  120s gives the
+# capacity window enough room without changing what the scenario tests
+# (still a single classify_invoice call).
+timeout_seconds: 120
 
 tags:
   - gate2

@@ -94,7 +94,8 @@ class TestApplyConfigFileNonNumeric:
         )
         config = Config()
         _apply_config_file(config, cfg_file)
-        assert config.rag.chunk_size == 2000
+        # Default lowered 2000 → 800 in #1952 Option C.
+        assert config.rag.chunk_size == 800
 
     def test_rag_chunk_overlap_non_numeric(self, tmp_path):
         cfg_file = self._write_yaml(
@@ -103,7 +104,8 @@ class TestApplyConfigFileNonNumeric:
         )
         config = Config()
         _apply_config_file(config, cfg_file)
-        assert config.rag.chunk_overlap == 200
+        # Default lowered 200 → 100 in #1952 Option C.
+        assert config.rag.chunk_overlap == 100
 
     def test_research_delegate_timeout_non_numeric(self, tmp_path):
         cfg_file = self._write_yaml(

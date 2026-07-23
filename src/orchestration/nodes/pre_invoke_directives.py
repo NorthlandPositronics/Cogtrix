@@ -34,8 +34,13 @@ P1 + P0 order:
 
 1. transient-filter (drops messages flagged ``response_metadata
    ["transient"]=True``)
-2. context-cap (``apply_context_message_cap``)
-3. compress (``maybe_compress``)
+2. compress (``maybe_compress``) — reduces size by summarising old
+   ToolMessages while preserving the content (lossy but recoverable).
+   Runs FIRST so the cap below has less to drop.
+3. context-cap (``apply_context_message_cap``) — last-resort eviction
+   when compression alone didn't fit the budget.  Drops oldest message
+   chunks and emits a SystemMessage marker noting that data was lost
+   (#1943 PR #1).
 4. topic-switch nudge (``_TOPIC_SWITCH_NUDGE`` appended +
    ``memory_manager.reset_summary_state`` invoked)
 5. stuck-conclusion nudge (only at ``call_count == 1`` when prior 2
@@ -142,6 +147,169 @@ def apply_late_directives(
     return msgs
 
 
+def _maybe_get_rolling_summary(memory_manager: Any, log: Any) -> str | None:
+    """Return the memory layer's rolling summary text when available.
+
+    Reads ``MemoryManager._summary`` under ``_hybrid_lock`` (non-blocking,
+    short timeout) so a contended summarizer job never stalls the
+    cascade.  Returns ``None`` on:
+
+    - no manager (CLI direct path with no memory plumbing)
+    - manager has no ``_summary`` attribute (very old subclass / mock)
+    - lock contention beyond a short timeout
+    - any exception (broad catch — memory layer must never break the
+      orchestration cascade; the marker simply falls back to PR #1 prose)
+
+    The string may be empty when the summarizer has not yet produced a
+    summary; callers treat empty the same as ``None``.
+    """
+    if memory_manager is None:
+        return None
+    try:
+        lock = getattr(memory_manager, "_hybrid_lock", None)
+        if lock is not None and hasattr(lock, "acquire"):
+            # Short timeout — never block the cascade waiting on the
+            # background summarizer.
+            if not lock.acquire(timeout=0.05):
+                return None
+            try:
+                summary = getattr(memory_manager, "_summary", None)
+            finally:
+                lock.release()
+        else:
+            summary = getattr(memory_manager, "_summary", None)
+        if isinstance(summary, str):
+            return summary
+        return None
+    except Exception as exc:  # noqa: BLE001 — memory must never crash the cascade
+        log.debug("Rolling-summary fetch skipped: %s", exc)
+        return None
+
+
+# Action-tier cap response signature — see ``src/orchestration/nodes/
+# process_tools.py:343``.  The dispatcher emits a ToolMessage with this
+# text when a tool has been called more than ``MAX_CONSECUTIVE_ACTION_CALLS``
+# times in succession this turn.  When this signature appears in the
+# recent N ToolMessages, the agent is being explicitly told to STOP
+# calling the tool — the polling-loop detector must still fire so the
+# advisory + thinking-break arm push the agent toward a final response.
+# Without this guard, #1943 Fix #4's distinct-args exemption suppresses
+# the polling-loop signal even while the agent thrashes the cap with
+# different queries — observed as Gate 2's
+# ``regression_web_search_no_external_url_recommendation_on_low_yield``
+# recursing to the limit after 25 cap-hits.
+_ACTION_TIER_CAP_SIGNATURE = "times in succession this turn"
+
+
+def _recent_tool_responses_are_cap_hits(
+    repaired_state_messages: list[Any],
+    n: int,
+) -> bool:
+    """True when the latest *n* ToolMessages contain action-tier cap-hit
+    responses (a dispatcher-emitted ``Further '<tool>' calls are blocked``
+    message).  When the agent is repeatedly hitting the action-tier cap,
+    the iteration is NOT making progress — it's thrashing — and the
+    polling-loop signal must fire regardless of args distinctness."""
+    if n <= 0:
+        return False
+    seen = 0
+    for m in reversed(repaired_state_messages):
+        if not hasattr(m, "tool_call_id"):
+            continue
+        seen += 1
+        content = getattr(m, "content", "") or ""
+        if isinstance(content, str) and _ACTION_TIER_CAP_SIGNATURE in content:
+            return True
+        if seen >= n:
+            break
+    return False
+
+
+def _consecutive_same_tool_args_distinct(
+    repaired_state_messages: list[Any],
+    n: int,
+) -> bool:
+    """True when the last *n* ToolMessages came from same-tool calls with
+    pairwise-distinct arguments — i.e. iteration, not polling (#1943 Fix #4).
+
+    The polling-loop detector below trips on N consecutive ToolMessages
+    that share a ``name`` (tool name) regardless of args.  But same-tool
+    same-args is genuine polling, while same-tool DIFFERENT-args is
+    legitimate iteration — sequential ``read_file`` of N distinct paths,
+    diversified ``web_search`` queries, batched ``patch_file`` of
+    different files.  This helper distinguishes the two so the
+    detector's advisory + thinking-break arm fire only on the polling
+    case.
+
+    Walks the message list backwards collecting the latest *n*
+    ToolMessages, matches each to its originating ``AIMessage.tool_calls``
+    entry by ``tool_call_id``, and compares the resolved ``args`` dicts
+    pairwise.  Returns ``False`` (i.e. NOT distinct → polling-loop
+    detector should fire) when any of:
+
+    * fewer than *n* ToolMessages found (insufficient evidence);
+    * any args dict cannot be resolved (mock test object, AIMessage
+      filtered out, etc.) — conservative default: fall through to
+      legacy behaviour;
+    * any pair of args dicts is structurally equal;
+    * the recent responses contain an action-tier cap-hit signature —
+      iteration that's thrashing the cap is NOT progress and the agent
+      needs the polling-loop nudge to stop.
+
+    Equality is by ``repr`` so unhashable values (lists, nested dicts)
+    compare correctly; the args dicts are small so the cost is trivial.
+    """
+    if n <= 0:
+        return False
+
+    # Walk backwards collecting the latest n ToolMessages with their
+    # tool_call_ids.
+    tool_msgs: list[tuple[str, str | None]] = []  # [(tool_call_id, name)]
+    for m in reversed(repaired_state_messages):
+        if not hasattr(m, "tool_call_id"):
+            continue
+        tc_id = getattr(m, "tool_call_id", None) or ""
+        tool_msgs.append((tc_id, getattr(m, "name", None)))
+        if len(tool_msgs) >= n:
+            break
+    if len(tool_msgs) < n:
+        return False
+
+    # #1984 follow-up: if recent responses are action-tier cap-hits, the
+    # iteration is thrashing — not progressing — and the polling-loop
+    # signal must fire to push the agent toward a final response.
+    if _recent_tool_responses_are_cap_hits(repaired_state_messages, n):
+        return False
+
+    # Build a lookup from tool_call_id -> args by walking AIMessages.
+    args_by_id: dict[str, Any] = {}
+    for m in repaired_state_messages:
+        tool_calls = getattr(m, "tool_calls", None)
+        if not tool_calls:
+            continue
+        for tc in tool_calls:
+            if isinstance(tc, dict):
+                tc_id = tc.get("id") or ""
+                tc_args = tc.get("args")
+            else:
+                tc_id = getattr(tc, "id", None) or ""
+                tc_args = getattr(tc, "args", None)
+            if tc_id:
+                args_by_id[tc_id] = tc_args
+
+    # Resolve each ToolMessage's args.  Conservative default: any
+    # unresolved entry → fall back to legacy polling-loop behaviour.
+    resolved_args: list[str] = []
+    for tc_id, _name in tool_msgs:
+        if tc_id not in args_by_id:
+            return False
+        # ``repr`` so dicts with unhashable nested values still compare.
+        resolved_args.append(repr(args_by_id[tc_id]))
+
+    # Distinct iff the set has n unique entries.
+    return len(set(resolved_args)) == n
+
+
 # ─────────────────────────────────────────────────────────────────────
 # P1 — post-bind message preparation
 # ─────────────────────────────────────────────────────────────────────
@@ -174,13 +342,31 @@ def _phase_p1_post_bind_prep(
         )
     ]
 
+    # #1943 PR #1: compress BEFORE cap.  Eviction is destructive — it
+    # drops messages without preserving their content.  Compression is
+    # lossy-but-recoverable — it replaces verbose ToolMessage bodies
+    # with one-paragraph summaries.  Running compression first means
+    # the cap below has less to drop (often nothing).  Before this
+    # change, the order was reversed: the cap evicted old ToolMessages
+    # whose content would later be impossible to recover, then
+    # compression ran on the survivors — which couldn't help with the
+    # data that was already gone.  Reproducer: #1943 / verify-1919
+    # context-overflow run.
+    msgs = context.maybe_compress(msgs)
     if context.context_max_messages > 0 or context.context_max_tokens > 0:
+        # #1943 PR #3: when the memory layer has a rolling summary, pass
+        # it to the cap so the eviction marker can embed it (giving the
+        # agent a semantic anchor for what was lost instead of just
+        # ``data was lost`` + anti-fabrication nudge).  Tolerant of
+        # missing manager (CLI direct path), missing attribute, or any
+        # snapshot error — fall through to PR #1 prose unchanged.
+        _evicted_summary: str | None = _maybe_get_rolling_summary(context.memory_manager, log)
         msgs = context.apply_context_message_cap(
             msgs,
             context.context_max_messages,
             context.context_max_tokens,
+            evicted_summary=_evicted_summary,
         )
-    msgs = context.maybe_compress(msgs)
 
     if (
         context.topic_switch_detection_enabled
@@ -449,7 +635,29 @@ def _phase_p2_late_directives(
         for m in repaired_state_messages[-(_MAX_CONSECUTIVE_SAME_TOOL * 2) :]
         if hasattr(m, "tool_call_id")
     ]
+    # #1943 Fix #4: when the last N same-tool calls each used DISTINCT
+    # arguments, the agent is iterating (sequential reads of N files,
+    # diversified web_search queries, etc.), not polling.  Suppress the
+    # polling-loop signal to avoid breaking legitimate iteration.  Same-
+    # tool same-args genuinely is a poll and still trips the detector.
+    _last_n_args_distinct = _consecutive_same_tool_args_distinct(
+        repaired_state_messages, _MAX_CONSECUTIVE_SAME_TOOL
+    )
     if (
+        len(_recent_tool_names) >= _MAX_CONSECUTIVE_SAME_TOOL
+        and len(set(_recent_tool_names[-_MAX_CONSECUTIVE_SAME_TOOL:])) == 1
+        and _last_n_args_distinct
+    ):
+        # Iteration, not polling — suppress.  INFO so operators can see
+        # the discriminator fired in case a legitimate-looking loop
+        # turns out to be problematic.
+        log.info(
+            "Polling-loop signal suppressed — '%s' called %d times with distinct args "
+            "(iteration, not polling).  No advisory injected.",
+            _recent_tool_names[-1],
+            _MAX_CONSECUTIVE_SAME_TOOL,
+        )
+    elif (
         len(_recent_tool_names) >= _MAX_CONSECUTIVE_SAME_TOOL
         and len(set(_recent_tool_names[-_MAX_CONSECUTIVE_SAME_TOOL:])) == 1
     ):

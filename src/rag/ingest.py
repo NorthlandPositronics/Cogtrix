@@ -109,17 +109,51 @@ _STOP_WORDS: frozenset[str] = frozenset(
 
 @dataclass
 class IngestConfig:
-    """Configuration for document ingestion."""
+    """Configuration for document ingestion.
+
+    ``vectordb_dir`` is the *exact* directory where the FAISS index files
+    (``index.faiss`` / ``index.pkl``) are written.  This matches the
+    convention used by ``src.tools.rag.configure_rag`` and
+    ``_collect_faiss_dirs`` (which look for ``index.faiss`` directly inside
+    the configured directory).  Callers that want the historical layout —
+    a ``faiss_index/`` sub-directory under some parent — must include that
+    segment in the path they pass (e.g. ``parent / "faiss_index"``).
+
+    Prior to #1951 this field meant the *parent* directory and the ingest
+    code silently appended ``/faiss_index``; that asymmetry caused
+    ``src/tools/rag.py`` (which already passed ``data/vectordb/faiss_index``)
+    to produce a doubled ``data/vectordb/faiss_index/faiss_index/`` layout
+    where the query side could never find the index.
+    """
 
     docs_dir: Path
     vectordb_dir: Path
-    chunk_size: int = 2000
-    chunk_overlap: int = 200
+    # #1952 Option C: lowered from 2000/200 → 800/100.  Diagnostic probing
+    # of the qwen3-embedding model (see #1952's Regime B / C analysis +
+    # tests/role_pm/corpus_ingest.py at 500/50) showed that
+    # 2000-character chunks span multiple topics — the per-chunk
+    # semantic vector becomes diffuse, and retrieval pulls toward
+    # whichever document happens to sit at the corpus centroid.  Smaller
+    # chunks give each one tighter focus.  800/100 is the moderate
+    # default: meaningfully smaller than 2000 (Regime B/C partial
+    # relief per the issue) without being as aggressive as the role_pm
+    # harness's 500/50 (which is calibrated for that specific corpus).
+    # Operators with explicit ``rag.chunk_size`` in ``~/.cogtrix.yaml``
+    # keep their override; operators on defaults get the new value on
+    # next ``python cogtrix.py --ingest``.
+    chunk_size: int = 800
+    chunk_overlap: int = 100
     embedding_provider: str = "ollama"
     embedding_model: str | None = None
     base_url: str | None = None
     api_key: str | None = None
     entity_index_path: Path | None = None
+    # #1981: opt-in BM25 sidecar for hybrid retrieval.  Default ``False``
+    # keeps every existing ingest pipeline pure-vector.  When ``True``
+    # a ``bm25.pkl`` is written alongside ``index.faiss`` and
+    # ``src.tools.rag`` can fuse vector + BM25 ranks at query time
+    # (gated separately by ``configure_rag({"use_bm25_hybrid": True})``).
+    build_bm25_sidecar: bool = False
 
 
 @dataclass
@@ -305,7 +339,9 @@ def ingest_documents(config: IngestConfig) -> IngestResult:
     try:
         vector_store = FAISS.from_documents(chunks, embeddings)
 
-        persist_path = config.vectordb_dir / "faiss_index"
+        # See ``IngestConfig`` docstring: ``vectordb_dir`` is the exact
+        # FAISS index directory; no implicit ``/faiss_index`` append.
+        persist_path = config.vectordb_dir
         save_faiss_store(vector_store, persist_path)
 
         result.vector_store_path = persist_path
@@ -314,6 +350,13 @@ def ingest_documents(config: IngestConfig) -> IngestResult:
     except Exception as e:
         result.errors.append(f"Failed to build vector store: {e}")
         return result
+
+    # #1981: opt-in BM25 sidecar — built only when explicitly enabled
+    # via ``config.build_bm25_sidecar``.  A sidecar-write failure is
+    # logged but does NOT fail the ingest: dense retrieval is still
+    # authoritative, hybrid is an opt-in enhancement.
+    if config.build_bm25_sidecar:
+        _maybe_build_bm25_sidecar(chunks, config.vectordb_dir)
 
     return result
 
@@ -351,8 +394,10 @@ def _ingest_one_file(path: Path, config: IngestConfig) -> bool:
         _, chunks = prepared
         embeddings = _create_embeddings(config)
         vector_store = FAISS.from_documents(chunks, embeddings)
-        persist_path = config.vectordb_dir / "faiss_index"
+        persist_path = config.vectordb_dir
         save_faiss_store(vector_store, persist_path)
+        if config.build_bm25_sidecar:
+            _maybe_build_bm25_sidecar(chunks, config.vectordb_dir)
         return True
     except Exception:
         return False
@@ -420,8 +465,10 @@ def ingest_many(
     try:
         embeddings = _create_embeddings(config)
         vector_store = FAISS.from_documents(prepared_chunks, embeddings)
-        persist_path = config.vectordb_dir / "faiss_index"
+        persist_path = config.vectordb_dir
         save_faiss_store(vector_store, persist_path)
+        if config.build_bm25_sidecar:
+            _maybe_build_bm25_sidecar(prepared_chunks, config.vectordb_dir)
     except Exception:
         for path_str in successful_paths:
             results[path_str] = False
@@ -513,3 +560,39 @@ def _update_entity_index(
         index_path.parent.mkdir(parents=True, exist_ok=True)
         with atomic_write_json(index_path) as fh:
             fh.write(json.dumps(existing, indent=2))
+
+
+def _maybe_build_bm25_sidecar(chunks: list[Document], vectordb_dir: Path) -> None:
+    """Build + persist a BM25 sidecar alongside the FAISS index (#1981).
+
+    Best-effort: failures are logged at WARNING and swallowed.  The
+    dense index has already been saved by the caller; an unwritable
+    sidecar must not corrupt that.  ``IngestConfig.build_bm25_sidecar``
+    gates this entire path — when ``False``, callers never reach here.
+    """
+    try:
+        from src.rag.bm25 import build_sidecar, save_sidecar
+    except ImportError as exc:
+        _log.warning("BM25 sidecar build skipped — module import failed: %s", exc)
+        return
+
+    try:
+        sidecar = build_sidecar(chunks)
+    except Exception as exc:  # noqa: BLE001 — best-effort sidecar
+        _log.warning("BM25 sidecar build failed: %s", exc)
+        return
+
+    if sidecar is None:
+        return  # build_sidecar logged the reason (empty after filtering)
+
+    try:
+        out = save_sidecar(sidecar, vectordb_dir)
+    except Exception as exc:  # noqa: BLE001 — best-effort sidecar
+        _log.warning("BM25 sidecar write failed: %s", exc)
+        return
+
+    _log.info(
+        "BM25 sidecar written: chunks=%d, path=%s",
+        len(sidecar.corpus_tokens),
+        out,
+    )

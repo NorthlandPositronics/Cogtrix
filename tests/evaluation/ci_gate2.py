@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import time
 from collections.abc import Callable
 from dataclasses import asdict
 from functools import partial
@@ -63,7 +64,10 @@ _SHARD_MAP: dict[str, frozenset[str]] = {
             "regression_web_search_no_external_url_recommendation_on_low_yield",
         }
     ),
-    # 120 + 60 + 180 + 180 = 540s
+    # 120 + 120 + 180 + 180 = 600s
+    #   (regression_deepseek_native_tool_call_format bumped 60 → 120 alongside
+    #    PR #1999 to give kimi-k2-5 enough room for the PR #1997 retry-backoff
+    #    path when Moonshot capacity is exhausted; see scenario YAML comment).
     "C": frozenset(
         {
             "procurement_supplier_registration",
@@ -72,7 +76,10 @@ _SHARD_MAP: dict[str, frozenset[str]] = {
             "regression_web_search_synthesis_disagreement",
         }
     ),
-    # 120 + 60 + 240 + 180 (× 2 turns) = 780s worst-case
+    # 240 + 60 + 240 + 180 (× 2 turns) = 900s worst-case
+    #   (finance_invoice_approval_workflow bumped 120 → 240 alongside
+    #    PR #2013 to give kimi-k2-5's retry path enough headroom when
+    #    Moonshot capacity is degraded; same precedent as PR #1999.)
     # Note: regression_multi_turn_effort_gate_no_carryover's 180s is
     # per-turn (2 turns ⇒ ~360s wall worst-case); shard D's other
     # entries are single-turn so they cap at their listed timeouts.
@@ -352,12 +359,41 @@ def _is_empty_response(result: EvalResult) -> bool:
     )
 
 
+def _backoff_before_retry(
+    model: ModelConfig,
+    reason: str,
+    emit: Callable[[str], None],
+    sleep: Callable[[float], None],
+) -> None:
+    """Pause before a retry when the model opts in to a backoff.
+
+    Issue #1994: kimi-k2-5 routed through OpenRouter regularly produces
+    empty-response flakes when Moonshot's upstream capacity window
+    closes.  An immediate retry hits the same closed window and burns
+    the retry budget without giving the capacity a chance to recover.
+    Models can opt in via ``ModelConfig.retry_backoff_seconds`` — when
+    that value is positive, this helper sleeps for that many seconds
+    and emits a diagnostic log line so the wait is visible in CI
+    output.  Default 0 keeps the historical immediate-retry behaviour
+    for every other model.
+
+    The ``sleep`` callable is injectable so tests can verify the
+    backoff path without actually waiting.
+    """
+    delay = max(0, model.retry_backoff_seconds)
+    if delay <= 0:
+        return
+    emit(f"[gate2] BACKOFF {model.id} sleeping {delay}s before retry " f"(reason={reason})")
+    sleep(delay)
+
+
 def _try_run_with_key(
     scenario: EvalScenario,
     model: ModelConfig,
     key: tuple[str, str],
     emit: Callable[[str], None],
     max_retries: int = 1,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> EvalResult | None:
     """Attempt to run scenario+model with one key. Returns None on auth/quota error.
 
@@ -376,6 +412,12 @@ def _try_run_with_key(
     "Model unavailable" errors (a provider deprecating a model_id, e.g.
     Cerebras dropping llama-3.3-70b) take the same shape and the same
     fallback path — see ``_is_model_unavailable_error``.
+
+    Issue #1994 — per-model retry backoff: models that opt in via
+    ``ModelConfig.retry_backoff_seconds`` get a short sleep between the
+    failing attempt and the retry, giving upstream capacity windows a
+    chance to roll forward.  The ``sleep`` parameter is injected so
+    tests can drive the backoff path deterministically.
     """
     for attempt in range(max_retries + 1):
         try:
@@ -386,6 +428,7 @@ def _try_run_with_key(
                 return None
             if attempt < max_retries and _is_transient_error(exc):
                 emit(f"[gate2] RETRY {key[0]} for {model.id} (attempt {attempt + 1}): {exc}")
+                _backoff_before_retry(model, "transient_exception", emit, sleep)
                 continue
             raise
 
@@ -397,6 +440,7 @@ def _try_run_with_key(
             return None
         if result.error and attempt < max_retries and _is_transient_error(Exception(result.error)):
             emit(f"[gate2] RETRY {key[0]} for {model.id} (attempt {attempt + 1}): {result.error}")
+            _backoff_before_retry(model, "transient_error", emit, sleep)
             continue
         # Empty-response flake (DeepSeek-V3 via OpenRouter occasionally
         # returns no tool calls and no content with no error).  This
@@ -411,6 +455,7 @@ def _try_run_with_key(
                 f"[gate2] RETRY {key[0]} for {model.id} (attempt {attempt + 1}): "
                 "empty_response (no tool calls, no content)"
             )
+            _backoff_before_retry(model, "empty_response", emit, sleep)
             continue
         return result
     # All retries exhausted — return the last result with error annotated.

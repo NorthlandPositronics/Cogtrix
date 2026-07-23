@@ -2451,6 +2451,10 @@ def run_ingest(args, config: Config) -> int:
         embedding_model=emb_model,
         base_url=emb_base_url,
         api_key=emb_api_key,
+        # #1981: pass through the BM25 sidecar build flag from operator
+        # config — when set, ``ingest_documents`` writes a ``bm25.pkl``
+        # alongside the FAISS index so the query path can run hybrid.
+        build_bm25_sidecar=config.rag.build_bm25_sidecar,
     )
 
     if console:

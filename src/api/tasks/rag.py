@@ -42,7 +42,11 @@ def _run_ingest(doc_id: str, file_path: Path) -> tuple[bool, int, str | None]:
     from src.rag.ingest import IngestConfig, ingest_documents
 
     docs_dir = file_path.parent
-    vectordb_dir = _get_uploads_dir() / doc_id / "vectordb"
+    # ``vectordb_dir`` is the EXACT FAISS index directory (see #1951).
+    # ``_collect_faiss_dirs`` in ``src/tools/rag.py`` looks for the
+    # per-document index at ``<uploads>/<doc_id>/vectordb/faiss_index/``,
+    # so we include that trailing segment explicitly here.
+    vectordb_dir = _get_uploads_dir() / doc_id / "vectordb" / "faiss_index"
 
     # Resolve embedding provider from app config so the API path uses the
     # same provider as the CLI (instead of defaulting to Ollama).
