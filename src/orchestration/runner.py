@@ -378,15 +378,19 @@ def has_phantom_tool_call(result: dict) -> bool:
     return False
 
 
-def extract_response(result: Any, log: Any = None) -> str | None:
+def extract_response(result: Any, log: Any = None, prior_count: int = 0) -> str | None:
     """Extract a meaningful AI response from the agent result.
 
-    Walks backward through messages to find the last AIMessage with
-    non-empty content, skipping ToolMessages and empty AIMessages.
+    Walks backward through messages produced THIS TURN (after prior_count)
+    to find the last AIMessage with non-empty content, skipping ToolMessages
+    and empty AIMessages.  Never looks at history messages before prior_count
+    to prevent returning a stale answer from a previous turn.
 
     Args:
         result: Agent execution result (dict with 'messages' key)
         log: Logger instance
+        prior_count: Number of messages that were in the history BEFORE this
+            turn.  Only messages at index >= prior_count are candidates.
 
     Returns:
         Response string, or None if no valid content found
@@ -403,7 +407,10 @@ def extract_response(result: Any, log: Any = None) -> str | None:
 
     from langchain_core.messages import AIMessage, ToolMessage
 
-    for msg in reversed(messages):
+    # Only search messages produced this turn (after prior_count)
+    turn_messages = messages[prior_count:] if prior_count > 0 else messages
+
+    for msg in reversed(turn_messages):
         if isinstance(msg, ToolMessage):
             continue
 
@@ -785,7 +792,7 @@ def run_agent(
             if hit_recursion_limit:
                 return recover_from_step_limit(graph, result, input_messages, invoke_config, log)
 
-            response = extract_response(result, log)
+            response = extract_response(result, log, prior_count=prior_msg_count)
             if response and not is_step_limit_apology(response):
                 return response
 

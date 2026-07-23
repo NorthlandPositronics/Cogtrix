@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.3](https://github.com/NorthlandPositronics/Cogtrix/compare/v0.2.2...v0.2.3) (2026-04-03)
+
+
+### Bug Fixes
+
+* **critical:** extract_response returned stale answer from previous turn ([d65a0f8](https://github.com/NorthlandPositronics/Cogtrix/commit/d65a0f875f31ce4f2a4ccad6fb8caf758bb1b65a))
+
 ## [0.2.2](https://github.com/NorthlandPositronics/Cogtrix/compare/v0.2.1...v0.2.2) (2026-04-03)
 
 
