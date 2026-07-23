@@ -1219,6 +1219,8 @@ def delegate_parallel(
                         ),
                     )
                 )
+            except UserCancelledRun:
+                raise
             except Exception as exc:
                 results.append(
                     (

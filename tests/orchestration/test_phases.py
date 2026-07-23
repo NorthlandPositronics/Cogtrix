@@ -325,3 +325,150 @@ class TestForceDeepThinkUserCancelledRun:
         assert result == "fallback response"
         log_mock.warning.assert_called_once()
         assert "Programmatic deep_think failed" in log_mock.warning.call_args[0][0]
+
+
+# ---------------------------------------------------------------------------
+# Regression — force_delegation must not swallow UserCancelledRun (#1166)
+# ---------------------------------------------------------------------------
+
+
+class TestForceDelegationUserCancelledRun:
+    def _make_config(self) -> MagicMock:
+        """Return a config that resolves to valid provider/model for task decomposition."""
+        pc = MagicMock()
+        pc.type = "openai"
+        pc.api_key = None
+        pc.get_base_url.return_value = None
+        mc = MagicMock()
+        mc.model = "gpt-4.1-mini"
+        mc.context_window = None
+        mc.max_tokens = None
+        config = MagicMock()
+        config.resolve_llm_config.return_value = (pc, mc)
+        return config
+
+    def test_user_cancelled_run_propagates(self):
+        """UserCancelledRun raised inside force_delegation must not be swallowed by except Exception."""
+        from unittest.mock import patch
+
+        from src.agent.safety import UserCancelledRun
+
+        log_mock = MagicMock()
+        config_mock = self._make_config()
+
+        fake_llm = MagicMock()
+        fake_response = MagicMock()
+        fake_response.content = '{"task":"do sub-task","model":"default"}'
+        fake_llm.invoke.return_value = fake_response
+
+        # Mock _delegate_config so available_aliases is non-empty (force_delegation reaches delegate_parallel).
+        # Both patches must be active BEFORE force_delegation is imported so that its local import
+        # of delegate_parallel picks up the patched version.
+        with patch("src.orchestration.phases.build_llm_for_decomposition", return_value=fake_llm):
+            with patch("src.tools.delegate._delegate_config") as mock_cfg:
+                mock_cfg.get.return_value = {"default": {"model": "gpt-4o", "provider": "openai"}}
+                with patch(
+                    "src.tools.delegate.delegate_parallel", side_effect=UserCancelledRun("stop")
+                ):
+                    from src.orchestration.phases import force_delegation
+
+                    with pytest.raises(UserCancelledRun):
+                        force_delegation(
+                            user_input="do this task",
+                            agent_response="some response",
+                            tool_outputs="",
+                            config=config_mock,
+                            log=log_mock,
+                        )
+
+    def test_other_exceptions_still_swallowed(self):
+        """Non-cancellation exceptions must still be caught and logged."""
+        from unittest.mock import patch
+
+        log_mock = MagicMock()
+        config_mock = self._make_config()
+
+        fake_llm = MagicMock()
+        fake_response = MagicMock()
+        fake_response.content = '{"task":"do sub-task","model":"default"}'
+        fake_llm.invoke.return_value = fake_response
+
+        with patch("src.orchestration.phases.build_llm_for_decomposition", return_value=fake_llm):
+            with patch("src.tools.delegate._delegate_config") as mock_cfg:
+                mock_cfg.get.return_value = {"default": {"model": "gpt-4o", "provider": "openai"}}
+                with patch(
+                    "src.tools.delegate.delegate_parallel", side_effect=RuntimeError("boom")
+                ):
+                    from src.orchestration.phases import force_delegation
+
+                    result = force_delegation(
+                        user_input="do this task",
+                        agent_response="fallback response",
+                        tool_outputs="",
+                        config=config_mock,
+                        log=log_mock,
+                    )
+
+        assert result == "fallback response"
+        log_mock.error.assert_called_once()
+        assert "Forced delegation failed" in log_mock.error.call_args[0][0]
+
+
+# ---------------------------------------------------------------------------
+# Regression — run_research_delegate must not swallow UserCancelledRun (#1166)
+# ---------------------------------------------------------------------------
+
+
+class TestRunResearchDelegateUserCancelledRun:
+    def test_user_cancelled_run_propagates(self):
+        """UserCancelledRun raised inside run_research_delegate must not be swallowed by except Exception."""
+        from unittest.mock import patch
+
+        from src.agent.safety import UserCancelledRun
+
+        fake_tool = MagicMock()
+        fake_tool.name = "http_get"
+        fake_tool.description = "Fetch URL"
+        fake_llm = MagicMock()
+
+        # Mock get_delegate_tools (otherwise function returns early) and create_delegate_llm
+        # (otherwise raises ValueError about missing provider). Patch run_delegate_agent at source.
+        # Import inside patch context so local import picks up the patch.
+        with patch("src.tools.delegate.get_delegate_tools", return_value=[fake_tool]):
+            with patch("src.tools.delegate.create_delegate_llm", return_value=fake_llm):
+                with patch(
+                    "src.tools.delegate.run_delegate_agent", side_effect=UserCancelledRun("stop")
+                ):
+                    from src.orchestration.phases import run_research_delegate
+
+                    with pytest.raises(UserCancelledRun):
+                        run_research_delegate(
+                            urls=["https://example.com"],
+                            task="research this",
+                            max_context_tokens=128000,
+                        )
+
+    def test_other_exceptions_still_swallowed(self):
+        """Non-cancellation exceptions must still be caught and logged."""
+        from unittest.mock import patch
+
+        fake_tool = MagicMock()
+        fake_tool.name = "http_get"
+        fake_tool.description = "Fetch URL"
+        fake_llm = MagicMock()
+
+        with patch("src.tools.delegate.get_delegate_tools", return_value=[fake_tool]):
+            with patch("src.tools.delegate.create_delegate_llm", return_value=fake_llm):
+                with patch(
+                    "src.tools.delegate.run_delegate_agent", side_effect=RuntimeError("boom")
+                ):
+                    from src.orchestration.phases import run_research_delegate
+
+                    result = run_research_delegate(
+                        urls=["https://example.com"],
+                        task="research this",
+                        max_context_tokens=128000,
+                    )
+
+        # Exception is caught by except Exception → returns ""
+        assert result == ""

@@ -127,6 +127,69 @@ class TestCreateSafeToolWrapper:
         wrapped = create_safe_tool_wrapper(tool, "test_tool", reg, set(), session_state=ss, ui=None)
         assert wrapped is not None
 
+    def test_tool_trust_deny_blocks_execution(self):
+        """tool_trust={"tool": "deny"} blocks execution regardless of registry or approvals.
+
+        Regression test for issue #1000: dynamic tool loading paths (process_tools.py,
+        sessions.py) were not propagating tool_trust to create_safe_tool_wrapper, causing
+        tool_trust: deny to be silently ignored for on-demand tools.
+        """
+        tool_func = MagicMock(return_value="executed result")
+        tool = MagicMock()
+        tool.name = "test_tool"
+        tool.description = "A test tool"
+        tool.args_schema = None
+        tool.func = tool_func
+        reg = self._make_registry(confirms=True)  # Would normally prompt
+        ss = SessionState()
+        approvals: set[str] = set()  # Not pre-approved
+        wrapped = create_safe_tool_wrapper(
+            tool,
+            "test_tool",
+            reg,
+            approvals,
+            session_state=ss,
+            ui=None,
+            tool_trust={"test_tool": "deny"},
+        )
+        result = wrapped.invoke({})
+        assert result == "User denied execution"
+        # Tool func must NOT have been called
+        tool_func.assert_not_called()
+        # Denied tool must NOT be added to approvals
+        assert "test_tool" not in approvals
+
+    def test_tool_trust_always_skips_confirmation(self):
+        """tool_trust={"tool": "always"} auto-approves without prompting.
+
+        Regression test for issue #1000: ensures tool_trust: always works for dynamically
+        loaded tools, preventing unwanted confirmation prompts for trusted tools.
+        """
+        tool_func = MagicMock(return_value="executed result")
+        tool = MagicMock()
+        tool.name = "test_tool"
+        tool.description = "A test tool"
+        tool.args_schema = None
+        tool.func = tool_func
+        reg = self._make_registry(confirms=True)  # Would normally prompt
+        ss = SessionState()
+        approvals: set[str] = set()
+        wrapped = create_safe_tool_wrapper(
+            tool,
+            "test_tool",
+            reg,
+            approvals,
+            session_state=ss,
+            ui=None,  # No UI — if trust: always is not respected, this would deny silently
+            tool_trust={"test_tool": "always"},
+        )
+        # With tool_trust: always, tool should execute even with no UI and no approvals
+        result = wrapped.invoke({})
+        # The wrapped tool executes and returns the func result (not a denial message)
+        assert result == "executed result"
+        # Tool func WAS called
+        tool_func.assert_called_once()
+
     def test_confirmation_ui_protocol_check(self):
         """_StubUI satisfies the ConfirmationUI protocol."""
         stub = _StubUI()

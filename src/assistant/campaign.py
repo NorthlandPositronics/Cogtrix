@@ -703,6 +703,18 @@ class CampaignManager:
     ) -> None:
         """Work function for executor — performs the actual handle_outbound call."""
         try:
+            # Re-check target status under lock to close the TOCTOU window
+            # between _process_follow_ups eligibility check and dispatch.
+            with self._lock:
+                if target.status != "active":
+                    log.info(
+                        "Campaign %s: follow-up #%d to %s suppressed — target status is '%s'",
+                        campaign.id,
+                        follow_up_num,
+                        target.contact_name,
+                        target.status,
+                    )
+                    return
             _resp, msg_id = self._handler.handle_outbound(
                 contact_name=target.contact_name,
                 instructions=framed,

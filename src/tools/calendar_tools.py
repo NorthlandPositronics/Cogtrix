@@ -30,6 +30,8 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, Field
 
+from src.tools.error_sanitizer import sanitize_google_api_error
+
 if TYPE_CHECKING:
     from src.config import Config
 
@@ -57,7 +59,7 @@ _gcal_config: dict[str, Any] = {}
 _NOT_CONFIGURED_MSG = (
     "Google Calendar is not configured. Add services.google_calendar to .cogtrix.yaml"
 )
-_INSTALL_HINT = "Google Calendar dependencies not installed. " "Run: uv add 'cogtrix[google]'"
+_INSTALL_HINT = "Google Calendar dependencies not installed. Run: uv add 'cogtrix[google]'"
 
 
 # ── Authentication helpers ────────────────────────────────────────────────────
@@ -191,7 +193,7 @@ class CalendarListEventsInput(BaseModel):
     time_max: str = Field(
         default="",
         description=(
-            "Upper bound (exclusive) for event start time. " "ISO 8601 string. Empty = unbounded."
+            "Upper bound (exclusive) for event start time. ISO 8601 string. Empty = unbounded."
         ),
     )
 
@@ -215,7 +217,7 @@ class CalendarSearchEventsInput(BaseModel):
     query: str = Field(
         ...,
         description=(
-            "Free-text search query across event titles, descriptions, " "and attendee names."
+            "Free-text search query across event titles, descriptions, and attendee names."
         ),
     )
     calendar_id: str = Field(
@@ -262,7 +264,7 @@ def calendar_list_events(
         items = result.get("items", [])
         return _format_events(items)
     except HttpError as exc:
-        return f"Google Calendar API error: {exc}"
+        return sanitize_google_api_error(exc, service="Google Calendar API")
 
 
 def calendar_create_event(
@@ -295,7 +297,7 @@ def calendar_create_event(
         event_id = (event.get("id") or "")[:8]
         return f"Event created: {summary} [{event_id}]"
     except HttpError as exc:
-        return f"Google Calendar API error: {exc}"
+        return sanitize_google_api_error(exc, service="Google Calendar API")
 
 
 def calendar_search_events(
@@ -325,7 +327,7 @@ def calendar_search_events(
         items = result.get("items", [])
         return _format_events(items)
     except HttpError as exc:
-        return f"Google Calendar API error: {exc}"
+        return sanitize_google_api_error(exc, service="Google Calendar API")
 
 
 # ── Tool registry entries ─────────────────────────────────────────────────────

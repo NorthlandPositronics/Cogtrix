@@ -278,6 +278,7 @@ async def create_session(
                                         tool_registry,
                                         set(),  # no pre-approved set for initial load
                                         session_state=ss,
+                                        tool_trust=rc.tool_trust,
                                     )
                                 atl.append(tool_obj)
                 for name in body.auto_approve_tools:

@@ -312,6 +312,7 @@ def _build_run_config(
     context_compression = _cfg_get("context_compression", True)
     context_max_messages = _cfg_get("context_max_messages", 200)
     context_max_tokens = _cfg_get("context_max_tokens", 40_000)
+    tool_trust = _cfg_get("tool_trust", None)
 
     # Build system prompt: use session override if set, otherwise construct
     # from DEFAULT_SYSTEM_PROMPT with model and tool context — matching CLI behavior.
@@ -418,6 +419,7 @@ def _build_run_config(
         pre_action_confirmation_enabled=(
             app_cfg.pre_action_confirmation_enabled if app_cfg is not None else False
         ),
+        tool_trust=tool_trust,
     )
 
 

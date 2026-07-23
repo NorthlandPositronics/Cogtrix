@@ -2616,6 +2616,7 @@ def build_agent_graph(
         _get_tool_executor=lambda: _get_tool_executor(),
         _detect_tool_request=_detect_tool_request,
         _safe_tool_name=_safe_tool_name,
+        tool_trust=config.tool_trust if config is not None else None,
     )
 
     def route_after_model(state: CogtrixState) -> str:

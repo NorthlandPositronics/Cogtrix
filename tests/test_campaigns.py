@@ -924,6 +924,44 @@ class TestCampaignBugfixRegressions:
         assert updated.name == "Still active"
         assert updated.status == "active"  # is_terminal was ignored
 
+    def test_follow_up_skips_completed_target(self, tmp_path) -> None:
+        """BUG-1121: _do_follow_up must re-check target.status under lock.
+
+        If a target was marked completed after the eligibility check in
+        _process_follow_ups but before _do_follow_up dispatches, the follow-up
+        must be suppressed to avoid sending to an already-resolved conversation.
+        """
+        mgr = CampaignManager(tmp_path / "campaigns.json")
+        targets = [
+            CampaignTarget(
+                contact_name="Alice",
+                channel="whatsapp",
+                chat_id="+111@c.us",
+                status="active",
+                last_outbound_at=time.time() - 90000,
+            ),
+        ]
+        campaign = _make_campaign(targets=targets, status="active")
+        mgr.create(campaign)
+
+        mock_handler = MagicMock()
+        mock_handler.handle_outbound.return_value = ("Follow-up!", "m2")
+        mgr.set_handler(mock_handler)
+        mgr.set_channels({"whatsapp": MagicMock()})
+
+        # Simulate concurrent completion: mark target completed before
+        # _send_follow_up / _do_follow_up executes.
+        targets[0].status = "completed"
+        targets[0].completion_reason = "Goal achieved"
+
+        mgr._send_follow_up(campaign, targets[0])
+
+        # Follow-up must be suppressed — handle_outbound must NOT be called.
+        mock_handler.handle_outbound.assert_not_called()
+        # Target must stay completed with original reason.
+        assert targets[0].status == "completed"
+        assert targets[0].completion_reason == "Goal achieved"
+
 
 class TestCampaignAPIBugfixRegressions:
     """Regression tests for API-level bug fixes."""

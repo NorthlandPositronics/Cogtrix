@@ -8,6 +8,7 @@ import logging
 import os
 import tempfile
 import threading
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any
 
@@ -185,15 +186,28 @@ class JsonFileMemoryStore(BaseMemoryStore):
     # JsonFileMemoryStore instance don't interleave writes.  Combined with
     # OS-level flock (see _lock_file) this guards both in-process and
     # multi-process concurrent access to the same session file.
-    _session_locks: dict[str, threading.Lock] = {}
+    #
+    # LRU eviction: _session_locks is bounded to _SESSION_LOCKS_MAX_SIZE entries.
+    # When capacity is reached, the least-recently-used entry is evicted before
+    # a new one is added. This prevents unbounded memory growth in long-running
+    # server processes that handle many ephemeral session IDs.
+    _SESSION_LOCKS_MAX_SIZE = 1024
+    _session_locks: OrderedDict[str, threading.Lock] = OrderedDict()
     _session_locks_meta = threading.Lock()
 
     @classmethod
     def _get_session_lock(cls, session_id: str) -> threading.Lock:
         with cls._session_locks_meta:
-            if session_id not in cls._session_locks:
-                cls._session_locks[session_id] = threading.Lock()
-            return cls._session_locks[session_id]
+            if session_id in cls._session_locks:
+                # Move to end to mark as most recently used
+                cls._session_locks.move_to_end(session_id)
+                return cls._session_locks[session_id]
+            # Evict oldest entries if at capacity
+            while len(cls._session_locks) >= cls._SESSION_LOCKS_MAX_SIZE:
+                cls._session_locks.popitem(last=False)
+            lock = threading.Lock()
+            cls._session_locks[session_id] = lock
+            return lock
 
     def __init__(self, base_dir: str = "data/history"):
         self.base_path = Path(base_dir)

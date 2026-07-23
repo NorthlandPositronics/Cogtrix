@@ -103,6 +103,7 @@ def build_process_tools_node(
     _get_tool_executor: Callable[[], concurrent.futures.ThreadPoolExecutor],
     _detect_tool_request: Callable[[list, int], Any],
     _safe_tool_name: Callable[[str], str],
+    tool_trust: dict[str, str] | None = None,
 ) -> Callable[[CogtrixState, RunnableConfig], dict]:
     """Build the process_tools node bound to the run-local mutable state."""
 
@@ -472,6 +473,7 @@ def build_process_tools_node(
                                 session_state=session_state,
                                 ui=confirmation_ui,
                                 git_native=git_native,
+                                tool_trust=tool_trust,
                             )
                         active_tools_list.append(tool_obj)
                         active_names_ref.add(rname)

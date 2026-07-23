@@ -516,6 +516,14 @@ class TestDelegateParallelWithMock:
         result = delegate_parallel(tasks=[{"task": "Test"}])
         assert "Delegation disabled" in result
 
+    @patch("src.tools.delegate._execute_single_task")
+    def test_parallel_user_cancelled_propagates(self, mock_execute):
+        """UserCancelledRun raised during parallel delegation must propagate."""
+        mock_execute.side_effect = UserCancelledRun("User cancelled")
+
+        with pytest.raises(UserCancelledRun):
+            delegate_parallel(tasks=[{"task": "Task 1"}])
+
 
 class TestCircuitBreaker:
     """Tests for the circuit breaker functionality."""

@@ -149,7 +149,14 @@ def _communicate_with_cap(
                     file=sys.stderr,
                 )
             proc.kill()
-        proc.wait()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            # Process is in D-state (uninterruptible kernel sleep) — abandon it.
+            print(
+                f"Warning: Process {proc.pid} could not be waited after kill (D-state).",
+                file=sys.stderr,
+            )
         raise
 
     t_out.join(timeout=5)
@@ -290,7 +297,14 @@ def execute_shell_command(
                     )
                 # Fall back to killing just the main process
                 proc.kill()
-            proc.wait()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                # Process is in D-state (uninterruptible kernel sleep) — abandon it.
+                print(
+                    f"Warning: Process {proc.pid} could not be waited after kill (D-state).",
+                    file=sys.stderr,
+                )
             return f"Error: Command execution timed out after {timeout} seconds"
 
         # Combine stdout and stderr

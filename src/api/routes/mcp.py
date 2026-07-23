@@ -413,7 +413,7 @@ async def restart_mcp_server(
     restart_fn = getattr(mcp_client, "restart_server", None)
     if restart_fn is not None:
         try:
-            restart_fn(server_name)
+            await asyncio.to_thread(restart_fn, server_name)
         except Exception as exc:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,

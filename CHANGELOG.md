@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.2.9](https://github.com/NorthlandPositronics/Cogtrix/compare/v0.2.8...v0.2.9) (2026-05-18)
+
+### Bug Fixes
+
+- **agent/safety:** propagate tool_trust to dynamic tool loading (closes [#1000](https://github.com/NorthlandPositronics/Cogtrix/issues/1000)) ([73444ce](https://github.com/NorthlandPositronics/Cogtrix/commit/73444ceaf2661e8ce36e7692022c8b1083532325))
+- **api/mcp:** offload restart_server to asyncio.to_thread ([#1198](https://github.com/NorthlandPositronics/Cogtrix/issues/1198)) ([f1307f4](https://github.com/NorthlandPositronics/Cogtrix/commit/f1307f4d71059574ce3ed6bea9f479f74c1d953c))
+- **assistant/campaign:** re-check target status under lock before follow-up dispatch ([#1488](https://github.com/NorthlandPositronics/Cogtrix/issues/1488)) ([25a2d1a](https://github.com/NorthlandPositronics/Cogtrix/commit/25a2d1a636b6a6e96b71100601b1b15661d86fcb))
+- **assistant/campaign:** re-check target status under lock before follow-up dispatch (closes [#1121](https://github.com/NorthlandPositronics/Cogtrix/issues/1121)) ([25a2d1a](https://github.com/NorthlandPositronics/Cogtrix/commit/25a2d1a636b6a6e96b71100601b1b15661d86fcb))
+- **assistant/campaign:** re-check target status under lock before follow-up dispatch (closes [#1121](https://github.com/NorthlandPositronics/Cogtrix/issues/1121)) ([3b409aa](https://github.com/NorthlandPositronics/Cogtrix/commit/3b409aa4a24905fe31a237fc78811598a9c8a6d7))
+- **assistant/scheduler:** prevent double-start race in MessageScheduler.start() ([47c7260](https://github.com/NorthlandPositronics/Cogtrix/commit/47c72605d8d6865ed5aa773c7b9b7b932bf5b268)), closes [#1120](https://github.com/NorthlandPositronics/Cogtrix/issues/1120)
+- **assistant/scheduler:** prevent double-start race under lock (closes [#1120](https://github.com/NorthlandPositronics/Cogtrix/issues/1120)) ([6f65dbf](https://github.com/NorthlandPositronics/Cogtrix/commit/6f65dbf342884966782cb16c841758d42abafda5))
+- **assistant:** add exponential backoff to \_dispatch_loop for persistent errors ([#1077](https://github.com/NorthlandPositronics/Cogtrix/issues/1077)) ([7885dff](https://github.com/NorthlandPositronics/Cogtrix/commit/7885dffefbd094cc67e25fc1fa62718aa3ba8a80))
+- **assistant:** add exponential backoff to \_dispatch_loop for persistent errors ([#1077](https://github.com/NorthlandPositronics/Cogtrix/issues/1077)) ([1ee1314](https://github.com/NorthlandPositronics/Cogtrix/commit/1ee131474f2e52ed7e570ae299e3b42f89d47f88))
+- **memory/json_store:** bound \_session_locks with LRU eviction — prevents unbounded memory leak (closes [#1080](https://github.com/NorthlandPositronics/Cogtrix/issues/1080)) ([2b828eb](https://github.com/NorthlandPositronics/Cogtrix/commit/2b828eb365ec23b75b8c4d96765dbb80bce3e04a))
+- **memory/json_store:** bound \_session_locks with LRU eviction (closes [#1080](https://github.com/NorthlandPositronics/Cogtrix/issues/1080)) ([895e657](https://github.com/NorthlandPositronics/Cogtrix/commit/895e6570c2bcfea3aeb1bdab36b198c17f1f6c7e))
+- **memory:** wrap \_messages read in \_mode_lock during save() ([a8e025a](https://github.com/NorthlandPositronics/Cogtrix/commit/a8e025a075131fd629122b5f004838940df92cbc)), closes [#1496](https://github.com/NorthlandPositronics/Cogtrix/issues/1496)
+- **memory:** wrap \_messages read in \_mode_lock during save() (closes [#1496](https://github.com/NorthlandPositronics/Cogtrix/issues/1496)) ([24623ba](https://github.com/NorthlandPositronics/Cogtrix/commit/24623ba28559aa8e1ff698013e22452869098d61))
+- **orchestration:** re-raise UserCancelledRun in force_delegation and run_research_delegate ([220df95](https://github.com/NorthlandPositronics/Cogtrix/commit/220df957c939861b71f01884c0e43bfc434101c0))
+- **orchestration:** re-raise UserCancelledRun in force_delegation and run_research_delegate ([a00249c](https://github.com/NorthlandPositronics/Cogtrix/commit/a00249c4d8fcd5093e392efdd3aab7f57cfe7d91))
+- **tools:** add 5s guard timeout to proc.wait() after kill in shell.py ([#1202](https://github.com/NorthlandPositronics/Cogtrix/issues/1202)) ([a8e886d](https://github.com/NorthlandPositronics/Cogtrix/commit/a8e886dbe10aded3d99042d7ce4ed97003a4cd63))
+- **tools:** add 5s guard timeout to proc.wait() after kill in shell.py ([#1202](https://github.com/NorthlandPositronics/Cogtrix/issues/1202)) ([770b1d1](https://github.com/NorthlandPositronics/Cogtrix/commit/770b1d1a7c1ce960e2c2552050fc6e5b75c9c112))
+- **tools:** error sanitization follow-ups from architecture sweep ([#1453](https://github.com/NorthlandPositronics/Cogtrix/issues/1453), [#1454](https://github.com/NorthlandPositronics/Cogtrix/issues/1454)) ([3c50ae3](https://github.com/NorthlandPositronics/Cogtrix/commit/3c50ae3c089e5a28a6bab3d218802b207eff6889))
+- **tools:** propagate UserCancelledRun through delegate_parallel (closes [#1173](https://github.com/NorthlandPositronics/Cogtrix/issues/1173)) ([a4c959e](https://github.com/NorthlandPositronics/Cogtrix/commit/a4c959e4512092767593179762c8dbcf92be4ef4))
+- **tools:** sanitize googleapiclient HttpError — stop API key leak to LLM ([#1467](https://github.com/NorthlandPositronics/Cogtrix/issues/1467)) ([ba8fe46](https://github.com/NorthlandPositronics/Cogtrix/commit/ba8fe46d022361ce63fd53eb314df447d83fce9d))
+- **tools:** sanitize googleapiclient HttpError — stop API key leak to LLM (closes [#1467](https://github.com/NorthlandPositronics/Cogtrix/issues/1467)) ([ba8fe46](https://github.com/NorthlandPositronics/Cogtrix/commit/ba8fe46d022361ce63fd53eb314df447d83fce9d))
+
 ## [0.2.8](https://github.com/NorthlandPositronics/Cogtrix/compare/v0.2.7...v0.2.8) (2026-05-18)
 
 ### Features

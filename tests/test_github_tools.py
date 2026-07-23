@@ -174,6 +174,8 @@ class TestGhCreateIssue:
         assert captured[0][label_idx + 1] == "bug,enhancement"
 
     def test_create_issue_gh_error(self):
+        # Regression test for issue #1453: gh errors now include category hints
+        # so the LLM can iterate remediation efficiently. Raw stderr is not leaked.
         from src.tools.github_tools import gh_create_issue
 
         with patch(
@@ -181,8 +183,9 @@ class TestGhCreateIssue:
             return_value=_make_completed(stderr="authentication required", returncode=1),
         ):
             result = gh_create_issue(title="T", repo="owner/repo")
-        assert "gh error" in result
-        assert "authentication required" in result
+        assert "GitHub command failed" in result
+        assert "authentication" in result
+        assert "authentication required" not in result  # raw stderr not leaked
 
     def test_create_issue_strips_null_bytes(self):
         from src.tools.github_tools import gh_create_issue
@@ -233,6 +236,7 @@ class TestGhCommentIssue:
         assert "Error" in result
 
     def test_comment_gh_error(self):
+        # Regression test for issue #1453: gh errors now include category hints.
         from src.tools.github_tools import gh_comment_issue
 
         with patch(
@@ -240,7 +244,9 @@ class TestGhCommentIssue:
             return_value=_make_completed(stderr="not found", returncode=1),
         ):
             result = gh_comment_issue(issue_number=99, body="x", repo="owner/repo")
-        assert "gh error" in result
+        assert "GitHub command failed" in result
+        assert "not-found" in result
+        assert "not found" not in result  # raw stderr not leaked
 
 
 # ---------------------------------------------------------------------------
@@ -282,6 +288,7 @@ class TestGhListPrs:
         assert result == "No pull requests found."
 
     def test_list_prs_gh_error(self):
+        # Regression test for issue #1453: gh errors now include category hints.
         from src.tools.github_tools import gh_list_prs
 
         with patch(
@@ -290,7 +297,9 @@ class TestGhListPrs:
         ):
             result = gh_list_prs(repo="owner/repo")
 
-        assert "gh error" in result
+        assert "GitHub command failed" in result
+        assert "rate-limit" in result
+        assert "rate limit exceeded" not in result  # raw stderr not leaked
 
     def test_list_prs_passes_state_and_limit(self):
         from src.tools.github_tools import gh_list_prs

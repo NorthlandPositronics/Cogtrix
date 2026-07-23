@@ -327,6 +327,8 @@ def force_delegation(
 
     except ImportError:
         log.warning("Required imports for forced delegation not available")
+    except UserCancelledRun:
+        raise
     except Exception as exc:
         log.error("Forced delegation failed: %s", exc, exc_info=True)
 
@@ -806,6 +808,8 @@ def run_research_delegate(
             log.warning("Research delegate returned empty response")
             return ""
 
+    except UserCancelledRun:
+        raise
     except Exception as exc:  # noqa: BLE001
         log.warning("Research delegate error: %s", exc, exc_info=True)
         return ""

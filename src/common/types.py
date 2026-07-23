@@ -255,6 +255,10 @@ class AgentRunConfig:
     tool_quality_gate_enabled: bool = True
     # Layer-3: topic-switch detection; reset rolling summary on short off-topic questions
     topic_switch_detection_enabled: bool = True
+    # Tool trust overrides: maps tool_name -> "always"|"ask"|"deny".
+    # When None, create_safe_tool_wrapper defaults to "ask" for all tools.
+    # Threaded through to dynamic tool loading in process_tools.py and sessions.py.
+    tool_trust: dict[str, str] | None = None
 
     def __post_init__(self) -> None:
         settings = self.execution_settings

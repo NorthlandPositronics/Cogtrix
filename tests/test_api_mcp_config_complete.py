@@ -27,7 +27,7 @@ from __future__ import annotations
 import asyncio as _asyncio
 import os
 import uuid
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -415,6 +415,27 @@ class TestMCPRestartServer:
         app, _ = app_engine
         r = client.post("/api/v1/mcp/servers/restart_srv/restart")
         assert r.status_code == 401
+
+    def test_restart_uses_asyncio_to_thread(self, client, tokens, app_engine):
+        """Regression for #1198: restart_fn must be offloaded via asyncio.to_thread."""
+        app, _ = app_engine
+        cfg = _make_mock_config()
+        cfg.mcp_servers = {
+            "restart_srv": {"command": "srv", "args": [], "requires_confirmation": True}
+        }
+        app.state.config = cfg
+        mcp = MagicMock()
+        mcp.get_server_info.return_value = []
+        restart_mock = MagicMock(return_value=None)
+        mcp.restart_server = restart_mock
+        app.state.mcp_client = mcp
+
+        with patch(
+            "src.api.routes.mcp.asyncio.to_thread", new_callable=AsyncMock
+        ) as mock_to_thread:
+            r = client.post("/api/v1/mcp/servers/restart_srv/restart", headers=_ah(tokens))
+            assert r.status_code == 200
+            mock_to_thread.assert_awaited_once_with(restart_mock, "restart_srv")
 
 
 # ---------------------------------------------------------------------------

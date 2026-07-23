@@ -115,7 +115,8 @@ class ConversationMemoryManager(BaseMemoryManager):
 
     def save(self) -> None:
         """Save conversation history to storage."""
-        self.store.save_history(self.session_id, self._messages)
+        with self._mode_lock:
+            self.store.save_history(self.session_id, self._messages)
         super().save()
 
     def _pending_path(self) -> "Any":

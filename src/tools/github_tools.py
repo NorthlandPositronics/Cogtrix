@@ -25,6 +25,8 @@ import subprocess
 from pathlib import PurePosixPath
 from typing import TYPE_CHECKING
 
+from src.tools.error_sanitizer import sanitize_error, sanitize_file_error
+
 if TYPE_CHECKING:
     from pydantic import BaseModel, Field
 else:
@@ -87,6 +89,29 @@ def _sanitize(text: str) -> str:
     return text.replace("\x00", "")
 
 
+def _classify_gh_error(stderr: str) -> str:
+    """
+    Return a category hint for a failed gh command based on stderr content.
+
+    The LLM uses this to iterate remediation efficiently rather than blind retry.
+    """
+    s = stderr.lower()
+    if (
+        "bad credentials" in s
+        or "requires authentication" in s
+        or "gh auth login" in s
+        or "authentication required" in s
+    ):
+        return "authentication"
+    if "rate limit" in s or "403" in s or "abuse" in s:
+        return "rate-limit"
+    if "404" in s or "not found" in s:
+        return "not-found"
+    if "connection" in s or "timeout" in s or "network" in s or "could not resolve" in s:
+        return "network"
+    return "unknown"
+
+
 # ── Configuration ──────────────────────────────────────────────────────────────
 
 
@@ -117,7 +142,7 @@ class GhCreateIssueInput(BaseModel):
     repo: str = Field(
         default="",
         description=(
-            "Repository in 'owner/repo' format. " "Uses the configured default_repo when empty."
+            "Repository in 'owner/repo' format. Uses the configured default_repo when empty."
         ),
     )
     labels: str = Field(
@@ -132,7 +157,7 @@ class GhCommentIssueInput(BaseModel):
     repo: str = Field(
         default="",
         description=(
-            "Repository in 'owner/repo' format. " "Uses the configured default_repo when empty."
+            "Repository in 'owner/repo' format. Uses the configured default_repo when empty."
         ),
     )
 
@@ -141,7 +166,7 @@ class GhListPrsInput(BaseModel):
     repo: str = Field(
         default="",
         description=(
-            "Repository in 'owner/repo' format. " "Uses the configured default_repo when empty."
+            "Repository in 'owner/repo' format. Uses the configured default_repo when empty."
         ),
     )
     state: str = Field(
@@ -159,7 +184,7 @@ class GhGetFileInput(BaseModel):
     repo: str = Field(
         default="",
         description=(
-            "Repository in 'owner/repo' format. " "Uses the configured default_repo when empty."
+            "Repository in 'owner/repo' format. Uses the configured default_repo when empty."
         ),
     )
     ref: str = Field(
@@ -198,7 +223,8 @@ def gh_create_issue(title: str, body: str = "", repo: str = "", labels: str = ""
 
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
-        return f"gh error: {result.stderr.strip()}"
+        category = _classify_gh_error(result.stderr)
+        return f"Error: GitHub command failed ({category})"
 
     try:
         data = json.loads(result.stdout)
@@ -206,7 +232,7 @@ def gh_create_issue(title: str, body: str = "", repo: str = "", labels: str = ""
         url = data["url"]
         return f"Issue created: #{number} — {title}\n{url}"
     except (json.JSONDecodeError, KeyError) as exc:
-        return f"Error parsing gh output: {exc}\n{result.stdout}"
+        return f"Error parsing GitHub response: {sanitize_error(exc)}"
 
 
 def gh_comment_issue(issue_number: int, body: str, repo: str = "") -> str:
@@ -229,7 +255,8 @@ def gh_comment_issue(issue_number: int, body: str, repo: str = "") -> str:
     ]
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
-        return f"gh error: {result.stderr.strip()}"
+        category = _classify_gh_error(result.stderr)
+        return f"Error: GitHub command failed ({category})"
 
     return f"Comment added to #{issue_number}"
 
@@ -260,12 +287,13 @@ def gh_list_prs(repo: str = "", state: str = "open", limit: int = 10) -> str:
     ]
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
-        return f"gh error: {result.stderr.strip()}"
+        category = _classify_gh_error(result.stderr)
+        return f"Error: GitHub command failed ({category})"
 
     try:
         prs = json.loads(result.stdout)
     except json.JSONDecodeError as exc:
-        return f"Error parsing gh output: {exc}"
+        return f"Error parsing GitHub response: {sanitize_error(exc)}"
 
     if not prs:
         return "No pull requests found."
@@ -304,12 +332,13 @@ def gh_get_file(path: str, repo: str = "", ref: str = "") -> str:
         stderr = result.stderr.strip()
         if "404" in stderr or "not found" in stderr.lower():
             return f"Error: file not found: {path}"
-        return f"gh error: {stderr}"
+        category = _classify_gh_error(result.stderr)
+        return f"Error: GitHub command failed ({category})"
 
     try:
         data = json.loads(result.stdout)
     except json.JSONDecodeError as exc:
-        return f"Error parsing gh output: {exc}"
+        return f"Error parsing GitHub response: {sanitize_error(exc)}"
 
     if data.get("type") != "file":
         return f"Error: {path!r} is not a file"
@@ -326,7 +355,7 @@ def gh_get_file(path: str, repo: str = "", ref: str = "") -> str:
             except UnicodeDecodeError:
                 content_str = repr(content_bytes)
         except Exception as exc:
-            return f"Error decoding file content: {exc}"
+            return f"Error decoding file content: {sanitize_file_error(exc)}"
     else:
         content_str = content_raw
 

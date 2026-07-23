@@ -509,3 +509,106 @@ class TestShellCommandTimeoutKillpg:
             assert "test" in result or "Error" in result
         finally:
             shell_module.os.killpg = original_killpg
+
+
+class TestShellProcWaitDStateGuard:
+    """Regression tests for issue #1202 — proc.wait() hang on D-state processes.
+
+    After SIGKILL, a process in uninterruptible kernel sleep (D-state) will not
+    respond to any signal. proc.wait() called without a timeout can hang forever.
+    The fix wraps proc.wait() with a 5-second guard timeout in both code paths
+    that call proc.wait() after proc.kill().
+    """
+
+    def test_proc_wait_timeout_after_kill_in_execute_shell_command(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Verify execute_shell_command does not hang when proc.wait() hangs after kill.
+
+        Simulates a D-state process: proc.wait() always raises TimeoutExpired
+        (process never terminates after SIGKILL). The 5-second guard timeout should
+        fire, allowing the function to return a timeout error without hanging.
+        """
+        import subprocess  # noqa: I001
+        import unittest.mock as mock  # noqa: I001
+        import src.tools.shell as shell_module  # noqa: I001
+
+        fake_proc = mock.MagicMock(spec=subprocess.Popen)
+        fake_proc.pid = 99999
+        fake_proc.returncode = -9
+        fake_proc.stdout = mock.MagicMock()
+        fake_proc.stdout.read = mock.MagicMock(return_value="")
+        fake_proc.stderr = mock.MagicMock()
+        fake_proc.stderr.read = mock.MagicMock(return_value="")
+
+        # Simulate D-state: wait() always raises TimeoutExpired (process stuck).
+        # A small sleep ensures the test runs fast rather than blocking 5s.
+        def hanging_wait(timeout: float | None = None) -> int:
+            raise subprocess.TimeoutExpired("fake", 0.1)
+
+        fake_proc.wait = hanging_wait
+
+        with mock.patch.object(subprocess, "Popen", return_value=fake_proc):
+            with mock.patch.object(
+                os, "killpg", side_effect=OSError(errno.ESRCH, "No such process")
+            ):
+                # Must complete within 5-second guard timeout + test overhead
+                start = __import__("time").time()
+                result = shell_module.execute_shell_command("echo test", timeout=1)
+                elapsed = __import__("time").time() - start
+
+        assert elapsed < 15, f"Function took {elapsed:.1f}s — may have hung beyond the 5s guard"
+        assert "timed out" in result.lower(), f"Expected timeout error, got: {result}"
+        # Verify D-state warning was printed (proc.wait guard fired)
+        captured = capsys.readouterr()
+        assert (
+            "D-state" in captured.err or fake_proc.pid in captured.err
+        ), "Expected D-state warning in stderr"
+
+    def test_proc_wait_timeout_after_kill_in_communicate_with_cap(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Verify _communicate_with_cap does not hang when proc.wait() hangs after kill.
+
+        Simulates a D-state process in the inner _communicate_with_cap path:
+        proc.wait(timeout=timeout) raises TimeoutExpired (process is hung),
+        then proc.wait(timeout=5) also raises TimeoutExpired (D-state confirmed).
+        The function should re-raise TimeoutExpired so execute_shell_command
+        handles it and returns a timeout error.
+        """
+        import subprocess
+        import unittest.mock as mock
+
+        import src.tools.shell as shell_module
+
+        fake_proc = mock.MagicMock(spec=subprocess.Popen)
+        fake_proc.pid = 99998
+        fake_proc.returncode = -9
+        fake_proc.stdout = mock.MagicMock()
+        fake_proc.stdout.read = mock.MagicMock(return_value="")
+        fake_proc.stderr = mock.MagicMock()
+        fake_proc.stderr.read = mock.MagicMock(return_value="")
+
+        # Simulate D-state in _communicate_with_cap: both wait() calls raise.
+        call_count = 0
+
+        def hanging_wait(timeout: float | None = None) -> int:
+            nonlocal call_count
+            call_count += 1
+            raise subprocess.TimeoutExpired("fake", 0.1)
+
+        fake_proc.wait = hanging_wait
+
+        with mock.patch.object(subprocess, "Popen", return_value=fake_proc):
+            with mock.patch.object(
+                os, "killpg", side_effect=OSError(errno.ESRCH, "No such process")
+            ):
+                start = __import__("time").time()
+                with pytest.raises(subprocess.TimeoutExpired):
+                    shell_module._communicate_with_cap(fake_proc, timeout=1, max_chars=200_000)
+                elapsed = __import__("time").time() - start
+
+        # Should not hang beyond the 5-second guard timeout + some overhead
+        assert elapsed < 15, f"_communicate_with_cap took {elapsed:.1f}s — may have hung"
+        # Both wait() calls should have been made (inner + guard after kill)
+        assert call_count >= 2, f"Expected ≥2 wait() calls (inner + guard), got {call_count}"

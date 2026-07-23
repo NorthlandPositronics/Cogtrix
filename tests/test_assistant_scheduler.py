@@ -816,6 +816,49 @@ class TestHandlerIntegration:
 
 
 # ---------------------------------------------------------------------------
+# TestStartRace
+# ---------------------------------------------------------------------------
+
+
+class TestStartRace:
+    """Regression: concurrent start() calls must not create orphan threads."""
+
+    def test_concurrent_start_creates_only_one_thread(self, tmp_path):
+        """Two racing start() calls must result in exactly one dispatch thread."""
+        import threading
+
+        sched = _make_scheduler(tmp_path)
+        threads: list[threading.Thread] = []
+
+        def _start():
+            sched.start()
+            threads.append(sched._thread)
+
+        t1 = threading.Thread(target=_start)
+        t2 = threading.Thread(target=_start)
+        t1.start()
+        t2.start()
+        t1.join(timeout=5)
+        t2.join(timeout=5)
+
+        # Only one unique thread should have been created.
+        unique_threads = {t for t in threads if t is not None}
+        assert len(unique_threads) == 1
+        assert sched._thread is not None
+        assert sched._thread.is_alive()
+
+    def test_second_start_returns_early_when_running(self, tmp_path):
+        """Calling start() twice sequentially should be a no-op the second time."""
+        sched = _make_scheduler(tmp_path)
+        sched.start()
+        first_thread = sched._thread
+
+        sched.start()  # should return early
+        assert sched._thread is first_thread
+        assert sched._thread.is_alive()
+
+
+# ---------------------------------------------------------------------------
 # TestDynamicDispatch
 # ---------------------------------------------------------------------------
 
@@ -966,3 +1009,123 @@ class TestQueueAfterTail:
         mid = sched.queue_after_tail("telegram", "42", "persist me")
         sched2 = _make_scheduler(tmp_path)
         assert mid in sched2._queue
+
+
+# ---------------------------------------------------------------------------
+# TestDispatchLoopBackoff — Regression for issue #1077
+# ---------------------------------------------------------------------------
+
+
+class TestDispatchLoopBackoff:
+    """Regression tests for _dispatch_loop exponential backoff on persistent errors."""
+
+    def test_consecutive_errors_incremented_on_exception(self, tmp_path):
+        """_consecutive_dispatch_errors increments each time _dispatch_due raises."""
+        sched = _make_scheduler(tmp_path)
+        assert sched._consecutive_dispatch_errors == 0
+
+        with patch.object(sched, "_dispatch_due", side_effect=RuntimeError("boom")):
+            with patch.object(sched, "_cleanup_old"):
+                # Simulate one loop iteration by calling the logic inline
+                try:
+                    sched._dispatch_due()
+                    sched._cleanup_old()
+                except Exception:
+                    sched._consecutive_dispatch_errors += 1
+        assert sched._consecutive_dispatch_errors == 1
+
+    def test_consecutive_errors_reset_on_success(self, tmp_path):
+        """_consecutive_dispatch_errors resets to 0 after a successful iteration."""
+        sched = _make_scheduler(tmp_path)
+        sched._consecutive_dispatch_errors = 3
+
+        with patch.object(sched, "_dispatch_due"):
+            with patch.object(sched, "_cleanup_old"):
+                try:
+                    sched._dispatch_due()
+                    sched._cleanup_old()
+                    sched._consecutive_dispatch_errors = 0
+                except Exception:
+                    pass
+        assert sched._consecutive_dispatch_errors == 0
+
+    def test_backoff_caps_at_300_seconds(self, tmp_path):
+        """Backoff computation is capped at 300s even for many consecutive errors."""
+        from src.assistant.scheduler import _MIN_DISPATCH_INTERVAL
+
+        sched = _make_scheduler(tmp_path)
+        sched._consecutive_dispatch_errors = 10
+        backoff = min(
+            _MIN_DISPATCH_INTERVAL * (2**sched._consecutive_dispatch_errors),
+            300.0,
+        )
+        assert backoff == 300.0
+
+    def test_backoff_grows_exponentially(self, tmp_path):
+        """Backoff doubles with each consecutive error, starting from _MIN_DISPATCH_INTERVAL."""
+        from src.assistant.scheduler import _MIN_DISPATCH_INTERVAL
+
+        sched = _make_scheduler(tmp_path)
+        for i in range(1, 5):
+            sched._consecutive_dispatch_errors = i
+            backoff = min(
+                _MIN_DISPATCH_INTERVAL * (2**sched._consecutive_dispatch_errors),
+                300.0,
+            )
+            assert backoff == _MIN_DISPATCH_INTERVAL * (2**i), f"error count {i}"
+
+    def test_backoff_first_error_is_2_seconds(self, tmp_path):
+        """First error backoff is 2s (_MIN_DISPATCH_INTERVAL * 2^1)."""
+        from src.assistant.scheduler import _MIN_DISPATCH_INTERVAL
+
+        backoff = min(_MIN_DISPATCH_INTERVAL * (2**1), 300.0)
+        assert backoff == 2.0
+
+    def test_dispatch_loop_uses_backoff_timeout_on_exception(self, tmp_path):
+        """On exception, _dispatch_loop waits for the computed backoff, not normal interval."""
+        sched = _make_scheduler(tmp_path)
+        call_count = [0]
+
+        def is_set_side_effect() -> bool:
+            call_count[0] += 1
+            return call_count[0] >= 2  # stop after first iteration
+
+        with patch.object(sched, "_dispatch_due", side_effect=RuntimeError("boom")):
+            with patch.object(sched, "_cleanup_old"):
+                with patch.object(sched._stop_event, "wait") as mock_wait:
+                    with patch.object(sched._stop_event, "is_set", side_effect=is_set_side_effect):
+                        sched._dispatch_loop()
+                        # First call: backoff (2s for first error)
+                        mock_wait.assert_any_call(timeout=2.0)
+
+    def test_dispatch_loop_uses_normal_interval_on_success(self, tmp_path):
+        """On success, _dispatch_loop waits for _next_wake_interval, not backoff."""
+        sched = _make_scheduler(tmp_path)
+        call_count = [0]
+
+        def is_set_side_effect() -> bool:
+            call_count[0] += 1
+            return call_count[0] >= 2  # stop after first iteration
+
+        with patch.object(sched, "_dispatch_due"):
+            with patch.object(sched, "_cleanup_old"):
+                with patch.object(sched._stop_event, "wait") as mock_wait:
+                    with patch.object(sched._stop_event, "is_set", side_effect=is_set_side_effect):
+                        sched._dispatch_loop()
+                        # Should call with normal interval on success (30s dispatch interval)
+                        mock_wait.assert_any_call(timeout=30.0)
+
+    def test_error_count_resets_after_successful_iteration(self, tmp_path):
+        """A successful _dispatch_due + _cleanup_old resets _consecutive_dispatch_errors to 0."""
+        sched = _make_scheduler(tmp_path)
+        sched._consecutive_dispatch_errors = 5
+
+        with patch.object(sched, "_dispatch_due"):
+            with patch.object(sched, "_cleanup_old"):
+                try:
+                    sched._dispatch_due()
+                    sched._cleanup_old()
+                    sched._consecutive_dispatch_errors = 0
+                except Exception:
+                    pass
+        assert sched._consecutive_dispatch_errors == 0

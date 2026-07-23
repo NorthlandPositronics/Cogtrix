@@ -5,6 +5,8 @@ from __future__ import annotations
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 import src.tools.calendar_tools as _mod
 from src.tools.calendar_tools import (
     TOOL_CONFIGS,
@@ -203,16 +205,30 @@ def test_list_events_explicit_calendar_id_overrides_default() -> None:
 
 
 def test_list_events_http_error_returns_error_string() -> None:
+    """HttpError is sanitized — no raw exception or API key leaks to the LLM."""
+    import json
+
+    try:
+        from googleapiclient.errors import HttpError  # pyright: ignore[reportMissingImports]
+    except ImportError:
+        pytest.skip("googleapiclient not installed")
+
     client = MagicMock()
-    fake_error = Exception("403 Forbidden")
+    # Build a real HttpError with a 403 response
+    resp = SimpleNamespace(status=403, reason="Forbidden")
+    body = json.dumps({"error": {"message": "Rate limit exceeded", "code": 403}}).encode()
+    fake_error = HttpError(resp, body)
     client.events.return_value.list.return_value.execute.side_effect = fake_error
     with (
         patch.object(_mod, "_client", client),
         patch.object(_mod, "_HAS_GOOGLE", True),
-        patch.object(_mod, "HttpError", Exception),
+        patch.object(_mod, "HttpError", HttpError),
     ):
         result = _mod.calendar_list_events()
+    # Result must contain "error" (new format) or status code — both satisfy the assertion
     assert "error" in result.lower() or "403" in result
+    # Result must follow the safe pattern: status code followed by (category)
+    assert "403 (" in result
 
 
 # ── calendar_create_event ─────────────────────────────────────────────────────
@@ -263,15 +279,30 @@ def test_create_event_with_attendees_passes_attendees_list() -> None:
 
 
 def test_create_event_http_error_returns_error_string() -> None:
+    """HttpError is sanitized — no raw exception or API key leaks to the LLM."""
+    import json
+
+    try:
+        from googleapiclient.errors import HttpError  # pyright: ignore[reportMissingImports]
+    except ImportError:
+        pytest.skip("googleapiclient not installed")
+
     client = MagicMock()
-    client.events.return_value.insert.return_value.execute.side_effect = Exception("409 Conflict")
+    # Build a real HttpError with a 409 response
+    resp = SimpleNamespace(status=409, reason="Conflict")
+    body = json.dumps({"error": {"message": "Conflict", "code": 409}}).encode()
+    fake_error = HttpError(resp, body)
+    client.events.return_value.insert.return_value.execute.side_effect = fake_error
     with (
         patch.object(_mod, "_client", client),
         patch.object(_mod, "_HAS_GOOGLE", True),
-        patch.object(_mod, "HttpError", Exception),
+        patch.object(_mod, "HttpError", HttpError),
     ):
         result = _mod.calendar_create_event("X", "2026-04-01T10:00:00Z", "2026-04-01T11:00:00Z")
+    # Result must contain "error" or status code — both satisfy the assertion
     assert "error" in result.lower() or "409" in result
+    # Result must follow the safe pattern: status code followed by (category)
+    assert "409 (" in result
 
 
 # ── calendar_search_events ────────────────────────────────────────────────────

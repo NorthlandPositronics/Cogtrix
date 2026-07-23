@@ -377,7 +377,8 @@ class ReasoningMemoryManager(BaseMemoryManager):
 
     def save(self) -> None:
         """Save reasoning session to storage."""
-        self.store.save_history(self.session_id, self._messages)
+        with self._mode_lock:
+            self.store.save_history(self.session_id, self._messages)
         super().save()
 
     def prepare_context(self, user_input: str) -> MemoryContext:

@@ -347,3 +347,36 @@ class TestJsonFileMemoryStore:
         path = store._session_path(long_id)
         # Path truncation is capped at 200 chars per path_safety.py
         assert len(path.stem) <= 200
+
+    def test_session_locks_evicts_when_at_capacity(self, tmp_path):
+        """_session_locks dict must not grow beyond _SESSION_LOCKS_MAX_SIZE."""
+        store = JsonFileMemoryStore(base_dir=str(tmp_path))
+        max_size = JsonFileMemoryStore._SESSION_LOCKS_MAX_SIZE
+
+        # Populate well beyond capacity — each unique session ID creates one lock
+        for i in range(max_size + 500):
+            store._get_session_lock(f"session-evict-{i}")
+
+        assert len(JsonFileMemoryStore._session_locks) == max_size
+
+    def test_session_locks_lru_eviction(self, tmp_path):
+        """Least-recently-used entries are evicted when capacity is reached."""
+        store = JsonFileMemoryStore(base_dir=str(tmp_path))
+        max_size = JsonFileMemoryStore._SESSION_LOCKS_MAX_SIZE
+
+        # Fill to capacity
+        for i in range(max_size):
+            store._get_session_lock(f"lru-{i}")
+
+        # Access a middle entry to make it recently used
+        store._get_session_lock("lru-0")
+        store._get_session_lock("lru-1")
+
+        # Add one more entry — lru-2 should be evicted (it was accessed earliest)
+        store._get_session_lock(f"lru-{max_size}")
+
+        # lru-0 and lru-1 are still in the dict (they were accessed recently)
+        assert "lru-0" in JsonFileMemoryStore._session_locks
+        assert "lru-1" in JsonFileMemoryStore._session_locks
+        # lru-2 is evicted (it was the LRU before lru-0 and lru-1 were re-accessed)
+        assert "lru-2" not in JsonFileMemoryStore._session_locks

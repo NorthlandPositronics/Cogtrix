@@ -619,6 +619,7 @@ class MessageScheduler:
         self._save_lock = threading.Lock()
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
+        self._consecutive_dispatch_errors: int = 0
 
         self._load()
         self._expire_stale()
@@ -790,15 +791,16 @@ class MessageScheduler:
 
     def start(self) -> None:
         """Launch the background dispatch thread (daemon)."""
-        if self._thread is not None and self._thread.is_alive():
-            return
-        self._stop_event.clear()
-        self._thread = threading.Thread(
-            target=self._dispatch_loop,
-            daemon=True,
-            name="scheduler-dispatch",
-        )
-        self._thread.start()
+        with self._lock:
+            if self._thread is not None and self._thread.is_alive():
+                return
+            self._stop_event.clear()
+            self._thread = threading.Thread(
+                target=self._dispatch_loop,
+                daemon=True,
+                name="scheduler-dispatch",
+            )
+            self._thread.start()
         log.info("MessageScheduler started")
 
     def stop(self) -> None:
@@ -885,8 +887,21 @@ class MessageScheduler:
             try:
                 self._dispatch_due()
                 self._cleanup_old()
+                self._consecutive_dispatch_errors = 0
             except Exception as exc:
-                log.error("MessageScheduler dispatch error: %s", exc)
+                self._consecutive_dispatch_errors += 1
+                backoff = min(
+                    _MIN_DISPATCH_INTERVAL * (2**self._consecutive_dispatch_errors),
+                    300.0,
+                )
+                log.warning(
+                    "MessageScheduler dispatch error (attempt %d, backing off %.0fs): %s",
+                    self._consecutive_dispatch_errors,
+                    backoff,
+                    exc,
+                )
+                self._stop_event.wait(timeout=backoff)
+                continue
             self._stop_event.wait(timeout=self._next_wake_interval())
 
     def _dispatch_due(self) -> None:
