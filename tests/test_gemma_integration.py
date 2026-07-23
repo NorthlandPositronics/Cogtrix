@@ -116,9 +116,18 @@ def safe_tools_dict() -> dict[str, Any]:
     from src.registry import ToolRegistry
 
     registry = ToolRegistry()
+    from src.registry import LazyToolProxy
+
     all_tools = registry.load_all_tools()
     keep = {"calculate", "get_current_datetime", "word_count", "find_replace"}
-    return {name: t for name, t in all_tools.items() if name in keep}
+    result = {}
+    for name, t in all_tools.items():
+        if name in keep:
+            if isinstance(t, LazyToolProxy):
+                t = t._resolve()
+            if t is not None:
+                result[name] = t
+    return result
 
 
 @pytest.fixture(scope="module")

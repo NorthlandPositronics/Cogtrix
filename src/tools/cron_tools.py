@@ -194,11 +194,10 @@ class CronScheduler:
     # ── Public job management ─────────────────────────────────────────────────
 
     def add(self, schedule: str, prompt: str, name: str = "") -> CronJob:
-        if not _HAS_CRONITER:
+        if not _HAS_CRONITER or _croniter is None:
             raise RuntimeError(
-                "croniter package is required for cron scheduling. " "Run: uv add croniter"
+                "croniter package is required for cron scheduling. Run: uv add croniter"
             )
-        assert _croniter is not None
         if not _croniter.is_valid(schedule):
             raise ValueError(
                 f"Invalid cron expression: {schedule!r}. "
@@ -261,8 +260,9 @@ class CronScheduler:
 
         # Compute next_run before calling the LLM so we don't lose the schedule on error
         try:
-            assert _croniter is not None
-            next_run: float | None = _croniter(job.schedule, now).get_next(float)
+            next_run: float | None = (
+                _croniter(job.schedule, now).get_next(float) if _croniter is not None else None
+            )
         except Exception:
             next_run = None
 
@@ -285,8 +285,14 @@ class CronScheduler:
             )
             return
 
+        if _HumanMessage is None:
+            log.warning(
+                "Cron job %s fired but langchain_core is not installed; "
+                "cannot invoke LLM without HumanMessage.",
+                job.id,
+            )
+            return
         try:
-            assert _HumanMessage is not None
             llm = factory()
             response = llm.invoke([_HumanMessage(content=job.prompt)])
             content = getattr(response, "content", str(response))

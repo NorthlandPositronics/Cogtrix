@@ -79,10 +79,9 @@ def _agent_key(name: str) -> str:
 
 def _parse_yaml_block(raw: str, agents_dir: Path) -> dict[str, Any]:
     """Parse a yaml block and return a dict of known fields."""
-    if not _HAS_YAML:
+    if not _HAS_YAML or _yaml is None:
         log.warning("PyYAML not installed — skipping yaml agent config block")
         return {}
-    assert _yaml is not None
     try:
         data = _yaml.safe_load(raw)
     except Exception as exc:
@@ -106,7 +105,12 @@ def _parse_yaml_block(raw: str, agents_dir: Path) -> dict[str, Any]:
                 out[key] = [str(val)]
         elif key == "prompt_file":
             if val:
-                pf = agents_dir / str(val)
+                pf = (agents_dir / str(val)).resolve()
+                try:
+                    pf.relative_to(agents_dir.resolve())
+                except ValueError:
+                    log.warning("prompt_file %r is outside AGENTS.md directory — skipping", val)
+                    continue
                 try:
                     out["system_prompt"] = pf.read_text(encoding="utf-8")
                     out["prompt_file"] = str(val)

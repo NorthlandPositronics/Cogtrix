@@ -218,7 +218,16 @@ def safe_tools() -> list:
         "split_text",
         "trim_text",
     }
-    return [t for name, t in all_tools.items() if name in safe_names]
+    from src.registry import LazyToolProxy
+
+    tools = []
+    for name, t in all_tools.items():
+        if name in safe_names:
+            if isinstance(t, LazyToolProxy):
+                t = t._resolve()
+            if t is not None:
+                tools.append(t)
+    return tools
 
 
 def _build_agent(

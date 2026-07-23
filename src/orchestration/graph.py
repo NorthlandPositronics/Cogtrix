@@ -34,6 +34,7 @@ from src.orchestration.compression import (
 )
 from src.orchestration.run_config import AgentRunConfig
 from src.orchestration.session_state import SessionState
+from src.registry import LazyToolProxy as _LazyToolProxy
 from src.tools.configure import (
     TOOL_OUTPUT_CAP_MIN_CHARS,
     apply_output_cap,
@@ -178,13 +179,23 @@ _TOOL_VERB_RE = re.compile(
 )
 
 
+# Phrases that LOOK like intent leads but are actually conversational.
+# "let me know" is the most common false positive.
+_INTENT_FALSE_POSITIVE_RE = re.compile(
+    r"\blet\s+me\s+know\b",
+    re.IGNORECASE,
+)
+
+
 def _is_action_intent(message: Any) -> bool:
     """Return True when the model describes a planned action but emits no tool calls.
 
     Checks for an intent-lead phrase (``I'll``, ``Let me``, ``Going to``, etc.)
-    paired with a tool-action verb (``create``, ``run``, ``fetch``, etc.).
-    The two-part AND prevents false positives on pure-text responses like
-    ``I'll explain...`` where the verb is not tool-requiring.
+    paired with a tool-action verb (``create``, ``run``, ``fetch``, etc.)
+    **in the same sentence**.  The sentence-locality requirement prevents false
+    positives where the lead phrase appears in a closing remark (e.g. "Feel
+    free to let me know") and the verb appears elsewhere (e.g. "reading" in a
+    weather table).
     """
     if getattr(message, "tool_calls", None):
         return False
@@ -194,7 +205,21 @@ def _is_action_intent(message: Any) -> bool:
     text = content.strip()
     if not text:
         return False
-    return bool(_INTENT_LEAD_RE.search(text)) and bool(_TOOL_VERB_RE.search(text))
+
+    # Split into sentences (on . ! ? or newlines) and check each independently.
+    # This prevents a verb in one sentence from pairing with an intent lead
+    # in a completely different sentence.
+    sentences = re.split(r"[.!?\n]", text)
+    for sentence in sentences:
+        s = sentence.strip()
+        if not s:
+            continue
+        # Skip sentences that match known false-positive patterns
+        if _INTENT_FALSE_POSITIVE_RE.search(s):
+            continue
+        if _INTENT_LEAD_RE.search(s) and _TOOL_VERB_RE.search(s):
+            return True
+    return False
 
 
 @dataclass
@@ -566,6 +591,22 @@ def build_agent_graph(
     _tool_call_history: OrderedDict[str, str] = OrderedDict()
     _MAX_TOOL_CALL_HISTORY = 256
     _history_lock = threading.Lock()
+    # Per-tool call counter: tracks how many times each tool is called this turn.
+    # After _TOOL_BUDGET_SOFT calls, a synthesis hint is appended to the output.
+    # After _TOOL_BUDGET_HARD calls, the tool returns a stop message.
+    _tool_call_counts: dict[str, int] = {}
+    _TOOL_BUDGET_SOFT = 5  # nudge: "please synthesize"
+    _TOOL_BUDGET_HARD = 8  # stop: "budget exhausted"
+    _TOOL_BUDGET_EXEMPT = {
+        "request_tools",
+        "report_progress",
+        "queue_reply",
+        "list_scheduled_messages",
+        "edit_scheduled_message",
+        "cancel_scheduled_message",
+        "defer_processing",
+        "suppress_reply",
+    }
     _DUPLICATE_EXEMPT = {
         "request_tools",
         "report_progress",
@@ -599,6 +640,9 @@ def build_agent_graph(
     _tool_lookup: dict[str, Any] = {getattr(t, "name", ""): t for t in active_tools_list}
     _tool_lookup.pop("", None)
     _active_names: set[str] = set(_tool_lookup.keys())
+    # Wrap available_tools in a single-element list so the closure can be
+    # updated in-place when the graph is reused across agent turns (Fix 3).
+    _available_tools_ref: list[dict] = [available_tools]
     tool_catalog: dict[str, str] = build_tool_catalog(available_tools)
 
     _compression_cache: dict[str, str] = (
@@ -879,6 +923,29 @@ def build_agent_graph(
             return dup
 
         tool_name = call["name"]
+
+        # ── Per-tool call budget ──────────────────────────────────────────
+        # Prevents runaway search loops where the model calls the same tool
+        # 10+ times with diminishing returns.  Exempt tools (request_tools,
+        # report_progress, etc.) are not counted.
+        if tool_name not in _TOOL_BUDGET_EXEMPT:
+            count = _tool_call_counts.get(tool_name, 0) + 1
+            _tool_call_counts[tool_name] = count
+            if count > _TOOL_BUDGET_HARD:
+                # Remove from active set so the model can't call it again
+                _tool_lookup.pop(tool_name, None)
+                _active_names.discard(tool_name)
+                _tool_version[0] += 1  # force bind_tools refresh
+                return ToolMessage(
+                    content=(
+                        f"Tool '{tool_name}' has been disabled after {_TOOL_BUDGET_HARD} calls "
+                        f"this turn. Please synthesize your findings into a final response now "
+                        f"using the data you already have."
+                    ),
+                    tool_call_id=call["id"],
+                    name=tool_name,
+                )
+
         tool_input = {**call, "type": "tool_call"}
 
         if tool_call_guard is not None:
@@ -908,12 +975,22 @@ def build_agent_graph(
                     name=tool_name,
                 )
             result = tool.invoke(tool_input, run_config)
-            if isinstance(result, ToolMessage):
-                _store_call_result(
-                    call,
-                    result.content if isinstance(result.content, str) else "",
-                    key=call_key,
+
+            # Soft budget nudge: after N calls to the same tool, hint to synthesize.
+            _cnt = _tool_call_counts.get(tool_name, 0)
+            _nudge = ""
+            if _cnt >= _TOOL_BUDGET_SOFT and tool_name not in _TOOL_BUDGET_EXEMPT:
+                _nudge = (
+                    f"\n\n[Note: You have called {tool_name} {_cnt} times this turn. "
+                    "You likely have enough data — please synthesize your findings "
+                    "into a complete response now rather than searching further.]"
                 )
+
+            if isinstance(result, ToolMessage):
+                content = result.content if isinstance(result.content, str) else ""
+                _store_call_result(call, content, key=call_key)
+                if _nudge:
+                    result.content = content + _nudge
                 return result
             text = str(result) if result is not None else ""
             _store_call_result(call, text, key=call_key)
@@ -988,10 +1065,10 @@ def build_agent_graph(
             else:
                 can_expand = auto_expansion_count[0] < _MAX_TOOL_EXPANSIONS
 
-                if can_expand and available_tools:
+                if can_expand and _available_tools_ref[0]:
                     match, source = _resolve_tool_name(
                         tool_name,
-                        available_tools,
+                        _available_tools_ref[0],
                         active_names_ref,
                     )
                 else:
@@ -1007,8 +1084,25 @@ def build_agent_graph(
                             )
                         )
                         continue
-                    tool_obj = available_tools.pop(match)
+                    tool_obj = _available_tools_ref[0].pop(match)
                     tool_catalog.pop(match, None)
+                    # Resolve LazyToolProxy before adding to active tools —
+                    # bind_tools() requires real StructuredTool objects.
+                    # Use isinstance() rather than hasattr() to avoid
+                    # accidentally calling _resolve() on MagicMock objects
+                    # in tests or other non-proxy objects that happen to have
+                    # a _resolve attribute.
+                    if isinstance(tool_obj, _LazyToolProxy):
+                        tool_obj = tool_obj._resolve()
+                        if tool_obj is None:
+                            result_msgs.append(
+                                ToolMessage(
+                                    content=f"Tool '{match}' could not be loaded.",
+                                    tool_call_id=call["id"],
+                                    name=tool_name,
+                                )
+                            )
+                            continue
                     apply_output_cap(tool_obj, output_cap)
                     if registry is not None and registry.requires_confirmation(match):
                         if session_state.no_confirm:
@@ -1219,17 +1313,21 @@ def build_agent_graph(
             if mgmt_req and mgmt_req.has_changes:
                 for rname in mgmt_req.add:
                     # Fuzzy-resolve names the LLM may have abbreviated
-                    if rname not in available_tools:
+                    if rname not in _available_tools_ref[0]:
                         resolved, source = _resolve_tool_name(
                             rname,
-                            available_tools,
+                            _available_tools_ref[0],
                             active_names_ref,
                         )
                         if resolved and source == "available":
                             rname = resolved
-                    if rname in available_tools and rname not in tools_activated:
-                        tool_obj = available_tools.pop(rname)
+                    if rname in _available_tools_ref[0] and rname not in tools_activated:
+                        tool_obj = _available_tools_ref[0].pop(rname)
                         tool_catalog.pop(rname, None)
+                        if isinstance(tool_obj, _LazyToolProxy):
+                            tool_obj = tool_obj._resolve()
+                            if tool_obj is None:
+                                continue
                         apply_output_cap(tool_obj, output_cap)
                         if registry is not None and registry.requires_confirmation(rname):
                             if session_state.no_confirm:
@@ -1278,7 +1376,7 @@ def build_agent_graph(
                             popped = active_tools_list.pop(idx)
                             active_names_ref.discard(rname)
                             original = session_state.all_tool_originals.get(rname, popped)
-                            available_tools[rname] = original
+                            _available_tools_ref[0][rname] = original
                             tool_catalog.update(build_tool_catalog({rname: original}))
                             tools_released.append(rname)
                             session_state.loaded_tools.discard(rname)
@@ -1314,9 +1412,9 @@ def build_agent_graph(
             ]
             _tool_lookup.pop("request_tools", None)
             releasable = active_names_ref - protected - {"request_tools"}
-            if available_tools or releasable:
+            if _available_tools_ref[0] or releasable:
                 rt = create_request_tools_tool(
-                    available_tools,
+                    _available_tools_ref[0],
                     tool_catalog,
                     active_names=active_names_ref,
                     protected_names=protected,
@@ -1325,7 +1423,7 @@ def build_agent_graph(
                     active_tools_list.append(rt)
                     _tool_lookup["request_tools"] = rt
 
-            configure_delegate_tools(active_tools_list, available_tools)
+            configure_delegate_tools(active_tools_list, _available_tools_ref[0])
 
             visible_count = sum(
                 1 for t in active_tools_list if getattr(t, "name", "") != "request_tools"
@@ -1401,6 +1499,46 @@ def build_agent_graph(
             return END
         return "call_model"
 
+    def _reset_for_new_run(
+        new_available_tools: dict,
+        new_bound_cache: "OrderedDict",
+        new_compression_cache: dict,
+    ) -> None:
+        """Reset all per-run mutable state so the compiled graph can be reused.
+
+        Called by ``run_agent()`` when the graph fingerprint matches the
+        cached graph.  Resets per-run counters, clears duplicate-call history,
+        and refreshes mutable references that change between agent turns.
+        """
+        phantom_count[0] = 0
+        action_intent_count[0] = 0
+        expansion_count[0] = 0
+        auto_expansion_count[0] = 0
+        call_count[0] = 0
+        _last_input_tokens[0] = 0
+        request_tools_noop_count[0] = 0
+        _tool_call_counts.clear()
+        with _history_lock:
+            _tool_call_history.clear()
+        _available_tools_ref[0] = new_available_tools
+        tool_catalog.clear()
+        tool_catalog.update(build_tool_catalog(new_available_tools))
+        _bound_cache.clear()
+        _bound_cache.update(new_bound_cache)
+        _compression_cache.clear()
+        _compression_cache.update(new_compression_cache)
+        # Refresh _tool_lookup and _active_names from the current active_tools_list
+        # so any tools loaded/released in the previous run are reflected correctly.
+        _tool_lookup.clear()
+        _tool_lookup.update(
+            {getattr(t, "name", ""): t for t in active_tools_list if getattr(t, "name", "")}
+        )
+        _active_names.clear()
+        _active_names.update(_tool_lookup.keys())
+        # Reset tool-version tracking so bind_tools() fingerprint is recomputed.
+        _tool_version[0] += 1
+        _last_tool_version[0] = -1
+
     graph: Any = StateGraph(CogtrixState)
     graph.add_node("call_model", call_model)
     graph.add_node("handle_phantom", handle_phantom)
@@ -1428,4 +1566,6 @@ def build_agent_graph(
         route_after_action_intent,
         {"call_model": "call_model", END: END},
     )
-    return graph.compile()
+    compiled = graph.compile()
+    compiled._reset_for_new_run = _reset_for_new_run  # type: ignore[attr-defined]
+    return compiled

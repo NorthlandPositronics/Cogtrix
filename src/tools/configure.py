@@ -500,13 +500,22 @@ def filter_unconfigured_tools(registry: ToolRegistry) -> None:
     Each tool module can export an ``is_configured() -> bool`` function.
     If present and it returns False, all tools from that module are removed
     from the registry so the agent never sees them.
+
+    ``LazyToolProxy`` stubs are skipped — they were registered precisely
+    because their module has no ``is_configured`` guard, so they are
+    implicitly always configured.
     """
+    from src.registry import LazyToolProxy
+
     log = get_logger()
 
     to_remove: list[str] = []
     module_status: dict[str, bool] = {}
 
     for tool_name, tool_obj in registry.tools.items():
+        # Lazy proxies have no is_configured() — skip without triggering import.
+        if isinstance(tool_obj, LazyToolProxy):
+            continue
         func = getattr(tool_obj, "_uncapped_func", None) or getattr(tool_obj, "func", None)
         if func is None:
             continue

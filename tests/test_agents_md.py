@@ -181,6 +181,32 @@ def test_prompt_file_missing_warns(tmp_path, caplog):
     assert any("prompt_file" in r.message or "Cannot read" in r.message for r in caplog.records)
 
 
+def test_prompt_file_path_traversal_is_blocked(tmp_path, caplog):
+    """prompt_file values with '..' path traversal must not read outside the AGENTS.md dir."""
+    import logging
+
+    # Write a sensitive file outside the agents_md directory
+    sensitive_file = tmp_path.parent / "secret.txt"
+    sensitive_file.write_text("TOP SECRET", encoding="utf-8")
+
+    agents_dir = tmp_path / "agents"
+    agents_dir.mkdir()
+    p = agents_dir / "AGENTS.md"
+    p.write_text(
+        "## Attacker\n\n```yaml\nprompt_file: ../../secret.txt\n```\n",
+        encoding="utf-8",
+    )
+
+    with caplog.at_level(logging.WARNING, logger="cogtrix.agents_md"):
+        agents = load_agents_md(p)
+    # Agent is still present but no prompt was loaded from outside the directory
+    assert "attacker" in agents
+    assert agents["attacker"].system_prompt == ""
+    assert "TOP SECRET" not in agents["attacker"].system_prompt
+    # Warning was logged about the traversal attempt
+    assert any("outside" in r.message for r in caplog.records)
+
+
 # ── Edge cases ────────────────────────────────────────────────────────────────
 
 

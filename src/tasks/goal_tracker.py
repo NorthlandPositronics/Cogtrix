@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -224,15 +225,21 @@ class GoalStack:
 # ── Module-level session cache ────────────────────────────────────────────────
 
 _stacks: dict[str, GoalStack] = {}
+_stacks_lock = threading.Lock()
 
 
 def get_goal_stack(session_id: str, data_dir: str | Path) -> GoalStack:
-    """Return the cached GoalStack for *session_id*, creating + loading if absent."""
-    if session_id not in _stacks:
-        stack = GoalStack(session_id, data_dir)
-        stack.load()
-        _stacks[session_id] = stack
-    return _stacks[session_id]
+    """Return the cached GoalStack for *session_id*, creating + loading if absent.
+
+    Thread-safe: concurrent calls with the same session_id return the same
+    instance; the lock prevents double-creation under concurrent load.
+    """
+    with _stacks_lock:
+        if session_id not in _stacks:
+            stack = GoalStack(session_id, data_dir)
+            stack.load()
+            _stacks[session_id] = stack
+        return _stacks[session_id]
 
 
 __all__ = [

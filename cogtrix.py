@@ -405,11 +405,32 @@ class _TokenAccumulator(_BaseCallback):  # type: ignore[misc]
                     if msg:
                         um = getattr(msg, "usage_metadata", None)
                         if um:
-                            inp = getattr(um, "input_tokens", 0)
+                            # UsageMetadata is a dict subclass — use dict access
+                            inp = (
+                                um.get("input_tokens", 0)
+                                if isinstance(um, dict)
+                                else getattr(um, "input_tokens", 0)
+                            )
+                            out = (
+                                um.get("output_tokens", 0)
+                                if isinstance(um, dict)
+                                else getattr(um, "output_tokens", 0)
+                            )
                             self.input_tokens += inp
-                            self.output_tokens += getattr(um, "output_tokens", 0)
+                            self.output_tokens += out
                             if inp > 0:
                                 self.last_input_tokens = inp
+                            return
+                        # Ollama returns prompt_eval_count in response_metadata
+                        rm = getattr(msg, "response_metadata", None)
+                        if rm and isinstance(rm, dict):
+                            inp = rm.get("prompt_eval_count", 0)
+                            out = rm.get("eval_count", 0)
+                            if inp or out:
+                                self.input_tokens += inp
+                                self.output_tokens += out
+                                if inp > 0:
+                                    self.last_input_tokens = inp
 
 
 def _format_stats_line(
@@ -1133,31 +1154,44 @@ def _try_configure_embeddings(
     memory_manager: Any,
     config: Any,
 ) -> None:
-    """Best-effort embedding setup for hybrid memory vector recall.
+    """Store embedding config for lazy initialisation.
 
-    Delegates to the provider registry — same creation path as chat
-    models.  If creation fails for any reason, vector recall is simply
-    disabled; summary + sliding window still operate normally.
+    The embedding provider SDK is NOT created here — this avoids the
+    ~280 ms provider-SDK init cost at session startup.  The provider is
+    created on first actual use (first ``prepare_context()`` that needs
+    vector recall, or first background ``_run_slow_path()`` call).
 
-    No startup probe or fallback chain: failures surface naturally on
-    first real use in ``SessionVectorStore.add_messages`` /
-    ``SessionVectorStore.recall``, which already handle them gracefully.
+    Falls back to calling ``set_embeddings()`` directly when the manager
+    does not expose ``set_embedding_config()`` (e.g. third-party subclasses).
     """
     _log = get_logger()
-    emb_type, emb_model, emb_base_url, emb_api_key = config.resolve_embedding_config()
-
     try:
-        from src.providers import create_embeddings_from_config
-
-        fn, tag = create_embeddings_from_config(
-            emb_type, model=emb_model, base_url=emb_base_url, api_key=emb_api_key
-        )
-        vector_dir = str(config.resolve_data_path("vectordb/sessions"))
-        memory_manager.set_embeddings(fn, tag, vector_store_dir=vector_dir)
-        _log.debug("Memory vector recall: using %s", tag)
+        emb_type, emb_model, emb_base_url, emb_api_key = config.resolve_embedding_config()
     except Exception as exc:
-        _log.debug("Embedding provider '%s' unavailable: %s", emb_type, exc)
-        _log.debug("Vector recall disabled — summary + sliding window still operate")
+        _log.debug("Could not resolve embedding config: %s", exc)
+        return
+
+    vector_dir = str(config.resolve_data_path("vectordb/sessions"))
+    if hasattr(memory_manager, "set_embedding_config"):
+        memory_manager.set_embedding_config(
+            emb_type,
+            emb_model,
+            emb_base_url,
+            emb_api_key,
+            vector_store_dir=vector_dir,
+        )
+        _log.debug("Embedding config stored for lazy init (provider: %s)", emb_type)
+    else:
+        try:
+            from src.providers import create_embeddings_from_config
+
+            fn, tag = create_embeddings_from_config(
+                emb_type, model=emb_model, base_url=emb_base_url, api_key=emb_api_key
+            )
+            memory_manager.set_embeddings(fn, tag, vector_store_dir=vector_dir)
+            _log.debug("Memory vector recall: using %s", tag)
+        except Exception as exc2:
+            _log.debug("Embedding provider '%s' unavailable: %s", emb_type, exc2)
 
 
 def _close_llm(llm_instance: Any) -> None:
@@ -5375,9 +5409,13 @@ def main():
         else 0
     )
 
-    # Configure embeddings early so has_embeddings reflects the real state in the banner
+    # Store embedding config for lazy init; report has_embeddings=True when
+    # the config is present (provider is expected to be available).
     _try_configure_embeddings(memory_manager, config)
-    _has_embeddings = getattr(memory_manager, "_vector_store", None) is not None
+    _has_embeddings = (
+        getattr(memory_manager, "_lazy_emb_type", None) is not None
+        or getattr(memory_manager, "_vector_store", None) is not None
+    )
 
     print_startup(
         config,

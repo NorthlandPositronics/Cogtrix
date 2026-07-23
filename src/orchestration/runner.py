@@ -36,6 +36,15 @@ _cached_llm_id: tuple[int, int] | None = None
 _cache_lock = threading.Lock()
 _llm_generation: int = 0
 
+# Compiled graph cache — avoids the ~25ms StateGraph.compile() cost per turn.
+# Keyed by (llm_id, llm_generation, active_fingerprint, available_fingerprint,
+# system_prompt_hash).  When the key matches, _reset_for_new_run() is called
+# to refresh per-run mutable state before the graph is reused.
+# Only used in CLI mode (not API mode, which manages per-session state
+# independently via AgentRunConfig.bound_cache / compression_cache).
+_MAX_GRAPH_CACHE_SIZE = 4
+_persistent_graph_cache: OrderedDict = OrderedDict()  # key → compiled graph
+
 
 def advance_llm_generation() -> None:
     """Increment the LLM generation counter when the LLM is switched."""
@@ -56,6 +65,7 @@ def invalidate_llm_caches() -> None:
         _llm_generation += 1
         _persistent_bound_cache.clear()
         _persistent_compression_cache.clear()
+        _persistent_graph_cache.clear()
 
 
 class ToolCallLogger:
@@ -661,16 +671,55 @@ def run_agent(
 
         _mark("cache_setup")
 
-        graph = build_agent_graph(
-            config=config,
-            registry=registry,
-            approvals=approvals,
-            compression_min_age=_compression_min_age,
-            compression_min_chars=_compression_min_chars,
-            bound_cache=local_bound_cache,
-            compression_cache_in=local_compression_cache,
-            tool_context_limit_pct=getattr(config, "tool_context_limit_pct", 0.80),
-        )
+        # ── Compiled-graph cache (CLI mode only) ─────────────────────────────
+        # Build a fingerprint from factors that determine whether an existing
+        # compiled graph can be safely reused.  API-mode sessions each have
+        # their own bound/compression caches so they bypass this cache.
+        graph: Any
+        if not use_per_session_caches:
+            _active_fp = tuple(getattr(t, "name", "") for t in (config.active_tools_list or []))
+            _avail_fp = tuple(sorted((config.available_tools or {}).keys()))
+            _sp_hash = hash(config.system_prompt or "")
+            _graph_key = (current_llm_id, _active_fp, _avail_fp, _sp_hash)
+            with _cache_lock:
+                _cached_graph = _persistent_graph_cache.get(_graph_key)
+                if _cached_graph is not None:
+                    _persistent_graph_cache.move_to_end(_graph_key)
+            if _cached_graph is not None and hasattr(_cached_graph, "_reset_for_new_run"):
+                _cached_graph._reset_for_new_run(  # type: ignore[attr-defined]
+                    config.available_tools or {},
+                    local_bound_cache,
+                    local_compression_cache,
+                )
+                graph = _cached_graph
+                log.debug("Graph cache hit — reusing compiled graph")
+            else:
+                graph = build_agent_graph(
+                    config=config,
+                    registry=registry,
+                    approvals=approvals,
+                    compression_min_age=_compression_min_age,
+                    compression_min_chars=_compression_min_chars,
+                    bound_cache=local_bound_cache,
+                    compression_cache_in=local_compression_cache,
+                    tool_context_limit_pct=getattr(config, "tool_context_limit_pct", 0.80),
+                )
+                with _cache_lock:
+                    _persistent_graph_cache[_graph_key] = graph
+                    _persistent_graph_cache.move_to_end(_graph_key)
+                    while len(_persistent_graph_cache) > _MAX_GRAPH_CACHE_SIZE:
+                        _persistent_graph_cache.popitem(last=False)
+        else:
+            graph = build_agent_graph(
+                config=config,
+                registry=registry,
+                approvals=approvals,
+                compression_min_age=_compression_min_age,
+                compression_min_chars=_compression_min_chars,
+                bound_cache=local_bound_cache,
+                compression_cache_in=local_compression_cache,
+                tool_context_limit_pct=getattr(config, "tool_context_limit_pct", 0.80),
+            )
         _mark("build_graph")
 
         if config.context_compression:

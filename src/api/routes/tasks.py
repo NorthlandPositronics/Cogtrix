@@ -241,7 +241,15 @@ async def get_task_log(
             status_code=status.HTTP_404_NOT_FOUND,
             detail={"code": "TASK_NOT_FOUND", "message": "No task with that ID exists."},
         )
-    log_path = pathlib.Path(record.log_path)
+    log_path = pathlib.Path(record.log_path).resolve()
+    try:
+        queue._log_dir.resolve()
+        log_path.relative_to(queue._log_dir.resolve())
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"code": "INTERNAL_ERROR", "message": "Task log path is invalid."},
+        ) from exc
     if not log_path.exists():
         return PlainTextResponse("")
     return PlainTextResponse(log_path.read_text(encoding="utf-8", errors="replace"))

@@ -182,6 +182,26 @@ class TestCronScheduler:
             s._fire(job, time.time())
         assert any("no LLM factory" in r.message for r in caplog.records)
 
+    def test_fire_no_humanmessage_logs_warning(self, data_dir, caplog):
+        """When langchain_core is unavailable, _invoke_llm should log a warning
+        rather than raising AssertionError swallowed by the except clause."""
+        import logging
+
+        import src.tools.cron_tools as _mod
+        from src.tools.cron_tools import CronScheduler
+
+        _mod._llm_factory = lambda: object()  # factory is set
+        original = _mod._HumanMessage
+        try:
+            _mod._HumanMessage = None  # simulate missing langchain_core
+            s = CronScheduler(data_dir)
+            job = s.add("*/5 * * * *", "lc-missing")
+            with caplog.at_level(logging.WARNING, logger="cogtrix.tools.cron"):
+                s._invoke_llm(job)
+        finally:
+            _mod._HumanMessage = original
+        assert any("langchain_core" in r.message for r in caplog.records)
+
     def test_fire_updates_run_count(self, data_dir):
         import src.tools.cron_tools as _mod
         from src.tools.cron_tools import CronScheduler

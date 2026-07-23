@@ -5,8 +5,10 @@ Dynamically loads and registers tools from the src/tools/ directory.
 
 from __future__ import annotations
 
+import ast
 import importlib
 import inspect
+import threading
 from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -35,6 +37,146 @@ def _func_to_schema_name(func_name: str) -> str:
     return "".join(word.capitalize() for word in func_name.split("_")) + "Input"
 
 
+def _scan_tool_metadata_from_file(file_path: Path) -> list[dict[str, Any]]:
+    """Extract tool name(s) and description(s) from a Python source file using AST.
+
+    Reads ``TOOL_CONFIG`` and ``TOOL_CONFIGS`` module-level assignments without
+    importing the module.  Only string-literal values are extracted; computed
+    expressions (f-strings, concatenations, function calls) fall back to an
+    empty string so the caller can use a placeholder description.
+
+    Returns a list of dicts with at least ``"name"`` and ``"description"`` keys.
+    Returns an empty list on parse failure.
+    """
+    try:
+        source = file_path.read_text(encoding="utf-8")
+        tree = ast.parse(source, filename=str(file_path))
+    except (OSError, SyntaxError):
+        return []
+
+    def _str_value(node: ast.expr) -> str:
+        """Return string value for a Constant(str) node, or '' otherwise."""
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return node.value
+        # Handle implicit string concatenation (JoinedStr / BinOp)
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+            return _str_value(node.left) + _str_value(node.right)
+        return ""
+
+    def _extract_from_dict(dict_node: ast.Dict) -> dict[str, str] | None:
+        result: dict[str, str] = {}
+        for key_node, val_node in zip(dict_node.keys, dict_node.values, strict=False):
+            if not isinstance(key_node, ast.Constant):
+                continue
+            key = key_node.value
+            if key in ("name", "description"):
+                result[key] = _str_value(val_node)
+        if "name" in result:
+            return result
+        return None
+
+    results: list[dict[str, Any]] = []
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign):
+            continue
+        for target in node.targets:
+            if not isinstance(target, ast.Name):
+                continue
+            if target.id == "TOOL_CONFIG" and isinstance(node.value, ast.Dict):
+                entry = _extract_from_dict(node.value)
+                if entry:
+                    results.append(entry)
+            elif target.id == "TOOL_CONFIGS" and isinstance(node.value, ast.List):
+                for elt in node.value.elts:
+                    if isinstance(elt, ast.Dict):
+                        entry = _extract_from_dict(elt)
+                        if entry:
+                            results.append(entry)
+
+    return results
+
+
+class LazyToolProxy:
+    """Defers module import and StructuredTool creation until first use.
+
+    Stored in ``available_tools`` during startup — the registry never imports
+    the module until the agent calls ``request_tools(add=[...])`` and the
+    tool is moved from ``available_tools`` to the active set.
+
+    ``func`` and ``_run`` property access also triggers resolution so that
+    ``apply_output_cap()`` (which reads these attrs) works transparently.
+    """
+
+    def __init__(
+        self,
+        name: str,
+        description: str,
+        module_name: str,
+        registry: ToolRegistry,
+    ) -> None:
+        self.name = name
+        self.description = description
+        self._module_name = module_name
+        self._registry = registry
+        self._resolved: Any = None
+        self._lock = threading.Lock()
+
+    def _resolve(self) -> Any:
+        """Import the module and register the real tool on first call."""
+        if self._resolved is not None:
+            return self._resolved
+        with self._lock:
+            if self._resolved is not None:
+                return self._resolved
+            log = get_logger()
+            log.debug("Lazy-loading tool module: %s (for tool: %s)", self._module_name, self.name)
+            module = self._registry.load_tool_module(self._module_name)
+            if module is None:
+                raise RuntimeError(
+                    f"Failed to import tool module '{self._module_name}' " f"for tool '{self.name}'"
+                )
+            results = self._registry.extract_tool_functions(module)
+            for func, cfg in results:
+                self._registry.register_tool(func, cfg)
+            tool = self._registry.tools.get(self.name)
+            if tool is None:
+                raise RuntimeError(
+                    f"Tool '{self.name}' not found in module '{self._module_name}' "
+                    f"after lazy load"
+                )
+            self._resolved = tool
+        return self._resolved
+
+    # ── Transparent delegation ────────────────────────────────────────
+
+    @property
+    def func(self) -> Any:
+        return getattr(self._resolve(), "func", None)
+
+    @property
+    def _run(self) -> Any:
+        return getattr(self._resolve(), "_run", None)
+
+    @property
+    def _uncapped_func(self) -> Any:
+        return getattr(self._resolve(), "_uncapped_func", None)
+
+    @_uncapped_func.setter
+    def _uncapped_func(self, value: Any) -> None:
+        self._resolve()._uncapped_func = value  # type: ignore[attr-defined]
+
+    def invoke(self, *args: Any, **kwargs: Any) -> Any:
+        return self._resolve().invoke(*args, **kwargs)
+
+    def __copy__(self) -> Any:
+        """Return the resolved real tool so copy.copy() gets a patchable object."""
+        return self._resolve()
+
+    def __repr__(self) -> str:
+        return f"LazyToolProxy(name={self.name!r}, module={self._module_name!r})"
+
+
 class ToolRegistry:
     """
     Registry for dynamically loading and managing LangChain tools.
@@ -58,6 +200,9 @@ class ToolRegistry:
         self.tools_directory = Path(tools_directory)
         self.tools: dict[str, _StructuredToolType] = {}
         self.tool_metadata: dict[str, dict] = {}
+        # Deferred tools: name → module_name.  Populated by load_all_tools()
+        # for on-demand tools; the module is imported on first access.
+        self._deferred: dict[str, str] = {}
 
     def scan_tools(self) -> list[str]:
         """
@@ -267,6 +412,13 @@ class ToolRegistry:
     def load_all_tools(self, config: Config | None = None) -> dict[str, _StructuredToolType]:
         """Scan tools directory and load all available tools.
 
+        Modules that do NOT declare ``is_configured()`` or ``TOOL_SETUP()``
+        are registered as ``LazyToolProxy`` stubs — the real module import is
+        deferred until the tool is first activated via ``request_tools``.
+        Modules that declare either hook are imported eagerly so the hook can
+        run at startup (``TOOL_SETUP`` wires provider config; ``is_configured``
+        gates availability on API-key presence).
+
         If *config* is provided, any built-in module that exposes a
         ``TOOL_SETUP(config)`` callable will have it invoked after import,
         and external tools from ``config.tool_dirs`` and installed
@@ -277,7 +429,8 @@ class ToolRegistry:
                 enables TOOL_SETUP dispatch and plugin loading.
 
         Returns:
-            Dictionary mapping tool names to StructuredTool objects
+            Dictionary mapping tool names to StructuredTool objects and
+            ``LazyToolProxy`` stubs for deferred modules.
         """
         log = get_logger()
         module_names = self.scan_tools()
@@ -285,44 +438,115 @@ class ToolRegistry:
         log.debug("Discovered %d tool modules", len(module_names))
 
         for module_name in module_names:
-            module = self.load_tool_module(module_name)
-            if module is None:
-                log.debug("Skipped module: %s (import failed)", module_name)
-                continue
+            file_path = self.tools_directory / f"{module_name}.py"
 
-            # Call TOOL_SETUP if the module exposes one and config is available
-            if config is not None and hasattr(module, "TOOL_SETUP") and callable(module.TOOL_SETUP):
-                try:
-                    module.TOOL_SETUP(config)
-                except Exception as exc:
-                    log.warning("TOOL_SETUP failed for %s: %s", module_name, exc)
+            # Peek at the file with AST to decide whether to load eagerly.
+            metadata = _scan_tool_metadata_from_file(file_path)
 
-            # Skip modules that declare is_configured() and return False
-            if hasattr(module, "is_configured") and callable(module.is_configured):
-                try:
-                    if not module.is_configured():
-                        log.debug("Skipped module: %s (not configured)", module_name)
-                        continue
-                except Exception:
-                    log.debug("Skipped module: %s (is_configured raised)", module_name)
+            # Determine if the module needs eager import.
+            # We check for is_configured / TOOL_SETUP markers in the AST
+            # (simple name-based heuristic — accurate for all built-in tools).
+            needs_eager = self._module_needs_eager_import(file_path)
+
+            if needs_eager or not metadata:
+                # Eager path: import now, run TOOL_SETUP, check is_configured.
+                module = self.load_tool_module(module_name)
+                if module is None:
+                    log.debug("Skipped module: %s (import failed)", module_name)
                     continue
 
-            results = self.extract_tool_functions(module)
-            if not results:
-                log.debug("No tool function found in module: %s", module_name)
-                continue
+                if (
+                    config is not None
+                    and hasattr(module, "TOOL_SETUP")
+                    and callable(module.TOOL_SETUP)
+                ):
+                    try:
+                        module.TOOL_SETUP(config)
+                    except Exception as exc:
+                        log.warning("TOOL_SETUP failed for %s: %s", module_name, exc)
 
-            for func, tool_config in results:
-                tool = self.register_tool(func, tool_config)
-                if tool:
-                    log.debug("Registered tool: %s", tool_config.get("name", func.__name__))
+                if hasattr(module, "is_configured") and callable(module.is_configured):
+                    try:
+                        if not module.is_configured():
+                            log.debug("Skipped module: %s (not configured)", module_name)
+                            continue
+                    except Exception:
+                        log.debug("Skipped module: %s (is_configured raised)", module_name)
+                        continue
+
+                results = self.extract_tool_functions(module)
+                if not results:
+                    log.debug("No tool function found in module: %s", module_name)
+                    continue
+
+                for func, tool_config in results:
+                    tool = self.register_tool(func, tool_config)
+                    if tool:
+                        log.debug("Registered tool: %s", tool_config.get("name", func.__name__))
+            else:
+                # Lazy path: register proxy stubs without importing the module.
+                for entry in metadata:
+                    name = entry.get("name", "")
+                    description = entry.get("description", "")
+                    if not name:
+                        continue
+                    proxy: Any = LazyToolProxy(
+                        name=name,
+                        description=description,
+                        module_name=module_name,
+                        registry=self,
+                    )
+                    self.tools[name] = proxy  # type: ignore[assignment]
+                    self._deferred[name] = module_name
+                    self.tool_metadata[name] = {"requires_confirmation": False}
+                    log.debug("Deferred tool stub registered: %s (module: %s)", name, module_name)
 
         # Load external plugins when config is available
         if config is not None:
             self._load_plugin_tools(config, log)
 
-        log.info("Loaded %d tools", len(self.tools))
+        log.info(
+            "Loaded %d tools (%d deferred)",
+            len(self.tools),
+            len(self._deferred),
+        )
         return self.tools
+
+    @staticmethod
+    def _module_needs_eager_import(file_path: Path) -> bool:
+        """Return True only when the module MUST be imported at startup.
+
+        A module needs eager import when it has ``is_configured`` that may
+        return False (tool gated on API keys/config) OR ``TOOL_SETUP`` that
+        must run at startup.  Modules whose ``is_configured`` always returns
+        True (no external dependency) are safe to defer.
+
+        Heuristic: if the source contains ``is_configured`` AND references
+        an API key, env var, or config value, it's gated and needs eager
+        import.  Otherwise it's always-available and can be deferred.
+        """
+        try:
+            source = file_path.read_text(encoding="utf-8")
+        except OSError:
+            return True  # Fail safe: import eagerly
+
+        if "TOOL_SETUP" in source:
+            return True
+
+        if "is_configured" not in source:
+            return False
+
+        # Gated tools reference API keys, env vars, or config dicts
+        gated_markers = (
+            "api_key",
+            "API_KEY",
+            "os.environ",
+            "os.getenv",
+            "_config.get(",
+            "_config[",
+            "not configured",
+        )
+        return any(m in source for m in gated_markers)
 
     def _load_plugin_tools(self, config: Config, log: Any) -> None:
         """Load tools from file-drop directories and installed entry-points."""

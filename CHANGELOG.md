@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.2.1](https://github.com/NorthlandPositronics/Cogtrix/compare/v0.2.0...v0.2.1) (2026-04-03)
+
+
+### Bug Fixes
+
+* **ci:** increase test job timeout from 15 to 25 minutes ([1e68cd6](https://github.com/NorthlandPositronics/Cogtrix/commit/1e68cd63540d22df5dca889a9e86fa8ffe04bef2))
+* forge audit — LazyToolProxy isinstance guard, path traversal, assert patterns, thread safety ([ccd55cd](https://github.com/NorthlandPositronics/Cogtrix/commit/ccd55cde83acdefdb3bf7814f3239da2005a4ec6))
+* **intent:** execution phase false positive on 'addresses to report' ([563c8f2](https://github.com/NorthlandPositronics/Cogtrix/commit/563c8f28d7b646308e770004ed92bb8325bfa253))
+* **orchestration:** action-intent false positive on informational queries ([8ba350a](https://github.com/NorthlandPositronics/Cogtrix/commit/8ba350aaae3de98fad02cb8efdfa783926077882))
+* **prompt:** smarter research instructions — one search for simple lookups ([e8fba89](https://github.com/NorthlandPositronics/Cogtrix/commit/e8fba89705a2e018d89c354b8d31435d4ce64567))
+* resolve LazyToolProxy before adding to active tool list in graph ([1544032](https://github.com/NorthlandPositronics/Cogtrix/commit/1544032f80be850be3e49cb6c92900fe8a4f9dc8))
+* **tests:** resolve LazyToolProxy before passing to LangChain in live_llm tests ([3ff888f](https://github.com/NorthlandPositronics/Cogtrix/commit/3ff888f0bf0ee473ae61de9fc3fcd37cf4239be7))
+* tool budget hard stop now removes tool from active set + nudge on both paths ([b206fb9](https://github.com/NorthlandPositronics/Cogtrix/commit/b206fb9f68673781782a4e5423b9a19418591f98))
+* **ux:** extract token counts from Ollama response_metadata ([f50e95c](https://github.com/NorthlandPositronics/Cogtrix/commit/f50e95c33c0725a85914ac335a6e223fdb8c449e))
+* **ux:** UsageMetadata is a dict — use dict access not getattr ([d6ddc22](https://github.com/NorthlandPositronics/Cogtrix/commit/d6ddc22bae38a175a27616940dad63ae722fa867))
+
+
+### Performance Improvements
+
+* **memory:** lazy-init embedding provider on first use ([b75b6e8](https://github.com/NorthlandPositronics/Cogtrix/commit/b75b6e85806ea75b6c11e54497efad0911b7aea9))
+* per-tool call budget — soft nudge at 5, hard stop at 8 ([917830d](https://github.com/NorthlandPositronics/Cogtrix/commit/917830dc432433d7c0d193eedc2eca4ea2e31f9f))
+* **registry:** lazy-load tool modules to cut startup imports by ~38 modules ([ee481b8](https://github.com/NorthlandPositronics/Cogtrix/commit/ee481b8cd13b5f1e968a7d573eee1dad5279584b))
+* **registry:** smarter eager-import heuristic — skip modules without gated config ([cf4c444](https://github.com/NorthlandPositronics/Cogtrix/commit/cf4c44401fa0d3e7d477e6a25b7a9a987913e573))
+* **runner:** cache compiled agent graph across turns ([f39c13f](https://github.com/NorthlandPositronics/Cogtrix/commit/f39c13ff7392203bdd7ddc2ec4161e75b6304720))
+
 ## [0.2.0](https://github.com/NorthlandPositronics/Cogtrix/compare/v0.1.39...v0.2.0) (2026-04-02)
 
 

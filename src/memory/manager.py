@@ -206,6 +206,15 @@ class BaseMemoryManager(ABC):
         # Optional vector recall (set via set_embeddings())
         self._vector_store: Any = None  # SessionVectorStore | None
 
+        # Lazy embedding config — populated by set_embedding_config(); the
+        # provider is instantiated on first actual use to avoid blocking startup.
+        self._lazy_emb_type: str | None = None
+        self._lazy_emb_model: str | None = None
+        self._lazy_emb_base_url: str | None = None
+        self._lazy_emb_api_key: str | None = None
+        self._lazy_emb_vector_store_dir: str | None = None
+        self._lazy_emb_resolved: bool = False  # True once the provider was created
+
         # ── Background slow-path threading ───────────────────────────
         self._hybrid_lock = threading.Lock()
         self._bg_future: Future | None = None
@@ -247,6 +256,62 @@ class BaseMemoryManager(ABC):
                 storage_dir=vector_store_dir or "data/vectordb/sessions",
             )
         self._vector_store.configure(embedding_fn, embedding_model)
+        self._lazy_emb_resolved = True
+
+    def set_embedding_config(
+        self,
+        emb_type: str,
+        emb_model: str,
+        emb_base_url: str | None,
+        emb_api_key: str | None,
+        vector_store_dir: str | None = None,
+    ) -> None:
+        """Store embedding config for lazy initialisation.
+
+        The embedding provider is NOT created here — it is created on the
+        first call to ``_ensure_embeddings_initialized()`` (triggered by
+        ``_build_hybrid_prefix()`` or ``_run_slow_path()``).  This avoids
+        the ~280 ms provider-SDK init cost at session startup.
+
+        Calling ``set_embeddings()`` directly still works and marks the
+        provider as already resolved.
+        """
+        self._lazy_emb_type = emb_type
+        self._lazy_emb_model = emb_model
+        self._lazy_emb_base_url = emb_base_url
+        self._lazy_emb_api_key = emb_api_key
+        self._lazy_emb_vector_store_dir = vector_store_dir
+        self._lazy_emb_resolved = False
+
+    def _ensure_embeddings_initialized(self) -> None:
+        """Create the embedding provider on first use if only config was stored.
+
+        Thread-safe: protected by ``_hybrid_lock``.  No-op if the provider is
+        already resolved or if no lazy config was stored.
+        """
+        if self._lazy_emb_resolved or self._lazy_emb_type is None:
+            return
+        with self._hybrid_lock:
+            if self._lazy_emb_resolved:
+                return
+            try:
+                from src.providers import create_embeddings_from_config
+
+                fn, tag = create_embeddings_from_config(
+                    self._lazy_emb_type,
+                    model=self._lazy_emb_model,
+                    base_url=self._lazy_emb_base_url,
+                    api_key=self._lazy_emb_api_key,
+                )
+                self.set_embeddings(fn, tag, vector_store_dir=self._lazy_emb_vector_store_dir)
+                log.debug("Lazy embedding init: using %s", tag)
+            except Exception as exc:
+                log.debug(
+                    "Lazy embedding provider '%s' unavailable: %s",
+                    self._lazy_emb_type,
+                    exc,
+                )
+                self._lazy_emb_resolved = True
 
     def _hybrid_meta_path(self) -> Path:
         """Return the path for the hybrid-state meta file.
@@ -563,6 +628,11 @@ class BaseMemoryManager(ABC):
         try:
             from src.memory.summarizer import generate_summary
 
+            # Materialise the embedding provider on first use — safe to call
+            # from the background thread; _ensure_embeddings_initialized is
+            # protected by _hybrid_lock internally.
+            self._ensure_embeddings_initialized()
+
             with self._hybrid_lock:
                 summary_before = self._summary
 
@@ -620,6 +690,9 @@ class BaseMemoryManager(ABC):
             summary = self._summary
         if summary:
             parts.append(f"Conversation summary (older context):\n{summary}")
+
+        # Materialise the embedding provider on first use if only config was stored.
+        self._ensure_embeddings_initialized()
 
         # Vector recall — skip for trivial inputs (greetings, single words)
         # to avoid a wasted embedding API call (~200ms+ round trip)

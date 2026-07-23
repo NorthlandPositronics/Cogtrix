@@ -1248,7 +1248,7 @@ ACTION_VERBS = re.compile(
     r"creat|writ|generat|implement|build|produc|sav"  # truncated stems
     r"|mak|set\s*up|configur|adapt|prepar"
     r"|fix|updat|modif|chang|patch|refactor"
-    r"|add|append|insert|replac"
+    r"|add(?:s|ed|ing)?\b|append|insert|replac"  # add with explicit inflections only (not "addresses")
     r")\w*\b",
     re.IGNORECASE,
 )
@@ -1260,7 +1260,7 @@ ACTION_TARGETS = re.compile(
     r"|code|module|class|function"
     r"|readme|claude\.md|yaml|json|toml"
     r"|director(?:y|ies)|folders?"
-    r"|documents?|reports?"
+    r"|documents?"  # "report" removed — too ambiguous (verb "to report" != noun "a report")
     r"|tests?|spec"
     r"|implementation|prototype|project|app|application|service|component"
     r")\b",

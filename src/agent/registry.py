@@ -38,7 +38,7 @@ class AgentConfig:
 
 
 class AgentRegistry:
-    """Thread-safe in-process registry of named AgentConfig objects."""
+    """In-process registry of named AgentConfig objects."""
 
     def __init__(self) -> None:
         self._agents: dict[str, AgentConfig] = {}

@@ -456,3 +456,52 @@ class TestIsActionIntent:
         """Object with no tool_calls attribute defaults to no tool calls."""
         msg = SimpleNamespace(content="I'll explain the architecture.")
         assert not _is_action_intent(msg)
+
+    # ── Regression: informational query false positives ──────────────────────
+
+    def test_returns_false_weather_response_with_let_me_know(self):
+        """Regression: weather table + 'let me know' triggered false positive.
+
+        'Feel free to let me know' matched _INTENT_LEAD_RE ('let me')
+        and 'reading' in the response body matched _TOOL_VERB_RE.
+        Fix: 'let me know' is excluded as a conversational phrase, and
+        intent+verb must appear in the same sentence.
+        """
+        text = (
+            "**Current Weather in Abu Dhabi (as of 10:17 UTC, 2 Apr 2026)**\n\n"
+            "| Item | Value | Source |\n"
+            "|------|-------|--------|\n"
+            "| Temperature | **69 °F (≈ 20 °C)** | AccuWeather |\n"
+            "| Condition | **Hazy sunshine** | AccuWeather |\n\n"
+            "**Quick Summary**\n"
+            "- The air feels slightly cooler than the thermometer reading "
+            "due to the RealFeel® adjustment.\n\n"
+            "Feel free to let me know if you'd like a forecast!"
+        )
+        assert not _is_action_intent(self._ai(text))
+
+    def test_returns_false_let_me_know_with_verb_elsewhere(self):
+        """'Let me know' in closing + tool verb in body must not trigger."""
+        text = "Here are the search results I found.\n" "Let me know if you need more details."
+        assert not _is_action_intent(self._ai(text))
+
+    def test_returns_false_informational_response_with_data_table(self):
+        """Data table responses should never trigger action-intent."""
+        text = (
+            "Here's what I found:\n\n"
+            "| City | Temp | Humidity |\n"
+            "|------|------|----------|\n"
+            "| Abu Dhabi | 24°C | 68% |\n\n"
+            "The reading is from open-meteo. Let me know if you need more."
+        )
+        assert not _is_action_intent(self._ai(text))
+
+    def test_still_triggers_when_intent_and_verb_in_same_sentence(self):
+        """Genuine action intent in a single sentence still triggers."""
+        assert _is_action_intent(self._ai("Let me search for that information now."))
+        assert _is_action_intent(self._ai("I'll create the file with the results."))
+
+    def test_returns_false_verb_in_one_sentence_intent_in_another(self):
+        """Verb and intent in different sentences must not trigger."""
+        text = "The reading shows 24°C.\n" "I'll explain what this means for your trip."
+        assert not _is_action_intent(self._ai(text))
