@@ -1,6 +1,6 @@
 # Cogtrix Development Guide
 
-Guide for extending and contributing to Cogtrix.
+Everything you need to extend Cogtrix with new tools, memory modes, or slash commands. If you want to understand the system architecture first, read [Architecture](ARCHITECTURE.md). For contribution guidelines and code style rules, see [CONTRIBUTING](../CONTRIBUTING.md).
 
 ## Table of Contents
 
@@ -81,7 +81,19 @@ __all__ = ["my_tool", "MyToolInput", "TOOL_CONFIG"]
 | `input_schema` | BaseModel | Yes | Pydantic input schema |
 | `requires_confirmation` | bool | Yes | Prompt user before execution |
 
-### Step 3: Restart
+### Step 3: Optional — API Key Gating
+
+If your tool requires an external service or API key, add an `is_configured()` function. The registry checks this before loading — if it returns `False`, the tool is silently skipped (no error, just absent from the toolbox).
+
+```python
+def is_configured() -> bool:
+    """Return True if the tool has the required credentials."""
+    return bool(os.getenv("MY_SERVICE_API_KEY"))
+```
+
+This pattern is used by all search providers, weather, and WhatsApp tools.
+
+### Step 4: Restart
 
 The tool is automatically discovered:
 
@@ -262,8 +274,14 @@ class CustomMemoryManager(BaseMemoryManager):
     
     def prepare_context(self, user_input: str) -> MemoryContext:
         """Prepare context for LLM."""
+        # Capture user-input timestamp (used later in update())
+        self._pending_user_ts = self._now_ts()
+
         # Get recent messages
         messages = self._get_recent_messages(self.working_memory_size)
+
+        # Inject timestamps so the LLM has temporal awareness
+        messages = self._inject_timestamps(messages)
         
         # Build context prefix
         context_parts = []
@@ -279,7 +297,19 @@ class CustomMemoryManager(BaseMemoryManager):
     
     def update(self, user_input: str, ai_response: str) -> None:
         """Update memory after interaction."""
-        super().update(user_input, ai_response)
+        # Create messages
+        from langchain_core.messages import AIMessage, HumanMessage
+        human_msg = HumanMessage(content=user_input)
+        ai_msg = AIMessage(content=ai_response)
+
+        # Stamp: user msg with ts captured in prepare_context(),
+        # AI msg with current time (shows LLM processing duration)
+        self._set_msg_ts(human_msg, self._pending_user_ts)
+        self._pending_user_ts = None
+        self._set_msg_ts(ai_msg)
+
+        self._messages.append(human_msg)
+        self._messages.append(ai_msg)
         
         # Custom tracking logic
         if "important" in user_input.lower():
@@ -458,7 +488,7 @@ uv run bandit -r src/ cogtrix.py -q
 
 1. **Type hints** — Use type hints for function signatures
 2. **Docstrings** — Document all public functions and classes
-3. **Line length** — Max 88 characters (Black default)
+3. **Line length** — Max 100 characters (configured in `pyproject.toml`)
 4. **Imports** — Group: stdlib, third-party, local
 
 ### Example
@@ -514,17 +544,41 @@ cogtrix/
 │   ├── config.py             # Configuration management
 │   ├── registry.py           # Tool discovery & registration
 │   ├── logging_config.py     # Logging infrastructure
+│   ├── setup_wizard.py       # Interactive --setup wizard
+│   │
+│   ├── providers/
+│   │   ├── __init__.py       # Registry: create_chat_model(), create_embeddings()
+│   │   ├── defaults.py       # Default models, base URLs, env vars, presets
+│   │   ├── openai.py         # OpenAI and compatible APIs
+│   │   ├── ollama.py         # Ollama local inference
+│   │   ├── anthropic.py      # Anthropic Claude
+│   │   └── google.py         # Google Gemini
 │   │
 │   ├── agent/
 │   │   ├── core.py           # LangGraph agent setup
 │   │   └── safety.py         # Tool confirmation wrapper
 │   │
+│   ├── assistant/
+│   │   ├── __init__.py      # Package exports
+│   │   ├── channel.py       # Channel ABC + IncomingMessage
+│   │   ├── channels/
+│   │   │   ├── whatsapp.py  # WhatsApp via Waha
+│   │   │   └── telegram.py  # Telegram Bot API
+│   │   ├── session.py       # Chat session lifecycle
+│   │   ├── handler.py       # Message → agent → reply
+│   │   ├── poller.py        # Per-channel polling threads
+│   │   ├── knowledge.py     # Cross-chat knowledge store
+│   │   ├── guardrails.py    # Security guardrails (input/output/rate-limit/LLM judge)
+│   │   └── service.py       # Main orchestrator
+│   │
 │   ├── memory/
 │   │   ├── base.py           # Abstract base classes
 │   │   ├── factory.py        # Memory mode factory
-│   │   ├── manager.py        # Base memory manager
+│   │   ├── manager.py        # Base memory manager + hybrid memory logic
 │   │   ├── context.py        # Context data structures
 │   │   ├── json_store.py     # JSON file persistence
+│   │   ├── summarizer.py     # LLM-based incremental summarization
+│   │   ├── recall.py         # Per-session FAISS vector store
 │   │   └── modes/
 │   │       ├── conversation.py  # General chat mode
 │   │       ├── code.py          # Code development mode
@@ -533,7 +587,7 @@ cogtrix/
 │   ├── rag/
 │   │   └── ingest.py         # Document ingestion
 │   │
-│   └── tools/                # Built-in tool modules (43 tools)
+│   └── tools/                # Built-in tool modules (51 tools)
 │       ├── brave_search.py   # Brave Search API
 │       ├── calculator.py     # Math expressions
 │       ├── datetime_tool.py  # Date/time utilities
@@ -552,18 +606,25 @@ cogtrix/
 │       ├── tavily_search.py  # Tavily AI search
 │       ├── text_tools.py     # Text processing
 │       ├── weather.py        # Weather information
-│       └── web_search.py     # DuckDuckGo search
+│       ├── web_search.py     # DuckDuckGo search
+│       ├── whatsapp.py       # WhatsApp messaging
+│       ├── _whatsapp_client.py # Waha HTTP client
+│       ├── telegram.py       # Telegram messaging
+│       └── _telegram_client.py # Telegram Bot API client
 │
 ├── tests/
 │   ├── memory/               # Memory mode tests
 │   ├── tools/                # Tool tests
+│   ├── test_assistant_*.py   # Assistant mode tests (including guardrails)
+│   ├── test_setup_wizard.py  # Setup wizard tests
 │   └── test_*.py             # Config & integration tests
 │
 ├── docs/                     # Documentation
 │
 └── data/                     # Runtime data
-    ├── history/              # Session history files
-    └── vectordb/             # FAISS vector index
+    ├── history/              # Session history + hybrid meta files
+    ├── knowledge/            # Cross-chat knowledge store (facts.json)
+    └── vectordb/             # FAISS vector indexes (RAG + per-session recall + knowledge)
 ```
 
 ---

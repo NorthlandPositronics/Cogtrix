@@ -94,9 +94,14 @@ def execute_shell_command(
         if result.returncode != 0:
             output += f"\n[exit code: {result.returncode}]"
 
-        # Truncate very long output
-        if len(output) > 50000:
-            output = output[:50000] + f"\n\n... (output truncated, {len(output)} total characters)"
+        _SAFETY_CAP = 512_000
+        if len(output) > _SAFETY_CAP:
+            half = _SAFETY_CAP // 2
+            output = (
+                output[:half]
+                + f"\n\n[... {len(output) - _SAFETY_CAP:,} chars truncated ...]\n\n"
+                + output[-half:]
+            )
 
         return (
             output

@@ -17,7 +17,7 @@ Features:
 
 import re
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 from src.memory.base import BaseMemoryStore
@@ -38,7 +38,7 @@ class FileContext:
     """Information about a file being worked on."""
 
     path: str
-    last_accessed: datetime = field(default_factory=datetime.now)
+    last_accessed: datetime = field(default_factory=lambda: datetime.now(UTC))
     snippet: str | None = None
     line_range: tuple | None = None  # (start, end) lines
 
@@ -48,7 +48,7 @@ class TaskProgress:
     """Tracks progress on current coding task."""
 
     description: str
-    started_at: datetime = field(default_factory=datetime.now)
+    started_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     steps_completed: list[str] = field(default_factory=list)
     current_step: str | None = None
     blockers: list[str] = field(default_factory=list)
@@ -59,7 +59,7 @@ class CodeDevelopmentMemoryManager(BaseMemoryManager):
     Memory manager optimized for code development assistance.
 
     Configuration options:
-        working_memory_size (int): Messages in context (default: 8)
+        working_memory_size (int): Messages in context (default: 30)
         track_files (bool): Track mentioned files (default: True)
         track_errors (bool): Track errors mentioned (default: True)
         max_errors (int): Max errors to keep (default: 5)
@@ -67,7 +67,7 @@ class CodeDevelopmentMemoryManager(BaseMemoryManager):
     """
 
     DEFAULT_CONFIG: dict[str, Any] = {
-        "working_memory_size": 8,
+        "working_memory_size": 30,
         "track_files": True,
         "track_errors": True,
         "max_errors": 5,
@@ -175,7 +175,7 @@ class CodeDevelopmentMemoryManager(BaseMemoryManager):
 
     def record_change(self, description: str) -> None:
         """Record a file change."""
-        timestamp = datetime.now().strftime("%H:%M")
+        timestamp = datetime.now(UTC).strftime("%H:%M")
         self._changes_made.append(f"{timestamp} - {description}")
 
     def get_tracked_files(self) -> list[str]:
@@ -192,19 +192,33 @@ class CodeDevelopmentMemoryManager(BaseMemoryManager):
         """Load code session from storage, sanitizing bad entries."""
         self._messages = self.store.load_history(self.session_id)
         self._messages = self.sanitize_history(self._messages)
+        self._load_hybrid_meta()
+        self._clamp_summary_idx()
         self._loaded = True
 
     def save(self) -> None:
         """Save code session to storage."""
         self.store.save_history(self.session_id, self._messages)
+        super().save()
 
     def prepare_context(self, user_input: str) -> MemoryContext:
         """Prepare code-optimized context for LLM."""
+        # Record the moment the user sent this message
+        self._pending_user_ts = self._now_ts()
+
         window_size = self._mode_config["working_memory_size"]
         context_messages = self._messages[-window_size:] if self._messages else []
 
+        # Inject timestamps so the LLM has temporal awareness
+        context_messages = self._inject_timestamps(context_messages)
+
         # Build context prefix with code-specific information
         prefix_parts = []
+
+        # Hybrid memory (summary + recall)
+        hybrid = self._build_hybrid_prefix(user_input)
+        if hybrid:
+            prefix_parts.append(hybrid)
 
         # Task context
         if self._current_task:
@@ -245,7 +259,7 @@ class CodeDevelopmentMemoryManager(BaseMemoryManager):
                     start, end = fc.line_range
                     lines_info = f" (lines {start}-{end})"
                 prefix_parts.append(
-                    f"**Current file:** `{fc.path}`{lines_info}\n" f"```\n{snippet_preview}\n```"
+                    f"**Current file:** `{fc.path}`{lines_info}\n```\n{snippet_preview}\n```"
                 )
 
         # Recent errors
@@ -276,15 +290,41 @@ class CodeDevelopmentMemoryManager(BaseMemoryManager):
             },
         )
 
-    def update(self, user_input: str, ai_response: str) -> None:
+    def update(
+        self,
+        user_input: str,
+        ai_response: str,
+        agent_messages: list[Any] | None = None,
+    ) -> None:
         """Update memory and extract code-related information."""
-        # Create messages
+        # --- Build the human message (always needed) ----------------
         if HumanMessage is not None:
-            self._messages.append(HumanMessage(content=user_input))
-            self._messages.append(AIMessage(content=ai_response))
+            human_msg: Any = HumanMessage(content=user_input)
         else:
-            self._messages.append({"type": "human", "content": user_input})
-            self._messages.append({"type": "ai", "content": ai_response})
+            human_msg = {"type": "human", "content": user_input}
+        self._set_msg_ts(human_msg, self._pending_user_ts)
+        self._pending_user_ts = None
+
+        self._messages.append(human_msg)
+
+        # --- Append the agent's messages ---------------------------
+        if agent_messages:
+            for m in agent_messages:
+                self._messages.append(m)
+            last = agent_messages[-1]
+            if hasattr(last, "content") or isinstance(last, dict):
+                self._set_msg_ts(last)
+        else:
+            if AIMessage is not None:
+                ai_msg: Any = AIMessage(content=ai_response)
+            else:
+                ai_msg = {"type": "ai", "content": ai_response}
+            self._set_msg_ts(ai_msg)
+            self._messages.append(ai_msg)
+
+        # Incrementally summarize messages outside the sliding window
+        window_size = self._mode_config["working_memory_size"]
+        self._maybe_summarize(self._messages, window_size)
 
         # Extract file references
         if self._mode_config["track_files"]:
@@ -301,11 +341,8 @@ class CodeDevelopmentMemoryManager(BaseMemoryManager):
             "You are an expert programmer. COMPLETE coding tasks end-to-end. "
             "When asked to analyze/modify code: read files, understand context, "
             "make changes or provide complete solutions. "
-            "Don't stop to ask what to do - execute the requested work. "
-            "Be concise, show code examples, track file paths and errors.\n"
-            "ACCURACY: Only report information you read from actual files. "
-            "Do NOT guess file contents, function signatures, or error messages "
-            "— use tools to verify.\n\n"
+            "Don't stop to ask what to do — execute the requested work. "
+            "Be concise, show code examples, track file paths and errors.\n\n"
             "When reviewing or analyzing multiple files, consider using "
             "`delegate_parallel` to process them concurrently. Use "
             "`delegate_task` to offload focused subtasks like code review, "
@@ -314,6 +351,7 @@ class CodeDevelopmentMemoryManager(BaseMemoryManager):
 
     def clear(self) -> None:
         """Clear all code development memory."""
+        super().clear()
         self._messages = []
         self._current_task = None
         self._files = {}
@@ -340,24 +378,11 @@ class CodeDevelopmentMemoryManager(BaseMemoryManager):
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize code development state."""
+        from src.memory.json_store import _message_to_dict
+
         base = super().to_dict()
 
-        # Serialize messages
-        messages_data = []
-        for msg in self._messages:
-            if BaseMessage is not None and isinstance(msg, BaseMessage):
-                if HumanMessage is not None and isinstance(msg, HumanMessage):
-                    msg_type = "human"
-                else:
-                    msg_type = "ai"
-                messages_data.append(
-                    {
-                        "type": msg_type,
-                        "content": msg.content or "",
-                    }
-                )
-            elif isinstance(msg, dict):
-                messages_data.append(msg)
+        messages_data = [_message_to_dict(m) for m in self._messages]
 
         # Serialize task
         task_data = None
@@ -392,19 +417,11 @@ class CodeDevelopmentMemoryManager(BaseMemoryManager):
 
     def from_dict(self, data: dict[str, Any]) -> None:
         """Restore code development state."""
+        from src.memory.json_store import _dict_to_message
+
         super().from_dict(data)
 
-        # Restore messages
-        self._messages = []
-        for msg_data in data.get("messages", []):
-            if HumanMessage is not None:
-                content = msg_data["content"]
-                if msg_data.get("type") == "ai":
-                    self._messages.append(AIMessage(content=content))
-                else:
-                    self._messages.append(HumanMessage(content=content))
-            else:
-                self._messages.append(msg_data)
+        self._messages = [_dict_to_message(d) for d in data.get("messages", [])]
 
         # Restore task
         task_data = data.get("task")
@@ -458,7 +475,7 @@ class CodeDevelopmentMemoryManager(BaseMemoryManager):
                         del self._files[oldest]
                     self._files[path] = FileContext(path=path)
                 else:
-                    self._files[path].last_accessed = datetime.now()
+                    self._files[path].last_accessed = datetime.now(UTC)
 
     def _extract_errors(self, text: str) -> None:
         """Extract error messages from text."""
@@ -469,22 +486,4 @@ class CodeDevelopmentMemoryManager(BaseMemoryManager):
                 if error and error not in self._recent_errors:
                     self.add_error(error)
 
-    def _estimate_tokens(self, messages: list[Any]) -> int:
-        """
-        Rough token estimation for messages.
-
-        Uses simple heuristic: ~4 characters per token.
-
-        Args:
-            messages: List of messages
-
-        Returns:
-            Estimated token count
-        """
-        total_chars = 0
-        for msg in messages:
-            if hasattr(msg, "content") and msg.content:
-                total_chars += len(msg.content)
-            elif isinstance(msg, dict) and msg.get("content"):
-                total_chars += len(msg["content"])
-        return total_chars // 4
+    # _estimate_tokens() is inherited from BaseMemoryManager

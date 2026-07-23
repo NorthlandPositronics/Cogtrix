@@ -20,9 +20,10 @@ class IngestConfig:
     vectordb_dir: Path
     chunk_size: int = 1200
     chunk_overlap: int = 200
-    embedding_provider: str = "openai"
+    embedding_provider: str = "ollama"
     embedding_model: str | None = None
     ollama_base_url: str | None = None
+    api_key: str | None = None
 
 
 @dataclass
@@ -116,6 +117,8 @@ def _load_documents(docs_dir: Path) -> tuple[list[Document], list[str]]:
 def _create_embeddings(config: IngestConfig):
     """Create embeddings instance based on provider config.
 
+    Delegates to the centralized ``src.providers`` registry.
+
     Args:
         config: Ingestion configuration.
 
@@ -124,22 +127,16 @@ def _create_embeddings(config: IngestConfig):
 
     Raises:
         ValueError: If provider is not supported.
+        NotImplementedError: If provider has no embedding support.
     """
-    if config.embedding_provider == "ollama":
-        from langchain_ollama import OllamaEmbeddings
+    from src.providers import create_embeddings
 
-        return OllamaEmbeddings(
-            model=config.embedding_model or "nomic-embed-text",
-            base_url=config.ollama_base_url or "http://localhost:11434",
-        )
-
-    elif config.embedding_provider == "openai":
-        from langchain_openai import OpenAIEmbeddings
-
-        return OpenAIEmbeddings(model=config.embedding_model or "text-embedding-3-small")
-
-    else:
-        raise ValueError(f"Unsupported embedding provider: {config.embedding_provider}")
+    return create_embeddings(
+        config.embedding_provider,
+        model=config.embedding_model,
+        base_url=config.ollama_base_url,
+        api_key=config.api_key,
+    )
 
 
 def _split_documents(documents: list[Document], config: IngestConfig) -> list[Document]:

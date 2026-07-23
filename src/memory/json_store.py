@@ -14,34 +14,117 @@ log = logging.getLogger("cogtrix")
 
 # Optional LangChain message classes
 try:  # pragma: no cover
-    from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
+    from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 except ImportError:  # pragma: no cover
     BaseMessage = None  # type: ignore
     HumanMessage = None  # type: ignore
     AIMessage = None  # type: ignore
+    ToolMessage = None  # type: ignore
 
 
 def _message_to_dict(msg: Any) -> dict:
-    """Serialize a message to a dict representation."""
+    """Serialize a message to a dict representation.
+
+    Supports HumanMessage, AIMessage (including tool_calls), and
+    ToolMessage so that the full agent chain — not just the final
+    text — survives a save/load round-trip.
+    """
+    ts: str | None = None
+
+    # ── ToolMessage ───────────────────────────────────────────────
+    if ToolMessage is not None and isinstance(msg, ToolMessage):
+        d: dict[str, Any] = {
+            "type": "tool",
+            "content": msg.content if isinstance(msg.content, str) else str(msg.content or ""),
+            "name": getattr(msg, "name", ""),
+            "tool_call_id": getattr(msg, "tool_call_id", ""),
+        }
+        return d
+
+    # ── BaseMessage (Human / AI) ──────────────────────────────────
     if BaseMessage is not None and isinstance(msg, BaseMessage):
-        role = "human" if isinstance(msg, HumanMessage) else "ai"
-        return {"type": role, "content": msg.content}
-    # Fallback for simple dict-like messages
+        is_human = HumanMessage is not None and isinstance(msg, HumanMessage)
+        role = "human" if is_human else "ai"
+        ts = (msg.additional_kwargs or {}).get("_ts")
+        content = msg.content if isinstance(msg.content, str) else str(msg.content or "")
+        d = {"type": role, "content": content}
+
+        # Preserve tool_calls on AIMessages so the agent can see its
+        # previous tool-calling chain on restart (Ralph Loop support).
+        if not is_human:
+            tool_calls = getattr(msg, "tool_calls", None)
+            if tool_calls:
+                d["tool_calls"] = [
+                    {
+                        "id": tc.get("id", "") if isinstance(tc, dict) else getattr(tc, "id", ""),
+                        "name": (
+                            tc.get("name", "") if isinstance(tc, dict) else getattr(tc, "name", "")
+                        ),
+                        "args": (
+                            tc.get("args", {}) if isinstance(tc, dict) else getattr(tc, "args", {})
+                        ),
+                    }
+                    for tc in tool_calls
+                ]
+
+        if ts:
+            d["timestamp"] = ts
+        return d
+
+    # ── Plain dict (fallback) ─────────────────────────────────────
     if isinstance(msg, dict) and "content" in msg:
-        return {"type": msg.get("type", "human"), "content": msg["content"]}
+        d = {"type": msg.get("type", "human"), "content": msg["content"]}
+        ts = msg.get("timestamp")
+        if ts:
+            d["timestamp"] = ts
+        # Forward tool-related fields
+        for key in ("tool_calls", "name", "tool_call_id"):
+            if key in msg:
+                d[key] = msg[key]
+        return d
+
     return {"type": "human", "content": str(msg)}
 
 
 def _dict_to_message(data: dict) -> Any:
-    """Deserialize dict back to a message object if LangChain is available."""
+    """Deserialize dict back to a message object.
+
+    Handles ``type`` values: ``"human"``, ``"ai"`` (optionally with
+    ``tool_calls``), and ``"tool"``.
+    """
     msg_type = data.get("type", "human")
     content = data.get("content", "")
-    if HumanMessage is not None and AIMessage is not None:
-        if msg_type == "ai":
-            return AIMessage(content=content)
-        return HumanMessage(content=content)
-    # Fallback: return the dict itself
-    return {"type": msg_type, "content": content}
+    ts = data.get("timestamp")
+    additional: dict[str, Any] = {"_ts": ts} if ts else {}
+
+    # ── ToolMessage ───────────────────────────────────────────────
+    if msg_type == "tool" and ToolMessage is not None:
+        return ToolMessage(
+            content=content,
+            name=data.get("name", ""),
+            tool_call_id=data.get("tool_call_id", ""),
+        )
+
+    # ── AIMessage (optionally with tool_calls) ────────────────────
+    if msg_type == "ai" and AIMessage is not None:
+        tool_calls_data = data.get("tool_calls")
+        if tool_calls_data:
+            return AIMessage(
+                content=content,
+                additional_kwargs=additional,
+                tool_calls=tool_calls_data,
+            )
+        return AIMessage(content=content, additional_kwargs=additional)
+
+    # ── HumanMessage ──────────────────────────────────────────────
+    if HumanMessage is not None:
+        return HumanMessage(content=content, additional_kwargs=additional)
+
+    # ── Fallback (no LangChain) ───────────────────────────────────
+    d: dict[str, Any] = {"type": msg_type, "content": content}
+    if ts:
+        d["timestamp"] = ts
+    return d
 
 
 class JsonFileMemoryStore(BaseMemoryStore):
@@ -49,11 +132,29 @@ class JsonFileMemoryStore(BaseMemoryStore):
 
     def __init__(self, base_dir: str = "data/history"):
         self.base_path = Path(base_dir)
-        self.base_path.mkdir(parents=True, exist_ok=True)
+        self._save_disabled = False
+        try:
+            self.base_path.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            self._save_disabled = True
+            log.warning(
+                "Cannot create history directory %s: %s. History will not be saved.", base_dir, exc
+            )
 
     def _session_path(self, session_id: str) -> Path:
-        safe_id = session_id.replace("/", "_")
-        return self.base_path / f"{safe_id}.json"
+        # Sanitize: replace path separators and collapse traversal attempts
+        safe_id = session_id.replace("/", "_").replace("\\", "_").replace("..", "_")
+
+        # Enforce a reasonable length (filesystem limit is typically 255)
+        if len(safe_id) > 128:
+            safe_id = safe_id[:128]
+
+        # Resolve and verify the path stays inside base_path
+        full_path = (self.base_path / f"{safe_id}.json").resolve()
+        if not str(full_path).startswith(str(self.base_path.resolve())):
+            raise ValueError(f"Invalid session ID: {session_id}")
+
+        return full_path
 
     def load_history(self, session_id: str):
         path = self._session_path(session_id)
@@ -71,7 +172,13 @@ class JsonFileMemoryStore(BaseMemoryStore):
             return []
 
     def save_history(self, session_id: str, messages: list[Any]):
+        if self._save_disabled:
+            return
         path = self._session_path(session_id)
         serializable = [_message_to_dict(m) for m in messages]
-        with path.open("w", encoding="utf-8") as f:
-            json.dump(serializable, f, ensure_ascii=False, indent=2)
+        try:
+            with path.open("w", encoding="utf-8") as f:
+                json.dump(serializable, f, ensure_ascii=False, indent=2)
+        except OSError as exc:
+            self._save_disabled = True
+            log.warning("Cannot save history to %s: %s. History will not be saved.", path, exc)

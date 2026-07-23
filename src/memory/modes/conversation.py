@@ -2,8 +2,9 @@
 Conversation memory mode for general chat, Q&A, and research.
 
 This is the default memory mode, providing:
-- Working memory: Last N messages in context
-- Session summary: Compressed older messages (future)
+- Working memory: Last N messages in context (sliding window)
+- Session summary: LLM-compressed older messages (incremental)
+- Vector recall: Semantic search over evicted messages (optional)
 - Entity store: Extracted facts and preferences (future)
 - RAG integration: Long-term retrieval (future)
 """
@@ -35,16 +36,16 @@ class ConversationMemoryManager(BaseMemoryManager):
     - Casual conversation
 
     Configuration options:
-        working_memory_size (int): Messages to keep in context (default: 20)
-        summary_threshold (int): When to trigger summarization (default: 30)
+        working_memory_size (int): Messages to keep in context (default: 25)
+        summary_threshold (int): When to trigger summarization (default: 35)
         entity_extraction (bool): Enable entity tracking (default: False)
         rag_enabled (bool): Enable RAG retrieval (default: False)
         rag_top_k (int): Number of RAG results (default: 3)
     """
 
     DEFAULT_CONFIG: dict[str, Any] = {
-        "working_memory_size": 20,
-        "summary_threshold": 30,
+        "working_memory_size": 25,
+        "summary_threshold": 35,
         "entity_extraction": False,
         "rag_enabled": False,
         "rag_top_k": 3,
@@ -72,9 +73,6 @@ class ConversationMemoryManager(BaseMemoryManager):
         # Working memory - recent messages
         self._messages: list[Any] = []
 
-        # Session summary (future feature)
-        self._summary: str | None = None
-
         # Entity store (future feature)
         self._entities: dict[str, Any] = {}
 
@@ -90,11 +88,14 @@ class ConversationMemoryManager(BaseMemoryManager):
         """Load conversation history from storage, sanitizing bad entries."""
         self._messages = self.store.load_history(self.session_id)
         self._messages = self.sanitize_history(self._messages)
+        self._load_hybrid_meta()
+        self._clamp_summary_idx()
         self._loaded = True
 
     def save(self) -> None:
         """Save conversation history to storage."""
         self.store.save_history(self.session_id, self._messages)
+        super().save()
 
     def prepare_context(self, user_input: str) -> MemoryContext:
         """
@@ -109,6 +110,9 @@ class ConversationMemoryManager(BaseMemoryManager):
         Returns:
             MemoryContext with messages and metadata
         """
+        # Record the moment the user sent this message
+        self._pending_user_ts = self._now_ts()
+
         # Get working memory window
         window_size = self._mode_config["working_memory_size"]
 
@@ -117,11 +121,15 @@ class ConversationMemoryManager(BaseMemoryManager):
         else:
             context_messages = []
 
-        # Build context prefix (summary + entities if available)
+        # Inject timestamps so the LLM has temporal awareness
+        context_messages = self._inject_timestamps(context_messages)
+
+        # Build context prefix (hybrid summary + recall + entities)
         prefix_parts = []
 
-        if self._summary:
-            prefix_parts.append(f"Previous conversation summary:\n{self._summary}")
+        hybrid = self._build_hybrid_prefix(user_input)
+        if hybrid:
+            prefix_parts.append(hybrid)
 
         if self._entities:
             entity_str = ", ".join(f"{k}: {v}" for k, v in self._entities.items())
@@ -148,36 +156,63 @@ class ConversationMemoryManager(BaseMemoryManager):
             token_estimate=token_estimate,
             metadata={
                 "has_summary": self._summary is not None,
+                "summary_coverage": self._summary_msg_idx,
                 "entity_count": len(self._entities),
             },
         )
 
-    def update(self, user_input: str, ai_response: str) -> None:
+    def update(
+        self,
+        user_input: str,
+        ai_response: str,
+        agent_messages: list[Any] | None = None,
+    ) -> None:
         """
         Add new turn to conversation memory.
 
-        Creates message objects and appends to history.
-        Future: trigger summarization if threshold exceeded.
+        If *agent_messages* is provided the full tool-call chain is
+        stored (enabling the Ralph Loop — the agent can see its
+        previous tool usage on restart).  Otherwise a simple
+        Human / AI pair is stored.
 
         Args:
             user_input: User's input
             ai_response: AI's response
+            agent_messages: Optional full chain from the agent run
         """
-        # Create message objects
-        if HumanMessage is not None and AIMessage is not None:
-            human_msg = HumanMessage(content=user_input)
-            ai_msg = AIMessage(content=ai_response)
+        # --- Build the human message (always needed) ----------------
+        if HumanMessage is not None:
+            human_msg: Any = HumanMessage(content=user_input)
         else:
             human_msg = {"type": "human", "content": user_input}
-            ai_msg = {"type": "ai", "content": ai_response}
+        self._set_msg_ts(human_msg, self._pending_user_ts)
+        self._pending_user_ts = None
 
         self._messages.append(human_msg)
-        self._messages.append(ai_msg)
 
-        # Check if summarization needed (future feature)
-        # threshold = self._mode_config["summary_threshold"]
-        # if len(self._messages) > threshold:
-        #     self._trigger_summarization()
+        # --- Append the agent's messages ---------------------------
+        if agent_messages:
+            # agent_messages already contains the full chain
+            # (AI tool_calls, ToolMessages, final AI).
+            # Stamp the final AI message with the current time.
+            for m in agent_messages:
+                self._messages.append(m)
+            # Stamp only the *last* AI message (the final answer)
+            last = agent_messages[-1]
+            if hasattr(last, "content") or isinstance(last, dict):
+                self._set_msg_ts(last)
+        else:
+            # Legacy path: just a plain AI text response
+            if AIMessage is not None:
+                ai_msg: Any = AIMessage(content=ai_response)
+            else:
+                ai_msg = {"type": "ai", "content": ai_response}
+            self._set_msg_ts(ai_msg)
+            self._messages.append(ai_msg)
+
+        # Incrementally summarize messages outside the sliding window
+        window_size = self._mode_config["working_memory_size"]
+        self._maybe_summarize(self._messages, window_size)
 
     def get_system_prompt_additions(self) -> str | None:
         """Return conversation-mode system prompt additions."""
@@ -185,17 +220,13 @@ class ConversationMemoryManager(BaseMemoryManager):
         return (
             "In conversation mode: answer questions fully, complete requested tasks, "
             "and use tools proactively to gather information you need. "
-            "Don't stop to ask clarifying questions when the task is clear.\n"
-            "ACCURACY: Base factual claims strictly on data gathered by tools. "
-            "Do NOT invent numbers, dates, parameter counts, URLs, or other "
-            "specifics not found in tool results. If the information was not "
-            "found, say so explicitly."
+            "Don't stop to ask clarifying questions when the task is clear."
         )
 
     def clear(self) -> None:
         """Clear all conversation memory."""
+        super().clear()
         self._messages = []
-        self._summary = None
         self._entities = {}
         self._topics = []
 
@@ -206,106 +237,50 @@ class ConversationMemoryManager(BaseMemoryManager):
     def get_stats(self) -> dict[str, Any]:
         """Return conversation memory statistics."""
         base_stats = super().get_stats()
+        vs = self._vector_store
         return {
             **base_stats,
             "total_messages": len(self._messages),
             "working_memory_size": self._mode_config["working_memory_size"],
             "has_summary": self._summary is not None,
+            "summary_coverage": self._summary_msg_idx,
+            "vector_recall_ready": vs is not None and vs.ready,
             "entity_count": len(self._entities),
             "topic_count": len(self._topics),
         }
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize conversation state."""
+        from src.memory.json_store import _message_to_dict
+
         base = super().to_dict()
 
-        # Serialize messages
-        messages_data = []
-        for msg in self._messages:
-            if BaseMessage is not None and isinstance(msg, BaseMessage):
-                if HumanMessage is not None and isinstance(msg, HumanMessage):
-                    msg_type = "human"
-                else:
-                    msg_type = "ai"
-                messages_data.append(
-                    {
-                        "type": msg_type,
-                        "content": msg.content or "",
-                    }
-                )
-            elif isinstance(msg, dict):
-                messages_data.append(msg)
-            else:
-                messages_data.append(
-                    {
-                        "type": "unknown",
-                        "content": str(msg),
-                    }
-                )
+        messages_data = [_message_to_dict(m) for m in self._messages]
 
         return {
             **base,
             "messages": messages_data,
-            "summary": self._summary,
             "entities": self._entities,
             "topics": self._topics,
         }
 
     def from_dict(self, data: dict[str, Any]) -> None:
         """Restore conversation state from dictionary."""
+        from src.memory.json_store import _dict_to_message
+
         super().from_dict(data)
 
-        # Restore messages
-        messages_data = data.get("messages", [])
-        self._messages = []
+        self._messages = [_dict_to_message(d) for d in data.get("messages", [])]
 
-        for msg_data in messages_data:
-            msg_type = msg_data.get("type", "human")
-            content = msg_data.get("content", "")
+        # Legacy "summary" key → migrate to base-class _summary
+        if self._summary is None and data.get("summary"):
+            self._summary = data["summary"]
 
-            if HumanMessage is not None and AIMessage is not None:
-                if msg_type == "ai":
-                    self._messages.append(AIMessage(content=content))
-                else:
-                    self._messages.append(HumanMessage(content=content))
-            else:
-                self._messages.append(msg_data)
-
-        self._summary = data.get("summary")
         self._entities = data.get("entities", {})
         self._topics = data.get("topics", [])
         self._loaded = True
 
-    def _estimate_tokens(self, messages: list[Any]) -> int:
-        """
-        Rough token estimation for messages.
-
-        Uses simple heuristic: ~4 characters per token.
-
-        Args:
-            messages: List of messages
-
-        Returns:
-            Estimated token count
-        """
-        total_chars = 0
-        for msg in messages:
-            if hasattr(msg, "content") and msg.content:
-                total_chars += len(msg.content)
-            elif isinstance(msg, dict) and msg.get("content"):
-                total_chars += len(msg["content"])
-
-        return total_chars // 4
-
     # --- Future features ---
-
-    def _trigger_summarization(self) -> None:
-        """
-        Summarize older messages to compress history.
-
-        Future feature: Use LLM to summarize messages beyond
-        the working memory window.
-        """
 
     def _extract_entities(self, text: str) -> None:
         """

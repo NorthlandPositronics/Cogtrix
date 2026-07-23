@@ -16,7 +16,7 @@ Features:
 """
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 from src.memory.base import BaseMemoryStore
@@ -60,7 +60,7 @@ class ReasoningMemoryManager(BaseMemoryManager):
     Memory manager for strategic reasoning and planning.
 
     Configuration options:
-        working_memory_size (int): Messages in context (default: 6)
+        working_memory_size (int): Messages in context (default: 40)
         track_reasoning (bool): Track reasoning chain (default: True)
         track_decisions (bool): Track decisions (default: True)
         track_goals (bool): Track goals (default: True)
@@ -69,7 +69,7 @@ class ReasoningMemoryManager(BaseMemoryManager):
     """
 
     DEFAULT_CONFIG: dict[str, Any] = {
-        "working_memory_size": 6,
+        "working_memory_size": 40,
         "track_reasoning": True,
         "track_decisions": True,
         "track_goals": True,
@@ -218,7 +218,7 @@ class ReasoningMemoryManager(BaseMemoryManager):
         """Log a decision with rationale."""
         dec = Decision(
             id=decision_id,
-            timestamp=datetime.now(),
+            timestamp=datetime.now(UTC),
             decision=decision,
             rationale=rationale,
             alternatives_rejected=alternatives_rejected or [],
@@ -254,18 +254,32 @@ class ReasoningMemoryManager(BaseMemoryManager):
         """Load reasoning session from storage, sanitizing bad entries."""
         self._messages = self.store.load_history(self.session_id)
         self._messages = self.sanitize_history(self._messages)
+        self._load_hybrid_meta()
+        self._clamp_summary_idx()
         self._loaded = True
 
     def save(self) -> None:
         """Save reasoning session to storage."""
         self.store.save_history(self.session_id, self._messages)
+        super().save()
 
     def prepare_context(self, user_input: str) -> MemoryContext:
         """Prepare reasoning-focused context for LLM."""
+        # Record the moment the user sent this message
+        self._pending_user_ts = self._now_ts()
+
         window_size = self._mode_config["working_memory_size"]
         context_messages = self._messages[-window_size:] if self._messages else []
 
+        # Inject timestamps so the LLM has temporal awareness
+        context_messages = self._inject_timestamps(context_messages)
+
         prefix_parts = []
+
+        # Hybrid memory (summary + recall)
+        hybrid = self._build_hybrid_prefix(user_input)
+        if hybrid:
+            prefix_parts.append(hybrid)
 
         # Primary objective
         if self._primary_objective:
@@ -368,38 +382,54 @@ class ReasoningMemoryManager(BaseMemoryManager):
             },
         )
 
-    def update(self, user_input: str, ai_response: str) -> None:
-        """Update memory with new turn."""
+    def update(
+        self,
+        user_input: str,
+        ai_response: str,
+        agent_messages: list[Any] | None = None,
+    ) -> None:
+        """Update memory with new turn (full chain if available)."""
+        # --- Build the human message --------------------------------
         if HumanMessage is not None:
-            self._messages.append(HumanMessage(content=user_input))
-            self._messages.append(AIMessage(content=ai_response))
+            human_msg: Any = HumanMessage(content=user_input)
         else:
-            self._messages.append({"type": "human", "content": user_input})
-            self._messages.append({"type": "ai", "content": ai_response})
+            human_msg = {"type": "human", "content": user_input}
+        self._set_msg_ts(human_msg, self._pending_user_ts)
+        self._pending_user_ts = None
+
+        self._messages.append(human_msg)
+
+        # --- Append the agent's messages ---------------------------
+        if agent_messages:
+            for m in agent_messages:
+                self._messages.append(m)
+            last = agent_messages[-1]
+            if hasattr(last, "content") or isinstance(last, dict):
+                self._set_msg_ts(last)
+        else:
+            if AIMessage is not None:
+                ai_msg: Any = AIMessage(content=ai_response)
+            else:
+                ai_msg = {"type": "ai", "content": ai_response}
+            self._set_msg_ts(ai_msg)
+            self._messages.append(ai_msg)
+
+        # Incrementally summarize messages outside the sliding window
+        window_size = self._mode_config["working_memory_size"]
+        self._maybe_summarize(self._messages, window_size)
 
     def get_system_prompt_additions(self) -> str | None:
         """Return reasoning-mode system prompt additions."""
         return (
             "You are a strategic advisor and reasoning partner. "
-            "COMPLETE tasks systematically - do not stop to ask what to do next. "
+            "COMPLETE tasks systematically — do not stop to ask what to do next. "
             "Think step-by-step, document reasoning and decisions. "
             "When given a multi-step task: break it down, execute each part, "
             "then synthesize results into a complete deliverable. "
-            "Flag assumptions but keep working toward the goal. "
-            "Avoid dead ends. Stay focused on completing the objective.\n\n"
-            "ACCURACY: Base factual claims strictly on data gathered by tools. "
-            "Do NOT invent numbers, dates, parameter counts, URLs, or other "
-            "specifics not found in tool results. If the information was not "
-            "found, say so explicitly.\n\n"
-            "IMPORTANT: When the user says 'think deep', 'think deeply', "
-            "'deep think', 'analyze thoroughly', or similar phrases, you MUST "
-            "invoke the `deep_think` tool — these are explicit tool requests.\n"
-            "Also use `deep_think` for decisions with significant trade-offs, "
+            "Flag assumptions but keep working toward the goal.\n\n"
+            "Use `deep_think` for decisions with significant trade-offs, "
             "complex strategy questions, or problems that benefit from exploring "
-            "multiple approaches.\n"
-            "NOTE: `deep_think` runs in isolation and cannot see your "
-            "conversation or prior tool results. Always paste the FULL text "
-            "of any gathered data into the `context` parameter.\n\n"
+            "multiple approaches.\n\n"
             "When a task involves multiple independent research or analysis "
             "subtasks, use `delegate_parallel` to run them concurrently. "
             "Use `delegate_task` to get a second opinion from another model "
@@ -408,6 +438,7 @@ class ReasoningMemoryManager(BaseMemoryManager):
 
     def clear(self) -> None:
         """Clear all reasoning memory."""
+        super().clear()
         self._messages = []
         self._current_problem = None
         self._active_hypothesis = None
@@ -448,24 +479,11 @@ class ReasoningMemoryManager(BaseMemoryManager):
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize reasoning state."""
+        from src.memory.json_store import _message_to_dict
+
         base = super().to_dict()
 
-        # Serialize messages
-        messages_data = []
-        for msg in self._messages:
-            if BaseMessage is not None and isinstance(msg, BaseMessage):
-                if HumanMessage is not None and isinstance(msg, HumanMessage):
-                    msg_type = "human"
-                else:
-                    msg_type = "ai"
-                messages_data.append(
-                    {
-                        "type": msg_type,
-                        "content": msg.content or "",
-                    }
-                )
-            elif isinstance(msg, dict):
-                messages_data.append(msg)
+        messages_data = [_message_to_dict(m) for m in self._messages]
 
         # Serialize goals
         goals_data = []
@@ -513,19 +531,11 @@ class ReasoningMemoryManager(BaseMemoryManager):
 
     def from_dict(self, data: dict[str, Any]) -> None:
         """Restore reasoning state."""
+        from src.memory.json_store import _dict_to_message
+
         super().from_dict(data)
 
-        # Restore messages
-        self._messages = []
-        for msg_data in data.get("messages", []):
-            if HumanMessage is not None:
-                content = msg_data["content"]
-                if msg_data.get("type") == "ai":
-                    self._messages.append(AIMessage(content=content))
-                else:
-                    self._messages.append(HumanMessage(content=content))
-            else:
-                self._messages.append(msg_data)
+        self._messages = [_dict_to_message(d) for d in data.get("messages", [])]
 
         # Restore reasoning state
         self._current_problem = data.get("current_problem")
@@ -575,22 +585,4 @@ class ReasoningMemoryManager(BaseMemoryManager):
 
         self._loaded = True
 
-    def _estimate_tokens(self, messages: list[Any]) -> int:
-        """
-        Rough token estimation for messages.
-
-        Uses simple heuristic: ~4 characters per token.
-
-        Args:
-            messages: List of messages
-
-        Returns:
-            Estimated token count
-        """
-        total_chars = 0
-        for msg in messages:
-            if hasattr(msg, "content") and msg.content:
-                total_chars += len(msg.content)
-            elif isinstance(msg, dict) and msg.get("content"):
-                total_chars += len(msg["content"])
-        return total_chars // 4
+    # _estimate_tokens() is inherited from BaseMemoryManager

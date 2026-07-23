@@ -255,14 +255,22 @@ def _simple_sentiment(text: str) -> dict:
     neg_count: float = 0.0
     intensity: float = 1.0
     negate = False
+    words_since_modifier = 0
 
     for _i, word in enumerate(words):
         if word in negations:
             negate = True
+            words_since_modifier = 0
             continue
         if word in intensifiers:
             intensity = 1.5
+            words_since_modifier = 0
             continue
+
+        words_since_modifier += 1
+        if words_since_modifier > 3:
+            negate = False
+            intensity = 1.0
 
         if word in positive_words:
             if negate:
@@ -271,6 +279,7 @@ def _simple_sentiment(text: str) -> dict:
                 pos_count += intensity
             negate = False
             intensity = 1.0
+            words_since_modifier = 0
         elif word in negative_words:
             if negate:
                 pos_count += intensity
@@ -278,6 +287,7 @@ def _simple_sentiment(text: str) -> dict:
                 neg_count += intensity
             negate = False
             intensity = 1.0
+            words_since_modifier = 0
 
     total = pos_count + neg_count
     if total == 0:

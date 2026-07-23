@@ -1,5 +1,5 @@
 # Auto-generated from pyproject.toml -- do not edit manually.
-# Regenerate with: uv export --no-hashes --no-header --quiet > requirements.txt
+# Regenerate with: uv export --no-hashes --no-header --no-dev --no-editable --no-emit-project --quiet > requirements.txt
 
 aiohappyeyeballs==2.6.1
     # via aiohttp
@@ -141,8 +141,6 @@ mypy-extensions==1.1.0
     # via typing-inspect
 nltk==3.9.2
     # via textblob
-nodeenv==1.10.0
-    # via pyright
 numpy==2.4.2
     # via
     #   faiss-cpu
@@ -191,7 +189,6 @@ pygments==2.19.2
     # via rich
 pypdf==6.5.0
     # via cogtrix
-pyright==1.1.408
 python-dateutil==2.9.0.post0
     # via cogtrix
 python-docx==1.2.0
@@ -204,6 +201,7 @@ pytz==2025.2
     # via cogtrix
 pyyaml==6.0.3
     # via
+    #   cogtrix
     #   langchain-classic
     #   langchain-community
     #   langchain-core
@@ -223,7 +221,6 @@ requests-toolbelt==1.0.0
     # via langsmith
 rich==14.2.0
     # via cogtrix
-ruff==0.15.1
 six==1.17.0
     # via python-dateutil
 sniffio==1.3.1
@@ -252,7 +249,6 @@ typing-extensions==4.15.0
     #   openai
     #   pydantic
     #   pydantic-core
-    #   pyright
     #   python-docx
     #   sqlalchemy
     #   typing-inspect

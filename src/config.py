@@ -34,7 +34,7 @@ JSON example::
           "num_ctx": 32768,
           "temperature": 0.7
         },
-        "openai": { "type": "openai", "model": "gpt-4o", "api_key": "sk-..." }
+        "openai": { "type": "openai", "model": "gpt-4.1", "api_key": "sk-..." }
       },
 
       "embedding": { "provider": "ollama", "model": "nomic-embed-text-v2-moe" },
@@ -76,7 +76,7 @@ YAML equivalent::
         temperature: 0.7
       openai:
         type: openai
-        model: gpt-4o
+        model: gpt-4.1
         api_key: "sk-..."
 
     embedding:
@@ -106,12 +106,15 @@ Backward compatibility:
 """
 
 import json
+import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+_log = logging.getLogger("cogtrix")
 
 
 class ConfigError(Exception):
@@ -132,29 +135,36 @@ class ProviderConfig:
     """Configuration for a single LLM provider."""
 
     name: str
-    type: str  # "openai" or "ollama"
+    type: str  # "openai", "ollama", "anthropic", or "google"
     base_url: str | None = None
     model: str | None = None
     api_key: str | None = None
     temperature: float | None = None
-    num_ctx: int | None = None  # Context window size (Ollama only)
+    num_ctx: int | None = None  # Context window size (tokens) for any provider
+    tool_instructions: str | None = None
+
+    def __post_init__(self) -> None:
+        """Validate fields after initialisation."""
+        if self.temperature is not None and not (0.0 <= self.temperature <= 2.0):
+            raise ValueError(f"Temperature must be between 0.0 and 2.0, got {self.temperature}")
+        if self.num_ctx is not None and self.num_ctx < 256:
+            raise ValueError(f"Context window (num_ctx) must be >= 256, got {self.num_ctx}")
 
     def get_base_url(self) -> str | None:
         """Get base URL with defaults for known types."""
         if self.base_url:
             return self.base_url
-        if self.type == "ollama":
-            return "http://localhost:11434"
-        # OpenAI: None means use default (https://api.openai.com/v1)
-        return None
+        from src.providers import get_default_base_url
+
+        return get_default_base_url(self.type)
 
     def get_model(self) -> str:
         """Get model with defaults for known types."""
         if self.model:
             return self.model
-        if self.type == "ollama":
-            return "qwen3:32b"
-        return "gpt-4o-mini"
+        from src.providers import get_default_model
+
+        return get_default_model(self.type)
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to dictionary."""
@@ -166,6 +176,7 @@ class ProviderConfig:
             "api_key": "***" if self.api_key else None,  # Don't expose key
             "temperature": self.temperature,
             "num_ctx": self.num_ctx,
+            "tool_instructions": self.tool_instructions,
         }
 
 
@@ -177,7 +188,7 @@ class RAGConfig:
     vectordb_dir: str = "data/vectordb"
     chunk_size: int = 1200
     chunk_overlap: int = 200
-    embedding_provider: str = "openai"
+    embedding_provider: str = "ollama"
     embedding_model: str | None = None
 
 
@@ -185,7 +196,7 @@ class RAGConfig:
 class EmbeddingConfig:
     """Configuration for the embedding subsystem."""
 
-    provider: str = "openai"
+    provider: str = "ollama"
     model: str | None = None
 
 
@@ -194,7 +205,7 @@ class Config:
     """Application configuration with defaults."""
 
     # General settings
-    provider: str = "openai"
+    provider: str = "ollama"
     model: str | None = None
     session: str = "default"
 
@@ -211,11 +222,11 @@ class Config:
 
     # Legacy OpenAI settings (for backward compatibility)
     openai_api_key: str | None = None
-    openai_model: str = "gpt-4o-mini"
+    openai_model: str = "gpt-4.1-mini"
 
     # Legacy Ollama settings (for backward compatibility)
     ollama_base_url: str = "http://localhost:11434"
-    ollama_model: str = "qwen3:32b"
+    ollama_model: str = "qwen3:8b"
 
     # Memory settings
     memory_mode: str = "conversation"
@@ -227,9 +238,21 @@ class Config:
 
     # Delegate tool settings
     delegate_enabled: bool = True
-    delegate_max_depth: int = 3
     delegate_default_timeout: int = 60
     delegate_allowed_providers: list | None = field(default=None)
+    delegate_allowed_models: list[str] | None = field(default=None)
+
+    # Prompt optimizer — rewrite complex prompts before agent execution
+    prompt_optimizer: bool = True
+
+    # Context compression — summarize old ToolMessages during agent loop
+    context_compression: bool = True
+    context_compression_min_age: int = 6
+    context_compression_min_chars: int = 2000
+    context_compression_model: str | None = None  # model alias or "provider/model"
+
+    # MCP server configurations
+    mcp_servers: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     # RAG settings
     rag: RAGConfig = field(default_factory=RAGConfig)
@@ -273,6 +296,21 @@ class Config:
     @property
     def google_cse_id(self) -> str | None:
         return self.services.get("google", {}).get("cse_id")
+
+    @property
+    def whatsapp_config(self) -> dict[str, Any]:
+        """Return the full WhatsApp service config dict (may be empty)."""
+        return self.services.get("whatsapp", {})
+
+    @property
+    def telegram_config(self) -> dict[str, Any]:
+        """Return the full Telegram service config dict (may be empty)."""
+        return self.services.get("telegram", {})
+
+    @property
+    def assistant_config(self) -> dict[str, Any]:
+        """Return the full assistant service config dict (may be empty)."""
+        return self.services.get("assistant", {})
 
     def get_provider_config(self, name: str | None = None) -> ProviderConfig:
         """
@@ -412,8 +450,8 @@ def load_config(cli_args=None) -> Config:
             provider_cfg = config.get_provider_config()
             config.model = provider_cfg.get_model()
         except ValueError:
-            # Fallback for unknown provider
-            config.model = "gpt-4o-mini"
+            # Fallback for unknown provider — match the default (ollama)
+            config.model = "qwen3:8b"
 
     return config
 
@@ -622,7 +660,7 @@ def _apply_config_file(config: Config, path: Path) -> None:
 
     # ── Inference providers ────────────────────────────────────────
     # Preferred key: "inference"; backward-compat: "providers"
-    inference_data = data.get("inference") or data.get("providers")
+    inference_data = data.get("inference") if "inference" in data else data.get("providers")
     if isinstance(inference_data, dict):
         _parse_providers_section(config, inference_data)
 
@@ -697,15 +735,38 @@ def _apply_config_file(config: Config, path: Path) -> None:
         delegate_cfg = data["delegate"]
         if "enabled" in delegate_cfg:
             config.delegate_enabled = bool(delegate_cfg["enabled"])
-        if "max_depth" in delegate_cfg:
-            config.delegate_max_depth = int(delegate_cfg["max_depth"])
+        # "max_depth" is accepted for backward compat but not used
         if "default_timeout" in delegate_cfg:
             config.delegate_default_timeout = int(delegate_cfg["default_timeout"])
         if "allowed_providers" in delegate_cfg:
             config.delegate_allowed_providers = delegate_cfg["allowed_providers"]
+        if "allowed_models" in delegate_cfg:
+            config.delegate_allowed_models = delegate_cfg["allowed_models"]
         # Backward compat: delegate.model_aliases → config.model_aliases
         if "model_aliases" in delegate_cfg and config.model_aliases is None:
             config.model_aliases = delegate_cfg["model_aliases"]
+
+    # ── Prompt optimizer ─────────────────────────────────────────
+    if "prompt_optimizer" in data:
+        config.prompt_optimizer = bool(data["prompt_optimizer"])
+
+    # ── Context compression ──────────────────────────────────────
+    if "context_compression" in data:
+        cc = data["context_compression"]
+        if isinstance(cc, dict):
+            config.context_compression = bool(cc.get("enabled", True))
+            if "min_age" in cc:
+                config.context_compression_min_age = int(cc["min_age"])
+            if "min_chars" in cc:
+                config.context_compression_min_chars = int(cc["min_chars"])
+            if "model" in cc:
+                config.context_compression_model = str(cc["model"])
+        else:
+            config.context_compression = bool(cc)
+
+    # ── MCP servers ──────────────────────────────────────────────
+    if "mcp_servers" in data and isinstance(data["mcp_servers"], dict):
+        config.mcp_servers = dict(data["mcp_servers"])
 
     # ── RAG settings ──────────────────────────────────────────────
     if "rag" in data and isinstance(data["rag"], dict):
@@ -736,21 +797,25 @@ def _apply_config_file(config: Config, path: Path) -> None:
 
 def _parse_providers_section(config: Config, providers_data: dict[str, Any]) -> None:
     """Parse the providers section into ProviderConfig objects."""
-    # NOTE: print() is intentional here — this runs during early config parsing
-    # before the logging infrastructure is configured.
     for name, provider_data in providers_data.items():
         if not isinstance(provider_data, dict):
-            print(f"⚠️  Invalid provider config for '{name}': expected dict")
+            _log.warning("Invalid provider config for '%s': expected dict", name)
             continue
 
         provider_type = provider_data.get("type")
         if not provider_type:
-            print(f"⚠️  Provider '{name}' missing required 'type' field")
+            _log.warning("Provider '%s' missing required 'type' field", name)
             continue
 
-        if provider_type not in ("openai", "ollama"):
-            print(f"⚠️  Provider '{name}' has unknown type: '{provider_type}'")
-            print("   Supported types: 'openai', 'ollama'")
+        from src.providers import PROVIDER_TYPES
+
+        if provider_type not in PROVIDER_TYPES:
+            _log.warning(
+                "Provider '%s' has unknown type '%s' (supported: %s)",
+                name,
+                provider_type,
+                ", ".join(sorted(PROVIDER_TYPES)),
+            )
             continue
 
         config.providers[name] = ProviderConfig(
@@ -761,14 +826,20 @@ def _parse_providers_section(config: Config, providers_data: dict[str, Any]) -> 
             api_key=provider_data.get("api_key"),
             temperature=provider_data.get("temperature"),
             num_ctx=provider_data.get("num_ctx"),
+            tool_instructions=provider_data.get("tool_instructions"),
         )
 
 
 def _add_legacy_provider(config: Config, name: str, legacy_data: dict[str, Any]) -> None:
-    """Convert legacy provider config to new ProviderConfig format."""
+    """Convert legacy provider config to new ProviderConfig format.
+
+    ``name`` is always ``"openai"`` or ``"ollama"`` — legacy configs
+    don't carry an explicit ``type`` field, so the section name doubles
+    as the provider type.
+    """
     config.providers[name] = ProviderConfig(
         name=name,
-        type=name,  # "openai" or "ollama"
+        type=name,
         base_url=legacy_data.get("base_url"),
         model=legacy_data.get("model"),
         api_key=legacy_data.get("api_key"),
@@ -782,6 +853,60 @@ def _set_service(config: Config, name: str, key: str, value: str) -> None:
     config.services[name][key] = value
 
 
+def _set_provider_key(config: Config, name: str, api_key: str) -> None:
+    """Set the API key for a named provider, creating it if needed."""
+    if name in config.providers:
+        config.providers[name].api_key = api_key
+    else:
+        from src.providers.defaults import OPENAI_PRESETS
+
+        # Check if it's an OpenAI-compatible preset (e.g. xai)
+        preset = OPENAI_PRESETS.get(name)
+        if preset:
+            config.providers[name] = ProviderConfig(
+                name=name,
+                type="openai",
+                api_key=api_key,
+                base_url=preset["base_url"],
+                model=preset["model"],
+            )
+        else:
+            config.providers[name] = ProviderConfig(
+                name=name,
+                type=name,
+                api_key=api_key,
+            )
+
+
+_OLLAMA_DEFAULT_PORT = "11434"
+
+
+def _parse_ollama_address(value: str) -> str:
+    """Parse an Ollama address into a full base URL.
+
+    Accepts:
+        ``host``          → ``http://host:11434``
+        ``host:port``     → ``http://host:port``
+        ``http://...``    → returned as-is
+
+    Returns:
+        A complete ``http://`` base URL suitable for the Ollama client.
+    """
+    value = value.strip()
+    if value.startswith(("http://", "https://")):
+        return value
+    if ":" in value:
+        # Exactly one colon → host:port; multiple colons → IPv6 address.
+        # Bracketed IPv6 like [::1]:8080 is fine — rsplit on the last ":"
+        # yields "[::1]" and "8080".
+        if value.count(":") == 1 or (value.startswith("[") and "]:" in value):
+            host, port = value.rsplit(":", 1)
+            if port.isdigit():
+                return f"http://{host}:{port}"
+        # Multiple colons without brackets — bare IPv6; treat as hostname
+    return f"http://{value}:{_OLLAMA_DEFAULT_PORT}"
+
+
 def _apply_env_vars(config: Config) -> None:
     """Apply settings from environment variables."""
     # General settings
@@ -792,13 +917,24 @@ def _apply_env_vars(config: Config) -> None:
     if env_val := os.getenv("COGTRIX_SESSION"):
         config.session = env_val
 
-    # OpenAI settings (legacy)
+    # LLM provider API keys
     if env_val := os.getenv("OPENAI_API_KEY"):
         config.openai_api_key = env_val
+    if env_val := os.getenv("ANTHROPIC_API_KEY"):
+        _set_provider_key(config, "anthropic", env_val)
+    if env_val := os.getenv("GEMINI_API_KEY"):
+        _set_provider_key(config, "google", env_val)
+    if env_val := os.getenv("XAI_API_KEY"):
+        _set_provider_key(config, "xai", env_val)
 
-    # Ollama settings (legacy)
+    # Ollama settings
+    # COGTRIX_OLLAMA accepts "host:port" or just "host" (default port: 11434)
+    if env_val := os.getenv("COGTRIX_OLLAMA"):
+        config.ollama_base_url = _parse_ollama_address(env_val)
+    # Legacy env var (full URL) — overridden by COGTRIX_OLLAMA if both set
     if env_val := os.getenv("OLLAMA_BASE_URL"):
-        config.ollama_base_url = env_val
+        if not os.getenv("COGTRIX_OLLAMA"):
+            config.ollama_base_url = env_val
 
     # Service API keys → services dict
     if env_val := os.getenv("OPENWEATHER_API_KEY"):

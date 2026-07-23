@@ -9,10 +9,24 @@ __pycache__
 .venv
 venv
 
-# IDE / editor
+# IDE / editor / AI agent configs
 .vscode
 .idea
 .cursor
+.cursorrules
+.cursorignore
+.claude
+.codex
+.gemini
+.copilot
+.windsurf
+.windsurfrules
+.cline
+.clinerules
+.roomodes
+.aider*
+.amazonq
+.qdeveloper
 *.swp
 *.swo
 *~
@@ -21,6 +35,7 @@ venv
 .env
 .env.local
 .cogtrix.json
+.cogtrix.yaml
 
 # Runtime data
 data/
@@ -43,4 +58,7 @@ LICENSE
 NOTICE
 Dockerfile
 .dockerignore
+docker-compose.yml
 setup.cfg
+mypy_report
+htmlcov

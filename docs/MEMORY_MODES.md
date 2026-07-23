@@ -1,10 +1,14 @@
 # Cogtrix Memory Modes
 
-Detailed documentation of the modular memory management system.
+Cogtrix manages what the LLM "remembers" during a session. Different tasks benefit from different memory strategies — a quick Q&A session doesn't need error tracking, and a planning session benefits from decision logging. Memory modes let you pick the right strategy for the job.
+
+**Not sure which mode to use?** Start with `conversation` (the default). Switch to `code` when you start writing or debugging code, and to `reasoning` when you need to plan, compare options, or make decisions.
 
 ## Table of Contents
 
 - [Overview](#overview)
+- [Hybrid Memory System](#hybrid-memory-system)
+- [Message Timestamps](#message-timestamps)
 - [Mode Comparison](#mode-comparison)
 - [Conversation Mode](#conversation-mode)
 - [Code Development Mode](#code-development-mode)
@@ -18,9 +22,11 @@ Detailed documentation of the modular memory management system.
 
 Cogtrix uses a pluggable memory system that optimizes context management for different use cases. Each mode manages:
 
-- **Working Memory** — Recent messages sent to the LLM
+- **Working Memory** — Recent messages sent to the LLM (sliding window)
+- **Hybrid Memory** — Automatic summarization and optional semantic recall of older messages
 - **Context Tracking** — Mode-specific information (files, decisions, etc.)
 - **System Prompt Additions** — Mode-specific instructions for the LLM
+- **Token-Aware Trimming** — Ensures the context always fits the model's context window
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -32,9 +38,152 @@ Cogtrix uses a pluggable memory system that optimizes context management for dif
         ▼                     ▼                     ▼
 ┌───────────────┐     ┌───────────────┐     ┌───────────────┐
 │ Conversation  │     │     Code      │     │   Reasoning   │
-│    (20 msgs)  │     │   (8 msgs)    │     │   (6 msgs)    │
-└───────────────┘     └───────────────┘     └───────────────┘
+│   (25 msgs)   │     │  (30 msgs)    │     │  (40 msgs)    │
+└───────┬───────┘     └───────┬───────┘     └───────┬───────┘
+        │                     │                     │
+        └─────────────────────┼─────────────────────┘
+                              │
+                    ┌─────────┴─────────┐
+                    │  Hybrid Memory    │
+                    │  (all modes)      │
+                    │  • Summary        │
+                    │  • Vector Recall  │
+                    └───────────────────┘
 ```
+
+---
+
+## Hybrid Memory System
+
+All three memory modes share a **hybrid memory layer** that prevents long-term context loss. When messages fall outside the sliding window, they are not simply discarded — they are processed in two ways:
+
+1. **Incremental summarization** — An LLM generates a concise rolling summary of older messages, preserving key facts, decisions, and user preferences.
+2. **Vector recall** (optional) — Older message pairs are embedded and stored in a per-session FAISS index. On each turn, the user's input is used to retrieve the most semantically relevant past exchanges.
+
+Both layers are injected at the top of the context, giving the LLM a sense of the full conversation history without consuming the entire context window.
+
+### How It Works
+
+```
+Full conversation (e.g. 80 messages over time)
+│
+├─ Messages 1–44  → Covered by rolling summary (compressed text)
+│                   + stored in vector index for semantic recall
+│
+├─ Messages 45–55  → Pending batch (will be summarized when ≥ 6 accumulate)
+│
+└─ Messages 56–80  → Sliding window (sent verbatim to the LLM)
+
+
+What the LLM actually sees on each turn:
+┌─────────────────────────────────────────────────────────┐
+│  System Prompt + Mode-specific additions                │
+├─────────────────────────────────────────────────────────┤
+│  Conversation summary (older context):                  │
+│  • The user asked about Python web frameworks...        │
+│  • They decided to use FastAPI with PostgreSQL...       │
+├─────────────────────────────────────────────────────────┤
+│  Related past exchanges (vector recall):                │
+│  User: How should I structure the database schema?      │
+│  Assistant: For your e-commerce project, I recommend... │
+├─────────────────────────────────────────────────────────┤
+│  [Sliding window: last 25/30/40 messages verbatim]      │
+│  [2026-02-14 15:23:05 UTC] Human: "..."                 │
+│  [2026-02-14 15:23:12 UTC] AI: "..."                    │
+│  Human: "..." ← Current input                           │
+└─────────────────────────────────────────────────────────┘
+```
+
+### Summarization
+
+Summarization is triggered **after each response**, not during the user's wait for a reply. Specifically:
+
+1. After the agent replies, the memory manager checks how many messages have fallen outside the sliding window since the last summary was generated.
+2. If **6 or more** unsummarized messages have accumulated, a batch is sent to the LLM for summarization.
+3. The LLM produces an updated rolling summary that merges the new batch into the existing summary.
+4. The summary index is advanced so those messages aren't re-summarized.
+
+The summarization prompt instructs the LLM to:
+- Preserve key facts, data, decisions, user preferences, and action items
+- Drop small-talk, greetings, and verbose tool-call details
+- Write in third person present tense
+- Keep the summary under 400 words
+- Use bullet points for clarity
+
+**Graceful degradation:** If the LLM call fails or returns an empty result, the previous summary is retained unchanged. Summarization never blocks or crashes the conversation.
+
+### Vector Recall
+
+When an embedding provider is available (Ollama with `nomic-embed-text`, OpenAI, etc.), Cogtrix automatically:
+
+1. Embeds older conversation exchanges (human + AI pairs) into a per-session FAISS index.
+2. On each new user input, queries the index for the top-k most similar past exchanges.
+3. Injects the recalled exchanges into the context as "Related past exchanges."
+
+This allows the agent to recall specific details from much earlier in the conversation — even details that the rolling summary may have compressed away.
+
+**Graceful degradation:** If no embedding provider is available, vector recall is simply skipped. The sliding window and rolling summary still function normally.
+
+**Configuring embeddings:** To explicitly set the embedding provider and model, use the [`embedding` section](CONFIGURATION.md#embedding-section) in your config file. If not configured, Cogtrix auto-detects an embedding provider at startup (tries Ollama first, then OpenAI).
+
+**Embedding model tracking:** The embedding model name is stored alongside the FAISS index. If you switch embedding models between sessions, the stale index is automatically discarded and rebuilt from scratch.
+
+### Configuration
+
+Hybrid memory is enabled by default. You can tune it per mode:
+
+```yaml
+memory:
+  modes:
+    conversation:
+      working_memory_size: 25
+      summarization: true        # Enable/disable LLM summarization (default: true)
+      vector_recall_k: 3         # Number of past exchanges to recall (default: 3)
+    code:
+      working_memory_size: 30
+      summarization: true
+      vector_recall_k: 3
+    reasoning:
+      working_memory_size: 40
+      summarization: true
+      vector_recall_k: 3
+```
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `summarization` | bool | `true` | Enable incremental LLM summarization of older messages |
+| `vector_recall_k` | int | `3` | Number of semantically similar past exchanges to retrieve |
+
+Setting `summarization: false` disables the rolling summary (useful if you want to save LLM calls on a metered API). Setting `vector_recall_k: 0` effectively disables vector recall.
+
+### Persistence
+
+Hybrid memory state is persisted alongside session history:
+
+- **Summary text + coverage index** → `data/history/{session_id}_hybrid.json`
+- **Vector index** → `data/vectordb/sessions/{session_id}/` (FAISS files + metadata)
+
+When you resume a session, both the summary and vector index are restored. If the session history was sanitized (e.g., corrupted messages removed), the summary index is automatically clamped to stay within bounds.
+
+---
+
+## Message Timestamps
+
+Every message in the conversation history is automatically stamped with a **UTC timestamp** at the moment it is created:
+
+- **User messages** are stamped when the input is submitted (at `prepare_context()` time).
+- **AI responses** are stamped when the LLM finishes generating its reply (at `update()` time).
+
+When messages are sent to the LLM, each one is prefixed with a human-readable timestamp:
+
+```
+[2026-02-14 15:23:05 UTC] What are the top news affecting the stock market?
+[2026-02-14 15:23:47 UTC] Here are the top stories...
+```
+
+This gives the model a sense of time: it can see how long a response took, how much time passed between turns, and whether a session spans minutes or days. Timestamps are stored in UTC for unambiguous cross-timezone comparison.
+
+**Persistence:** Timestamps are saved alongside each message in the session JSON file (as an ISO 8601 string, e.g. `"2026-02-14T15:23:05Z"`). Old session files without timestamps load normally — those messages simply appear without a time prefix.
 
 ---
 
@@ -42,10 +191,13 @@ Cogtrix uses a pluggable memory system that optimizes context management for dif
 
 | Aspect | Conversation | Code | Reasoning |
 |--------|--------------|------|-----------|
-| **Working Memory** | 20 messages | 8 messages | 6 messages |
+| **Working Memory** | 25 messages | 30 messages | 40 messages |
 | **Best For** | General chat, Q&A | Programming, debugging | Planning, decisions |
 | **Tracks** | Topics, entities | Files, errors, changes | Goals, decisions, constraints |
 | **Context Focus** | Conversation flow | Current code + task | Problem + objectives |
+| **Hybrid Memory** | Summary + vector recall | Summary + vector recall | Summary + vector recall |
+
+**About tools:** All tools are on-demand regardless of memory mode — the agent requests only the tools it needs for the current task. See [Tool Loading](CONFIGURATION.md#tool-loading) for details.
 
 ---
 
@@ -64,13 +216,19 @@ Maintains a sliding window of recent messages with entity tracking:
 │                    CONVERSATION MEMORY                          │
 ├────────────────────────────────────────────────────────────────┤
 │                                                                │
-│  Working Memory (Last 20 messages)                             │
+│  Hybrid Prefix (injected when available)                       │
 │  ┌──────────────────────────────────────────────────────────┐  │
-│  │  Human: "What is Python?"                                │  │
-│  │  AI: "Python is a programming language..."               │  │
-│  │  Human: "How do I install it?"                           │  │
-│  │  AI: "You can download Python from..."                   │  │
-│  │  ... (up to 20 messages)                                 │  │
+│  │  Summary: "The user discussed Python frameworks..."      │  │
+│  │  Related: [vector-recalled past exchanges]               │  │
+│  └──────────────────────────────────────────────────────────┘  │
+│                                                                │
+│  Working Memory (Last 25 messages, timestamped)                │
+│  ┌──────────────────────────────────────────────────────────┐  │
+│  │  [2026-02-14 15:23:05 UTC] Human: "What is Python?"     │  │
+│  │  [2026-02-14 15:23:12 UTC] AI: "Python is a ..."        │  │
+│  │  [2026-02-14 15:23:40 UTC] Human: "How do I install?"   │  │
+│  │  [2026-02-14 15:23:48 UTC] AI: "You can download..."    │  │
+│  │  ... (up to 25 messages)                                 │  │
 │  └──────────────────────────────────────────────────────────┘  │
 │                                                                │
 │  Entity Tracking                                               │
@@ -87,35 +245,36 @@ Maintains a sliding window of recent messages with entity tracking:
 What gets sent to the LLM:
 
 ```
-┌────────────────────────────────────────┐
-│ System Prompt                          │
-│ "You are a helpful AI assistant..."    │
-├────────────────────────────────────────┤
-│ Working Memory (Last 20 messages)      │
-│   Human: "..."                         │
-│   AI: "..."                            │
-│   Human: "..." ← Current input         │
-└────────────────────────────────────────┘
+┌──────────────────────────────────────────────────┐
+│ System Prompt                                    │
+│ "You are a helpful AI assistant..."              │
+├──────────────────────────────────────────────────┤
+│ Hybrid Prefix (summary + recalled exchanges)     │
+├──────────────────────────────────────────────────┤
+│ Working Memory (Last 25 messages, timestamped)   │
+│   [2026-02-14 15:23:05 UTC] Human: "..."         │
+│   [2026-02-14 15:23:12 UTC] AI: "..."            │
+│   Human: "..." ← Current input                   │
+└──────────────────────────────────────────────────┘
 ```
 
 ### Configuration
 
-```json
-{
-  "memory": {
-    "mode": "conversation",
-    "modes": {
-      "conversation": {
-        "working_memory_size": 20
-      }
-    }
-  }
-}
+```yaml
+memory:
+  mode: conversation
+  modes:
+    conversation:
+      working_memory_size: 25
+      summarization: true
+      vector_recall_k: 3
 ```
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `working_memory_size` | 20 | Number of messages to keep in context |
+| `working_memory_size` | 25 | Number of messages to keep in context |
+| `summarization` | `true` | Enable rolling summary of older messages |
+| `vector_recall_k` | 3 | Semantically similar past exchanges to retrieve |
 
 ---
 
@@ -134,11 +293,17 @@ Optimized for coding with task and file tracking:
 │                   CODE DEVELOPMENT MEMORY                       │
 ├────────────────────────────────────────────────────────────────┤
 │                                                                │
-│  Working Memory (Last 8 messages)                              │
+│  Hybrid Prefix (summary + vector recall)                       │
 │  ┌──────────────────────────────────────────────────────────┐  │
-│  │  Human: "Fix the bug in auth.py"                         │  │
-│  │  AI: "I see the issue. The token validation..."          │  │
-│  │  ... (up to 8 messages)                                  │  │
+│  │  Summary: "Working on auth module refactor..."           │  │
+│  │  Related: [past exchanges about auth.py]                 │  │
+│  └──────────────────────────────────────────────────────────┘  │
+│                                                                │
+│  Working Memory (Last 30 messages, timestamped)                │
+│  ┌──────────────────────────────────────────────────────────┐  │
+│  │  [10:05:30 UTC] Human: "Fix the bug in auth.py"         │  │
+│  │  [10:05:47 UTC] AI: "I see the issue..."                │  │
+│  │  ... (up to 30 messages)                                 │  │
 │  └──────────────────────────────────────────────────────────┘  │
 │                                                                │
 │  Task Context                                                  │
@@ -167,14 +332,16 @@ What gets sent to the LLM:
 │ System Prompt                          │
 │ "You are an expert programmer..."      │
 ├────────────────────────────────────────┤
+│ Hybrid Prefix (summary + recall)       │
+├────────────────────────────────────────┤
 │ Task Context                           │
 │ "Current task: Fix authentication bug  │
 │  Files: auth.py, test_auth.py          │
 │  Recent errors: TypeError at line 45"  │
 ├────────────────────────────────────────┤
-│ Working Memory (Last 8 messages)       │
-│   Human: "..."                         │
-│   AI: "..."                            │
+│ Working Memory (Last 30 messages)      │
+│   [10:05:30 UTC] Human: "..."          │
+│   [10:05:47 UTC] AI: "..."             │
 │   Human: "..." ← Current input         │
 └────────────────────────────────────────┘
 ```
@@ -184,30 +351,29 @@ What gets sent to the LLM:
 1. **File Tracking** — Automatically tracks mentioned files
 2. **Error Memory** — Retains error messages for debugging context
 3. **Task Progress** — Tracks what's been accomplished
-4. **Concise Context** — Smaller window to leave room for code
+4. **Structured Context** — Task, files, and errors injected alongside messages
 
 ### Configuration
 
-```json
-{
-  "memory": {
-    "mode": "code",
-    "modes": {
-      "code": {
-        "working_memory_size": 8,
-        "max_files": 20,
-        "max_errors": 10
-      }
-    }
-  }
-}
+```yaml
+memory:
+  mode: code
+  modes:
+    code:
+      working_memory_size: 30
+      max_files: 20
+      max_errors: 5
+      summarization: true
+      vector_recall_k: 3
 ```
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `working_memory_size` | 8 | Number of messages to keep |
+| `working_memory_size` | 30 | Number of messages to keep |
 | `max_files` | 20 | Maximum files to track |
-| `max_errors` | 10 | Maximum errors to remember |
+| `max_errors` | 5 | Maximum errors to remember |
+| `summarization` | `true` | Enable rolling summary of older messages |
+| `vector_recall_k` | 3 | Semantically similar past exchanges to retrieve |
 
 ---
 
@@ -226,11 +392,17 @@ Designed for deep thinking with goal and decision tracking:
 │                     REASONING MEMORY                            │
 ├────────────────────────────────────────────────────────────────┤
 │                                                                │
-│  Working Memory (Last 6 messages)                              │
+│  Hybrid Prefix (summary + vector recall)                       │
 │  ┌──────────────────────────────────────────────────────────┐  │
-│  │  Human: "Should we use microservices?"                   │  │
-│  │  AI: "Let me analyze the trade-offs..."                  │  │
-│  │  ... (up to 6 messages)                                  │  │
+│  │  Summary: "Evaluating microservices architecture..."     │  │
+│  │  Related: [recalled constraint discussion]               │  │
+│  └──────────────────────────────────────────────────────────┘  │
+│                                                                │
+│  Working Memory (Last 40 messages, timestamped)                │
+│  ┌──────────────────────────────────────────────────────────┐  │
+│  │  [09:00:15 UTC] Human: "Should we use microservices?"   │  │
+│  │  [09:01:03 UTC] AI: "Let me analyze the trade-offs..."  │  │
+│  │  ... (up to 40 messages)                                 │  │
 │  └──────────────────────────────────────────────────────────┘  │
 │                                                                │
 │  Goal Hierarchy                                                │
@@ -271,8 +443,10 @@ What gets sent to the LLM:
 │ System Prompt                          │
 │ "You are a strategic advisor..."       │
 ├────────────────────────────────────────┤
+│ Hybrid Prefix (summary + recall)       │
+├────────────────────────────────────────┤
 │ Goal Hierarchy                         │
-│ "🎯 OBJECTIVE: Design scalable arch    │
+│ "Objective: Design scalable arch       │
 │  Sub-goals: [list]                     │
 │  Current phase: Evaluation"            │
 ├────────────────────────────────────────┤
@@ -282,9 +456,9 @@ What gets sent to the LLM:
 │ Recent Decisions                       │
 │ "#1: Use event-driven - Rationale:..." │
 ├────────────────────────────────────────┤
-│ Working Memory (Last 6 messages)       │
-│   Human: "..."                         │
-│   AI: "..."                            │
+│ Working Memory (Last 40 messages)      │
+│   [09:00:15 UTC] Human: "..."          │
+│   [09:01:03 UTC] AI: "..."             │
 └────────────────────────────────────────┘
 ```
 
@@ -298,26 +472,25 @@ What gets sent to the LLM:
 
 ### Configuration
 
-```json
-{
-  "memory": {
-    "mode": "reasoning",
-    "modes": {
-      "reasoning": {
-        "working_memory_size": 6,
-        "max_decisions": 20,
-        "max_goals": 10
-      }
-    }
-  }
-}
+```yaml
+memory:
+  mode: reasoning
+  modes:
+    reasoning:
+      working_memory_size: 40
+      max_decisions: 20
+      max_goals: 10
+      summarization: true
+      vector_recall_k: 3
 ```
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `working_memory_size` | 6 | Number of messages to keep |
+| `working_memory_size` | 40 | Number of messages to keep |
 | `max_decisions` | 20 | Maximum decisions to track |
 | `max_goals` | 10 | Maximum goals to track |
+| `summarization` | `true` | Enable rolling summary of older messages |
+| `vector_recall_k` | 3 | Semantically similar past exchanges to retrieve |
 
 ---
 
@@ -325,17 +498,22 @@ What gets sent to the LLM:
 
 ### Via Config File
 
-```json
-{
-  "memory": {
-    "mode": "code",
-    "modes": {
-      "conversation": { "working_memory_size": 20 },
-      "code": { "working_memory_size": 8 },
-      "reasoning": { "working_memory_size": 6 }
-    }
-  }
-}
+```yaml
+memory:
+  mode: code
+  modes:
+    conversation:
+      working_memory_size: 25
+      summarization: true
+      vector_recall_k: 3
+    code:
+      working_memory_size: 30
+      summarization: true
+      vector_recall_k: 3
+    reasoning:
+      working_memory_size: 40
+      summarization: true
+      vector_recall_k: 3
 ```
 
 ### Via Environment Variable
@@ -387,14 +565,18 @@ python cogtrix.py -M conversation -s research
 
 ### Mode Selection Guide
 
-| If you're doing... | Use mode |
-|--------------------|----------|
-| General questions, research | `conversation` |
-| Writing or reviewing code | `code` |
-| Debugging errors | `code` |
-| Architecture decisions | `reasoning` |
-| Project planning | `reasoning` |
-| Analyzing trade-offs | `reasoning` |
+| If you're doing... | Use mode | Why |
+|--------------------|----------|-----|
+| General questions, research | `conversation` | Lightweight, fast — no extra overhead |
+| Summarizing articles, brainstorming | `conversation` | Focus on the flow of ideas |
+| Writing or reviewing code | `code` | Tracks files you mention and errors you hit |
+| Debugging errors | `code` | Error memory prevents the LLM from losing context on the bug |
+| Refactoring a codebase | `code` | Larger working memory (30 msgs) keeps more context visible |
+| Architecture decisions | `reasoning` | Decision log records choices and rationale |
+| Project planning | `reasoning` | Goal hierarchy keeps objectives structured |
+| Comparing options with trade-offs | `reasoning` | Constraint tracking + deep think integration |
+
+**Rule of thumb:** conversation < code < reasoning in terms of working memory size and tracking overhead. Pick the lightest mode that fits your task.
 
 ---
 
@@ -403,11 +585,13 @@ python cogtrix.py -M conversation -s research
 All modes save to the same JSON format:
 
 ```
-data/history/{session_id}.json
+data/history/{session_id}.json          ← Message history + mode tracking
+data/history/{session_id}_hybrid.json   ← Summary text + coverage index
+data/vectordb/sessions/{session_id}/    ← FAISS vector index (if embeddings available)
 ```
 
-The file contains:
-- Full message history
+The history file contains:
+- Full message history (each message includes a UTC `timestamp` field)
 - Mode-specific tracking data
 - Session metadata
 
@@ -419,9 +603,22 @@ python cogtrix.py -M code -s my-project
 # ... work on code ...
 # Exit
 
-# Resume later (memory restored)
+# Resume later (memory restored — including summary and vector index)
 python cogtrix.py -M code -s my-project
 ```
+
+---
+
+## Token-Aware Context Management
+
+Regardless of the memory mode, Cogtrix ensures the prepared context never exceeds the model's context window. Before messages are sent to the LLM:
+
+1. The total token count is estimated using a character-based heuristic (~4 characters per token).
+2. If the total exceeds the available budget, the oldest history messages are dropped first.
+3. If individual messages are still too large after trimming, they are truncated with a `[…truncated…]` marker.
+4. The system prompt and the current user input are never removed.
+
+The `max_tokens` parameter sent to the LLM is also dynamically calculated to avoid requesting more tokens than the remaining context window allows, preventing "max_tokens must be at least 1" errors from the API.
 
 ---
 

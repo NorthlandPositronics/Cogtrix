@@ -18,22 +18,6 @@ from src.logging_config import get_logger, log_delegation
 
 # LangChain imports with graceful fallback
 try:
-    from langchain_openai import ChatOpenAI
-
-    OPENAI_AVAILABLE = True
-except ImportError:
-    ChatOpenAI = None  # type: ignore[misc, assignment]
-    OPENAI_AVAILABLE = False
-
-try:
-    from langchain_ollama import ChatOllama
-
-    OLLAMA_AVAILABLE = True
-except ImportError:
-    ChatOllama = None  # type: ignore[misc, assignment]
-    OLLAMA_AVAILABLE = False
-
-try:
     from langchain_core.messages import HumanMessage, SystemMessage
 
     LANGCHAIN_MESSAGES_AVAILABLE = True
@@ -46,11 +30,10 @@ except ImportError:
 # Module-level configuration (set by cogtrix.py at startup)
 _delegate_config: dict[str, Any] = {
     "enabled": True,
-    "max_depth": 3,
     "default_timeout": 60,
     "default_provider": "ollama",
     "default_model": None,
-    "allowed_providers": ["openai", "ollama"],
+    "allowed_providers": ["openai", "ollama", "anthropic", "google"],
     "model_aliases": {},
     "providers": {},  # Named provider configurations
     # Legacy fallbacks
@@ -59,6 +42,86 @@ _delegate_config: dict[str, Any] = {
     "max_consecutive_failures": 5,
     "circuit_breaker_cooldown": 300,  # seconds before retry
 }
+
+# Tools available to delegate agents.  Set by the host application
+# via ``set_delegate_tools()``.  When non-empty, delegates can run
+# as full ReAct agents with tool access instead of plain LLM calls.
+_delegate_tools: list[Any] = []
+
+# Names excluded from the delegate tool set to prevent recursion
+# and keep delegate execution fast.
+_DELEGATE_EXCLUDED_TOOLS = frozenset(
+    {
+        "delegate_task",
+        "delegate_parallel",
+        "deep_think",
+        "request_tools",
+    }
+)
+
+
+def set_delegate_tools(
+    active_tools: list[Any],
+    available_tools: dict[str, Any] | None = None,
+) -> None:
+    """Register tools that delegate agents can use.
+
+    Delegates receive **all** tools — both the currently active set and
+    any on-demand tools that the main agent hasn't activated yet.  This
+    means delegates can read files, run shell commands, search the web,
+    etc. from the very first invocation without needing to request tools.
+
+    Delegation tools and ``deep_think`` are automatically excluded to
+    prevent recursion.
+
+    Parameters
+    ----------
+    active_tools:
+        The main agent's currently active tool list.
+    available_tools:
+        On-demand tools not yet active in the main agent.  Merged into
+        the delegate toolset so delegates have full capabilities.
+    """
+    global _delegate_tools
+
+    seen: set[str] = set()
+    merged: list[Any] = []
+
+    for t in active_tools:
+        name = getattr(t, "name", "")
+        if name not in _DELEGATE_EXCLUDED_TOOLS and name not in seen:
+            merged.append(t)
+            seen.add(name)
+
+    if available_tools:
+        for name, t in available_tools.items():
+            if name not in _DELEGATE_EXCLUDED_TOOLS and name not in seen:
+                merged.append(t)
+                seen.add(name)
+
+    _delegate_tools = merged
+
+
+# Optional callback for real-time delegation status messages.
+# Signature: (message: str) -> None
+# Set by the host application (e.g. cogtrix.py) to display delegation
+# activity in the UI while the spinner is running.
+_status_callback: Any = None
+
+
+def set_status_callback(callback) -> None:
+    """Register a callback that receives delegation status messages."""
+    global _status_callback
+    _status_callback = callback
+
+
+def _emit_status(message: str) -> None:
+    """Emit a status message if a callback is registered."""
+    if _status_callback is not None:
+        try:
+            _status_callback(message)
+        except Exception:
+            pass
 
 
 @dataclass
@@ -84,7 +147,7 @@ class ModelCircuitBreaker:
         self.is_unavailable = False
         self.last_error = ""
 
-    def check_availability(self, cooldown: float = 300.0) -> tuple:
+    def check_availability(self, cooldown: float = 300.0) -> tuple[bool, str | None]:
         """
         Check if model is available.
 
@@ -201,7 +264,20 @@ class DelegateInput(BaseModel):
     task: str = Field(description="Clear description of what the delegated model should do")
     context: str = Field(
         default="",
-        description="Relevant context/data for the task (code, text, documents, etc.)",
+        description=(
+            "Relevant context/data for the task (code, text, documents, etc.). "
+            "Required when use_tools=False. When use_tools=True the delegate "
+            "can gather data itself, but providing context still helps."
+        ),
+    )
+    use_tools: bool = Field(
+        default=True,
+        description=(
+            "When True (default), the delegate runs as a full agent with "
+            "tool access (file I/O, shell, search, etc.) and can gather "
+            "data independently. When False, the delegate is LLM-only and "
+            "can only reason about text provided in 'context'."
+        ),
     )
     response_format: str = Field(
         default="text",
@@ -213,11 +289,11 @@ class DelegateInput(BaseModel):
     )
     provider: str | None = Field(
         default=None,
-        description="LLM provider: 'openai', 'ollama', or alias from config",
+        description="LLM provider: 'openai', 'ollama', 'anthropic', 'google', or alias from config",
     )
     model: str | None = Field(
         default=None,
-        description="Model name (e.g., 'gpt-4', 'llama3:8b') or alias from config",
+        description="Model name (e.g., 'gpt-4.1-mini', 'qwen3:8b', 'claude-sonnet-4-5') or alias from config",
     )
     timeout: int = Field(
         default=60,
@@ -235,8 +311,9 @@ class DelegateParallelInput(BaseModel):
     tasks: list[dict[str, Any]] = Field(
         description=(
             "List of tasks to run in parallel. Each task is a dict with: "
-            "'task' (required), 'context', 'response_format', 'json_schema', "
-            "'provider', 'model', 'temperature'"
+            "'task' (required), 'context', 'use_tools' (default True), "
+            "'response_format', 'json_schema', 'provider', 'model', "
+            "'temperature'"
         )
     )
     timeout: int = Field(
@@ -318,10 +395,11 @@ def _create_llm(
     """
     Create an LLM instance for the specified provider.
 
-    Supports both named providers from config and legacy providers.
+    Delegates to the centralized ``src.providers`` registry.
+    Supports named providers from config and legacy provider names.
 
     Args:
-        provider: Provider name (e.g., 'openai', 'ollama', 'my-server')
+        provider: Provider name (e.g., 'openai', 'ollama', 'anthropic', 'my-server')
         model: Model name (overrides provider config default)
         temperature: Sampling temperature
         num_ctx: Context window size (Ollama only)
@@ -332,7 +410,9 @@ def _create_llm(
     Raises:
         ValueError: If provider is not supported or not available
     """
-    allowed = _delegate_config.get("allowed_providers", ["openai", "ollama"])
+    from src.providers import create_chat_model
+
+    allowed = _delegate_config.get("allowed_providers", ["openai", "ollama", "anthropic", "google"])
     if provider not in allowed:
         raise ValueError(f"Provider '{provider}' not allowed. Allowed: {allowed}")
 
@@ -342,69 +422,34 @@ def _create_llm(
     if provider in providers:
         prov_cfg = providers[provider]
         prov_type = prov_cfg.get("type", provider)
-        base_url = prov_cfg.get("base_url")
-        api_key = prov_cfg.get("api_key")
-        default_model = prov_cfg.get("model")
-        final_model = model or default_model
-        # Use alias num_ctx if provided, else fall back to provider config
+        final_model = model or prov_cfg.get("model")
         final_num_ctx = num_ctx if num_ctx is not None else prov_cfg.get("num_ctx")
 
-        if prov_type == "openai":
-            if not OPENAI_AVAILABLE:
-                raise ImportError("OpenAI not available. Install: pip install langchain-openai")
-            kwargs: dict[str, Any] = {
-                "model": final_model or "gpt-4o-mini",
-                "temperature": temperature,
-                "max_retries": 3,
-            }
-            if api_key:
-                kwargs["api_key"] = api_key
-            if base_url:
-                kwargs["base_url"] = base_url
-            return ChatOpenAI(**kwargs)
-
-        elif prov_type == "ollama":
-            if not OLLAMA_AVAILABLE:
-                raise ImportError("Ollama not available. Install: pip install langchain-ollama")
-            ollama_kwargs: dict[str, Any] = {
-                "model": final_model or "llama3:8b",
-                "base_url": base_url or "http://localhost:11434",
-                "temperature": temperature,
-            }
-            if final_num_ctx is not None:
-                ollama_kwargs["num_ctx"] = final_num_ctx
-            return ChatOllama(**ollama_kwargs)
-
-        else:
-            raise ValueError(
-                f"Unknown provider type '{prov_type}' for '{provider}'. "
-                "Use 'openai' or 'ollama'."
-            )
+        return create_chat_model(
+            prov_type,
+            model=final_model,
+            api_key=prov_cfg.get("api_key"),
+            base_url=prov_cfg.get("base_url"),
+            temperature=temperature,
+            num_ctx=final_num_ctx,
+        )
 
     # Legacy fallback for built-in provider names
-    if provider == "openai":
-        if not OPENAI_AVAILABLE:
-            raise ImportError("OpenAI not available. Install: pip install langchain-openai")
-        api_key = _delegate_config.get("openai_api_key")
-        return ChatOpenAI(
-            model=model or "gpt-4o-mini",
-            temperature=temperature,
-            api_key=api_key,  # type: ignore[arg-type]
-            max_retries=3,
-        )
+    legacy_api_key = _delegate_config.get("openai_api_key") if provider == "openai" else None
+    legacy_base_url = (
+        _delegate_config.get("ollama_base_url", "http://localhost:11434")
+        if provider == "ollama"
+        else None
+    )
 
-    elif provider == "ollama":
-        if not OLLAMA_AVAILABLE:
-            raise ImportError("Ollama not available. Install: pip install langchain-ollama")
-        base_url = _delegate_config.get("ollama_base_url", "http://localhost:11434")
-        return ChatOllama(
-            model=model or "llama3:8b",
-            base_url=base_url,
-            temperature=temperature,
-        )
-
-    else:
-        raise ValueError(f"Unsupported provider: {provider}")
+    return create_chat_model(
+        provider,
+        model=model,
+        api_key=legacy_api_key,
+        base_url=legacy_base_url,
+        temperature=temperature,
+        num_ctx=num_ctx,
+    )
 
 
 def _build_prompt(
@@ -479,37 +524,169 @@ def _validate_json_response(response: str) -> tuple:
         return False, None
 
 
+def _resolve_defaults(
+    provider: str | None,
+    model: str | None,
+) -> tuple[str, str]:
+    """Apply default provider/model when values are still ``None``.
+
+    Call **after** alias resolution so defaults only fill in gaps.
+
+    Returns:
+        ``(provider, model)`` with no ``None`` values.
+    """
+    resolved_provider: str = provider or str(_delegate_config.get("default_provider", "ollama"))
+    resolved_model: str = model or str(_delegate_config.get("default_model") or "default")
+    return resolved_provider, resolved_model
+
+
+def _check_allowed_model(model: str | None) -> str | None:
+    """Validate that the requested model/alias is in ``allowed_models``.
+
+    If ``allowed_models`` is not configured (``None``), every model is
+    permitted (backward-compatible behaviour).
+
+    Returns:
+        ``None`` if the model is allowed, or an error message string.
+    """
+    allowed: list[str] | None = _delegate_config.get("allowed_models")
+    if allowed is None:
+        return None  # no restriction
+
+    if not model:
+        return None  # no model specified; defaults will apply
+
+    if model in allowed:
+        return None  # explicitly allowed
+
+    # Also accept aliases that resolve to an allowed alias
+    # (e.g. "code" and "coder" might both be defined)
+    return (
+        f"Model '{model}' is not in the allowed delegation list. "
+        f"Allowed models: {', '.join(allowed)}"
+    )
+
+
+_DELEGATE_AGENT_RECURSION_LIMIT = 30
+_DELEGATE_AGENT_SYSTEM_PROMPT = (
+    "You are a delegate agent completing a specific task. "
+    "Use your tools to gather information and complete the task. "
+    "Be thorough but efficient — you have a limited number of steps. "
+    "When done, provide your final answer directly.\n\n"
+    "IMPORTANT:\n"
+    "- Do NOT delegate to other models (you have no delegation tools).\n"
+    "- Do NOT say 'I need more steps'. Deliver what you have.\n"
+    "- Focus on the specific task assigned to you.\n"
+)
+
+
+def _extract_content(result: Any) -> str:
+    """Extract text content from an LLM response object."""
+    if hasattr(result, "content"):
+        content = result.content
+        if isinstance(content, list):
+            text_parts = []
+            for part in content:
+                if isinstance(part, str):
+                    text_parts.append(part)
+                elif isinstance(part, dict) and "text" in part:
+                    text_parts.append(part["text"])
+            return "\n".join(text_parts) if text_parts else str(content)
+        return str(content) if content is not None else ""
+    return str(result)
+
+
+def _run_delegate_agent(
+    llm: Any,
+    task: str,
+    context: str,
+    tools: list[Any],
+) -> str:
+    """Run a delegate as a full ReAct agent with tool access.
+
+    Returns the final text response from the agent.  Falls back to
+    plain LLM invocation if the agent framework is unavailable or
+    the model does not support tool calling.
+    """
+    log = get_logger()
+
+    try:
+        from langgraph.prebuilt import create_react_agent
+    except ImportError:
+        log.debug("LangGraph unavailable — falling back to plain LLM for delegate")
+        return ""  # empty signals caller to fall back
+
+    prompt = _DELEGATE_AGENT_SYSTEM_PROMPT
+    if context:
+        prompt += f"\n## Provided Context\n\n{context}\n"
+
+    try:
+        agent = create_react_agent(
+            model=llm,
+            tools=tools,
+            prompt=prompt,
+        )
+    except Exception as exc:
+        log.debug(f"Delegate agent creation failed ({exc}) — falling back to plain LLM")
+        return ""
+
+    try:
+        if LANGCHAIN_MESSAGES_AVAILABLE:
+            input_msg = HumanMessage(content=task)
+        else:
+            input_msg = {"role": "user", "content": task}
+
+        result = agent.invoke(
+            {"messages": [input_msg]},
+            {"recursion_limit": _DELEGATE_AGENT_RECURSION_LIMIT},
+        )
+
+        messages = result.get("messages", [])
+        for msg in reversed(messages):
+            msg_content = _extract_content(msg)
+            if not msg_content.strip():
+                continue
+            msg_type = type(msg).__name__.lower()
+            if msg_type in ("aimessage", "ai"):
+                if not getattr(msg, "tool_calls", None):
+                    return msg_content
+        return _extract_content(messages[-1]) if messages else ""
+
+    except Exception as exc:
+        log.warning(f"Delegate agent execution failed: {exc}")
+        return ""
+
+
 def _execute_single_task(
     task: str,
     context: str = "",
     response_format: str = "text",
     json_schema: str | None = None,
-    provider: str | None = None,
-    model: str | None = None,
+    provider: str = "ollama",
+    model: str = "default",
     temperature: float = 0.7,
     num_ctx: int | None = None,
+    use_tools: bool = True,
 ) -> DelegateResult:
     """
     Execute a single delegated task.
 
-    Includes circuit breaker logic to prevent repeated calls to failing models.
+    When *use_tools* is ``True`` and delegate tools are configured,
+    the task runs as a full ReAct agent with tool access.  Otherwise
+    it falls back to a plain LLM call.
+
+    **Callers must resolve aliases and defaults before calling this
+    function.**  Use ``_resolve_model_alias`` followed by
+    ``_resolve_defaults`` to prepare the arguments.
+
+    Includes circuit breaker logic to prevent repeated calls to failing
+    models.
 
     Returns:
         DelegateResult with response and metadata
     """
     log = get_logger()
     start_time = time.time()
-
-    # Resolve aliases and defaults
-    provider, model, alias_config = _resolve_model_alias(provider, model)
-    provider = provider or _delegate_config.get("default_provider", "ollama")
-    model = model or _delegate_config.get("default_model") or "default"
-
-    # Apply alias config overrides (alias takes precedence over parameter)
-    if "temperature" in alias_config:
-        temperature = alias_config["temperature"]
-    if "num_ctx" in alias_config:
-        num_ctx = alias_config["num_ctx"]
 
     target_model = f"{provider}/{model}"
     log.debug(f"Delegation starting: {target_model}")
@@ -537,29 +714,23 @@ def _execute_single_task(
         # Create LLM
         llm = _create_llm(provider, model, temperature, num_ctx)
 
-        # Build prompt
-        messages = _build_prompt(task, context, response_format, json_schema)
+        # ── Agent mode: run as full ReAct agent with tools ──────
+        response_text = ""
+        if use_tools and _delegate_tools:
+            log.debug(
+                f"Running delegate agent with {len(_delegate_tools)} tools: " f"{target_model}"
+            )
+            response_text = _run_delegate_agent(llm, task, context, _delegate_tools)
 
-        # Invoke LLM
-        log.debug(f"Invoking delegate LLM: {target_model}")
-        result = llm.invoke(messages)
-
-        # Extract response content
-        if hasattr(result, "content"):
-            content = result.content
-            if isinstance(content, list):
-                # Multimodal message — extract text parts
-                text_parts = []
-                for part in content:
-                    if isinstance(part, str):
-                        text_parts.append(part)
-                    elif isinstance(part, dict) and "text" in part:
-                        text_parts.append(part["text"])
-                response_text = "\n".join(text_parts) if text_parts else str(content)
+        # ── Fallback: plain LLM call ────────────────────────────
+        if not response_text:
+            if not use_tools:
+                log.debug(f"Invoking delegate LLM (no tools): {target_model}")
             else:
-                response_text = str(content) if content is not None else ""
-        else:
-            response_text = str(result)
+                log.debug(f"Invoking delegate LLM (agent fallback): {target_model}")
+            messages = _build_prompt(task, context, response_format, json_schema)
+            result = llm.invoke(messages)
+            response_text = _extract_content(result)
 
         # Validate JSON if requested
         format_valid = True
@@ -633,6 +804,7 @@ def _execute_single_task(
 def delegate_task(
     task: str,
     context: str = "",
+    use_tools: bool = True,
     response_format: str = "text",
     json_schema: str | None = None,
     provider: str | None = None,
@@ -643,12 +815,14 @@ def delegate_task(
     """
     Delegate a task to another LLM model.
 
-    This tool allows the agent to offload subtasks to other models,
-    enabling specialization, cost optimization, and parallel processing.
+    When *use_tools* is True (default), the delegate runs as a full
+    agent with tool access (file I/O, shell, search, etc.).  When
+    False, the delegate is LLM-only and requires non-empty *context*.
 
     Args:
         task: Clear description of what the delegated model should do
         context: Relevant context/data for the task
+        use_tools: Whether the delegate can use tools (default True)
         response_format: Expected format ('text', 'json', 'code', 'markdown')
         json_schema: If JSON, the expected structure description
         provider: LLM provider ('openai', 'ollama') or alias
@@ -662,18 +836,40 @@ def delegate_task(
     if not _delegate_config.get("enabled", True):
         return "**Delegation disabled.** Enable in configuration."
 
-    # Resolve aliases first to get any timeout/temperature overrides
+    # Reject LLM-only delegation with empty context
+    if not use_tools and not context.strip():
+        return (
+            "**Delegation rejected:** context is empty and use_tools=False. "
+            "Either provide context data for the delegate to analyse, or "
+            "set use_tools=True so the delegate can gather data itself."
+        )
+
+    # Validate against allowed_models before any resolution
+    error = _check_allowed_model(model)
+    if error:
+        return f"**Delegation blocked:** {error}"
+
+    # Resolve aliases first to get any timeout/temperature/num_ctx overrides
     resolved_provider, resolved_model, alias_config = _resolve_model_alias(provider, model)
 
-    # Apply alias overrides (alias config takes precedence)
+    # Apply alias overrides (alias config takes precedence over parameters)
     if "timeout" in alias_config:
         timeout = alias_config["timeout"]
     if "temperature" in alias_config:
         temperature = alias_config["temperature"]
     num_ctx = alias_config.get("num_ctx")
 
-    # Clamp timeout
+    # Fill in defaults for anything still None after alias resolution
+    resolved_provider, resolved_model = _resolve_defaults(resolved_provider, resolved_model)
+
+    # Clamp timeout and temperature to valid ranges
     timeout = max(10, min(600, timeout))  # Allow up to 600s for reasoning models
+    temperature = max(0.0, min(2.0, temperature))
+
+    # Show delegation activity to the user
+    alias_hint = f" (alias: {model})" if model and model != resolved_model else ""
+    mode_hint = " (with tools)" if use_tools and _delegate_tools else ""
+    _emit_status(f"→ Delegating to {resolved_provider}/{resolved_model}" f"{alias_hint}{mode_hint}")
 
     # Execute with timeout
     with ThreadPoolExecutor(max_workers=1) as executor:
@@ -687,15 +883,20 @@ def delegate_task(
             model=resolved_model,
             temperature=temperature,
             num_ctx=num_ctx,
+            use_tools=use_tools,
         )
 
         try:
             result = future.result(timeout=timeout)
         except FuturesTimeoutError:
+            _emit_status(f"✗ Delegation timed out after {timeout}s")
             return f"**Delegation timed out** after {timeout}s.\n\n" f"Task: {task[:100]}..."
 
     # Format output
     if result.success:
+        _emit_status(
+            f"✓ {result.provider}/{result.model_used} responded in {result.duration_seconds}s"
+        )
         output_parts = [
             f"**Delegated to:** `{result.provider}/{result.model_used}`",
             f"**Duration:** {result.duration_seconds}s",
@@ -727,6 +928,7 @@ def delegate_parallel(
         tasks: List of task definitions, each with:
             - task (required): Task description
             - context: Context for the task
+            - use_tools: Run as agent with tools (default True)
             - response_format: 'text', 'json', 'code', 'markdown'
             - json_schema: Expected JSON structure
             - provider: 'openai', 'ollama', or alias
@@ -743,22 +945,60 @@ def delegate_parallel(
     if not tasks:
         return "**No tasks provided.**"
 
+    # Validate context for LLM-only tasks and allowed_models up front
+    for i, task_def in enumerate(tasks):
+        error = _check_allowed_model(task_def.get("model"))
+        if error:
+            return f"**Delegation blocked (task {i + 1}):** {error}"
+        task_use_tools = task_def.get("use_tools", True)
+        task_context = task_def.get("context", "")
+        if not task_use_tools and not task_context.strip():
+            return (
+                f"**Delegation rejected (task {i + 1}):** context is empty "
+                f"and use_tools=False. Provide context or set use_tools=True."
+            )
+
     # Clamp timeout
     timeout = max(30, min(600, timeout))
+
+    # Build summary of delegation targets for the status message
+    target_summaries = []
+    for task_def in tasks:
+        prov_peek, mdl_peek, _ = _resolve_model_alias(
+            task_def.get("provider"), task_def.get("model")
+        )
+        prov_peek, mdl_peek = _resolve_defaults(prov_peek, mdl_peek)
+        label = task_def.get("model") or mdl_peek
+        target_summaries.append(f"{prov_peek}/{label}")
+    _emit_status(f"→ Delegating {len(tasks)} tasks in parallel: {', '.join(target_summaries)}")
 
     start_time = time.time()
     results: list[tuple] = []  # (index, DelegateResult)
 
     def execute_indexed(index: int, task_def: dict[str, Any]) -> tuple:
         """Execute task and return with index for ordering."""
+        prov, mdl, alias_cfg = _resolve_model_alias(
+            task_def.get("provider"),
+            task_def.get("model"),
+        )
+        temp = task_def.get("temperature", 0.7)
+        if "temperature" in alias_cfg:
+            temp = alias_cfg["temperature"]
+        temp = max(0.0, min(2.0, temp))
+        num_ctx = alias_cfg.get("num_ctx")
+
+        prov, mdl = _resolve_defaults(prov, mdl)
+
         result = _execute_single_task(
             task=task_def.get("task", ""),
             context=task_def.get("context", ""),
             response_format=task_def.get("response_format", "text"),
             json_schema=task_def.get("json_schema"),
-            provider=task_def.get("provider"),
-            model=task_def.get("model"),
-            temperature=task_def.get("temperature", 0.7),
+            provider=prov,
+            model=mdl,
+            temperature=temp,
+            num_ctx=num_ctx,
+            use_tools=task_def.get("use_tools", True),
         )
         return (index, result)
 
@@ -815,6 +1055,11 @@ def delegate_parallel(
     total_duration = time.time() - start_time
     success_count = sum(1 for _, r in results if r.success)
 
+    _emit_status(
+        f"✓ Parallel delegation complete: {success_count}/{len(tasks)} "
+        f"succeeded in {round(total_duration, 1)}s"
+    )
+
     # Format output
     output_parts = [
         f"**Parallel Delegation:** {len(tasks)} tasks",
@@ -847,26 +1092,22 @@ TOOL_CONFIGS = [
     {
         "name": "delegate_task",
         "description": (
-            "Delegate a task to another LLM model. Offload subtasks to "
-            "specialized or cost-effective models while you orchestrate "
-            "the overall workflow.\n"
+            "Delegate a task to another LLM model. By default the "
+            "delegate runs as a full agent with tool access (file I/O, "
+            "shell, search, etc.). Set use_tools=False for pure text "
+            "analysis (faster, but requires non-empty context).\n"
             "\n"
             "USE THIS TOOL WHEN:\n"
-            "- A subtask would benefit from a specialized model (e.g., "
-            "code review → code model, translation → multilingual model)\n"
-            "- You need a second opinion or independent verification of "
-            "your own analysis\n"
-            "- The task involves processing large text (summarization, "
-            "extraction, rewriting) that can be offloaded\n"
-            "- The user mentions model aliases ('use the fast model', "
-            "'ask the code model') or asks you to delegate\n"
-            "- You are orchestrating a multi-step workflow and individual "
-            "steps can be handled by other models\n"
-            "- A cheaper/faster model can handle routine work while you "
-            "focus on synthesis and reasoning\n"
+            "- A subtask can run independently (code review, research, "
+            "testing, data gathering)\n"
+            "- You need a second opinion or specialised model\n"
+            "- The user asks you to delegate or use a specific model\n"
+            "- Multiple independent subtasks can run in parallel\n"
             "\n"
-            "DO NOT delegate when you can answer directly with equal "
-            "quality, or when the task requires your conversation context."
+            "RULES:\n"
+            "- NEVER use use_tools=False with empty context\n"
+            "- Provide context when possible to avoid redundant work\n"
+            "- Delegates cannot see your conversation history"
         ),
         "input_schema": DelegateInput,
         "function": delegate_task,
@@ -875,20 +1116,19 @@ TOOL_CONFIGS = [
     {
         "name": "delegate_parallel",
         "description": (
-            "Run multiple independent tasks in parallel across LLM models. "
-            "Each task can target a different model.\n"
+            "Run multiple independent tasks in parallel across LLM "
+            "models. Each task can target a different model and each "
+            "delegate runs as a full agent with tool access by default.\n"
             "\n"
             "USE THIS TOOL WHEN:\n"
-            "- You have multiple independent subtasks that don't depend "
-            "on each other (e.g., summarize 5 documents, review 3 files)\n"
-            "- You need to compare outputs from different models on the "
-            "same task\n"
-            "- Batch processing: extract data from several sources, "
-            "translate multiple texts, analyze multiple items\n"
-            "- Speed matters and tasks can run concurrently\n"
+            "- You have multiple independent subtasks (e.g., review "
+            "3 modules, research 5 topics, run tests in parallel)\n"
+            "- You need to compare outputs from different models\n"
+            "- Batch processing where tasks don't depend on each other\n"
             "\n"
-            "DO NOT use for sequential tasks where each step depends on "
-            "the previous result — use delegate_task in sequence instead."
+            "Set use_tools=False per task for pure text analysis "
+            "(requires non-empty context). Delegates cannot see "
+            "your conversation history — pass relevant data in context."
         ),
         "input_schema": DelegateParallelInput,
         "function": delegate_parallel,
@@ -900,11 +1140,19 @@ __all__ = [
     "delegate_task",
     "delegate_parallel",
     "configure_delegate",
+    "set_delegate_tools",
+    "set_status_callback",
     "get_model_status",
     "reset_model_status",
     "DelegateInput",
     "DelegateParallelInput",
     "DelegateResult",
     "ModelCircuitBreaker",
+    "_build_prompt",
+    "_check_allowed_model",
+    "_resolve_defaults",
+    "_resolve_model_alias",
+    "_validate_json_response",
+    "_extract_content",
     "TOOL_CONFIGS",
 ]

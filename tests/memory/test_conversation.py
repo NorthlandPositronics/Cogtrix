@@ -1,5 +1,7 @@
 """Unit tests for ConversationMemoryManager."""
 
+from datetime import datetime
+
 # Import to trigger registration
 from src.memory import modes  # noqa: F401
 from src.memory.context import MemoryContext
@@ -40,8 +42,8 @@ class TestConversationMemoryManager:
     def test_default_config(self):
         """Test default configuration values."""
         manager = ConversationMemoryManager(MockStore(), "test")
-        assert manager._mode_config["working_memory_size"] == 20
-        assert manager._mode_config["summary_threshold"] == 30
+        assert manager._mode_config["working_memory_size"] == 25
+        assert manager._mode_config["summary_threshold"] == 35
         assert manager._mode_config["entity_extraction"] is False
         assert manager._mode_config["rag_enabled"] is False
 
@@ -53,7 +55,7 @@ class TestConversationMemoryManager:
         assert manager._mode_config["working_memory_size"] == 10
         assert manager._mode_config["custom_option"] is True
         # Default values still present
-        assert manager._mode_config["summary_threshold"] == 30
+        assert manager._mode_config["summary_threshold"] == 35
 
     def test_prepare_context_empty(self):
         """Test prepare_context with no messages."""
@@ -150,7 +152,7 @@ class TestConversationMemoryManager:
 
         assert stats["mode"] == "conversation"
         assert stats["total_messages"] == 2
-        assert stats["working_memory_size"] == 20
+        assert stats["working_memory_size"] == 25
         assert stats["has_summary"] is False
         assert stats["entity_count"] == 0
 
@@ -198,15 +200,18 @@ class TestConversationMemoryManager:
         assert manager2._loaded is True
 
     def test_token_estimation(self):
-        """Test rough token estimation."""
+        """Test rough token estimation (content + timestamp overhead)."""
         manager = ConversationMemoryManager(MockStore(), "test")
         manager.load()
-        # 100 chars each = 200 total = ~50 tokens
+        # 100 chars each = 200 total content + ~19 chars timestamp per message
         manager.update("A" * 100, "B" * 100)
 
         context = manager.prepare_context("next")
 
-        assert context.token_estimate == 50
+        # 200 content chars + 38 timestamp chars ≈ 238 / 4 ≈ 59
+        assert context.token_estimate is not None
+        assert context.token_estimate > 50
+        assert context.token_estimate < 70
 
     def test_context_prefix_with_summary(self):
         """Test that summary appears in context prefix."""
@@ -309,7 +314,7 @@ class TestFactoryCreation:
         """Test factory creation with no config."""
         manager = MemoryFactory.create("conversation", MockStore(), "test-session")
         assert isinstance(manager, ConversationMemoryManager)
-        assert manager._mode_config["working_memory_size"] == 20
+        assert manager._mode_config["working_memory_size"] == 25
 
     def test_create_with_custom_config(self):
         """Test factory creation with custom config."""
@@ -321,3 +326,103 @@ class TestFactoryCreation:
         """Test that conversation is in available modes."""
         available = MemoryFactory.available_modes()
         assert "conversation" in available
+
+
+class TestTimestamps:
+    """Tests for message timestamp functionality."""
+
+    def test_update_stamps_messages(self):
+        """Test that update attaches timestamps to messages."""
+        manager = ConversationMemoryManager(MockStore(), "test")
+        manager.load()
+        manager.update("Hello", "Hi!")
+
+        for msg in manager._messages:
+            ts = manager._get_msg_ts(msg)
+            assert ts is not None
+            datetime.fromisoformat(ts)
+
+    def test_prepare_context_injects_timestamps(self):
+        """Test that prepare_context prepends timestamps to message content."""
+        manager = ConversationMemoryManager(MockStore(), "test")
+        manager.load()
+        manager.update("Hello", "Hi!")
+
+        context = manager.prepare_context("next")
+
+        for msg in context.messages:
+            content = msg.content if hasattr(msg, "content") else msg["content"]
+            assert content.startswith("[")
+            assert "] " in content
+
+    def test_to_dict_preserves_timestamps(self):
+        """Test that serialization includes timestamps."""
+        manager = ConversationMemoryManager(MockStore(), "test")
+        manager.load()
+        manager.update("Hello", "Hi!")
+
+        data = manager.to_dict()
+        for msg_data in data["messages"]:
+            assert "timestamp" in msg_data
+            datetime.fromisoformat(msg_data["timestamp"])
+
+    def test_from_dict_restores_timestamps(self):
+        """Test that deserialization restores timestamps."""
+        manager1 = ConversationMemoryManager(MockStore(), "test")
+        manager1.load()
+        manager1.update("Q", "A")
+
+        data = manager1.to_dict()
+
+        manager2 = ConversationMemoryManager(MockStore(), "test")
+        manager2.from_dict(data)
+
+        for msg in manager2._messages:
+            ts = manager2._get_msg_ts(msg)
+            assert ts is not None
+
+    def test_backward_compat_no_timestamps(self):
+        """Test loading data without timestamps (backward compatibility)."""
+        manager = ConversationMemoryManager(MockStore(), "test")
+        data = {
+            "mode": "conversation",
+            "version": 1,
+            "session_id": "test",
+            "config": {},
+            "messages": [
+                {"type": "human", "content": "Hello"},
+                {"type": "ai", "content": "Hi!"},
+            ],
+            "summary": None,
+            "entities": {},
+            "topics": [],
+        }
+
+        manager.from_dict(data)
+
+        context = manager.prepare_context("next")
+        assert len(context.messages) == 2
+        # Messages without timestamps pass through unmodified
+        content = (
+            context.messages[0].content
+            if hasattr(context.messages[0], "content")
+            else context.messages[0]["content"]
+        )
+        assert not content.startswith("[")
+
+    def test_json_store_roundtrip_preserves_timestamps(self, tmp_path):
+        """Test that save/load through JsonFileMemoryStore keeps timestamps."""
+        store = JsonFileMemoryStore(str(tmp_path))
+
+        m1 = ConversationMemoryManager(store, "ts-test")
+        m1.load()
+        m1.update("Hello", "Hi!")
+        m1.save()
+
+        m2 = ConversationMemoryManager(store, "ts-test")
+        m2.load()
+
+        for msg in m2._messages:
+            ts = m2._get_msg_ts(msg)
+            assert ts is not None
+            datetime.fromisoformat(ts)

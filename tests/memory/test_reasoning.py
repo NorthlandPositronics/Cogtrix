@@ -1,5 +1,7 @@
 """Unit tests for ReasoningMemoryManager."""
 
+from datetime import datetime
+
 from src.memory.factory import MemoryFactory
 from src.memory.json_store import JsonFileMemoryStore
 from src.memory.modes.reasoning import ReasoningMemoryManager
@@ -47,7 +49,7 @@ class TestReasoningMemoryManager:
     def test_default_config(self):
         """Test default configuration values."""
         manager = ReasoningMemoryManager(MockStore(), "test")
-        assert manager._mode_config["working_memory_size"] == 6
+        assert manager._mode_config["working_memory_size"] == 40
         assert manager._mode_config["track_reasoning"] is True
         assert manager._mode_config["track_decisions"] is True
         assert manager._mode_config["max_decisions"] == 20
@@ -515,3 +517,49 @@ class TestClear:
         assert len(manager._decisions) == 0
         assert len(manager._reasoning_chain) == 0
         assert len(manager._alternatives) == 0
+
+
+class TestReasoningTimestamps:
+    """Tests for timestamp support in reasoning memory mode."""
+
+    def setup_method(self):
+        _ensure_registration()
+
+    def test_update_stamps_messages(self):
+        """Test that update attaches timestamps to messages."""
+        manager = ReasoningMemoryManager(MockStore(), "test")
+        manager.load()
+        manager.update("Analyze options", "Here is my analysis.")
+
+        for msg in manager._messages:
+            ts = manager._get_msg_ts(msg)
+            assert ts is not None
+            datetime.fromisoformat(ts)
+
+    def test_prepare_context_injects_timestamps(self):
+        """Test that prepare_context prepends timestamps to message content."""
+        manager = ReasoningMemoryManager(MockStore(), "test")
+        manager.load()
+        manager.update("Question", "Answer")
+
+        context = manager.prepare_context("next")
+
+        for msg in context.messages:
+            content = msg.content if hasattr(msg, "content") else msg["content"]
+            assert content.startswith("[")
+
+    def test_to_dict_from_dict_roundtrip(self):
+        """Test that timestamps survive to_dict / from_dict round-trip."""
+        m1 = ReasoningMemoryManager(MockStore(), "test")
+        m1.load()
+        m1.update("Q", "A")
+
+        data = m1.to_dict()
+        for msg_data in data["messages"]:
+            assert "timestamp" in msg_data
+
+        m2 = ReasoningMemoryManager(MockStore(), "test")
+        m2.from_dict(data)
+
+        for msg in m2._messages:
+            assert m2._get_msg_ts(msg) is not None

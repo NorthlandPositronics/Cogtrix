@@ -271,6 +271,16 @@ class ToolRegistry:
                 log.debug(f"Skipped module: {module_name} (import failed)")
                 continue
 
+            # Skip modules that declare is_configured() and return False
+            if hasattr(module, "is_configured") and callable(module.is_configured):
+                try:
+                    if not module.is_configured():
+                        log.debug(f"Skipped module: {module_name} (not configured)")
+                        continue
+                except Exception:
+                    log.debug(f"Skipped module: {module_name} (is_configured raised)")
+                    continue
+
             results = self.extract_tool_functions(module)
             if not results:
                 log.debug(f"No tool function found in module: {module_name}")
@@ -295,3 +305,12 @@ class ToolRegistry:
     def list_tools(self) -> list[str]:
         """Get list of all registered tool names."""
         return list(self.tools.keys())
+
+    def is_mcp_tool(self, name: str) -> bool:
+        """Check if a tool came from an MCP server."""
+        return self.tool_metadata.get(name, {}).get("source") == "mcp"
+
+    def get_tool_server(self, name: str) -> str | None:
+        """Return the MCP server name for an MCP tool."""
+        meta = self.tool_metadata.get(name, {})
+        return meta.get("server") if meta.get("source") == "mcp" else None

@@ -1,0 +1,440 @@
+"""Tests for src/setup_wizard.py."""
+
+from __future__ import annotations
+
+import os
+from unittest.mock import MagicMock, patch
+
+import pytest
+import yaml
+
+from src.setup_wizard import (
+    _detect_environment,
+    _extract_config_info,
+    _extract_yaml,
+    _has_yaml_block,
+    _inject_bootstrap,
+    _list_ollama_models,
+    _load_docs,
+    _load_existing_config,
+    _mask_secrets,
+    _print_detections,
+    _test_connection,
+)
+
+
+class TestDetectEnvironment:
+    def test_detects_openai_key(self):
+        with patch.dict(os.environ, {"OPENAI_API_KEY": "sk-test123"}):
+            env = _detect_environment()
+        assert env["openai_key"] == "sk-test123"
+
+    def test_no_openai_key(self):
+        with patch.dict(os.environ, {}, clear=True):
+            with patch("src.setup_wizard.urllib.request.urlopen", side_effect=Exception):
+                env = _detect_environment()
+        assert "openai_key" not in env
+
+    def test_detects_ollama_running(self):
+        mock_resp = MagicMock()
+        mock_resp.status = 200
+        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        with patch.dict(os.environ, {}, clear=True):
+            with patch("src.setup_wizard.urllib.request.urlopen", return_value=mock_resp):
+                env = _detect_environment()
+        assert env.get("ollama_running") is True
+
+    def test_ollama_not_running(self):
+        with patch.dict(os.environ, {}, clear=True):
+            with patch("src.setup_wizard.urllib.request.urlopen", side_effect=Exception("refused")):
+                env = _detect_environment()
+        assert "ollama_running" not in env
+
+
+class TestLoadDocs:
+    def test_loads_embedded_docs(self):
+        docs = _load_docs()
+        assert "Configuration" in docs
+        assert len(docs) > 100
+
+    def test_url_fallback_on_failure(self):
+        with patch("src.setup_wizard.urllib.request.urlopen", side_effect=Exception("fail")):
+            docs = _load_docs(url="https://example.com/bad")
+        assert "Configuration" in docs
+
+    def test_url_success(self):
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = b"# Custom Docs\nContent here"
+        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        with patch("src.setup_wizard.urllib.request.urlopen", return_value=mock_resp):
+            docs = _load_docs(url="https://example.com/docs")
+        assert docs == "# Custom Docs\nContent here"
+
+
+class TestLoadExistingConfig:
+    def test_no_config_found(self):
+        with patch("src.config.find_config_file", return_value=None):
+            content, path = _load_existing_config()
+        assert content == ""
+        assert path is None
+
+    def test_config_found(self, tmp_path):
+        cfg_file = tmp_path / ".cogtrix.yaml"
+        cfg_file.write_text("provider: ollama\nmodel: qwen3:8b\n")
+        with patch("src.config.find_config_file", return_value=cfg_file):
+            content, path = _load_existing_config()
+        assert "provider: ollama" in content
+        assert path == cfg_file
+
+
+class TestHasYamlBlock:
+    def test_complete_block(self):
+        assert _has_yaml_block("Here is the config:\n```yaml\nprovider: ollama\n```\nDone.")
+
+    def test_no_block(self):
+        assert not _has_yaml_block("No yaml here")
+
+    def test_unclosed_block(self):
+        assert not _has_yaml_block("```yaml\nprovider: ollama\n")
+
+    def test_only_marker(self):
+        assert not _has_yaml_block("```yaml")
+
+
+class TestExtractYaml:
+    def test_extracts_yaml_block(self):
+        text = "Some text\n```yaml\nprovider: ollama\nmodel: qwen3:8b\n```\nMore text"
+        result = _extract_yaml(text)
+        assert "provider: ollama" in result
+        assert "model: qwen3:8b" in result
+
+    def test_takes_last_block(self):
+        text = "```yaml\nfirst: block\n```\nLater:\n```yaml\nsecond: block\n```"
+        result = _extract_yaml(text)
+        assert "second: block" in result
+        assert "first" not in result
+
+    def test_no_block_raises(self):
+        with pytest.raises(ValueError, match="No.*yaml.*block"):
+            _extract_yaml("no yaml here")
+
+    def test_strips_whitespace(self):
+        text = "```yaml\n  provider: ollama  \n```"
+        result = _extract_yaml(text)
+        assert result == "provider: ollama"
+
+
+class TestInjectBootstrap:
+    def test_injects_api_key(self):
+        data = {"provider": "openai"}
+        bootstrap = {
+            "provider": "openai",
+            "model": "gpt-4.1-mini",
+            "api_key": "sk-real-key",
+            "base_url": None,
+            "type": "openai",
+        }
+        _inject_bootstrap(data, bootstrap)
+        assert data["inference"]["openai"]["api_key"] == "sk-real-key"
+        assert data["inference"]["openai"]["model"] == "gpt-4.1-mini"
+
+    def test_injects_ollama_base_url(self):
+        data = {}
+        bootstrap = {
+            "provider": "ollama",
+            "model": "qwen3:8b",
+            "api_key": None,
+            "base_url": "http://localhost:11434",
+            "type": "ollama",
+        }
+        _inject_bootstrap(data, bootstrap)
+        assert data["provider"] == "ollama"
+        assert data["inference"]["ollama"]["base_url"] == "http://localhost:11434"
+
+    def test_preserves_existing_inference(self):
+        data = {"inference": {"other_provider": {"type": "openai", "model": "gpt-4.1"}}}
+        bootstrap = {
+            "provider": "ollama",
+            "model": "qwen3:8b",
+            "api_key": None,
+            "base_url": None,
+            "type": "ollama",
+        }
+        _inject_bootstrap(data, bootstrap)
+        assert "other_provider" in data["inference"]
+        assert "ollama" in data["inference"]
+
+    def test_no_api_key_when_none(self):
+        data = {}
+        bootstrap = {
+            "provider": "ollama",
+            "model": "qwen3:8b",
+            "api_key": None,
+            "base_url": None,
+            "type": "ollama",
+        }
+        _inject_bootstrap(data, bootstrap)
+        assert "api_key" not in data["inference"]["ollama"]
+
+
+class TestMaskSecrets:
+    def test_masks_api_key(self):
+        text = 'api_key: "sk-secret-value"'
+        result = _mask_secrets(text)
+        assert "sk-secret-value" not in result
+        assert "***" in result
+
+    def test_masks_token(self):
+        text = "token: bot123456:ABC"
+        result = _mask_secrets(text)
+        assert "bot123456" not in result
+
+    def test_preserves_non_secret(self):
+        text = "provider: ollama\nmodel: qwen3:8b"
+        result = _mask_secrets(text)
+        assert "provider: ollama" in result
+        assert "model: qwen3:8b" in result
+
+
+class TestValidateYamlIntegration:
+    def test_valid_yaml_round_trip(self):
+        yaml_content = "provider: ollama\n"
+        data = yaml.safe_load(yaml_content)
+        assert isinstance(data, dict)
+        assert data["provider"] == "ollama"
+
+
+class TestExtractConfigInfo:
+    def test_basic_provider_and_model(self):
+        yaml_content = "provider: openai\nmodel: gpt-4.1-mini\n"
+        info = _extract_config_info(yaml_content)
+        assert info["provider"] == "openai"
+        assert info["model"] == "gpt-4.1-mini"
+
+    def test_inference_section_type_and_base_url(self):
+        yaml_content = (
+            "provider: myollama\n"
+            "inference:\n"
+            "  myollama:\n"
+            "    type: ollama\n"
+            "    model: qwen3:8b\n"
+            "    base_url: http://localhost:11434\n"
+        )
+        info = _extract_config_info(yaml_content)
+        assert info["provider"] == "myollama"
+        assert info["type"] == "ollama"
+        assert info["base_url"] == "http://localhost:11434"
+
+    def test_model_falls_back_to_inference_when_top_level_absent(self):
+        yaml_content = (
+            "provider: ollama\n"
+            "inference:\n"
+            "  ollama:\n"
+            "    type: ollama\n"
+            "    model: llama3.2\n"
+        )
+        info = _extract_config_info(yaml_content)
+        assert info["model"] == "llama3.2"
+
+    def test_top_level_model_takes_precedence_over_inference_model(self):
+        yaml_content = (
+            "provider: ollama\n"
+            "model: top-level-model\n"
+            "inference:\n"
+            "  ollama:\n"
+            "    type: ollama\n"
+            "    model: inference-model\n"
+        )
+        info = _extract_config_info(yaml_content)
+        assert info["model"] == "top-level-model"
+
+    def test_missing_provider_returns_empty(self):
+        yaml_content = "model: gpt-4.1-mini\n"
+        info = _extract_config_info(yaml_content)
+        assert "provider" not in info
+        assert "type" not in info
+
+    def test_invalid_yaml_returns_empty(self):
+        info = _extract_config_info("not: valid: yaml: ::::")
+        assert info == {}
+
+    def test_non_dict_yaml_returns_empty(self):
+        info = _extract_config_info("- item1\n- item2\n")
+        assert info == {}
+
+    def test_empty_string_returns_empty(self):
+        info = _extract_config_info("")
+        assert info == {}
+
+    def test_extracts_api_key_from_inference(self):
+        yaml_content = (
+            "provider: openai\n"
+            "inference:\n"
+            "  openai:\n"
+            "    type: openai\n"
+            "    model: gpt-4.1-mini\n"
+            "    api_key: sk-existing-key\n"
+        )
+        info = _extract_config_info(yaml_content)
+        assert info["api_key"] == "sk-existing-key"
+
+    def test_no_api_key_when_absent(self):
+        yaml_content = (
+            "provider: ollama\n"
+            "inference:\n"
+            "  ollama:\n"
+            "    type: ollama\n"
+            "    model: qwen3:8b\n"
+        )
+        info = _extract_config_info(yaml_content)
+        assert "api_key" not in info
+        assert "base_url" not in info
+
+    def test_providers_key_used_as_fallback_for_inference(self):
+        yaml_content = (
+            "provider: groq\n"
+            "providers:\n"
+            "  groq:\n"
+            "    type: openai\n"
+            "    base_url: https://api.groq.com/openai/v1\n"
+        )
+        info = _extract_config_info(yaml_content)
+        assert info["type"] == "openai"
+        assert info["base_url"] == "https://api.groq.com/openai/v1"
+
+
+class TestListOllamaModels:
+    def _make_mock_urlopen(self, payload: bytes):
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = payload
+        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        return MagicMock(return_value=mock_resp)
+
+    def test_returns_model_names(self):
+        payload = b'{"models": [{"name": "qwen3:8b", "size": 20000000000}, {"name": "llama3.2", "size": 500000000}]}'
+        mock_urlopen = self._make_mock_urlopen(payload)
+        with patch("src.setup_wizard.urllib.request.urlopen", mock_urlopen):
+            names = _list_ollama_models("http://localhost:11434")
+        assert names == ["qwen3:8b", "llama3.2"]
+
+    def test_prints_model_names_and_sizes(self, capsys):
+        payload = b'{"models": [{"name": "phi4", "size": 2500000000}]}'
+        mock_urlopen = self._make_mock_urlopen(payload)
+        with patch("src.setup_wizard.urllib.request.urlopen", mock_urlopen):
+            _list_ollama_models("http://localhost:11434")
+        captured = capsys.readouterr()
+        assert "phi4" in captured.out
+        assert "2.5GB" in captured.out
+
+    def test_size_displayed_as_mb_when_under_1gb(self, capsys):
+        payload = b'{"models": [{"name": "tiny", "size": 750000000}]}'
+        mock_urlopen = self._make_mock_urlopen(payload)
+        with patch("src.setup_wizard.urllib.request.urlopen", mock_urlopen):
+            _list_ollama_models("http://localhost:11434")
+        captured = capsys.readouterr()
+        assert "MB" in captured.out
+
+    def test_empty_models_list_returns_empty(self):
+        payload = b'{"models": []}'
+        mock_urlopen = self._make_mock_urlopen(payload)
+        with patch("src.setup_wizard.urllib.request.urlopen", mock_urlopen):
+            names = _list_ollama_models("http://localhost:11434")
+        assert names == []
+
+    def test_connection_failure_returns_empty(self):
+        with patch("src.setup_wizard.urllib.request.urlopen", side_effect=Exception("refused")):
+            names = _list_ollama_models("http://localhost:11434")
+        assert names == []
+
+
+class TestTestConnection:
+    def _make_llm_mock(self, response_text: str = "ok"):
+        response = MagicMock()
+        response.content = response_text
+        llm = MagicMock()
+        llm.invoke.return_value = response
+        return llm
+
+    def test_successful_connection_returns_llm(self):
+        llm_mock = self._make_llm_mock("ok")
+        with patch(
+            "src.setup_wizard.create_llm_from_provider_config", return_value=llm_mock, create=True
+        ):
+            with patch("src.agent.core.create_llm_from_provider_config", return_value=llm_mock):
+                result = _test_connection("ollama", "qwen3:8b", None, "http://localhost:11434")
+        assert result is llm_mock
+
+    def test_provider_setup_failure_returns_none(self, capsys):
+        with patch(
+            "src.agent.core.create_llm_from_provider_config",
+            side_effect=ValueError("bad config"),
+        ):
+            result = _test_connection("ollama", "bad-model", None, None)
+        assert result is None
+        captured = capsys.readouterr()
+        assert "Provider setup failed" in captured.out
+
+    def test_invoke_failure_returns_none(self, capsys):
+        llm_mock = MagicMock()
+        llm_mock.invoke.side_effect = RuntimeError("timeout")
+        with patch("src.agent.core.create_llm_from_provider_config", return_value=llm_mock):
+            result = _test_connection("openai", "gpt-4.1-mini", "sk-test", None)
+        assert result is None
+        captured = capsys.readouterr()
+        assert "Connection failed" in captured.out
+
+    def test_empty_response_returns_none(self, capsys):
+        llm_mock = self._make_llm_mock("   ")
+        with patch("src.agent.core.create_llm_from_provider_config", return_value=llm_mock):
+            result = _test_connection("openai", "gpt-4.1-mini", "sk-test", None)
+        assert result is None
+        captured = capsys.readouterr()
+        assert "Connection failed" in captured.out
+
+    def test_response_without_content_attr_uses_str(self):
+        class _NoContent:
+            def __str__(self) -> str:
+                return "ok"
+
+        llm_mock = MagicMock()
+        llm_mock.invoke.return_value = _NoContent()
+        with patch("src.agent.core.create_llm_from_provider_config", return_value=llm_mock):
+            result = _test_connection("ollama", "llama3.2", None, "http://localhost:11434")
+        assert result is llm_mock
+
+
+class TestPrintDetections:
+    def test_prints_openai_key_detection(self, capsys):
+        _print_detections({"openai_key": "sk-abc"})
+        captured = capsys.readouterr()
+        assert "OPENAI_API_KEY" in captured.out
+
+    def test_prints_ollama_detection_with_url(self, capsys):
+        _print_detections({"ollama_running": True, "ollama_url": "http://localhost:11434"})
+        captured = capsys.readouterr()
+        assert "Ollama" in captured.out
+        assert "http://localhost:11434" in captured.out
+
+    def test_prints_ollama_default_url_when_missing(self, capsys):
+        _print_detections({"ollama_running": True})
+        captured = capsys.readouterr()
+        assert "127.0.0.1:11434" in captured.out
+
+    def test_both_detections(self, capsys):
+        _print_detections(
+            {"openai_key": "sk-xyz", "ollama_running": True, "ollama_url": "http://10.0.0.1:11434"}
+        )
+        captured = capsys.readouterr()
+        assert "OPENAI_API_KEY" in captured.out
+        assert "Ollama" in captured.out
+
+    def test_empty_env_prints_nothing(self, capsys):
+        _print_detections({})
+        captured = capsys.readouterr()
+        assert captured.out == ""
+
+    def test_no_exception_on_arbitrary_env(self):
+        _print_detections({"some_unknown_key": "value"})

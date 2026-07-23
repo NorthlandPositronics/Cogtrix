@@ -1,7 +1,7 @@
 """
 RAG tool: query_knowledge_base
 Uses FAISS index stored at data/vectordb/faiss_index.
-Supports multiple embedding providers: OpenAI and Ollama.
+Supports multiple embedding providers via the ``src.providers`` registry.
 """
 
 import os
@@ -18,35 +18,20 @@ except ImportError:
     FAISS = None  # type: ignore[misc, assignment]
     FAISS_AVAILABLE = False
 
-try:
-    from langchain_openai import OpenAIEmbeddings
-
-    OPENAI_EMBEDDINGS_AVAILABLE = True
-except ImportError:
-    OpenAIEmbeddings = None  # type: ignore[misc, assignment]
-    OPENAI_EMBEDDINGS_AVAILABLE = False
-
-try:
-    from langchain_ollama import OllamaEmbeddings
-
-    OLLAMA_EMBEDDINGS_AVAILABLE = True
-except ImportError:
-    OllamaEmbeddings = None  # type: ignore[misc, assignment]
-    OLLAMA_EMBEDDINGS_AVAILABLE = False
-
 
 VECTOR_DIR = Path("data/vectordb/faiss_index")
 
 # Default configuration from environment variables
-_DEFAULT_EMBEDDING_PROVIDER = os.getenv("COGTRIX_EMBEDDING_PROVIDER", "openai")
+_DEFAULT_EMBEDDING_PROVIDER = os.getenv("COGTRIX_EMBEDDING_PROVIDER", "ollama")
 _DEFAULT_OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 _DEFAULT_OLLAMA_EMBEDDING_MODEL = os.getenv("OLLAMA_EMBEDDING_MODEL", "nomic-embed-text")
 
 # Runtime configuration (set by configure_rag())
-_rag_config = {
+_rag_config: dict[str, str | None] = {
     "embedding_provider": _DEFAULT_EMBEDDING_PROVIDER,
     "embedding_model": _DEFAULT_OLLAMA_EMBEDDING_MODEL,
     "ollama_base_url": _DEFAULT_OLLAMA_BASE_URL,
+    "api_key": None,
 }
 
 
@@ -58,9 +43,10 @@ def configure_rag(config: dict) -> None:
 
     Args:
         config: Dictionary with keys:
-            - embedding_provider: "openai" or "ollama"
+            - embedding_provider: "openai", "ollama", or "google"
             - embedding_model: Model name for embeddings
             - ollama_base_url: Ollama server URL (if using Ollama)
+            - api_key: Provider API key (for OpenAI/Google; None for Ollama)
     """
     if "embedding_provider" in config:
         _rag_config["embedding_provider"] = config["embedding_provider"]
@@ -68,6 +54,8 @@ def configure_rag(config: dict) -> None:
         _rag_config["embedding_model"] = config["embedding_model"]
     if "ollama_base_url" in config:
         _rag_config["ollama_base_url"] = config["ollama_base_url"]
+    if "api_key" in config:
+        _rag_config["api_key"] = config["api_key"]
 
 
 class KnowledgeQueryInput(BaseModel):
@@ -78,26 +66,18 @@ class KnowledgeQueryInput(BaseModel):
 
 
 def _get_embeddings():
-    """Get embeddings instance based on configured provider."""
-    provider = _rag_config["embedding_provider"].lower()
+    """Get embeddings instance based on configured provider.
+
+    Delegates to the centralized ``src.providers`` registry.
+    """
+    from src.providers import create_embeddings
+
+    provider = (_rag_config["embedding_provider"] or "ollama").lower()
     model = _rag_config["embedding_model"]
     base_url = _rag_config["ollama_base_url"]
+    api_key = _rag_config["api_key"]
 
-    if provider == "ollama":
-        if not OLLAMA_EMBEDDINGS_AVAILABLE:
-            raise ImportError(
-                "Ollama embeddings not available. Install: pip install langchain-ollama"
-            )
-        return OllamaEmbeddings(
-            model=model or "nomic-embed-text",
-            base_url=base_url or "http://localhost:11434",
-        )
-    else:  # openai
-        if not OPENAI_EMBEDDINGS_AVAILABLE:
-            raise ImportError(
-                "OpenAI embeddings not available. Install: pip install langchain-openai"
-            )
-        return OpenAIEmbeddings(model=model or "text-embedding-3-small")
+    return create_embeddings(provider, model=model, base_url=base_url, api_key=api_key)
 
 
 def query_knowledge_base(

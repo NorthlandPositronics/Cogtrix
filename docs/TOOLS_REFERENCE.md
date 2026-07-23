@@ -1,6 +1,13 @@
 # Cogtrix Tools Reference
 
-Complete documentation of all 43 built-in tools.
+Complete documentation of all 51 built-in tools. You don't need to memorize these — the agent picks the right tool automatically based on your request. This page is a reference for when you want to know exactly what's available, what parameters a tool accepts, or how to configure optional providers.
+
+**Quick orientation:**
+
+- **DuckDuckGo search** works immediately — no setup, no API key.
+- **File, shell, Python, text, JSON, date/time, HTTP, NLP, delegation, and deep reasoning tools** are always available.
+- **Premium search** (Tavily, Exa, Brave, Google, SerpAPI), **weather**, **WhatsApp**, and **Telegram** tools appear automatically when you provide their API key or token. If the key is missing, the tool is silently hidden — no errors.
+- Tools marked with a warning sign require user confirmation before running.
 
 ## Table of Contents
 
@@ -15,6 +22,8 @@ Complete documentation of all 43 built-in tools.
 - [Web & HTTP](#web--http)
 - [Weather](#weather)
 - [NLP Tools](#nlp-tools)
+- [WhatsApp Messaging](#whatsapp-messaging)
+- [Telegram Messaging](#telegram-messaging)
 - [Knowledge Base](#knowledge-base)
 - [Delegation](#delegation)
 - [Deep Reasoning](#deep-reasoning)
@@ -33,9 +42,18 @@ Complete documentation of all 43 built-in tools.
 ### Confirmation Responses
 
 When prompted for confirmation:
-- `y` — Allow this execution once
-- `n` — Deny execution
-- `all` — Approve tool for entire session
+- `y` — Yes, allow this execution once
+- `n` — No, deny execution
+- `a` — Allow all (approve tool for entire session)
+- `d` — Disable tool (block for this session)
+- `f` — Forbid all further tool requests (resets on next prompt)
+- `c` — Cancel the current agent workflow
+
+### On-Demand Loading
+
+All tools start in an on-demand pool. The agent requests only the tools it needs for the current task through an internal `request_tools` meta-tool. When the agent calls `request_tools`, the requested tools are activated before the next turn. The agent can also release tools it no longer needs.
+
+You don't need to manage this yourself — the agent decides which tools to load based on your request. See [Tool Loading](CONFIGURATION.md#tool-loading) for details.
 
 ---
 
@@ -534,7 +552,7 @@ Convert JSON to human-readable text.
 
 ## Search
 
-Cogtrix includes 10 search tools across 6 providers. DuckDuckGo is always available (no API key). Other providers are automatically enabled when their API key is configured, and hidden from the agent otherwise.
+Cogtrix includes 10 search tools across 6 providers. All API-key-gated tools (search, weather, WhatsApp) are automatically hidden from the agent when not configured — they simply don't appear in the tool list. DuckDuckGo is always available (no API key). Other providers are automatically enabled when their API key is configured, and hidden from the agent otherwise.
 
 ### search_web
 
@@ -829,6 +847,183 @@ Extract the most important keywords from text.
 
 ---
 
+## WhatsApp Messaging
+
+Send and receive WhatsApp messages via a self-hosted [Waha](https://waha.devlike.pro/) container. All four tools are automatically hidden when WhatsApp is not configured.
+
+**Requires:** A running Waha Docker container. See [WhatsApp Setup](CONFIGURATION.md#whatsapp-messaging) for configuration.
+
+### whatsapp_send ⚠️
+
+Send a text message via WhatsApp.
+
+**Requires Confirmation:** Yes (configurable)
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `to` | string | Yes | Recipient — phone number in E.164 format (e.g. `+14155551234`) or a phonebook nickname (e.g. `alice`) |
+| `message` | string | Yes | Text message body (max 4096 chars) |
+
+**Returns:** Confirmation with message ID, or error/block reason
+
+**Example:**
+```
+whatsapp_send(to="alice", message="Meeting moved to 3pm")
+```
+
+---
+
+### whatsapp_send_image ⚠️
+
+Send an image via WhatsApp given a public URL.
+
+**Requires Confirmation:** Yes (configurable)
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `to` | string | Yes | Recipient — phone number or phonebook nickname |
+| `image_url` | string | Yes | Public URL of the image (JPEG preferred) |
+| `caption` | string | No | Optional caption text |
+
+**Returns:** Confirmation with message ID, or error/block reason
+
+---
+
+### whatsapp_check
+
+Retrieve recent WhatsApp messages. Optionally filter by a specific contact.
+
+**Parameters:**
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `contact` | string | No | All chats | Phone number or phonebook nickname to filter by |
+| `limit` | int | No | `10` | Number of recent messages (max 50) |
+
+**Returns:** Formatted list of recent messages with sender, timestamp, and body
+
+---
+
+### whatsapp_contacts
+
+List the configured phonebook contacts and active filter rules.
+
+**Parameters:** None
+
+**Returns:** Phonebook listing with nicknames, phone numbers, and filter mode
+
+---
+
+### Contact Filtering
+
+WhatsApp tools enforce contact restrictions before any message is sent or received:
+
+| Filter Mode | Behavior |
+|-------------|----------|
+| `none` (default) | All contacts allowed |
+| `whitelist` | Only contacts in the list can send/receive |
+| `blacklist` | Contacts in the list are blocked |
+
+Phonebook nicknames (e.g. `"alice"`) are resolved to E.164 numbers automatically and are case-insensitive.
+
+### Rate Limiting
+
+Outbound messages are rate-limited to prevent abuse. Default: 30 messages/hour (configurable, 0 = unlimited). The limit uses an in-memory sliding window that resets on process restart.
+
+---
+
+## Telegram Messaging
+
+Send and receive Telegram messages via a bot created with [@BotFather](https://t.me/BotFather). All four tools are automatically hidden when the bot token is not configured.
+
+**Requires:** A bot token (`COGTRIX_TELEGRAM_TOKEN` environment variable or `services.telegram.bot_token` in config). See [Telegram Setup](CONFIGURATION.md#telegram-messaging) for configuration.
+
+### telegram_send
+
+Send a text message via Telegram.
+
+**Requires Confirmation:** Yes (configurable)
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `to` | string | Yes | Recipient — a chat ID (numeric), @username, or a phonebook nickname (e.g. `alice`) |
+| `message` | string | Yes | Text message body (max 4096 chars) |
+
+**Returns:** Confirmation with message ID, or error/block reason
+
+**Example:**
+```
+telegram_send(to="alice", message="Meeting moved to 3pm")
+```
+
+---
+
+### telegram_send_photo
+
+Send a photo via Telegram given a public URL.
+
+**Requires Confirmation:** Yes (configurable)
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `to` | string | Yes | Recipient — a chat ID, @username, or phonebook nickname |
+| `photo_url` | string | Yes | Public URL of the photo |
+| `caption` | string | No | Optional caption text |
+
+**Returns:** Confirmation with message ID, or error/block reason
+
+---
+
+### telegram_check
+
+Retrieve recent Telegram messages sent to the bot.
+
+**Parameters:**
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `limit` | int | No | `10` | Number of recent messages (max 50) |
+
+**Returns:** Formatted list of recent messages with sender, timestamp, chat, and body
+
+---
+
+### telegram_contacts
+
+List the configured phonebook contacts and active filter rules.
+
+**Parameters:** None
+
+**Returns:** Phonebook listing with nicknames, chat IDs, and filter mode
+
+---
+
+### Contact Filtering
+
+Telegram tools enforce contact restrictions before any message is sent or received:
+
+| Filter Mode | Behavior |
+|-------------|----------|
+| `none` (default) | All contacts allowed |
+| `whitelist` | Only contacts in the list can send/receive |
+| `blacklist` | Contacts in the list are blocked |
+
+Phonebook nicknames are resolved to chat IDs automatically and are case-insensitive.
+
+### Rate Limiting
+
+Outbound messages are rate-limited to prevent abuse. Default: 30 messages/hour (configurable, 0 = unlimited). The limit uses an in-memory sliding window that resets on process restart.
+
+---
+
 ## Knowledge Base
 
 ### query_knowledge_base
@@ -873,11 +1068,11 @@ Delegate a single task to another LLM model.
 ```
 model: "fast"                    → Uses string alias from config
 model: "deep"                    → Uses object alias (with num_ctx, temperature)
-model: "ollama/llama3:8b"        → Direct provider/model
-model: "openai/gpt-4o"           → Direct provider/model
+model: "ollama/qwen3:8b"         → Direct provider/model
+model: "openai/gpt-4.1"           → Direct provider/model
 ```
 
-Object aliases can override `num_ctx`, `temperature`, and `timeout` per delegation call. See [CONFIGURATION.md](CONFIGURATION.md#model-alias-formats) for alias format details.
+Object aliases can override `num_ctx`, `temperature`, and `timeout` per delegation call. See [CONFIGURATION.md](CONFIGURATION.md#model-aliases) for alias format details and [Delegate Section](CONFIGURATION.md#delegate-section) for `allowed_models` restrictions.
 
 ---
 
@@ -977,3 +1172,5 @@ deep_think(
 - [DEVELOPMENT.md](DEVELOPMENT.md) — Adding custom tools
 - [DEEPTHINK.md](DEEPTHINK.md) — Deep Think reasoning guide
 - [RAG_GUIDE.md](RAG_GUIDE.md) — Knowledge base setup
+- [WHATSAPP_GUIDE.md](WHATSAPP_GUIDE.md) — WhatsApp assistant setup
+- [TELEGRAM_GUIDE.md](TELEGRAM_GUIDE.md) — Telegram assistant setup

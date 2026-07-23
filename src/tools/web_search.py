@@ -62,7 +62,12 @@ def _suppress_native_stderr() -> Generator[None]:
     Python's ``sys.stderr`` and write directly to file descriptor 2.
     """
     devnull_fd = os.open(os.devnull, os.O_WRONLY)
-    old_stderr_fd = os.dup(2)
+    try:
+        old_stderr_fd = os.dup(2)
+    except OSError:
+        os.close(devnull_fd)
+        yield
+        return
     try:
         os.dup2(devnull_fd, 2)
         yield

@@ -71,3 +71,34 @@ data/
 .DS_Store
 Thumbs.db
 .coverage
+
+# ── AI coding agents ──────────────────────────────────────────────
+# Anthropic Claude Code
+CLAUDE.md
+.claude/
+# OpenAI Codex
+AGENTS.md
+.codex/
+# Google Gemini
+GEMINI.md
+.gemini/
+# GitHub Copilot
+.copilot/
+.github/copilot-instructions.md
+# Cursor
+.cursor/
+.cursorrules
+.cursorignore
+# Windsurf (Codeium)
+.windsurf/
+.windsurfrules
+# Cline / Roo Code
+.cline/
+.clinerules
+.roomodes
+# Aider
+.aider*
+.aider.conf.yml
+# Amazon Q Developer
+.amazonq/
+.qdeveloper/

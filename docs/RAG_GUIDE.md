@@ -1,6 +1,6 @@
 # Cogtrix RAG Guide
 
-Complete guide to setting up and using the knowledge base (RAG) feature.
+Turn your own documents into a searchable knowledge base that the agent can query during conversation. This feature uses Retrieval-Augmented Generation (RAG): your documents are split into chunks, converted into vector embeddings, and stored in a local FAISS index. When you ask a question, the most relevant chunks are retrieved and sent to the LLM alongside your query.
 
 ## Table of Contents
 
@@ -65,11 +65,11 @@ cp your-notes.md docs/
 ### 2. Build Vector Database
 
 ```bash
-# Using OpenAI embeddings (requires API key)
+# Using Ollama embeddings (default — local, free)
 python cogtrix.py --ingest
 
-# Using Ollama embeddings (local, free)
-python cogtrix.py --ingest --embedding-provider ollama
+# Using OpenAI embeddings instead (requires API key)
+python cogtrix.py --ingest --embedding-provider openai
 ```
 
 ### 3. Query
@@ -101,19 +101,18 @@ You: What does the policy say about remote work?
 
 ### Directory Structure
 
+Place all files directly in the docs directory — **subdirectories are not traversed**.
+
 ```
 docs/
-├── policies/
-│   ├── remote-work-policy.pdf
-│   └── expense-policy.pdf
-├── guides/
-│   ├── onboarding-guide.md
-│   └── tech-stack.md
-└── data/
-    └── employees.csv
+├── remote-work-policy.pdf
+├── expense-policy.pdf
+├── onboarding-guide.md
+├── tech-stack.md
+└── employees.csv
 ```
 
-Note: Subdirectories are not scanned. Place all files directly in `docs/`.
+If you currently organize files in folders, either flatten them into `docs/` before ingestion, or point `--docs-dir` at the specific folder containing the files you want to ingest.
 
 ---
 
@@ -209,22 +208,12 @@ You: Search the knowledge base for "vacation policy"
 
 ## Embedding Providers
 
-### OpenAI Embeddings
+The default embedding provider is `ollama` (local, no API key required). OpenAI and Google are also supported.
 
-**Pros:** High quality, fast  
-**Cons:** Requires API key, costs money
+### Ollama Embeddings (default)
 
-```bash
-export OPENAI_API_KEY="sk-..."
-python cogtrix.py --ingest
-```
-
-**Default model:** `text-embedding-3-small`
-
-### Ollama Embeddings
-
-**Pros:** Free, local, no API key  
-**Cons:** Requires Ollama running, slower
+**Pros:** Free, local, no API key
+**Cons:** Requires Ollama running
 
 ```bash
 # Make sure Ollama is running
@@ -233,40 +222,62 @@ ollama serve
 # Pull embedding model
 ollama pull nomic-embed-text
 
-# Run ingestion
-python cogtrix.py --ingest --embedding-provider ollama
+# Run ingestion (default — no flags needed)
+python cogtrix.py --ingest
 ```
 
 **Default model:** `nomic-embed-text`
 
+### OpenAI Embeddings
+
+**Pros:** High quality, fast
+**Cons:** Requires API key, costs money
+
+```bash
+export OPENAI_API_KEY="sk-..."
+python cogtrix.py --ingest --embedding-provider openai
+```
+
+**Default model:** `text-embedding-3-small`
+
+### Google Embeddings
+
+**Pros:** High quality
+**Cons:** Requires API key (`GEMINI_API_KEY`)
+
+```bash
+export GEMINI_API_KEY="..."
+python cogtrix.py --ingest --embedding-provider google
+```
+
+**Default model:** `text-embedding-004`
+
+Requires `langchain-google-genai`: `uv pip install "cogtrix[google]"`
+
 ### Using Named Providers
 
-You can use any named Ollama provider from your config for embeddings:
+You can use any named provider from your config for embeddings. The API key is resolved automatically from the provider config, so you do not need to set it separately.
 
-```json
-{
-  "providers": {
-    "gpu-server": {
-      "type": "ollama",
-      "base_url": "http://192.168.1.100:11434",
-      "model": "llama3:70b"
-    }
-  },
-  "rag": {
-    "embedding_provider": "gpu-server",
-    "embedding_model": "nomic-embed-text"
-  }
-}
+```yaml
+inference:
+  gpu-server:
+    type: ollama
+    base_url: "http://192.168.1.100:11434"
+    model: qwen3:8b
+  cloud-openai:
+    type: openai
+    api_key: "sk-..."
+
+rag:
+  # Ollama on a remote server
+  embedding_provider: gpu-server
+  embedding_model: nomic-embed-text
+
+  # Or OpenAI — API key comes from the cloud-openai provider config
+  # embedding_provider: cloud-openai
 ```
 
-The embedding provider will resolve to the named provider's type and base_url:
-
-```
-📚 RAG Document Ingestion
-
-  Embedding provider:  gpu-server (ollama)
-  Ollama URL:          http://192.168.1.100:11434
-```
+The embedding provider resolves to the named provider's type and base_url.
 
 ### Available Ollama Embedding Models
 
@@ -283,17 +294,14 @@ The embedding provider will resolve to the named provider's type and base_url:
 
 ### Via Config File
 
-```json
-{
-  "rag": {
-    "docs_dir": "docs",
-    "vectordb_dir": "data/vectordb",
-    "chunk_size": 1200,
-    "chunk_overlap": 200,
-    "embedding_provider": "ollama",
-    "embedding_model": "nomic-embed-text"
-  }
-}
+```yaml
+rag:
+  docs_dir: docs
+  vectordb_dir: data/vectordb
+  chunk_size: 1200
+  chunk_overlap: 200
+  embedding_provider: ollama
+  embedding_model: nomic-embed-text
 ```
 
 ### Configuration Options
@@ -304,8 +312,10 @@ The embedding provider will resolve to the named provider's type and base_url:
 | `vectordb_dir` | `"data/vectordb"` | Vector database output |
 | `chunk_size` | `1200` | Characters per chunk |
 | `chunk_overlap` | `200` | Overlap between chunks |
-| `embedding_provider` | `"openai"` | `"openai"`, `"ollama"`, or named provider |
+| `embedding_provider` | `"ollama"` | `"openai"`, `"ollama"`, `"google"`, or named provider |
 | `embedding_model` | Auto | Embedding model name |
+
+**Tip:** If you define a global [`embedding` section](CONFIGURATION.md#embedding-section) in your config, its `provider` and `model` automatically become the defaults for RAG — so you only configure embeddings once.
 
 ### Chunk Size Guidelines
 
@@ -344,13 +354,21 @@ Cause: No supported files in docs/
 Solution: Add PDF, MD, TXT, or CSV files to docs/
 ```
 
-### "Failed to create embeddings" (OpenAI)
+### "Failed to create embeddings"
 
 ```
-Cause: Missing or invalid API key
-Solution: 
+Cause: Missing or invalid API key (OpenAI/Google), or Ollama not running
+Solutions:
+  # For OpenAI
   export OPENAI_API_KEY="sk-..."
-  Or use Ollama: --embedding-provider ollama
+  python cogtrix.py --ingest --embedding-provider openai
+
+  # For Google
+  export GEMINI_API_KEY="..."
+  python cogtrix.py --ingest --embedding-provider google
+
+  # Use Ollama (default, no API key needed)
+  python cogtrix.py --ingest
 ```
 
 ### "Failed to connect to Ollama"
@@ -415,12 +433,22 @@ Note: Currently, only one knowledge base can be queried at a time (the one in co
 from src.rag import ingest_documents, IngestConfig
 from pathlib import Path
 
+# Using Ollama (default)
 config = IngestConfig(
     docs_dir=Path("./my-docs"),
     vectordb_dir=Path("./my-vectordb"),
     embedding_provider="ollama",
     embedding_model="nomic-embed-text",
 )
+
+# Using OpenAI or Google — pass the api_key explicitly
+# config = IngestConfig(
+#     docs_dir=Path("./my-docs"),
+#     vectordb_dir=Path("./my-vectordb"),
+#     embedding_provider="openai",
+#     embedding_model="text-embedding-3-small",
+#     api_key="sk-...",
+# )
 
 result = ingest_documents(config)
 

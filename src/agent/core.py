@@ -4,7 +4,8 @@ Decoupled from CLI; callable from any interface.
 Supports multiple LLM providers: OpenAI, Ollama, and OpenAI-compatible APIs.
 """
 
-from typing import TYPE_CHECKING, Any
+from collections.abc import Sequence
+from typing import TYPE_CHECKING, Annotated, Any, TypedDict
 
 from src.logging_config import get_logger
 
@@ -13,10 +14,12 @@ if TYPE_CHECKING:
 
 # LangGraph agent creation (modern API)
 try:
+    from langgraph.graph.message import add_messages
     from langgraph.prebuilt import create_react_agent
 
     LANGGRAPH_AVAILABLE = True
 except ImportError:
+    add_messages = None  # type: ignore[misc, assignment]
     create_react_agent = None  # type: ignore[misc, assignment]
     LANGGRAPH_AVAILABLE = False
 
@@ -34,103 +37,125 @@ except ImportError:
     AIMessage = None  # type: ignore[misc, assignment]
     SystemMessage = None  # type: ignore[misc, assignment]
 
-# OpenAI provider
-try:
-    from langchain_openai import ChatOpenAI
-except ImportError:
-    ChatOpenAI = None  # type: ignore[misc, assignment]
 
-# Ollama provider
-try:
-    from langchain_ollama import ChatOllama
-except ImportError:
-    ChatOllama = None  # type: ignore[misc, assignment]
+class CogtrixState(TypedDict):
+    """State schema for the Cogtrix agent graph."""
+
+    messages: Annotated[
+        Sequence[BaseMessage], add_messages  # pyright: ignore[reportInvalidTypeForm]
+    ]
 
 
 DEFAULT_SYSTEM_PROMPT = """You are a capable AI assistant that COMPLETES TASKS end-to-end.
 
 ## Core Principles
-
-1. **COMPLETE TASKS FULLY** - When given a task, work through it step-by-step until finished. Never stop halfway to ask "what would you like me to do?" when the task is clear.
-
-2. **USE TOOLS PROACTIVELY** - If you need information, use tools to get it. Don't ask the user for information you can gather yourself.
-
-3. **SYNTHESIZE AND DELIVER** - After using tools to gather information, synthesize your findings into a complete, useful response. Don't just list what you found - analyze, organize, and present it meaningfully.
-
-4. **STAY FOCUSED** - Keep working on the current task. Don't offer tangential help or ask what the user wants to do next until you've completed what they asked for.
-
-5. **HANDLE MULTI-STEP TASKS** - For complex requests:
-   - Break down the task mentally
-   - Execute each step using appropriate tools
-   - Combine results into a coherent deliverable
-   - Present the final result
+- Fully execute every task step-by-step until complete. Never stop halfway
+  or ask "what would you like me to do?" when the task is clear.
+- Use tools proactively to gather information — never ask the user for data
+  you can obtain yourself.
+- After gathering data, synthesize, analyze, organize, and deliver one
+  complete, polished response (never just raw lists or partial output).
+- Stay focused on the current task; do not offer tangential help until done.
+- For complex requests: break it down, execute each part with tools, combine
+  results into one coherent deliverable.
 
 ## Accuracy and Grounding
-
-When answering questions that require factual information:
-- Base your answer **strictly on data returned by tools** (search results, web
-  pages, file contents, etc.).  Do NOT fill gaps with assumptions or prior
-  knowledge — state what the tools found and explicitly note when information
-  was not available.
-- If search results or web pages do not contain the requested details, say so
-  clearly (e.g., "This information was not found in the sources I checked")
-  rather than guessing.
-- Clearly distinguish between what the tools confirmed vs. what you are
-  inferring.  Use hedging language ("likely", "appears to be") for inferences.
+- Base answers **strictly on data returned by tools**. Do NOT fill gaps with
+  assumptions or prior knowledge — state what the tools found and explicitly
+  note when information was not available.
+- If sources do not contain the requested details, say so clearly (e.g.,
+  "This information was not found in the sources I checked") rather than
+  guessing.
+- Clearly distinguish confirmed facts from inferences; use hedging language
+  ("likely", "appears to be") for inferences.
 - Cite URLs or source names from tool results when presenting factual claims.
 
-## What NOT To Do
+## Forbidden Behaviors
+- Never say "I'm ready to help!" or "What would you like me to do?" — do
+  the work.
+- Never stop after using tools — synthesize results into your answer.
+- NEVER invent numbers, dates, parameter counts, version numbers, URLs, or
+  any specifics not found in tool results.
+- **NEVER** say "I need more steps" or "I ran out of steps" — deliver your
+  best answer with whatever you have gathered. Partial real information is
+  always better than an apology.
 
-- DON'T say "I'm ready to help!" when you should be doing the work
-- DON'T ask "What would you like me to do?" when the task is already specified
-- DON'T provide tangential information instead of completing the task
-- DON'T stop after using tools - synthesize the results into your answer
-- DON'T give up on complex tasks - break them into manageable steps
-- DON'T make up facts, URLs, parameter counts, version numbers, or other
-  specific details that were not in the tool results
-- **NEVER** say "I need more steps", "I ran out of steps", or any variation. If you have been working through many tool calls, STOP calling tools and deliver your answer with whatever you have gathered so far. A partial answer with real information is always better than an apology with no content.
+## Tools
 
-## Example Behavior
+You start with **one meta-tool**: `request_tools`.  It lists every tool
+available in the catalog.  Before you can use any tool you must request it
+first:
 
-If asked to "analyze this codebase":
-1. List directories and files using tools
-2. Read key files to understand structure
-3. Identify patterns, architecture, dependencies
-4. Synthesize findings into a structured analysis
-5. Present complete analysis to user
+1. Read the catalog inside `request_tools` to see what is available.
+2. Call `request_tools(add=["tool_a", "tool_b"])` to load what you need.
+3. The requested tools become available on your **next** turn — do NOT
+   attempt to call them in the same turn you requested them.
+4. When you no longer need a tool, release it with
+   `request_tools(remove=["tool_a"])` to keep your toolkit lean.
 
-NOT: Read one file and say "Let me know what you'd like to explore!"
+Request only the tools relevant to the current task.  Don't load tools
+speculatively.
+
+## Context Budget
+
+You have a **limited context window**.  Every tool output consumes part of it.
+
+**Be strategic:**
+- Prefer `list_directory` first, then read only the files you need.
+- Don't read entire large files — use `start_line` and `max_lines` to page
+  (e.g. 200 lines at a time).
+- If output shows "[truncated]", read only the needed section instead of
+  re-reading everything.
+- Delegate independent subtasks to free up your own context.
 
 ## Deep Reasoning
 
-IMPORTANT: When the user includes phrases like "think deep", "think deeply",
-"deep think", "analyze thoroughly", "think step by step", "consider all angles",
-or "explore multiple approaches", you MUST invoke the `deep_think` tool.
-These phrases are explicit requests for the Tree-of-Thought reasoning engine,
-not general instructions to be more careful.
+When the user asks for deep or thorough analysis, invoke the `deep_think`
+tool.  It explores multiple solution paths in parallel using Tree-of-Thought
+reasoning.  Use it for architecture decisions, strategy, complex debugging,
+or multi-angle analysis.  You may combine it with prior tool calls.
 
-The `deep_think` tool explores several solution paths in parallel, evaluates
-each with structured reflection, and synthesizes the best elements into an
-improved solution through iterative cycles.  Use it for architecture decisions,
-strategy planning, complex debugging, or multi-angle analysis.
+CRITICAL: `deep_think` runs in ISOLATION — it cannot see conversation history
+or previous tool results.  You MUST copy the FULL text of all relevant data
+into the `context` parameter.  Do NOT pass references like "see above" —
+pass the actual text, or the tool will hallucinate.
 
-You may combine `deep_think` with other tools: for example, first gather
-information via `search_web` or `http_get`, then call `deep_think` to reason
-deeply about the collected data.  Do NOT skip the `deep_think` call when the
-user explicitly asks for deep or thorough thinking.
-
-CRITICAL: `deep_think` runs in ISOLATION — it cannot see your conversation
-history or previous tool results.  When calling it, you MUST copy the FULL
-text of all relevant data (search results, web page content, etc.) into the
-`context` parameter.  Do NOT pass references like "see search result 1" or
-"the data above" — pass the actual text, or the tool will hallucinate.
-
-Do NOT use `deep_think` for simple factual questions or straightforward tasks.
+Do not use `deep_think` for simple factual or straightforward tasks.
 
 ## Task Delegation
 
-You can delegate subtasks to other LLM models using `delegate_task` or `delegate_parallel`. Use delegation when a subtask would benefit from a specialized model (code review, translation, summarization), when you need a second opinion, when processing multiple independent items in parallel, or when a cheaper/faster model can handle routine work while you focus on orchestration and synthesis. Model aliases (like "fast", "code", "smart") are configured by the user — use them when the task matches their purpose. Do NOT delegate when you can answer directly with equal quality or when the task needs your conversation context.
+Use `delegate_task` and `delegate_parallel` for:
+- Independent subtasks (fan out with `delegate_parallel`)
+- Specialized work (code, research, etc.)
+- Second opinions or verification
+- Large-scale processing, summarization, batch analysis
+- Pure text analysis (`use_tools=False` — must provide `context`)
+
+Rules:
+- Delegates have the same tools you do (except delegation and deep_think).
+- Delegates cannot see conversation history — include relevant findings
+  in `context`.
+- Never leave `context` empty when `use_tools=False`.
+- In parallel calls, assign different model aliases to spread load.
+- After receiving results, synthesize into one polished response — don't
+  just list raw outputs.
+
+Do not delegate simple questions or tasks requiring conversation memory.
 """
+
+DEFAULT_TOOL_INSTRUCTIONS = (
+    "When a tool is needed, output ONLY a valid tool call in the exact "
+    "OpenAI format.\n"
+    "NEVER add explanations, thoughts, markdown, or extra text outside "
+    "the JSON.\n"
+    "The arguments MUST be valid JSON \u2014 escape quotes, no trailing "
+    "commas, correct types.\n\n"
+    "Example of correct output when calling a tool:\n"
+    '{"name": "get_weather", "arguments": '
+    '"{\\"location\\": \\"Dubai\\", \\"unit\\": \\"celsius\\"}"}\n\n'
+    "For final answers (no tool needed), just respond normally.\n\n"
+    "Repeat: Output tool calls as pure JSON only \u2014 nothing else."
+)
 
 
 def build_agent_executor(
@@ -169,23 +194,18 @@ def build_agent_executor(
 
     # Use pre-created LLM if provided, otherwise create one (legacy path)
     if llm is None:
-        # Resolve model name with provider-specific defaults
-        if provider == "ollama":
-            resolved_model = model or "qwen3:32b"
-        else:
-            resolved_model = model or "gpt-4o-mini"
+        from src.providers import create_chat_model, get_default_model
 
-        log.debug(f"Creating LLM: provider={provider}, model={resolved_model}")
+        resolved_model = model or get_default_model(provider)
+        log.debug("Creating LLM: provider=%s, model=%s", provider, resolved_model)
 
-        # Create LLM based on provider
-        if provider == "ollama":
-            llm = _create_ollama_llm(resolved_model, base_url)
-            log.debug(f"Ollama LLM created: base_url={base_url or 'localhost:11434'}")
-        elif provider == "openai":
-            llm = _create_openai_llm(resolved_model, api_key, base_url)
-            log.debug("OpenAI LLM created")
-        else:
-            raise ValueError(f"Unsupported provider: {provider}. Use 'openai' or 'ollama'.")
+        llm = create_chat_model(
+            provider,
+            model=resolved_model,
+            api_key=api_key,
+            base_url=base_url,
+        )
+        log.debug("LLM created: %s", type(llm).__name__)
 
     # Use custom system prompt or default
     final_prompt = system_prompt if system_prompt else DEFAULT_SYSTEM_PROMPT
@@ -203,9 +223,82 @@ def build_agent_executor(
     return agent_executor
 
 
+def _format_alias_detail(value: Any) -> str:
+    """Return a human-readable description of one alias value."""
+    if isinstance(value, dict):
+        provider = value.get("provider", "?")
+        model = value.get("model", "?")
+        extras: list[str] = []
+        if "temperature" in value:
+            extras.append(f"temp={value['temperature']}")
+        if "timeout" in value:
+            extras.append(f"timeout={value['timeout']}s")
+        if "num_ctx" in value:
+            extras.append(f"ctx={value['num_ctx']}")
+        detail = f"{provider}/{model}"
+        if extras:
+            detail += f" ({', '.join(extras)})"
+        return detail
+    if isinstance(value, str):
+        return value
+    return str(value)
+
+
+def _format_alias_table(
+    model_aliases: dict[str, Any],
+    delegation_models: list[str] | None = None,
+) -> str:
+    """Format model aliases into a readable table for the system prompt.
+
+    If *delegation_models* is provided, the table is split into two
+    groups: aliases that are allowed for delegation (highlighted) and
+    the remaining aliases which are only available via ``/model``.
+
+    Returns an empty string when there are no aliases to show.
+    """
+    if not model_aliases:
+        return ""
+
+    lines: list[str] = ["## Available Model Aliases", ""]
+
+    if delegation_models:
+        # Show delegation targets prominently
+        lines.append("### Delegation targets (use with `delegate_task` / `delegate_parallel`):")
+        lines.append("")
+        for alias in delegation_models:
+            if alias in model_aliases:
+                detail = _format_alias_detail(model_aliases[alias])
+                lines.append(f"- **{alias}** → `{detail}`")
+        lines.append("")
+
+        # Show remaining aliases
+        others = {k: v for k, v in model_aliases.items() if k not in delegation_models}
+        if others:
+            lines.append("### Other aliases (available via `/model` command):")
+            lines.append("")
+            for alias, value in others.items():
+                detail = _format_alias_detail(value)
+                lines.append(f"- **{alias}** → `{detail}`")
+            lines.append("")
+    else:
+        lines.append(
+            "Use these names as the `model` parameter in `delegate_task` / `delegate_parallel`:"
+        )
+        lines.append("")
+        for alias, value in model_aliases.items():
+            detail = _format_alias_detail(value)
+            lines.append(f"- **{alias}** → `{detail}`")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
 def build_system_prompt(
     base_prompt: str | None = None,
     mode_additions: str | None = None,
+    model_aliases: dict[str, Any] | None = None,
+    delegation_models: list[str] | None = None,
+    tool_instructions: str | None = None,
 ) -> str:
     """
     Build a complete system prompt with mode-specific additions.
@@ -213,22 +306,213 @@ def build_system_prompt(
     Args:
         base_prompt: Base system prompt (uses default if None)
         mode_additions: Additional instructions from memory mode
+        model_aliases: User-defined model aliases to expose to the agent
+        delegation_models: Subset of alias names allowed for delegation
+            (``None`` means all aliases are allowed)
+        tool_instructions: Optional tool-call formatting instructions to
+            append.  Defaults to ``None`` (no instructions), since
+            LangGraph ``bind_tools()`` handles tool-call formatting at the
+            API level for all supported providers.  Set to a non-empty
+            string to inject custom instructions for providers that need
+            explicit guidance.
 
     Returns:
         Combined system prompt
     """
     base = base_prompt if base_prompt else DEFAULT_SYSTEM_PROMPT
 
-    if mode_additions:
-        return f"{base}\n\n{mode_additions}"
+    parts = [base]
 
-    return base
+    # Inject alias table so the agent knows what models are available
+    alias_section = _format_alias_table(
+        model_aliases or {},
+        delegation_models=delegation_models,
+    )
+    if alias_section:
+        parts.append(alias_section)
+
+    if mode_additions:
+        parts.append(mode_additions)
+
+    # Inject tool-call formatting instructions only when explicitly provided.
+    # bind_tools() handles formatting at the API level, so injecting raw-JSON
+    # examples into the system prompt can conflict with the structured
+    # tool_calls response format and cause parsing failures (especially on
+    # vLLM's openai_tool_parser).
+    if tool_instructions:
+        parts.append(tool_instructions)
+
+    return "\n\n".join(parts)
+
+
+_DEFAULT_CONTEXT_WINDOW = 32_768
+_MIN_RESPONSE_TOKENS = 1024
+_RESPONSE_RESERVE_RATIO = 0.25
+_MAX_SINGLE_MESSAGE_TOKENS = 6_000
+
+
+def _estimate_msg_tokens(msg: Any) -> int:
+    """Estimate token count for a single message (~4 chars per token)."""
+    if hasattr(msg, "content") and msg.content:
+        content = msg.content
+    elif isinstance(msg, dict) and msg.get("content"):
+        content = msg["content"]
+    else:
+        return 10  # overhead for empty/structural messages
+    if isinstance(content, list):
+        total = sum(len(str(p)) for p in content)
+    else:
+        total = len(str(content))
+    return max(total // 4, 1)
+
+
+def _truncate_content(content: str, max_tokens: int) -> str:
+    """Truncate a string to roughly *max_tokens* (at ~4 chars/token)."""
+    max_chars = max_tokens * 4
+    if len(content) <= max_chars:
+        return content
+    half = max_chars // 2
+    return (
+        content[:half] + f"\n\n[... truncated: {len(content) - max_chars} chars removed "
+        f"to fit context window ...]\n\n" + content[-half:]
+    )
+
+
+def _trim_to_token_budget(
+    messages: list[Any],
+    max_context_tokens: int,
+) -> list[Any]:
+    """Drop the oldest history messages so the total fits the budget.
+
+    **Never removed:** the first message (if it's a SystemMessage) and the
+    last message (current user input).  Everything in between (history) is
+    trimmed oldest-first.  Oversized individual messages are truncated as a
+    last resort.
+    """
+    _log = get_logger()
+
+    response_reserve = max(
+        _MIN_RESPONSE_TOKENS,
+        int(max_context_tokens * _RESPONSE_RESERVE_RATIO),
+    )
+    budget = max_context_tokens - response_reserve
+
+    if budget <= 0:
+        _log.warning(
+            "Context window (%d tokens) too small for response reserve (%d)",
+            max_context_tokens,
+            response_reserve,
+        )
+        budget = max_context_tokens // 2
+
+    # Separate fixed parts from trimmable history
+    fixed_head: list[Any] = []
+    fixed_tail: list[Any] = []
+    history: list[Any] = list(messages)
+
+    if history and SystemMessage is not None and isinstance(history[0], SystemMessage):
+        fixed_head.append(history.pop(0))
+
+    if history:
+        fixed_tail.append(history.pop(-1))
+
+    # Truncate oversized fixed parts (system prompt, user input) to ensure
+    # they don't individually consume the entire budget.
+    max_fixed_single = budget // 2
+    for bucket in (fixed_head, fixed_tail):
+        for idx, msg in enumerate(bucket):
+            est = _estimate_msg_tokens(msg)
+            if est > max_fixed_single and max_fixed_single > 0:
+                content = ""
+                if hasattr(msg, "content") and isinstance(msg.content, str):
+                    content = msg.content
+                elif isinstance(msg, dict) and isinstance(msg.get("content"), str):
+                    content = msg["content"]
+                if content:
+                    trimmed = _truncate_content(content, max_fixed_single)
+                    if isinstance(msg, dict):
+                        bucket[idx] = {**msg, "content": trimmed}
+                    elif hasattr(msg, "copy"):
+                        bucket[idx] = msg.copy(update={"content": trimmed})
+
+    fixed_cost = sum(_estimate_msg_tokens(m) for m in fixed_head + fixed_tail)
+
+    history_budget = budget - fixed_cost
+    if history_budget <= 0:
+        _log.warning(
+            "System prompt + user input alone (~%d tokens) nearly fills "
+            "the context window (%d tokens) — sending without history",
+            fixed_cost,
+            max_context_tokens,
+        )
+        return fixed_head + fixed_tail
+
+    # Truncate individual oversized messages in history.
+    # Create copies to avoid mutating the caller's original messages.
+    for idx, msg in enumerate(history):
+        est = _estimate_msg_tokens(msg)
+        if est > _MAX_SINGLE_MESSAGE_TOKENS:
+            content = ""
+            if hasattr(msg, "content") and isinstance(msg.content, str):
+                content = msg.content
+            elif isinstance(msg, dict) and isinstance(msg.get("content"), str):
+                content = msg["content"]
+            if content:
+                trimmed = _truncate_content(content, _MAX_SINGLE_MESSAGE_TOKENS)
+                if isinstance(msg, dict):
+                    history[idx] = {**msg, "content": trimmed}
+                elif hasattr(msg, "copy"):
+                    clone = msg.copy(update={"content": trimmed})
+                    history[idx] = clone
+                else:
+                    try:
+                        from copy import copy as _shallow_copy
+
+                        clone = _shallow_copy(msg)
+                        clone.content = trimmed
+                        history[idx] = clone
+                    except Exception:
+                        pass
+
+    # Drop oldest history messages until we fit
+    total_history = sum(_estimate_msg_tokens(m) for m in history)
+    dropped = 0
+    while history and total_history > history_budget:
+        removed = history.pop(0)
+        total_history -= _estimate_msg_tokens(removed)
+        dropped += 1
+
+    # Remove orphaned ToolMessages at the head of the trimmed history.
+    # A ToolMessage is orphaned if no preceding AIMessage carries its tool_call_id.
+    try:
+        from langchain_core.messages import ToolMessage as _ToolMessage
+    except ImportError:
+        _ToolMessage = None  # type: ignore[assignment, misc]
+
+    if _ToolMessage is not None and AIMessage is not None:
+        while history and isinstance(history[0], _ToolMessage):
+            removed = history.pop(0)
+            total_history -= _estimate_msg_tokens(removed)
+            dropped += 1
+
+    if dropped:
+        _log.info(
+            "Context trimmed: dropped %d oldest messages to fit "
+            "token budget (%d / %d used, %d reserved for response)",
+            dropped,
+            fixed_cost + total_history,
+            max_context_tokens,
+            response_reserve,
+        )
+
+    return fixed_head + history + fixed_tail
 
 
 def prepare_messages_with_context(
     history_messages: list[Any],
     user_input: str,
     context_prefix: str | None = None,
+    max_context_tokens: int | None = None,
 ) -> list[Any]:
     """
     Prepare messages for the agent with optional context prefix.
@@ -237,10 +521,17 @@ def prepare_messages_with_context(
     tracked files, reasoning state, etc.) is injected as a SystemMessage
     before the conversation history.
 
+    When *max_context_tokens* is provided, the assembled message list is
+    trimmed to fit the token budget.  Oldest history messages are dropped
+    first; oversized individual messages are truncated as a last resort.
+
     Args:
         history_messages: Conversation history from memory manager
         user_input: Current user input
         context_prefix: Mode-specific context to inject
+        max_context_tokens: Token budget for the full prompt (from
+            ``ProviderConfig.num_ctx`` or a sensible default).  When set,
+            the function trims history to leave room for the LLM response.
 
     Returns:
         List of messages ready for agent invocation
@@ -264,70 +555,20 @@ def prepare_messages_with_context(
     # Add current user input
     result.append(HumanMessage(content=user_input))
 
+    # Trim to budget if a limit is set
+    if max_context_tokens and max_context_tokens > 0:
+        result = _trim_to_token_budget(result, max_context_tokens)
+
     return result
-
-
-def _create_openai_llm(
-    model: str | None = None,
-    api_key: str | None = None,
-    base_url: str | None = None,
-    temperature: float = 0,
-):
-    """
-    Create OpenAI or OpenAI-compatible chat model.
-
-    Args:
-        model: Model name
-        api_key: API key (None = use OPENAI_API_KEY env var)
-        base_url: Custom API endpoint (None = use OpenAI default)
-        temperature: Sampling temperature
-    """
-    if ChatOpenAI is None:
-        raise ImportError("langchain-openai not installed. Run: pip install langchain-openai")
-
-    kwargs: dict = {
-        "model": model or "gpt-4o-mini",
-        "temperature": temperature,
-        # Retry on transient errors (malformed JSON from vLLM tool
-        # parser, 5xx, etc.).  LangChain's ChatOpenAI passes this
-        # through to the underlying HTTP client.
-        "max_retries": 3,
-    }
-
-    if api_key:
-        kwargs["api_key"] = api_key
-    if base_url:
-        kwargs["base_url"] = base_url
-
-    return ChatOpenAI(**kwargs)
-
-
-def _create_ollama_llm(
-    model: str | None = None,
-    base_url: str | None = None,
-    temperature: float = 0,
-    num_ctx: int | None = None,
-):
-    """Create Ollama chat model."""
-    if ChatOllama is None:
-        raise ImportError("langchain-ollama not installed. Run: pip install langchain-ollama")
-
-    kwargs: dict[str, Any] = {
-        "model": model or "qwen3:32b",
-        "base_url": base_url or "http://localhost:11434",
-        "temperature": temperature,
-    }
-
-    # Set context window size if specified
-    if num_ctx is not None:
-        kwargs["num_ctx"] = num_ctx
-
-    return ChatOllama(**kwargs)  # type: ignore[arg-type]
 
 
 def create_llm_from_provider_config(provider_config: "ProviderConfig") -> Any:
     """
     Create an LLM instance from a ProviderConfig.
+
+    Delegates to the centralized ``src.providers`` registry which
+    supports openai, ollama, anthropic, google, and OpenAI-compatible
+    providers (xAI, vLLM, Groq, etc.).
 
     Args:
         provider_config: Provider configuration object
@@ -341,47 +582,27 @@ def create_llm_from_provider_config(provider_config: "ProviderConfig") -> Any:
     """
     log = get_logger()
 
-    provider_type = provider_config.type
-    model = provider_config.get_model()
-    base_url = provider_config.get_base_url()
-    temperature = provider_config.temperature or 0
+    from src.providers import create_chat_model_from_config
 
     log.debug(
-        f"Creating LLM from config: name={provider_config.name}, "
-        f"type={provider_type}, model={model}"
+        "Creating LLM from config: name=%s, type=%s, model=%s",
+        provider_config.name,
+        provider_config.type,
+        provider_config.get_model(),
     )
 
-    if provider_type == "openai":
-        llm = _create_openai_llm(
-            model=model,
-            api_key=provider_config.api_key,
-            base_url=base_url,
-            temperature=temperature,
-        )
-        url_info = f" (base_url={base_url})" if base_url else ""
-        log.debug(f"OpenAI LLM created{url_info}")
+    llm = create_chat_model_from_config(provider_config)
 
-    elif provider_type == "ollama":
-        llm = _create_ollama_llm(
-            model=model,
-            base_url=base_url,
-            temperature=temperature,
-            num_ctx=provider_config.num_ctx,
-        )
-        ctx_info = f", num_ctx={provider_config.num_ctx}" if provider_config.num_ctx else ""
-        log.debug(f"Ollama LLM created: base_url={base_url}{ctx_info}")
-
-    else:
-        raise ValueError(
-            f"Unsupported provider type: '{provider_type}'. " "Use 'openai' or 'ollama'."
-        )
-
+    log.debug("LLM created: %s", type(llm).__name__)
     return llm
 
 
 def ensure_base_messages(history: list[Any]) -> list[Any]:
     """
     Convert stored history (dicts or BaseMessages) into BaseMessages.
+
+    Preserves tool_calls on AIMessages and correctly handles ToolMessages
+    so that the full agent chain survives a dict→BaseMessage round-trip.
 
     Args:
         history: List of message dicts or BaseMessage objects
@@ -392,6 +613,11 @@ def ensure_base_messages(history: list[Any]) -> list[Any]:
     if BaseMessage is None or HumanMessage is None:
         return history
 
+    try:
+        from langchain_core.messages import ToolMessage
+    except ImportError:
+        ToolMessage = None  # type: ignore[assignment, misc]
+
     converted = []
     for msg in history:
         if isinstance(msg, BaseMessage):
@@ -399,10 +625,34 @@ def ensure_base_messages(history: list[Any]) -> list[Any]:
             continue
         if isinstance(msg, dict) and "content" in msg:
             role = msg.get("type", "human")
-            if role == "ai" and AIMessage is not None:
-                converted.append(AIMessage(content=msg["content"]))
+            additional: dict[str, Any] = {}
+            ts = msg.get("timestamp")
+            if ts:
+                additional["_ts"] = ts
+
+            if role == "tool" and ToolMessage is not None:
+                converted.append(
+                    ToolMessage(
+                        content=msg["content"],
+                        name=msg.get("name", ""),
+                        tool_call_id=msg.get("tool_call_id", ""),
+                    )
+                )
+            elif role == "ai" and AIMessage is not None:
+                kwargs: dict[str, Any] = {
+                    "content": msg["content"],
+                }
+                if additional:
+                    kwargs["additional_kwargs"] = additional
+                tool_calls = msg.get("tool_calls")
+                if tool_calls:
+                    kwargs["tool_calls"] = tool_calls
+                converted.append(AIMessage(**kwargs))
             elif role == "system" and SystemMessage is not None:
                 converted.append(SystemMessage(content=msg["content"]))
             else:
-                converted.append(HumanMessage(content=msg["content"]))
+                kwargs_h: dict[str, Any] = {"content": msg["content"]}
+                if additional:
+                    kwargs_h["additional_kwargs"] = additional
+                converted.append(HumanMessage(**kwargs_h))
     return converted

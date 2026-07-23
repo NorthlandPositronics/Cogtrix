@@ -49,6 +49,11 @@ from pydantic import BaseModel, Field
 log = logging.getLogger("cogtrix")
 
 
+def _escape_braces(s: str) -> str:
+    """Escape curly braces so they survive str.format()."""
+    return s.replace("{", "{{").replace("}", "}}")
+
+
 # ── Module-level configuration ──────────────────────────────────────────
 
 _config: dict[str, Any] = {}
@@ -113,54 +118,26 @@ class IterationResult:
 
 
 def _create_llm(temperature: float = 0.7) -> Any:
-    """Create an LLM from the stored module config (mirrors delegate._create_llm)."""
-    provider_name = _config.get("default_provider", "openai")
+    """Create an LLM from the stored module config.
+
+    Delegates to the centralized ``src.providers`` registry.
+    """
+    from src.providers import create_chat_model
+
+    provider_name = _config.get("default_provider", "ollama")
     providers = _config.get("providers", {})
     prov_cfg = providers.get(provider_name, {})
     prov_type = prov_cfg.get("type", provider_name)
     model = _config.get("default_model") or prov_cfg.get("model")
 
-    if prov_type == "openai":
-        try:
-            from langchain_openai import ChatOpenAI
-        except ImportError as exc:
-            raise ImportError(
-                "langchain-openai is required for deep_think with OpenAI providers"
-            ) from exc
-        import os
-
-        kwargs: dict[str, Any] = {
-            "model": model or "gpt-4o-mini",
-            "temperature": temperature,
-            "max_retries": 3,
-        }
-        api_key = prov_cfg.get("api_key") or os.getenv("OPENAI_API_KEY")
-        if api_key:
-            kwargs["api_key"] = api_key
-        base_url = prov_cfg.get("base_url")
-        if base_url:
-            kwargs["base_url"] = base_url
-        return ChatOpenAI(**kwargs)
-
-    if prov_type == "ollama":
-        try:
-            from langchain_ollama import ChatOllama
-        except ImportError as exc:
-            raise ImportError(
-                "langchain-ollama is required for deep_think with Ollama providers"
-            ) from exc
-
-        ollama_kwargs: dict[str, Any] = {
-            "model": model or "llama3:8b",
-            "base_url": prov_cfg.get("base_url") or "http://localhost:11434",
-            "temperature": temperature,
-        }
-        num_ctx = prov_cfg.get("num_ctx")
-        if num_ctx is not None:
-            ollama_kwargs["num_ctx"] = num_ctx
-        return ChatOllama(**ollama_kwargs)
-
-    raise ValueError(f"Unsupported provider type for deep_think: {prov_type}")
+    return create_chat_model(
+        prov_type,
+        model=model,
+        api_key=prov_cfg.get("api_key"),
+        base_url=prov_cfg.get("base_url"),
+        temperature=temperature,
+        num_ctx=prov_cfg.get("num_ctx"),
+    )
 
 
 def _call_llm(llm: Any, prompt: str, timeout: int = 180) -> str:
@@ -276,15 +253,32 @@ def _parse_json(text: str) -> Any:
                 continue
 
     # 3. Find first balanced { … } or [ … ]
+    # Tracks whether we're inside a JSON string to avoid counting
+    # braces that appear inside quoted values.
     for open_ch, close_ch in ("{", "}"), ("[", "]"):
         start = text.find(open_ch)
         if start == -1:
             continue
         depth = 0
+        in_string = False
+        escape = False
         for i in range(start, len(text)):
-            if text[i] == open_ch:
+            ch = text[i]
+            if escape:
+                escape = False
+                continue
+            if ch == "\\":
+                if in_string:
+                    escape = True
+                continue
+            if ch == '"':
+                in_string = not in_string
+                continue
+            if in_string:
+                continue
+            if ch == open_ch:
                 depth += 1
-            elif text[i] == close_ch:
+            elif ch == close_ch:
                 depth -= 1
                 if depth == 0:
                     try:
@@ -470,9 +464,9 @@ def _phase_branch(
 
     prompt = _BRANCH_PROMPT.format(
         num_branches=num_branches,
-        task=task,
-        context_block=context_block,
-        reflection_block=reflection_block,
+        task=_escape_braces(task),
+        context_block=_escape_braces(context_block),
+        reflection_block=_escape_braces(reflection_block),
     )
 
     raw = _call_llm(llm, prompt, timeout=timeout)
@@ -522,10 +516,10 @@ def _phase_develop(
 
     prompts = [
         _DEVELOP_PROMPT.format(
-            task=task,
-            approach_name=b.name,
-            approach_strategy=b.strategy,
-            context_block=context_block,
+            task=_escape_braces(task),
+            approach_name=_escape_braces(b.name),
+            approach_strategy=_escape_braces(b.strategy),
+            context_block=_escape_braces(context_block),
         )
         for b in branches
     ]
@@ -582,9 +576,9 @@ def _phase_converge(
 
     prompt = _CONVERGE_PROMPT.format(
         n_solutions=len(branches),
-        task=task,
-        context_block=context_block,
-        solutions_block=solutions_block,
+        task=_escape_braces(task),
+        context_block=_escape_braces(context_block),
+        solutions_block=_escape_braces(solutions_block),
     )
 
     raw = _call_llm(llm, prompt, timeout=timeout)
@@ -774,6 +768,12 @@ def deep_think(
         return (
             "**Deep Think error:** Not configured. " "Ensure the agent has a provider configured."
         )
+
+    # Guard: context length (100K chars ≈ 25K tokens)
+    _MAX_CONTEXT = 100_000
+    if len(context) > _MAX_CONTEXT:
+        context = context[:_MAX_CONTEXT]
+        log.warning("deep_think context truncated to %d characters", _MAX_CONTEXT)
 
     # Clamp parameters
     max_iterations = max(1, min(int(max_iterations), 5))

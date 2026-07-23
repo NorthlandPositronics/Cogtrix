@@ -1,5 +1,7 @@
 """Unit tests for CodeDevelopmentMemoryManager."""
 
+from datetime import datetime
+
 # Import to trigger registration
 from src.memory import modes  # noqa: F401
 from src.memory.factory import MemoryFactory
@@ -39,7 +41,7 @@ class TestCodeDevelopmentMemoryManager:
     def test_default_config(self):
         """Test default configuration values."""
         manager = CodeDevelopmentMemoryManager(MockStore(), "test")
-        assert manager._mode_config["working_memory_size"] == 8
+        assert manager._mode_config["working_memory_size"] == 30
         assert manager._mode_config["track_files"] is True
         assert manager._mode_config["track_errors"] is True
         assert manager._mode_config["max_errors"] == 5
@@ -55,20 +57,20 @@ class TestCodeDevelopmentMemoryManager:
         # Defaults preserved
         assert manager._mode_config["track_files"] is True
 
-    def test_smaller_working_memory(self):
-        """Test that code mode has smaller working memory window."""
+    def test_working_memory_window(self):
+        """Test that code mode respects working memory window."""
         manager = CodeDevelopmentMemoryManager(MockStore(), "test")
         manager.load()
 
-        # Add 20 messages (10 turns)
-        for i in range(10):
+        # Add 80 messages (40 turns) to exceed the 30-message window
+        for i in range(40):
             manager.update(f"Q{i}", f"A{i}")
 
         context = manager.prepare_context("next")
 
-        # Should only have 8 messages in context (default)
-        assert context.context_messages_count == 8
-        assert context.total_messages_stored == 20
+        # Should only have 30 messages in context (default)
+        assert context.context_messages_count == 30
+        assert context.total_messages_stored == 80
 
     def test_system_prompt_additions(self):
         """Test that code mode adds system prompt."""
@@ -440,7 +442,7 @@ class TestStats:
 
         assert stats["mode"] == "code"
         assert stats["total_messages"] == 2
-        assert stats["working_memory_size"] == 8
+        assert stats["working_memory_size"] == 30
         assert stats["files_tracked"] == 1
         assert stats["has_task"] is True
         assert stats["error_count"] == 1
@@ -468,3 +470,54 @@ class TestClear:
         assert len(manager._files) == 0
         assert len(manager._recent_errors) == 0
         assert len(manager._changes_made) == 0
+
+
+class TestCodeTimestamps:
+    """Tests for timestamp support in code memory mode."""
+
+    def test_update_stamps_messages(self):
+        """Test that update attaches timestamps to messages."""
+        manager = CodeDevelopmentMemoryManager(MockStore(), "test")
+        manager.load()
+        manager.update("Fix the bug", "Done.")
+
+        for msg in manager._messages:
+            ts = manager._get_msg_ts(msg)
+            assert ts is not None
+            datetime.fromisoformat(ts)
+
+    def test_prepare_context_injects_timestamps(self):
+        """Test that prepare_context prepends timestamps to message content."""
+        manager = CodeDevelopmentMemoryManager(MockStore(), "test")
+        manager.load()
+        manager.update("Fix the bug", "Done.")
+
+        context = manager.prepare_context("next")
+
+        for msg in context.messages:
+            content = msg.content if hasattr(msg, "content") else msg["content"]
+            assert content.startswith("[")
+
+    def test_to_dict_preserves_timestamps(self):
+        """Test that serialization includes timestamps."""
+        manager = CodeDevelopmentMemoryManager(MockStore(), "test")
+        manager.load()
+        manager.update("Q", "A")
+
+        data = manager.to_dict()
+        for msg_data in data["messages"]:
+            assert "timestamp" in msg_data
+
+    def test_from_dict_restores_timestamps(self):
+        """Test that deserialization restores timestamps."""
+        m1 = CodeDevelopmentMemoryManager(MockStore(), "test")
+        m1.load()
+        m1.update("Q", "A")
+
+        data = m1.to_dict()
+
+        m2 = CodeDevelopmentMemoryManager(MockStore(), "test")
+        m2.from_dict(data)
+
+        for msg in m2._messages:
+            assert m2._get_msg_ts(msg) is not None

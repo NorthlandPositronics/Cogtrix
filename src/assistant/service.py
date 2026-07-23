@@ -1,0 +1,214 @@
+"""
+AssistantService — top-level orchestrator for Cogtrix assistant mode.
+
+Discovers available channels, wires session management and message handling,
+starts polling threads, and blocks until SIGINT/SIGTERM is received.
+"""
+
+from __future__ import annotations
+
+import logging
+import signal
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from typing import Any
+
+from src.assistant.channel import Channel
+from src.assistant.guardrails import GuardrailPipeline
+from src.assistant.handler import MessageHandler
+from src.assistant.knowledge import SharedKnowledgeStore, create_extraction_llm
+from src.assistant.poller import ChannelPoller
+from src.assistant.session import ChatSessionManager
+
+log = logging.getLogger("cogtrix")
+
+_ASSISTANT_SYSTEM_PROMPT = (
+    "You are a helpful AI assistant responding via messaging.\n\n"
+    "Be concise — messaging conversations favor shorter, focused replies.\n"
+    "Do not use markdown headers (#, ##). Use plain text with line breaks.\n"
+    "Keep responses under 2000 characters when possible.\n"
+    "Use tools silently — present results, do not narrate tool usage.\n"
+    "You have access to this conversation's history and general knowledge.\n"
+)
+
+
+class AssistantService:
+    """Main orchestrator for headless assistant mode.
+
+    Args:
+        config: Full application Config object.
+        llm: Primary LLM instance.
+        registry: Tool registry.
+        system_prompt: Base system prompt (overridden by assistant persona).
+        available_tools: {name: tool} dict of on-demand tools.
+        active_tools: List of initially active tool objects.
+        max_context_tokens: Context window budget.
+        compression_llm: Optional dedicated LLM for context compression.
+    """
+
+    def __init__(
+        self,
+        config: Any,
+        llm: Any,
+        registry: Any,
+        system_prompt: str,
+        available_tools: dict[str, Any],
+        active_tools: list[Any],
+        max_context_tokens: int | None = None,
+        compression_llm: Any = None,
+        cli_system_prompt: str | None = None,
+    ) -> None:
+        self._config = config
+        asst_cfg: dict[str, Any] = (
+            config.services.get("assistant", {}) if hasattr(config, "services") else {}
+        )
+        max_concurrent: int = asst_cfg.get("max_concurrent", 4)
+        effective_prompt = self._build_system_prompt(asst_cfg, system_prompt, cli_system_prompt)
+
+        know_cfg: dict[str, Any] = asst_cfg.get("knowledge", {})
+        self._knowledge_store: SharedKnowledgeStore | None = None
+        if know_cfg.get("enabled", True):
+            extraction_model: str | None = know_cfg.get("extraction_model")
+            extraction_llm = None
+            if extraction_model:
+                extraction_llm = create_extraction_llm(extraction_model, config)
+            self._knowledge_store = SharedKnowledgeStore(
+                config=config,
+                llm=llm,
+                extraction_llm=extraction_llm,
+            )
+            log.info("Knowledge store enabled (%d facts loaded)", len(self._knowledge_store._facts))
+
+        judge_llm = None
+        judge_cfg = asst_cfg.get("guardrails", {}).get("llm_judge", {})
+        if judge_cfg.get("enabled", False):
+            judge_model: str | None = judge_cfg.get("model")
+            if judge_model:
+                judge_llm = create_extraction_llm(judge_model, config)
+            else:
+                judge_llm = llm
+        guardrails = GuardrailPipeline(config=asst_cfg, llm=judge_llm)
+
+        self._session_mgr = ChatSessionManager(
+            config=config,
+            llm=llm,
+            system_prompt=effective_prompt,
+            registry=registry,
+            max_sessions=asst_cfg.get("max_sessions", 50),
+            idle_timeout=float(asst_cfg.get("idle_timeout", 3600.0)),
+        )
+
+        self._handler = MessageHandler(
+            session_mgr=self._session_mgr,
+            config=asst_cfg,
+            llm=llm,
+            system_prompt=effective_prompt,
+            registry=registry,
+            approvals={"*"},
+            available_tools=available_tools,
+            active_tools=active_tools,
+            max_context_tokens=max_context_tokens,
+            compression_llm=compression_llm,
+            knowledge_store=self._knowledge_store,
+            guardrails=guardrails,
+        )
+
+        self._executor = ThreadPoolExecutor(max_workers=max_concurrent)
+        self._channels: list[Channel] = self._discover_channels(config)
+        self._poller = ChannelPoller(
+            self._channels,
+            self._handler,
+            self._executor,
+            asst_cfg,
+            self._session_mgr,
+        )
+        self._stop_event = threading.Event()
+
+    def run(self) -> None:
+        """Start polling and block until a shutdown signal is received."""
+        signal.signal(signal.SIGINT, self._handle_shutdown)
+        signal.signal(signal.SIGTERM, self._handle_shutdown)
+
+        log.info("Assistant mode starting with %d channels", len(self._channels))
+        if not self._channels:
+            log.error("No messaging channels are ready. Check your WhatsApp/Telegram config.")
+            return
+
+        for ch in self._channels:
+            log.info("  Channel: %s", ch.name)
+
+        self._poller.start()
+        self._stop_event.wait()
+
+    def _handle_shutdown(self, _signum: int, _frame: Any) -> None:
+        log.info("Shutdown signal received")
+        self._poller.stop()
+        self._executor.shutdown(wait=True, cancel_futures=False)
+        self._session_mgr.save_all()
+        if self._knowledge_store is not None:
+            self._knowledge_store.save()
+        log.info("Assistant mode stopped")
+        self._stop_event.set()
+
+    def _discover_channels(self, config: Any) -> list[Channel]:
+        channels: list[Channel] = []
+        asst_cfg: dict[str, Any] = (
+            config.services.get("assistant", {}) if hasattr(config, "services") else {}
+        )
+        ch_cfgs: dict[str, Any] = asst_cfg.get("channels", {})
+
+        if ch_cfgs.get("whatsapp", {}).get("enabled", True):
+            try:
+                from src.assistant.channels.whatsapp import WhatsAppChannel
+
+                wa = WhatsAppChannel(config.services.get("whatsapp", {}))
+                if wa.is_ready():
+                    channels.append(wa)
+                else:
+                    log.warning("WhatsApp channel enabled but not ready (check Waha config)")
+            except Exception as e:
+                log.warning("Failed to init WhatsApp channel: %s", e)
+
+        if ch_cfgs.get("telegram", {}).get("enabled", True):
+            try:
+                from src.assistant.channels.telegram import TelegramChannel
+
+                tg_cfg = config.services.get("telegram", {})
+                long_poll = ch_cfgs.get("telegram", {}).get("long_poll_timeout", 30)
+                tg = TelegramChannel(tg_cfg, long_poll_timeout=long_poll)
+                if tg.is_ready():
+                    channels.append(tg)
+                else:
+                    log.warning("Telegram channel enabled but not ready (check bot token)")
+            except Exception as e:
+                log.warning("Failed to init Telegram channel: %s", e)
+
+        return channels
+
+    @staticmethod
+    def _build_system_prompt(
+        asst_cfg: dict[str, Any], _fallback_prompt: str, cli_prompt: str | None = None
+    ) -> str:
+        if cli_prompt:
+            return cli_prompt
+
+        inline: str | None = asst_cfg.get("system_prompt")
+        if inline:
+            return inline
+
+        prompt_file: str | None = asst_cfg.get("system_prompt_file")
+        if prompt_file:
+            from pathlib import Path
+
+            path = Path(prompt_file)
+            if path.exists():
+                content = path.read_text(encoding="utf-8").strip()
+                if content:
+                    log.info("Loaded assistant system prompt from %s", path)
+                    return content
+                else:
+                    log.warning("System prompt file is empty: %s", path)
+            else:
+                log.warning("System prompt file not found: %s", path)
+
+        return _ASSISTANT_SYSTEM_PROMPT

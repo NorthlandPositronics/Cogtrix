@@ -9,6 +9,7 @@ Provides centralized logging setup with support for:
 """
 
 import logging
+import re as _re
 import sys
 import uuid
 from contextvars import ContextVar
@@ -27,8 +28,32 @@ DEFAULT_LOG_FILE = "cogtrix.log"
 _verbose_logging: bool = False
 
 
+# Patterns that look like secrets (compiled once at import time)
+_SENSITIVE_RE = _re.compile(
+    r"""
+    (?:api[_-]?key|secret|token|password|authorization)
+    \s*[:=]\s*
+    ["']?([A-Za-z0-9_\-/.]{8,})["']?
+    """,
+    _re.IGNORECASE | _re.VERBOSE,
+)
+_BEARER_RE = _re.compile(r"Bearer\s+[A-Za-z0-9_\-/.]{8,}", _re.IGNORECASE)
+_SK_RE = _re.compile(r"sk-[A-Za-z0-9]{8,}")
+_KEY_LIKE_RE = _re.compile(r"(?:exa-|tvly-|BSA)[A-Za-z0-9_\-]{6,}")
+
+
+def _scrub_secrets(text: str) -> str:
+    """Replace likely API keys / tokens with a redacted placeholder."""
+    text = _SENSITIVE_RE.sub("***REDACTED***", text)
+    text = _BEARER_RE.sub("Bearer ***", text)
+    text = _SK_RE.sub("sk-***", text)
+    text = _KEY_LIKE_RE.sub("***REDACTED***", text)
+    return text
+
+
 def _truncate(text: str, max_len: int) -> str:
-    """Truncate text if verbose logging is disabled."""
+    """Truncate text if verbose logging is disabled, scrub secrets."""
+    text = _scrub_secrets(text)
     if _verbose_logging or len(text) <= max_len:
         return text
     return text[:max_len] + "..."

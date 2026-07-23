@@ -9,6 +9,9 @@ from src.tools.delegate import (
     DelegateResult,
     ModelCircuitBreaker,
     _build_prompt,
+    _check_allowed_model,
+    _extract_content,
+    _resolve_defaults,
     _resolve_model_alias,
     _validate_json_response,
     configure_delegate,
@@ -16,6 +19,7 @@ from src.tools.delegate import (
     delegate_task,
     get_model_status,
     reset_model_status,
+    set_delegate_tools,
 )
 
 
@@ -28,14 +32,14 @@ class TestConfiguration:
             {
                 "enabled": False,
                 "default_provider": "openai",
-                "model_aliases": {"fast": "ollama/llama3:8b"},
+                "model_aliases": {"fast": "ollama/gemma3:12b"},
             }
         )
 
         # Config should be updated (we test via _resolve_model_alias)
         provider, model, alias_config = _resolve_model_alias(None, "fast")
         assert provider == "ollama"
-        assert model == "llama3:8b"
+        assert model == "gemma3:12b"
 
     def test_resolve_alias_with_provider_model(self):
         """Test resolving alias with provider/model format."""
@@ -43,7 +47,7 @@ class TestConfiguration:
             {
                 "model_aliases": {
                     "smart": "openai/gpt-4",
-                    "code": "ollama/codellama:13b",
+                    "code": "ollama/qwen3-coder:30b-a3b",
                 }
             }
         )
@@ -54,21 +58,21 @@ class TestConfiguration:
 
         provider, model, alias_config = _resolve_model_alias(None, "code")
         assert provider == "ollama"
-        assert model == "codellama:13b"
+        assert model == "qwen3-coder:30b-a3b"
 
     def test_resolve_alias_model_only(self):
         """Test resolving alias that's just a model name."""
         configure_delegate(
             {
                 "model_aliases": {
-                    "default": "llama3:8b",
+                    "default": "gemma3:12b",
                 }
             }
         )
 
         provider, model, alias_config = _resolve_model_alias("ollama", "default")
         assert provider == "ollama"
-        assert model == "llama3:8b"
+        assert model == "gemma3:12b"
 
     def test_no_alias_passthrough(self):
         """Test that non-alias values pass through unchanged."""
@@ -205,6 +209,7 @@ class TestInputSchemas:
         input_data = DelegateInput(task="Test task")
         assert input_data.task == "Test task"
         assert input_data.context == ""
+        assert input_data.use_tools is True
         assert input_data.response_format == "text"
         assert input_data.timeout == 60
         assert input_data.temperature == 0.7
@@ -318,6 +323,36 @@ class TestDelegateTaskWithMock:
         result = delegate_task(task="Test")
         assert "Delegation disabled" in result
 
+    def test_delegate_task_rejects_empty_context_no_tools(self):
+        """Test that LLM-only delegation with empty context is rejected."""
+        result = delegate_task(task="Summarize", use_tools=False, context="")
+        assert "rejected" in result.lower()
+        assert "context is empty" in result.lower()
+
+    def test_delegate_task_rejects_whitespace_context_no_tools(self):
+        """Test that LLM-only delegation with whitespace-only context is rejected."""
+        result = delegate_task(task="Summarize", use_tools=False, context="   \n  ")
+        assert "rejected" in result.lower()
+
+    @patch("src.tools.delegate._create_llm")
+    def test_delegate_task_allows_empty_context_with_tools(self, mock_create_llm):
+        """Test that tool-capable delegation with empty context is allowed."""
+        mock_llm = MagicMock()
+        mock_response = MagicMock()
+        mock_response.content = "Found results"
+        mock_llm.invoke.return_value = mock_response
+        mock_llm.model = "test-model"
+        mock_create_llm.return_value = mock_llm
+
+        result = delegate_task(
+            task="Search for info",
+            context="",
+            use_tools=True,
+            provider="ollama",
+        )
+        assert "rejected" not in result.lower()
+        assert "Found results" in result
+
     @patch("src.tools.delegate._create_llm")
     def test_delegate_task_error_handling(self, mock_create_llm):
         """Test error handling in delegation."""
@@ -368,6 +403,16 @@ class TestDelegateParallelWithMock:
         """Test parallel with empty task list."""
         result = delegate_parallel(tasks=[])
         assert "No tasks provided" in result
+
+    def test_parallel_rejects_empty_context_no_tools(self):
+        """Test that parallel rejects LLM-only tasks with empty context."""
+        result = delegate_parallel(
+            tasks=[
+                {"task": "Task 1", "use_tools": False, "context": ""},
+            ],
+        )
+        assert "rejected" in result.lower()
+        assert "task 1" in result.lower()
 
     def test_parallel_disabled(self):
         """Test parallel when delegation is disabled."""
@@ -423,7 +468,7 @@ class TestCircuitBreaker:
 
         available, reason = breaker.check_availability(cooldown=300)
         assert available is False
-        assert "consecutive failures" in reason
+        assert reason is not None and "consecutive failures" in reason
 
     def test_circuit_breaker_resets_on_success(self):
         """Test that success resets the circuit breaker."""
@@ -527,3 +572,211 @@ class TestCircuitBreaker:
         status = get_model_status()
         assert status["ollama/recover-model"]["consecutive_failures"] == 0
         assert status["ollama/recover-model"]["available"] is True
+
+
+class TestCheckAllowedModel:
+    """Tests for _check_allowed_model — the allowed-models gate."""
+
+    def test_no_restriction_when_allowed_models_is_none(self):
+        """When allowed_models is not configured, all models should pass."""
+        configure_delegate({"allowed_models": None})
+        assert _check_allowed_model("anything") is None
+
+    def test_allowed_model_passes(self):
+        """An explicitly allowed model should pass."""
+        configure_delegate({"allowed_models": ["coder", "gpt4o", "fast"]})
+        assert _check_allowed_model("coder") is None
+
+    def test_disallowed_model_returns_error(self):
+        """A model not in the allowed list should return an error message."""
+        configure_delegate({"allowed_models": ["coder", "gpt4o"]})
+        err = _check_allowed_model("unknown-model")
+        assert err is not None
+        assert "not in the allowed" in err
+
+    def test_none_model_passes_when_allowed_list_set(self):
+        """When model is None (agent uses defaults), it should pass."""
+        configure_delegate({"allowed_models": ["coder", "gpt4o"]})
+        assert _check_allowed_model(None) is None
+
+    def test_empty_string_model_passes_when_allowed_list_set(self):
+        """When model is empty string (agent omitted it), it should pass."""
+        configure_delegate({"allowed_models": ["coder", "gpt4o"]})
+        assert _check_allowed_model("") is None
+
+
+class TestResolveDefaults:
+    """Tests for _resolve_defaults — filling in missing provider/model."""
+
+    def test_both_provided(self):
+        """When both provider and model are given, they should pass through."""
+        p, m = _resolve_defaults("openai", "gpt-4.1")
+        assert p == "openai"
+        assert m == "gpt-4.1"
+
+    def test_provider_none_uses_default(self):
+        """When provider is None, the configured default should be used."""
+        configure_delegate({"default_provider": "spark-cluster"})
+        p, m = _resolve_defaults(None, "some-model")
+        assert p == "spark-cluster"
+        assert m == "some-model"
+
+    def test_model_none_uses_default(self):
+        """When model is None, the configured default should be used."""
+        configure_delegate({"default_model": "nemotron-nano"})
+        p, m = _resolve_defaults("ollama", None)
+        assert p == "ollama"
+        assert m == "nemotron-nano"
+
+    def test_both_none_uses_defaults(self):
+        """When both are None, both defaults should be applied."""
+        configure_delegate({"default_provider": "ollama", "default_model": "qwen3:8b"})
+        p, m = _resolve_defaults(None, None)
+        assert p == "ollama"
+        assert m == "qwen3:8b"
+
+    def test_model_none_no_default_configured(self):
+        """When model is None and no default_model configured, fallback to 'default'."""
+        configure_delegate({"default_model": None})
+        _, m = _resolve_defaults("ollama", None)
+        assert m == "default"
+
+
+class TestSetDelegateTools:
+    """Tests for set_delegate_tools — registering tools for delegates."""
+
+    def teardown_method(self):
+        """Clean up module-level _delegate_tools after each test."""
+        set_delegate_tools([])
+
+    def test_filters_excluded_tools(self):
+        """Delegation/recursion tools should be excluded."""
+        tools = []
+        for name in ("read_file", "delegate_task", "deep_think", "request_tools", "shell"):
+            tool = MagicMock()
+            tool.name = name
+            tools.append(tool)
+
+        set_delegate_tools(tools)
+
+        import src.tools.delegate as mod
+
+        names = [t.name for t in mod._delegate_tools]
+        assert "read_file" in names
+        assert "shell" in names
+        assert "delegate_task" not in names
+        assert "deep_think" not in names
+        assert "request_tools" not in names
+
+    def test_empty_input_clears_tools(self):
+        """Passing an empty list should clear delegate tools."""
+        tool = MagicMock()
+        tool.name = "read_file"
+        set_delegate_tools([tool])
+
+        import src.tools.delegate as mod
+
+        assert len(mod._delegate_tools) == 1
+
+        set_delegate_tools([])
+        assert len(mod._delegate_tools) == 0
+
+    def test_tools_without_name_attribute_are_skipped(self):
+        """Objects without a 'name' attribute get empty-string name → kept."""
+        tool = MagicMock(spec=[])  # no attributes
+        set_delegate_tools([tool])
+
+        import src.tools.delegate as mod
+
+        assert len(mod._delegate_tools) == 1
+
+    def test_merges_active_and_available_tools(self):
+        """Active + available on-demand tools should be merged for delegates."""
+        active = MagicMock()
+        active.name = "read_file"
+        ondemand_shell = MagicMock()
+        ondemand_shell.name = "execute_shell_command"
+        ondemand_python = MagicMock()
+        ondemand_python.name = "execute_python"
+
+        set_delegate_tools(
+            [active],
+            available_tools={
+                "execute_shell_command": ondemand_shell,
+                "execute_python": ondemand_python,
+            },
+        )
+
+        import src.tools.delegate as mod
+
+        names = {t.name for t in mod._delegate_tools}
+        assert names == {"read_file", "execute_shell_command", "execute_python"}
+
+    def test_deduplicates_across_active_and_available(self):
+        """A tool in both active and available should appear only once."""
+        tool_a = MagicMock()
+        tool_a.name = "read_file"
+        tool_b = MagicMock()
+        tool_b.name = "read_file"
+
+        set_delegate_tools([tool_a], available_tools={"read_file": tool_b})
+
+        import src.tools.delegate as mod
+
+        assert len(mod._delegate_tools) == 1
+        assert mod._delegate_tools[0] is tool_a
+
+    def test_excludes_recursion_tools_from_available(self):
+        """Excluded tools in available_tools should be filtered out."""
+        active = MagicMock()
+        active.name = "read_file"
+        deep = MagicMock()
+        deep.name = "deep_think"
+
+        set_delegate_tools([active], available_tools={"deep_think": deep})
+
+        import src.tools.delegate as mod
+
+        names = {t.name for t in mod._delegate_tools}
+        assert "deep_think" not in names
+        assert "read_file" in names
+
+
+class TestExtractContent:
+    """Tests for _extract_content — text extraction from LLM responses."""
+
+    def test_string_content(self):
+        """Simple string .content attribute."""
+        msg = MagicMock()
+        msg.content = "Hello world"
+        assert _extract_content(msg) == "Hello world"
+
+    def test_list_content_strings(self):
+        """List of plain strings."""
+        msg = MagicMock()
+        msg.content = ["Part 1", "Part 2"]
+        assert _extract_content(msg) == "Part 1\nPart 2"
+
+    def test_list_content_dicts(self):
+        """List of text-content dicts (Anthropic-style)."""
+        msg = MagicMock()
+        msg.content = [{"type": "text", "text": "Hello"}, {"type": "text", "text": "World"}]
+        assert _extract_content(msg) == "Hello\nWorld"
+
+    def test_none_content(self):
+        """None .content should return empty string."""
+        msg = MagicMock()
+        msg.content = None
+        assert _extract_content(msg) == ""
+
+    def test_no_content_attribute(self):
+        """Object without .content falls back to str()."""
+        result = _extract_content(42)
+        assert result == "42"
+
+    def test_empty_list_content(self):
+        """Empty list .content falls back to str(content)."""
+        msg = MagicMock()
+        msg.content = []
+        result = _extract_content(msg)
+        assert result == "[]"

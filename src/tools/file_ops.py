@@ -14,9 +14,14 @@ class ReadFileInput(BaseModel):
 
     path: str = Field(description="Path to the file to read")
     encoding: str = Field(default="utf-8", description="File encoding (default: utf-8)")
+    start_line: int = Field(
+        default=0,
+        ge=0,
+        description="0-based line number to start reading from (default: 0)",
+    )
     max_lines: int | None = Field(
         default=None,
-        description="Maximum number of lines to read (None for all)",
+        description="Maximum number of lines to read from start_line (None for all)",
     )
 
 
@@ -62,26 +67,39 @@ def _validate_path(path: str) -> tuple[bool, str, Path | None]:
 
         # Check for path traversal attempts
         if ".." in path:
-            # Reject any path with ".." that resolves outside cwd
             cwd = Path.cwd().resolve()
             try:
                 p.relative_to(cwd)
             except ValueError:
                 return False, "Path traversal not allowed", None
 
+        # Relative paths must resolve within cwd (catches symlink traversal)
+        if not Path(path).is_absolute():
+            cwd = Path.cwd().resolve()
+            try:
+                p.relative_to(cwd)
+            except ValueError:
+                return False, "Path traversal via symlink not allowed", None
+
         return True, "", p
     except Exception as e:
         return False, f"Invalid path: {e}", None
 
 
-def read_file(path: str, encoding: str = "utf-8", max_lines: int | None = None) -> str:
+def read_file(
+    path: str,
+    encoding: str = "utf-8",
+    start_line: int = 0,
+    max_lines: int | None = None,
+) -> str:
     """
     Read the contents of a file.
 
     Args:
         path: Path to the file to read
         encoding: File encoding (default: utf-8)
-        max_lines: Maximum number of lines to read (None for all)
+        start_line: 0-based line number to start reading from (default: 0)
+        max_lines: Maximum number of lines to read from start_line (None for all)
 
     Returns:
         File contents or error message
@@ -99,25 +117,56 @@ def read_file(path: str, encoding: str = "utf-8", max_lines: int | None = None) 
     if not resolved.is_file():
         return f"Error: Not a file: {path}"
 
+    # Pre-check file size to avoid loading huge files into memory
+    try:
+        file_size = resolved.stat().st_size
+    except OSError as e:
+        return f"Error: Cannot stat file: {e}"
+    _MAX_READ_BYTES = 100 * 1024 * 1024  # 100 MB
+    if file_size > _MAX_READ_BYTES:
+        return (
+            f"Error: File too large ({file_size / (1024 * 1024):.1f} MB). "
+            f"Maximum readable size is {_MAX_READ_BYTES // (1024 * 1024)} MB."
+        )
+
+    if start_line < 0:
+        return "Error: start_line must be >= 0"
+
     try:
         with open(resolved, encoding=encoding) as f:
-            if max_lines is not None:
-                lines = []
-                for i, line in enumerate(f):
-                    if i >= max_lines:
-                        lines.append(f"\n... (truncated after {max_lines} lines)")
-                        break
-                    lines.append(line)
-                return "".join(lines)
-            else:
-                content = f.read()
-                # Warn if file is very large
-                if len(content) > 100000:
-                    return (
-                        f"[File is {len(content)} characters]\n\n"
-                        f"{content[:50000]}\n\n... (truncated, file too large)"
-                    )
-                return content
+            all_lines = f.readlines()
+        total_lines = len(all_lines)
+        total_chars = sum(len(ln) for ln in all_lines)
+
+        if start_line > 0 or max_lines is not None:
+            if start_line >= total_lines:
+                return (
+                    f"Error: start_line {start_line} is beyond end of file "
+                    f"({total_lines} lines)"
+                )
+            end = min(start_line + max_lines, total_lines) if max_lines is not None else total_lines
+            selected = all_lines[start_line:end]
+            header = (
+                f"[File: {total_lines:,} lines, {total_chars:,} chars — "
+                f"showing lines {start_line}-{end - 1} "
+                f"({len(selected)} lines)]\n"
+            )
+            return header + "".join(selected)
+        else:
+            content = "".join(all_lines)
+            _SAFETY_CAP = 512_000
+            if len(content) > _SAFETY_CAP:
+                half = _SAFETY_CAP // 2
+                return (
+                    f"[File: {total_lines:,} lines, {total_chars:,} chars "
+                    f"— showing first and last {half:,} chars. "
+                    f"Use start_line/max_lines to page through.]\n\n"
+                    f"{content[:half]}\n\n"
+                    f"[... {len(content) - _SAFETY_CAP:,} chars "
+                    f"omitted ...]\n\n"
+                    f"{content[-half:]}"
+                )
+            return content
     except UnicodeDecodeError:
         return f"Error: Could not decode file with encoding '{encoding}'. Try a different encoding."
     except PermissionError:
@@ -315,7 +364,10 @@ TOOL_CONFIGS = [
         "name": "read_file",
         "description": (
             "Read the contents of a file. "
-            "Use this to view file contents, configuration files, source code, etc."
+            "Large files are automatically truncated. "
+            "Use start_line and max_lines to page through large files "
+            "(e.g. start_line=0, max_lines=200 for the first 200 lines; "
+            "start_line=200, max_lines=200 for the next page)."
         ),
         "input_schema": ReadFileInput,
         "requires_confirmation": False,

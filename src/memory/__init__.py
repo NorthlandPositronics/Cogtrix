@@ -27,6 +27,8 @@ from src.memory.context import MemoryContext
 from src.memory.factory import MemoryFactory
 from src.memory.json_store import JsonFileMemoryStore
 from src.memory.manager import BaseMemoryManager
+from src.memory.recall import SessionVectorStore
+from src.memory.summarizer import generate_summary
 
 __all__ = [
     "BaseMemoryStore",
@@ -34,4 +36,6 @@ __all__ = [
     "MemoryContext",
     "BaseMemoryManager",
     "MemoryFactory",
+    "SessionVectorStore",
+    "generate_summary",
 ]

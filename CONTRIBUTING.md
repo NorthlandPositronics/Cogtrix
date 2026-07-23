@@ -1,6 +1,6 @@
 # Contributing to Cogtrix
 
-Thank you for your interest in Cogtrix! We welcome bug reports, feature suggestions, and contributions under the terms described below.
+Thank you for your interest in Cogtrix! We welcome bug reports, feature suggestions, and code contributions under the terms described below.
 
 ## Important: Licensing
 
@@ -11,6 +11,13 @@ Cogtrix is released under the **Cogtrix Source-Available License 1.0**. By submi
 3. Your contribution is provided under the same license terms as the Software.
 
 See the [LICENSE](LICENSE) file for full terms.
+
+## Getting Started
+
+1. **Fork** the repository and clone your fork.
+2. **Install dependencies:** `uv sync` (or `pip install -r requirements.txt`).
+3. **Run the test suite** to make sure everything works: `uv run pytest tests/ -v`.
+4. **Read the docs** — [Architecture](docs/ARCHITECTURE.md) for system design, [Development](docs/DEVELOPMENT.md) for practical extension guides.
 
 ## How to Contribute
 
@@ -32,45 +39,40 @@ See the [LICENSE](LICENSE) file for full terms.
 
 ### Submitting Code
 
-1. Fork the repository.
-2. Create a feature branch from `main`.
-3. Make your changes following the code style guidelines below.
-4. Add or update tests as appropriate.
-5. Run the test suite:
+1. Create a feature branch from `main`.
+2. Make your changes following the code style guidelines below.
+3. Add or update tests as appropriate.
+4. Run all quality checks:
 
 ```bash
-uv run pytest
+uv run black cogtrix.py src/ tests/
+uv run ruff check cogtrix.py src/ tests/
+uv run pyright src/
+uv run pytest tests/ -v
 ```
 
-6. Submit a pull request with:
+5. Submit a pull request with:
    - A clear description of what the change does and why
    - Reference to any related issues
 
-### Code Style
+### Your First Contribution
 
-- Python 3.13+
+Good places to start:
+
+- **Add a new tool** — see [Development Guide: Adding Custom Tools](docs/DEVELOPMENT.md#adding-custom-tools). Drop a `.py` file in `src/tools/` with a `TOOL_CONFIG` dict, and it's auto-discovered.
+- **Improve test coverage** — pick a tool or memory mode and add edge-case tests.
+- **Fix a typo or clarify docs** — documentation improvements are always welcome.
+
+## Code Style
+
+- Python 3.13.x
 - Follow existing code patterns and conventions
 - Use type hints where practical
-- Run linting before submitting:
-
-```bash
-uv run flake8
-uv run mypy src/
-```
-
+- Format with [Black](https://github.com/psf/black) (line length 100)
+- Lint with [Ruff](https://docs.astral.sh/ruff/)
+- Type-check with [Pyright](https://github.com/microsoft/pyright)
 - Keep commits focused — one logical change per commit
-- Write clear commit messages
-
-### Adding Tools
-
-Cogtrix uses auto-discovery for tools. To add a new tool:
-
-1. Create a new file in `src/tools/`.
-2. Define your tool function(s) with proper type hints and docstrings.
-3. Define an input schema using Pydantic.
-4. Add a `TOOL_CONFIG` dictionary for auto-registration.
-5. See `src/tools/calculator.py` for a minimal example.
-6. Add tests in `tests/`.
+- Use [Conventional Commits](https://www.conventionalcommits.org/) for commit messages (`feat:`, `fix:`, `docs:`, etc.)
 
 ## Code of Conduct
 

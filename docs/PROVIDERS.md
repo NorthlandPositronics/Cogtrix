@@ -1,9 +1,10 @@
 # Cogtrix Provider Setup
 
-Step-by-step guides for configuring LLM providers.
+Step-by-step guides for configuring LLM providers. If you're new to Cogtrix, start with the [Quick Start](../README.md#quick-start) first — you can come back here when you want to add or switch providers.
 
 ## Table of Contents
 
+- [Which Provider Should I Choose?](#which-provider-should-i-choose)
 - [Overview](#overview)
 - [OpenAI](#openai)
 - [Ollama](#ollama)
@@ -12,6 +13,24 @@ Step-by-step guides for configuring LLM providers.
 - [Local vLLM](#local-vllm)
 - [Multiple Providers](#multiple-providers)
 - [Troubleshooting](#troubleshooting)
+
+---
+
+## Which Provider Should I Choose?
+
+Not sure where to start? Use this table:
+
+| I want... | Best choice | Setup time |
+|-----------|-------------|------------|
+| **Free, private, runs on my machine** | **Ollama** (default) | 5 minutes |
+| **Best quality, don't mind paying** | **OpenAI** (GPT-4o) | 2 minutes (need API key) |
+| **Fast inference, free tier available** | **Groq** | 3 minutes (need API key) |
+| **Wide model selection, competitive pricing** | **Together AI** | 3 minutes (need API key) |
+| **Full control, own GPU server** | **vLLM** | 15 minutes |
+
+Cogtrix defaults to Ollama on `localhost:11434`. If you already have Ollama running, you don't need to configure anything — just run `python cogtrix.py`.
+
+You can configure multiple providers and switch between them at runtime with `/provider <name>`.
 
 ---
 
@@ -47,32 +66,28 @@ Cogtrix supports two provider types:
 **Environment variable only:**
 ```bash
 export OPENAI_API_KEY="sk-..."
-python cogtrix.py -p openai -m gpt-4o
+python cogtrix.py -p openai -m gpt-4.1
 ```
 
 **Config file:**
-```json
-{
-  "provider": "openai",
-  "providers": {
-    "openai": {
-      "type": "openai",
-      "model": "gpt-4o",
-      "api_key": "sk-..."
-    }
-  }
-}
+```yaml
+provider: openai
+inference:
+  openai:
+    type: openai
+    model: gpt-4.1
+    api_key: "sk-..."
 ```
 
 ### Available Models
 
 | Model | Context | Best For |
 |-------|---------|----------|
-| `gpt-4o` | 128K | Complex tasks, coding |
-| `gpt-4o-mini` | 128K | Fast, cost-effective |
-| `gpt-4-turbo` | 128K | Previous flagship |
-| `o1-preview` | 128K | Reasoning tasks |
-| `o1-mini` | 128K | Fast reasoning |
+| `gpt-4.1` | 1M | Complex tasks, coding |
+| `gpt-4.1-mini` | 1M | Fast, cost-effective (default) |
+| `gpt-4.1-nano` | 1M | Fastest, cheapest |
+| `o3` | 200K | Reasoning tasks |
+| `o3-mini` | 200K | Fast reasoning |
 
 ---
 
@@ -89,73 +104,63 @@ python cogtrix.py -p openai -m gpt-4o
 
 3. Pull a model:
    ```bash
-   ollama pull llama3:70b
+   ollama pull qwen3:8b       # or any model you prefer
    ```
 
 4. Run:
    ```bash
-   python cogtrix.py -p ollama -m llama3:70b
+   python cogtrix.py           # Ollama is the default provider
+   python cogtrix.py -m qwen3:8b   # use a different model
    ```
 
-### Configuration
+No configuration file is needed for local Ollama — Cogtrix connects to `localhost:11434` automatically.
 
-**Local server (default):**
-```json
-{
-  "provider": "ollama",
-  "providers": {
-    "ollama": {
-      "type": "ollama",
-      "model": "llama3:70b"
-    }
-  }
-}
+### Remote Ollama Server
+
+Set the `COGTRIX_OLLAMA` environment variable to point at a remote server:
+
+```bash
+export COGTRIX_OLLAMA="192.168.1.100"          # default port 11434
+export COGTRIX_OLLAMA="192.168.1.100:8080"     # custom port
 ```
 
-**Remote server:**
-```json
-{
-  "provider": "ollama",
-  "providers": {
-    "ollama": {
-      "type": "ollama",
-      "base_url": "http://192.168.1.100:11434",
-      "model": "llama3:70b"
-    }
-  }
-}
+Or use a config file:
+
+```yaml
+provider: ollama
+inference:
+  ollama:
+    type: ollama
+    base_url: "http://192.168.1.100:11434"
+    model: qwen3:8b
 ```
 
 ### Popular Models
 
 | Model | Size | Best For |
 |-------|------|----------|
-| `llama3:70b` | 70B | General purpose |
-| `llama3:8b` | 8B | Fast, lightweight |
-| `codellama:34b` | 34B | Code generation |
-| `mistral:7b` | 7B | Fast, efficient |
-| `mixtral:8x7b` | 8x7B | MoE, balanced |
-| `qwen2:72b` | 72B | Multilingual |
-| `deepseek-coder:33b` | 33B | Code specialized |
+| `qwen3:8b` | 8B | General purpose (default) |
+| `qwen3:30b-a3b` | 30B (3B active) | General purpose, MoE — fast on low VRAM |
+| `gemma3:12b` | 12B | Multimodal, 128K context |
+| `llama4:scout` | 109B (17B active) | Multimodal, MoE |
+| `deepseek-r1:14b` | 14B | Reasoning, math |
+| `hf.co/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF` | 30B (3B active) | Code generation, MoE |
+| `phi4-reasoning:14b` | 14B | Reasoning, math olympiad |
+| `mistral-small3.2` | 24B | Agentic, tool use |
 
 ### Multiple Ollama Servers
 
-```json
-{
-  "provider": "gpu-server",
-  "providers": {
-    "gpu-server": {
-      "type": "ollama",
-      "base_url": "http://192.168.1.100:11434",
-      "model": "llama3:70b"
-    },
-    "cpu-server": {
-      "type": "ollama",
-      "base_url": "http://192.168.1.101:11434",
-      "model": "llama3:8b"
-    }
-  }
-}
+```yaml
+provider: gpu-server
+inference:
+  gpu-server:
+    type: ollama
+    base_url: "http://192.168.1.100:11434"
+    model: qwen3:8b
+  cpu-server:
+    type: ollama
+    base_url: "http://192.168.1.101:11434"
+    model: qwen3:8b
 ```
 
 ---
@@ -168,19 +173,15 @@ Fast inference with open-source models.
 
 1. Get an API key from [console.groq.com](https://console.groq.com/keys)
 
-2. Configure:
-   ```json
-   {
-     "provider": "groq",
-     "providers": {
-       "groq": {
-         "type": "openai",
-         "base_url": "https://api.groq.com/openai/v1",
-         "api_key": "gsk-...",
-         "model": "llama-3.3-70b-versatile"
-       }
-     }
-   }
+2. Configure (`.cogtrix.yaml`):
+   ```yaml
+   provider: groq
+   inference:
+     groq:
+       type: openai
+       base_url: "https://api.groq.com/openai/v1"
+       api_key: "gsk-..."
+       model: llama-3.3-70b-versatile
    ```
 
 3. Run:
@@ -207,19 +208,15 @@ Wide model selection with competitive pricing.
 
 1. Get an API key from [api.together.xyz](https://api.together.xyz/settings/api-keys)
 
-2. Configure:
-   ```json
-   {
-     "provider": "together",
-     "providers": {
-       "together": {
-         "type": "openai",
-         "base_url": "https://api.together.xyz/v1",
-         "api_key": "...",
-         "model": "meta-llama/Llama-3-70b-chat-hf"
-       }
-     }
-   }
+2. Configure (`.cogtrix.yaml`):
+   ```yaml
+   provider: together
+   inference:
+     together:
+       type: openai
+       base_url: "https://api.together.xyz/v1"
+       api_key: "..."
+       model: meta-llama/Llama-3-70b-chat-hf
    ```
 
 ### Popular Models
@@ -251,18 +248,14 @@ Run models locally with vLLM server.
      --port 8000
    ```
 
-3. Configure:
-   ```json
-   {
-     "provider": "vllm",
-     "providers": {
-       "vllm": {
-         "type": "openai",
-         "base_url": "http://localhost:8000/v1",
-         "model": "meta-llama/Llama-3-8b-chat-hf"
-       }
-     }
-   }
+3. Configure (`.cogtrix.yaml`):
+   ```yaml
+   provider: vllm
+   inference:
+     vllm:
+       type: openai
+       base_url: "http://localhost:8000/v1"
+       model: meta-llama/Llama-3-8b-chat-hf
    ```
 
 ---
@@ -271,41 +264,35 @@ Run models locally with vLLM server.
 
 Configure multiple providers for different use cases:
 
-```json
-{
-  "provider": "ollama-local",
+```yaml
+provider: ollama-local
 
-  "providers": {
-    "ollama-local": {
-      "type": "ollama",
-      "model": "llama3:8b"
-    },
-    "ollama-gpu": {
-      "type": "ollama",
-      "base_url": "http://gpu-server:11434",
-      "model": "llama3:70b"
-    },
-    "openai": {
-      "type": "openai",
-      "model": "gpt-4o"
-    },
-    "groq": {
-      "type": "openai",
-      "base_url": "https://api.groq.com/openai/v1",
-      "api_key": "gsk-...",
-      "model": "llama-3.3-70b-versatile"
-    }
-  },
+inference:
+  ollama-local:
+    type: ollama
+    model: qwen3:8b
+  ollama-gpu:
+    type: ollama
+    base_url: "http://gpu-server:11434"
+    model: qwen3:8b
+  openai:
+    type: openai
+    model: gpt-4.1-mini
+  groq:
+    type: openai
+    base_url: "https://api.groq.com/openai/v1"
+    api_key: "gsk-..."
+    model: llama-3.3-70b-versatile
 
-  "delegate": {
-    "model_aliases": {
-      "fast": "groq/llama-3.3-70b-versatile",
-      "smart": "openai/gpt-4o",
-      "local": "ollama-local/llama3:8b",
-      "code": "ollama-gpu/codellama:34b"
-    }
-  }
-}
+model_aliases:
+  fast: groq/llama-3.3-70b-versatile
+  smart: openai/gpt-4.1
+  local: ollama-local/qwen3:8b
+  coder: ollama-gpu/qwen3-coder:30b-a3b
+
+delegate:
+  enabled: true
+  allowed_models: [fast, smart, coder]
 ```
 
 ### Switching Providers
@@ -330,13 +317,13 @@ python cogtrix.py -p groq
 
 ```
 You: /provider openai
-Switched to provider openai (model: gpt-4o)
+Switched to provider openai (model: gpt-4.1)
 
 You: /p groq
 Switched to provider groq (model: llama-3.3-70b-versatile)
 
-You: /model gpt-4o-mini
-Switched to model gpt-4o-mini (openai)
+You: /model gpt-4.1-mini
+Switched to model gpt-4.1-mini (openai)
 ```
 
 The `/provider` (or `/p`) and `/model` (or `/m`) commands rebuild the LLM and agent immediately. If the switch fails (e.g., invalid model name), the previous configuration is automatically restored.
@@ -358,7 +345,7 @@ Check:
 **"Model not found"**
 ```
 Check:
-- Model name is correct (e.g., "gpt-4o" not "gpt4o")
+- Model name is correct (e.g., "gpt-4.1" not "gpt4o")
 - Your API key has access to the model
 ```
 
@@ -383,15 +370,15 @@ Check:
 **"Model not found"**
 ```
 Pull the model first:
-ollama pull llama3:70b
+ollama pull qwen3:8b
 ```
 
 **"Out of memory"**
 ```
 Solutions:
-- Use a smaller model (e.g., llama3:8b instead of llama3:70b)
+- Use a smaller/MoE model (e.g., qwen3:30b-a3b instead of qwen3:32b)
 - Close other applications
-- Use quantized models (e.g., llama3:70b-q4_0)
+- Use quantized models (e.g., llama4:scout-q4_K_M)
 ```
 
 ### Groq / Together

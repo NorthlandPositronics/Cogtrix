@@ -1,6 +1,6 @@
 # Deep Think — Tree-of-Thought Reasoning Engine
 
-Comprehensive documentation of Cogtrix's advanced reasoning tool.
+Cogtrix includes a built-in reasoning engine for problems that deserve more than a single-pass answer. Instead of generating one response, Deep Think explores multiple approaches in parallel, evaluates them, and iteratively refines the best elements into a superior solution. This page covers how it works under the hood.
 
 ## Table of Contents
 
@@ -14,6 +14,7 @@ Comprehensive documentation of Cogtrix's advanced reasoning tool.
 - [Output Format](#output-format)
 - [When to Use](#when-to-use)
 - [How the Agent Discovers It](#how-the-agent-discovers-it)
+- [Research Delegate Pre-Processing](#research-delegate-pre-processing)
 - [Configuration](#configuration)
 - [Internal Data Structures](#internal-data-structures)
 - [Error Handling and Robustness](#error-handling-and-robustness)
@@ -324,7 +325,7 @@ The agent's decision to use `deep_think` is guided by three layers:
 
 The base system prompt (`src/agent/core.py`) includes a "Deep Reasoning" section that instructs the agent:
 
-> For complex problems that have multiple valid approaches, significant trade-offs, or require thorough multi-angle analysis, use the `deep_think` tool.
+> When the user asks for deep or thorough analysis, invoke the `deep_think` tool. It explores multiple solution paths in parallel using Tree-of-Thought reasoning. Use it for architecture decisions, strategy, complex debugging, or multi-angle analysis.
 
 ### 2. Tool Description
 
@@ -343,15 +344,42 @@ The description also includes a guard: "DO NOT use for simple factual questions.
 
 In **reasoning mode** (`-M reasoning`), the system prompt receives an additional nudge:
 
-> For decisions with significant trade-offs, complex strategy questions, or problems that benefit from exploring multiple approaches, use the `deep_think` tool to perform thorough Tree-of-Thought analysis before committing to a direction.
+> Use `deep_think` for decisions with significant trade-offs, complex strategy questions, or problems that benefit from exploring multiple approaches.
 
 This makes the agent more likely to reach for deep reasoning in the mode designed for strategic planning.
 
 ---
 
+## Research Delegate Pre-Processing
+
+When deep thinking is triggered on a task that involved web research, the orchestrator can optionally run a **research delegate** before invoking the Deep Think engine. This addresses a key limitation: the main agent's web tool outputs are often truncated to fit the normal context budget, losing critical details like exact schemas, field names, and code examples.
+
+### How It Works
+
+1. The main agent performs initial web research (searches, page fetches) with the standard output cap.
+2. The orchestrator detects that web tools were used (`_agent_used_web_tools()`) and extracts the URLs the agent visited (`_extract_fetched_urls()`).
+3. A **research delegate** sub-agent is spawned with the same provider/model configuration. Its web tools are temporarily patched to allow output up to **85% of the model's context window** (configurable via `research_delegate.cap_ratio`).
+4. The delegate re-fetches the URLs and is instructed to extract **verbatim specifications** — exact schemas, field names, code examples, file paths — without summarizing.
+5. The delegate's structured output is passed to `_force_deep_think()` as `research_context`, where it takes priority over the raw tool outputs.
+
+### Why This Matters
+
+Without the research delegate, Deep Think receives the same truncated web content that the main agent saw. This often leads to:
+- Hallucinated field names and configuration syntax
+- Generic advice instead of project-specific recommendations
+- Missing code examples that were present on the original pages
+
+With the delegate, Deep Think operates on high-fidelity data extracted directly from the source pages, producing more accurate and actionable analysis.
+
+### Configuration
+
+The research delegate is enabled by default and configurable via the [`research_delegate` section](CONFIGURATION.md#research-delegate-section) in your config file. Set `enabled: false` to disable it if you don't use web research with deep thinking.
+
+---
+
 ## Configuration
 
-Deep Think uses the active provider configuration from `.cogtrix.json`. It creates its own LLM instance using the same provider type, base URL, model, API key, and context window settings as the main agent.
+Deep Think uses the active provider configuration from your config file (`.cogtrix.yaml` or `.cogtrix.json`). It creates its own LLM instance using the same provider type, base URL, model, API key, and context window settings as the main agent.
 
 No additional configuration is required. The tool is auto-registered by the tool registry on startup and initialized via `_configure_deep_think_tool()` in the main entry point.
 
@@ -359,11 +387,11 @@ No additional configuration is required. The tool is auto-registered by the tool
 
 | Setting | Source | Fallback |
 |---------|--------|----------|
-| Provider type | `providers.<name>.type` | `"openai"` |
-| Model | CLI `-m` flag or `providers.<name>.model` | `gpt-4o-mini` (OpenAI) / `llama3:8b` (Ollama) |
-| Base URL | `providers.<name>.base_url` | Provider defaults |
-| API key | `providers.<name>.api_key` or `OPENAI_API_KEY` env var | — |
-| Context window | `providers.<name>.num_ctx` | Provider default |
+| Provider type | `inference.<name>.type` | `"ollama"` |
+| Model | CLI `-m` flag or `inference.<name>.model` | `gpt-4.1-mini` (OpenAI) / `qwen3:8b` (Ollama) |
+| Base URL | `inference.<name>.base_url` | Provider defaults |
+| API key | `inference.<name>.api_key` or `OPENAI_API_KEY` env var | — |
+| Context window | `inference.<name>.num_ctx` | Provider default |
 | Temperature | Hardcoded | `0.7` |
 
 ---

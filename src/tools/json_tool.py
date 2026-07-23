@@ -115,49 +115,60 @@ def _get_by_path(data: Any, path: str) -> Any:
     if not path:
         return data
 
-    # Split path into parts
     parts = re.split(r"\.(?![^\[]*\])", path)
+    return _get_by_parts(data, [p for p in parts if p])
 
-    current = data
-    for part in parts:
-        if not part:
-            continue
 
-        # Handle array indexing like "items[0]" or "items[*]"
-        match = re.match(r"(\w+)(?:\[(\d+|\*)\])?", part)
-        if not match:
-            raise KeyError(f"Invalid path part: {part}")
+def _get_by_parts(current: Any, parts: list[str]) -> Any:
+    """Recursively traverse a parsed path parts list."""
+    if not parts:
+        return current
 
-        key, index = match.groups()
+    part = parts[0]
+    remaining = parts[1:]
 
-        # Get by key
-        if isinstance(current, dict):
-            if key not in current:
-                raise KeyError(f"Key not found: {key}")
-            current = current[key]
-        elif isinstance(current, list) and key.isdigit():
-            idx = int(key)
-            if idx >= len(current):
-                raise IndexError(f"Index out of range: {idx}")
-            current = current[idx]
-        else:
-            raise KeyError(f"Cannot access '{key}' on {type(current).__name__}")
+    # Extract the key and all bracket expressions
+    # e.g., "items[*][0]" -> key="items", indices=["*","0"]
+    key_match = re.match(r"(\w+)((?:\[\d+\]|\[\*\])*)", part)
+    if not key_match or key_match.end() != len(part):
+        raise KeyError(f"Invalid path part: {part}")
 
-        # Handle array index if present
-        if index is not None:
-            if not isinstance(current, list):
-                raise TypeError(f"Cannot index non-array: {type(current).__name__}")
+    key = key_match.group(1)
+    indices = re.findall(r"\[(\d+|\*)\]", key_match.group(2))
 
-            if index == "*":
-                # Wildcard - keep as list for further processing
-                pass
-            else:
-                idx = int(index)
-                if idx >= len(current):
-                    raise IndexError(f"Index out of range: {idx}")
-                current = current[idx]
+    if isinstance(current, dict):
+        if key not in current:
+            raise KeyError(f"Key not found: {key}")
+        current = current[key]
+    elif isinstance(current, list) and key.isdigit():
+        idx = int(key)
+        if idx >= len(current):
+            raise IndexError(f"Index out of range: {idx}")
+        current = current[idx]
+    else:
+        raise KeyError(f"Cannot access '{key}' on {type(current).__name__}")
 
-    return current
+    return _apply_bracket_indices(current, indices, remaining)
+
+
+def _apply_bracket_indices(current: Any, indices: list[str], remaining: list[str]) -> Any:
+    """Apply a sequence of bracket indices, then continue with remaining path parts."""
+    if not indices:
+        return _get_by_parts(current, remaining)
+
+    index = indices[0]
+    rest_indices = indices[1:]
+
+    if not isinstance(current, list):
+        raise TypeError(f"Cannot index non-array: {type(current).__name__}")
+
+    if index == "*":
+        return [_apply_bracket_indices(item, rest_indices, remaining) for item in current]
+    else:
+        idx = int(index)
+        if idx >= len(current):
+            raise IndexError(f"Index out of range: {idx}")
+        return _apply_bracket_indices(current[idx], rest_indices, remaining)
 
 
 def query_json(json_str: str, path: str) -> str:
@@ -167,6 +178,8 @@ def query_json(json_str: str, path: str) -> str:
     Supports:
     - Dot notation: data.users.name
     - Array indexing: items[0], items[2]
+    - Wildcard: items[*], items[*].price
+    - Chained brackets: items[*][0], matrix[0][*]
     - Nested paths: data.users[0].name
 
     Args:
