@@ -277,6 +277,7 @@ async def _run_message_turn_inner(
     from src.orchestration.runner import run_agent
 
     turn_start = time.monotonic()
+    log.debug("Turn start: session=%s mode=%s", session.id, mode)
     await _enqueue_agent_state(session, "thinking")
 
     # Clear ephemeral per-prompt state: remove agent-loaded (non-pinned) tools
@@ -312,6 +313,7 @@ async def _run_message_turn_inner(
 
     # Read history from memory manager.
     history_messages = _build_history(session.memory_manager, text)
+    log.debug("Context prepared: session=%s history_msgs=%d", session.id, len(history_messages))
 
     # The tool registry is needed by run_agent for requires_confirmation() checks
     # during tool auto-expansion. Pass the registry stored on the session (populated
@@ -414,6 +416,15 @@ async def _run_message_turn_inner(
         session.token_counts["output_tokens"] += token_counts.get("output_tokens", 0)
 
         duration_ms = int((time.monotonic() - turn_start) * 1000)
+        log.debug(
+            "Turn complete: session=%s mode=%s duration_ms=%d in=%d out=%d tools=%d",
+            session.id,
+            mode,
+            duration_ms,
+            token_counts.get("input_tokens", 0),
+            token_counts.get("output_tokens", 0),
+            token_counts.get("tool_call_count", 0),
+        )
         session.last_activity = time.time()
         session.agent_state = "idle"
         await _enqueue_agent_state(session, "idle")

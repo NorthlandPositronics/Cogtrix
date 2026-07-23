@@ -72,6 +72,18 @@ class WebSocketCallbackHandler(BaseCallbackHandler):
     # LLM events
     # ------------------------------------------------------------------
 
+    def on_llm_start(
+        self,
+        serialized: dict[str, Any],
+        prompts: list[str],
+        **kwargs: Any,
+    ) -> None:
+        """Log the start of an LLM call."""
+        model_name = (serialized or {}).get("name") or (serialized or {}).get("id", ["?"])[-1]
+        # Rough token estimate: ~4 chars per token
+        prompt_chars = sum(len(p) for p in (prompts or []))
+        log.debug("LLM call started: model=%s prompt_chars=%d", model_name, prompt_chars)
+
     def on_llm_new_token(self, token: str, **kwargs: Any) -> None:
         """Forward a streaming token to the WebSocket."""
         # BUG-218: final is True only when tool calls have been seen AND none
@@ -97,6 +109,10 @@ class WebSocketCallbackHandler(BaseCallbackHandler):
             if usage:
                 self.input_tokens += usage.get("prompt_tokens", 0)
                 self.output_tokens += usage.get("completion_tokens", 0)
+                log.debug(
+                    "LLM call ended: completion_tokens=%d",
+                    usage.get("completion_tokens", 0),
+                )
                 return
         gens = getattr(response, "generations", None)
         if gens:
@@ -108,13 +124,17 @@ class WebSocketCallbackHandler(BaseCallbackHandler):
                         if um:
                             if isinstance(um, dict):
                                 self.input_tokens += um.get("input_tokens", 0)
-                                self.output_tokens += um.get("output_tokens", 0)
+                                out = um.get("output_tokens", 0)
+                                self.output_tokens += out
                             else:
                                 self.input_tokens += getattr(um, "input_tokens", 0)
-                                self.output_tokens += getattr(um, "output_tokens", 0)
+                                out = getattr(um, "output_tokens", 0)
+                                self.output_tokens += out
+                            log.debug("LLM call ended: output_tokens=%d", out)
 
     def on_llm_error(self, error: BaseException | str, **kwargs: Any) -> None:
         """Forward an LLM-level error to the WebSocket."""
+        log.warning("LLM error: %s", error)
         self._enqueue("error", {"code": "AGENT_ERROR", "message": str(error)})
 
     # ------------------------------------------------------------------
@@ -143,6 +163,8 @@ class WebSocketCallbackHandler(BaseCallbackHandler):
                 tool_input = parsed if isinstance(parsed, dict) else {}
             except Exception:
                 tool_input = {}
+        input_preview = str(tool_input)[:120]
+        log.debug("Tool start: %s input=%.120s", tool_name, input_preview)
         self._enqueue(
             "tool_start",
             {
@@ -159,6 +181,9 @@ class WebSocketCallbackHandler(BaseCallbackHandler):
             start = self._tool_starts.pop(key, time.time())
         duration_ms = int((time.time() - start) * 1000)
         tool_name: str = kwargs.get("name", "unknown")
+        log.debug(
+            "Tool end: %s duration_ms=%d output=%.120s", tool_name, duration_ms, str(output)[:120]
+        )
         self._enqueue(
             "tool_end",
             {
@@ -174,6 +199,8 @@ class WebSocketCallbackHandler(BaseCallbackHandler):
     ) -> None:
         """Notify the WebSocket that a tool invocation failed."""
         key = str(run_id) if run_id is not None else ""
+        tool_name_err: str = kwargs.get("name", "unknown")
+        log.warning("Tool error: %s error=%s", tool_name_err, error)
         with self._tool_starts_lock:
             start = self._tool_starts.pop(key, time.time())
         duration_ms = int((time.time() - start) * 1000)

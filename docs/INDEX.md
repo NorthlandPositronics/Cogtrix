@@ -9,7 +9,7 @@
 
 **Pull examples:**
 ```bash
-docker pull ghcr.io/northlandpositronics/cogtrix:v0.1.23
+docker pull ghcr.io/northlandpositronics/cogtrix:v0.1.25
 docker pull ghcr.io/northlandpositronics/cogtrix-webui:latest
 ```
 

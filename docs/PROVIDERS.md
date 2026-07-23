@@ -320,6 +320,7 @@ Run models locally with vLLM server.
      vllm:
        type: openai
        base_url: "http://localhost:8000/v1"
+       # api_key: omit or leave blank — vLLM does not require authentication by default
 
    models:
      default: vllm
@@ -327,6 +328,8 @@ Run models locally with vLLM server.
        provider: vllm
        model: meta-llama/Llama-3-8b-chat-hf
    ```
+
+> **No API key needed:** vLLM (and LM Studio) run unauthenticated by default. Leave `api_key` out of the provider config entirely. Cogtrix will connect without a key.
 
 ---
 
@@ -525,6 +528,22 @@ Solutions:
 - Wait and retry
 - Use a different model
 - Upgrade your API plan
+```
+
+### Local vLLM / LM Studio
+
+**"The api_key client option must be set"**
+```
+vLLM and LM Studio do not require an API key. Remove the api_key field
+from the provider config (or leave it blank). Cogtrix passes a placeholder
+automatically so the OpenAI SDK does not reject the connection.
+```
+
+**"Connection refused"**
+```
+Check:
+- vLLM server is running (python -m vllm.entrypoints.openai.api_server ...)
+- base_url matches the server port (default 8000 for vLLM)
 ```
 
 ### Ollama

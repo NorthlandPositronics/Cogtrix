@@ -95,7 +95,7 @@ providers:
 |--------|------|----------|-------------|
 | `type` | string | Yes | Provider type: `"openai"`, `"ollama"`, `"anthropic"`, or `"google"` (case-insensitive) |
 | `base_url` | string | No | API endpoint URL |
-| `api_key` | string | No | API key (all providers except Ollama) |
+| `api_key` | string | No | API key. Omit or leave empty for unauthenticated OpenAI-compatible endpoints (vLLM, LM Studio). Required for OpenAI, Groq, Together, Anthropic, Google, and xAI. Not used by Ollama. |
 | `tool_instructions` | string | No | Custom tool-call formatting instructions appended to the system prompt. Not injected by default — `bind_tools()` handles formatting at the API level. Set a non-empty string only for providers that need explicit guidance. |
 
 #### Provider Types
@@ -1145,6 +1145,31 @@ Rate limit violations are recorded but do not increment the security violation c
 | `COGTRIX_API_PORT` | API server bind port (default `8000`) | `3001` |
 | `COGTRIX_API_WORKERS` | Number of uvicorn workers (default `1`) | `4` |
 
+#### Docker Healthcheck
+
+The container image includes a built-in healthcheck that probes `GET /api/v1/health` using Python's stdlib `urllib` (no `curl` or `wget` required). This enables `depends_on: condition: service_healthy` in docker-compose:
+
+```yaml
+services:
+  cogtrix:
+    image: ghcr.io/northlandpositronics/cogtrix:latest
+    command: ["api"]
+    environment:
+      COGTRIX_JWT_SECRET: "your-secret-key-at-least-32-chars"
+    ports:
+      - "8000:8000"
+
+  webui:
+    image: ghcr.io/northlandpositronics/cogtrix-webui:latest
+    depends_on:
+      cogtrix:
+        condition: service_healthy
+    ports:
+      - "5173:80"
+```
+
+The healthcheck runs every 30 seconds with a 5-second deadline (4-second socket timeout + 1 second margin), starting 15 seconds after container launch. It only passes in API mode — CLI and assistant modes do not expose the health endpoint.
+
 ---
 
 ## Command Line Arguments
@@ -1249,8 +1274,18 @@ python cogtrix.py --setup --setup-docs https://example.com/cogtrix-config-docs
 **Notes:**
 
 - The wizard detects an existing config automatically and asks whether to edit it or start fresh.
+- The API key field echoes `*` for each character typed. The masked preview shows the first 3 and last 4 characters (e.g. `sk-***4bcd`) for keys ≥ 10 characters, or `***` for shorter keys.
+- Leave the API key blank for endpoints that do not require authentication (vLLM, LM Studio, and other self-hosted OpenAI-compatible servers).
+- All values entered during bootstrap (provider type, base URL, model, API key) are preserved as defaults if the connection test fails — retry without re-entering unchanged fields.
 - API keys entered during bootstrap are injected into the final YAML, so the LLM never sees the actual key value.
 - The output file is shown after writing: `Config written to: ~/.cogtrix.yaml`.
+
+**Docker auto-start:** When running the official container image and no config file or API key environment variable is set, the container automatically launches the setup wizard (if stdin is a TTY). This simplifies first-run setup:
+
+```bash
+docker run -it -v ~/.cogtrix.yaml:/app/.cogtrix.yaml ghcr.io/northlandpositronics/cogtrix:latest
+# → wizard starts automatically, writes config to the mounted path
+```
 
 ---
 

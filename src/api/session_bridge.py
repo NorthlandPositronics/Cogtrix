@@ -396,6 +396,7 @@ class ApiSessionRegistry:
             if session_id in self._sessions:
                 sess = self._sessions[session_id]
                 sess.last_activity = time.time()
+                log.debug("Session %s: warm hit", session_id)
                 return sess
 
             # Another coroutine is already warming this session — wait for it.
@@ -417,6 +418,7 @@ class ApiSessionRegistry:
                 return sess
 
         # We own the warming responsibility.
+        log.debug("Session %s: cold start", session_id)
         try:
             from src.api.db.repositories.sessions import SessionRepository
 

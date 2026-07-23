@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.1.26](https://github.com/NorthlandPositronics/Cogtrix/compare/v0.1.25...v0.1.26) (2026-03-22)
+
+
+### Features
+
+* **api:** add DEBUG-level logging to core chat pipeline ([5f266f2](https://github.com/NorthlandPositronics/Cogtrix/commit/5f266f2e259b3b2533ecaf1a49d14c0c5c6540ef))
+* **api:** add DEBUG-level logging to core chat pipeline ([05b8c5d](https://github.com/NorthlandPositronics/Cogtrix/commit/05b8c5d28690228bbe3c160d38bd839723a737ba))
+
+
+### Documentation
+
+* update documentation for v0.1.24–v0.1.25 changes ([49750c1](https://github.com/NorthlandPositronics/Cogtrix/commit/49750c1110aa469cd2a456f4a547cfffeb4c616f))
+* update documentation for v0.1.24–v0.1.25 changes ([7a71bc3](https://github.com/NorthlandPositronics/Cogtrix/commit/7a71bc309a05b3ef4371f635708a01ae6c4b8de8))
+
 ## [0.1.25](https://github.com/NorthlandPositronics/Cogtrix/compare/v0.1.24...v0.1.25) (2026-03-22)
 
 
