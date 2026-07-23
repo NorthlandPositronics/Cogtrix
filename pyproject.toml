@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cogtrix"
-version = "0.1.20"
+version = "0.1.21"
 description = "Modular AI assistant with 51 built-in tools, multi-provider LLM support, and hybrid memory"
 readme = "README.md"
 requires-python = "~=3.13.0"
@@ -27,7 +27,7 @@ dependencies = [
     "langchain-openai~=1.1.6",
     "langchain-text-splitters~=1.1.0",
     "langchain-community~=0.4.1",
-    "langgraph~=1.0.5",
+    "langgraph~=1.1.3",
 
     # LLM Providers
     "openai~=2.14.0",
@@ -41,7 +41,7 @@ dependencies = [
     "python-docx~=1.2.0",
 
     # CLI & Display
-    "rich~=14.2.0",
+    "rich~=14.3.0",
 
     # Utilities
     "python-dotenv~=1.2.0",
@@ -58,7 +58,7 @@ dependencies = [
 [project.optional-dependencies]
 search = [
     "tavily-python~=0.7.21",
-    "exa-py~=2.4.0",
+    "exa-py~=2.9.0",
     "google-search-results~=2.4.2",
 ]
 dev = [
@@ -73,10 +73,10 @@ dev = [
     "bandit~=1.9.3",
     "pyright~=1.1.408",
     "tavily-python~=0.7.21",
-    "exa-py~=2.4.0",
+    "exa-py~=2.9.0",
     "google-search-results~=2.4.2",
     "mcp~=1.26.0",
-    "langchain-anthropic~=1.3.3",
+    "langchain-anthropic~=1.4.0",
     "langchain-google-genai~=4.0.0",
 ]
 science = [
@@ -87,7 +87,7 @@ mcp = [
     "mcp~=1.26.0",
 ]
 anthropic = [
-    "langchain-anthropic~=1.3.3",
+    "langchain-anthropic~=1.4.0",
 ]
 google = [
     "langchain-google-genai~=4.0.0",
@@ -98,7 +98,7 @@ api = [
     "sqlalchemy[asyncio]~=2.0.0",
     "aiosqlite~=0.22.0",
     "alembic~=1.18.0",
-    "python-jose[cryptography]~=3.4.0",
+    "python-jose[cryptography]~=3.5.0",
     "bcrypt~=4.3.0",
     "email-validator~=2.2.0",
 ]
@@ -181,10 +181,10 @@ dev = [
     "bandit~=1.9.3",
     "pyright~=1.1.408",
     "tavily-python~=0.7.21",
-    "exa-py~=2.4.0",
+    "exa-py~=2.9.0",
     "google-search-results~=2.4.2",
     "mcp~=1.26.0",
-    "langchain-anthropic~=1.3.3",
+    "langchain-anthropic~=1.4.0",
     "langchain-google-genai~=4.0.0",
 ]
 

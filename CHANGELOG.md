@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.1.21](https://github.com/NorthlandPositronics/Cogtrix/compare/v0.1.20...v0.1.21) (2026-03-20)
+
+
+### Bug Fixes
+
+* **ci:** add --extra api and timeout to release workflow ([34087f6](https://github.com/NorthlandPositronics/Cogtrix/commit/34087f681b7189236bea7834284e26ed516e459c))
+* **ci:** add --extra api and timeout to release workflow; make Docker publish advisory ([d8c76f7](https://github.com/NorthlandPositronics/Cogtrix/commit/d8c76f7bce971308d05568000bbda08e4cecbf8f))
+* **ci:** add statuses: write permission to release-please workflow ([4115270](https://github.com/NorthlandPositronics/Cogtrix/commit/41152706924387bcc6a1e604f7f75e4610bb0c6a))
+* **ci:** add statuses: write permission to release-please workflow ([ef30656](https://github.com/NorthlandPositronics/Cogtrix/commit/ef3065623cbd44f8c8f9ad11a9cd69503c98c86a))
+* **ci:** add statuses: write permission to release-please workflow ([024f167](https://github.com/NorthlandPositronics/Cogtrix/commit/024f167c1607b33ee750c1575447b99a7396d5ba))
+
 ## [0.1.20](https://github.com/NorthlandPositronics/Cogtrix/compare/v0.1.19...v0.1.20) (2026-03-20)
 
 
