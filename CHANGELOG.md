@@ -1,5 +1,54 @@
 # Changelog
 
+## [0.1.6](https://github.com/NorthlandPositronics/Cogtrix/compare/v0.1.5...v0.1.6) (2026-02-28)
+
+
+### Features
+
+* add optimizer feedback message and parallel tool execution ADR ([ff1986c](https://github.com/NorthlandPositronics/Cogtrix/commit/ff1986c6e349e10176d016e119533f71beb10061))
+* implement parallel tool execution in process_tools node ([d016206](https://github.com/NorthlandPositronics/Cogtrix/commit/d016206610fe82e69110d4b48fed9c2a5c4b596e))
+
+
+### Bug Fixes
+
+* address three medium-severity bugs (BUG-1402, BUG-1403, BUG-1404) ([a9c97a9](https://github.com/NorthlandPositronics/Cogtrix/commit/a9c97a97efa58b0f755d5e183946983393e6fd6f))
+* address three security/correctness bugs in runner and python_exec ([c0405fb](https://github.com/NorthlandPositronics/Cogtrix/commit/c0405fb6813e9454b1a191339fc6ca7d49bc55a0))
+* break parallel futures loop on cancel and snapshot dict before iteration ([75e3016](https://github.com/NorthlandPositronics/Cogtrix/commit/75e3016d21459e90124b4f29b0ce6bf598b8a81c))
+* bump version to 0.1.5 and fix release-please extra-files path ([8f74fa5](https://github.com/NorthlandPositronics/Cogtrix/commit/8f74fa57256999e3752541aa67e32330e9bd7a3f))
+* close fd race, spinner dirty-terminal, and stderr fd leak ([8039cbd](https://github.com/NorthlandPositronics/Cogtrix/commit/8039cbd6f716c55736ba14aab104f15965a6cbad))
+* derive no_confirm from self._session_state when set, falling back to True. ([1b1667e](https://github.com/NorthlandPositronics/Cogtrix/commit/1b1667e54a43293f86545e829382bb78e1c22c79))
+* empty API key re-prompt, output cap module resolution, and wizard prompt injection ([9c89f0b](https://github.com/NorthlandPositronics/Cogtrix/commit/9c89f0b7854f474adf4354f54dc4068c449129b1))
+* guard parallel block on cancel, fix UserCancelledRun in auto-expansion, pass parallel_tool_execution to MessageHandler, defer tool_list on cache-hit ([8ae422f](https://github.com/NorthlandPositronics/Cogtrix/commit/8ae422f72407ba57e02fc4a2c5c35eb2622f7a53))
+* log tracebacks on agent/tool errors and defer old-LLM close until after swap ([574f95a](https://github.com/NorthlandPositronics/Cogtrix/commit/574f95ae3d52f05fd7f551f765c743d7bb57b298))
+* **mcp:** upgrade connection cleanup log level and fix inter-server collision detection ([82f29b5](https://github.com/NorthlandPositronics/Cogtrix/commit/82f29b5d3bd3315fdcd131bdb0ea92cc1fb1619e))
+* **orchestration:** stop serial-first loop on cancel and guard stale cache merge-back ([88dea96](https://github.com/NorthlandPositronics/Cogtrix/commit/88dea965eeaf35e30a1ad9579ab5668168ef022f))
+* resolve 3 HIGH-severity bugs in approve toggle, event loop leak, and spinner race ([ca27ecb](https://github.com/NorthlandPositronics/Cogtrix/commit/ca27ecb4ab533e0a85b1322a0cd4f06e29c0f8a8))
+* resolve Pyright type error in graph.py classification pass ([0efc0b5](https://github.com/NorthlandPositronics/Cogtrix/commit/0efc0b5cc0b365d9f1a681f3b06475b36a63f1ae))
+* restore provider_config after rollback and respect no_confirm in MessageHandler ([1b1667e](https://github.com/NorthlandPositronics/Cogtrix/commit/1b1667e54a43293f86545e829382bb78e1c22c79))
+* Round 18 audit fixes + holistic documentation revision ([f0fcf7a](https://github.com/NorthlandPositronics/Cogtrix/commit/f0fcf7a9704bd213073fd29145b40a8a0ca88951))
+* Round 19-20 bug fixes, guardrails cleanup, and audit docs ([8097160](https://github.com/NorthlandPositronics/Cogtrix/commit/8097160e35cecc3e4b11d29e1d48a43c955b86b5))
+* round 21 bug fixes — thread safety, cancel propagation, config wiring ([6aedc28](https://github.com/NorthlandPositronics/Cogtrix/commit/6aedc287609cf2eb47d7f4b49f871f048e4c76fd))
+* round 22 bug fixes — cache isolation, cancel guards, session locks ([5459140](https://github.com/NorthlandPositronics/Cogtrix/commit/54591401ade342ab49c818db8ac957b20ff21e3f))
+* **runner:** eliminate cache race condition in concurrent assistant mode ([0feb507](https://github.com/NorthlandPositronics/Cogtrix/commit/0feb507465c45d346eb30088dd88fad9e41659e4))
+* serialize _turn_count/_section_ts in reasoning memory, fix falsy-string KeyError in compression, and bijective session ID sanitization ([80d379a](https://github.com/NorthlandPositronics/Cogtrix/commit/80d379a550aaa292482684b6d7f9bee7586edaf4))
+
+
+### Performance Improvements
+
+* move function-level imports to module level in runner.py ([dae4cd3](https://github.com/NorthlandPositronics/Cogtrix/commit/dae4cd39d27ce03b6625a0fb66a41b589bb53fb0))
+* persist _bound_cache and compression_cache across graph rebuilds ([b799c2f](https://github.com/NorthlandPositronics/Cogtrix/commit/b799c2f06ea4b79fc5137d660d71e8e573582f62))
+* run optimize_prompt() concurrently with prepare_context() to reduce TTFT ([817cc9b](https://github.com/NorthlandPositronics/Cogtrix/commit/817cc9b5c495c8e13018ae852c2204cf05ca1e27))
+
+
+### Documentation
+
+* add ADRs 0015-0022, bug reports rounds 10-18, and update lockfile ([141bb8c](https://github.com/NorthlandPositronics/Cogtrix/commit/141bb8c36941cda26b0c04a7fc70f46ffd6aaf2c))
+* add Round 18 bug hunt report ([858edd3](https://github.com/NorthlandPositronics/Cogtrix/commit/858edd30299c4da77f35e8858ae0b124f1836671))
+* add Round 23 bug report and audit findings ([7f732f3](https://github.com/NorthlandPositronics/Cogtrix/commit/7f732f3e58dfaa00e70651b4374e654c3a87242c))
+* add Round 24 audit reports (bugs, performance, architecture) ([bbcdcca](https://github.com/NorthlandPositronics/Cogtrix/commit/bbcdcca3fec43e1a4375f7434fbb9f397adf59f4))
+* holistic documentation revision — fix accuracy drift and fill gaps ([af82852](https://github.com/NorthlandPositronics/Cogtrix/commit/af82852bfd159a1cd93164489eaf96f11f5ce1d0))
+* update CLAUDE.md with parallel tool execution architecture ([d7653ec](https://github.com/NorthlandPositronics/Cogtrix/commit/d7653ec211e5f1a754fd15d9bcd5d675695f2387))
+
 ## [0.1.5](https://github.com/NorthlandPositronics/Cogtrix/compare/v0.1.4...v0.1.5) (2026-02-27)
 
 

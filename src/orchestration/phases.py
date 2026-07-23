@@ -70,6 +70,7 @@ WRITE_FAILURE_PREFIXES = (
     "Error",
     "User denied execution",
     "Tool execution error",
+    "User cancelled agent workflow",
 )
 
 
@@ -672,6 +673,7 @@ def run_execution_phase(
     preset_tools: set[str] | None = None,
     session_state: Any = None,
     on_tool_expansion: Any = None,
+    parallel_tool_execution: bool = True,
 ) -> tuple[str, list]:
     """Feed the analysis back to the agent with an explicit 'execute now' prompt.
 
@@ -733,6 +735,7 @@ def run_execution_phase(
                 preset_tools=preset_tools,
                 session_state=session_state,
                 on_tool_expansion=on_tool_expansion,
+                parallel_tool_execution=parallel_tool_execution,
             )
         if result and result.strip():
             wrote = agent_performed_writes(exec_msgs)

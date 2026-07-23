@@ -12,6 +12,7 @@ Includes hybrid memory support:
 import json
 import logging
 import os
+import re
 import tempfile
 import threading
 import time
@@ -49,16 +50,26 @@ _SESSION_ID_MAX_LEN = 200
 
 
 def _sanitize_session_id(session_id: str) -> str:
-    """Return a filesystem-safe version of *session_id*.
+    """Sanitize a session ID for safe use as a filesystem path component.
 
-    Replaces path separators, traversal sequences, and null bytes with
-    underscores, then truncates to ``_SESSION_ID_MAX_LEN`` characters.
+    Uses percent-encoding for non-safe characters to ensure bijectivity
+    (distinct session IDs always produce distinct sanitized IDs).
     """
-    safe = session_id.replace("..", "_").replace("/", "_").replace("\\", "_")
-    safe = safe.replace("\x00", "_")
-    if len(safe) > _SESSION_ID_MAX_LEN:
-        safe = safe[:_SESSION_ID_MAX_LEN]
-    return safe
+    if not session_id:
+        return "default"
+    # Encode anything that isn't alphanumeric, dot, hyphen, or underscore
+    sanitized = re.sub(
+        r"[^a-zA-Z0-9._-]",
+        lambda m: f"%{ord(m.group()):02X}",
+        session_id,
+    )
+    # Still prevent directory traversal via sequences like "..".
+    sanitized = sanitized.replace("..", "%2E%2E")
+    if len(sanitized) > _SESSION_ID_MAX_LEN:
+        sanitized = sanitized[:_SESSION_ID_MAX_LEN]
+    if not sanitized:
+        return "default"
+    return sanitized
 
 
 # Error prefixes that should never be stored in conversation history.

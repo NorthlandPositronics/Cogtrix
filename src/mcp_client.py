@@ -234,7 +234,7 @@ class MCPConnection:
             try:
                 await self._exit_stack.__aexit__(None, None, None)
             except Exception as exc:
-                get_logger().debug("MCP: error during connection cleanup: %s", exc)
+                get_logger().warning("MCP: error during connection cleanup: %s", exc)
             self._exit_stack = None
         self._session = None
 
@@ -501,12 +501,18 @@ class MCPManager:
             self._loop.close()
         self._loop = None
 
-    def restart(self, server_name: str | None = None) -> dict[str, Any]:
+    def restart(
+        self,
+        server_name: str | None = None,
+        builtin_tool_names: set[str] | None = None,
+    ) -> dict[str, Any]:
         """
         Reconnect one or all MCP servers and return rebuilt LangChain tools.
 
         Args:
             server_name: If given, reconnect only this server. Otherwise restart all.
+            builtin_tool_names: Optional set of built-in (non-MCP) tool names to
+                include in collision detection when rebuilding tools.
 
         Returns:
             Dict mapping tool name to LangChain StructuredTool for every tool
@@ -541,14 +547,30 @@ class MCPManager:
             except Exception as exc:
                 log.warning("MCP: restart of server '%s' failed: %s", name, exc)
 
+        # Collect tool names from servers NOT being restarted
+        known_tool_names: set[str] = set()
+        for tool_name_key, srv in self._tool_server_map.items():
+            if srv not in targets:
+                known_tool_names.add(tool_name_key)
+
         new_tools: dict[str, Any] = {}
         for name in targets:
             if name in self._connections:
-                server_tools = self.get_langchain_tools(server_name=name)
+                server_tools = self.get_langchain_tools(
+                    server_name=name,
+                    builtin_tool_names=builtin_tool_names,
+                    known_tool_names=known_tool_names,
+                )
+                known_tool_names |= set(server_tools)
                 new_tools.update(server_tools)
         return new_tools
 
-    def get_langchain_tools(self, server_name: str | None = None) -> dict[str, Any]:
+    def get_langchain_tools(
+        self,
+        server_name: str | None = None,
+        builtin_tool_names: set[str] | None = None,
+        known_tool_names: set[str] | None = None,
+    ) -> dict[str, Any]:
         """
         Build LangChain StructuredTool objects for currently connected servers.
 
@@ -558,6 +580,10 @@ class MCPManager:
         Args:
             server_name: If given, return tools only for that server.
                          If ``None``, return tools for all connected servers.
+            builtin_tool_names: Optional set of built-in (non-MCP) tool names to
+                include in collision detection.
+            known_tool_names: Optional set of already-registered tool names from
+                other MCP servers to include in collision detection.
 
         Returns:
             Dict mapping display tool name → LangChain StructuredTool.
@@ -576,9 +602,15 @@ class MCPManager:
                 original_name: str = mcp_tool.name
                 tool_name = original_name
 
-                if tool_name in all_tools:
+                collision_names = set(all_tools)
+                if builtin_tool_names:
+                    collision_names |= builtin_tool_names
+                if known_tool_names:
+                    collision_names |= known_tool_names
+
+                if tool_name in collision_names:
                     prefixed = f"{name}_{tool_name}"
-                    if prefixed in all_tools:
+                    if prefixed in collision_names:
                         log.error(
                             "MCP: tool '%s' from server '%s': prefixed name '%s' also collides;"
                             " skipping tool",
@@ -587,6 +619,12 @@ class MCPManager:
                             prefixed,
                         )
                         continue
+                    log.warning(
+                        "MCP: tool name collision '%s' from server '%s'; renamed to '%s'",
+                        tool_name,
+                        name,
+                        prefixed,
+                    )
                     tool_name = prefixed
 
                 lc_tool = _create_mcp_tool_wrapper(mcp_tool, name, cfg, self)

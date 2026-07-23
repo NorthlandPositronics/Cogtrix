@@ -71,6 +71,7 @@ class MessageHandler:
         guardrails: Any = None,
         agent_runner: AgentRunner,
         session_state: SessionState | None = None,
+        parallel_tool_execution: bool = True,
     ) -> None:
         self._session_mgr = session_mgr
         self._llm = llm
@@ -83,6 +84,7 @@ class MessageHandler:
         self._guardrails = guardrails if guardrails is not None else GuardrailPipeline({})
         self._agent_runner: AgentRunner = agent_runner
         self._session_state = session_state
+        self._parallel_tool_execution = parallel_tool_execution
         self._max_response_length: int = config.get("max_response_length", 4000)
 
         excluded = _DEFAULT_EXCLUDED | set(config.get("excluded_tools", []))
@@ -126,7 +128,9 @@ class MessageHandler:
 
             try:
                 runner = self._agent_runner
-                call_session_state = SessionState(no_confirm=True)
+                call_session_state = SessionState(
+                    no_confirm=self._session_state.no_confirm if self._session_state else True,
+                )
                 response = runner(
                     user_input=msg.text,
                     history_messages=context.messages,
@@ -141,6 +145,7 @@ class MessageHandler:
                     compression_llm=self._compression_llm,
                     tool_call_guard=self._guardrails.check_tool_call,
                     session_state=call_session_state,
+                    parallel_tool_execution=self._parallel_tool_execution,
                 )
             except Exception as exc:
                 log.error("Agent error for session %s: %s", session.session_key, exc)

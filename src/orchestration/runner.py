@@ -8,12 +8,36 @@ and phantom-call detection.
 from __future__ import annotations
 
 import logging
+import threading
 import time
+from collections import OrderedDict
 from typing import Any
 
+from src.agent.core import prepare_messages_with_context
 from src.agent.safety import UserCancelledRun
 from src.logging_config import get_logger, log_tool_call
+from src.orchestration.compression import COMPRESSION_MIN_AGE_CYCLES, COMPRESSION_MIN_CHARS
+from src.orchestration.graph import DEFAULT_RECURSION_LIMIT, build_agent_graph
 from src.orchestration.run_config import AgentRunConfig
+
+# Persistent caches that survive across graph rebuilds.
+# _persistent_bound_cache stores LLM bind_tools() results (expensive to recreate).
+# _persistent_compression_cache stores compressed tool message summaries.
+# _cached_llm_id tracks which LLM generation the bound cache was built for;
+# when the LLM changes, advance_llm_generation() is called and the cache is cleared.
+_MAX_COMPRESSION_CACHE_SIZE = 256
+_persistent_bound_cache: OrderedDict = OrderedDict()
+_persistent_compression_cache: OrderedDict = OrderedDict()
+_cached_llm_id: tuple[int, int] | None = None
+_cache_lock = threading.Lock()
+_llm_generation: int = 0
+
+
+def advance_llm_generation() -> None:
+    """Increment the LLM generation counter when the LLM is switched."""
+    global _llm_generation
+    with _cache_lock:
+        _llm_generation += 1
 
 
 class ToolCallLogger:
@@ -448,6 +472,7 @@ def run_agent(
     session_state: Any = None,
     confirmation_ui: Any | None = None,
     on_tool_expansion: Any | None = None,
+    parallel_tool_execution: bool = True,
 ) -> str:
     """Run agent using a custom LangGraph StateGraph.
 
@@ -475,9 +500,6 @@ def run_agent(
     Returns:
         Agent response as string
     """
-    from src.agent.core import prepare_messages_with_context
-    from src.orchestration.compression import COMPRESSION_MIN_AGE_CYCLES, COMPRESSION_MIN_CHARS
-    from src.orchestration.graph import DEFAULT_RECURSION_LIMIT, build_agent_graph
     from src.orchestration.phases import is_step_limit_apology, recover_from_step_limit
 
     if config is None:
@@ -496,6 +518,7 @@ def run_agent(
             session_state=session_state,
             confirmation_ui=confirmation_ui,
             on_tool_expansion=on_tool_expansion,
+            parallel_tool_execution=parallel_tool_execution,
         )
 
     _compression_min_age = config.compression_min_age
@@ -533,51 +556,73 @@ def run_agent(
         if callbacks:
             invoke_config["callbacks"] = callbacks
 
+        global _persistent_bound_cache, _persistent_compression_cache, _cached_llm_id
+
+        current_llm_id = (id(config.llm), _llm_generation)
+        with _cache_lock:
+            if _cached_llm_id is not None and _cached_llm_id != current_llm_id:
+                _persistent_bound_cache.clear()
+                _persistent_compression_cache.clear()
+            _cached_llm_id = current_llm_id
+            local_bound_cache = OrderedDict(_persistent_bound_cache)
+            local_compression_cache = dict(_persistent_compression_cache)
+
         graph = build_agent_graph(
             config=config,
             registry=registry,
             approvals=approvals,
             compression_min_age=_compression_min_age,
             compression_min_chars=_compression_min_chars,
+            bound_cache=local_bound_cache,
+            compression_cache_in=local_compression_cache,
         )
 
         hit_recursion_limit = False
         result: dict = {"messages": input_messages}
         try:
-            for chunk in graph.stream(
-                {"messages": input_messages},
-                config=invoke_config,
-                stream_mode="values",
-            ):
-                if isinstance(chunk, dict) and "messages" in chunk:
-                    result = chunk
-        except RecursionError:
-            hit_recursion_limit = True
-            log.warning("Agent hit the recursion limit")
+            try:
+                for chunk in graph.stream(
+                    {"messages": input_messages},
+                    config=invoke_config,
+                    stream_mode="values",
+                ):
+                    if isinstance(chunk, dict) and "messages" in chunk:
+                        result = chunk
+            except RecursionError:
+                hit_recursion_limit = True
+                log.warning("Agent hit the recursion limit")
 
-        log_tool_calls_from_result(result)
+            log_tool_calls_from_result(result)
 
-        if result_messages is not None:
-            result_messages.extend(result.get("messages", []))
+            if result_messages is not None:
+                result_messages.extend(result.get("messages", []))
 
-        if hit_recursion_limit:
+            if hit_recursion_limit:
+                return recover_from_step_limit(graph, result, input_messages, invoke_config, log)
+
+            response = extract_response(result, log)
+            if response and not is_step_limit_apology(response):
+                return response
+
+            if response and is_step_limit_apology(response):
+                log.warning(
+                    "Agent returned a step-limit apology instead of a real answer, "
+                    "attempting recovery"
+                )
+            else:
+                log.warning("Agent returned empty content, attempting recovery")
+
             return recover_from_step_limit(graph, result, input_messages, invoke_config, log)
-
-        response = extract_response(result, log)
-        if response and not is_step_limit_apology(response):
-            return response
-
-        if response and is_step_limit_apology(response):
-            log.warning(
-                "Agent returned a step-limit apology instead of a real answer, "
-                "attempting recovery"
-            )
-        else:
-            log.warning("Agent returned empty content, attempting recovery")
-
-        return recover_from_step_limit(graph, result, input_messages, invoke_config, log)
+        finally:
+            with _cache_lock:
+                if _cached_llm_id == current_llm_id:
+                    _persistent_bound_cache.update(local_bound_cache)
+                    _persistent_compression_cache.update(local_compression_cache)
+                    while len(_persistent_compression_cache) > _MAX_COMPRESSION_CACHE_SIZE:
+                        _persistent_compression_cache.popitem(last=False)
 
     except UserCancelledRun:
         raise
     except Exception as e:
+        log.error("Agent execution failed: %s", e, exc_info=True)
         return format_agent_error(e)

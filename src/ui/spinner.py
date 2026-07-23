@@ -170,13 +170,14 @@ class ActivityIndicator:
     # -- public API ---------------------------------------------------------
 
     def start(self) -> None:
-        if self._running:
-            return
-        self._running = True
-        self._pause_count = 0
-        self._msg_index = 0
-        self._message = _SPINNER_MESSAGES[0]
-        self._thread = threading.Thread(target=self._animate, daemon=True)
+        with self._lock:
+            if self._running:
+                return
+            self._running = True
+            self._pause_count = 0
+            self._msg_index = 0
+            self._message = _SPINNER_MESSAGES[0]
+            self._thread = threading.Thread(target=self._animate, daemon=True)
         self._thread.start()
         if self._escape_monitor is not None:
             self._escape_monitor.start()
@@ -190,8 +191,6 @@ class ActivityIndicator:
             self._escape_monitor.stop()
         if self._thread:
             self._thread.join(timeout=2)
-            if self._thread.is_alive():
-                return  # thread still running — skip clear to avoid concurrent stdout writes
         self._clear_line()
 
     def pause(self) -> None:

@@ -121,6 +121,11 @@ class AssistantService:
             guardrails=guardrails,
             agent_runner=agent_runner,
             session_state=_asst_session_state,
+            parallel_tool_execution=bool(
+                asst_cfg.get(
+                    "parallel_tool_execution", getattr(config, "parallel_tool_execution", True)
+                )
+            ),
         )
 
         self._executor = ThreadPoolExecutor(max_workers=max_concurrent)

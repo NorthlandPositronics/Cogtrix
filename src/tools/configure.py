@@ -344,7 +344,7 @@ def filter_unconfigured_tools(registry: ToolRegistry) -> None:
     module_status: dict[str, bool] = {}
 
     for tool_name, tool_obj in registry.tools.items():
-        func = getattr(tool_obj, "func", None)
+        func = getattr(tool_obj, "_uncapped_func", None) or getattr(tool_obj, "func", None)
         if func is None:
             continue
         module_name = getattr(func, "__module__", "")

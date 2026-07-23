@@ -183,7 +183,7 @@ def apply_message_compression(
     result = []
     for i, msg in enumerate(messages):
         if i in compressed_results or i in cached:
-            compressed_content = compressed_results.get(i) or cached[i]
+            compressed_content = compressed_results[i] if i in compressed_results else cached[i]
             replacement = ToolMessage(
                 content=compressed_content,
                 tool_call_id=getattr(msg, "tool_call_id", "") or "",

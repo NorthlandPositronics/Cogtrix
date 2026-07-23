@@ -28,3 +28,4 @@ class AgentRunConfig:
     session_state: Any = None
     confirmation_ui: Any | None = None
     on_tool_expansion: Any | None = None
+    parallel_tool_execution: bool = True

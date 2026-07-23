@@ -1163,9 +1163,9 @@ class TestProviderConfigValidation:
             cfg = ProviderConfig(name="test", type=ptype)
             assert cfg.type == ptype
 
-    def test_invalid_temperature_in_providers_section_raises(self):
-        """temperature: 5.0 in providers config raises ConfigError (not silently accepted)."""
-        from src.config import Config, ConfigError
+    def test_invalid_temperature_in_providers_section_skips(self):
+        """temperature: 5.0 in providers config logs a warning and skips the entry."""
+        from src.config import Config
 
         config = Config()
         providers_data = {
@@ -1174,12 +1174,12 @@ class TestProviderConfigValidation:
                 "temperature": 5.0,
             }
         }
-        with pytest.raises(ConfigError, match="temperature"):
-            _parse_providers_section(config, providers_data)
+        _parse_providers_section(config, providers_data)
+        assert "bad" not in config.providers
 
-    def test_invalid_num_ctx_in_providers_section_raises(self):
-        """num_ctx: -1 in providers config raises ConfigError."""
-        from src.config import Config, ConfigError
+    def test_invalid_num_ctx_in_providers_section_skips(self):
+        """num_ctx: -1 in providers config logs a warning and skips the entry."""
+        from src.config import Config
 
         config = Config()
         providers_data = {
@@ -1188,12 +1188,12 @@ class TestProviderConfigValidation:
                 "num_ctx": -1,
             }
         }
-        with pytest.raises(ConfigError, match="num_ctx"):
-            _parse_providers_section(config, providers_data)
+        _parse_providers_section(config, providers_data)
+        assert "bad" not in config.providers
 
-    def test_invalid_max_tokens_in_providers_section_raises(self):
-        """max_tokens: 0 in providers config raises ConfigError."""
-        from src.config import Config, ConfigError
+    def test_invalid_max_tokens_in_providers_section_skips(self):
+        """max_tokens: 0 in providers config logs a warning and skips the entry."""
+        from src.config import Config
 
         config = Config()
         providers_data = {
@@ -1202,5 +1202,5 @@ class TestProviderConfigValidation:
                 "max_tokens": 0,
             }
         }
-        with pytest.raises(ConfigError, match="max_tokens"):
-            _parse_providers_section(config, providers_data)
+        _parse_providers_section(config, providers_data)
+        assert "bad" not in config.providers

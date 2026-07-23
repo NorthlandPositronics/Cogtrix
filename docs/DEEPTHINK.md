@@ -387,11 +387,11 @@ No additional configuration is required. The tool is auto-registered by the tool
 
 | Setting | Source | Fallback |
 |---------|--------|----------|
-| Provider type | `inference.<name>.type` | `"ollama"` |
-| Model | CLI `-m` flag or `inference.<name>.model` | `gpt-4.1-mini` (OpenAI) / `qwen3:8b` (Ollama) |
-| Base URL | `inference.<name>.base_url` | Provider defaults |
-| API key | `inference.<name>.api_key` or `OPENAI_API_KEY` env var | — |
-| Context window | `inference.<name>.num_ctx` | Provider default |
+| Provider type | `providers.<name>.type` | `"ollama"` |
+| Model | CLI `-m` flag or `providers.<name>.model` | `gpt-4.1-mini` (OpenAI) / `qwen3:8b` (Ollama) |
+| Base URL | `providers.<name>.base_url` | Provider defaults |
+| API key | `providers.<name>.api_key` or `OPENAI_API_KEY` env var | — |
+| Context window | `providers.<name>.num_ctx` | Provider default |
 | Temperature | Hardcoded | `0.7` |
 
 ---

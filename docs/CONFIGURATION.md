@@ -322,7 +322,7 @@ prompt_optimizer: true
 
 **How it works:**
 
-1. Prompts shorter than 150 characters skip optimization entirely (no LLM call).
+1. Prompts shorter than 400 characters skip optimization entirely (no LLM call).
 2. The LLM evaluates the prompt — if already clear and actionable, it returns it unchanged.
 3. If the prompt is complex or vague, it rewrites it to preserve the goal, add a high-level approach (phases/steps), and include practical guardrails.
 4. The optimizer's system instructions are ephemeral — they do not persist in conversation history or affect subsequent prompts.
@@ -370,6 +370,32 @@ context_compression:
 - Set `model` to a fast/cheap model alias to avoid using the main agent model for compression. Without this, each compression call uses the same (potentially slow) model.
 - Increase `min_age` if you find recent tool outputs are being compressed too early.
 - Increase `min_chars` to only compress very large outputs (e.g., full file contents).
+
+### Parallel Tool Execution
+
+When the LLM emits multiple tool calls in a single response, Cogtrix can execute them concurrently using a thread pool instead of processing them sequentially.
+
+```yaml
+parallel_tool_execution: true
+```
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `parallel_tool_execution` | bool | `true` | Enable/disable concurrent execution of independent tool calls |
+
+**How it works:**
+
+1. When the LLM returns multiple tool calls, a classification pass splits them into two groups:
+   - **Serial-first** — `request_tools` calls and calls to tools not yet loaded (require auto-expansion). These run sequentially first.
+   - **Parallel** — all other calls to already-active tools. These run concurrently via a `ThreadPoolExecutor` (up to 8 workers).
+2. A single tool call in a batch skips pool overhead and runs inline.
+3. `UserCancelledRun` from any tool stops all remaining execution immediately.
+4. The system prompt instructs models to batch independent operations when possible.
+
+**When to tune:**
+
+- Set `parallel_tool_execution: false` if you experience issues with tools that have hidden shared state or if you need deterministic tool execution order.
+- Models that support parallel tool calls (GPT-4o, Claude, Gemini) benefit most from this feature. Models that emit one call per response (some open-source/vLLM models) are unaffected.
 
 ### MCP Servers
 
@@ -722,6 +748,7 @@ services:
 | `knowledge.extraction_model` | string | `null` | Model alias for fact extraction (null = main LLM) |
 | `knowledge.recall_k` | int | `5` | Number of facts recalled per query |
 | `knowledge.max_facts` | int | `10000` | Maximum stored facts |
+| `knowledge.data_dir` | string | `"data"` | Base directory for knowledge persistence (facts.json, FAISS index) |
 | `guardrails.enabled` | bool | `true` | Master kill switch for all guardrails |
 | `guardrails.max_input_length` | int | `4000` | Maximum input length in characters |
 | `guardrails.unicode_checks` | bool | `true` | Detect invisible/RTL Unicode steganography |
@@ -828,15 +855,7 @@ Rate limit violations are recorded but do not increment the security violation c
 | `COGTRIX_WHATSAPP_URL` | Waha server URL | `http://localhost:3000` |
 | `COGTRIX_WHATSAPP_API_KEY` | Waha API key | `yoursecretkey` |
 | `COGTRIX_WHATSAPP_SESSION` | Waha session name | `default` |
-| `COGTRIX_WHATSAPP_SEND` | Enable send tools | `true` |
-| `COGTRIX_WHATSAPP_RECEIVE` | Enable receive tools | `true` |
-| `COGTRIX_WHATSAPP_FILTER` | Contact filter mode | `whitelist` |
-| `COGTRIX_WHATSAPP_CONTACTS` | Comma-separated E.164 numbers | `+1415...,+4420...` |
 | `COGTRIX_TELEGRAM_TOKEN` | Telegram bot token | `123456:ABC-DEF...` |
-| `COGTRIX_TELEGRAM_SEND` | Enable send tools | `true` |
-| `COGTRIX_TELEGRAM_RECEIVE` | Enable receive tools | `true` |
-| `COGTRIX_TELEGRAM_FILTER` | Contact filter mode | `whitelist` |
-| `COGTRIX_TELEGRAM_CONTACTS` | Comma-separated chat IDs | `123456789,987654321` |
 
 ---
 

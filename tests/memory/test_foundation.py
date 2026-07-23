@@ -372,12 +372,12 @@ class TestSanitizeSessionId:
     def test_forward_slash_replaced(self):
         result = _sanitize_session_id("user/session")
         assert "/" not in result
-        assert result == "user_session"
+        assert result == "user%2Fsession"
 
     def test_backslash_replaced(self):
         result = _sanitize_session_id("user\\session")
         assert "\\" not in result
-        assert result == "user_session"
+        assert result == "user%5Csession"
 
     def test_double_dot_replaced(self):
         result = _sanitize_session_id("../secrets")
@@ -392,7 +392,7 @@ class TestSanitizeSessionId:
     def test_null_bytes_replaced(self):
         result = _sanitize_session_id("session\x00evil")
         assert "\x00" not in result
-        assert result == "session_evil"
+        assert result == "session%00evil"
 
     def test_length_capped_at_200(self):
         long_id = "a" * 300

@@ -80,9 +80,11 @@ def _suppress_native_stderr() -> Generator[None]:
             os.dup2(devnull_fd, 2)
             yield
         finally:
-            os.dup2(old_stderr_fd, 2)
-            os.close(old_stderr_fd)
-            os.close(devnull_fd)
+            try:
+                os.dup2(old_stderr_fd, 2)
+            finally:
+                os.close(old_stderr_fd)
+                os.close(devnull_fd)
 
 
 class WebSearchInput(BaseModel):

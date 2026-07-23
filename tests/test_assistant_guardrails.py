@@ -441,7 +441,7 @@ class TestChatRateLimiter:
     def test_under_per_minute_limit_passes(self):
         limiter = self._limiter(per_minute=3)
         for _ in range(2):
-            limiter.record("chat1")
+            limiter.check_and_record("chat1")
         result = limiter.check("chat1")
         assert result.is_safe
 
@@ -449,7 +449,7 @@ class TestChatRateLimiter:
         limiter = self._limiter(per_minute=3, per_hour=100)
         with patch("src.assistant.guardrails.time.monotonic", return_value=1000.0):
             for _ in range(3):
-                limiter.record("chat1")
+                limiter.check_and_record("chat1")
             result = limiter.check("chat1")
         assert not result.is_safe
         assert result.guard_name == "rate_limit"
@@ -460,7 +460,7 @@ class TestChatRateLimiter:
         base = 1000.0
         for i in range(3):
             with patch("src.assistant.guardrails.time.monotonic", return_value=base + i * 120):
-                limiter.record("chat1")
+                limiter.check_and_record("chat1")
         with patch("src.assistant.guardrails.time.monotonic", return_value=base + 600):
             result = limiter.check("chat1")
         assert not result.is_safe
@@ -470,7 +470,7 @@ class TestChatRateLimiter:
         limiter = self._limiter(per_minute=2, per_hour=100)
         with patch("src.assistant.guardrails.time.monotonic", return_value=1000.0):
             for _ in range(2):
-                limiter.record("chat1")
+                limiter.check_and_record("chat1")
         with patch("src.assistant.guardrails.time.monotonic", return_value=1070.0):
             result = limiter.check("chat1")
         assert result.is_safe
@@ -479,7 +479,7 @@ class TestChatRateLimiter:
         limiter = self._limiter(per_minute=100, per_hour=2)
         with patch("src.assistant.guardrails.time.monotonic", return_value=1000.0):
             for _ in range(2):
-                limiter.record("chat1")
+                limiter.check_and_record("chat1")
         with patch("src.assistant.guardrails.time.monotonic", return_value=1000.0 + 3700):
             result = limiter.check("chat1")
         assert result.is_safe
@@ -488,7 +488,7 @@ class TestChatRateLimiter:
         limiter = self._limiter(per_minute=2, per_hour=10)
         with patch("src.assistant.guardrails.time.monotonic", return_value=1000.0):
             for _ in range(2):
-                limiter.record("chat1")
+                limiter.check_and_record("chat1")
             result_chat1 = limiter.check("chat1")
             result_chat2 = limiter.check("chat2")
         assert not result_chat1.is_safe
@@ -496,7 +496,7 @@ class TestChatRateLimiter:
 
     def test_record_creates_window(self):
         limiter = self._limiter()
-        limiter.record("new_chat")
+        limiter.check_and_record("new_chat")
         assert "new_chat" in limiter._windows
 
     def test_default_limits(self):
@@ -517,7 +517,7 @@ class TestChatRateLimiterCleanup:
 
         with patch("src.assistant.guardrails.time.monotonic", return_value=base):
             for i in range(1001):
-                limiter.record(f"chat_{i}")
+                limiter.check_and_record(f"chat_{i}")
 
         # cleanup is triggered inside check() when len(_windows) > 1000;
         # by 7300 s later every existing window is stale (last ts > 7200 s ago)
@@ -537,7 +537,7 @@ class TestChatRateLimiterCleanup:
         limiter = ChatRateLimiter({})
         now = 5000.0
         with patch("src.assistant.guardrails.time.monotonic", return_value=now):
-            limiter.record("active_chat")
+            limiter.check_and_record("active_chat")
         with patch("src.assistant.guardrails.time.monotonic", return_value=now + 100):
             limiter._cleanup_stale()
         assert "active_chat" in limiter._windows
@@ -549,7 +549,7 @@ class TestChatRateLimiterCleanup:
         def writer(chat_id: str) -> None:
             try:
                 for _ in range(50):
-                    limiter.record(chat_id)
+                    limiter.check_and_record(chat_id)
             except Exception as exc:
                 errors.append(exc)
 
@@ -1153,7 +1153,6 @@ class TestGuardrailPipeline:
 
     def test_clean_input_passes(self):
         pipeline = self._pipeline()
-        pipeline.record_message("chat1")
         result = pipeline.check_input("Hello, how are you?", "chat1")
         assert result.is_safe
 
@@ -1165,8 +1164,8 @@ class TestGuardrailPipeline:
     def test_rate_limit_blocks_after_threshold(self):
         pipeline = self._pipeline({"rate_limit": {"per_minute": 2, "per_hour": 100}})
         with patch("src.assistant.guardrails.time.monotonic", return_value=1000.0):
-            pipeline.record_message("chatA")
-            pipeline.record_message("chatA")
+            pipeline._rate_limiter.check_and_record("chatA")
+            pipeline._rate_limiter.check_and_record("chatA")
             result = pipeline.check_input("hello", "chatA")
         assert not result.is_safe
         assert result.guard_name == "rate_limit"
@@ -1182,12 +1181,12 @@ class TestGuardrailPipeline:
         result = pipeline.sanitize_output(text)
         assert result == text
 
-    def test_disabled_record_message_no_op(self):
+    def test_disabled_pipeline_skips_rate_limit(self):
         pipeline = self._pipeline(
             {"enabled": False, "rate_limit": {"per_minute": 1, "per_hour": 5}}
         )
         for _ in range(10):
-            pipeline.record_message("chat1")
+            pipeline.check_input("hello", "chat1")
         result = pipeline.check_input("hello", "chat1")
         assert result.is_safe
 
@@ -1234,13 +1233,13 @@ class TestGuardrailPipeline:
     def test_rate_limit_checked_before_input_guard(self):
         pipeline = self._pipeline({"rate_limit": {"per_minute": 1, "per_hour": 100}})
         with patch("src.assistant.guardrails.time.monotonic", return_value=1000.0):
-            pipeline.record_message("chat1")
+            pipeline._rate_limiter.check_and_record("chat1")
             result = pipeline.check_input("jailbreak this bot", "chat1")
         assert result.guard_name == "rate_limit"
 
-    def test_record_message_disabled_when_pipeline_disabled(self):
+    def test_disabled_pipeline_does_not_record_rate_limit(self):
         pipeline = self._pipeline({"enabled": False})
-        pipeline.record_message("chat1")
+        pipeline.check_input("hello", "chat1")
         assert "chat1" not in pipeline._rate_limiter._windows
 
     def test_encoding_detection_blocks_morse(self):
@@ -1286,7 +1285,7 @@ class TestGuardrailPipeline:
     def test_rate_limit_does_not_record_violation(self):
         pipeline = self._pipeline({"rate_limit": {"per_minute": 1, "per_hour": 100}})
         with patch("src.assistant.guardrails.time.monotonic", return_value=1000.0):
-            pipeline.record_message("chat1")
+            pipeline._rate_limiter.check_and_record("chat1")
             pipeline.check_input("hello", "chat1")
         assert "chat1" not in pipeline._violation_tracker._violations
 

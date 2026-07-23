@@ -249,6 +249,9 @@ class Config:
     # Prompt optimizer — rewrite complex prompts before agent execution
     prompt_optimizer: bool = True
 
+    # Parallel tool execution — run independent tool calls concurrently
+    parallel_tool_execution: bool = True
+
     # Context compression — summarize old ToolMessages during agent loop
     context_compression: bool = True
     context_compression_min_age: int = 6
@@ -747,6 +750,9 @@ def _apply_config_file(config: Config, path: Path) -> None:
     if "prompt_optimizer" in data:
         config.prompt_optimizer = bool(data["prompt_optimizer"])
 
+    if "parallel_tool_execution" in data:
+        config.parallel_tool_execution = bool(data["parallel_tool_execution"])
+
     # ── Context compression ──────────────────────────────────────
     if "context_compression" in data:
         cc = data["context_compression"]
@@ -806,6 +812,14 @@ def _apply_config_file(config: Config, path: Path) -> None:
                 )
         if "model" in rag_cfg:
             config.rag.model = rag_cfg["model"]
+        if config.rag.chunk_overlap >= config.rag.chunk_size:
+            _log.warning(
+                "rag.chunk_overlap (%d) must be less than rag.chunk_size (%d); "
+                "resetting chunk_overlap to default",
+                config.rag.chunk_overlap,
+                config.rag.chunk_size,
+            )
+            config.rag.chunk_overlap = RAGConfig().chunk_overlap
 
     # ── Research delegate ─────────────────────────────────────────
     if "research_delegate" in data and isinstance(data["research_delegate"], dict):
@@ -854,29 +868,32 @@ def _parse_providers_section(config: Config, providers_data: dict[str, Any]) -> 
         raw_temperature = provider_data.get("temperature")
         raw_num_ctx = provider_data.get("num_ctx")
         raw_max_tokens = provider_data.get("max_tokens")
-        config.providers[name] = ProviderConfig(
-            name=name,
-            type=provider_type,
-            base_url=provider_data.get("base_url"),
-            model=provider_data.get("model"),
-            api_key=provider_data.get("api_key"),
-            tool_instructions=provider_data.get("tool_instructions"),
-            temperature=(
-                _safe_float(raw_temperature, f"providers.{name}.temperature")
-                if raw_temperature is not None
-                else None
-            ),
-            num_ctx=(
-                _safe_int(raw_num_ctx, f"providers.{name}.num_ctx")
-                if raw_num_ctx is not None
-                else None
-            ),
-            max_tokens=(
-                _safe_int(raw_max_tokens, f"providers.{name}.max_tokens")
-                if raw_max_tokens is not None
-                else None
-            ),
-        )
+        try:
+            config.providers[name] = ProviderConfig(
+                name=name,
+                type=provider_type,
+                base_url=provider_data.get("base_url"),
+                model=provider_data.get("model"),
+                api_key=provider_data.get("api_key"),
+                tool_instructions=provider_data.get("tool_instructions"),
+                temperature=(
+                    _safe_float(raw_temperature, f"providers.{name}.temperature")
+                    if raw_temperature is not None
+                    else None
+                ),
+                num_ctx=(
+                    _safe_int(raw_num_ctx, f"providers.{name}.num_ctx")
+                    if raw_num_ctx is not None
+                    else None
+                ),
+                max_tokens=(
+                    _safe_int(raw_max_tokens, f"providers.{name}.max_tokens")
+                    if raw_max_tokens is not None
+                    else None
+                ),
+            )
+        except (ConfigError, ValueError, TypeError) as exc:
+            _log.warning("Skipping provider '%s': %s", name, exc)
 
 
 def _parse_models_section(config: Config, models_data: dict[str, Any]) -> None:
@@ -1072,7 +1089,7 @@ def _apply_env_vars(config: Config) -> None:
     if wa_url or wa_key or wa_session:
         wa = config.services.setdefault("whatsapp", {})
         if wa_url:
-            wa["url"] = wa_url
+            wa["waha_url"] = wa_url
         if wa_key:
             wa["api_key"] = wa_key
         if wa_session:

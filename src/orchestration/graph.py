@@ -6,6 +6,7 @@ Builds a custom StateGraph with three nodes:
 - handle_phantom: recovers from phantom tool calls
 """
 
+import concurrent.futures
 import re
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -32,6 +33,7 @@ from src.tools.resolver import resolve_tool_name as _resolve_tool_name
 
 DEFAULT_RECURSION_LIMIT = 150
 EMPTY_RESPONSE_MSG = "**Error:** The model returned an empty response. Please try again."
+_PARALLEL_TOOL_WORKERS = 8
 
 _INVALID_TOOL_RE = re.compile(r"^Error:\s*(\S+)\s+is not a valid tool")
 
@@ -191,8 +193,11 @@ def build_agent_graph(
     session_state: SessionState | None = None,
     confirmation_ui: Any | None = None,
     on_tool_expansion: Any | None = None,
+    parallel_tool_execution: bool = True,
     *,
     config: AgentRunConfig | None = None,
+    bound_cache: OrderedDict | None = None,
+    compression_cache_in: dict[str, str] | None = None,
 ) -> Any:
     """Build a custom LangGraph StateGraph for the Cogtrix agent.
 
@@ -237,6 +242,7 @@ def build_agent_graph(
             confirmation_ui = config.confirmation_ui
         if config.on_tool_expansion is not None:
             on_tool_expansion = config.on_tool_expansion
+        parallel_tool_execution = config.parallel_tool_execution
 
     if active_tools_list is None:
         active_tools_list = []
@@ -252,13 +258,20 @@ def build_agent_graph(
     expansion_count = [0]
     auto_expansion_count = [0]
     call_count = [0]
-    compression_cache: dict[str, str] = {}
+    compression_cache: dict[str, str] = (
+        compression_cache_in if compression_cache_in is not None else {}
+    )
     _MAX_PHANTOM_RETRIES = 3
     _MAX_TOOL_EXPANSIONS = 3
     request_tools_noop_count = [0]
     _MAX_REQUEST_TOOLS_NOOPS = 3
     protected = (preset_tools or set()) | {"request_tools"}
-    _bound_cache: OrderedDict[tuple[str, ...], Any] = OrderedDict()
+    _bound_cache: OrderedDict[tuple[str, ...], Any] = (
+        bound_cache if bound_cache is not None else OrderedDict()
+    )
+    _tool_version = [0]
+    _last_tool_version = [-1]
+    _cached_fingerprint: list[tuple[str, ...]] = [()]
     output_cap = (
         compute_tool_output_cap(max_context_tokens)
         if max_context_tokens
@@ -271,17 +284,24 @@ def build_agent_graph(
 
     def call_model(state: CogtrixState, config: RunnableConfig) -> dict:
         call_count[0] += 1
-        tool_list = list(active_tools_list)
-        fingerprint = tuple(getattr(t, "name", "") for t in tool_list) if tool_list else ()
+        if _tool_version[0] != _last_tool_version[0]:
+            _cached_fingerprint[0] = (
+                tuple(getattr(t, "name", "") for t in active_tools_list)
+                if active_tools_list
+                else ()
+            )
+            _last_tool_version[0] = _tool_version[0]
+        fingerprint = _cached_fingerprint[0]
         if fingerprint in _bound_cache:
             _bound_cache.move_to_end(fingerprint)
         else:
+            tool_list = list(active_tools_list) if active_tools_list else []
             if len(_bound_cache) > 8:
                 _bound_cache.popitem(last=False)
             _bound_cache[fingerprint] = llm.bind_tools(tool_list) if tool_list else llm
         model = _bound_cache[fingerprint]
-        full_messages = [_sys_msg] + list(state["messages"])
         if context_compression:
+            full_messages = [_sys_msg] + list(state["messages"])
             full_messages = apply_message_compression(
                 full_messages,
                 call_count=call_count[0],
@@ -291,6 +311,8 @@ def build_agent_graph(
                 min_age_cycles=compression_min_age,
                 min_chars=compression_min_chars,
             )
+        else:
+            full_messages = [_sys_msg, *state["messages"]]
         response = model.invoke(full_messages, config)
         return {"messages": [response]}
 
@@ -331,7 +353,60 @@ def build_agent_graph(
             ]
         }
 
+    def _invoke_one(call: dict, run_config: Any) -> Any:
+        """Execute a single tool call already in tool_lookup. Returns ToolMessage."""
+        from src.agent.safety import UserCancelledRun
+
+        tool_name = call["name"]
+        tool_input = {**call, "type": "tool_call"}
+
+        if tool_call_guard is not None:
+            _guard_result = tool_call_guard(tool_name, call.get("args", {}))
+            if hasattr(_guard_result, "is_safe") and not _guard_result.is_safe:
+                log = get_logger()
+                log.warning(
+                    "Tool call blocked [%s]: %s — %s",
+                    getattr(_guard_result, "guard_name", ""),
+                    tool_name,
+                    getattr(_guard_result, "reason", ""),
+                )
+                return ToolMessage(
+                    content=(
+                        f"Tool call blocked by security policy: "
+                        f"{getattr(_guard_result, 'reason', 'blocked')}"
+                    ),
+                    tool_call_id=call["id"],
+                    name=tool_name,
+                )
+        try:
+            tool = _tool_lookup.get(tool_name)
+            if tool is None:
+                return ToolMessage(
+                    content=f"Tool '{tool_name}' is no longer active.",
+                    tool_call_id=call["id"],
+                    name=tool_name,
+                )
+            result = tool.invoke(tool_input, run_config)
+            if isinstance(result, ToolMessage):
+                return result
+            return ToolMessage(
+                content=str(result) if result is not None else "",
+                tool_call_id=call["id"],
+                name=tool_name,
+            )
+        except UserCancelledRun:
+            raise
+        except Exception as exc:
+            log = get_logger()
+            log.warning("Tool %s raised: %s", tool_name, exc, exc_info=True)
+            return ToolMessage(
+                content=f"Error executing {tool_name}: {exc}",
+                tool_call_id=call["id"],
+                name=tool_name,
+            )
+
     def process_tools(state: CogtrixState, config: RunnableConfig) -> dict:
+        from src.agent.safety import UserCancelledRun
         from src.agent.safety import create_safe_tool_wrapper as _safe_wrap
 
         log = get_logger()
@@ -341,8 +416,8 @@ def build_agent_graph(
         if not (isinstance(last, AIMessage) and last.tool_calls):
             return {"messages": []}
 
-        tool_lookup = _tool_lookup
-        active_names = _active_names
+        tool_lookup_ref = _tool_lookup
+        active_names_ref = _active_names
 
         result_msgs: list = []
         tools_activated: list[str] = []
@@ -350,53 +425,39 @@ def build_agent_graph(
         guidance_lines: list[str] = []
         saw_request_tools = False
 
-        for call in last.tool_calls:
+        # ── Classification pass ──────────────────────────────────
+        if parallel_tool_execution and len(last.tool_calls) > 1:
+            snapshot_names = set(tool_lookup_ref.keys())
+            serial_first: list = []
+            parallel_calls: list = []
+            for call in last.tool_calls:
+                name = call["name"]
+                if name == "request_tools" or name not in snapshot_names:
+                    serial_first.append(call)
+                else:
+                    parallel_calls.append(call)
+        else:
+            serial_first = list(last.tool_calls)
+            parallel_calls = []
+
+        # ── Serial-first execution (expansion, request_tools) ────
+        cancel_requested = False
+        for call in serial_first:
             tool_name = call["name"]
-            tool_input = {**call, "type": "tool_call"}
 
-            if tool_name in tool_lookup:
-                if tool_call_guard is not None:
-                    _guard_result = tool_call_guard(tool_name, call.get("args", {}))
-                    if hasattr(_guard_result, "is_safe") and not _guard_result.is_safe:
-                        log.warning(
-                            "Tool call blocked [%s]: %s — %s",
-                            getattr(_guard_result, "guard_name", ""),
-                            tool_name,
-                            getattr(_guard_result, "reason", ""),
-                        )
-                        result_msgs.append(
-                            ToolMessage(
-                                content=(
-                                    f"Tool call blocked by security policy: "
-                                    f"{getattr(_guard_result, 'reason', 'blocked')}"
-                                ),
-                                tool_call_id=call["id"],
-                                name=tool_name,
-                            )
-                        )
-                        continue
+            if tool_name in tool_lookup_ref:
                 try:
-                    tool = tool_lookup[tool_name]
-                    result = tool.invoke(tool_input, config)
-                    if isinstance(result, ToolMessage):
-                        result_msgs.append(result)
-                    else:
-                        result_msgs.append(
-                            ToolMessage(
-                                content=str(result) if result is not None else "",
-                                tool_call_id=call["id"],
-                                name=tool_name,
-                            )
-                        )
-                except Exception as exc:
-                    result_msgs.append(
-                        ToolMessage(
-                            content=f"Error executing {tool_name}: {exc}",
-                            tool_call_id=call["id"],
-                            name=tool_name,
-                        )
+                    msg = _invoke_one(call, config)
+                except UserCancelledRun:
+                    cancel_requested = True
+                    msg = ToolMessage(
+                        content="User cancelled agent workflow",
+                        tool_call_id=call["id"],
+                        name=tool_name,
                     )
-
+                result_msgs.append(msg)
+                if cancel_requested:
+                    break
                 if tool_name == "request_tools":
                     saw_request_tools = True
             else:
@@ -406,7 +467,7 @@ def build_agent_graph(
                     match, source = _resolve_tool_name(
                         tool_name,
                         available_tools,
-                        active_names,
+                        active_names_ref,
                     )
                 else:
                     match, source = None, ""
@@ -435,8 +496,8 @@ def build_agent_graph(
                             ui=confirmation_ui,
                         )
                     active_tools_list.append(tool_obj)
-                    active_names.add(match)
-                    tool_lookup[match] = tool_obj
+                    active_names_ref.add(match)
+                    tool_lookup_ref[match] = tool_obj
                     tools_activated.append(match)
                     session_state.loaded_tools.add(match)
                     auto_expansion_count[0] += 1
@@ -479,7 +540,18 @@ def build_agent_graph(
                                     name=match,
                                 )
                             )
+                    except UserCancelledRun:
+                        cancel_requested = True
+                        result_msgs.append(
+                            ToolMessage(
+                                content="User cancelled agent workflow",
+                                tool_call_id=call["id"],
+                                name=match,
+                            )
+                        )
+                        break
                     except Exception as exc:
+                        log.warning("Tool %s raised: %s", match, exc, exc_info=True)
                         result_msgs.append(
                             ToolMessage(
                                 content=f"Error executing {match}: {exc}",
@@ -513,6 +585,81 @@ def build_agent_graph(
                         )
                     )
 
+        # ── Parallel execution ───────────────────────────────────
+        if cancel_requested:
+            for call in parallel_calls:
+                result_msgs.append(
+                    ToolMessage(
+                        content="User cancelled agent workflow",
+                        tool_call_id=call["id"],
+                        name=call["name"],
+                    )
+                )
+        elif len(parallel_calls) == 1:
+            try:
+                result_msgs.append(_invoke_one(parallel_calls[0], config))
+            except UserCancelledRun:
+                cancel_requested = True
+                result_msgs.append(
+                    ToolMessage(
+                        content="User cancelled agent workflow",
+                        tool_call_id=parallel_calls[0]["id"],
+                        name=parallel_calls[0]["name"],
+                    )
+                )
+            if parallel_calls[0]["name"] == "request_tools":
+                saw_request_tools = True
+        elif parallel_calls:
+            workers = min(len(parallel_calls), _PARALLEL_TOOL_WORKERS)
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=workers, thread_name_prefix="tool"
+            ) as pool:
+                futures = [
+                    (call, pool.submit(_invoke_one, call, config)) for call in parallel_calls
+                ]
+                for call, future in futures:
+                    try:
+                        result_msgs.append(future.result())
+                    except UserCancelledRun:
+                        cancel_requested = True
+                        result_msgs.append(
+                            ToolMessage(
+                                content="User cancelled agent workflow",
+                                tool_call_id=call["id"],
+                                name=call["name"],
+                            )
+                        )
+                        break
+                    except Exception as exc:
+                        log.error("Unexpected future exception: %s", exc, exc_info=True)
+                        result_msgs.append(
+                            ToolMessage(
+                                content=f"Error executing {call['name']}: {exc}",
+                                tool_call_id=call["id"],
+                                name=call["name"],
+                            )
+                        )
+                    if call["name"] == "request_tools":
+                        saw_request_tools = True
+
+                if cancel_requested:
+                    processed_ids = {
+                        m.tool_call_id for m in result_msgs if hasattr(m, "tool_call_id")
+                    }
+                    for call, future in futures:
+                        if call["id"] not in processed_ids:
+                            future.cancel()
+                            result_msgs.append(
+                                ToolMessage(
+                                    content="User cancelled agent workflow",
+                                    tool_call_id=call["id"],
+                                    name=call["name"],
+                                )
+                            )
+
+        if cancel_requested:
+            raise UserCancelledRun()
+
         if saw_request_tools:
             mgmt_req = _detect_tool_request(
                 [last],
@@ -525,7 +672,7 @@ def build_agent_graph(
                         resolved, source = _resolve_tool_name(
                             rname,
                             available_tools,
-                            active_names,
+                            active_names_ref,
                         )
                         if resolved and source == "available":
                             rname = resolved
@@ -544,18 +691,18 @@ def build_agent_graph(
                                 ui=confirmation_ui,
                             )
                         active_tools_list.append(tool_obj)
-                        active_names.add(rname)
-                        tool_lookup[rname] = tool_obj
+                        active_names_ref.add(rname)
+                        tool_lookup_ref[rname] = tool_obj
                         tools_activated.append(rname)
                         session_state.loaded_tools.add(rname)
 
                 for rname in mgmt_req.remove:
                     # Fuzzy-resolve against active pool only (not available)
-                    if rname not in active_names and rname not in protected:
+                    if rname not in active_names_ref and rname not in protected:
                         resolved, source = _resolve_tool_name(
                             rname,
                             {},
-                            active_names,
+                            active_names_ref,
                         )
                         if resolved and source == "active":
                             rname = resolved
@@ -565,7 +712,7 @@ def build_agent_graph(
                         guidance_lines.append(
                             f"'{rname}' is core to this mode and cannot be released."
                         )
-                    elif rname in active_names:
+                    elif rname in active_names_ref:
                         idx = next(
                             (
                                 i
@@ -576,13 +723,13 @@ def build_agent_graph(
                         )
                         if idx is not None:
                             popped = active_tools_list.pop(idx)
-                            active_names.discard(rname)
+                            active_names_ref.discard(rname)
                             original = session_state.all_tool_originals.get(rname, popped)
                             available_tools[rname] = original
                             tools_released.append(rname)
                             session_state.loaded_tools.discard(rname)
-                            if rname in tool_lookup:
-                                del tool_lookup[rname]
+                            if rname in tool_lookup_ref:
+                                del tool_lookup_ref[rname]
                     else:
                         guidance_lines.append(f"'{rname}' is not in the active set.")
 
@@ -606,17 +753,18 @@ def build_agent_graph(
 
         if tools_activated or tools_released:
             expansion_count[0] += 1
+            _tool_version[0] += 1
 
             active_tools_list[:] = [
                 t for t in active_tools_list if getattr(t, "name", "") != "request_tools"
             ]
             _tool_lookup.pop("request_tools", None)
-            releasable = active_names - protected - {"request_tools"}
+            releasable = active_names_ref - protected - {"request_tools"}
             if available_tools or releasable:
                 rt = create_request_tools_tool(
                     available_tools,
                     build_tool_catalog(available_tools),
-                    active_names=active_names,
+                    active_names=active_names_ref,
                     protected_names=protected,
                 )
                 if rt:
@@ -667,14 +815,21 @@ def build_agent_graph(
         if not msgs:
             return END
 
-        from src.orchestration.runner import has_phantom_tool_call
-
-        if has_phantom_tool_call({"messages": list(msgs)}):
-            return "handle_phantom"
-
         last = msgs[-1]
-        if isinstance(last, AIMessage) and getattr(last, "tool_calls", None):
-            return "process_tools"
+        if type(last).__name__ == "AIMessage":
+            content = getattr(last, "content", "")
+            has_content = isinstance(content, str) and bool(content.strip())
+            tool_calls = getattr(last, "tool_calls", None)
+
+            if not has_content and not tool_calls:
+                meta = getattr(last, "response_metadata", None)
+                if meta and isinstance(meta, dict):
+                    if meta.get("finish_reason") == "tool_calls":
+                        return "handle_phantom"
+                return END
+
+            if tool_calls:
+                return "process_tools"
 
         return END
 

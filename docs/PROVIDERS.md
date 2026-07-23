@@ -11,6 +11,8 @@ Step-by-step guides for configuring LLM providers. If you're new to Cogtrix, sta
 - [Groq](#groq)
 - [Together AI](#together-ai)
 - [Local vLLM](#local-vllm)
+- [Anthropic Claude](#anthropic-claude)
+- [Google Gemini](#google-gemini)
 - [Multiple Providers](#multiple-providers)
 - [Troubleshooting](#troubleshooting)
 
@@ -23,10 +25,12 @@ Not sure where to start? Use this table:
 | I want... | Best choice | Setup time |
 |-----------|-------------|------------|
 | **Free, private, runs on my machine** | **Ollama** (default) | 5 minutes |
-| **Best quality, don't mind paying** | **OpenAI** (GPT-4o) | 2 minutes (need API key) |
+| **Best quality, don't mind paying** | **OpenAI** (GPT-4.1) | 2 minutes (need API key) |
 | **Fast inference, free tier available** | **Groq** | 3 minutes (need API key) |
 | **Wide model selection, competitive pricing** | **Together AI** | 3 minutes (need API key) |
 | **Full control, own GPU server** | **vLLM** | 15 minutes |
+| **Claude models (reasoning, long context)** | **Anthropic** | 2 minutes (need API key) |
+| **Gemini models (multimodal, fast)** | **Google** | 2 minutes (need API key) |
 
 Cogtrix defaults to Ollama on `localhost:11434`. If you already have Ollama running, you don't need to configure anything — just run `python cogtrix.py`.
 
@@ -264,6 +268,99 @@ Run models locally with vLLM server.
 
 ---
 
+## Anthropic Claude
+
+> **Optional dependency:** `pip install "cogtrix[anthropic]"` or `uv pip install "cogtrix[anthropic]"`
+
+### Setup
+
+1. Get an API key from [console.anthropic.com](https://console.anthropic.com/)
+
+2. Set the environment variable:
+   ```bash
+   export ANTHROPIC_API_KEY="sk-ant-..."
+   ```
+
+3. Run:
+   ```bash
+   python cogtrix.py -p anthropic
+   ```
+
+### Configuration
+
+**Environment variable only:**
+```bash
+export ANTHROPIC_API_KEY="sk-ant-..."
+python cogtrix.py -p anthropic -m claude-sonnet-4-5
+```
+
+**Config file:**
+```yaml
+provider: anthropic
+providers:
+  anthropic:
+    type: anthropic
+    model: claude-sonnet-4-5
+    api_key: "sk-ant-..."
+```
+
+### Available Models
+
+| Model | Context | Best For |
+|-------|---------|----------|
+| `claude-sonnet-4-5` | 200K | Complex reasoning (default) |
+| `claude-opus-4-5` | 200K | Highest capability |
+| `claude-haiku-3-5` | 200K | Fast, cost-effective |
+
+> **Note:** Anthropic does not provide an embedding API. Use a different provider (OpenAI or Ollama) for RAG embeddings.
+
+---
+
+## Google Gemini
+
+> **Optional dependency:** `pip install "cogtrix[google]"` or `uv pip install "cogtrix[google]"`
+
+### Setup
+
+1. Get an API key from [aistudio.google.com](https://aistudio.google.com/apikey)
+
+2. Set the environment variable:
+   ```bash
+   export GEMINI_API_KEY="..."
+   ```
+
+3. Run:
+   ```bash
+   python cogtrix.py -p google
+   ```
+
+### Configuration
+
+**Environment variable only:**
+```bash
+export GEMINI_API_KEY="..."
+python cogtrix.py -p google -m gemini-2.5-flash
+```
+
+**Config file:**
+```yaml
+provider: google
+providers:
+  google:
+    type: google
+    model: gemini-2.5-flash
+    api_key: "..."
+```
+
+### Available Models
+
+| Model | Context | Best For |
+|-------|---------|----------|
+| `gemini-2.5-flash` | 1M | Fast, cost-effective (default) |
+| `gemini-2.5-pro` | 1M | Highest capability |
+
+---
+
 ## Multiple Providers
 
 Configure multiple providers for different use cases:
@@ -397,6 +494,37 @@ Check:
 **"Model not available"**
 ```
 Check provider documentation for current model names
+```
+
+### Anthropic
+
+**"Invalid API key"**
+```
+Check:
+- ANTHROPIC_API_KEY environment variable is set
+- Key starts with "sk-ant-"
+- Key is not expired
+```
+
+**"Module not found: langchain_anthropic"**
+```
+Install the optional dependency:
+pip install "cogtrix[anthropic]"
+```
+
+### Google
+
+**"Invalid API key"**
+```
+Check:
+- GEMINI_API_KEY environment variable is set
+- Key is valid (test at aistudio.google.com)
+```
+
+**"Module not found: langchain_google_genai"**
+```
+Install the optional dependency:
+pip install "cogtrix[google]"
 ```
 
 ### General

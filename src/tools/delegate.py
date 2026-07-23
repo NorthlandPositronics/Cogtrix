@@ -281,7 +281,8 @@ def configure_delegate(config: dict[str, Any]) -> None:
 
     Called by cogtrix.py at startup to pass configuration.
     """
-    _delegate_config.update(config)
+    global _delegate_config
+    _delegate_config = {**_delegate_config, **config}
 
 
 @dataclass
@@ -406,7 +407,7 @@ def resolve_model_alias(provider: str | None, model: str | None) -> tuple:
         # Object format: {"provider": "...", "model": "...", "timeout": 300, "num_ctx": 32768}
         if isinstance(alias_value, dict):
             resolved_provider = alias_value.get("provider", provider)
-            resolved_model = alias_value.get("model")
+            resolved_model = alias_value.get("model", model)
             _extract_alias_config(alias_value)
             return resolved_provider, resolved_model, alias_config
 
@@ -1101,6 +1102,22 @@ def delegate_parallel(
                             provider="unknown",
                             duration_seconds=0,
                             error="Task timed out",
+                        ),
+                    )
+                )
+            except Exception as exc:
+                results.append(
+                    (
+                        i,
+                        DelegateResult(
+                            success=False,
+                            response="",
+                            format_valid=False,
+                            parsed_json=None,
+                            model_used="unknown",
+                            provider="unknown",
+                            duration_seconds=0,
+                            error=f"Task failed: {exc}",
                         ),
                     )
                 )

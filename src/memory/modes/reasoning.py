@@ -60,7 +60,7 @@ class ReasoningMemoryManager(BaseMemoryManager):
     Memory manager for strategic reasoning and planning.
 
     Configuration options:
-        working_memory_size (int): Messages in context (default: 40)
+        working_memory_size (int): Messages in context (default: 30)
         track_reasoning (bool): Track reasoning chain (default: True)
         track_decisions (bool): Track decisions (default: True)
         track_goals (bool): Track goals (default: True)
@@ -543,7 +543,7 @@ class ReasoningMemoryManager(BaseMemoryManager):
                 }
             )
 
-        return {
+        data = {
             **base,
             "messages": messages_data,
             "current_problem": self._current_problem,
@@ -559,6 +559,9 @@ class ReasoningMemoryManager(BaseMemoryManager):
             "decisions": decisions_data,
             "constraints": self._constraints,
         }
+        data["_turn_count"] = self._turn_count
+        data["_section_ts"] = dict(self._section_ts)
+        return data
 
     def from_dict(self, data: dict[str, Any]) -> None:
         """Restore reasoning state."""
@@ -613,6 +616,9 @@ class ReasoningMemoryManager(BaseMemoryManager):
                     trade_offs=d_data.get("trade_offs", []),
                 )
             )
+
+        self._turn_count = data.get("_turn_count", 0)
+        self._section_ts = data.get("_section_ts", {})
 
         self._loaded = True
 

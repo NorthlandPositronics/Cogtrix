@@ -20,7 +20,7 @@ Cogtrix is a modular LangChain-based AI agent built with a layered architecture:
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │                      CLI Interface Layer                         │
-│                      (cogtrix.py ~4300 LOC)                        │
+│        (cogtrix.py ~4300 LOC + src/cli/ + src/ui/)              │
 │  • Interactive & non-interactive modes  • Slash command system   │
 │  • Session management  • Tool management (load/enable/disable)  │
 └─────────────────────────────────┬───────────────────────────────┘
@@ -32,15 +32,23 @@ Cogtrix is a modular LangChain-based AI agent built with a layered architecture:
 └─────────────────────────────────┬───────────────────────────────┘
                                   │
 ┌─────────────────────────────────┴───────────────────────────────┐
+│                    Orchestration Layer                           │
+│                   (src/orchestration/)                           │
+│  • Agent execution pipeline  • Session state  • Intent detection │
+│  • Context compression  • Research/execution phases             │
+│  • Provider/model switching with snapshot/rollback              │
+└─────────────────────────────────┬───────────────────────────────┘
+                                  │
+┌─────────────────────────────────┴───────────────────────────────┐
 │                      Agent Core Layer                            │
 │                    (src/agent/core.py)                           │
-│  • CogtrixState schema  • LLM factory  • System prompt builder     │
+│  • CogtrixState schema  • LLM factory  • System prompt builder  │
 └─────────────────────────────────┬───────────────────────────────┘
                                   │
 ┌─────────────────────────────────┴───────────────────────────────┐
 │                       Safety Layer                               │
 │                    (src/agent/safety.py)                         │
-│  • Tool confirmation (y/n/a/d/D/c)  • Approval & denial tracking │
+│  • Tool confirmation (y/n/a/d/f/c)  • Approval & denial tracking │
 └─────────────────────────────────┬───────────────────────────────┘
                                   │
 ┌─────────────────────────────────┴───────────────────────────────┐
@@ -69,8 +77,8 @@ Cogtrix is a modular LangChain-based AI agent built with a layered architecture:
 ┌─────────────────────────────────────────────────────────────────┐
 │                  Setup Wizard (src/setup_wizard.py)              │
 │  • Interactive --setup  • Provider bootstrap with retry         │
-│  • Ollama model listing  • Rich markdown rendering + spinner   │
-│  • LLM-guided Q&A  • YAML validation and write                 │
+│  • Ollama model listing  • Rich markdown rendering + spinner    │
+│  • LLM-guided Q&A  • YAML validation and write                  │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -82,9 +90,10 @@ Cogtrix is a modular LangChain-based AI agent built with a layered architecture:
 
 ```
 src/
+├── _version.py            # Single source of truth: __version__, __copyright__
 ├── config.py              # Configuration management
 ├── registry.py            # Tool discovery and registration
-├── logging_config.py      # Logging infrastructure
+├── logging_config.py      # Logging infrastructure with secret scrubbing
 ├── setup_wizard.py        # Interactive --setup configuration wizard
 ├── mcp_client.py          # MCP server lifecycle, tool discovery, LangChain integration
 ├── providers/
@@ -94,21 +103,39 @@ src/
 │   ├── ollama.py          # Ollama local inference
 │   ├── anthropic.py       # Anthropic Claude
 │   └── google.py          # Google Gemini
+├── orchestration/
+│   ├── run_config.py      # AgentRunConfig dataclass (14 session-constant parameters)
+│   ├── runner.py          # run_agent() entry point, response extraction, ToolCallLogger
+│   ├── graph.py           # LangGraph StateGraph: call_model, process_tools, handle_phantom
+│   ├── phases.py          # Research delegation, deep think, execution phase, step-limit recovery
+│   ├── intent.py          # Intent detection: user_wants_deep_think(), classify_think_task()
+│   ├── compression.py     # Context compression: apply_message_compression()
+│   ├── session_state.py   # SessionState dataclass (replaces 7 former module-level globals)
+│   └── session_orchestrator.py  # SessionOrchestrator snapshot()/rollback()
 ├── agent/
-│   ├── core.py            # LangGraph agent setup
-│   └── safety.py          # Tool confirmation wrapper
+│   ├── core.py            # CogtrixState schema, system prompt builder, LLM factory
+│   └── safety.py          # SafeTool wrapper, create_safe_tool_wrapper(), ConfirmationUI protocol
+├── cli/
+│   ├── args.py            # parse_arguments(), ColorHelpFormatter, ANSI color helpers
+│   ├── banner.py          # print_startup(), LOGO_LINES
+│   ├── input.py           # read_multiline(), run_inline_shell(), readline history
+│   └── escape_monitor.py  # EscapeMonitor: daemon thread translating Escape to SIGINT
+├── ui/
+│   └── spinner.py         # ActivityIndicator animated terminal spinner
+├── prompt/
+│   └── optimizer.py       # optimize_prompt(): one-shot LLM prompt rewriter
 ├── memory/
 │   ├── base.py            # Abstract base classes
 │   ├── factory.py         # Memory mode factory
-│   ├── manager.py         # Base memory manager + hybrid memory logic
-│   ├── context.py         # Context data structures
+│   ├── manager.py         # BaseMemoryManager + hybrid memory logic + _sanitize_session_id()
+│   ├── context.py         # MemoryContext data structure
 │   ├── json_store.py      # JSON file persistence
 │   ├── summarizer.py      # LLM-based incremental summarization
 │   ├── recall.py          # Per-session FAISS vector store for semantic recall
 │   └── modes/
 │       ├── conversation.py  # General chat mode
 │       ├── code.py          # Code development mode
-│       └── reasoning.py     # Planning/reasoning mode
+│       └── reasoning.py     # Planning/reasoning mode with section-freshness gating
 ├── assistant/
 │   ├── __init__.py        # Package exports
 │   ├── channel.py         # Channel ABC + IncomingMessage dataclass
@@ -125,6 +152,9 @@ src/
 │   ├── __init__.py        # RAG module
 │   └── ingest.py          # Document ingestion
 └── tools/
+    ├── configure.py       # Tool config factories: load_tools(), build_tool_catalog(),
+    │                      #   apply_output_cap(), TOOL_PRESETS, configure_* functions
+    ├── resolver.py        # resolve_tool_name(): canonical fuzzy tool-name resolver
     ├── brave_search.py    # Brave Search API
     ├── calculator.py      # Math expressions
     ├── datetime_tool.py   # Date/time utilities
@@ -133,7 +163,7 @@ src/
     ├── exa_search.py      # Exa semantic search (3 tools)
     ├── file_ops.py        # File operations
     ├── google_search.py   # Google Custom Search API
-    ├── http_request.py    # HTTP requests
+    ├── http_request.py    # HTTP requests with SSRF protection
     ├── json_tool.py       # JSON processing
     ├── nlp_tools.py       # NLP (sentiment, summarization)
     ├── python_exec.py     # Python execution
@@ -206,18 +236,28 @@ class Config:
 | `Config.list_providers()` | List all available provider names |
 | `Config.resolve_embedding_config()` | Resolve `rag.model` via the `models` registry to `(provider_type, model, base_url, api_key)` |
 
-### 2. CLI Interface (`cogtrix.py`)
+`ProviderConfig` validates inputs at construction time via `__post_init__`: `temperature` must be in `[0.0, 2.0]`, `num_ctx` and `max_tokens` must be `> 0`, and `type` must be a recognized provider type — all violations raise `ConfigError`. The `num_ctx` field is gated to Ollama-type providers only in the provider registry; it is silently dropped for OpenAI, Anthropic, and Google.
 
-The entry point handles both interactive and non-interactive modes.
+### 2. CLI Interface (`cogtrix.py` + `src/cli/`)
+
+The entry point handles both interactive and non-interactive modes. CLI utility code is extracted into `src/cli/`.
 
 **Key Components:**
 
-| Component | Purpose |
-|-----------|---------|
-| `SlashCommandRegistry` | Registers, resolves, and dispatches `/commands` |
-| `SlashCommand` | Dataclass: name, handler, help text, aliases |
-| `ToolCallLogger` | `BaseCallbackHandler` for LLM/tool observability |
-| `readline` import | Enables arrow keys, Home/End, input history |
+| Component | Location | Purpose |
+|-----------|----------|---------|
+| `SlashCommandRegistry` | `cogtrix.py` | Registers, resolves, and dispatches `/commands` |
+| `SlashCommand` | `cogtrix.py` | Dataclass: name, handler, help text, aliases |
+| `parse_arguments()` | `src/cli/args.py` | CLI argument parsing |
+| `ColorHelpFormatter` | `src/cli/args.py` | Argparse formatter with bold headers |
+| `color_enabled()`, `bold()`, `dim()` | `src/cli/args.py` | ANSI color helpers |
+| `print_startup()`, `LOGO_LINES` | `src/cli/banner.py` | Startup banner |
+| `read_multiline()` | `src/cli/input.py` | Multi-line paste input |
+| `run_inline_shell()` | `src/cli/input.py` | `!<cmd>` inline shell execution |
+| `EscapeMonitor` | `src/cli/escape_monitor.py` | Daemon thread: Escape key → SIGINT |
+| `ActivityIndicator` | `src/ui/spinner.py` | Animated terminal spinner |
+
+`EscapeMonitor` runs as a background daemon thread. On Unix terminals with a real tty, it enters cbreak mode during LLM inference, detects standalone Escape bytes (as opposed to escape sequences such as arrow keys), restores the terminal, and sends SIGINT to the main process. The existing `KeyboardInterrupt` handler in `cogtrix.py` catches this signal. It is a no-op on non-tty stdin, Windows, or assistant mode.
 
 **Slash Command Dispatch:**
 
@@ -264,23 +304,59 @@ Hidden commands (not in `/help` listing):
 |---------|---------|-------------|
 | `/system_prompt` | `/sp` | Display the full system prompt |
 
-### 3. Agent Core (`src/agent/core.py`)
+### 3. Orchestration Layer (`src/orchestration/`)
 
-Defines the state schema, system prompt, and LLM factory. The actual agent graph is built in `cogtrix.py`.
+The agent execution pipeline was extracted from `cogtrix.py` into a dedicated package. This is the central coordination layer between the CLI and the agent core.
+
+#### 3a. AgentRunConfig (`src/orchestration/run_config.py`)
+
+`AgentRunConfig` is a dataclass that bundles the 14 session-constant parameters required by `run_agent()`, `build_agent_graph()`, and `run_execution_phase()`. Using a single config object instead of positional kwargs makes omissions visible as `AttributeError` at call time and keeps function signatures readable.
+
+```python
+@dataclass
+class AgentRunConfig:
+    llm: Any = None
+    system_prompt: str | None = None
+    available_tools: dict[str, Any] | None = None
+    active_tools_list: list[Any] | None = None
+    max_context_tokens: int | None = None
+    preset_tools: set[str] | None = None
+    context_compression: bool = True
+    compression_min_age: int | None = None
+    compression_min_chars: int | None = None
+    compression_llm: Any = None
+    tool_call_guard: Any | None = None
+    session_state: Any = None
+    confirmation_ui: Any | None = None
+    on_tool_expansion: Any | None = None
+```
+
+Individual kwargs are preserved in `run_agent()` for backward compatibility; when `config` is `None`, a temporary `AgentRunConfig` is assembled from the flat kwargs.
+
+#### 3b. Agent Runner (`src/orchestration/runner.py`)
+
+`run_agent()` is the main entry point for a prompt-to-response cycle. It builds the agent graph, streams its execution, and handles errors and edge cases.
 
 **Key Exports:**
 
 | Symbol | Purpose |
 |--------|---------|
-| `CogtrixState` | TypedDict with `messages: Annotated[Sequence[BaseMessage], add_messages]` |
-| `build_system_prompt(mode_additions, tool_instructions)` | Generate system prompt with mode context and optional tool-call formatting |
-| `create_llm_from_provider_config(config)` | LLM factory from ProviderConfig |
-| `build_agent_executor(tools, ...)` | Legacy ReAct agent builder (used by delegates) |
-| `DEFAULT_TOOL_INSTRUCTIONS` | Raw-JSON tool-call formatting instructions (not injected by default; available for explicit opt-in via `tool_instructions` config) |
+| `run_agent()` | Main entry point: build graph, stream, return response string |
+| `extract_response(result)` | Walk backward through messages to find the last AIMessage with content |
+| `extract_ai_content(msg)` | Handle string, list, multimodal, and reasoning-token content |
+| `has_phantom_tool_call(result)` | Detect empty AIMessage with `finish_reason=tool_calls` |
+| `format_agent_error(e)` | Categorize exceptions into user-friendly Markdown error messages |
+| `ToolCallLogger` | Tracks tool invocations by `call_id` for accurate duration measurement |
 
-**Agent Architecture:**
+`ToolCallLogger` uses `call_id` (LangChain's unique per-call ID) as the timing key so concurrent calls to the same tool each get accurate duration measurements. Stale entries are evicted after 10 minutes to prevent memory leaks.
 
-The main agent uses a custom LangGraph `StateGraph` built by `_build_agent_graph()` in `cogtrix.py`. It has three nodes with conditional routing:
+`format_agent_error()` categorizes `NotFoundError`, `AuthenticationError`, `RateLimitError`, `APIConnectionError`, `Timeout`, `BadRequestError`, `InternalServerError`, and `ServiceUnavailableError`, plus Ollama-specific connection and model-not-found errors. SDK internals (request/response bodies, headers) are stripped from messages before display.
+
+#### 3c. Agent Graph (`src/orchestration/graph.py`)
+
+`build_agent_graph()` constructs a custom LangGraph `StateGraph` with three nodes and conditional routing.
+
+**Graph Structure:**
 
 ```
 User Input
@@ -297,8 +373,9 @@ User Input
 │       │ (no tool calls)             │
 │       ▼                             │
 │  ┌──────────────┐                   │
-│  │handle_phantom│ (fuzzy-match      │
-│  │              │  unknown tools)    │
+│  │handle_phantom│ (empty AIMessage  │
+│  │              │  with tool_calls  │
+│  │              │  finish_reason)   │
 │  └──────────────┘                   │
 └─────────────────────────────────────┘
     │
@@ -306,22 +383,153 @@ User Input
 Agent Response
 ```
 
-### 4. Safety Layer (`src/agent/safety.py`)
+**Node responsibilities:**
+
+- `call_model` — binds active tools to the LLM via `bind_tools()`, prepends the system message, optionally runs context compression, and invokes the model. Uses `_bound_cache` (an `OrderedDict` with LRU eviction at capacity 8) keyed by a tuple of active tool names. The cache is only rebuilt when the active tool set changes, avoiding redundant `bind_tools()` calls on every LLM invocation.
+- `process_tools` — iterates the last AIMessage's `tool_calls`, executes known tools, and handles unknown tool names via `_resolve_tool_name()`. When the agent calls a tool not yet in the active set, `process_tools` auto-loads it from the on-demand pool (up to `_MAX_TOOL_EXPANSIONS = 3` auto-expansions per graph run). The `on_tool_expansion` callback decouples spinner updates from the orchestration layer — `graph.py` has no UI imports. `request_tools` calls are processed via `_detect_tool_request()` which scans only the current iteration's messages, not the full history.
+- `handle_phantom` — injects a correction hint when the model returns an empty AIMessage with `finish_reason=tool_calls` (a malformed-JSON failure mode seen in vLLM and some inference servers). Retries up to `_MAX_PHANTOM_RETRIES = 3` times before injecting a fallback response.
+
+**Key exports from `graph.py`:**
+
+| Symbol | Purpose |
+|--------|---------|
+| `build_agent_graph(config, registry, approvals, ...)` | Build and compile the StateGraph |
+| `ToolManagementRequest` | Dataclass: `add: list[str]`, `remove: list[str]`, `has_changes: bool` |
+| `DEFAULT_RECURSION_LIMIT` | 150 (approximately 75 tool calls) |
+
+#### 3d. Pipeline Phases (`src/orchestration/phases.py`)
+
+Houses the post-agent pipeline stages that run between the initial agent response and the memory update.
+
+**Key Exports:**
+
+| Symbol | Purpose |
+|--------|---------|
+| `extract_fetched_urls(messages)` | Harvest URLs from the agent's tool call history |
+| `run_research_delegate(urls, config, ...)` | Spawn sub-agent to re-fetch URLs with high context budget |
+| `force_deep_think(task, context, config, ...)` | Invoke Tree-of-Thought engine with gathered research |
+| `run_execution_phase(analysis, config, ...)` | Re-run agent to act on analysis output |
+| `recover_from_step_limit(graph, result, ...)` | Recover from RecursionError or step-limit apology |
+| `is_step_limit_apology(response)` | Detect LLM responses claiming insufficient steps |
+| `build_llm_for_decomposition(config)` | Create an LLM instance via provider registry for delegate tasks |
+| `WEB_TOOL_NAMES` | frozenset of 9 web tool names used for research-delegate detection |
+
+`build_llm_for_decomposition` delegates to the provider registry in `src/providers/`, keeping `phases.py` provider-agnostic. Research delegate sub-agents use shallow-copied tool objects to avoid shared-state mutation between the delegate and the main agent.
+
+#### 3e. Intent Detection (`src/orchestration/intent.py`)
+
+Classifies user prompts to determine which pipeline branches to activate.
+
+**Key Exports:**
+
+| Symbol | Purpose |
+|--------|---------|
+| `user_wants_deep_think(prompt)` | Regex detection of deep-thinking requests |
+| `user_wants_delegation(prompt)` | Detect explicit delegation requests |
+| `prompt_requests_action(prompt)` | Verb+target matching for action-oriented prompts |
+| `classify_think_task(prompt, llm)` | LLM-based classification into one of 23 `ThinkCategory` definitions |
+| `THINK_CATEGORIES` | Tuple of 23 `ThinkCategory` objects with gather/analysis templates |
+
+Each `ThinkCategory` defines keywords for fast pattern matching, a `gather_template` for Stage 1 data collection, an `analysis_preamble` and `stage2_task_framing` for the deep_think call, and a `tool_intensive` flag. When `tool_intensive=True`, automatic `_force_deep_think` is suppressed in normal prompts — the `/think` command still works.
+
+#### 3f. Context Compression (`src/orchestration/compression.py`)
+
+Summarizes old, large `ToolMessage` objects before each LLM call to reduce token usage without losing task-critical context.
+
+**Constants:**
+
+| Constant | Value | Purpose |
+|----------|-------|---------|
+| `COMPRESSION_MIN_AGE_CYCLES` | 6 | Minimum `call_model` cycles before a message is eligible |
+| `COMPRESSION_MIN_CHARS` | 2000 | Minimum message length to qualify for compression |
+| `_COMPRESSION_THRESHOLD_RATIO` | 0.72 | Total message size / context window before compression runs |
+
+**Key Exports:**
+
+| Symbol | Purpose |
+|--------|---------|
+| `apply_message_compression(messages, ...)` | Entry point; returns a (possibly modified) message list |
+| `compress_tool_message(content, tool_name, llm)` | One-shot LLM summarization; falls back to `truncate_tool_output()` |
+| `truncate_tool_output(text, max_chars)` | Middle-truncation with informative ellipsis |
+
+Compression is skipped entirely for providers with fewer than 16,384 context tokens (where simple truncation is cheaper). Once compressed, results are cached by `tool_call_id` and reused. The compression pass operates on a copy of the message list — graph state is never mutated.
+
+#### 3g. Session State (`src/orchestration/session_state.py`)
+
+`SessionState` replaces 7 former module-level globals in `cogtrix.py` with a proper dataclass. One instance is created per interactive session and passed into `build_agent_graph()` and `create_safe_tool_wrapper()`.
+
+```python
+@dataclass
+class SessionState:
+    denials: set[str]           # tools blocked via 'd' or /tools disable
+    deny_all: bool              # blanket forbid (reset each prompt cycle)
+    no_confirm: bool            # True in assistant mode (auto-approve)
+    approvals: set[str]         # tools auto-approved via 'a' or /approve
+    loaded_tools: set[str]      # tools dynamically loaded from on-demand pool
+    all_tool_descriptions: dict[str, str]   # process-scoped, populated at startup
+    all_tool_originals: dict[str, Any]      # process-scoped, populated at startup
+```
+
+**Lifetime mapping:**
+- `denials`, `loaded_tools`, `approvals` — session-scoped; cleared on session switch via `reset_for_new_session()`
+- `deny_all` — per-prompt; reset at the start of each new prompt cycle via `reset_for_new_prompt()`
+- `no_confirm` — process-scoped; set once at startup
+- `all_tool_descriptions`, `all_tool_originals` — process-scoped; populated once at startup
+
+In assistant mode, each call receives its own `SessionState(no_confirm=True)` to prevent any state bleeding between concurrent conversations.
+
+#### 3h. Session Orchestrator (`src/orchestration/session_orchestrator.py`)
+
+`SessionOrchestrator` provides snapshot/rollback semantics for provider, model, mode, and session switches. It captures mutable state before a switch attempt and can restore it if the switch fails (for example, if the new provider fails to authenticate).
+
+```python
+class SessionOrchestrator:
+    def snapshot(self, *, memory_manager, system_prompt,
+                 registry_tools, available_tools, tools) -> SessionSnapshot
+    def rollback(self, snap: SessionSnapshot, *, tools_list) -> dict[str, Any]
+```
+
+`SessionSnapshot` captures: `model`, `provider`, `active_model`, `memory_mode`, `memory_config`, `session`, `system_prompt`, `memory_manager`, `registry_tools`, `available_tools`, and `tools`. The orchestrator does not perform switches itself — all switch logic remains in `cogtrix.py`; the orchestrator only captures and restores state.
+
+### 4. Agent Core (`src/agent/core.py`)
+
+Defines the state schema, system prompt builder, and LLM factory. The actual graph is built in `src/orchestration/graph.py`.
+
+**Key Exports:**
+
+| Symbol | Purpose |
+|--------|---------|
+| `CogtrixState` | TypedDict with `messages: Annotated[Sequence[BaseMessage], add_messages]` |
+| `build_system_prompt(mode_additions, tool_instructions)` | Generate system prompt with mode context |
+| `create_llm_from_provider_config(config)` | LLM factory from ProviderConfig |
+| `build_agent_executor(tools, ...)` | Legacy ReAct agent builder (used by delegates) |
+| `prepare_messages_with_context(...)` | Token-aware trimming before messages are sent to the LLM |
+| `DEFAULT_TOOL_INSTRUCTIONS` | Raw-JSON tool-call formatting (opt-in via `tool_instructions` config) |
+
+`build_system_prompt()` generates generic task instructions only. Deep-think and delegation guidance lives in the respective tool descriptions, not in the system prompt.
+
+`prepare_messages_with_context()` estimates total token count and trims the oldest history messages (or truncates oversized individual messages) to fit the model's context window. The `max_tokens` parameter is dynamically capped to prevent negative values.
+
+### 5. Safety Layer (`src/agent/safety.py`)
 
 Wraps sensitive tools with confirmation prompts.
 
 **Mechanism:**
 
-1. Tools marked with `requires_confirmation: True` are wrapped
-2. Wrapper intercepts execution and prompts user
-3. User can: Yes — allow once (`y`), No — deny once (`n`), Allow all — approve
-   for session (`a`), Disable tool (`d`), Forbid all tools (`f`), or Cancel
-   workflow (`c`)
-4. Session-scoped sets track approvals (`approvals`), denials (`_denials`),
-   and dynamically loaded tools (`_loaded_tools`)
-5. Disabled tools are also blocked at the expansion point in `process_tools`
+1. Tools marked with `requires_confirmation: True` are wrapped via `create_safe_tool_wrapper()`
+2. Wrapper intercepts execution and checks `session_state.deny_all` and `session_state.denials` inside `_confirmation_lock` to eliminate TOCTOU races
+3. When `session_state.no_confirm` is `True` (assistant mode), the tool is auto-approved silently
+4. Otherwise, the confirmation prompt is shown; the user can choose:
+   - `y` — Yes, allow once
+   - `n` — No, deny once (agent may retry)
+   - `a` — Allow all (approve this tool for the session)
+   - `d` — Disable tool (block for the session)
+   - `f` — Forbid all further tool requests (reset on next prompt)
+   - `c` — Cancel the current agent workflow
+5. The prompt is wrapped in `try/finally` so `ui.resume_spinner()` is guaranteed even if `KeyboardInterrupt` or `UserCancelledRun` is raised
+6. Disabled tools are also blocked at the expansion point in `process_tools` — the agent cannot load them even via `request_tools`
 
-**Sensitive Tools:**
+**Sensitive Tools (default):**
 - `execute_shell_command`
 - `execute_python`
 - `write_file`
@@ -330,7 +538,62 @@ Wraps sensitive tools with confirmation prompts.
 - `whatsapp_send`, `whatsapp_send_image` (configurable)
 - `telegram_send`, `telegram_send_photo` (configurable)
 
-### 5. Tool Registry (`src/registry.py`)
+**Key Protocol:**
+
+```python
+@runtime_checkable
+class ConfirmationUI(Protocol):
+    def render_prompt(self, tool_name, tool_args) -> str
+    def pause_spinner(self) -> None
+    def resume_spinner(self) -> None
+```
+
+CLI passes a Rich-based implementation; tests use stubs; assistant mode passes `None` (which triggers `no_confirm` auto-approval).
+
+### 6. Tool Configuration (`src/tools/configure.py` and `src/tools/resolver.py`)
+
+#### Tool Configuration Factories (`src/tools/configure.py`)
+
+Centralizes all `configure_*` functions that wire up API keys, provider settings, and runtime parameters for each tool module. Called by `cogtrix.py` at startup and on provider/model switches.
+
+**Key Exports:**
+
+| Symbol | Purpose |
+|--------|---------|
+| `load_tools(tool_filter)` | Load tools from `src/tools/` directory |
+| `build_tool_catalog(tools)` | Build `{name: one-line-description}` dict |
+| `apply_output_cap(tool, max_chars)` | Patch a tool's output cap in-place |
+| `compute_tool_output_cap(max_context_tokens)` | Derive per-tool output limit (10% of context, minimum 8192 chars) |
+| `filter_unconfigured_tools(registry)` | Remove tools whose `is_configured()` returns False |
+| `TOOL_PRESETS` | Dict of preset names to sets of tool names |
+| `apply_tool_preset(preset, tools)` | Filter a tool list to a named preset |
+| `create_request_tools_tool(...)` | Build the `request_tools` meta-tool with current catalog |
+| `configure_delegate_tools(...)` | Update delegate tool with current provider config |
+| `configure_*` functions | Per-module wiring (e.g. `configure_brave_search`, `configure_exa_search`) |
+
+All `configure_*` functions use atomic reference swap (`_config = {**_config, **new}`) so concurrent reads always see a consistent snapshot.
+
+#### Fuzzy Tool Name Resolver (`src/tools/resolver.py`)
+
+`resolve_tool_name()` is the canonical resolver used by both the `process_tools` node and the `request_tools` factory.
+
+```python
+def resolve_tool_name(
+    requested: str,
+    available_tools: dict[str, Any],
+    active_tool_names: set[str] | None = None,
+) -> tuple[str | None, str]:
+```
+
+Resolution order:
+1. Exact match in the on-demand pool → `("name", "available")`
+2. Exact match among active tools → `("name", "active")`
+3. Fuzzy match (Jaccard token overlap + substring/prefix bonuses) → `("name", "available"|"active")`
+4. No match → `(None, "none")`
+
+The fuzzy threshold is `FUZZY_MATCH_THRESHOLD = 0.40`. Token overlap uses underscore-split normalization. Substring containment and token-prefix hits add score bonuses so abbreviated names (e.g., `search` → `search_web`) resolve correctly.
+
+### 7. Tool Registry (`src/registry.py`)
 
 Discovers and loads tools dynamically.
 
@@ -368,7 +631,7 @@ TOOL_CONFIG = {
 
 **API Key Gating:** Modules that export an `is_configured()` function are checked before registration. If it returns `False`, the module is skipped — its tools never appear in the agent's toolbox. This is used by search providers, weather, and WhatsApp to hide themselves when their API keys or services are unavailable.
 
-### 6. MCP Client (`src/mcp_client.py`)
+### 8. MCP Client (`src/mcp_client.py`)
 
 Connects to external MCP (Model Context Protocol) servers, discovers their tools, and exposes them as LangChain StructuredTool objects.
 
@@ -410,7 +673,7 @@ Register in ToolRegistry → available_tools pool (on-demand)
 
 **Configuration:** `mcp_servers` section in config file. Transport is auto-detected: `command` → stdio, `url` → SSE. Optional dependency: `mcp` package (`uv pip install "cogtrix[mcp]"`).
 
-### 7. Memory System (`src/memory/`)
+### 9. Memory System (`src/memory/`)
 
 Pluggable memory management with multiple modes and a shared hybrid layer.
 
@@ -459,7 +722,7 @@ class BaseMemoryManager(ABC):
     def prepare_context(self, user_input: str) -> MemoryContext
     def update(self, user_input: str, ai_response: str,
                agent_messages: list[Any] | None = None) -> None
-    def save(self) -> None
+    def save(self) -> None        # non-blocking: uses alive check, not join()
     def load(self) -> None
     def get_system_prompt_additions(self) -> str
 
@@ -470,13 +733,36 @@ class BaseMemoryManager(ABC):
     def _build_hybrid_prefix(self, user_input: str) -> str | None
 ```
 
-**Hybrid Memory:** All modes inherit a hybrid memory layer from `BaseMemoryManager`. When an LLM is injected via `set_llm()`, messages that fall outside the sliding window are incrementally summarized every 6 messages. When an embedding function is injected via `set_embeddings()`, evicted messages are also embedded into a per-session FAISS index for semantic recall. Both are injected into the context prefix by `_build_hybrid_prefix()`. See [Memory Modes — Hybrid Memory System](MEMORY_MODES.md#hybrid-memory-system) for details.
+**Hybrid Memory:** All modes inherit a hybrid memory layer from `BaseMemoryManager`. When an LLM is injected via `set_llm()`, messages that fall outside the sliding window are incrementally summarized every 6 messages. Summarization and embedding both run on a background daemon thread named `memory-slow-path` — they never block the user response. `save()` checks whether the background thread is alive rather than blocking on `join()`. When an embedding function is injected via `set_embeddings()`, evicted messages are also embedded into a per-session FAISS index for semantic recall. Both are injected into the context prefix by `_build_hybrid_prefix()`.
 
-**Message Timestamps:** Every message is automatically stamped with a UTC timestamp. The user message is stamped in `prepare_context()` (when the user sends input) and the AI message is stamped in `update()` (when the response arrives). This lets the LLM see elapsed time between turns. Timestamps are stored as ISO 8601 strings (`2026-02-14T15:23:05Z`) and injected into message content as `[2026-02-14 15:23:05 UTC]` at context-preparation time. Old sessions without timestamps load normally (backward-compatible).
+**Meaningful-Content Gate:** Summarization will not fire on short or tool-heavy exchanges. It only runs when at least `_MIN_MEANINGFUL_MSGS_FOR_SUMMARY = 4` messages (2 full H+A pairs) and `_MIN_MEANINGFUL_CHARS_FOR_SUMMARY = 5000` characters of real conversational content exist outside the sliding window.
 
-**Token-Aware Trimming:** Before messages are sent to the LLM, `prepare_messages_with_context()` in `src/agent/core.py` estimates the total token count and trims the oldest history messages (or truncates oversized individual messages) to fit the model's context window. The `max_tokens` parameter is also dynamically capped to prevent negative values.
+**Reasoning Mode Section-Freshness Gating (F5):** The reasoning memory mode tracks the turn each prefix section was last modified. Sections older than `prefix_max_stale_turns` (default 3) are omitted from the context prefix to reduce per-call token overhead. This prevents stale planning context from consuming tokens on every LLM call.
 
-### 8. RAG System (`src/rag/`)
+**Message Timestamps:** Every message is automatically stamped with a UTC timestamp. The user message is stamped in `prepare_context()` and the AI message in `update()`. Timestamps are stored as ISO 8601 strings and injected as `[2026-02-14 15:23:05 UTC]` at context-preparation time. Old sessions without timestamps load normally (backward-compatible).
+
+**Token-Aware Trimming:** `prepare_messages_with_context()` in `src/agent/core.py` estimates total token count before sending to the LLM and trims the oldest history messages (or truncates oversized individual messages) to fit the context window.
+
+**Session ID Sanitization:** `_sanitize_session_id()` in `src/memory/manager.py` (shared helper) replaces `..`, `/`, `\`, and null bytes in session IDs before use as filesystem paths, then enforces `resolve()` + prefix containment.
+
+### 10. Prompt Optimizer (`src/prompt/optimizer.py`)
+
+`optimize_prompt()` rewrites complex user prompts for clarity using a one-shot LLM call. The optimizer's system instructions are ephemeral — they do not persist in conversation history.
+
+**Gates (checked in order, skip if any matches):**
+
+1. Prompt shorter than `PROMPT_OPTIMIZER_MIN_LENGTH` (400 chars) — always skip
+2. Prompt between 400–600 chars and starts with a clear action verb (`create`, `write`, `analyze`, etc.) — skip
+3. LLM self-gates: decides whether restructuring is needed; returns original if not
+4. Any exception — fail-safe: return original unchanged
+
+A random nonce delimiter is injected around the optimized prompt in the LLM response to prevent prompt injection attacks from embedding instructions in the optimized text.
+
+**Config:** `prompt_optimizer: true` (default) in config file or `Config.prompt_optimizer`.
+
+**Call sites:** non-interactive (before `run_single_prompt`) and interactive (after `user_wants_deep_think()` but before `run_agent()`). Memory and deep-think detection always see the original prompt, not the optimized one.
+
+### 11. RAG System (`src/rag/`)
 
 Document ingestion and knowledge base queries.
 
@@ -510,7 +796,9 @@ Documents (docs/)
 └─────────────────┘
 ```
 
-### 9. Assistant Mode (`src/assistant/`)
+The embedding model is resolved from the `models` registry via `Config.resolve_embedding_config()`. The default embedding provider is `"ollama"`.
+
+### 12. Assistant Mode (`src/assistant/`)
 
 Headless daemon that maintains ongoing conversations over WhatsApp and Telegram with per-chat context isolation and shared cross-chat knowledge.
 
@@ -566,6 +854,7 @@ Incoming Message (from channel.poll())
     ▼
 ┌─────────────────────────────────────┐
 │ 2. Guardrails: check_input()        │
+│    - Blacklist check                │
 │    - Rate limit check (per-chat)    │
 │    - Input length + Unicode check   │
 │    - Injection pattern matching     │
@@ -594,7 +883,7 @@ Incoming Message (from channel.poll())
 │ 5. Agent: run_agent()               │
 │    - Same pipeline as interactive   │
 │    - Excluded tools filtered out    │
-│    - All tools auto-approved        │
+│    - SessionState(no_confirm=True)  │
 └─────────────────────────────────────┘
     │
     ▼
@@ -635,6 +924,7 @@ Incoming Message (from channel.poll())
 - Per-session `threading.Lock` serializes messages within the same chat
 - One polling thread per channel (WhatsApp short-poll 5s, Telegram long-poll 30s)
 - Session eviction thread runs every 60s
+- `available_tools` and `active_tools` are shallow-copied per call in `MessageHandler` so concurrent sessions cannot mutate each other's tool sets
 
 **Two-Layer Memory:**
 
@@ -647,8 +937,7 @@ Incoming Message (from channel.poll())
 
 **Security Guardrails (`src/assistant/guardrails.py`):**
 
-Every message in assistant mode passes through a `GuardrailPipeline` that wraps seven
-independent components:
+Every message in assistant mode passes through a `GuardrailPipeline` that wraps seven independent components:
 
 | Component | What it does |
 |-----------|-------------|
@@ -682,7 +971,16 @@ User Input
     │
     ▼
 ┌─────────────────────────────────────┐
-│ 1. Memory: prepare_context()        │
+│ 1. Prompt Optimizer (optional)      │
+│    - Skip if < 400 chars            │
+│    - LLM decides if restructuring   │
+│      is needed                      │
+│    - Fail-safe: returns original    │
+└─────────────────────────────────────┘
+    │
+    ▼
+┌─────────────────────────────────────┐
+│ 2. Memory: prepare_context()        │
 │    - Capture user timestamp (UTC)   │
 │    - Get working memory             │
 │    - Inject timestamps into context │
@@ -691,7 +989,7 @@ User Input
     │
     ▼
 ┌─────────────────────────────────────┐
-│ 2. Agent: graph.stream()            │
+│ 3. Agent: graph.stream()            │
 │    - Compress old ToolMessages      │
 │      (context_compression)          │
 │    - Process with LLM (call_model)  │
@@ -702,26 +1000,28 @@ User Input
     │
     ▼
 ┌─────────────────────────────────────┐
-│ 3. Safety: check confirmation       │
+│ 4. Safety: check confirmation       │
 │    - Prompt if required             │
 │    - Execute or deny                │
 └─────────────────────────────────────┘
     │
     ▼
 ┌─────────────────────────────────────┐
-│ 4. Memory: update()                 │
+│ 5. Memory: update()                 │
 │    - Stamp user msg with saved ts   │
 │    - Stamp AI msg with current ts   │
 │    - Add to history                 │
 │    - Update mode-specific tracking  │
 │    - Trigger hybrid memory:         │
 │      • Summarize if batch ready     │
+│        (background thread)          │
 │      • Feed evicted msgs to vector  │
 └─────────────────────────────────────┘
     │
     ▼
 ┌─────────────────────────────────────┐
-│ 5. Memory: save()                   │
+│ 6. Memory: save()                   │
+│    - Non-blocking: alive check only │
 │    - Persist history to JSON file   │
 │    - Persist hybrid meta (summary)  │
 │    - Persist vector index (FAISS)   │
@@ -745,8 +1045,10 @@ Agent decides to use tool
 ┌─────────────────────────────────────┐
 │ Safety Wrapper: check               │
 │                                     │
-│ Disabled or forbid-all?              │
+│ deny_all or in denials?              │
 │   └── Yes → Return denial silently  │
+│ no_confirm (assistant mode)?        │
+│   └── Yes → Auto-approve            │
 │ Requires confirmation?              │
 │   ├── No  → Execute directly        │
 │   └── Yes → Prompt user             │
@@ -769,22 +1071,22 @@ Result to Agent
 
 ### Research Delegate and Deep Think Pipeline
 
-When the user requests deep reasoning and the agent has used web tools, an enhanced pipeline runs between steps 2 and 4 above:
+When the user requests deep reasoning and the agent has used web tools, an enhanced pipeline runs between steps 3 and 5 above:
 
 ```
-Agent finished initial research (step 2)
+Agent finished initial research (step 3)
     │
     ▼
 ┌─────────────────────────────────────┐
-│ 2a. Detect web tool usage           │
-│     _agent_used_web_tools()         │
-│     _extract_fetched_urls()         │
+│ 3a. Detect web tool usage           │
+│     WEB_TOOL_NAMES check            │
+│     extract_fetched_urls()          │
 └─────────────────────────────────────┘
     │
     ▼
 ┌─────────────────────────────────────┐
-│ 2b. Research Delegate               │
-│     _run_research_delegate()        │
+│ 3b. Research Delegate               │
+│     run_research_delegate()         │
 │     - Spawn sub-agent               │
 │     - Temporarily patch output caps │
 │       to cap_ratio × max_context    │
@@ -795,8 +1097,8 @@ Agent finished initial research (step 2)
     │
     ▼
 ┌─────────────────────────────────────┐
-│ 2c. Deep Think                      │
-│     _force_deep_think()             │
+│ 3c. Deep Think                      │
+│     force_deep_think()              │
 │     - Prefer research_context over  │
 │       raw tool_outputs              │
 │     - Run Tree-of-Thought engine    │
@@ -804,8 +1106,8 @@ Agent finished initial research (step 2)
     │
     ▼
 ┌─────────────────────────────────────┐
-│ 2d. Execution Phase (if needed)     │
-│     _run_execution_phase()          │
+│ 3d. Execution Phase (if needed)     │
+│     run_execution_phase()           │
 │     - Check: prompt requests action │
 │       but agent made no write calls │
 │     - Re-prompt agent to create     │
@@ -814,12 +1116,12 @@ Agent finished initial research (step 2)
 └─────────────────────────────────────┘
     │
     ▼
-Continue to step 4 (Memory: update)
+Continue to step 5 (Memory: update)
 ```
 
-**Execution phase trigger:** When a prompt requests file actions (`_prompt_requests_action()`) but the agent produced only text with no `write_file` / `append_file` calls (`_agent_performed_writes()` returns False), the orchestrator feeds the analysis back to the agent via `_run_execution_phase()` so it can act on it. Write tools are available throughout both phases.
+**Execution phase trigger:** When a prompt requests file actions (`prompt_requests_action()`) but the agent produced only text with no `write_file` / `append_file` calls (`agent_performed_writes()` returns False), the orchestrator feeds the analysis back to the agent via `run_execution_phase()` so it can act on it. Write tools are available throughout both phases.
 
-**Configurable via:** The `research_delegate` section in the config file (note: config-file overrides are not yet active; runtime defaults are hardcoded in `cogtrix.py`). See [CONFIGURATION.md — Research Delegate Section](CONFIGURATION.md#research-delegate-section).
+All pipeline functions live in `src/orchestration/phases.py`. Runtime defaults are hardcoded (accessed via `getattr` with fallbacks); config-file overrides for the `research_delegate` section are not yet active.
 
 ---
 
@@ -849,12 +1151,15 @@ To add a new native provider type:
 
 ### Adding a New Interface
 
-The agent core is interface-agnostic:
+The agent core is interface-agnostic. The orchestration layer provides a clean `run_agent()` entry point:
 
 ```python
 from src.config import load_config
 from src.registry import ToolRegistry
-from src.agent.core import build_agent_executor, create_llm_from_provider_config
+from src.agent.core import create_llm_from_provider_config
+from src.orchestration.runner import run_agent
+from src.orchestration.run_config import AgentRunConfig
+from src.orchestration.session_state import SessionState
 from src.memory import MemoryFactory, JsonFileMemoryStore
 
 # Load config
@@ -865,21 +1170,32 @@ registry = ToolRegistry()
 registry.load_all_tools()
 tools = list(registry.tools.values())
 
-# Create LLM and agent
+# Create LLM
 provider_config = config.get_provider_config()
 llm = create_llm_from_provider_config(provider_config)
-agent = build_agent_executor(tools, llm=llm)
 
 # Setup memory
 memory_store = JsonFileMemoryStore()
 memory_manager = MemoryFactory.create(mode="conversation", store=memory_store)
 memory_manager.load()
 
+# Build run config
+agent_config = AgentRunConfig(
+    llm=llm,
+    active_tools_list=tools,
+    session_state=SessionState(),
+)
+
 # Use agent
 context = memory_manager.prepare_context(user_input)
-for chunk in graph.stream({"messages": context.messages}, stream_mode="values"):
-    result = chunk  # last chunk holds final state
-memory_manager.update(user_input, str(result))
+response = run_agent(
+    user_input=user_input,
+    history_messages=context.messages,
+    registry=registry,
+    approvals=set(),
+    config=agent_config,
+)
+memory_manager.update(user_input, response)
 memory_manager.save()
 ```
 
@@ -895,9 +1211,19 @@ memory_manager.save()
 | Sensitive | `execute_shell_command`, `write_file`, `execute_python` | Yes |
 | External | `http_post` | Yes |
 
+Tool confirmation checks are serialized inside `_confirmation_lock` in `create_safe_tool_wrapper()` to eliminate TOCTOU races between `deny_all` / `denials` checks and the prompt display.
+
+### HTTP Request SSRF Protection
+
+`src/tools/http_request.py` uses Python's `ipaddress` module to block requests to loopback, private, link-local, reserved, and unspecified IP ranges. DNS resolution is checked on every returned address (not just the first) to prevent DNS rebinding attacks.
+
+### Atomic Tool Configuration Updates
+
+All `configure_*` functions in `src/tools/configure.py` use atomic reference swap (`_config = {**_config, **new}`) so concurrent reads always see a consistent snapshot. This prevents partial configuration states during provider or model switches.
+
 ### Assistant Mode Guardrails
 
-Assistant mode adds a dedicated security layer in `src/assistant/guardrails.py`. See [Section 8 — Security Guardrails](#security-guardrails-srcassistantguardrailspy) for the full description. The pipeline now includes `EncodingDetectionGuard`, `ToolCallGuard`, and `ViolationTracker` (auto-blacklist) in addition to the original four components. Configuration is in the `services.assistant.guardrails` config block.
+Assistant mode adds a dedicated security layer in `src/assistant/guardrails.py`. See [Section 12 — Security Guardrails](#security-guardrails-srcassistantguardrailspy) for the full description. The pipeline includes `EncodingDetectionGuard`, `ToolCallGuard`, and `ViolationTracker` (auto-blacklist) in addition to the original four components. Configuration is in the `services.assistant.guardrails` config block.
 
 ### API Key Management
 
@@ -909,8 +1235,9 @@ Assistant mode adds a dedicated security layer in `src/assistant/guardrails.py`.
 ### Session Isolation
 
 - Each session has separate memory file
-- Approvals are session-scoped (not persisted)
+- Approvals and denials are session-scoped (not persisted)
 - History stored in `data/history/{session_id}.json`
+- Session IDs are sanitized via `_sanitize_session_id()` before filesystem use
 
 ---
 

@@ -93,6 +93,7 @@ from src.orchestration.phases import (  # noqa: F401
 )
 from src.orchestration.runner import (  # noqa: F401
     ToolCallLogger,
+    advance_llm_generation,
     build_tool_results_response,
     extract_ai_content,
     extract_response,
@@ -449,8 +450,10 @@ def _cleanup():
                     import asyncio
 
                     loop = asyncio.new_event_loop()
-                    loop.run_until_complete(resource.async_client.aclose())
-                    loop.close()
+                    try:
+                        loop.run_until_complete(resource.async_client.aclose())
+                    finally:
+                        loop.close()
                 except Exception:  # noqa: BLE001  # nosec B110
                     pass  # atexit handler; logging may be torn down
         except Exception:  # noqa: BLE001  # nosec B110
@@ -508,8 +511,10 @@ def _close_llm(llm_instance: Any) -> None:
             import asyncio
 
             loop = asyncio.new_event_loop()
-            loop.run_until_complete(llm_instance.async_client.aclose())
-            loop.close()
+            try:
+                loop.run_until_complete(llm_instance.async_client.aclose())
+            finally:
+                loop.close()
     except Exception:  # noqa: BLE001  # nosec B110
         pass
 
@@ -1165,9 +1170,7 @@ class SlashCommandRegistry:
         elif not _session.no_confirm:
             # Revoke auto-approvals (tools will prompt again)
             self.approvals.clear()
-            _session.denials.clear()
             _session.deny_all = False
-            _session.loaded_tools.clear()
 
         if console is not None:
             color = "yellow" if _session.no_confirm else "green"
@@ -1249,7 +1252,16 @@ class SlashCommandRegistry:
 
         if args.startswith("restart") and (len(args) == 7 or args[7] == " "):
             target = args[len("restart") :].strip() or None
-            mgr.restart(target)
+            _reg = self.registry
+            _builtin_names: set[str] = set()
+            if _reg is not None:
+                for _tname in list(_reg.tools):
+                    if _reg.tool_metadata.get(_tname, {}).get("source") != "mcp":
+                        _builtin_names.add(_tname)
+                for _tname in list(self.available_tools):
+                    if _reg.tool_metadata.get(_tname, {}).get("source") != "mcp":
+                        _builtin_names.add(_tname)
+            mgr.restart(target, builtin_tool_names=_builtin_names or None)
 
             reg = self.registry
             if reg is not None:
@@ -2534,8 +2546,24 @@ def run_single_prompt(
         # Log user message
         log_user_message(prompt_text)
 
-        # Prepare context from memory manager
-        context = memory_manager.prepare_context(prompt_text)
+        # Preserve the user's original phrasing before the optimizer
+        # rewrites it — memory, classification, delegation must all
+        # see what the user actually typed.
+        original_input = prompt_text
+
+        # Run prepare_context and optimize_prompt concurrently when optimizer is enabled.
+        # The two operations are independent: the optimizer rewrites the prompt text
+        # while prepare_context reads conversation history — no data dependency.
+        if config and config.prompt_optimizer:
+            import concurrent.futures as _cf
+
+            with _cf.ThreadPoolExecutor(max_workers=2, thread_name_prefix="prep") as _pool:
+                _ctx_future = _pool.submit(memory_manager.prepare_context, prompt_text)
+                _opt_future = _pool.submit(optimize_prompt, prompt_text, llm)
+                context = _ctx_future.result()
+                prompt_text = _opt_future.result()
+        else:
+            context = memory_manager.prepare_context(prompt_text)
 
         if log:
             log.debug(
@@ -2544,12 +2572,7 @@ def run_single_prompt(
             )
 
         # Run agent
-        wants_deep = user_wants_deep_think(prompt_text)
-
-        # Preserve the user's original phrasing before the optimizer
-        # rewrites it — memory, classification, delegation must all
-        # see what the user actually typed.
-        original_input = prompt_text
+        wants_deep = user_wants_deep_think(original_input)
 
         agent_msgs: list = []
 
@@ -2562,9 +2585,6 @@ def run_single_prompt(
         _agent_t0 = _time_mod.monotonic()
         _spinner.start()
         try:
-            if config and config.prompt_optimizer:
-                prompt_text = optimize_prompt(prompt_text, llm)
-
             output = run_agent(
                 prompt_text,
                 context.messages,
@@ -2590,6 +2610,7 @@ def run_single_prompt(
                 session_state=_session,
                 confirmation_ui=_rich_ui,
                 on_tool_expansion=_tool_expansion_ui,
+                parallel_tool_execution=config.parallel_tool_execution if config else True,
             )
         finally:
             _spinner.stop()
@@ -2717,6 +2738,7 @@ def run_single_prompt(
                     preset_tools=(TOOL_PRESETS.get(config.memory_mode, set()) if config else set()),
                     session_state=_session,
                     on_tool_expansion=_tool_expansion_ui,
+                    parallel_tool_execution=config.parallel_tool_execution if config else True,
                 )
             finally:
                 _spinner.stop()
@@ -3527,10 +3549,8 @@ def main():
                             )
                             slash_cmds.system_prompt = system_prompt
 
-                            # Success — close old LLM and commit the new one
-                            _close_llm(llm)
-                            if llm in _cleanup_resources:
-                                _cleanup_resources.remove(llm)
+                            # All potential failures are past — now atomically swap
+                            old_llm = llm
                             llm = new_llm
                             max_context_tokens = provider_config.num_ctx or _DEFAULT_CONTEXT_WINDOW
                             _cleanup_resources.append(llm)
@@ -3553,6 +3573,12 @@ def main():
                             else:
                                 compression_llm = None
 
+                            # Close old LLM last — it's no longer referenced
+                            _close_llm(old_llm)
+                            advance_llm_generation()
+                            if old_llm in _cleanup_resources:
+                                _cleanup_resources.remove(old_llm)
+
                             if console is not None:
                                 prov = config.provider
                                 console.print(
@@ -3569,6 +3595,7 @@ def main():
                         except Exception as exc:
                             restored = session_orch.rollback(_snap)
                             system_prompt = restored["system_prompt"]
+                            provider_config = config.resolve_provider_config()
                             log.error(f"Model switch failed: {exc}")
                             friendly = _friendly_error(exc, provider=config.provider)
                             if console is not None:
@@ -3601,10 +3628,8 @@ def main():
                             )
                             slash_cmds.system_prompt = system_prompt
 
-                            # Success — close old LLM and commit the new one
-                            _close_llm(llm)
-                            if llm in _cleanup_resources:
-                                _cleanup_resources.remove(llm)
+                            # All potential failures are past — now atomically swap
+                            old_llm = llm
                             llm = new_llm
                             max_context_tokens = provider_config.num_ctx or _DEFAULT_CONTEXT_WINDOW
                             _cleanup_resources.append(llm)
@@ -3627,6 +3652,12 @@ def main():
                             else:
                                 compression_llm = None
 
+                            # Close old LLM last — it's no longer referenced
+                            _close_llm(old_llm)
+                            advance_llm_generation()
+                            if old_llm in _cleanup_resources:
+                                _cleanup_resources.remove(old_llm)
+
                             actual_model = provider_config.get_model()
                             if console is not None:
                                 console.print(
@@ -3645,6 +3676,7 @@ def main():
                         except Exception as exc:
                             restored = session_orch.rollback(_snap)
                             system_prompt = restored["system_prompt"]
+                            provider_config = config.resolve_provider_config()
                             log.error(f"Provider switch failed: {exc}")
                             friendly = _friendly_error(exc, provider=new_provider)
                             if console is not None:
@@ -3816,6 +3848,7 @@ def main():
                                     session_state=_session,
                                     confirmation_ui=_rich_ui,
                                     on_tool_expansion=_tool_expansion_ui,
+                                    parallel_tool_execution=config.parallel_tool_execution,
                                 )
                             finally:
                                 _spinner.stop()
@@ -3986,6 +4019,7 @@ def main():
                             provider_config = config.resolve_provider_config()
                             new_llm = create_llm_from_provider_config(provider_config)
                             _close_llm(llm)
+                            advance_llm_generation()
                             if llm in _cleanup_resources:
                                 _cleanup_resources.remove(llm)
                             llm = new_llm
@@ -4067,8 +4101,20 @@ def main():
             original_input = user_input
 
             try:
-                # Prepare context from memory manager
-                context = memory_manager.prepare_context(user_input)
+                # Run prepare_context and optimize_prompt concurrently when optimizer is enabled.
+                # The two operations are independent: the optimizer rewrites the prompt text
+                # while prepare_context reads conversation history — no data dependency.
+                if config.prompt_optimizer and not already_optimized:
+                    import concurrent.futures as _cf
+
+                    with _cf.ThreadPoolExecutor(max_workers=2, thread_name_prefix="prep") as _pool:
+                        _ctx_future = _pool.submit(memory_manager.prepare_context, user_input)
+                        _opt_future = _pool.submit(optimize_prompt, user_input, llm)
+                        context = _ctx_future.result()
+                        user_input = _opt_future.result()
+                    already_optimized = True
+                else:
+                    context = memory_manager.prepare_context(user_input)
 
                 # Debug: log context details
                 log.debug(
@@ -4077,7 +4123,7 @@ def main():
                     + (f", ~{context.token_estimate} tokens" if context.token_estimate else "")
                 )
 
-                wants_deep = user_wants_deep_think(user_input)
+                wants_deep = user_wants_deep_think(original_input)
 
                 agent_msgs: list = []
 
@@ -4086,9 +4132,6 @@ def main():
                 _agent_t0 = _time_mod.monotonic()
                 _spinner.start()
                 try:
-                    if config.prompt_optimizer and not already_optimized:
-                        user_input = optimize_prompt(user_input, llm)
-
                     output = run_agent(
                         user_input,
                         context.messages,
@@ -4114,6 +4157,7 @@ def main():
                         session_state=_session,
                         confirmation_ui=_rich_ui,
                         on_tool_expansion=_tool_expansion_ui,
+                        parallel_tool_execution=config.parallel_tool_execution,
                     )
                 finally:
                     _spinner.stop()
@@ -4234,6 +4278,7 @@ def main():
                             preset_tools=TOOL_PRESETS.get(config.memory_mode, set()),
                             session_state=_session,
                             on_tool_expansion=_tool_expansion_ui,
+                            parallel_tool_execution=config.parallel_tool_execution,
                         )
                     finally:
                         _spinner.stop()

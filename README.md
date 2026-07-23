@@ -8,7 +8,7 @@ A modular AI assistant with 51 built-in tools, multi-provider LLM support, and i
 
 Cogtrix is an **interactive command-line AI assistant** that connects to large language models (LLMs) and extends them with tools — web search, file operations, code execution, deep reasoning, and more. You type a question or task; the agent reasons about it, calls tools as needed, and delivers the result.
 
-**Works with:** [Ollama](https://ollama.com/) (local, free), OpenAI, and any OpenAI-compatible API (Groq, Together, vLLM, etc.)
+**Works with:** [Ollama](https://ollama.com/) (local, free), OpenAI, Anthropic Claude, Google Gemini, and any OpenAI-compatible API (Groq, Together, vLLM, xAI, etc.)
 
 **Highlights:**
 
@@ -243,7 +243,7 @@ Full parameter reference: **[Tools Reference](docs/TOOLS_REFERENCE.md)**
 |------|----------|----------------|
 | `conversation` (default) | General chat, Q&A, research | 25 messages |
 | `code` | Programming, debugging | 30 messages + file/error tracking |
-| `reasoning` | Planning, architecture decisions | 40 messages + goal/decision tracking |
+| `reasoning` | Planning, architecture decisions | 30 messages + goal/decision tracking |
 
 All modes include **hybrid memory**: older messages are automatically compressed into a rolling summary, and (when an embedding provider is available) stored for semantic recall — so the agent retains awareness of the full conversation even after messages leave the sliding window. Token-aware trimming ensures the context always fits the model's context window.
 

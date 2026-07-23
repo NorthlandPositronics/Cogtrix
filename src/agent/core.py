@@ -97,6 +97,22 @@ first:
 Request only the tools relevant to the current task.  Don't load tools
 speculatively.
 
+### Batching Tool Calls
+
+The runtime can execute multiple tool calls from a single response in parallel.
+Use this to your advantage:
+
+- **Batch independent operations** — if you need to search three topics, fetch
+  two URLs, or read four files that do not depend on each other, emit all calls
+  in a single response. The results will arrive faster than issuing them one
+  at a time.
+- **Keep dependent operations sequential** — if the output of one tool call is
+  an input to the next (e.g., first search for a URL, then fetch that URL), emit
+  them in separate responses.
+- **`request_tools` is always alone** — never mix `request_tools` with other
+  tool calls in the same response; tool activation must complete before the
+  newly loaded tools can be used.
+
 ## Search and Research Persistence
 
 When a task requires gathering information from the web:
@@ -665,4 +681,5 @@ class AgentRunner(Protocol):
         session_state: Any = None,
         confirmation_ui: Any | None = None,
         on_tool_expansion: Any | None = None,
+        parallel_tool_execution: bool = True,
     ) -> str: ...

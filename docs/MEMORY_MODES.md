@@ -99,7 +99,10 @@ What the LLM actually sees on each turn:
 Summarization is triggered **after each response**, not during the user's wait for a reply. Specifically:
 
 1. After the agent replies, the memory manager checks how many messages have fallen outside the sliding window since the last summary was generated.
-2. If **6 or more** unsummarized messages have accumulated, a batch is sent to the LLM for summarization.
+2. If unsummarized messages have accumulated, a meaningful-content gate runs before sending anything to the LLM:
+   - At least **4 meaningful messages** (2 full human+assistant turns) must be present (`_MIN_MEANINGFUL_MSGS_FOR_SUMMARY = 4`)
+   - At least **5,000 characters** of meaningful content must exist (`_MIN_MEANINGFUL_CHARS_FOR_SUMMARY = 5000`)
+   - Both thresholds must be missed simultaneously to skip summarization — if either is met, the batch proceeds. This prevents summarization from firing on short or tool-heavy exchanges that contain no real conversational substance.
 3. The LLM produces an updated rolling summary that merges the new batch into the existing summary.
 4. The summary index is advanced so those messages aren't re-summarized.
 
@@ -482,6 +485,7 @@ memory:
       max_goals: 10
       summarization: true
       vector_recall_k: 3
+      prefix_max_stale_turns: 3  # Turns before a stale section is omitted from prefix
 ```
 
 | Option | Default | Description |
@@ -491,6 +495,7 @@ memory:
 | `max_goals` | 10 | Maximum goals to track |
 | `summarization` | `true` | Enable rolling summary of older messages |
 | `vector_recall_k` | 3 | Semantically similar past exchanges to retrieve |
+| `prefix_max_stale_turns` | 3 | Turns a prefix section can go unmodified before being omitted from the context prefix (section-freshness gating) |
 
 ---
 

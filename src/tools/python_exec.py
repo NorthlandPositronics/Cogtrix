@@ -137,14 +137,16 @@ def add_to_history(code: str, success: bool, output: str, session_id: str | None
 
 def clear_context(session_id: str | None = None) -> None:
     """Clear execution context for a session (keeps history)."""
-    state = _get_session_state(session_id)
-    state.variables.clear()
+    with _session_states_lock:
+        state = _get_session_state(session_id)
+        state.variables.clear()
 
 
 def clear_history(session_id: str | None = None) -> None:
     """Clear execution history for a session."""
-    state = _get_session_state(session_id)
-    state.history.clear()
+    with _session_states_lock:
+        state = _get_session_state(session_id)
+        state.history.clear()
 
 
 # Module names to block via AST Import/ImportFrom node inspection.
@@ -187,15 +189,14 @@ _BLOCKED_MODULES: frozenset[str] = frozenset(
     }
 )
 
-# Non-module patterns that remain as substring checks because they represent
-# function calls, attribute accesses, or built-in names — not import targets.
-_DANGEROUS_CALL_PATTERNS: list[str] = [
+# Built-in call names checked via AST to avoid substring false positives
+# (e.g. "profile(" containing "file(", "hexec(" containing "exec(").
+_DANGEROUS_CALL_NAMES: frozenset[str] = frozenset({"eval", "exec", "compile", "open", "file"})
+
+# Dunder/special-name patterns that remain as substring checks — these are
+# distinctive enough that false positives are not a concern.
+_DANGEROUS_DUNDER_PATTERNS: list[str] = [
     "__import__",
-    "eval(",
-    "exec(",
-    "compile(",
-    "open(",
-    "file(",
     "__builtins__",
     "__class__",
     "__bases__",
@@ -208,8 +209,15 @@ _DANGEROUS_CALL_PATTERNS: list[str] = [
     "__setstate__",
 ]
 
+# Alias kept for code that iterates _DANGEROUS_CALL_PATTERNS directly.
+_DANGEROUS_CALL_PATTERNS: list[str] = _DANGEROUS_DUNDER_PATTERNS
+
 # Keep DANGEROUS_PATTERNS as a combined list for backward compatibility
-DANGEROUS_PATTERNS: list[str] = list(_DANGEROUS_CALL_PATTERNS) + sorted(_BLOCKED_MODULES)
+DANGEROUS_PATTERNS: list[str] = (
+    [f"{name}(" for name in sorted(_DANGEROUS_CALL_NAMES)]
+    + _DANGEROUS_DUNDER_PATTERNS
+    + sorted(_BLOCKED_MODULES)
+)
 
 
 # Dangerous attribute names that could be used for sandbox escape
@@ -506,6 +514,19 @@ def _check_ast_security(tree: ast.AST) -> tuple[bool, str]:
                                 False,
                                 f"Blocked: getattr/setattr with '{arg.value}' " "is not allowed",
                             )
+
+            # AST-based detection of dangerous built-in calls (avoids substring
+            # false positives such as "profile(" matching "file(").
+            call_name: str | None = None
+            if isinstance(func, ast.Name):
+                call_name = func.id
+            elif isinstance(func, ast.Attribute):
+                call_name = func.attr
+            if call_name in _DANGEROUS_CALL_NAMES:
+                return (
+                    False,
+                    f"Blocked: Call to '{call_name}' is not allowed (security)",
+                )
 
     return True, ""
 
@@ -818,8 +839,10 @@ def _handle_special_command(
     if cmd == "%vars":
         if not context:
             return "No variables in current context."
+        with _session_states_lock:
+            vars_snapshot = dict(context)
         var_list = []
-        for name, value in sorted(context.items()):
+        for name, value in sorted(vars_snapshot.items()):
             if name.startswith("_"):
                 continue
             val_repr = repr(value)
@@ -832,7 +855,8 @@ def _handle_special_command(
         return "Variables:\n" + "\n".join(var_list)
 
     if cmd in ("%clear", "%reset"):
-        context.clear()
+        with _session_states_lock:
+            context.clear()
         return "Context cleared. All variables removed."
 
     if cmd == "%history":
@@ -1225,7 +1249,12 @@ def execute_python(
 
     # Prepare serializable context data
     context_data: dict[str, Any] = {}
-    for k, v in context.items():
+    if persistent:
+        with _session_states_lock:
+            snapshot = dict(context)
+    else:
+        snapshot = context
+    for k, v in snapshot.items():
         try:
             # Test pickling
             import pickle  # nosec B403
@@ -1264,8 +1293,9 @@ def execute_python(
         dropped_vars: list[str] = result.get("dropped_vars", [])
         if persistent and "context" in result:
             with _session_states_lock:
-                context.clear()
-                context.update(result.get("context", {}))
+                fresh_state = _get_session_state(session_id)
+                fresh_state.variables.clear()
+                fresh_state.variables.update(result.get("context", {}))
 
         # Format output
         if not result.get("success"):

@@ -63,7 +63,13 @@ _DANGEROUS_CODEPOINTS: frozenset[int] = frozenset(
 
 _PII_PATTERNS: dict[str, re.Pattern[str]] = {
     "email": re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b"),
-    "credit_card": re.compile(r"\b(?:\d{4}[ -]\d{4}[ -]\d{4}[ -]\d{1,4}|\d{13,16})\b"),
+    "credit_card": re.compile(
+        r"\b(?:\d{4}[ -]\d{4}[ -]\d{4}[ -]\d{1,4}"
+        r"|4\d{12}(?:\d{3})?"
+        r"|5[1-5]\d{14}"
+        r"|3[47]\d{13}"
+        r"|6(?:011|5\d{2})\d{12})\b"
+    ),
     "ssn": re.compile(r"\b\d{3}-\d{2}-\d{4}\b"),
     "ip_address": re.compile(r"\b(?:10|172\.(?:1[6-9]|2\d|3[01])|192\.168)\.\d{1,3}\.\d{1,3}\b"),
 }
@@ -477,12 +483,6 @@ class ChatRateLimiter:
             window.timestamps.append(now)
             return GuardrailResult(is_safe=True)
 
-    def record(self, chat_id: str) -> None:
-        with self._lock:
-            if chat_id not in self._windows:
-                self._windows[chat_id] = _ChatWindow()
-            self._windows[chat_id].timestamps.append(time.monotonic())
-
     def _cleanup_stale(self) -> None:
         now = time.monotonic()
         stale = [
@@ -678,12 +678,19 @@ class ToolCallGuard:
 
     @staticmethod
     def _normalize_path(raw: str) -> str:
-        """Collapse traversal components and redundant separators in a path.
+        """Collapse traversal components, resolve symlinks, and normalize a path.
 
         Leading ``//`` is collapsed to ``/`` before normpath so that the POSIX
         implementation-defined double-slash cannot bypass prefix checks.
+        ``os.path.realpath`` is called first to resolve symlinks so that a
+        symlink pointing into a sensitive directory does not bypass the prefix
+        check.
         """
-        s = raw.replace("\\", "/")
+        try:
+            resolved = os.path.realpath(raw)
+        except (OSError, ValueError):
+            resolved = raw
+        s = resolved.replace("\\", "/")
         # POSIX allows // at the start as implementation-defined; treat as /
         s = re.sub(r"^/+", "/", s)
         return os.path.normpath(s)
@@ -813,10 +820,6 @@ class GuardrailPipeline:
         if not self._enabled:
             return GuardrailResult(is_safe=True)
         return self._tool_call_guard.check(tool_name, tool_args)
-
-    def record_message(self, chat_id: str) -> None:
-        if self._enabled:
-            self._rate_limiter.record(chat_id)
 
     def sanitize_output(self, text: str) -> str:
         if not self._enabled:

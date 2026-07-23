@@ -10,7 +10,7 @@
       "extra-files": [
         {
           "type": "generic",
-          "path": "cogtrix.py"
+          "path": "src/_version.py"
         }
       ]
     }

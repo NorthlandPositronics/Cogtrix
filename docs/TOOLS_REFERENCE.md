@@ -70,7 +70,7 @@ Execute shell commands with timeout protection.
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `command` | string | Yes | Shell command to execute |
-| `working_dir` | string | No | Working directory (default: current) |
+| `working_directory` | string | No | Working directory (default: current) |
 | `timeout` | int | No | Timeout in seconds (default: 30) |
 
 **Example:**
@@ -215,8 +215,8 @@ Read contents of a file.
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `path` | string | Yes | File path to read |
-| `start_line` | int | No | First line to read (1-based) |
-| `end_line` | int | No | Last line to read |
+| `start_line` | int | No | Line number to start reading from (0-based) |
+| `max_lines` | int | No | Maximum number of lines to read from start_line |
 
 **Example:**
 ```
@@ -264,7 +264,7 @@ List contents of a directory.
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `path` | string | Yes | Directory path |
-| `include_hidden` | bool | No | Include hidden files (default: false) |
+| `show_hidden` | bool | No | Include hidden files (default: false) |
 
 **Returns:** List of files/directories with sizes
 
@@ -321,7 +321,7 @@ Get current date and time in any timezone.
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `timezone` | string | No | Timezone name (default: UTC) |
-| `format` | string | No | Output format (default: ISO 8601) |
+| `output_format` | string | No | Output format (default: %Y-%m-%d %H:%M:%S %Z) |
 
 **Examples:**
 ```
@@ -341,8 +341,8 @@ Convert datetime between timezones.
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `datetime_str` | string | Yes | Datetime to convert |
-| `from_tz` | string | Yes | Source timezone |
-| `to_tz` | string | Yes | Target timezone |
+| `from_timezone` | string | Yes | Source timezone |
+| `to_timezone` | string | Yes | Target timezone |
 
 ---
 
@@ -354,8 +354,8 @@ Parse date strings in various formats.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `date_string` | string | Yes | Date string to parse |
-| `format` | string | No | Expected format (auto-detect if not provided) |
+| `date_str` | string | Yes | Date string to parse |
+| `output_format` | string | No | Output format (strftime format string) |
 
 **Supported Formats:**
 - `2024-12-25`
@@ -400,7 +400,7 @@ Find and replace text with regex support.
 | `text` | string | Yes | Input text |
 | `find` | string | Yes | Pattern to find |
 | `replace` | string | Yes | Replacement text |
-| `regex` | bool | No | Use regex (default: false) |
+| `use_regex` | bool | No | Use regex (default: false) |
 | `case_sensitive` | bool | No | Case sensitive (default: true) |
 
 ---
@@ -458,6 +458,7 @@ Split text by delimiter.
 |-----------|------|----------|-------------|
 | `text` | string | Yes | Text to split |
 | `delimiter` | string | No | Delimiter (default: newline) |
+| `max_parts` | int | No | Maximum number of parts to split into |
 
 ---
 
@@ -471,7 +472,7 @@ Trim text to maximum length.
 |-----------|------|----------|-------------|
 | `text` | string | Yes | Text to trim |
 | `max_length` | int | Yes | Maximum length |
-| `suffix` | string | No | Suffix when trimmed (default: "...") |
+| `add_ellipsis` | bool | No | Whether to add '...' when truncated (default: true) |
 
 ---
 
@@ -485,7 +486,7 @@ Parse and validate JSON strings.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `json_string` | string | Yes | JSON string to parse |
+| `json_str` | string | Yes | JSON string to parse |
 
 **Returns:** Parsed object or validation error
 
@@ -499,7 +500,7 @@ Pretty-print JSON with indentation.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `json_string` | string | Yes | JSON to format |
+| `json_str` | string | Yes | JSON to format |
 | `indent` | int | No | Indentation level (default: 2) |
 
 ---
@@ -512,7 +513,7 @@ Query JSON using path expressions.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `json_string` | string | Yes | JSON to query |
+| `json_str` | string | Yes | JSON to query |
 | `path` | string | Yes | Query path (e.g., `data.users[0].name`) |
 
 **Path Syntax:**
@@ -547,7 +548,7 @@ Convert JSON to human-readable text.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `json_string` | string | Yes | JSON to convert |
+| `json_str` | string | Yes | JSON to convert |
 
 ---
 
