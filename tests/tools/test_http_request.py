@@ -1,12 +1,15 @@
 """Tests for the http_request tool — timeout clamping and SSRF protection."""
 
+import json
 import socket
 from unittest.mock import MagicMock, patch
 
 from src.tools.http_request import (
+    _BLOCKED_HEADERS,
     _MAX_TIMEOUT,
     _dns_pins,
     _is_blocked_ip,
+    _parse_headers,
     _pin_dns,
     _validate_url,
     http_get,
@@ -351,3 +354,114 @@ class TestDnsPinning:
         assert result is final_response
         # _validate_url must have been called for the redirect target
         assert any("final" in url for url in pinned_calls)
+
+
+class TestParseHeaders:
+    """Tests for _parse_headers — blocked-header stripping and CRLF sanitization."""
+
+    def test_blocked_headers_set_is_defined(self) -> None:
+        assert "host" in _BLOCKED_HEADERS
+        assert "x-forwarded-for" in _BLOCKED_HEADERS
+        assert "x-real-ip" in _BLOCKED_HEADERS
+        assert "x-forwarded-host" in _BLOCKED_HEADERS
+        assert "x-forwarded-proto" in _BLOCKED_HEADERS
+        assert "x-forwarded-server" in _BLOCKED_HEADERS
+
+    def test_host_header_stripped(self) -> None:
+        headers_json = json.dumps({"Host": "evil.internal", "Accept": "text/plain"})
+        result, err = _parse_headers(headers_json)
+        assert err is None
+        assert "Host" not in result
+        assert "host" not in result
+        assert result.get("Accept") == "text/plain"
+
+    def test_x_forwarded_for_stripped(self) -> None:
+        headers_json = json.dumps({"X-Forwarded-For": "127.0.0.1"})
+        result, err = _parse_headers(headers_json)
+        assert err is None
+        assert not any(k.lower() == "x-forwarded-for" for k in result)
+
+    def test_x_real_ip_stripped(self) -> None:
+        headers_json = json.dumps({"X-Real-IP": "10.0.0.1"})
+        result, err = _parse_headers(headers_json)
+        assert err is None
+        assert not any(k.lower() == "x-real-ip" for k in result)
+
+    def test_x_forwarded_host_stripped(self) -> None:
+        headers_json = json.dumps({"X-Forwarded-Host": "internal.host"})
+        result, err = _parse_headers(headers_json)
+        assert err is None
+        assert not any(k.lower() == "x-forwarded-host" for k in result)
+
+    def test_x_forwarded_proto_stripped(self) -> None:
+        headers_json = json.dumps({"X-Forwarded-Proto": "https"})
+        result, err = _parse_headers(headers_json)
+        assert err is None
+        assert not any(k.lower() == "x-forwarded-proto" for k in result)
+
+    def test_x_forwarded_server_stripped(self) -> None:
+        headers_json = json.dumps({"X-Forwarded-Server": "proxy.internal"})
+        result, err = _parse_headers(headers_json)
+        assert err is None
+        assert not any(k.lower() == "x-forwarded-server" for k in result)
+
+    def test_all_blocked_headers_stripped_at_once(self) -> None:
+        payload = {
+            "Host": "evil",
+            "X-Forwarded-For": "127.0.0.1",
+            "X-Real-IP": "10.0.0.1",
+            "X-Forwarded-Host": "bad",
+            "X-Forwarded-Proto": "http",
+            "X-Forwarded-Server": "proxy",
+            "Authorization": "Bearer token",
+        }
+        result, err = _parse_headers(json.dumps(payload))
+        assert err is None
+        lower_keys = {k.lower() for k in result}
+        for blocked in _BLOCKED_HEADERS:
+            assert blocked not in lower_keys
+        assert "authorization" in lower_keys
+
+    def test_crlf_stripped_from_header_value(self) -> None:
+        headers_json = json.dumps({"X-Custom": "value\r\nX-Injected: bad"})
+        result, err = _parse_headers(headers_json)
+        assert err is None
+        assert "\r" not in result.get("X-Custom", "")
+        assert "\n" not in result.get("X-Custom", "")
+
+    def test_cr_only_stripped_from_header_value(self) -> None:
+        headers_json = json.dumps({"X-Custom": "val\rue"})
+        result, err = _parse_headers(headers_json)
+        assert err is None
+        assert "\r" not in result.get("X-Custom", "")
+
+    def test_lf_only_stripped_from_header_value(self) -> None:
+        headers_json = json.dumps({"X-Custom": "val\nue"})
+        result, err = _parse_headers(headers_json)
+        assert err is None
+        assert "\n" not in result.get("X-Custom", "")
+
+    def test_none_returns_empty_dict(self) -> None:
+        result, err = _parse_headers(None)
+        assert result == {}
+        assert err is None
+
+    def test_invalid_json_returns_error(self) -> None:
+        result, err = _parse_headers("{not valid json")
+        assert result == {}
+        assert err is not None
+        assert "Invalid headers JSON" in err
+
+    def test_non_object_json_returns_error(self) -> None:
+        result, err = _parse_headers('["list", "not", "object"]')
+        assert result == {}
+        assert err is not None
+
+    def test_allowed_headers_pass_through(self) -> None:
+        headers_json = json.dumps(
+            {"Authorization": "Bearer abc", "Content-Type": "application/json"}
+        )
+        result, err = _parse_headers(headers_json)
+        assert err is None
+        assert result["Authorization"] == "Bearer abc"
+        assert result["Content-Type"] == "application/json"

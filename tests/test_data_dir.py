@@ -6,7 +6,16 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from src.config import Config, RAGConfig, _apply_cli_args, _apply_config_file, _apply_env_vars
+import pytest
+
+from src.config import (
+    Config,
+    ConfigError,
+    RAGConfig,
+    _apply_cli_args,
+    _apply_config_file,
+    _apply_env_vars,
+)
 
 
 class TestDefaultDataDir:
@@ -43,11 +52,18 @@ class TestResolveDataPath:
         result = config.resolve_data_path("history")
         assert result == Path("/mnt/storage/history")
 
-    def test_resolve_data_path_custom_dir_no_legacy_strip(self):
+    def test_resolve_data_path_legacy_strip_custom_data_dir(self):
+        """Legacy 'data/' prefix is stripped even with custom data_dir (BUG-1700)."""
         config = Config()
         config.data_dir = "/mnt/storage"
         result = config.resolve_data_path("data/foo")
-        assert result == Path("/mnt/storage/data/foo")
+        assert result == Path("/mnt/storage/foo")
+
+    def test_resolve_data_path_non_data_prefix_not_stripped(self):
+        config = Config()
+        config.data_dir = "/mnt/storage"
+        result = config.resolve_data_path("other/foo")
+        assert result == Path("/mnt/storage/other/foo")
 
     def test_resolve_data_path_absolute_ignores_data_dir(self):
         config = Config()
@@ -59,6 +75,36 @@ class TestResolveDataPath:
         config = Config()
         result = config.resolve_data_path("sessions/foo")
         assert result == Path("data/sessions/foo")
+
+    def test_resolve_data_path_bare_data(self):
+        """subpath='data' resolves to data_dir itself (BUG-1703)."""
+        config = Config()
+        assert config.resolve_data_path("data") == Path("data")
+
+    def test_resolve_data_path_trailing_slash(self):
+        """subpath='data/' does not produce 'data/data/' (BUG-1703)."""
+        config = Config()
+        result = config.resolve_data_path("data/")
+        assert result == Path("data")
+        assert "data/data" not in str(result)
+
+    def test_resolve_data_path_traversal_raises(self):
+        """Path traversal via '..' escaping data_dir raises ConfigError (BUG-1850)."""
+        config = Config()
+        with pytest.raises(ConfigError, match="Path traversal detected"):
+            config.resolve_data_path("../../etc/passwd")
+
+    def test_resolve_data_path_traversal_single_dotdot_raises(self):
+        """A single '..' that escapes data_dir raises ConfigError."""
+        config = Config()
+        with pytest.raises(ConfigError, match="Path traversal detected"):
+            config.resolve_data_path("../sibling")
+
+    def test_resolve_data_path_traversal_nested_escape_raises(self):
+        """Deep traversal sequence that escapes data_dir raises ConfigError."""
+        config = Config()
+        with pytest.raises(ConfigError, match="Path traversal detected"):
+            config.resolve_data_path("subdir/../../..")
 
 
 class TestRAGConfigDefaults:

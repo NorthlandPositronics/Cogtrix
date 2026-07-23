@@ -138,7 +138,7 @@ def read_multiline(first_line: str = "") -> str:
 
 def run_inline_shell(command: str) -> None:
     """Execute a shell command inline and print the output."""
-    if not command:
+    if not command.strip():
         if _console is not None:
             _console.print("[dim]Usage: !<command>  (e.g. !ls -la)[/dim]")
         else:
@@ -150,22 +150,35 @@ def run_inline_shell(command: str) -> None:
 
     try:
         if needs_shell:
-            result = subprocess.run(  # nosec B602
+            proc = subprocess.Popen(  # nosec B602
                 command,
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
-                timeout=30,
-                check=False,
                 shell=True,  # nosec B602
             )
         else:
-            result = subprocess.run(  # nosec B603
+            proc = subprocess.Popen(  # nosec B603
                 shlex.split(command),
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
-                timeout=30,
-                check=False,
             )
+
+        try:
+            stdout, stderr = proc.communicate(timeout=30)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.communicate()
+            raise
+
+        class _Result:
+            def __init__(self, out: str, err: str, rc: int) -> None:
+                self.stdout = out
+                self.stderr = err
+                self.returncode = rc
+
+        result = _Result(stdout, stderr, proc.returncode)
 
         output = result.stdout
         if result.stderr:

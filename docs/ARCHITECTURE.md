@@ -104,7 +104,7 @@ src/
 │   ├── anthropic.py       # Anthropic Claude
 │   └── google.py          # Google Gemini
 ├── orchestration/
-│   ├── run_config.py      # AgentRunConfig dataclass (14 session-constant parameters)
+│   ├── run_config.py      # AgentRunConfig dataclass (15 session-constant parameters)
 │   ├── runner.py          # run_agent() entry point, response extraction, ToolCallLogger
 │   ├── graph.py           # LangGraph StateGraph: call_model, process_tools, handle_phantom
 │   ├── phases.py          # Research delegation, deep think, execution phase, step-limit recovery
@@ -236,7 +236,7 @@ class Config:
 | `Config.list_providers()` | List all available provider names |
 | `Config.resolve_embedding_config()` | Resolve `rag.model` via the `models` registry to `(provider_type, model, base_url, api_key)` |
 
-`ProviderConfig` validates inputs at construction time via `__post_init__`: `temperature` must be in `[0.0, 2.0]`, `num_ctx` and `max_tokens` must be `> 0`, and `type` must be a recognized provider type — all violations raise `ConfigError`. The `num_ctx` field is gated to Ollama-type providers only in the provider registry; it is silently dropped for OpenAI, Anthropic, and Google.
+`ProviderConfig` validates inputs at construction time via `__post_init__`: `temperature` must be in `[0.0, 2.0]`, `num_ctx` must be `>= 256`, `max_tokens` must be `> 0`, and `type` must be a recognized provider type — all violations raise `ConfigError`. The `num_ctx` field is gated to Ollama-type providers only in the provider registry; it is silently dropped for OpenAI, Anthropic, and Google.
 
 ### 2. CLI Interface (`cogtrix.py` + `src/cli/`)
 
@@ -310,7 +310,7 @@ The agent execution pipeline was extracted from `cogtrix.py` into a dedicated pa
 
 #### 3a. AgentRunConfig (`src/orchestration/run_config.py`)
 
-`AgentRunConfig` is a dataclass that bundles the 14 session-constant parameters required by `run_agent()`, `build_agent_graph()`, and `run_execution_phase()`. Using a single config object instead of positional kwargs makes omissions visible as `AttributeError` at call time and keeps function signatures readable.
+`AgentRunConfig` is a dataclass that bundles the 15 session-constant parameters required by `run_agent()`, `build_agent_graph()`, and `run_execution_phase()`. Using a single config object instead of positional kwargs makes omissions visible as `AttributeError` at call time and keeps function signatures readable.
 
 ```python
 @dataclass
@@ -395,7 +395,7 @@ Agent Response
 |--------|---------|
 | `build_agent_graph(config, registry, approvals, ...)` | Build and compile the StateGraph |
 | `ToolManagementRequest` | Dataclass: `add: list[str]`, `remove: list[str]`, `has_changes: bool` |
-| `DEFAULT_RECURSION_LIMIT` | 150 (approximately 75 tool calls) |
+| `DEFAULT_RECURSION_LIMIT` | 90 (approximately 45 tool calls) |
 
 #### 3d. Pipeline Phases (`src/orchestration/phases.py`)
 

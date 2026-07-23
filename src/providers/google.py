@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from typing import Any
 
+from src.logging_config import get_logger
 from src.providers.defaults import CHAT_MODELS, EMBEDDING_MODELS
+
+log = get_logger()
 
 # ── Lazy imports ─────────────────────────────────────────────────────
 
@@ -53,6 +56,9 @@ def create_chat_model(
             "langchain-google-genai not installed. Run: pip install langchain-google-genai"
         )
 
+    if base_url:
+        log.warning("Google provider does not support custom base_url; ignoring '%s'", base_url)
+
     llm_kwargs: dict[str, Any] = {
         "model": model or CHAT_MODELS["google"],
         "temperature": temperature,
@@ -86,6 +92,9 @@ def create_embeddings(
         raise ImportError(
             "langchain-google-genai not installed. Run: pip install langchain-google-genai"
         )
+
+    if base_url:
+        log.warning("Google provider does not support custom base_url; ignoring '%s'", base_url)
 
     resolved_model = model or EMBEDDING_MODELS["google"]
     if not resolved_model.startswith("models/"):

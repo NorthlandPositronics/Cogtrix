@@ -33,6 +33,13 @@ OPERATORS = {
     ast.UAdd: operator.pos,
 }
 
+
+def _safe_factorial(n: int) -> int:
+    if n > 10000:
+        raise ValueError("factorial argument too large (max 10000)")
+    return math.factorial(n)
+
+
 # Supported functions
 FUNCTIONS = {
     # Basic math
@@ -68,7 +75,7 @@ FUNCTIONS = {
     "floor": math.floor,
     "trunc": math.trunc,
     # Other
-    "factorial": math.factorial,
+    "factorial": lambda n: _safe_factorial(n),
     "gcd": math.gcd,
 }
 

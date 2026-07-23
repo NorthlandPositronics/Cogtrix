@@ -37,6 +37,11 @@ STEP_LIMIT_PHRASES = (
 # ("search result 1,2,3") rather than actual data.
 MIN_GOOD_CONTEXT_LEN = 500
 
+# ── preserve_tables_for_markdown regex patterns ───────────────────────────
+_TABLE_SEP_RE = re.compile(r"[━─═]{3,}")
+_COL_GAP_RE = re.compile(r"\S {3,}\S")
+_PIPE_TABLE_RE = re.compile(r"^\s*\|.*\|\s*$")
+
 # ── Research-delegate pipeline ────────────────────────────────────────────
 
 WEB_TOOL_NAMES = frozenset(
@@ -332,10 +337,6 @@ def preserve_tables_for_markdown(text: str) -> str:
     * Contains 3+ consecutive spaces between non-space characters
       (typical column padding) — **unless** the line is a pipe table row
     """
-    _TABLE_SEP_RE = re.compile(r"[━─═]{3,}")
-    _COL_GAP_RE = re.compile(r"\S {3,}\S")
-    _PIPE_TABLE_RE = re.compile(r"^\s*\|.*\|\s*$")
-
     lines = text.split("\n")
     result: list[str] = []
     table_buf: list[str] = []
@@ -448,6 +449,15 @@ def extract_fetched_urls(messages: list) -> list[str]:
         if u not in seen:
             seen.add(u)
             unique.append(u)
+
+    # Filter SSRF-unsafe URLs
+    try:
+        from src.tools.http_request import _validate_url
+
+        unique = [u for u in unique if _validate_url(u)[0]]
+    except ImportError:
+        pass  # http_request tool not available; keep URLs as-is
+
     return unique
 
 

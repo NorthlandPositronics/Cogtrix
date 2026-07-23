@@ -194,6 +194,7 @@ _MAX_CIRCUIT_BREAKERS = 200
 _CIRCUIT_BREAKER_IDLE_SECONDS = 3600.0  # 1 hour
 
 
+# Must only be called while holding _circuit_breaker_lock.
 def _evict_stale_breakers() -> None:
     """Remove stale entries from the circuit breaker registry.
 
@@ -551,7 +552,11 @@ def _validate_json_response(response: str) -> tuple:
     # Try to extract JSON from response (might be wrapped in markdown)
     text = response.strip()
 
-    # Remove markdown code blocks if present
+    # Remove markdown code blocks if present — search instead of startswith
+    # so prose written before the fence is tolerated
+    fence_idx = text.find("```json")
+    if fence_idx != -1:
+        text = text[fence_idx:]
     if text.startswith("```json"):
         text = text[7:]
     elif text.startswith("```"):
@@ -672,8 +677,8 @@ def run_delegate_agent(
             prompt=prompt,
         )
     except Exception as exc:
-        log.debug(f"Delegate agent creation failed ({exc}) — falling back to plain LLM")
-        return ""
+        log.warning("Delegate agent creation/execution failed: %s", exc, exc_info=True)
+        return f"Error: delegate agent failed ({type(exc).__name__}: {exc})"
 
     try:
         if LANGCHAIN_MESSAGES_AVAILABLE:
@@ -698,8 +703,11 @@ def run_delegate_agent(
         return _extract_content(messages[-1]) if messages else ""
 
     except Exception as exc:
-        log.warning(f"Delegate agent execution failed: {exc}")
-        return ""
+        if "recursion" in type(exc).__name__.lower() or "recursion" in str(exc).lower():
+            log.warning("Delegate exceeded step limit: %s", exc)
+            return f"Error: delegate exceeded step limit ({exc})"
+        log.warning("Delegate agent creation/execution failed: %s", exc, exc_info=True)
+        return f"Error: delegate agent failed ({type(exc).__name__}: {exc})"
 
 
 def _execute_single_task(
@@ -1239,7 +1247,6 @@ __all__ = [
     "_build_prompt",
     "_check_allowed_model",
     "_circuit_breaker_lock",
-    "_evict_stale_breakers",
     "_get_circuit_breaker",
     "_MAX_CIRCUIT_BREAKERS",
     "_validate_json_response",

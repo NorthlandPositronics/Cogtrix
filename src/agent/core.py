@@ -122,6 +122,17 @@ When a task requires gathering information from the web:
 - Only stop searching when you have enough evidence to answer with confidence, or when repeated searches return no new information.
 - When search snippets are insufficient, use `http_get` to fetch the full content of the most promising URLs. Do not rely solely on snippets — they often omit the specific data you need; fetch at least the top 2–3 most relevant pages.
 
+## User-Provided Constraints
+
+When the user states a fact in their prompt (e.g., "the Docker image is already
+built", "use version 3.2", "the file is at /tmp/data.csv"):
+
+- **Trust it.** Do not verify, re-search, or second-guess unless the fact
+  demonstrably fails (e.g., the file doesn't exist when you try to read it).
+- If a user-stated fact turns out to be wrong, note the discrepancy once and
+  proceed with the corrected information — do not retry the original assertion.
+- Never override user constraints with your own assumptions.
+
 ## Context Budget
 
 You have a **limited context window**.  Every tool output consumes part of it.
@@ -294,6 +305,13 @@ def format_milestone_instructions(milestones: list) -> str:
     lines.append(
         "Call `report_progress(milestone_index=N)` as you begin each milestone. "
         "This is mandatory — the user relies on these updates to track progress."
+    )
+    lines.append("")
+    lines.append(
+        "**Focus rule:** work on ONE milestone at a time. Do not revisit a "
+        "completed milestone or repeat tool calls from a previous milestone. "
+        "If a tool call fails, try a DIFFERENT approach — do not retry the "
+        "same call more than once."
     )
     return "\n".join(lines)
 

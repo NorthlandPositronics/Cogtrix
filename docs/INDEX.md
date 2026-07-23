@@ -101,3 +101,7 @@ Chronological sweep reports produced by the `bug_hunter` agent. Each report cove
 | [Round 21](bugs/2026-02-28-round-21.md) | 2026-02-28 | Round 21: comprehensive audit |
 | [Round 22](bugs/2026-02-28-round-22.md) | 2026-02-28 | Round 22: holistic optimization audit |
 | [Round 23](bugs/2026-02-28-round-23.md) | 2026-02-28 | Round 23: holistic optimization audit |
+| [Round 27](bugs/2026-02-28-round-27.md) | 2026-02-28 | Round 27: holistic optimization audit |
+| [Round 27 Architecture Review](bugs/2026-02-28-arch-round27-review.md) | 2026-02-28 | Round 27: architecture review |
+| [Performance Audit: TTFT](bugs/2026-02-28-performance-audit-ttft.md) | 2026-02-28 | Round 27: TTFT performance audit |
+| [Exhaustive Sweep](bugs/2026-03-01-exhaustive-sweep.md) | 2026-03-01 | Round 28: exhaustive sweep — thread safety, compression, arg correction |

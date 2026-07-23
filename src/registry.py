@@ -169,7 +169,7 @@ class ToolRegistry:
         if not results:
             log = get_logger()
             log.warning(
-                "Module %s has no TOOL_CONFIG/TOOL_CONFIGS — using fallback discovery",
+                "Module %s: no tools resolved from TOOL_CONFIG/TOOL_CONFIGS — using fallback discovery",
                 module.__name__,
             )
             input_schemas = {}

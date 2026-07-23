@@ -211,14 +211,13 @@ models:
 fast: my-server/qwen3:8b
 ```
 
-**Object format** — with additional overrides (`num_ctx`, `temperature`, `timeout`):
+**Object format** — with additional overrides (`num_ctx`, `temperature`):
 
 ```yaml
 coder:
   provider: my-server
   model: qwen3-coder
   temperature: 0.3
-  timeout: 300
 ```
 
 The object format fields `num_ctx` and `temperature` are model-level settings. They are applied at resolution time and override any defaults from the provider config. The `provider` field references a key in the `providers` section.
@@ -861,6 +860,7 @@ Rate limit violations are recorded but do not increment the security violation c
 | `COGTRIX_MODEL` | Model name | `qwen3:8b` |
 | `COGTRIX_SESSION` | Session ID | `my-project` |
 | `COGTRIX_MEMORY_MODE` | Memory mode | `code` |
+| `COGTRIX_DATA_DIR` | Root directory for data storage | `./data` |
 | `COGTRIX_OLLAMA` | Ollama server address (`host` or `host:port`) | `192.168.1.100` or `192.168.1.100:8080` |
 | `OPENAI_API_KEY` | OpenAI API key | `sk-...` |
 | `ANTHROPIC_API_KEY` | Anthropic API key | `sk-ant-...` |

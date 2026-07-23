@@ -18,6 +18,7 @@ from __future__ import annotations
 from unittest.mock import MagicMock, patch
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from pydantic import BaseModel, Field
 
 from cogtrix import (
     _build_agent_graph,
@@ -27,6 +28,7 @@ from src.orchestration.compression import (
     apply_message_compression,
     compress_tool_message,
 )
+from src.orchestration.graph import _correct_tool_args
 from src.prompt.optimizer import optimize_prompt
 
 # ---------------------------------------------------------------------------
@@ -668,3 +670,229 @@ class TestMessageCompression:
         content = "Z" * 3000
         result = compress_tool_message(content, "read_file", mock_llm)
         assert result == content
+
+
+# ---------------------------------------------------------------------------
+# _correct_tool_args
+# ---------------------------------------------------------------------------
+
+
+class _ShellSchema(BaseModel):
+    cmd: str = Field(description="The command to run")
+    timeout: int = Field(default=30, description="Timeout")
+
+
+class _HeaderSchema(BaseModel):
+    url: str = Field(description="URL")
+    headers: str | None = Field(default=None, description="Headers as JSON string")
+
+
+class _LongNameSchema(BaseModel):
+    working_directory: str = Field(description="Working directory")
+    timeout: int = Field(default=30, description="Timeout")
+
+
+class TestCorrectToolArgs:
+    def test_no_correction_needed(self):
+        tool = MagicMock()
+        tool.args_schema = _ShellSchema
+        args = {"cmd": "ls -la", "timeout": 10}
+        assert _correct_tool_args(tool, args) == args
+
+    def test_substring_match_remaps(self):
+        """'directory' is a substring of 'working_directory' — should be remapped."""
+        tool = MagicMock()
+        tool.args_schema = _LongNameSchema
+        result = _correct_tool_args(tool, {"directory": "/tmp", "timeout": 10})
+        assert result == {"working_directory": "/tmp", "timeout": 10}
+
+    def test_superstring_match_remaps(self):
+        """'working_directory_path' contains 'working_directory' — should be remapped."""
+        tool = MagicMock()
+        tool.args_schema = _LongNameSchema
+        result = _correct_tool_args(tool, {"working_directory_path": "/tmp", "timeout": 10})
+        assert result == {"working_directory": "/tmp", "timeout": 10}
+
+    def test_close_fuzzy_match_remaps(self):
+        """'header' vs 'headers' has ratio 0.92 — should be remapped."""
+        tool = MagicMock()
+        tool.args_schema = _HeaderSchema
+        result = _correct_tool_args(tool, {"url": "http://x.com", "header": "{}'"})
+        assert result == {"url": "http://x.com", "headers": "{}'"}
+
+    def test_low_ratio_no_remap(self):
+        """'cmd' vs 'working_directory' has very low ratio — should NOT remap."""
+        tool = MagicMock()
+        tool.args_schema = _LongNameSchema
+        result = _correct_tool_args(tool, {"cmd": "/tmp", "timeout": 10})
+        assert "cmd" in result  # not remapped
+
+    def test_no_schema_returns_unchanged(self):
+        tool = MagicMock(spec=[])  # no args_schema attribute
+        args = {"cmd": "ls"}
+        assert _correct_tool_args(tool, args) == args
+
+    def test_ambiguous_match_no_remap(self):
+        """If unknown key matches multiple expected fields, leave it alone."""
+
+        class _AmbiguousSchema(BaseModel):
+            command_a: str = ""
+            command_b: str = ""
+
+        tool = MagicMock()
+        tool.args_schema = _AmbiguousSchema
+        result = _correct_tool_args(tool, {"command": "x"})
+        assert "command" in result  # not remapped
+
+    def test_type_coercion_dict_to_str(self):
+        """Schema expects str but LLM sent dict — should be JSON-encoded."""
+        tool = MagicMock()
+        tool.args_schema = _HeaderSchema
+        result = _correct_tool_args(
+            tool, {"url": "http://example.com", "headers": {"Authorization": "Bearer tok"}}
+        )
+        assert result["url"] == "http://example.com"
+        assert isinstance(result["headers"], str)
+        assert "Bearer tok" in result["headers"]
+
+    def test_type_coercion_str_list_joined(self):
+        """Schema expects str but LLM sent list of strings — should be space-joined."""
+        tool = MagicMock()
+        tool.args_schema = _ShellSchema
+        result = _correct_tool_args(tool, {"cmd": ["ls", "-la"], "timeout": 10})
+        assert result["cmd"] == "ls -la"
+
+    def test_type_coercion_mixed_list_json(self):
+        """Schema expects str but LLM sent list with non-strings — should be JSON-encoded."""
+        tool = MagicMock()
+        tool.args_schema = _ShellSchema
+        result = _correct_tool_args(tool, {"cmd": ["echo", 42], "timeout": 10})
+        assert isinstance(result["cmd"], str)
+        assert "42" in result["cmd"]
+        assert result["cmd"].startswith("[")  # JSON array
+
+    def test_combined_remap_and_coerce(self):
+        """Both rename and type coercion in one call."""
+        tool = MagicMock()
+        tool.args_schema = _LongNameSchema
+        result = _correct_tool_args(tool, {"directory": ["/tmp", "/var"], "timeout": 10})
+        assert "working_directory" in result
+        assert "directory" not in result
+        assert result["working_directory"] == "/tmp /var"
+
+    def test_empty_args(self):
+        tool = MagicMock()
+        tool.args_schema = _ShellSchema
+        assert _correct_tool_args(tool, {}) == {}
+
+
+# ---------------------------------------------------------------------------
+# Duplicate tool call detection
+# ---------------------------------------------------------------------------
+
+
+class TestDuplicateToolCallDetection:
+    """Tests for duplicate tool call detection in process_tools."""
+
+    def test_duplicate_tool_call_returns_cached(self):
+        """Second identical tool call should return cached result, not invoke tool again."""
+        tool_call_1 = {"name": "echo_tool", "args": {"text": "hello"}, "id": "c1"}
+        tool_call_2 = {"name": "echo_tool", "args": {"text": "hello"}, "id": "c2"}
+        ai_msg_1 = AIMessage(content="", tool_calls=[tool_call_1], id="m1")
+        ai_msg_2 = AIMessage(content="", tool_calls=[tool_call_2], id="m2")
+        final = AIMessage(content="done", id="m3")
+
+        mock_tool = MagicMock()
+        mock_tool.name = "echo_tool"
+        mock_tool.invoke.return_value = ToolMessage(
+            content="world", tool_call_id="c1", name="echo_tool"
+        )
+
+        mock_llm = _make_mock_llm([ai_msg_1, ai_msg_2, final])
+
+        graph = _build_agent_graph(
+            llm=mock_llm,
+            system_prompt="",
+            active_tools_list=[mock_tool],
+            available_tools={},
+            registry=_make_registry(),
+            approvals=set(),
+        )
+        result = graph.invoke({"messages": [HumanMessage(content="go")]})
+
+        tool_msgs = [m for m in result["messages"] if isinstance(m, ToolMessage)]
+        assert len(tool_msgs) == 2
+        # First call: normal result
+        assert tool_msgs[0].content == "world"
+        # Second call: cached with duplicate prefix
+        assert "Duplicate call" in tool_msgs[1].content
+        assert "world" in tool_msgs[1].content
+        # Tool was only invoked once
+        assert mock_tool.invoke.call_count == 1
+
+    def test_different_args_not_duplicate(self):
+        """Same tool with different args should NOT be treated as duplicate."""
+        call_a = {"name": "echo_tool", "args": {"text": "hello"}, "id": "c1"}
+        call_b = {"name": "echo_tool", "args": {"text": "world"}, "id": "c2"}
+        ai_msg_1 = AIMessage(content="", tool_calls=[call_a], id="m1")
+        ai_msg_2 = AIMessage(content="", tool_calls=[call_b], id="m2")
+        final = AIMessage(content="done", id="m3")
+
+        mock_tool = MagicMock()
+        mock_tool.name = "echo_tool"
+
+        def side_effect(inp, *a, **kw):
+            return ToolMessage(
+                content=f"echo: {inp['args']['text']}",
+                tool_call_id=inp["id"],
+                name="echo_tool",
+            )
+
+        mock_tool.invoke.side_effect = side_effect
+
+        mock_llm = _make_mock_llm([ai_msg_1, ai_msg_2, final])
+
+        graph = _build_agent_graph(
+            llm=mock_llm,
+            system_prompt="",
+            active_tools_list=[mock_tool],
+            available_tools={},
+            registry=_make_registry(),
+            approvals=set(),
+        )
+        result = graph.invoke({"messages": [HumanMessage(content="go")]})
+
+        tool_msgs = [m for m in result["messages"] if isinstance(m, ToolMessage)]
+        assert len(tool_msgs) == 2
+        assert "Duplicate" not in tool_msgs[0].content
+        assert "Duplicate" not in tool_msgs[1].content
+        assert mock_tool.invoke.call_count == 2
+
+    def test_request_tools_exempt_from_dedup(self):
+        """request_tools calls should never be deduplicated."""
+        from src.tools.configure import create_request_tools_tool
+
+        call_1 = {"name": "request_tools", "args": {}, "id": "c1"}
+        call_2 = {"name": "request_tools", "args": {}, "id": "c2"}
+        ai_msg_1 = AIMessage(content="", tool_calls=[call_1], id="m1")
+        ai_msg_2 = AIMessage(content="", tool_calls=[call_2], id="m2")
+        final = AIMessage(content="done", id="m3")
+
+        rt_tool = create_request_tools_tool({}, {})
+        mock_llm = _make_mock_llm([ai_msg_1, ai_msg_2, final])
+
+        graph = _build_agent_graph(
+            llm=mock_llm,
+            system_prompt="",
+            active_tools_list=[rt_tool],
+            available_tools={},
+            registry=_make_registry(),
+            approvals=set(),
+        )
+        result = graph.invoke({"messages": [HumanMessage(content="go")]})
+
+        tool_msgs = [m for m in result["messages"] if isinstance(m, ToolMessage)]
+        assert len(tool_msgs) == 2
+        # Neither should be flagged as duplicate
+        for msg in tool_msgs:
+            assert "Duplicate" not in msg.content

@@ -5,6 +5,7 @@ POST requests require user confirmation for safety.
 
 import ipaddress
 import json
+import logging
 import re
 import socket
 import threading
@@ -30,6 +31,17 @@ _MAX_RESPONSE_BYTES = 512_000  # 512 KB — more than enough for 10 K char trunc
 
 # RFC 6598 Shared Address Space (CGNAT) — not classified as private by ipaddress module
 _CGNAT_NETWORK = ipaddress.ip_network("100.64.0.0/10")
+
+_BLOCKED_HEADERS: frozenset[str] = frozenset(
+    {
+        "host",
+        "x-forwarded-host",
+        "x-forwarded-for",
+        "x-real-ip",
+        "x-forwarded-proto",
+        "x-forwarded-server",
+    }
+)
 
 
 class HttpGetInput(BaseModel):
@@ -59,6 +71,8 @@ class HttpPostInput(BaseModel):
 # urllib3 resolves hostnames inside create_connection().  We intercept
 # that function and replace the hostname with a pre-validated IP so
 # the same address used for SSRF checks is the one actually connected.
+log = logging.getLogger("cogtrix")
+
 _dns_pins: threading.local = threading.local()
 _dns_pin_installed: bool = False
 _dns_pin_lock = threading.Lock()
@@ -75,6 +89,7 @@ def _install_dns_pin_hook() -> None:
         try:
             import urllib3.util.connection as _uc  # type: ignore[import-not-found]
         except ImportError:
+            log.warning("DNS pin hook unavailable — SSRF rebinding protection degraded")
             return
         _orig = _uc.create_connection
 
@@ -191,6 +206,8 @@ def _parse_headers(headers_str: str | None) -> tuple[dict, str | None]:
         headers = json.loads(headers_str)
         if not isinstance(headers, dict):
             return {}, "Headers must be a JSON object"
+        headers = {k: v.replace("\r", "").replace("\n", "") for k, v in headers.items()}
+        headers = {k: v for k, v in headers.items() if k.lower() not in _BLOCKED_HEADERS}
         return headers, None
     except json.JSONDecodeError as e:
         return {}, f"Invalid headers JSON: {e}"

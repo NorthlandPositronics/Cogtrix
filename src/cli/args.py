@@ -327,4 +327,11 @@ def parse_arguments():
         help="Output path (default: ~/.cogtrix.yaml)",
     )
 
-    return parser.parse_args()
+    args = parser.parse_args()
+
+    if getattr(args, "prompt", None) and getattr(args, "prompt_file", None):
+        parser.error("--prompt and --prompt-file are mutually exclusive")
+    if getattr(args, "system_prompt", None) and getattr(args, "system_prompt_file", None):
+        parser.error("--system-prompt and --system-prompt-file are mutually exclusive")
+
+    return args

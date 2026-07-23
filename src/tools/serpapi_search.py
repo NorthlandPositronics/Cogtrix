@@ -68,7 +68,8 @@ def configure_serpapi(config: dict[str, Any]) -> None:
     Expected keys:
         api_key  - SerpAPI key (or read from SERPAPI_API_KEY env var)
     """
-    _serpapi_config.update(config)
+    global _serpapi_config
+    _serpapi_config = {**_serpapi_config, **config}
 
 
 def _get_api_key() -> str | None:

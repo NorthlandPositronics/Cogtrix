@@ -111,7 +111,7 @@ class SessionOrchestrator:
         cfg.session = snap.session
 
         # Restore tool list in-place when the caller supplies it
-        if tools_list is not None and snap.tools:
+        if tools_list is not None and snap.tools is not None:
             tools_list.clear()
             tools_list.extend(snap.tools)
 

@@ -15,6 +15,7 @@ Features:
 - Code extraction (identify file references in conversation)
 """
 
+import logging
 import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -23,6 +24,8 @@ from typing import Any
 from src.memory.base import BaseMemoryStore
 from src.memory.context import MemoryContext
 from src.memory.manager import BaseMemoryManager
+
+log = logging.getLogger("cogtrix")
 
 # Optional LangChain imports
 try:
@@ -193,8 +196,37 @@ class CodeDevelopmentMemoryManager(BaseMemoryManager):
         self._messages = self.store.load_history(self.session_id)
         self._messages = self.sanitize_history(self._messages)
         self._load_hybrid_meta()
+        self._load_mode_meta()
         self._clamp_summary_idx()
         self._loaded = True
+
+    def _restore_mode_state(self, data: dict) -> None:
+        """Restore code-specific state from mode_state.json."""
+        task_data = data.get("task")
+        if task_data:
+            self._current_task = TaskProgress(
+                description=task_data["description"],
+                started_at=datetime.fromisoformat(task_data["started_at"]),
+                steps_completed=task_data.get("steps_completed", []),
+                current_step=task_data.get("current_step"),
+                blockers=task_data.get("blockers", []),
+            )
+        else:
+            self._current_task = None
+
+        self._files = {}
+        for path, fc_data in data.get("files", {}).items():
+            line_range = fc_data.get("line_range")
+            self._files[path] = FileContext(
+                path=fc_data["path"],
+                last_accessed=datetime.fromisoformat(fc_data["last_accessed"]),
+                snippet=fc_data.get("snippet"),
+                line_range=tuple(line_range) if line_range else None,
+            )
+
+        self._current_file = data.get("current_file")
+        self._recent_errors = data.get("recent_errors", [])
+        self._changes_made = data.get("changes_made", [])
 
     def save(self) -> None:
         """Save code session to storage."""
@@ -274,6 +306,11 @@ class CodeDevelopmentMemoryManager(BaseMemoryManager):
 
         context_prefix = "\n\n".join(prefix_parts) if prefix_parts else None
 
+        if log.isEnabledFor(logging.DEBUG):
+            token_estimate = self._estimate_tokens(context_messages)
+        else:
+            token_estimate = 0
+
         return MemoryContext(
             messages=context_messages,
             system_additions=self.get_system_prompt_additions(),
@@ -281,7 +318,7 @@ class CodeDevelopmentMemoryManager(BaseMemoryManager):
             mode=self.mode_name,
             total_messages_stored=len(self._messages),
             context_messages_count=len(context_messages),
-            token_estimate=self._estimate_tokens(context_messages),
+            token_estimate=token_estimate,
             metadata={
                 "files_tracked": len(self._files),
                 "current_file": self._current_file,

@@ -65,26 +65,24 @@ def _suppress_native_stderr() -> Generator[None]:
     This catches output from native (Rust/C) libraries that bypass
     Python's ``sys.stderr`` and write directly to file descriptor 2.
 
-    A module-level lock serializes concurrent callers so that concurrent
-    tool calls in assistant mode cannot race on fd 2.
+    The lock is held only during the dup2 calls, not during the search,
+    so concurrent searches are not serialized.
     """
-    with _stderr_lock:
-        devnull_fd = os.open(os.devnull, os.O_WRONLY)
-        try:
-            old_stderr_fd = os.dup(2)
-        except OSError:
-            os.close(devnull_fd)
-            yield
-            return
-        try:
+    try:
+        saved_fd = os.dup(2)
+    except OSError:
+        yield
+        return
+    try:
+        with _stderr_lock:
+            devnull_fd = os.open(os.devnull, os.O_WRONLY)
             os.dup2(devnull_fd, 2)
-            yield
-        finally:
-            try:
-                os.dup2(old_stderr_fd, 2)
-            finally:
-                os.close(old_stderr_fd)
-                os.close(devnull_fd)
+            os.close(devnull_fd)
+        yield
+    finally:
+        with _stderr_lock:
+            os.dup2(saved_fd, 2)
+            os.close(saved_fd)
 
 
 class WebSearchInput(BaseModel):

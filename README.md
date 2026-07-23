@@ -193,13 +193,14 @@ Full reference: **[Configuration Guide](docs/CONFIGURATION.md)**
 |---------|---------|-------------|
 | `/help [cmd]` | `/h`, `/?` | List commands or show detailed help |
 | `/info` | `/i` | Show session info (provider, model, mode) |
-| `/tools [filter]` | `/t`, `/tool` | List loaded tools |
+| `/tools [search\|load\|enable\|disable]` | `/t`, `/tool` | List, search, load, or manage tools |
 | `/think <task>` | `/T` | Run deep Tree-of-Thought reasoning |
 | `/delegate <task>` | `/d` | Force task delegation across models |
 | `/mode [name]` | `/M` | Show / switch memory mode |
 | `/model [name]` | `/m` | Show / switch LLM model |
 | `/provider [name]` | `/p` | Show / switch LLM provider |
 | `/session [id]` | `/s` | Show / switch session |
+| `/setup` | — | Launch interactive setup wizard |
 | `/approve` | `/a` | Toggle tool auto-approval (also: `-y` at startup) |
 | `/paste` | `/P` | Enter multi-line paste mode |
 | `/clear` | `/c` | Clear conversation history |

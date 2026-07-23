@@ -123,7 +123,16 @@ def json_schema_to_pydantic(name: str, schema: dict[str, Any]) -> type:
             if has_null:
                 python_type = Optional[python_type]  # noqa: UP045
         else:
-            python_type = _JSON_SCHEMA_TYPE_MAP.get(raw_type, str)
+            python_type = _JSON_SCHEMA_TYPE_MAP.get(raw_type)
+            if python_type is None:
+                get_logger().warning(
+                    "MCP tool '%s': unsupported JSON Schema type '%s' for property '%s', "
+                    "falling back to str",
+                    name,
+                    raw_type,
+                    prop_name,
+                )
+                python_type = str
         description = prop_schema.get("description", "")
 
         if prop_name in required_fields and not has_null:
@@ -517,7 +526,7 @@ class MCPManager:
     def close_all(self) -> None:
         """Close all MCP connections and stop the background event loop."""
         log = get_logger()
-        for name, conn in self._connections.items():
+        for name, conn in list(self._connections.items()):
             try:
                 self._run(conn.close(), timeout=10)
             except Exception as exc:

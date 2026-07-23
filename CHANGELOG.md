@@ -1,5 +1,43 @@
 # Changelog
 
+## [0.1.9](https://github.com/NorthlandPositronics/Cogtrix/compare/v0.1.8...v0.1.9) (2026-03-01)
+
+
+### Features
+
+* add user-constraint trust rule and milestone focus guidance to system prompt ([468e376](https://github.com/NorthlandPositronics/Cogtrix/commit/468e376b4c2110b7da93b066793237913aadaf2c))
+
+
+### Bug Fixes
+
+* add thread safety to ToolCallLogger, deduplicate tool-call key computation, and synchronize deep_think progress callback ([d54bfbd](https://github.com/NorthlandPositronics/Cogtrix/commit/d54bfbd1d6525d536c595b0b61c52151276ecbf7))
+* address 5 low-severity bugs and perf issues (BUG-1829, BUG-1848, PERF-1101/1102/1103) ([3e4a583](https://github.com/NorthlandPositronics/Cogtrix/commit/3e4a583907121ddbfd756519fad31d67abf6a2a4))
+* address three concurrent-safety and injection bugs ([24b0bc6](https://github.com/NorthlandPositronics/Cogtrix/commit/24b0bc643255c015b1b02d67c3e93d166f67dd6a))
+* comprehensive security, thread-safety, and correctness audit (56 bugs fixed) ([7d6ad16](https://github.com/NorthlandPositronics/Cogtrix/commit/7d6ad167dac6d5f48113adac091b24b85e90ba7e))
+* correct misleading log message, add CLI mutual-exclusion guard, and add hasattr guard in _TokenAccumulator ([1694041](https://github.com/NorthlandPositronics/Cogtrix/commit/16940416f7f7be764c33761169c11f420e1cbd30))
+* factorial DoS cap, JSON dot-path guard, exception types, session_state wiring ([b4e3c80](https://github.com/NorthlandPositronics/Cogtrix/commit/b4e3c805ebe39664dc151b6a13d00e58121562b3))
+* guard against four High-severity bugs (BUG-1837..1840) ([40c2319](https://github.com/NorthlandPositronics/Cogtrix/commit/40c23197387cead25ca028f8651517ea568f6fac))
+* handle plain host:badport in _parse_ollama_address and early tmp_path assignment in setup wizard ([f3a65a2](https://github.com/NorthlandPositronics/Cogtrix/commit/f3a65a23b03e7e2d9cb250ba010c41ab699ec27c))
+* MCP unsupported type warning, close_all iteration safety, handler approvals copy, guardrails test ([dbfa1e2](https://github.com/NorthlandPositronics/Cogtrix/commit/dbfa1e202c1837f4155c279356c441434fe045bc))
+* **memory:** persist and restore mode-specific state across session restarts ([b5c07a3](https://github.com/NorthlandPositronics/Cogtrix/commit/b5c07a346390525a557ab45b813af20872cd2b0d))
+* patch three confirmed bugs — SSRF in delegate URL re-fetch, intent false positives, and secret masking ([325cf99](https://github.com/NorthlandPositronics/Cogtrix/commit/325cf99397b9c2e618049e558398d44c6ae59541))
+* path traversal guard in resolve_data_path and SSRF header blocking ([75999aa](https://github.com/NorthlandPositronics/Cogtrix/commit/75999aaf3c20d367c68e5d5518c5394fa7229e83))
+* prevent ANSI corruption on non-TTY, fix spinner TOCTOU, and harden inline shell ([3cbd464](https://github.com/NorthlandPositronics/Cogtrix/commit/3cbd46423a1f49fae1667d59a5b76ca9ea26f6cf))
+* resolve 4 medium-severity bugs (BUG-1852, BUG-1853, SEC-0802) ([9ac9b79](https://github.com/NorthlandPositronics/Cogtrix/commit/9ac9b79e7dc63a5d78adaa21fdee2ae4783147d9))
+* resolve five medium-severity bugs (BUG-1828, BUG-1842, BUG-1844, BUG-1845, PERF-1100) ([1a453c9](https://github.com/NorthlandPositronics/Cogtrix/commit/1a453c9bb604e8598815763d20a8dc5f96867876))
+* setup live-reload missing state rebuilds and ProviderConfig in-place mutation ([4cca9e4](https://github.com/NorthlandPositronics/Cogtrix/commit/4cca9e41c406cb2f9c98be86374218b24506b07a))
+* warn on unsupported base_url in Google provider, atomic config swaps, broaden json_store exception handling ([34ffcb0](https://github.com/NorthlandPositronics/Cogtrix/commit/34ffcb051d6f3343119a8cbd311dce44a04d4956))
+
+
+### Performance Improvements
+
+* move hot-closure imports and regex literals to module scope ([d8a71f2](https://github.com/NorthlandPositronics/Cogtrix/commit/d8a71f211f1a6a432cdc4bb5dc59b2ba030385d0))
+
+
+### Documentation
+
+* update CLAUDE.md, AGENTS.md, README.md, and architecture docs for Rounds 6-10 ([86443a8](https://github.com/NorthlandPositronics/Cogtrix/commit/86443a80abc2f8d7fbe671073e6c1ffb948c625d))
+
 ## [0.1.8](https://github.com/NorthlandPositronics/Cogtrix/compare/v0.1.7...v0.1.8) (2026-02-28)
 
 

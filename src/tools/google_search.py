@@ -57,7 +57,8 @@ def configure_google_search(config: dict[str, Any]) -> None:
         api_key  - Google API key (or read from GOOGLE_API_KEY env var)
         cse_id   - Programmable Search Engine ID (or GOOGLE_CSE_ID env var)
     """
-    _google_config.update(config)
+    global _google_config
+    _google_config = {**_google_config, **config}
 
 
 def _get_api_key() -> str | None:

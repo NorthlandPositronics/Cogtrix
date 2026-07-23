@@ -7,12 +7,16 @@ Builds a custom StateGraph with three nodes:
 """
 
 import concurrent.futures
+import json as _json
 import re
+import threading
 from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any
 
 from src.agent.core import CogtrixState
+from src.agent.safety import UserCancelledRun
+from src.agent.safety import create_safe_tool_wrapper as _safe_wrap
 from src.logging_config import get_logger
 from src.orchestration.compression import (
     COMPRESSION_MIN_AGE_CYCLES,
@@ -31,7 +35,7 @@ from src.tools.configure import (
 )
 from src.tools.resolver import resolve_tool_name as _resolve_tool_name
 
-DEFAULT_RECURSION_LIMIT = 150
+DEFAULT_RECURSION_LIMIT = 90
 EMPTY_RESPONSE_MSG = "**Error:** The model returned an empty response. Please try again."
 _PARALLEL_TOOL_WORKERS = 8
 
@@ -175,6 +179,108 @@ def _strip_failed_tool_messages(messages: list, tool_names: set[str]) -> list:
     return final
 
 
+def _correct_tool_args(tool: Any, args: dict) -> dict:
+    """Best-effort correction of misnamed tool arguments.
+
+    Weaker LLMs sometimes send wrong parameter names (e.g. ``cmd`` instead of
+    ``command``).  This function compares provided keys against the tool's
+    Pydantic ``args_schema`` and applies two heuristics:
+
+    1. **Fuzzy name match** — uses substring containment and SequenceMatcher
+       to remap unknown arg names to the closest expected field.
+    2. **Type coercion** — if the schema expects ``str`` and the value is a
+       ``list`` or ``dict``, serialise it to a JSON string.
+
+    Returns the (possibly corrected) args dict.  On any error, returns the
+    original args unchanged.
+    """
+    import json
+    import types
+    import typing
+    from difflib import SequenceMatcher
+
+    schema = getattr(tool, "args_schema", None)
+    if schema is None:
+        return args
+
+    try:
+        expected: dict[str, Any] = {}
+        if hasattr(schema, "model_fields"):
+            expected = schema.model_fields  # Pydantic v2
+        elif hasattr(schema, "__fields__"):
+            expected = schema.__fields__  # Pydantic v1
+        if not expected:
+            return args
+    except Exception:
+        return args
+
+    expected_names = set(expected.keys())
+    provided_names = set(args.keys())
+
+    corrected = dict(args)
+
+    # --- Name remapping ---------------------------------------------------
+    unknown = provided_names - expected_names
+    missing = expected_names - provided_names
+
+    if unknown and missing:
+        _REMAP_THRESHOLD = 0.75
+        for unk in unknown:
+            unk_lower = unk.lower()
+            best: str | None = None
+            best_ratio = 0.0
+            tied = False
+            for exp in missing:
+                exp_lower = exp.lower()
+                # Substring containment — only trust when the shorter
+                # string is long enough to be meaningful.
+                shorter_len = min(len(unk_lower), len(exp_lower))
+                longer_len = max(len(unk_lower), len(exp_lower))
+                if (
+                    shorter_len >= 4
+                    and shorter_len / longer_len >= 0.4
+                    and (unk_lower in exp_lower or exp_lower in unk_lower)
+                ):
+                    ratio = 1.0
+                else:
+                    ratio = SequenceMatcher(None, unk_lower, exp_lower).ratio()
+                if ratio > best_ratio:
+                    best_ratio = ratio
+                    best = exp
+                    tied = False
+                elif ratio == best_ratio and ratio >= _REMAP_THRESHOLD:
+                    tied = True
+            if best is not None and best_ratio >= _REMAP_THRESHOLD and not tied:
+                corrected[best] = corrected.pop(unk)
+                missing.discard(best)
+                log = get_logger()
+                log.info("Tool arg corrected: '%s' → '%s' (score=%.2f)", unk, best, best_ratio)
+
+    # --- Type coercion: schema expects str but got list/dict → JSON-encode.
+    for key, value in list(corrected.items()):
+        if key not in expected:
+            continue
+        if not isinstance(value, (list, dict)):
+            continue
+        field_info = expected[key]
+        annotation = getattr(field_info, "annotation", None) or getattr(
+            field_info, "outer_type_", None
+        )
+        # Unwrap Optional[str] / str | None → str
+        origin = typing.get_origin(annotation)
+        if origin is typing.Union or isinstance(annotation, types.UnionType):
+            type_args = [a for a in typing.get_args(annotation) if a is not type(None)]
+            if len(type_args) == 1:
+                annotation = type_args[0]
+        if annotation is str:
+            if isinstance(value, list) and all(isinstance(v, str) for v in value):
+                corrected[key] = " ".join(value)
+            else:
+                corrected[key] = json.dumps(value)
+
+    return corrected
+
+
 def build_agent_graph(
     llm: Any = None,
     system_prompt: str = "",
@@ -264,6 +370,10 @@ def build_agent_graph(
     _MAX_TOOL_EXPANSIONS = 3
     request_tools_noop_count = [0]
     _MAX_REQUEST_TOOLS_NOOPS = 3
+    _tool_call_history: OrderedDict[str, str] = OrderedDict()
+    _MAX_TOOL_CALL_HISTORY = 256
+    _history_lock = threading.Lock()
+    _DUPLICATE_EXEMPT = {"request_tools", "report_progress"}
     protected = (preset_tools or set()) | {"request_tools"}
     _bound_cache: OrderedDict[tuple[str, ...], Any] = (
         bound_cache if bound_cache is not None else OrderedDict()
@@ -352,9 +462,57 @@ def build_agent_graph(
             ]
         }
 
+    def _tool_call_key(call: dict) -> str | None:
+        """Compute the deduplication key for a tool call, or None if not serializable."""
+        tool_name = call["name"]
+        if tool_name in _DUPLICATE_EXEMPT:
+            return None
+        try:
+            return tool_name + ":" + _json.dumps(call.get("args", {}), sort_keys=True)
+        except (TypeError, ValueError):
+            return None
+
+    def _check_duplicate(call: dict, key: str | None = None) -> ToolMessage | None:
+        """Return a cached ToolMessage if this exact call was seen before."""
+        tool_name = call["name"]
+        if key is None:
+            key = _tool_call_key(call)
+        if key is None:
+            return None
+        with _history_lock:
+            cached = _tool_call_history.get(key)
+            if cached is not None:
+                _tool_call_history.move_to_end(key)
+        if cached is None:
+            return None
+        log = get_logger()
+        log.warning("Duplicate tool call detected: %s (returning cached result)", tool_name)
+        return ToolMessage(
+            content=(
+                "[Duplicate call — returning cached result. "
+                "Do NOT repeat this call.]\n\n" + cached
+            ),
+            tool_call_id=call["id"],
+            name=tool_name,
+        )
+
+    def _store_call_result(call: dict, result_text: str, key: str | None = None) -> None:
+        """Store a tool call result for duplicate detection."""
+        if key is None:
+            key = _tool_call_key(call)
+        if key is None:
+            return
+        with _history_lock:
+            _tool_call_history[key] = result_text[:500]
+            if len(_tool_call_history) > _MAX_TOOL_CALL_HISTORY:
+                _tool_call_history.popitem(last=False)
+
     def _invoke_one(call: dict, run_config: Any) -> Any:
         """Execute a single tool call already in tool_lookup. Returns ToolMessage."""
-        from src.agent.safety import UserCancelledRun
+        call_key = _tool_call_key(call)
+        dup = _check_duplicate(call, key=call_key)
+        if dup is not None:
+            return dup
 
         tool_name = call["name"]
         tool_input = {**call, "type": "tool_call"}
@@ -387,9 +545,16 @@ def build_agent_graph(
                 )
             result = tool.invoke(tool_input, run_config)
             if isinstance(result, ToolMessage):
+                _store_call_result(
+                    call,
+                    result.content if isinstance(result.content, str) else "",
+                    key=call_key,
+                )
                 return result
+            text = str(result) if result is not None else ""
+            _store_call_result(call, text, key=call_key)
             return ToolMessage(
-                content=str(result) if result is not None else "",
+                content=text,
                 tool_call_id=call["id"],
                 name=tool_name,
             )
@@ -405,9 +570,6 @@ def build_agent_graph(
             )
 
     def process_tools(state: CogtrixState, config: RunnableConfig) -> dict:
-        from src.agent.safety import UserCancelledRun
-        from src.agent.safety import create_safe_tool_wrapper as _safe_wrap
-
         log = get_logger()
         msgs = state["messages"]
         last = msgs[-1]
@@ -527,14 +689,25 @@ def build_agent_graph(
                             )
                             continue
                     try:
-                        corrected_input = {**call, "name": match, "type": "tool_call"}
+                        corrected_args = _correct_tool_args(tool_obj, call.get("args", {}))
+                        corrected_input = {
+                            **call,
+                            "name": match,
+                            "type": "tool_call",
+                            "args": corrected_args,
+                        }
                         result = tool_obj.invoke(corrected_input, config)
                         if isinstance(result, ToolMessage):
+                            _store_call_result(
+                                call, result.content if isinstance(result.content, str) else ""
+                            )
                             result_msgs.append(result)
                         else:
+                            text = str(result) if result is not None else ""
+                            _store_call_result(call, text)
                             result_msgs.append(
                                 ToolMessage(
-                                    content=str(result) if result is not None else "",
+                                    content=text,
                                     tool_call_id=call["id"],
                                     name=match,
                                 )
@@ -642,6 +815,10 @@ def build_agent_graph(
                         saw_request_tools = True
 
                 if cancel_requested:
+                    # Note: future.cancel() only prevents not-yet-started futures.
+                    # In-flight futures complete naturally when the pool's `with`
+                    # block calls shutdown(wait=True). This is intentional — abrupt
+                    # thread termination could leave resources in an inconsistent state.
                     processed_ids = {
                         m.tool_call_id for m in result_msgs if hasattr(m, "tool_call_id")
                     }

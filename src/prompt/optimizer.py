@@ -58,15 +58,19 @@ class PromptPlan:
         return len(self.milestones) > 0
 
 
+_MAX_MILESTONE_TITLE_LEN = 40
+
 _MILESTONE_APPENDIX = (
     "\n\nIf you restructure the prompt, also generate a milestone plan (3-7 steps) "
     "tracking major phases of the task.\n\n"
+    "Milestone titles MUST be short — 40 characters max (e.g. 'Analyze API docs', "
+    "'Write unit tests'). They are shown in a status line.\n\n"
     "Format:\n"
     "---PROMPT---\n"
     "<optimized prompt>\n"
     "---MILESTONES---\n"
-    "1. <milestone title>\n"
-    "2. <milestone title>\n"
+    "1. <short milestone title>\n"
+    "2. <short milestone title>\n"
     "...\n"
     "---END---\n\n"
     "If the prompt does NOT need restructuring, return it unchanged with NO "
@@ -99,12 +103,16 @@ def _parse_plan_response(raw: str, original: str) -> PromptPlan:
     prompt_text = prompt_text.strip() or original
 
     milestone_block = rest.split("---END---")[0] if "---END---" in rest else rest
-    milestones: list[Milestone] = []
+    valid_milestones: list[Milestone] = []
     for line in milestone_block.splitlines():
-        line = line.strip()
-        m = _MILESTONE_LINE.match(line)
+        stripped = line.strip()
+        if not re.match(r"^\d+\.\s+", stripped):
+            continue
+        m = _MILESTONE_LINE.match(stripped)
         if m:
-            milestones.append(Milestone(index=len(milestones) + 1, title=m.group(1).strip()))
+            title = m.group(1).strip()[:_MAX_MILESTONE_TITLE_LEN]
+            valid_milestones.append(Milestone(index=len(valid_milestones) + 1, title=title))
+    milestones = valid_milestones
 
     if len(milestones) < 2:
         milestones = []
@@ -157,14 +165,23 @@ def optimize_prompt(
         nonce = secrets.token_hex(8)
         delimiter_start = f"__USER_INPUT_{nonce}_START__"
         delimiter_end = f"__USER_INPUT_{nonce}_END__"
+        if force:
+            evaluation_rule = "ALWAYS rewrite the request with added structure — the user explicitly asked for optimization."
+        else:
+            evaluation_rule = (
+                "If it is already clear and actionable, return it UNCHANGED.\n\n"
+                "If the request is complex, vague, or would benefit from structure, "
+                "REWRITE it to add structure."
+            )
         base_instructions = (
             "You are a prompt optimizer for an AI agent that has access to tools "
             "(file reading, web search, shell commands, code execution, etc.).\n\n"
-            "Your job: evaluate the user request below. "
-            "If it is already clear and actionable, return it UNCHANGED.\n\n"
-            "If the request is complex, vague, or would benefit from structure, "
-            "REWRITE it to:\n"
+            f"Your job: evaluate the user request below. {evaluation_rule}\n\n"
+            "When rewriting:\n"
             "- Preserve the intended goal fully\n"
+            "- Preserve all user-stated facts, constraints, and assertions verbatim "
+            "(e.g., 'the image is already built', 'use port 8080'). Never drop or "
+            "paraphrase factual claims — they are instructions, not suggestions\n"
             "- Add a high-level approach (phases or steps) without specific "
             "file names, commands, or details you cannot know\n"
             "- Add practical guardrails (handle errors gracefully, don't repeat "
@@ -204,11 +221,17 @@ def optimize_prompt(
             print("  [optimizer] Prompt restructured for clarity")
             if plan.has_milestones:
                 print(f"  [optimizer] Task decomposed into {len(plan.milestones)} milestones")
+            elif plan_milestones:
+                log.debug("Optimizer returned restructured text but no milestone markers")
         else:
             log.debug("Prompt optimizer: no changes needed")
+            if force:
+                print("  [optimizer] Prompt already clear — no changes needed")
 
         return plan
 
     except Exception as exc:
         log.warning("Prompt optimizer failed: %s", exc)
+        if force:
+            print(f"  [optimizer] Failed: {exc}")
         return PromptPlan(text=user_input)

@@ -60,7 +60,8 @@ def configure_tavily(config: dict[str, Any]) -> None:
     Expected keys:
         api_key  – Tavily API key (or read from TAVILY_API_KEY env var)
     """
-    _tavily_config.update(config)
+    global _tavily_config
+    _tavily_config = {**_tavily_config, **config}
 
 
 def _get_api_key() -> str | None:

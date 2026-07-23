@@ -179,6 +179,12 @@ class ActivityIndicator:
 
     # -- public API ---------------------------------------------------------
 
+    @staticmethod
+    def _tty_output_enabled() -> bool:
+        import os
+
+        return sys.stdout.isatty() or bool(os.environ.get("FORCE_COLOR"))
+
     def start(self) -> None:
         with self._lock:
             if self._running:
@@ -189,7 +195,7 @@ class ActivityIndicator:
             self._message = _SPINNER_MESSAGES[0]
             self._context = ""
             self._thread = threading.Thread(target=self._animate, daemon=True)
-        self._thread.start()
+            self._thread.start()
         if self._escape_monitor is not None:
             self._escape_monitor.start()
 
@@ -234,6 +240,8 @@ class ActivityIndicator:
     def _animate(self) -> None:
         import time
 
+        if not self._tty_output_enabled():
+            return
         idx = 0
         frame_count = 0
         grad_len = len(_SPINNER_GRADIENT)
@@ -273,7 +281,10 @@ class ActivityIndicator:
 
     @staticmethod
     def _clear_line() -> None:
-        sys.stdout.write("\r" + " " * 80 + "\r")
+        if not ActivityIndicator._tty_output_enabled():
+            return
+        # \033[2K erases the entire line regardless of width; \r returns to column 0
+        sys.stdout.write("\033[2K\r")
         sys.stdout.flush()
 
 

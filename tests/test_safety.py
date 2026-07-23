@@ -214,3 +214,23 @@ class TestCreateSafeToolWrapper:
                 wrapped.invoke({})
 
         assert ui.paused == 0
+
+    def test_file_not_found_error_type_in_message(self):
+        """When the underlying tool raises FileNotFoundError, the result names the exception type."""
+        tool = self._make_tool()
+        tool.func = MagicMock(side_effect=FileNotFoundError("no such file"))
+        reg = self._make_registry(confirms=False)
+        ss = SessionState()
+        wrapped = create_safe_tool_wrapper(tool, "test_tool", reg, set(), session_state=ss, ui=None)
+        result = wrapped.invoke({})
+        assert "FileNotFoundError" in result
+
+    def test_tool_execution_error_includes_exception_class_name(self):
+        """The error message for any tool exception includes the exception class name."""
+        tool = self._make_tool()
+        tool.func = MagicMock(side_effect=PermissionError("access denied"))
+        reg = self._make_registry(confirms=False)
+        ss = SessionState()
+        wrapped = create_safe_tool_wrapper(tool, "test_tool", reg, set(), session_state=ss, ui=None)
+        result = wrapped.invoke({})
+        assert "PermissionError" in result

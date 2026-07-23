@@ -188,6 +188,9 @@ def ingest_documents(config: IngestConfig) -> IngestResult:
     # Split into chunks
     try:
         chunks = _split_documents(documents, config)
+        if not chunks:
+            result.errors.append("No text content found in documents after splitting")
+            return result
         result.chunks_created = len(chunks)
     except Exception as e:
         result.errors.append(f"Failed to split documents: {e}")

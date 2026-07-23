@@ -99,6 +99,7 @@ class TelegramBotClient:
             json=kwargs,
             timeout=self.timeout,
         )
+        resp.raise_for_status()
         return resp.json()  # type: ignore[no-any-return]
 
     def _get(self, method: str, **params: Any) -> dict[str, Any]:
@@ -109,6 +110,7 @@ class TelegramBotClient:
             params=clean_params,
             timeout=self.timeout,
         )
+        resp.raise_for_status()
         return resp.json()  # type: ignore[no-any-return]
 
     # -- bot info ----------------------------------------------------------

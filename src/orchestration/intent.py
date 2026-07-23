@@ -1211,10 +1211,33 @@ DELEGATION_TRIGGERS = re.compile(
     re.IGNORECASE | re.VERBOSE,
 )
 
+# Navigation-verb phrases that make "top N" or "N <adj>" purely positional
+_TOP_N_NAVIGATION = re.compile(
+    r"\b(?:go|scroll|move|jump|navigate|get)\s+(?:to\s+)?(?:the\s+)?top\s+\d+\b",
+    re.IGNORECASE,
+)
+# Past-tense personal-discovery phrasing ("the 5 biggest issues I found")
+_N_ADJ_PAST_DISCOVERY = re.compile(
+    r"\b\d+\s+(?:best|worst|biggest|largest|most|top|leading)\b"
+    r".{0,30}\b(?:I|we|they|he|she)\s+(?:found|discovered|identified|noticed|saw|reported)\b",
+    re.IGNORECASE,
+)
+
 
 def user_wants_delegation(user_input: str) -> bool:
     """Return True if the input looks like a multi-part task suited for delegation."""
-    return bool(DELEGATION_TRIGGERS.search(user_input))
+    if not DELEGATION_TRIGGERS.search(user_input):
+        return False
+    # Exclude positional navigation uses of "top N" ("go to the top 3 lines")
+    if _TOP_N_NAVIGATION.search(user_input):
+        # Only suppress if there are no other delegation triggers present
+        stripped = _TOP_N_NAVIGATION.sub("", user_input)
+        return bool(DELEGATION_TRIGGERS.search(stripped))
+    # Exclude past-tense personal-discovery phrasing ("the 5 biggest issues I found")
+    if _N_ADJ_PAST_DISCOVERY.search(user_input):
+        stripped = _N_ADJ_PAST_DISCOVERY.sub("", user_input)
+        return bool(DELEGATION_TRIGGERS.search(stripped))
+    return True
 
 
 # ── Action detection ──────────────────────────────────────────────────────
@@ -1257,6 +1280,15 @@ def prompt_requests_action(prompt: str) -> bool:
     target_match = ACTION_TARGETS.search(prompt)
     if not verb_match or not target_match:
         return False
+
+    # Reject past-tense / passive constructions
+    matched_verb = verb_match.group(0).lower()
+    if matched_verb.endswith(("ed", "ten")):
+        return False
+    prefix = prompt[: verb_match.start()].rstrip()
+    if prefix.endswith(("was", "were", "been", "already", "had")):
+        return False
+
     explain_match = _EXPLAIN_VERBS.search(prompt)
     if (
         explain_match

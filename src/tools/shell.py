@@ -6,6 +6,7 @@ Enhanced with working directory and configurable timeout options.
 import os
 import shlex
 import subprocess  # nosec B404
+from pathlib import Path
 
 from pydantic import BaseModel, Field
 
@@ -13,7 +14,7 @@ from pydantic import BaseModel, Field
 class ShellCommandInput(BaseModel):
     """Input schema for shell command execution."""
 
-    command: str = Field(
+    cmd: str = Field(
         description="The shell command to execute (e.g., 'ls -la', 'pwd', 'cat file.txt')"
     )
     working_directory: str | None = Field(
@@ -27,7 +28,7 @@ class ShellCommandInput(BaseModel):
 
 
 def execute_shell_command(
-    command: str,
+    cmd: str,
     working_directory: str | None = None,
     timeout: int = 30,
 ) -> str:
@@ -38,7 +39,7 @@ def execute_shell_command(
     user confirmation before execution (handled by the safety layer).
 
     Args:
-        command: The shell command to execute
+        cmd: The shell command to execute
         working_directory: Directory to execute the command in (default: current directory)
         timeout: Command timeout in seconds (default: 30, max: 300)
 
@@ -51,6 +52,7 @@ def execute_shell_command(
     # Validate working directory
     cwd = None
     if working_directory:
+        working_directory = str(Path(working_directory).resolve())
         if not os.path.isdir(working_directory):
             return f"Error: Working directory does not exist: {working_directory}"
         cwd = working_directory
@@ -59,13 +61,13 @@ def execute_shell_command(
         # Detect shell metacharacters that require a real shell to interpret
         # (pipes, redirects, chaining, subshells, globs, env vars, etc.)
         _shell_meta = {"|", ">", "<", "&", ";", "`", "$", "(", ")", "*", "?", "{", "}"}
-        needs_shell = any(ch in command for ch in _shell_meta)
+        needs_shell = any(ch in cmd for ch in _shell_meta)
 
         if needs_shell:
             # Use shell=True so pipes, redirects, etc. work correctly.
             # Safety is enforced by the confirmation prompt (requires_confirmation=True).
             result = subprocess.run(  # nosec B602
-                command,
+                cmd,
                 capture_output=True,
                 text=True,
                 timeout=timeout,
@@ -75,7 +77,7 @@ def execute_shell_command(
             )
         else:
             # Simple command — use shlex.split for cleaner execution
-            cmd_parts = shlex.split(command)
+            cmd_parts = shlex.split(cmd)
             result = subprocess.run(  # nosec B603
                 cmd_parts,
                 capture_output=True,
@@ -94,7 +96,7 @@ def execute_shell_command(
         if result.returncode != 0:
             output += f"\n[exit code: {result.returncode}]"
 
-        _SAFETY_CAP = 512_000
+        _SAFETY_CAP = 50_000
         if len(output) > _SAFETY_CAP:
             half = _SAFETY_CAP // 2
             output = (
@@ -112,7 +114,7 @@ def execute_shell_command(
     except subprocess.TimeoutExpired:
         return f"Error: Command execution timed out after {timeout} seconds"
     except FileNotFoundError:
-        cmd_name = command.split()[0] if command.split() else command
+        cmd_name = cmd.split()[0] if cmd.split() else cmd
         return f"Error: Command not found: {cmd_name}"
     except PermissionError:
         return "Error: Permission denied executing command"

@@ -7,13 +7,24 @@ reduce per-cycle token usage without losing important context.
 from __future__ import annotations
 
 import concurrent.futures
+import re
 from typing import Any
 
 from src.logging_config import get_logger
 
-COMPRESSION_MIN_AGE_CYCLES = 6
+try:
+    from langchain_core.messages import AIMessage, ToolMessage
+
+    _HAS_LANGCHAIN = True
+except ImportError:
+    AIMessage = None  # type: ignore[misc, assignment]
+    ToolMessage = None  # type: ignore[misc, assignment]
+    _HAS_LANGCHAIN = False
+
+COMPRESSION_MIN_AGE_CYCLES = 3
 COMPRESSION_MIN_CHARS = 2_000
-_COMPRESSION_THRESHOLD_RATIO = 0.72
+_COMPRESSION_THRESHOLD_RATIO = 0.50
+_FALLBACK_MAX_CHARS = 30_000
 
 
 def truncate_tool_output(text: str, max_chars: int) -> str:
@@ -66,7 +77,8 @@ def compress_tool_message(content: str, tool_name: str, llm: Any) -> str:
 
         if not compressed or len(compressed) < 20:
             log.debug("Compression returned empty/tiny result, using truncation fallback")
-            return truncate_tool_output(content, len(content) // 2)
+            fallback_len = max(len(content) * 3 // 4, min(len(content), 200))
+            return truncate_tool_output(content, min(fallback_len, _FALLBACK_MAX_CHARS))
 
         if len(compressed) >= len(content):
             log.debug("Compression did not reduce size, keeping original")
@@ -81,8 +93,9 @@ def compress_tool_message(content: str, tool_name: str, llm: Any) -> str:
         return compressed
 
     except Exception as exc:
-        log.warning("Tool message compression failed: %s", exc)
-        return truncate_tool_output(content, len(content) // 2)
+        log.warning("Tool message compression failed: %s", exc, exc_info=True)
+        fallback_len = max(len(content) * 3 // 4, min(len(content), 200))
+        return truncate_tool_output(content, min(fallback_len, _FALLBACK_MAX_CHARS))
 
 
 def apply_message_compression(
@@ -104,11 +117,12 @@ def apply_message_compression(
       1. More than *min_age_cycles* call_model outputs appear after it.
       2. Its content length >= *min_chars*.
 
-    The pass itself only runs when total message chars reach 72 % of the
+    The pass itself only runs when total message chars reach 50 % of the
     context window, and is skipped entirely for providers with fewer than
     16 384 context tokens (where trimming is cheaper).
     """
-    from langchain_core.messages import AIMessage, ToolMessage
+    if not _HAS_LANGCHAIN:
+        return messages
 
     if max_context_tokens is None:
         return messages
@@ -148,10 +162,10 @@ def apply_message_compression(
         if not isinstance(msg, ToolMessage):
             continue
         tcid = getattr(msg, "tool_call_id", None)
-        content = getattr(msg, "content", "") or ""
-        if isinstance(content, list):
-            content = " ".join(str(c) for c in content)
-        content = str(content)
+        raw_content = getattr(msg, "content", "")
+        if not isinstance(raw_content, str):
+            continue
+        content = raw_content or ""
         age = msg_age.get(i, 0)
         if age < min_age_cycles or len(content) < min_chars:
             continue
@@ -159,6 +173,7 @@ def apply_message_compression(
             cached[i] = compression_cache[tcid]
         else:
             tool_name = getattr(msg, "name", "unknown_tool")
+            tool_name = re.sub(r"[\r\n\x00]", "", tool_name)[:100]
             eligible[i] = (content, tool_name, tcid or "")
 
     # Compress eligible messages in parallel. LangChain LLM.invoke() makes

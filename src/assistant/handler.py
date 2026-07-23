@@ -138,7 +138,7 @@ class MessageHandler:
                     llm=self._llm,
                     system_prompt=self._system_prompt,
                     registry=self._registry,
-                    approvals=self._approvals,
+                    approvals=set(self._approvals),
                     available_tools=dict(self._available_tools),
                     active_tools_list=list(self._active_tools),
                     max_context_tokens=self._max_context_tokens,

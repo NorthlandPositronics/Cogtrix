@@ -12,6 +12,8 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from src.logging_config import get_logger
 
+log = get_logger()
+
 # LangChain imports — always available at type-check time so Pyright sees
 # StructuredTool as a real class rather than ``None``.
 if TYPE_CHECKING:
@@ -46,7 +48,6 @@ def create_safe_tool(
         confirm: Whether the tool requires explicit user confirmation.
         args_schema: Optional Pydantic BaseModel schema for tool arguments.
     """
-    log = get_logger()
 
     def implementation(*args, **kwargs):
         # Execution is handled by the agent; this wrapper only tags metadata.
@@ -159,7 +160,10 @@ def create_safe_tool_wrapper(
             if not ss.no_confirm:
                 try:
                     if ui is not None:
-                        ui.pause_spinner()
+                        try:
+                            ui.pause_spinner()
+                        except Exception:
+                            pass
                     with _confirmation_lock:
                         if ss.deny_all or tool_name in ss.denials:
                             return "User denied execution"
@@ -200,12 +204,16 @@ def create_safe_tool_wrapper(
                                 return "User denied execution"
                 finally:
                     if ui is not None:
-                        ui.resume_spinner()
+                        try:
+                            ui.resume_spinner()
+                        except Exception:
+                            pass
 
         try:
             return original_func(*args, **kwargs)
         except Exception as e:
-            return f"Tool execution error: {e}"
+            log.warning("Tool %s execution error: %s", tool_name, e, exc_info=True)
+            return f"Tool execution error ({type(e).__name__}): {e}"
 
     return _ST.from_function(
         func=safe_wrapper,

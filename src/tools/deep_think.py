@@ -40,6 +40,7 @@ import copy
 import json
 import logging
 import re
+import threading
 import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -65,12 +66,14 @@ _config: dict[str, Any] = {}
 # Signature: (message: str) -> None
 # Default: plain print to stdout.
 _progress_callback: Callable[[str], None] | None = None
+_progress_lock = threading.Lock()
 
 
 def set_progress_callback(callback: Callable[[str], None]) -> None:
     """Set the progress reporting callback for deep think operations."""
     global _progress_callback
-    _progress_callback = callback
+    with _progress_lock:
+        _progress_callback = callback
 
 
 def configure_deep_think(config: dict[str, Any]) -> None:
@@ -329,8 +332,10 @@ def _parse_json(text: str) -> Any:
 
 def _progress(msg: str) -> None:
     """Print a visible progress line to stdout."""
-    if _progress_callback is not None:
-        _progress_callback(msg)
+    with _progress_lock:
+        cb = _progress_callback
+    if cb is not None:
+        cb(msg)
         return
     print(f"  [think] {msg}")
 

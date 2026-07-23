@@ -15,6 +15,7 @@ Features:
 - Alternatives and dead-end tracking
 """
 
+import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -22,6 +23,8 @@ from typing import Any
 from src.memory.base import BaseMemoryStore
 from src.memory.context import MemoryContext
 from src.memory.manager import BaseMemoryManager
+
+log = logging.getLogger("cogtrix")
 
 # Optional LangChain imports
 try:
@@ -289,8 +292,50 @@ class ReasoningMemoryManager(BaseMemoryManager):
         self._messages = self.store.load_history(self.session_id)
         self._messages = self.sanitize_history(self._messages)
         self._load_hybrid_meta()
+        self._load_mode_meta()
         self._clamp_summary_idx()
         self._loaded = True
+
+    def _restore_mode_state(self, data: dict) -> None:
+        """Restore reasoning-specific state from mode_state.json."""
+        self._current_problem = data.get("current_problem")
+        self._active_hypothesis = data.get("active_hypothesis")
+        self._reasoning_chain = data.get("reasoning_chain", [])
+        self._open_questions = data.get("open_questions", [])
+        self._alternatives = data.get("alternatives", {})
+        self._dead_ends = data.get("dead_ends", [])
+        self._assumptions = data.get("assumptions", [])
+        self._primary_objective = data.get("primary_objective")
+        self._current_phase = data.get("current_phase")
+        self._constraints = data.get(
+            "constraints",
+            {"business": [], "technical": [], "non_negotiables": []},
+        )
+        self._goals = []
+        for g_data in data.get("goals", []):
+            self._goals.append(
+                Goal(
+                    id=g_data["id"],
+                    description=g_data["description"],
+                    status=g_data.get("status", "pending"),
+                    parent_id=g_data.get("parent_id"),
+                    success_criteria=g_data.get("success_criteria", []),
+                )
+            )
+        self._decisions = []
+        for d_data in data.get("decisions", []):
+            self._decisions.append(
+                Decision(
+                    id=d_data["id"],
+                    timestamp=datetime.fromisoformat(d_data["timestamp"]),
+                    decision=d_data["decision"],
+                    rationale=d_data["rationale"],
+                    alternatives_rejected=d_data.get("alternatives_rejected", []),
+                    trade_offs=d_data.get("trade_offs", []),
+                )
+            )
+        self._turn_count = data.get("_turn_count", 0)
+        self._section_ts = data.get("_section_ts", {})
 
     def save(self) -> None:
         """Save reasoning session to storage."""
@@ -401,6 +446,11 @@ class ReasoningMemoryManager(BaseMemoryManager):
 
         context_prefix = "\n\n".join(prefix_parts) if prefix_parts else None
 
+        if log.isEnabledFor(logging.DEBUG):
+            token_estimate = self._estimate_tokens(context_messages)
+        else:
+            token_estimate = 0
+
         return MemoryContext(
             messages=context_messages,
             system_additions=self.get_system_prompt_additions(),
@@ -408,7 +458,7 @@ class ReasoningMemoryManager(BaseMemoryManager):
             mode=self.mode_name,
             total_messages_stored=len(self._messages),
             context_messages_count=len(context_messages),
-            token_estimate=self._estimate_tokens(context_messages),
+            token_estimate=token_estimate,
             metadata={
                 "has_objective": self._primary_objective is not None,
                 "goal_count": len(self._goals),

@@ -342,18 +342,29 @@ class Config:
         """Resolve a data subpath against ``data_dir``.
 
         Absolute paths are returned as-is.  Relative paths starting with
-        the legacy ``data/`` prefix are normalized to avoid double-nesting
-        when ``data_dir`` is ``"data"`` (the default).
+        the legacy ``data/`` prefix (from configs written before the
+        ``data_dir`` option existed) are normalized to avoid double-nesting.
+        Path traversal sequences (``..``) that escape ``data_dir`` are rejected.
         """
+        subpath = str(subpath)
         p = Path(subpath)
         if p.is_absolute():
             return p
-        data_prefix = self.data_dir.rstrip("/\\") + "/"
-        if subpath.startswith(data_prefix):
-            stripped = subpath[len(data_prefix) :]
-            if stripped:
-                return Path(self.data_dir) / stripped
-        return Path(self.data_dir) / subpath
+        # Legacy migration: configs written before data_dir existed may
+        # contain paths like "data/vectordb".  Strip the "data/" prefix
+        # so they resolve correctly under any data_dir value.
+        data_dir = Path(self.data_dir)
+        if subpath.startswith("data/") or subpath == "data":
+            stripped = subpath[5:]  # len("data/") == 5
+            result = data_dir / stripped if stripped else data_dir
+        else:
+            result = data_dir / subpath
+        # Traversal check: use resolved absolute paths to catch ``..`` escapes.
+        base_resolved = data_dir.resolve()
+        result_resolved = result.resolve()
+        if not result_resolved.is_relative_to(base_resolved):
+            raise ConfigError(f"Path traversal detected in data path: {subpath!r}")
+        return result
 
     def get_provider_config(self, name: str | None = None) -> ProviderConfig:
         """Get configuration for a provider by name.
@@ -1047,6 +1058,13 @@ def _parse_ollama_address(value: str) -> str:
                     _OLLAMA_DEFAULT_PORT,
                 )
                 return f"http://{host}:{_OLLAMA_DEFAULT_PORT}"
+            # Plain host:badport — treat hostname only, ignore invalid port
+            _log.warning(
+                "Invalid port %r in Ollama address %r, using default port",
+                port,
+                value,
+            )
+            return f"http://{host}:{_OLLAMA_DEFAULT_PORT}"
         # Multiple colons without brackets — bare IPv6; wrap in brackets
         return f"http://[{value}]:{_OLLAMA_DEFAULT_PORT}"
     return f"http://{value}:{_OLLAMA_DEFAULT_PORT}"

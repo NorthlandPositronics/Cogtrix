@@ -9,12 +9,15 @@ This is the default memory mode, providing:
 - RAG integration: Long-term retrieval (future)
 """
 
+import logging
 from typing import Any
 
 from src.logging_config import log_memory_context
 from src.memory.base import BaseMemoryStore
 from src.memory.context import MemoryContext
 from src.memory.manager import BaseMemoryManager
+
+log = logging.getLogger("cogtrix")
 
 # Optional LangChain message classes
 try:
@@ -89,8 +92,14 @@ class ConversationMemoryManager(BaseMemoryManager):
         self._messages = self.store.load_history(self.session_id)
         self._messages = self.sanitize_history(self._messages)
         self._load_hybrid_meta()
+        self._load_mode_meta()
         self._clamp_summary_idx()
         self._loaded = True
+
+    def _restore_mode_state(self, data: dict) -> None:
+        """Restore conversation-specific state from mode_state.json."""
+        self._entities = data.get("entities", {})
+        self._topics = data.get("topics", [])
 
     def save(self) -> None:
         """Save conversation history to storage."""
@@ -139,12 +148,13 @@ class ConversationMemoryManager(BaseMemoryManager):
 
         token_estimate = self._estimate_tokens(context_messages)
 
-        # Log context preparation
-        log_memory_context(
-            mode=self.mode_name,
-            message_count=len(context_messages),
-            token_estimate=token_estimate,
-        )
+        # Log context preparation (debug-only — skip the call on non-debug paths)
+        if log.isEnabledFor(logging.DEBUG):
+            log_memory_context(
+                mode=self.mode_name,
+                message_count=len(context_messages),
+                token_estimate=token_estimate,
+            )
 
         return MemoryContext(
             messages=context_messages,

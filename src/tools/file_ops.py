@@ -5,6 +5,7 @@ Write operations require user confirmation for safety.
 
 import os
 import tempfile
+import threading
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -15,6 +16,16 @@ from pydantic import BaseModel, Field
 _APP_DIR: Path = Path(__file__).resolve().parent.parent.parent
 
 _extra_write_dirs: list[Path] = []
+
+_append_lock_guard = threading.Lock()
+_append_locks: dict[str, threading.Lock] = {}
+
+
+def _get_append_lock(path: str) -> threading.Lock:
+    with _append_lock_guard:
+        if path not in _append_locks:
+            _append_locks[path] = threading.Lock()
+        return _append_locks[path]
 
 
 def set_allowed_write_dirs(dirs: list[str] | None) -> None:
@@ -298,8 +309,10 @@ def append_file(path: str, content: str, encoding: str = "utf-8") -> str:
         # Create parent directories if they don't exist
         resolved.parent.mkdir(parents=True, exist_ok=True)
 
-        with open(resolved, "a", encoding=encoding) as f:
-            f.write(content)
+        lock = _get_append_lock(str(resolved))
+        with lock:
+            with open(resolved, "a", encoding=encoding) as f:
+                f.write(content)
 
         return f"Successfully appended {len(content)} characters to {path}"
     except PermissionError:
@@ -336,6 +349,8 @@ def list_directory(path: str = ".", pattern: str = "*", show_hidden: bool = Fals
     try:
         entries = []
         for item in sorted(resolved.glob(pattern)):
+            if not item.resolve().is_relative_to(resolved):
+                continue
             name = item.name
 
             # Skip hidden files unless requested

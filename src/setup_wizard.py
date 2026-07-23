@@ -807,8 +807,8 @@ def _validate_and_write(
         with tempfile.NamedTemporaryFile(
             mode="w", suffix=".yaml", delete=False, encoding="utf-8"
         ) as tmp:
-            yaml.dump(data, tmp, default_flow_style=False, sort_keys=False)
             tmp_path = Path(tmp.name)
+            yaml.dump(data, tmp, default_flow_style=False, sort_keys=False)
 
         from src.config import Config, _apply_config_file
 
@@ -876,12 +876,22 @@ def _inject_bootstrap(data: dict[str, Any], bootstrap_info: dict[str, Any]) -> N
 
 def _mask_secrets(yaml_text: str) -> str:
     """Mask API keys and tokens in YAML text for display."""
-    return re.sub(
-        r"(api_key|api_secret|token|password|secret):\s*[\"']?([^\s\"'#]+)",
+    _SECRET_KEYS = r"api_key|api_secret|token|password|secret"
+    # Inline values (plain, single-quoted, double-quoted) — trailing quote consumed
+    result = re.sub(
+        rf"({_SECRET_KEYS}):\s*[\"']?[^\s\"'#]+[\"']?",
         lambda m: f"{m.group(1)}: ***",
         yaml_text,
         flags=re.IGNORECASE,
     )
+    # Block scalar values (| or > with optional chomping indicator)
+    result = re.sub(
+        rf"({_SECRET_KEYS}):\s*[|>]-?\n(?:[ \t]+\S[^\n]*\n?)+",
+        lambda m: f"{m.group(1)}: ***",
+        result,
+        flags=re.IGNORECASE,
+    )
+    return result
 
 
 # ── Input helpers ────────────────────────────────────────────────────

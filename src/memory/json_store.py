@@ -194,6 +194,6 @@ class JsonFileMemoryStore(BaseMemoryStore):
                 except OSError:
                     pass
                 raise
-        except OSError as exc:
+        except Exception as exc:
             self._save_disabled = True
             log.warning("Cannot save history to %s: %s. History will not be saved.", path, exc)

@@ -10,6 +10,7 @@ import os
 import sys
 import time as _time_mod
 import warnings
+from copy import copy
 from pathlib import Path
 from typing import Any
 
@@ -295,6 +296,8 @@ class _TokenAccumulator(_BaseCallback):  # type: ignore[misc]
         self.output_tokens: int = 0
 
     def on_llm_end(self, response: Any, **kwargs: Any) -> None:
+        if not hasattr(self, "input_tokens"):
+            return
         llm_output = getattr(response, "llm_output", None)
         if llm_output:
             usage = llm_output.get("token_usage") or llm_output.get("usage")
@@ -3177,7 +3180,9 @@ def main():
     tools = []
     for tool_name, tool in registry.tools.items():
         if registry.requires_confirmation(tool_name):
-            safe_tool = create_safe_tool_wrapper(tool, tool_name, registry, approvals)
+            safe_tool = create_safe_tool_wrapper(
+                tool, tool_name, registry, approvals, session_state=_session
+            )
             tools.append(safe_tool)
         else:
             tools.append(tool)
@@ -3243,6 +3248,7 @@ def main():
         # Deep think and delegate are uncapped — they set their own limits.
         _DEFAULT_MAX_TOKENS = 4096
         if provider_config.max_tokens is None:
+            provider_config = copy(provider_config)
             provider_config.max_tokens = _DEFAULT_MAX_TOKENS
         llm = create_llm_from_provider_config(provider_config)
 
@@ -3543,7 +3549,9 @@ def main():
                                 for tn, tl in registry.tools.items():
                                     if registry.requires_confirmation(tn):
                                         tools.append(
-                                            create_safe_tool_wrapper(tl, tn, registry, approvals)
+                                            create_safe_tool_wrapper(
+                                                tl, tn, registry, approvals, session_state=_session
+                                            )
                                         )
                                     else:
                                         tools.append(tl)
@@ -3634,6 +3642,7 @@ def main():
                             memory_manager.set_llm(llm)
 
                             # Reconfigure tools that depend on provider/model
+                            configure_python_exec_tool(config)
                             configure_delegate_tool(config, status_callback=_delegation_status)
                             configure_deep_think_tool(config)
 
@@ -3713,6 +3722,7 @@ def main():
                             memory_manager.set_llm(llm)
 
                             # Reconfigure tools that depend on provider/model
+                            configure_python_exec_tool(config)
                             configure_delegate_tool(config, status_callback=_delegation_status)
                             configure_deep_think_tool(config)
 
@@ -3840,7 +3850,7 @@ def main():
                                 if _session.no_confirm:
                                     approvals.add(load_name)
                                 tool_obj = create_safe_tool_wrapper(
-                                    tool_obj, load_name, registry, approvals
+                                    tool_obj, load_name, registry, approvals, session_state=_session
                                 )
                             tools.append(tool_obj)
                             registry.tools[load_name] = _session.all_tool_originals.get(
@@ -4102,8 +4112,36 @@ def main():
                             _cleanup_resources.append(llm)
 
                             memory_manager.set_llm(llm)
+                            configure_tavily_tool(config)
+                            configure_exa_tool(config)
+                            configure_brave_tool(config)
+                            configure_serpapi_tool(config)
+                            configure_python_exec_tool(config)
                             configure_delegate_tool(config, status_callback=_delegation_status)
                             configure_deep_think_tool(config)
+
+                            mode_adds = memory_manager.get_system_prompt_additions()
+                            system_prompt = build_system_prompt(
+                                mode_additions=mode_adds,
+                                models=config.models,
+                                delegation_models=config.delegate_allowed_models,
+                                tool_instructions=provider_config.tool_instructions,
+                            )
+                            slash_cmds.system_prompt = system_prompt
+
+                            _tool_output_cap = _compute_tool_output_cap(max_context_tokens)
+                            for t in tools:
+                                apply_output_cap(t, _tool_output_cap)
+
+                            if config.context_compression:
+                                try:
+                                    compression_llm = create_compression_llm(
+                                        config.context_compression_model, config
+                                    )
+                                except Exception:
+                                    compression_llm = None
+                            else:
+                                compression_llm = None
 
                             slash_cmds.config = config
                             actual_model = provider_config.get_model()

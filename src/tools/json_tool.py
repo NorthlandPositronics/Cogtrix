@@ -115,8 +115,10 @@ def _get_by_path(data: Any, path: str) -> Any:
     if not path:
         return data
 
-    parts = re.split(r"\.(?![^\[]*\])", path)
-    return _get_by_parts(data, [p for p in parts if p])
+    parts = [p for p in re.split(r"\.(?![^\[]*\])", path) if p]
+    if not parts and path.strip():
+        raise KeyError(f"Invalid path: {path!r}")
+    return _get_by_parts(data, parts)
 
 
 def _get_by_parts(current: Any, parts: list[str]) -> Any:

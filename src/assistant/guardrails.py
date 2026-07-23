@@ -543,7 +543,7 @@ class ViolationTracker:
                 cid: [ts - _MONO_OFFSET for ts in timestamps]
                 for cid, timestamps in self._violations.items()
             }
-        self._save_snapshot(snapshot)
+            self._save_snapshot(snapshot)
 
     def _cleanup_stale(self) -> None:
         now = time.monotonic()
@@ -579,7 +579,7 @@ class ViolationTracker:
                 cid: [ts - _MONO_OFFSET for ts in timestamps]
                 for cid, timestamps in self._violations.items()
             }
-        self._save_snapshot(snapshot)
+            self._save_snapshot(snapshot)
 
     def save(self) -> None:
         self._save()
@@ -736,7 +736,7 @@ class ToolCallGuard:
                         guard_name="tool_call_path",
                     )
         if tool_name == "execute_shell_command":
-            cmd = tool_args.get("command", "")
+            cmd = tool_args.get("cmd", "") or tool_args.get("command", "")
             if isinstance(cmd, str):
                 for substr in _SENSITIVE_PATH_SUBSTRINGS:
                     if substr in cmd.lower():

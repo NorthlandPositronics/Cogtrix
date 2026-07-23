@@ -820,6 +820,11 @@ class TestToolCallGuardPaths:
 
     def test_shell_command_with_sensitive_path_blocked(self):
         guard = ToolCallGuard({})
+        result = guard.check("execute_shell_command", {"cmd": "cat /etc/shadow"})
+        assert not result.is_safe
+
+    def test_shell_command_legacy_command_key_blocked(self):
+        guard = ToolCallGuard({})
         result = guard.check("execute_shell_command", {"command": "cat /etc/shadow"})
         assert not result.is_safe
 

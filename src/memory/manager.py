@@ -47,6 +47,7 @@ _MIN_MEANINGFUL_MSGS_FOR_SUMMARY = 4  # at least 2 full turns (H+A pairs)
 _MIN_MEANINGFUL_CHARS_FOR_SUMMARY = 5000  # ignore tiny exchanges
 
 _SESSION_ID_MAX_LEN = 200
+_SLOW_PATH_MAX_FAILURES = 3
 
 
 def _sanitize_session_id(session_id: str) -> str:
@@ -67,6 +68,11 @@ def _sanitize_session_id(session_id: str) -> str:
     sanitized = sanitized.replace("..", "%2E%2E")
     if len(sanitized) > _SESSION_ID_MAX_LEN:
         sanitized = sanitized[:_SESSION_ID_MAX_LEN]
+        # Don't split a percent-encoded triplet (e.g. %2E)
+        if sanitized.endswith("%"):
+            sanitized = sanitized[:-1]
+        elif len(sanitized) >= 2 and sanitized[-2] == "%":
+            sanitized = sanitized[:-2]
     if not sanitized:
         return "default"
     return sanitized
@@ -187,6 +193,7 @@ class BaseMemoryManager(ABC):
         # ── Background slow-path threading ───────────────────────────
         self._hybrid_lock = threading.Lock()
         self._bg_thread: threading.Thread | None = None
+        self._slow_path_failures: int = 0
 
     # ── Hybrid memory wiring ────────────────────────────────────────
 
@@ -277,6 +284,59 @@ class BaseMemoryManager(ABC):
         except Exception as exc:
             log.warning("Failed to load hybrid meta: %s", exc)
 
+    def _mode_meta_path(self) -> Path:
+        """Return the path for mode-specific state."""
+        hybrid = self._hybrid_meta_path()
+        return hybrid.parent / hybrid.name.replace("_hybrid.json", "_mode_state.json")
+
+    def _save_mode_meta(self) -> None:
+        """Persist mode-specific state (from to_dict) to a file."""
+        data = self.to_dict()
+        for key in ("mode", "version", "session_id", "config", "_summary", "_summary_msg_idx"):
+            data.pop(key, None)
+        data.pop("messages", None)
+        if not data:
+            meta_path = self._mode_meta_path()
+            if meta_path.exists():
+                meta_path.unlink(missing_ok=True)
+            return
+        try:
+            meta_path = self._mode_meta_path()
+            meta_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp_fd, tmp_path = tempfile.mkstemp(dir=str(meta_path.parent), suffix=".tmp")
+            try:
+                with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
+                    json.dump(data, f)
+                Path(tmp_path).replace(meta_path)
+            except Exception:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+                raise
+        except Exception as exc:
+            log.warning("Failed to save mode meta: %s", exc)
+
+    def _load_mode_meta(self) -> None:
+        """Restore mode-specific state from the meta file (if present)."""
+        meta_path = self._mode_meta_path()
+        if not meta_path.exists():
+            return
+        try:
+            data = json.loads(meta_path.read_text(encoding="utf-8"))
+            self._restore_mode_state(data)
+        except Exception as exc:
+            log.warning("Failed to load mode meta: %s", exc)
+
+    def _restore_mode_state(self, data: dict) -> None:  # noqa: B027
+        """Override in subclasses to restore mode-specific state from dict.
+
+        Called during load() to restore mode-specific state that was persisted
+        by _save_mode_meta(). The dict contains only mode-specific keys
+        (messages, hybrid state, and base keys are excluded).
+        """
+        pass
+
     def _clamp_summary_idx(self) -> None:
         """Ensure ``_summary_msg_idx`` does not exceed the message count.
 
@@ -318,7 +378,7 @@ class BaseMemoryManager(ABC):
         # is sufficient to proceed.
         meaningful_count = 0
         meaningful_chars = 0
-        for m in messages:
+        for m in messages[unsummarized_start:unsummarized_end]:
             if self._is_meaningful_message(m):
                 meaningful_count += 1
                 content = getattr(m, "content", None)
@@ -330,6 +390,14 @@ class BaseMemoryManager(ABC):
             meaningful_count < _MIN_MEANINGFUL_MSGS_FOR_SUMMARY
             and meaningful_chars < _MIN_MEANINGFUL_CHARS_FOR_SUMMARY
         ):
+            return
+
+        if self._slow_path_failures >= _SLOW_PATH_MAX_FAILURES:
+            log.warning(
+                "Background memory slow-path disabled after %d consecutive failures — "
+                "summarization LLM may be unreachable",
+                self._slow_path_failures,
+            )
             return
 
         if self._bg_thread is not None and self._bg_thread.is_alive():
@@ -380,7 +448,9 @@ class BaseMemoryManager(ABC):
             self._save_hybrid_meta()
             if self._vector_store is not None:
                 self._vector_store.save()
+            self._slow_path_failures = 0
         except Exception as exc:
+            self._slow_path_failures += 1
             log.warning("Background memory update failed: %s", exc)
 
     def join_background(self, timeout: float = 60.0) -> None:
@@ -731,6 +801,7 @@ class BaseMemoryManager(ABC):
         t = self._bg_thread
         if t is None or not t.is_alive():
             self._save_hybrid_meta()
+        self._save_mode_meta()
         if self._vector_store is not None:
             self._vector_store.save()
 

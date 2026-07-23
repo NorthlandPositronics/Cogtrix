@@ -62,9 +62,13 @@ class ToolCallLogger:
 
     def __init__(self) -> None:
         self._tool_start_times: dict[str, float] = {}
+        self._lock = threading.Lock()
 
     def _evict_stale(self) -> None:
-        """Remove entries older than ``_STALE_TIMEOUT`` to prevent leaks."""
+        """Remove entries older than ``_STALE_TIMEOUT`` to prevent leaks.
+
+        Must be called with ``self._lock`` already held.
+        """
         cutoff = time.time() - self._STALE_TIMEOUT
         stale_keys = [k for k, ts in self._tool_start_times.items() if ts < cutoff]
         for k in stale_keys:
@@ -72,24 +76,26 @@ class ToolCallLogger:
 
     def on_tool_start(self, tool_name: str, tool_input: dict, call_id: str = "") -> None:
         """Log when a tool starts execution."""
-        self._evict_stale()
         key = call_id or tool_name
-        self._tool_start_times[key] = time.time()
+        with self._lock:
+            self._evict_stale()
+            self._tool_start_times[key] = time.time()
         log_tool_call(tool_name, inputs=tool_input)
 
     def on_tool_end(self, tool_name: str, output: str, call_id: str = "") -> None:
         """Log when a tool finishes execution."""
         key = call_id or tool_name
         duration = None
-        if key in self._tool_start_times:
-            duration = time.time() - self._tool_start_times.pop(key)
-
+        with self._lock:
+            if key in self._tool_start_times:
+                duration = time.time() - self._tool_start_times.pop(key)
         log_tool_call(tool_name, output=output, duration=duration)
 
     def on_tool_error(self, tool_name: str, error: str, call_id: str = "") -> None:
         """Log when a tool encounters an error."""
         key = call_id or tool_name
-        self._tool_start_times.pop(key, None)
+        with self._lock:
+            self._tool_start_times.pop(key, None)
         log_tool_call(tool_name, error=error)
 
 
@@ -412,10 +418,10 @@ def build_tool_results_response(result: Any) -> str | None:
     return "".join(parts)
 
 
-def log_tool_calls_from_result(result: dict) -> None:
+def log_tool_calls_from_result(result: dict, prior_count: int = 0) -> None:
     """Extract and log tool calls from agent result messages.
 
-    Parses the message sequence to find:
+    Parses only the new messages (since ``prior_count``) to find:
     - AIMessage with tool_calls (tool invocation requests)
     - ToolMessage (tool execution results)
     """
@@ -428,7 +434,7 @@ def log_tool_calls_from_result(result: dict) -> None:
     if not isinstance(result, dict) or "messages" not in result:
         return
 
-    messages = result["messages"]
+    messages = result["messages"][prior_count:]
     log = get_logger()
     log.debug(f"Processing {len(messages)} messages for tool calls")
 
@@ -579,7 +585,7 @@ def run_agent(
                 _persistent_compression_cache.clear()
             _cached_llm_id = current_llm_id
             local_bound_cache = OrderedDict(_persistent_bound_cache)
-            local_compression_cache = dict(_persistent_compression_cache)
+            local_compression_cache = OrderedDict(_persistent_compression_cache)
 
         graph = build_agent_graph(
             config=config,
@@ -592,6 +598,7 @@ def run_agent(
         )
 
         hit_recursion_limit = False
+        prior_msg_count = len(input_messages)
         result: dict = {"messages": input_messages}
         try:
             try:
@@ -606,7 +613,7 @@ def run_agent(
                 hit_recursion_limit = True
                 log.warning("Agent hit the recursion limit")
 
-            log_tool_calls_from_result(result)
+            log_tool_calls_from_result(result, prior_count=prior_msg_count)
 
             if result_messages is not None:
                 result_messages.extend(result.get("messages", []))
