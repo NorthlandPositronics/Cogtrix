@@ -172,10 +172,10 @@ class JsonFileMemoryStore(BaseMemoryStore):
                 data = json.load(f)
             return [_dict_to_message(item) for item in data]
         except json.JSONDecodeError as e:
-            log.error(f"Corrupt session file {path}: {e}")
+            log.error("Corrupt session file %s: %s", path, e)
             return []
         except Exception as e:
-            log.error(f"Error loading session {session_id}: {e}")
+            log.error("Error loading session %s: %s", session_id, e)
             return []
 
     def save_history(self, session_id: str, messages: list[Any]):

@@ -181,15 +181,15 @@ def clear_request_id() -> None:
 def log_user_message(message: str) -> None:
     """Log a user message."""
     log = get_logger()
-    log.info(f"User: {_truncate(message, 200)}")
+    log.info("User: %s", _truncate(message, 200))
 
 
 def log_agent_response(response: str, token_count: int | None = None) -> None:
     """Log an agent response."""
     log = get_logger()
     token_info = f" ({token_count} tokens)" if token_count else ""
-    log.info(f"Agent response{token_info}")
-    log.debug(f"Agent: {_truncate(response, 500)}")
+    log.info("Agent response%s", token_info)
+    log.debug("Agent: %s", _truncate(response, 500))
 
 
 def log_tool_call(
@@ -203,18 +203,18 @@ def log_tool_call(
     log = get_logger()
 
     if error:
-        log.error(f"Tool failed: {tool_name} - {error}")
+        log.error("Tool failed: %s - %s", tool_name, error)
         if inputs:
-            log.debug(f"Tool input: {inputs}")
+            log.debug("Tool input: %s", inputs)
         return
 
     duration_str = f" ({duration:.2f}s)" if duration else ""
-    log.info(f"Tool: {tool_name}{duration_str}")
+    log.info("Tool: %s%s", tool_name, duration_str)
 
     if inputs:
-        log.debug(f"Tool input: {inputs}")
+        log.debug("Tool input: %s", inputs)
     if output:
-        log.debug(f"Tool output: {_truncate(output, 300)}")
+        log.debug("Tool output: %s", _truncate(output, 300))
 
 
 def log_llm_call(
@@ -226,10 +226,10 @@ def log_llm_call(
     """Log an LLM invocation."""
     log = get_logger()
     token_info = f", {token_count} tokens" if token_count else ""
-    log.info(f"LLM: {provider}/{model}{token_info}")
+    log.info("LLM: %s/%s%s", provider, model, token_info)
 
     if reasoning:
-        log.debug(f"LLM reasoning: {_truncate(reasoning, 400)}")
+        log.debug("LLM reasoning: %s", _truncate(reasoning, 400))
 
 
 def log_memory_context(
@@ -240,7 +240,7 @@ def log_memory_context(
     """Log memory context preparation."""
     log = get_logger()
     token_info = f", ~{token_estimate} tokens" if token_estimate else ""
-    log.debug(f"Context: mode={mode}, {message_count} messages{token_info}")
+    log.debug("Context: mode=%s, %d messages%s", mode, message_count, token_info)
 
 
 def log_error(
@@ -254,14 +254,14 @@ def log_error(
     error_msg = str(error)
 
     if context:
-        log.error(f"{context}: {error_type} - {error_msg}")
+        log.error("%s: %s - %s", context, error_type, error_msg)
     else:
-        log.error(f"{error_type}: {error_msg}")
+        log.error("%s: %s", error_type, error_msg)
 
     if include_trace:
         import traceback
 
-        log.debug(f"Traceback:\n{traceback.format_exc()}")
+        log.debug("Traceback:\n%s", traceback.format_exc())
 
 
 def log_session_info(
@@ -273,10 +273,10 @@ def log_session_info(
 ) -> None:
     """Log session information at startup."""
     log = get_logger()
-    log.info(f"Session started: {session_id}")
-    log.info(f"Provider: {provider}/{model}")
-    log.info(f"Memory mode: {memory_mode}")
-    log.debug(f"Existing messages: {message_count}")
+    log.info("Session started: %s", session_id)
+    log.info("Provider: %s/%s", provider, model)
+    log.info("Memory mode: %s", memory_mode)
+    log.debug("Existing messages: %d", message_count)
 
 
 def log_delegation(
@@ -292,12 +292,12 @@ def log_delegation(
     duration_str = f" ({duration:.2f}s)" if duration else ""
 
     if success:
-        log.info(f"Delegation to {target_model}: success{duration_str}")
+        log.info("Delegation to %s: success%s", target_model, duration_str)
     else:
-        log.error(f"Delegation to {target_model}: failed - {error}")
+        log.error("Delegation to %s: failed - %s", target_model, error)
 
-    log.debug(f"Delegation task: {_truncate(task, 200)}")
-    log.debug(f"Response format: {response_format}")
+    log.debug("Delegation task: %s", _truncate(task, 200))
+    log.debug("Response format: %s", response_format)
 
 
 # LangChain callback handler for LLM observability

@@ -68,7 +68,7 @@ class ToolRegistry:
 
         if not self.tools_directory.exists():
             log = get_logger()
-            log.warning(f"Tools directory {self.tools_directory} does not exist")
+            log.warning("Tools directory %s does not exist", self.tools_directory)
             return discovered_modules
 
         # Scan for Python files (excluding __init__.py)
@@ -98,11 +98,11 @@ class ToolRegistry:
             return module
         except ImportError as e:
             log = get_logger()
-            log.warning(f"Failed to import tool module {module_name}: {e}")
+            log.warning("Failed to import tool module %s: %s", module_name, e)
             return None
         except Exception as e:
             log = get_logger()
-            log.error(f"Error loading tool module {module_name}: {e}")
+            log.error("Error loading tool module %s: %s", module_name, e)
             return None
 
     def extract_tool_functions(self, module: object) -> list[tuple]:
@@ -259,7 +259,7 @@ class ToolRegistry:
 
         except Exception as e:
             log = get_logger()
-            log.error(f"Error registering tool {config.get('name', 'unknown')}: {e}")
+            log.error("Error registering tool %s: %s", config.get("name", "unknown"), e)
             return None
 
     def load_all_tools(self) -> dict[str, _StructuredToolType]:
@@ -272,35 +272,35 @@ class ToolRegistry:
         log = get_logger()
         module_names = self.scan_tools()
 
-        log.debug(f"Discovered {len(module_names)} tool modules")
+        log.debug("Discovered %d tool modules", len(module_names))
 
         for module_name in module_names:
             module = self.load_tool_module(module_name)
             if module is None:
-                log.debug(f"Skipped module: {module_name} (import failed)")
+                log.debug("Skipped module: %s (import failed)", module_name)
                 continue
 
             # Skip modules that declare is_configured() and return False
             if hasattr(module, "is_configured") and callable(module.is_configured):
                 try:
                     if not module.is_configured():
-                        log.debug(f"Skipped module: {module_name} (not configured)")
+                        log.debug("Skipped module: %s (not configured)", module_name)
                         continue
                 except Exception:
-                    log.debug(f"Skipped module: {module_name} (is_configured raised)")
+                    log.debug("Skipped module: %s (is_configured raised)", module_name)
                     continue
 
             results = self.extract_tool_functions(module)
             if not results:
-                log.debug(f"No tool function found in module: {module_name}")
+                log.debug("No tool function found in module: %s", module_name)
                 continue
 
             for func, config in results:
                 tool = self.register_tool(func, config)
                 if tool:
-                    log.debug(f"Registered tool: {config.get('name', func.__name__)}")
+                    log.debug("Registered tool: %s", config.get("name", func.__name__))
 
-        log.info(f"Loaded {len(self.tools)} tools")
+        log.info("Loaded %d tools", len(self.tools))
         return self.tools
 
     def get_tool(self, name: str) -> _StructuredToolType | None:

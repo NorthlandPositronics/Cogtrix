@@ -780,8 +780,8 @@ def _execute_single_task(
     start_time = time.time()
 
     target_model = f"{provider}/{model}"
-    log.debug(f"Delegation starting: {target_model}")
-    log.debug(f"Task: {task[:100]}{'...' if len(task) > 100 else ''}")
+    log.debug("Delegation starting: %s", target_model)
+    log.debug("Task: %s%s", task[:100], "..." if len(task) > 100 else "")
 
     # Check circuit breaker status
     circuit_breaker = _get_circuit_breaker(provider, model)
@@ -790,7 +790,7 @@ def _execute_single_task(
         is_available, unavailable_reason = circuit_breaker._check_availability_locked(cooldown)
 
     if not is_available:
-        log.info(f"Delegation blocked: {target_model} - circuit breaker open")
+        log.info("Delegation blocked: %s - circuit breaker open", target_model)
         return DelegateResult(
             success=False,
             response="",
@@ -810,16 +810,18 @@ def _execute_single_task(
         response_text = ""
         if use_tools and get_delegate_tools():
             log.debug(
-                f"Running delegate agent with {len(get_delegate_tools())} tools: " f"{target_model}"
+                "Running delegate agent with %d tools: %s",
+                len(get_delegate_tools()),
+                target_model,
             )
             response_text = run_delegate_agent(llm, task, context)
 
         # ── Fallback: plain LLM call ────────────────────────────
         if not response_text:
             if not use_tools:
-                log.debug(f"Invoking delegate LLM (no tools): {target_model}")
+                log.debug("Invoking delegate LLM (no tools): %s", target_model)
             else:
-                log.debug(f"Invoking delegate LLM (agent fallback): {target_model}")
+                log.debug("Invoking delegate LLM (agent fallback): %s", target_model)
             messages = _build_prompt(task, context, response_format, json_schema)
             result = llm.invoke(messages)
             response_text = _extract_content(result)

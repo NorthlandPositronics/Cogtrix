@@ -79,10 +79,11 @@ class WebSocketCallbackHandler(BaseCallbackHandler):
         **kwargs: Any,
     ) -> None:
         """Log the start of an LLM call."""
-        model_name = (serialized or {}).get("name") or (serialized or {}).get("id", ["?"])[-1]
-        # Rough token estimate: ~4 chars per token
-        prompt_chars = sum(len(p) for p in (prompts or []))
-        log.debug("LLM call started: model=%s prompt_chars=%d", model_name, prompt_chars)
+        if log.isEnabledFor(logging.DEBUG):
+            model_name = (serialized or {}).get("name") or (serialized or {}).get("id", ["?"])[-1]
+            # Rough token estimate: ~4 chars per token
+            prompt_chars = sum(len(p) for p in (prompts or []))
+            log.debug("LLM call started: model=%s prompt_chars=%d", model_name, prompt_chars)
 
     def on_llm_new_token(self, token: str, **kwargs: Any) -> None:
         """Forward a streaming token to the WebSocket."""
@@ -152,7 +153,7 @@ class WebSocketCallbackHandler(BaseCallbackHandler):
         """Notify the WebSocket that a tool invocation has started."""
         key = str(run_id) if run_id is not None else ""
         with self._tool_starts_lock:
-            self._tool_starts[key] = time.time()
+            self._tool_starts[key] = time.monotonic()
             self.tool_call_count += 1
         tool_name: str = serialized.get("name", "unknown") if serialized else "unknown"
         if isinstance(input_str, dict):
@@ -178,8 +179,8 @@ class WebSocketCallbackHandler(BaseCallbackHandler):
         """Notify the WebSocket that a tool invocation completed successfully."""
         key = str(run_id) if run_id is not None else ""
         with self._tool_starts_lock:
-            start = self._tool_starts.pop(key, time.time())
-        duration_ms = int((time.time() - start) * 1000)
+            start = self._tool_starts.pop(key, time.monotonic())
+        duration_ms = int((time.monotonic() - start) * 1000)
         tool_name: str = kwargs.get("name", "unknown")
         log.debug(
             "Tool end: %s duration_ms=%d output=%.120s", tool_name, duration_ms, str(output)[:120]
@@ -202,8 +203,8 @@ class WebSocketCallbackHandler(BaseCallbackHandler):
         tool_name_err: str = kwargs.get("name", "unknown")
         log.warning("Tool error: %s error=%s", tool_name_err, error)
         with self._tool_starts_lock:
-            start = self._tool_starts.pop(key, time.time())
-        duration_ms = int((time.time() - start) * 1000)
+            start = self._tool_starts.pop(key, time.monotonic())
+        duration_ms = int((time.monotonic() - start) * 1000)
         tool_name: str = kwargs.get("name", "unknown")
         self._enqueue(
             "tool_end",

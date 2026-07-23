@@ -6,6 +6,9 @@
 __pycache__
 *.py[cod]
 *.egg-info
+*.egg-info/
+dist/
+build/
 .venv
 venv
 
@@ -31,11 +34,16 @@ venv
 *.swo
 *~
 
-# Environment and config (secrets)
+# Environment and secrets
 .env
 .env.local
+.env.*
 .cogtrix.json
 .cogtrix.yaml
+config/
+
+# Python version pin (host-specific, not needed in image)
+.python-version
 
 # Runtime data
 data/
@@ -51,7 +59,7 @@ Thumbs.db
 
 # CI / build files (not needed at runtime)
 .github
-tests
+tests/
 Dockerfile
 .dockerignore
 requirements.txt

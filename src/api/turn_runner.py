@@ -365,14 +365,34 @@ async def _run_message_turn_inner(
             return
 
         # ── Think / delegate post-processing ──────────────────────────
-        if mode == "think" and response_text:
-            response_text = await _run_think_pipeline(
-                session, text, response_text, agent_msgs, run_config
-            )
-        elif mode == "delegate" and response_text:
-            response_text = await _run_delegate_pipeline(
-                session, text, response_text, agent_msgs, run_config
-            )
+        try:
+            if mode == "think" and response_text:
+                response_text = await _run_think_pipeline(
+                    session, text, response_text, agent_msgs, run_config
+                )
+            elif mode == "delegate" and response_text:
+                response_text = await _run_delegate_pipeline(
+                    session, text, response_text, agent_msgs, run_config
+                )
+        except asyncio.CancelledError:
+            # Pipeline phase was cancelled — reset session state to idle before
+            # re-raising so the WebSocket client sees the session as available
+            # and not stuck in "analyzing", "researching", or "deep_thinking".
+            session.agent_state = "idle"
+            await _enqueue_agent_state(session, "idle")
+            try:
+                session.ws_queue.put_nowait(
+                    {
+                        "type": "error",
+                        "payload": {
+                            "code": "CANCELLED",
+                            "message": "Agent turn cancelled during post-processing.",
+                        },
+                    }
+                )
+            except asyncio.QueueFull:
+                log.warning("Queue full, dropping CANCELLED error for session %s", session.id)
+            raise
 
         # Update memory with the new exchange.
         if session.memory_manager is not None:

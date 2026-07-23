@@ -742,7 +742,13 @@ async def advance_wizard(
         messages.append(HumanMessage(content=user_answer))
 
         llm = ws["llm"]
-        ai_text = await asyncio.to_thread(_wizard_invoke_llm, llm, messages)
+        try:
+            ai_text = await asyncio.to_thread(_wizard_invoke_llm, llm, messages)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail={"code": "PROVIDER_UNREACHABLE", "message": str(exc)},
+            ) from exc
         messages.append(AIMessage(content=ai_text))
 
         from src.setup_wizard import _has_yaml_block
@@ -849,12 +855,20 @@ def _wizard_load_docs(url: str | None) -> str:
 def _wizard_test_connection(
     provider_type: str, model: str, api_key: str | None, base_url: str | None
 ) -> Any:
-    """Test LLM connection. Returns LLM on success, raises on failure."""
-    from src.setup_wizard import _test_connection
+    """Test LLM connection for API wizard. Returns LLM on success, raises on failure.
 
-    llm = _test_connection(provider_type, model, api_key, base_url)
-    if llm is None:
-        raise RuntimeError(f"Could not connect to {provider_type}/{model}")
+    Unlike the CLI _test_connection which swallows errors, this version propagates
+    the original provider exception so callers can surface the real failure reason.
+    """
+    from langchain_core.messages import HumanMessage as _HumanMessage
+
+    from src.agent.core import create_llm_from_provider_config
+    from src.config import ModelConfig, ProviderConfig
+
+    pc = ProviderConfig(name=provider_type, type=provider_type, api_key=api_key, base_url=base_url)
+    mc = ModelConfig(provider=provider_type, model=model)
+    llm = create_llm_from_provider_config(pc, mc)
+    llm.invoke([_HumanMessage(content="Say 'ok' in one word.")])
     return llm
 
 

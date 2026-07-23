@@ -97,7 +97,10 @@ async def test_app(http_db_engine):
     app.state.config = None
     app.state.tool_registry = None
 
-    with patch("src.api.routes.sessions.warm_session", new_callable=AsyncMock) as mock_warm:
+    with (
+        patch("src.api.routes.sessions.warm_session", new_callable=AsyncMock) as mock_warm,
+        patch("src.config.load_config", side_effect=Exception("no config in tests")),
+    ):
 
         async def _fake_warm(record, app_state):
             from src.api.session_bridge import ApiSession
@@ -576,22 +579,58 @@ class TestSessionUpdate:
 
     @pytest.mark.asyncio
     async def test_update_config_model(self, test_app) -> None:
+        # app.state.config is None (load_config patched out in fixture) so
+        # model-alias validation is skipped and any string passes through.
         client, sf = test_app
         uid = await _create_user(sf)
         tok = _token(uid)
         sid = client.post(
             "/api/v1/sessions",
-            json={"name": "S", "config": {"model": "gpt-4.1-mini"}},
+            json={"name": "S", "config": {"model": "oss"}},
             headers=_auth(tok),
         ).json()["data"]["id"]
 
         resp = client.patch(
             f"/api/v1/sessions/{sid}",
-            json={"config": {"model": "gpt-4o"}},
+            json={"config": {"model": "some-model-alias"}},
             headers=_auth(tok),
         )
         assert resp.status_code == 200
-        assert resp.json()["data"]["config"]["model"] == "gpt-4o"
+        assert resp.json()["data"]["config"]["model"] == "some-model-alias"
+
+    @pytest.mark.asyncio
+    async def test_update_config_model_invalid_alias_returns_422(self, test_app) -> None:
+        # Inject a mock config so alias validation is active; unknown aliases → 422.
+        from unittest.mock import MagicMock
+
+        from src.config import ConfigError
+
+        client, sf = test_app
+        mock_cfg = MagicMock()
+        mock_cfg.resolve_llm_config_for.side_effect = ConfigError("alias not found")
+        client.app.state.config = mock_cfg
+
+        uid = await _create_user(sf)
+        tok = _token(uid)
+        sid = client.post(
+            "/api/v1/sessions",
+            json={"name": "S2"},
+            headers=_auth(tok),
+        ).json()[
+            "data"
+        ]["id"]
+
+        resp = client.patch(
+            f"/api/v1/sessions/{sid}",
+            json={"config": {"model": "nonexistent-alias-xyz"}},
+            headers=_auth(tok),
+        )
+        assert resp.status_code == 422
+        err = resp.json().get("error") or {}
+        assert err.get("code") == "MODEL_NOT_FOUND"
+
+        # Restore so subsequent tests in the fixture scope are unaffected.
+        client.app.state.config = None
 
     @pytest.mark.asyncio
     async def test_patch_preserves_existing_config(self, test_app) -> None:

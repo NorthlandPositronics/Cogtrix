@@ -516,7 +516,7 @@ class TestWebSocketLifecycle:
 
     @pytest.mark.xfail(
         strict=False,
-        reason="sync TestClient may hang waiting for agent_state before pong",
+        reason="teardown aiosqlite collision when run alongside test_api_ws_assistant",
     )
     @pytest.mark.timeout(10)
     def test_ws_ping_pong(self, client: TestClient) -> None:

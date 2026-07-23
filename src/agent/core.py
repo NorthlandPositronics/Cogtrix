@@ -137,14 +137,14 @@ def build_agent_executor(
 
     # Create agent using LangGraph's create_react_agent
     # This creates a compiled graph that handles tool calling
-    log.debug(f"Creating ReAct agent with {len(tools)} tools")
+    log.debug("Creating ReAct agent with %d tools", len(tools))
     agent_executor = create_react_agent(
         model=llm,
         tools=tools,
         prompt=final_prompt,
     )
 
-    log.info(f"Agent initialized: {type(llm).__name__}")
+    log.info("Agent initialized: %s", type(llm).__name__)
     return agent_executor
 
 

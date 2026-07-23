@@ -1,5 +1,34 @@
 # Changelog
 
+## [0.1.29](https://github.com/NorthlandPositronics/Cogtrix/compare/v0.1.28...v0.1.29) (2026-03-23)
+
+
+### Bug Fixes
+
+* **api:** correct misleading errors across sessions, assistant, and knowledge routes ([f85f1d6](https://github.com/NorthlandPositronics/Cogtrix/commit/f85f1d678140c0a2e79f9a8d1edac5a3b321ede5))
+* **api:** correct misleading errors across sessions, assistant, and knowledge routes ([32fd02c](https://github.com/NorthlandPositronics/Cogtrix/commit/32fd02c2a9bd8b03311a7303447cade3f91c35fc))
+* **api:** propagate real provider error in wizard step 0/1 (BUG-001) ([affd3ec](https://github.com/NorthlandPositronics/Cogtrix/commit/affd3ec0cbe8507a9d80f8a63e8898182dce9d45))
+* **api:** propagate real provider error in wizard step 0/1 (BUG-001) ([7bfaf3c](https://github.com/NorthlandPositronics/Cogtrix/commit/7bfaf3c4ef3453d68e6fcaa80fc06119e9b8a423))
+* **api:** propagate real provider error in wizard step 0/1 (BUG-001) ([#51](https://github.com/NorthlandPositronics/Cogtrix/issues/51)) ([affd3ec](https://github.com/NorthlandPositronics/Cogtrix/commit/affd3ec0cbe8507a9d80f8a63e8898182dce9d45))
+* **docker:** holistic Dockerfile, compose, and entrypoint audit ([#48](https://github.com/NorthlandPositronics/Cogtrix/issues/48)) ([6ccad8c](https://github.com/NorthlandPositronics/Cogtrix/commit/6ccad8c709d795ac606361a1d234d0f92dfab14d))
+* **graph:** replace mid-conversation SystemMessage with HumanMessage ([6e109ce](https://github.com/NorthlandPositronics/Cogtrix/commit/6e109ce85ec57006d4f8a1c96474bf538448a5dd))
+* **graph:** replace mid-conversation SystemMessage with HumanMessage ([#50](https://github.com/NorthlandPositronics/Cogtrix/issues/50)) ([13f58d3](https://github.com/NorthlandPositronics/Cogtrix/commit/13f58d37f37de4de1faf32f7b224976c74837fdf))
+* reset agent_state on pipeline-phase cancel; gate debug-log computation ([#40](https://github.com/NorthlandPositronics/Cogtrix/issues/40)) ([32b7285](https://github.com/NorthlandPositronics/Cogtrix/commit/32b72857d599bf52565b415a272fa41e2a3fe7a6))
+* resolve all forge audit findings — lazy logging, monotonic clock, and async I/O ([6d095ed](https://github.com/NorthlandPositronics/Cogtrix/commit/6d095ed85c66ad861cf6ec00f53c7b817d863bdb))
+
+
+### Documentation
+
+* **api:** exhaustive accuracy audit of client-contract.md ([a2d56f1](https://github.com/NorthlandPositronics/Cogtrix/commit/a2d56f1bd93816786a605719a4f70796652be1c1))
+* **api:** exhaustive accuracy audit of client-contract.md ([3a5fb6b](https://github.com/NorthlandPositronics/Cogtrix/commit/3a5fb6b3ac4806b3d3c8c7e488a8f9bcc405c890))
+* **api:** exhaustive accuracy audit of client-contract.md ([#46](https://github.com/NorthlandPositronics/Cogtrix/issues/46)) ([602e76d](https://github.com/NorthlandPositronics/Cogtrix/commit/602e76d22bc8c87e3c5c609dcab855359032ad22))
+* **api:** fix WorkflowDocumentOut TypeScript type and delete path ([#36](https://github.com/NorthlandPositronics/Cogtrix/issues/36)) ([d2fae0b](https://github.com/NorthlandPositronics/Cogtrix/commit/d2fae0be46fd64458637534717a944466b32f976))
+* **api:** regenerate openapi.yaml and openapi.json from live routes ([a9ee98b](https://github.com/NorthlandPositronics/Cogtrix/commit/a9ee98b774c775dfcff0378127d2cfc337ea6ed1))
+* **api:** regenerate openapi.yaml and openapi.json from live routes ([6476a55](https://github.com/NorthlandPositronics/Cogtrix/commit/6476a55a7b39cd33600f7b09192f78198b1bb082))
+* **architecture:** update turn_runner and callbacks descriptions for cancel handling and debug guard ([#44](https://github.com/NorthlandPositronics/Cogtrix/issues/44)) ([5c1f56b](https://github.com/NorthlandPositronics/Cogtrix/commit/5c1f56bced153ec21d3ae9c5649a1a992f3e8cf1))
+* holistic documentation audit — sync with recent fixes ([0a45796](https://github.com/NorthlandPositronics/Cogtrix/commit/0a45796c2f5e30dd4a37b7128c0242b12cc3a640))
+* holistic documentation audit — sync with recent fixes ([8da7dcb](https://github.com/NorthlandPositronics/Cogtrix/commit/8da7dcbf1359b40f75aeb3e82d043176e348b341))
+
 ## [0.1.28](https://github.com/NorthlandPositronics/Cogtrix/compare/v0.1.27...v0.1.28) (2026-03-22)
 
 
@@ -216,6 +245,13 @@
 * **compression:** inner `future.result()` now has `timeout=120` so the per-future `TimeoutError` handler is reachable (was dead code without a timeout) (BUG-219)
 * **assistant:** `_auto_detect` returns the highest-scoring workflow that meets `min_confidence`, not the first alphabetical match (BUG-220)
 * **api:** `update_workflow` route returns `_wf_to_out(updated)` instead of the stale pre-update object
+* **graph:** `handle_phantom` and `process_tools` nodes now inject mid-conversation guidance as `HumanMessage` instead of `SystemMessage`, fixing compatibility with providers that reject `SystemMessage` outside position 0 (Qwen3, strict vLLM deployments)
+* **api:** `patch_session` in `sessions.py` validates the requested model alias via `config.resolve_llm_config_for()` before touching the DB — invalid alias now returns 422 `MODEL_NOT_FOUND` instead of silently committing an unusable config
+* **api:** `start_assistant` in `assistant.py` returns 503 `SERVICE_UNAVAILABLE` (not 409 `CONFLICT`) when server configuration or tool registry is absent at startup, or when service initialization fails; 409 `ASSISTANT_ALREADY_RUNNING` is now reserved exclusively for the case where the service is already running
+* **api:** `violation_tracker.save()`, `knowledge_store.save()`, `scheduler.edit_message()`, and `scheduler.cancel_message()` in `assistant.py` routes are now wrapped with `asyncio.to_thread`, preventing event loop blocking during JSON persistence (P2)
+* **callbacks:** `WebSocketCallbackHandler` now uses `time.monotonic()` for tool duration measurement, consistent with `ToolCallLogger` in `runner.py` and immune to NTP clock-adjustment drift
+* **wizard:** `_test_connection()` propagates real provider errors to the API caller (BUG-001) — step 1 LLM initialization failure now returns 422 instead of 500
+* **logging:** 46 f-string log calls converted to lazy `%`-formatting across `src/` — eliminates string evaluation cost when the log level is filtered out
 
 ### Features
 

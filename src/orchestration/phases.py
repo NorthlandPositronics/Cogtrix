@@ -970,7 +970,7 @@ def recover_from_step_limit(
     except UserCancelledRun:
         raise
     except Exception as retry_err:  # noqa: BLE001 — recovery must not crash
-        log.warning(f"Recovery retry failed: {retry_err}")
+        log.warning("Recovery retry failed: %s", retry_err)
 
     # ── Step 2: Build response from tool results ──────────────────
     # Check retry messages first (more recent), then original run

@@ -75,7 +75,7 @@ cryptography==46.0.5
     #   pyjwt
 dataclasses-json==0.6.7
     # via langchain-community
-ddgs==9.10.0
+ddgs==9.11.4
     # via cogtrix
 distro==1.9.0
     # via
@@ -102,7 +102,7 @@ frozenlist==1.8.0
     # via
     #   aiohttp
     #   aiosignal
-google-auth==2.48.0
+google-auth==2.49.1
     # via google-genai
 google-genai==1.68.0
     # via langchain-google-genai
@@ -167,7 +167,7 @@ jsonschema-specifications==2025.9.1
     # via jsonschema
 langchain-anthropic==1.4.0
     # via cogtrix
-langchain-classic==1.0.2
+langchain-classic==1.0.3
     # via langchain-community
 langchain-community==0.4.1
     # via cogtrix
@@ -188,7 +188,7 @@ langchain-google-genai==4.0.0
     # via cogtrix
 langchain-ollama==1.0.1
     # via cogtrix
-langchain-openai==1.1.9
+langchain-openai==1.1.11
     # via cogtrix
 langchain-text-splitters==1.1.1
     # via
@@ -237,7 +237,7 @@ nltk==3.9.3
     # via textblob
 nodeenv==1.10.0
     # via pyright
-numpy==2.4.2
+numpy==2.4.3
     # via
     #   cogtrix
     #   faiss-cpu
@@ -245,7 +245,7 @@ numpy==2.4.2
     #   scipy
 ollama==0.6.1
     # via langchain-ollama
-openai==2.14.0
+openai==2.29.0
     # via
     #   cogtrix
     #   exa-py
@@ -305,7 +305,7 @@ pydantic==2.12.5
     #   pydantic-settings
 pydantic-core==2.41.5
     # via pydantic
-pydantic-settings==2.12.0
+pydantic-settings==2.13.1
     # via
     #   langchain-community
     #   mcp
@@ -397,7 +397,7 @@ rsa==4.9.1
     # via google-auth
 ruff==0.15.7
     # via cogtrix
-scipy==1.17.0
+scipy==1.17.1
     # via cogtrix
 six==1.17.0
     # via python-dateutil

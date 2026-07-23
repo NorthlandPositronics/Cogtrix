@@ -417,6 +417,23 @@ async def patch_session(
             existing_config = {}
         patch_dict = body.config.model_dump(exclude_none=True)
         merged = {**existing_config, **patch_dict}
+
+        # Validate model alias before touching the DB so an invalid alias produces a
+        # clear 422 rather than silently committing an unusable config (P0).
+        if body.config.model is not None:
+            app_cfg = getattr(request.app.state, "config", None)
+            if app_cfg is not None:
+                try:
+                    app_cfg.resolve_llm_config_for(body.config.model)
+                except Exception as exc:
+                    raise HTTPException(
+                        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                        detail={
+                            "code": "MODEL_NOT_FOUND",
+                            "message": f"Model alias '{body.config.model}' is not configured: {exc}",
+                        },
+                    ) from exc
+
         updates["config_json"] = json.dumps(merged)
 
     if updates:
@@ -451,22 +468,33 @@ async def patch_session(
                 new_config = json.loads(record.config_json) if record.config_json else {}
                 # Build the LLM outside the lock — network I/O must not hold the lock.
                 new_llm = await asyncio.to_thread(_build_llm, new_config, request.app.state)
-                # Swap the live session state atomically under turn_lock so an
-                # in-flight agent turn cannot observe a half-updated session.
-                # _build_run_config is called inside the lock so it reads the
-                # just-built LLM and cannot race with an in-flight turn.
-                async with live_session.turn_lock:
-                    new_run_config = _build_run_config(
-                        new_llm,
-                        live_session.session_state,
-                        new_config,
-                        request.app.state,
+                # Guard: _build_llm swallows errors and returns None on failure.
+                # Never assign None to the live session — that would break all future
+                # agent turns in this process lifetime.
+                if new_llm is None:
+                    log.warning(
+                        "LLM build returned None for session %s (model=%s) — "
+                        "live session retains previous LLM until next warm",
+                        session_id,
+                        body.config.model,
                     )
-                    live_session.llm = new_llm
-                    live_session.config = new_config
-                    live_session.run_config = new_run_config
-                invalidate_llm_caches()
-                log.debug("Rebuilt LLM for session %s after provider/model change", session_id)
+                else:
+                    # Swap the live session state atomically under turn_lock so an
+                    # in-flight agent turn cannot observe a half-updated session.
+                    # _build_run_config is called inside the lock so it reads the
+                    # just-built LLM and cannot race with an in-flight turn.
+                    async with live_session.turn_lock:
+                        new_run_config = _build_run_config(
+                            new_llm,
+                            live_session.session_state,
+                            new_config,
+                            request.app.state,
+                        )
+                        live_session.llm = new_llm
+                        live_session.config = new_config
+                        live_session.run_config = new_run_config
+                    invalidate_llm_caches()
+                    log.debug("Rebuilt LLM for session %s after provider/model change", session_id)
             except Exception as exc:
                 log.warning("Could not rebuild LLM for session %s: %s", session_id, exc)
 

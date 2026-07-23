@@ -367,7 +367,7 @@ def build_agent_graph(
     When *config* is provided, its fields take precedence over the individual
     keyword arguments (backward-compat layer).
     """
-    from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
+    from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
     from langchain_core.messages.modifier import RemoveMessage
     from langchain_core.runnables import RunnableConfig
     from langgraph.graph import END, StateGraph
@@ -523,7 +523,7 @@ def build_agent_graph(
         return {
             "messages": [
                 RemoveMessage(id=last.id),
-                SystemMessage(
+                HumanMessage(
                     content=(
                         "Your last tool call could not be parsed by the server. "
                         "The JSON was malformed. Please try your tool call again "
@@ -1061,10 +1061,10 @@ def build_agent_graph(
             if guidance_lines:
                 note_parts.append(" ".join(guidance_lines))
             note_parts.append("Continue with your task.")
-            result_msgs.append(SystemMessage(content=" ".join(note_parts)))
+            result_msgs.append(HumanMessage(content=" ".join(note_parts)))
         elif guidance_lines:
             result_msgs.append(
-                SystemMessage(content=" ".join(guidance_lines) + " Continue with your task.")
+                HumanMessage(content=" ".join(guidance_lines) + " Continue with your task.")
             )
 
         return {"messages": result_msgs}

@@ -420,7 +420,7 @@ class TestWebSocketPingPong:
 
     @pytest.mark.xfail(
         strict=False,
-        reason="sync TestClient may hang waiting for agent_state before pong",
+        reason="setup/teardown aiosqlite collision when run after test_api_phase3",
     )
     @pytest.mark.timeout(10)
     def test_ping_receives_pong(self, ws_client: TestClient) -> None:
@@ -440,7 +440,7 @@ class TestWebSocketPingPong:
 
     @pytest.mark.xfail(
         strict=False,
-        reason="sync TestClient may hang waiting for agent_state before resilience check",
+        reason="setup/teardown aiosqlite collision when run after test_api_phase3",
     )
     @pytest.mark.timeout(10)
     def test_malformed_json_does_not_crash_connection(self, ws_client: TestClient) -> None:
@@ -473,7 +473,7 @@ class TestWebSocketReconnect:
 
     @pytest.mark.xfail(
         strict=False,
-        reason="sync TestClient may hang in teardown waiting for LLM warm-up thread to exit",
+        reason="setup/teardown aiosqlite collision when run after test_api_phase3",
     )
     @pytest.mark.timeout(10)
     def test_last_seq_triggers_replay(self, ws_client: TestClient) -> None:
@@ -623,12 +623,11 @@ class TestAssistantStartStop:
         assert resp.status_code == 409
         assert resp.json()["error"]["code"] == "ASSISTANT_ALREADY_RUNNING"
 
-    def test_start_config_missing_returns_409_internal_error(self, client: TestClient) -> None:
-        """POST start when config is absent returns 409 INTERNAL_ERROR.
+    def test_start_config_missing_returns_503_service_unavailable(self, client: TestClient) -> None:
+        """POST start when config is absent returns 503 SERVICE_UNAVAILABLE.
 
         Temporarily removes app.state.config so the endpoint hits the
-        "config not available" branch and returns INTERNAL_ERROR quickly,
-        without attempting actual network connections.
+        "config not available" branch without attempting actual network connections.
         Auth is still checked first (401/403 would indicate an auth bug).
         """
         from src.api.app import app
@@ -644,8 +643,8 @@ class TestAssistantStartStop:
         finally:
             app.state.config = saved_config
         assert resp.status_code not in (401, 403)
-        assert resp.status_code == 409
-        assert resp.json()["error"]["code"] == "INTERNAL_ERROR"
+        assert resp.status_code == 503
+        assert resp.json()["error"]["code"] == "SERVICE_UNAVAILABLE"
 
     # --- stop ---
 

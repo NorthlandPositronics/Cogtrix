@@ -264,10 +264,10 @@ async def start_assistant(
     tool_registry = getattr(request.app.state, "tool_registry", None)
     if app_config is None or tool_registry is None:
         raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail={
-                "code": "INTERNAL_ERROR",
-                "message": "Cannot start assistant: config or tool registry not available.",
+                "code": "SERVICE_UNAVAILABLE",
+                "message": "Cannot start assistant: server configuration or tool registry is not loaded.",
             },
         )
 
@@ -278,8 +278,11 @@ async def start_assistant(
         request.app.state.assistant_service = new_svc
     except Exception as exc:
         raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={"code": "INTERNAL_ERROR", "message": f"Failed to start assistant: {exc}"},
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "code": "ASSISTANT_START_FAILED",
+                "message": f"Failed to start assistant: {exc}",
+            },
         ) from exc
 
     return APIResponse(data=_build_status(request.app.state.assistant_service))
@@ -350,8 +353,11 @@ async def send_outbound(
     handler = getattr(svc, "_handler", None)
     if handler is None:
         raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={"code": "INTERNAL_ERROR", "message": "Handler not available."},
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "code": "SERVICE_UNAVAILABLE",
+                "message": "Assistant message handler is not available.",
+            },
         )
 
     services_config: dict = getattr(handler, "_services_config", {})
@@ -838,7 +844,9 @@ async def edit_scheduled(
     if body.send_at is not None:
         new_send_at = body.send_at.timestamp()
 
-    ok = scheduler.edit_message(message_id, new_text=body.text, new_send_at=new_send_at)
+    ok = await asyncio.to_thread(
+        scheduler.edit_message, message_id, new_text=body.text, new_send_at=new_send_at
+    )
     if not ok:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -895,7 +903,7 @@ async def cancel_scheduled(
                 message_id = mid
                 break
 
-    ok = scheduler.cancel_message(message_id)
+    ok = await asyncio.to_thread(scheduler.cancel_message, message_id)
     if not ok:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -1239,9 +1247,9 @@ async def remove_from_blacklist(
                 )
             del violations_dict[chat_id]
 
-    # Persist the update
+    # Persist the update — offload blocking JSON I/O to a thread
     try:
-        violation_tracker.save()
+        await asyncio.to_thread(violation_tracker.save)
     except Exception as exc:
         log.warning("Failed to persist violation tracker: %s", exc)
 
@@ -1385,7 +1393,8 @@ async def search_knowledge(
 
     try:
         results_text = await asyncio.to_thread(knowledge_store.recall, body.query, body.top_k)
-    except Exception:
+    except Exception as exc:
+        log.warning("Knowledge recall failed for query %r: %s", body.query, exc)
         results_text = None
 
     if not results_text:
@@ -1472,7 +1481,7 @@ async def delete_fact(
         ) from None
 
     try:
-        knowledge_store.save()
+        await asyncio.to_thread(knowledge_store.save)
     except Exception as exc:
         log.warning("Failed to persist knowledge store: %s", exc)
 

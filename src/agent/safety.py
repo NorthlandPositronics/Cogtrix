@@ -65,7 +65,7 @@ def create_safe_tool(
     tool.requires_confirmation = confirm  # type: ignore[attr-defined]
 
     if confirm:
-        log.debug(f"Created safe tool: {name} (requires confirmation)")
+        log.debug("Created safe tool: %s (requires confirmation)", name)
 
     return tool  # type: ignore[return-value]
 

@@ -158,6 +158,20 @@ def _sanitize_sdk_error(text: str) -> str:
     return text[:_SANITIZE_MAX_LEN]
 
 
+def _extract_api_message(error_str: str) -> str | None:
+    """Extract the 'message' field from an OpenAI-compatible API error body.
+
+    Handles the SDK format: ``Error code: 429 - {'error': {'message': "...", ...}}``
+    """
+    import re
+
+    m = re.search(r"""['"]message['"]\s*:\s*['"](.+?)['"](?:\s*,|\s*\})""", error_str, re.DOTALL)
+    if m:
+        msg = m.group(1).strip()
+        return msg[:_SANITIZE_MAX_LEN] if msg else None
+    return None
+
+
 def format_agent_error(e: Exception) -> str:
     """Format agent execution errors into user-friendly messages.
 
@@ -191,6 +205,9 @@ def format_agent_error(e: Exception) -> str:
         )
 
     if "RateLimitError" in error_type or "rate_limit" in error_str.lower():
+        actual_msg = _extract_api_message(error_str)
+        if actual_msg:
+            return f"**Rate limit / capacity error:**\n\n{actual_msg}"
         return (
             "**Rate limit exceeded.**\n\n"
             "Please wait a moment and try again, or:\n"
@@ -454,7 +471,7 @@ def log_tool_calls_from_result(result: dict, prior_count: int = 0) -> None:
 
     messages = result["messages"][prior_count:]
     log = get_logger()
-    log.debug(f"Processing {len(messages)} messages for tool calls")
+    log.debug("Processing %d messages for tool calls", len(messages))
 
     pending_tool_calls: dict = {}
 

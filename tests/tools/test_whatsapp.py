@@ -549,9 +549,21 @@ class TestToolConfigs:
             assert "function" in cfg
 
     def test_send_tool_requires_confirmation_by_default(self):
-        from src.tools.whatsapp import TOOL_CONFIGS
+        # Build tool configs with an isolated config so local overrides (e.g.
+        # allow_send=False or require_confirmation=False from a developer's local
+        # .cogtrix.yaml) cannot cause this test to fail.
+        from unittest.mock import patch
 
-        send_tools = [c for c in TOOL_CONFIGS if "send" in c["name"]]
+        import src.tools.whatsapp as _wa
+
+        with (
+            patch.object(_wa._cfg, "require_confirmation", True),
+            patch.object(_wa._cfg, "allow_send", True),
+        ):
+            configs = _wa._build_tool_configs()
+
+        send_tools = [c for c in configs if "send" in c["name"]]
+        assert send_tools, "expected at least one send tool when allow_send=True"
         for tool in send_tools:
             assert tool["requires_confirmation"] is True
 

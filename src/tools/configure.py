@@ -461,7 +461,7 @@ def filter_unconfigured_tools(registry: ToolRegistry) -> None:
     for tool_name in to_remove:
         del registry.tools[tool_name]
         registry.tool_metadata.pop(tool_name, None)
-        log.debug(f"Removed unconfigured tool: {tool_name}")
+        log.debug("Removed unconfigured tool: %s", tool_name)
 
     if to_remove:
         log.info(

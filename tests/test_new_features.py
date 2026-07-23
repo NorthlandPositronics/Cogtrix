@@ -390,6 +390,47 @@ class TestCancelEventChecks:
                 next_cancel > classify_pos
             ), "cancel_event check should appear after classify_think_task"
 
+    @pytest.mark.asyncio
+    async def test_pipeline_cancelled_error_resets_agent_state(self):
+        """CancelledError raised in think/delegate pipeline resets agent_state to idle.
+
+        Regression test for BUG-FORGE-PIPELINE-CANCEL: when the pipeline phase
+        raises CancelledError, session.agent_state must be reset to 'idle' so
+        subsequent requests are not blocked by a stuck 'analyzing'/'delegating' state.
+        """
+        from unittest.mock import MagicMock, patch
+
+        from src.api.turn_runner import _run_message_turn_inner
+
+        session = MagicMock()
+        session.id = "test-session-pipeline-cancel"
+        session.turn_lock = asyncio.Lock()
+        session.session_state = None
+        session.run_config = None
+        session.memory_manager = None
+        session.cancel_event = asyncio.Event()
+        # Simulate queue that can hold items
+        session.ws_queue = asyncio.Queue(maxsize=100)
+        session.active_confirmation_ui = None
+        session.agent_state = "idle"
+        session.token_counts = {"input_tokens": 0, "output_tokens": 0}
+
+        # Patch run_agent at its source module (it is imported lazily inside the function)
+        with patch("src.orchestration.runner.run_agent", return_value="some response"):
+            # Patch _run_think_pipeline to raise CancelledError
+            async def _cancel_think(*args, **kwargs):
+                raise asyncio.CancelledError("test cancel from pipeline")
+
+            with patch("src.api.turn_runner._run_think_pipeline", side_effect=_cancel_think):
+                with pytest.raises(asyncio.CancelledError):
+                    await _run_message_turn_inner(session, "test", "think", None, None)
+
+        # The key invariant: agent_state must be "idle" after a pipeline cancel,
+        # not stuck at "analyzing", "researching", or "deep_thinking".
+        assert (
+            session.agent_state == "idle"
+        ), f"agent_state should be 'idle' after pipeline cancel, got {session.agent_state!r}"
+
 
 # ---------------------------------------------------------------------------
 # Workflow schema validation

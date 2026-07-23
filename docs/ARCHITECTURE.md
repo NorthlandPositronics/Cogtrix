@@ -448,8 +448,8 @@ Agent Response
 **Node responsibilities:**
 
 - `call_model` — binds active tools to the LLM via `bind_tools()`, prepends the system message, optionally runs context compression, and invokes the model. Uses `_bound_cache` (an `OrderedDict` with LRU eviction at capacity 8) keyed by a tuple of active tool names. The cache is only rebuilt when the active tool set changes, avoiding redundant `bind_tools()` calls on every LLM invocation.
-- `process_tools` — iterates the last AIMessage's `tool_calls`, executes known tools, and handles unknown tool names via `_resolve_tool_name()`. When the agent calls a tool not yet in the active set, `process_tools` auto-loads it from the on-demand pool (up to `_MAX_TOOL_EXPANSIONS = 3` auto-expansions per graph run). The `on_tool_expansion` callback decouples spinner updates from the orchestration layer — `graph.py` has no UI imports. `request_tools` calls are processed via `_detect_tool_request()` which scans only the current iteration's messages, not the full history.
-- `handle_phantom` — injects a correction hint when the model returns an empty AIMessage with `finish_reason=tool_calls` (a malformed-JSON failure mode seen in vLLM and some inference servers). Retries up to `_MAX_PHANTOM_RETRIES = 3` times before injecting a fallback response.
+- `process_tools` — iterates the last AIMessage's `tool_calls`, executes known tools, and handles unknown tool names via `_resolve_tool_name()`. When the agent calls a tool not yet in the active set, `process_tools` auto-loads it from the on-demand pool (up to `_MAX_TOOL_EXPANSIONS = 3` auto-expansions per graph run). The `on_tool_expansion` callback decouples spinner updates from the orchestration layer — `graph.py` has no UI imports. `request_tools` calls are processed via `_detect_tool_request()` which scans only the current iteration's messages, not the full history. Mid-turn guidance messages injected by this node are sent as `HumanMessage` (not `SystemMessage`) to remain compatible with providers that reject `SystemMessage` outside position 0.
+- `handle_phantom` — injects a correction hint when the model returns an empty AIMessage with `finish_reason=tool_calls` (a malformed-JSON failure mode seen in vLLM and some inference servers). The correction hint is sent as a `HumanMessage`, not a `SystemMessage`, so it is accepted by providers that reject `SystemMessage` outside position 0 (Qwen3, strict vLLM deployments). Retries up to `_MAX_PHANTOM_RETRIES = 3` times before injecting a fallback response.
 
 **Key exports from `graph.py`:**
 
@@ -1087,7 +1087,7 @@ Idle 30+ minutes                → ApiSessionRegistry.evict_idle() saves + remo
 Process shutdown                → save_all() flushes all live sessions
 ```
 
-**Turn execution (`turn_runner.py`):** `run_message_turn()` runs `run_agent()` via `asyncio.to_thread` (never blocks the event loop). Three execution modes are supported: `normal` (standard agent run), `think` (deep reasoning via `force_deep_think`), and `delegate` (parallel sub-agent delegation via `force_delegation`). Intermediate agent states (`analyzing`, `deep_thinking`, `researching`, `delegating`) are streamed to the WebSocket for frontend progress visibility.
+**Turn execution (`turn_runner.py`):** `run_message_turn()` runs `run_agent()` via `asyncio.to_thread` (never blocks the event loop). Three execution modes are supported: `normal` (standard agent run), `think` (deep reasoning via `_run_think_pipeline`), and `delegate` (parallel sub-agent delegation via `_run_delegate_pipeline`). Intermediate agent states (`analyzing`, `deep_thinking`, `researching`, `delegating`) are streamed to the WebSocket for frontend progress visibility. Both pipeline helpers check `session.cancel_event.is_set()` between phases; if cancellation arrives during post-processing, an `except asyncio.CancelledError` block resets `session.agent_state = "idle"` before re-raising so the session is never left in a stale intermediate state. The `callbacks.py` `WebSocketCallbackHandler` measures tool duration with `time.monotonic()` (consistent with `ToolCallLogger` in `runner.py`; immune to NTP clock-adjustment drift). Prompt character computation in `on_llm_start` is gated behind `log.isEnabledFor(logging.DEBUG)` to avoid an O(n) string scan on every LLM call in production.
 
 **WebSocket streaming (`ws.py`):** `ConnectionManager` maintains one WebSocket per session; a second connection gracefully displaces the first. Messages are typed via `ServerMessage` / `ClientMessage` Pydantic envelopes. A 30-second reconnect buffer with sequence-based replay handles brief disconnections. Server message types include `token`, `tool_start`, `tool_end`, `tool_confirm_request`, `agent_state`, `memory_update`, `error`, `done`, and `pong`.
 
@@ -1101,7 +1101,7 @@ Process shutdown                → save_all() flushes all live sessions
 |---------|--------|
 | Response envelope | `APIResponse[T]`: `{"data": T \| null, "error": APIError \| null}` |
 | Paginated lists | `CursorPage[T]`: opaque base64url cursors; compound `(created_at, id)` keyset for stable ordering |
-| Blocking I/O | All memory, LLM init, file stat, config I/O, and network calls run via `asyncio.to_thread` |
+| Blocking I/O | All memory, LLM init, file stat, config I/O, network calls, and assistant JSON persistence (`violation_tracker.save`, `knowledge_store.save`, `scheduler.edit_message`, `scheduler.cancel_message`) run via `asyncio.to_thread` |
 | Duplicate warm | Per-session `asyncio.Event` in `ApiSessionRegistry` prevents concurrent `warm_session()` races |
 | Thread safety | `WebSocketCallbackHandler` uses `call_soon_threadsafe` + `_try_put_nowait` for per-token enqueue |
 
