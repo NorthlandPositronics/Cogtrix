@@ -1,0 +1,979 @@
+# Cogtrix Tools Reference
+
+Complete documentation of all 43 built-in tools.
+
+## Table of Contents
+
+- [Overview](#overview)
+- [System Tools](#system-tools)
+- [File Operations](#file-operations)
+- [Math & Calculation](#math--calculation)
+- [Date & Time](#date--time)
+- [Text Processing](#text-processing)
+- [JSON Processing](#json-processing)
+- [Search](#search)
+- [Web & HTTP](#web--http)
+- [Weather](#weather)
+- [NLP Tools](#nlp-tools)
+- [Knowledge Base](#knowledge-base)
+- [Delegation](#delegation)
+- [Deep Reasoning](#deep-reasoning)
+
+---
+
+## Overview
+
+### Safety Categories
+
+| Category | Confirmation | Examples |
+|----------|--------------|----------|
+| **Safe** | No | `read_file`, `calculate`, `search_web` |
+| **Sensitive** | Yes | `execute_shell_command`, `write_file`, `execute_python` |
+
+### Confirmation Responses
+
+When prompted for confirmation:
+- `y` — Allow this execution once
+- `n` — Deny execution
+- `all` — Approve tool for entire session
+
+---
+
+## System Tools
+
+### execute_shell_command ⚠️
+
+Execute shell commands with timeout protection.
+
+**Requires Confirmation:** Yes
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `command` | string | Yes | Shell command to execute |
+| `working_dir` | string | No | Working directory (default: current) |
+| `timeout` | int | No | Timeout in seconds (default: 30) |
+
+**Example:**
+```
+Execute: ls -la /home/user
+```
+
+**Returns:** Command output (stdout + stderr) and exit code
+
+---
+
+### execute_python ⚠️
+
+Execute Python code in a restricted environment with persistent state.
+
+**Requires Confirmation:** Yes
+
+**Features:**
+- **Persistent variables** — Variables preserved between calls within a session
+- **REPL-style output** — Last expression value automatically displayed
+- **True timeout** — Enforced via subprocess isolation
+- **Execution history** — Track past executions with `%history`
+- **Optional NumPy/Pandas** — Automatically enabled if installed
+- **Special commands** — `%vars`, `%clear`, `%history`, `%modules`, `%help`
+
+**Parameters:**
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `code` | string | Yes | — | Python code to execute |
+| `timeout` | int | No | 30 | Timeout in seconds (max: 60) |
+| `persistent` | bool | No | true | Persist variables between calls |
+
+**Special Commands:**
+
+| Command | Description |
+|---------|-------------|
+| `%vars` | List all stored variables with types |
+| `%clear` | Clear all variables |
+| `%reset` | Same as `%clear` |
+| `%history N` | Show last N executions (default: 10) |
+| `%modules` | Show available modules |
+| `%help` | Show available commands |
+
+**Core Modules:**
+
+`math`, `random`, `string`, `re`, `json`, `datetime`, `collections`, `itertools`, `functools`, `operator`, `statistics`, `decimal`, `fractions`, `csv`, `dataclasses`, `enum`, `uuid`, `copy`, `typing`, `base64`, `hashlib`, `textwrap`, `time`, `cmath`, `bisect`, `heapq`
+
+**Optional Modules (if installed):**
+
+`numpy`, `pandas`, `scipy` — Automatically available if installed on the system.
+
+**Security Limits:**
+
+| Limit | Value | Description |
+|-------|-------|-------------|
+| Max output | 10,000 chars | Output truncated with warning |
+| Max result | 2,000 chars | Result repr truncated |
+| Max loop iterations | 100,000 | Prevents infinite loops |
+| Max recursion depth | 100 | Prevents stack overflow |
+| Max range size | 100,000 | Large ranges blocked |
+| Max collection size | 10,000 | Large lists/dicts/sets limited |
+| History entries | 50 | Per session |
+
+**Security Features:**
+- **AST Analysis** — Deep inspection blocks dangerous attribute access
+- **Loop Limiting** — Automatic iteration counter injection
+- **Recursion Control** — Custom depth limit per subprocess
+- **Size Guards** — Prevents memory exhaustion attacks
+
+**Restrictions:**
+- No file system access (`open`, `pathlib`)
+- No network access (`socket`, `urllib`, `requests`)
+- No system commands (`os`, `sys`, `subprocess`)
+- No dangerous builtins (`eval`, `exec`, `compile`)
+- No dangerous attributes (`__class__`, `__bases__`, `__subclasses__`, `__globals__`)
+
+**Examples:**
+
+*Multi-step computation with persistent state:*
+```
+Call 1: data = [1, 2, 3, 4, 5]
+→ [Variables: data]
+
+Call 2: avg = sum(data) / len(data)
+→ Result: 3.0
+  [Variables: avg, data]
+
+Call 3: print(f"Average: {avg}")
+→ Average: 3.0
+```
+
+*REPL-style expression evaluation:*
+```python
+2 ** 10
+```
+→ `Result: 1024`
+
+*Using allowed modules:*
+```python
+import math
+math.factorial(20)
+```
+→ `Result: 2432902008176640000`
+
+*View variables with types:*
+```
+%vars
+```
+→
+```
+Variables:
+  avg: float = 3.0
+  data: list = [1, 2, 3, 4, 5]
+```
+
+*View execution history:*
+```
+%history 5
+```
+→
+```
+Last 5 execution(s):
+  1. [10:15:01] ✓ data = [1, 2, 3, 4, 5]
+  2. [10:15:05] ✓ avg = sum(data) / len(data)
+  3. [10:15:10] ✓ 2 ** 10
+  4. [10:15:15] ✗ undefined_var
+  5. [10:15:20] ✓ %vars
+```
+
+---
+
+## File Operations
+
+### read_file
+
+Read contents of a file.
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `path` | string | Yes | File path to read |
+| `start_line` | int | No | First line to read (1-based) |
+| `end_line` | int | No | Last line to read |
+
+**Example:**
+```
+Read file: /path/to/config.json
+```
+
+---
+
+### write_file ⚠️
+
+Write content to a file (creates if not exists).
+
+**Requires Confirmation:** Yes
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `path` | string | Yes | File path to write |
+| `content` | string | Yes | Content to write |
+
+---
+
+### append_file ⚠️
+
+Append content to an existing file.
+
+**Requires Confirmation:** Yes
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `path` | string | Yes | File path to append to |
+| `content` | string | Yes | Content to append |
+
+---
+
+### list_directory
+
+List contents of a directory.
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `path` | string | Yes | Directory path |
+| `include_hidden` | bool | No | Include hidden files (default: false) |
+
+**Returns:** List of files/directories with sizes
+
+---
+
+### file_info
+
+Get detailed information about a file or directory.
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `path` | string | Yes | File or directory path |
+
+**Returns:** Size, creation date, modification date, permissions
+
+---
+
+## Math & Calculation
+
+### calculate
+
+Evaluate mathematical expressions safely.
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `expression` | string | Yes | Math expression to evaluate |
+
+**Supported Functions:**
+- Basic: `+`, `-`, `*`, `/`, `**`, `%`
+- Functions: `sqrt`, `sin`, `cos`, `tan`, `log`, `log10`, `exp`
+- Constants: `pi`, `e`
+
+**Examples:**
+```
+sqrt(16) + 2**3        → 12.0
+sin(pi/2)              → 1.0
+log(100, 10)           → 2.0
+```
+
+---
+
+## Date & Time
+
+### get_current_datetime
+
+Get current date and time in any timezone.
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `timezone` | string | No | Timezone name (default: UTC) |
+| `format` | string | No | Output format (default: ISO 8601) |
+
+**Examples:**
+```
+Timezone: America/New_York
+Timezone: Europe/London
+Timezone: Asia/Tokyo
+```
+
+---
+
+### convert_timezone
+
+Convert datetime between timezones.
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `datetime_str` | string | Yes | Datetime to convert |
+| `from_tz` | string | Yes | Source timezone |
+| `to_tz` | string | Yes | Target timezone |
+
+---
+
+### parse_date
+
+Parse date strings in various formats.
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `date_string` | string | Yes | Date string to parse |
+| `format` | string | No | Expected format (auto-detect if not provided) |
+
+**Supported Formats:**
+- `2024-12-25`
+- `December 25, 2024`
+- `25/12/2024`
+- `12-25-2024`
+
+---
+
+## Text Processing
+
+### word_count
+
+Count words, characters, lines, and sentences.
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `text` | string | Yes | Text to analyze |
+
+**Returns:**
+```json
+{
+  "words": 150,
+  "characters": 823,
+  "lines": 12,
+  "sentences": 8
+}
+```
+
+---
+
+### find_replace
+
+Find and replace text with regex support.
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `text` | string | Yes | Input text |
+| `find` | string | Yes | Pattern to find |
+| `replace` | string | Yes | Replacement text |
+| `regex` | bool | No | Use regex (default: false) |
+| `case_sensitive` | bool | No | Case sensitive (default: true) |
+
+---
+
+### extract_urls
+
+Extract all URLs from text.
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `text` | string | Yes | Text to extract URLs from |
+
+**Returns:** List of URLs found
+
+---
+
+### extract_emails
+
+Extract all email addresses from text.
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `text` | string | Yes | Text to extract emails from |
+
+**Returns:** List of email addresses found
+
+---
+
+### text_compare
+
+Compare two texts and show differences.
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `text1` | string | Yes | First text |
+| `text2` | string | Yes | Second text |
+
+**Returns:** Diff output showing additions and deletions
+
+---
+
+### split_text
+
+Split text by delimiter.
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `text` | string | Yes | Text to split |
+| `delimiter` | string | No | Delimiter (default: newline) |
+
+---
+
+### trim_text
+
+Trim text to maximum length.
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `text` | string | Yes | Text to trim |
+| `max_length` | int | Yes | Maximum length |
+| `suffix` | string | No | Suffix when trimmed (default: "...") |
+
+---
+
+## JSON Processing
+
+### parse_json
+
+Parse and validate JSON strings.
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `json_string` | string | Yes | JSON string to parse |
+
+**Returns:** Parsed object or validation error
+
+---
+
+### format_json
+
+Pretty-print JSON with indentation.
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `json_string` | string | Yes | JSON to format |
+| `indent` | int | No | Indentation level (default: 2) |
+
+---
+
+### query_json
+
+Query JSON using path expressions.
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `json_string` | string | Yes | JSON to query |
+| `path` | string | Yes | Query path (e.g., `data.users[0].name`) |
+
+**Path Syntax:**
+```
+data.users         → Access 'users' in 'data'
+data.users[0]      → First element of array
+data.users[-1]     → Last element of array
+data.users[*].name → All 'name' fields in array
+```
+
+---
+
+### extract_json
+
+Extract JSON from mixed text content.
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `text` | string | Yes | Text containing JSON |
+
+**Returns:** Extracted JSON object(s)
+
+---
+
+### json_to_text
+
+Convert JSON to human-readable text.
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `json_string` | string | Yes | JSON to convert |
+
+---
+
+## Search
+
+Cogtrix includes 10 search tools across 6 providers. DuckDuckGo is always available (no API key). Other providers are automatically enabled when their API key is configured, and hidden from the agent otherwise.
+
+### search_web
+
+Search the web using DuckDuckGo (no API key needed).
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `query` | string | Yes | Search query |
+| `max_results` | int | No | Maximum results (default: 5) |
+
+**Returns:** List of results with title, URL, and snippet
+
+---
+
+### search_news
+
+Search recent news using DuckDuckGo.
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `query` | string | Yes | Search query |
+| `max_results` | int | No | Maximum results (default: 5) |
+
+**Returns:** List of news articles with title, URL, date, and source
+
+---
+
+### tavily_search
+
+AI-optimised web search that crawls pages and extracts their full text content.
+
+**Requires:** `TAVILY_API_KEY` environment variable or `services.tavily.api_key` in config. Also requires `tavily-python` package.
+
+**Parameters:**
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `query` | string | Yes | — | Search query |
+| `search_depth` | string | No | `"advanced"` | `"basic"` (fast, snippets) or `"advanced"` (deep crawl, full content) |
+| `max_results` | int | No | `5` | Number of results (1-10) |
+| `include_answer` | bool | No | `true` | Include AI-generated answer summary |
+| `topic` | string | No | `"general"` | `"general"` or `"news"` |
+
+**Returns:** AI summary + results with title, URL, relevance score, and extracted page content
+
+---
+
+### tavily_extract
+
+Extract clean text content from specific URLs using Tavily. Handles JavaScript-rendered pages.
+
+**Requires:** Same as `tavily_search`.
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `urls` | array | Yes | List of URLs to extract content from (max 20) |
+
+**Returns:** Extracted text content per URL
+
+---
+
+### exa_search
+
+AI-native semantic web search using neural embeddings. Understands the *meaning* of queries, not just keywords.
+
+**Requires:** `EXA_API_KEY` environment variable or `services.exa.api_key` in config. Also requires `exa-py` package.
+
+**Parameters:**
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `query` | string | Yes | — | Natural-language search query |
+| `num_results` | int | No | `5` | Number of results (1-10) |
+| `include_text` | bool | No | `true` | Include extracted page text |
+| `search_type` | string | No | `"auto"` | `"auto"`, `"neural"` (semantic), or `"keyword"` |
+
+**Returns:** Results with title, URL, relevance score, and extracted page text
+
+---
+
+### exa_find_similar
+
+Find web pages similar to a given URL using Exa's neural embeddings.
+
+**Requires:** Same as `exa_search`.
+
+**Parameters:**
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `url` | string | Yes | — | URL of the reference page |
+| `num_results` | int | No | `5` | Number of similar results (1-10) |
+| `include_text` | bool | No | `true` | Include extracted page text |
+
+**Returns:** List of similar pages with content
+
+---
+
+### exa_get_contents
+
+Extract clean text content from web pages using Exa.
+
+**Requires:** Same as `exa_search`.
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `urls` | array | Yes | List of URLs to extract content from |
+
+**Returns:** Extracted text content per URL (truncated at 8,000 chars each)
+
+---
+
+### brave_search
+
+Search the web using Brave Search — a privacy-focused search engine with its own independent index.
+
+**Requires:** `BRAVE_API_KEY` environment variable or `services.brave.api_key` in config. No extra package needed.
+
+**Parameters:**
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `query` | string | Yes | — | Search query |
+| `count` | int | No | `5` | Number of results (1-20) |
+| `search_type` | string | No | `"web"` | `"web"` or `"news"` |
+| `freshness` | string | No | `""` | Time filter: `"pd"` (day), `"pw"` (week), `"pm"` (month), `"py"` (year) |
+
+**Returns:** Results with titles, URLs, descriptions, age, extra snippets, FAQ answers, and infoboxes
+
+---
+
+### google_search
+
+Search using the official Google Custom Search JSON API — real Google Search results.
+
+**Requires:** `GOOGLE_API_KEY` and `GOOGLE_CSE_ID` environment variables (or `services.google.api_key` / `services.google.cse_id` in config). No extra package needed. Free tier: 100 queries/day.
+
+**Parameters:**
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `query` | string | Yes | — | Search query |
+| `num_results` | int | No | `10` | Number of results (1-10) |
+| `date_restrict` | string | No | `""` | Date filter: `"d7"` (7 days), `"w2"` (2 weeks), `"m1"` (month), `"y1"` (year) |
+| `language` | string | No | `""` | Language restriction (e.g., `"lang_en"`, `"lang_de"`) |
+| `safe_search` | string | No | `"off"` | `"off"` or `"active"` |
+
+**Returns:** Organic results with titles, URLs, snippets, spelling suggestions, published dates, and meta descriptions
+
+---
+
+### serpapi_search
+
+Search using SerpAPI — structured proxy for Google and Bing with the richest structured output.
+
+**Requires:** `SERPAPI_API_KEY` environment variable or `services.serpapi.api_key` in config. Also requires `google-search-results` package.
+
+**Parameters:**
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `query` | string | Yes | — | Search query |
+| `engine` | string | No | `"google"` | `"google"` or `"bing"` |
+| `num_results` | int | No | `10` | Number of results (1-20) |
+| `search_type` | string | No | `""` | `""` (web), `"nws"` (news), `"isch"` (images), `"shop"` (shopping) |
+| `time_period` | string | No | `""` | `"qdr:d"` (day), `"qdr:w"` (week), `"qdr:m"` (month), `"qdr:y"` (year) |
+
+**Returns:** Answer boxes, knowledge graph, People Also Ask, rich snippets, and organic results
+
+---
+
+## Web & HTTP
+
+### http_get
+
+Make HTTP GET requests.
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `url` | string | Yes | URL to request |
+| `headers` | object | No | Request headers |
+| `timeout` | int | No | Timeout in seconds (default: 30) |
+
+**Returns:** Response body and status code
+
+---
+
+### http_post ⚠️
+
+Make HTTP POST requests with JSON data.
+
+**Requires Confirmation:** Yes
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `url` | string | Yes | URL to request |
+| `data` | object | Yes | JSON data to send |
+| `headers` | object | No | Request headers |
+| `timeout` | int | No | Timeout in seconds (default: 30) |
+
+---
+
+## Weather
+
+### get_weather
+
+Get current weather for any location.
+
+**Requires:** OpenWeather API key (set in config or `OPENWEATHER_API_KEY`)
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `location` | string | Yes | City name or coordinates |
+| `units` | string | No | Units: `metric`, `imperial` (default: metric) |
+
+**Returns:**
+```json
+{
+  "temperature": 22,
+  "feels_like": 24,
+  "humidity": 65,
+  "description": "partly cloudy",
+  "wind_speed": 12
+}
+```
+
+---
+
+## NLP Tools
+
+### analyze_sentiment
+
+Analyze text sentiment.
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `text` | string | Yes | Text to analyze |
+
+**Returns:**
+```json
+{
+  "sentiment": "positive",
+  "polarity": 0.75,
+  "subjectivity": 0.6
+}
+```
+
+- **polarity:** -1.0 (negative) to 1.0 (positive)
+- **subjectivity:** 0.0 (objective) to 1.0 (subjective)
+
+---
+
+### summarize_text
+
+Summarize long text by extracting important sentences.
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `text` | string | Yes | Text to summarize |
+| `num_sentences` | int | No | Number of sentences (default: 3) |
+
+---
+
+### extract_keywords
+
+Extract the most important keywords from text.
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `text` | string | Yes | Text to analyze |
+| `num_keywords` | int | No | Number of keywords (default: 10) |
+
+---
+
+## Knowledge Base
+
+### query_knowledge_base
+
+Search the knowledge base for information from uploaded documents.
+
+**Requires:** Vector store built with `python cogtrix.py --ingest`
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `question` | string | Yes | The question or topic to search for |
+| `k` | int | No | Number of results to return (default: 4, max: 10) |
+
+**Returns:** Relevant document chunks with sources
+
+See [RAG_GUIDE.md](RAG_GUIDE.md) for setup instructions.
+
+---
+
+## Delegation
+
+### delegate_task
+
+Delegate a single task to another LLM model.
+
+**Parameters:**
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `task` | string | Yes | — | Task description |
+| `context` | string | No | `""` | Relevant context/data for the task |
+| `response_format` | string | No | `"text"` | Expected format: `text`, `json`, `code`, `markdown` |
+| `json_schema` | string | No | — | Expected JSON structure (if `response_format="json"`) |
+| `provider` | string | No | — | Provider name or alias |
+| `model` | string | No | — | Model alias or model name |
+| `timeout` | int | No | `60` | Timeout in seconds (10-300) |
+| `temperature` | float | No | `0.7` | Model temperature (0.0-2.0) |
+
+**Model Resolution:**
+```
+model: "fast"                    → Uses string alias from config
+model: "deep"                    → Uses object alias (with num_ctx, temperature)
+model: "ollama/llama3:8b"        → Direct provider/model
+model: "openai/gpt-4o"           → Direct provider/model
+```
+
+Object aliases can override `num_ctx`, `temperature`, and `timeout` per delegation call. See [CONFIGURATION.md](CONFIGURATION.md#model-alias-formats) for alias format details.
+
+---
+
+### delegate_parallel
+
+Run multiple tasks in parallel across LLM models.
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `tasks` | array | Yes | List of task objects |
+| `timeout` | int | No | Timeout per task |
+
+**Task Object:**
+```json
+{
+  "task": "Summarize this article",
+  "model": "fast",
+  "context": "Article text here...",
+  "provider": "ollama",
+  "temperature": 0.5,
+  "response_format": "text"
+}
+```
+
+Only `task` is required; other fields are optional.
+
+**Returns:** List of results from all tasks
+
+---
+
+## Deep Reasoning
+
+### deep_think
+
+Tree-of-Thought with Chain-of-Thought Reflection engine for complex problems.
+
+**Also available as:** `/think <task>` slash command (invokes deep_think directly, bypassing agent tool selection).
+
+**How It Works:**
+
+The engine runs multiple iterations, each with three phases:
+
+1. **Branch** — Generate N fundamentally different approaches (1 LLM call)
+2. **Develop** — Full Chain-of-Thought for each approach in parallel: Plan → Execute → Observe → Reflect (N parallel LLM calls)
+3. **Converge** — Evaluate all solutions, cross-pollinate best ideas, synthesize an improved solution (1 LLM call)
+
+Between iterations, the reflection output feeds into the next branching phase, progressively refining the solution. Stops when confidence is high or max iterations reached.
+
+**Parameters:**
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `task` | string | Yes | — | Problem to solve through deep reasoning |
+| `context` | string | No | `""` | Additional context or constraints |
+| `max_iterations` | int | No | `3` | Reflection-revision cycles (1-5) |
+| `num_branches` | int | No | `3` | Parallel approaches per iteration (2-5) |
+| `beam_width` | int | No | `2` | Best paths to keep between iterations (1-3) |
+
+**LLM calls per iteration:** N + 2 (where N = `num_branches`)
+
+**Typical duration:** 1-5 minutes depending on model speed and parameters.
+
+**Returns:** Structured analysis report with:
+- Scored approaches from each iteration
+- Reflection insights
+- Final synthesized solution with confidence rating
+
+**When the LLM uses this tool automatically:**
+
+The agent is guided to use `deep_think` when it encounters:
+- Problems with multiple valid approaches or significant trade-offs
+- Requests for thorough analysis, deep research, or "think step by step"
+- Architecture/design decisions, strategy planning
+- Complex debugging where the root cause is unclear
+- Comparing or evaluating multiple options systematically
+
+In **reasoning mode** (`-M reasoning`), the agent receives extra encouragement to use this tool for decisions with trade-offs.
+
+**Example:**
+```
+deep_think(
+  task="Design a caching strategy for a microservices architecture
+        with 50 services and mixed read/write workloads",
+  context="Budget: moderate. Must handle 10K req/s. Latency < 50ms.",
+  max_iterations=3,
+  num_branches=3
+)
+```
+
+---
+
+## See Also
+
+- [CONFIGURATION.md](CONFIGURATION.md) — Tool configuration
+- [DEVELOPMENT.md](DEVELOPMENT.md) — Adding custom tools
+- [DEEPTHINK.md](DEEPTHINK.md) — Deep Think reasoning guide
+- [RAG_GUIDE.md](RAG_GUIDE.md) — Knowledge base setup

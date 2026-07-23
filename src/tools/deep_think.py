@@ -1,0 +1,960 @@
+"""
+Deep Think — Tree-of-Thought with Chain-of-Thought Reflection.
+
+Implements autonomous, iterative deep reasoning through parallel
+exploration of solution paths with structured self-reflection:
+
+    Plan → Execute → Observe → Reflect → Revise → Retry
+
+Architecture:
+
+    ┌─────────────────────────────────────────────────┐
+    │            ITERATION LOOP                        │
+    │                                                  │
+    │  ┌─────────┐   ┌──────────┐   ┌────────────┐   │
+    │  │ BRANCH  │──→│ DEVELOP  │──→│  CONVERGE  │   │
+    │  │(1 call) │   │(N calls) │   │  (1 call)  │   │
+    │  │Generate │   │Plan+Exec │   │Eval+Reflect│   │
+    │  │N ideas  │   │+Observe  │   │+Synthesize │   │
+    │  └─────────┘   └──────────┘   └─────┬──────┘   │
+    │                                      │          │
+    │       ┌──────────────────────────────┘          │
+    │       │ reflection feeds next iteration          │
+    │       ▼                                          │
+    │  Converged? ──No──→ Next iteration               │
+    │       │                                          │
+    │      Yes                                         │
+    │       │                                          │
+    │       ▼                                          │
+    │  FINAL SOLUTION                                  │
+    └─────────────────────────────────────────────────┘
+
+Each DEVELOP call follows Chain-of-Thought with Reflection:
+    Plan → Execute → Observe → Reflect
+
+The CONVERGE phase performs:
+    Evaluate → Cross-pollinate → Synthesize → Decide
+"""
+
+import json
+import logging
+import re
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass, field
+from typing import Any
+
+from pydantic import BaseModel, Field
+
+log = logging.getLogger("cogtrix")
+
+
+# ── Module-level configuration ──────────────────────────────────────────
+
+_config: dict[str, Any] = {}
+
+
+def configure_deep_think(config: dict[str, Any]) -> None:
+    """
+    Set runtime configuration.  Called from cogtrix.py during startup.
+
+    Expected keys:
+        providers       – dict of named provider configs
+        default_provider – name of the active provider
+        default_model    – model name
+    """
+    _config.update(config)
+
+
+# ── Data structures ─────────────────────────────────────────────────────
+
+
+@dataclass
+class ThoughtBranch:
+    """A single reasoning branch in the thought tree."""
+
+    id: str
+    name: str
+    strategy: str
+    rationale: str
+    risks: str = ""
+
+    # Populated during DEVELOP phase (CoT)
+    plan: str = ""
+    execution: str = ""
+    solution: str = ""
+    observation: str = ""
+    reflection: str = ""
+    confidence: float = 0.0
+    strengths: list[str] = field(default_factory=list)
+    weaknesses: list[str] = field(default_factory=list)
+
+    # Populated during CONVERGE phase
+    score: float = 0.0
+    verdict: str = ""
+
+
+@dataclass
+class IterationResult:
+    """Captures the outcome of a single think→develop→converge cycle."""
+
+    iteration: int
+    branches: list[ThoughtBranch]
+    best_solution: str
+    synthesis_reasoning: str
+    confidence: float
+    reflection_summary: str
+    insights: list[str] = field(default_factory=list)
+    should_continue: bool = True
+    next_focus: str = ""
+
+
+# ── LLM utilities ───────────────────────────────────────────────────────
+
+
+def _create_llm(temperature: float = 0.7) -> Any:
+    """Create an LLM from the stored module config (mirrors delegate._create_llm)."""
+    provider_name = _config.get("default_provider", "openai")
+    providers = _config.get("providers", {})
+    prov_cfg = providers.get(provider_name, {})
+    prov_type = prov_cfg.get("type", provider_name)
+    model = _config.get("default_model") or prov_cfg.get("model")
+
+    if prov_type == "openai":
+        try:
+            from langchain_openai import ChatOpenAI
+        except ImportError as exc:
+            raise ImportError(
+                "langchain-openai is required for deep_think with OpenAI providers"
+            ) from exc
+        import os
+
+        kwargs: dict[str, Any] = {
+            "model": model or "gpt-4o-mini",
+            "temperature": temperature,
+            "max_retries": 3,
+        }
+        api_key = prov_cfg.get("api_key") or os.getenv("OPENAI_API_KEY")
+        if api_key:
+            kwargs["api_key"] = api_key
+        base_url = prov_cfg.get("base_url")
+        if base_url:
+            kwargs["base_url"] = base_url
+        return ChatOpenAI(**kwargs)
+
+    if prov_type == "ollama":
+        try:
+            from langchain_ollama import ChatOllama
+        except ImportError as exc:
+            raise ImportError(
+                "langchain-ollama is required for deep_think with Ollama providers"
+            ) from exc
+
+        ollama_kwargs: dict[str, Any] = {
+            "model": model or "llama3:8b",
+            "base_url": prov_cfg.get("base_url") or "http://localhost:11434",
+            "temperature": temperature,
+        }
+        num_ctx = prov_cfg.get("num_ctx")
+        if num_ctx is not None:
+            ollama_kwargs["num_ctx"] = num_ctx
+        return ChatOllama(**ollama_kwargs)
+
+    raise ValueError(f"Unsupported provider type for deep_think: {prov_type}")
+
+
+def _call_llm(llm: Any, prompt: str, timeout: int = 180) -> str:
+    """Invoke *llm* with a single human message; returns text."""
+    from langchain_core.messages import HumanMessage
+
+    try:
+        # Use a thread so we can enforce a wall-clock timeout
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(llm.invoke, [HumanMessage(content=prompt)])
+            result = future.result(timeout=timeout)
+
+        content = result.content
+        if isinstance(content, list):
+            # Multimodal fallback
+            content = " ".join(str(c.get("text", c) if isinstance(c, dict) else c) for c in content)
+        return str(content) if content else ""
+    except Exception as exc:  # noqa: BLE001 — best-effort; caller handles empty
+        log.warning("deep_think LLM call failed: %s", exc)
+        return ""
+
+
+def _call_llm_parallel(llm: Any, prompts: list[str], timeout: int = 180) -> list[str]:
+    """Fire *prompts* in parallel and return results in order."""
+    from langchain_core.messages import HumanMessage
+
+    results: list[str] = [""] * len(prompts)
+
+    def _invoke(idx: int, prompt: str) -> tuple:
+        try:
+            res = llm.invoke([HumanMessage(content=prompt)])
+            content = res.content
+            if isinstance(content, list):
+                content = " ".join(
+                    str(c.get("text", c) if isinstance(c, dict) else c) for c in content
+                )
+            return idx, str(content) if content else ""
+        except Exception as exc:  # noqa: BLE001
+            log.warning("deep_think parallel call %d failed: %s", idx, exc)
+            return idx, ""
+
+    workers = min(len(prompts), 5)
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {pool.submit(_invoke, i, p): i for i, p in enumerate(prompts)}
+        for future in as_completed(futures, timeout=timeout * 2):
+            try:
+                idx, text = future.result(timeout=timeout)
+                results[idx] = text
+            except Exception:  # noqa: BLE001  # nosec B110
+                pass
+
+    return results
+
+
+# ── Type-coercion helpers ────────────────────────────────────────────────
+
+
+def _ensure_str(value: Any) -> str:
+    """Coerce *value* to a string.  Lists/dicts are joined or serialized."""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        return ", ".join(_ensure_str(item) for item in value)
+    if isinstance(value, dict):
+        try:
+            return json.dumps(value, ensure_ascii=False)
+        except (TypeError, ValueError):
+            return str(value)
+    return str(value) if value is not None else ""
+
+
+def _ensure_str_list(value: Any) -> list[str]:
+    """Coerce *value* to a flat list of strings."""
+    if not isinstance(value, list):
+        return [str(value)] if value else []
+    return [_ensure_str(item) for item in value]
+
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    """Coerce *value* to float, returning *default* on failure."""
+    if isinstance(value, (int, float)):
+        return float(value)
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+# ── JSON helpers ────────────────────────────────────────────────────────
+
+
+def _parse_json(text: str) -> Any:
+    """Robustly extract the first JSON object/array from *text*."""
+    if not text:
+        return None
+
+    # 1. Try direct parse
+    try:
+        return json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        pass
+
+    # 2. Try extracting from markdown code fences
+    for pattern in (
+        r"```json\s*\n?(.*?)\n?\s*```",
+        r"```\s*\n?(.*?)\n?\s*```",
+    ):
+        m = re.search(pattern, text, re.DOTALL)
+        if m:
+            try:
+                return json.loads(m.group(1))
+            except (json.JSONDecodeError, TypeError):
+                continue
+
+    # 3. Find first balanced { … } or [ … ]
+    for open_ch, close_ch in ("{", "}"), ("[", "]"):
+        start = text.find(open_ch)
+        if start == -1:
+            continue
+        depth = 0
+        for i in range(start, len(text)):
+            if text[i] == open_ch:
+                depth += 1
+            elif text[i] == close_ch:
+                depth -= 1
+                if depth == 0:
+                    try:
+                        return json.loads(text[start : i + 1])
+                    except (json.JSONDecodeError, TypeError):
+                        break
+    return None
+
+
+# ── Progress output ─────────────────────────────────────────────────────
+
+
+def _progress(msg: str) -> None:
+    """Print a visible progress line to stdout.
+
+    Temporarily pauses the global activity spinner (if running) so the
+    progress line is not garbled by the spinner's carriage-return rewriting.
+    """
+    import sys
+
+    try:
+        from cogtrix import _spinner
+
+        _spinner.pause()
+    except Exception:  # noqa: BLE001
+        pass  # nosec B110
+
+    # Clear any leftover spinner characters on the current line
+    sys.stdout.write("\033[2K\r")
+    sys.stdout.flush()
+    print(f"  [think] {msg}")
+
+    try:
+        from cogtrix import _spinner
+
+        _spinner.resume()
+    except Exception:  # noqa: BLE001
+        pass  # nosec B110
+
+
+# ── Prompt templates ────────────────────────────────────────────────────
+
+_BRANCH_PROMPT = """\
+You are a strategic problem-solver.  Given the task below, generate \
+{num_branches} **fundamentally different** approaches to solve it.
+
+TASK:
+{task}
+{context_block}
+{reflection_block}
+For EACH approach provide:
+1. name        — short, descriptive title
+2. strategy    — detailed description of the approach
+3. rationale   — why this approach could work
+4. risks       — potential pitfalls
+
+Make the approaches as DIVERSE as possible — vary methodology, \
+perspective, and abstraction level, not just surface details.
+
+Return ONLY a JSON array (no other text):
+[
+  {{"name": "...", "strategy": "...", "rationale": "...", "risks": "..."}},
+  ...
+]"""
+
+_DEVELOP_PROMPT = """\
+You are executing ONE specific approach to solve a task.  Follow the \
+Chain-of-Thought process meticulously.
+
+TASK:
+{task}
+
+APPROACH: {approach_name}
+STRATEGY: {approach_strategy}
+{context_block}
+
+Work through these steps IN ORDER:
+
+## 1. PLAN
+Break this approach into concrete, actionable steps.
+
+## 2. EXECUTE
+Work through each step.  Show full reasoning.  Produce the complete solution.
+
+## 3. OBSERVE
+Critically examine your solution:
+  - Does it fully address the task?
+  - Are there gaps or hidden assumptions?
+  - How good is the result?
+
+## 4. REFLECT
+  - What went well?
+  - What was difficult or uncertain?
+  - What could be improved?
+  - Rate your confidence 0-10.
+
+Return ONLY a JSON object (no other text):
+{{
+  "plan": "...",
+  "execution": "...",
+  "solution": "...",
+  "observation": "...",
+  "reflection": "...",
+  "confidence": 7,
+  "strengths": ["...", "..."],
+  "weaknesses": ["...", "..."]
+}}"""
+
+_CONVERGE_PROMPT = """\
+You are a meta-analyst reviewing {n_solutions} solution attempts for a task.
+
+TASK:
+{task}
+{context_block}
+
+## SOLUTIONS
+{solutions_block}
+
+Perform the following analysis:
+
+### 1. EVALUATE
+Score each solution 0-10 on correctness, completeness, elegance, and \
+practicality.  Give a one-line verdict.
+
+### 2. REFLECT
+  - What patterns emerge from the best solutions?
+  - What common mistakes appeared?
+  - What was missed by ALL approaches?
+  - What surprising insights emerged?
+
+### 3. SYNTHESIZE
+Combine the best elements from all solutions into a SINGLE superior \
+solution.  Address every weakness identified.  Incorporate missed elements.
+
+### 4. DECIDE
+  - Confidence in the synthesized solution (0-10).
+  - Should we iterate further?  (true/false)
+  - If true, what should the next iteration focus on?
+
+Return ONLY a JSON object (no other text):
+{{
+  "evaluations": [
+    {{"name": "...", "score": 8.0, "verdict": "..."}},
+    ...
+  ],
+  "reflection": {{
+    "patterns": "...",
+    "mistakes": "...",
+    "missed": "...",
+    "insights": "..."
+  }},
+  "synthesis": {{
+    "solution": "...",
+    "reasoning": "...",
+    "improvements_made": ["...", "..."]
+  }},
+  "confidence": 8.0,
+  "should_continue": true,
+  "next_focus": "..."
+}}"""
+
+
+# ── Core phases ─────────────────────────────────────────────────────────
+
+
+def _phase_branch(
+    llm: Any,
+    task: str,
+    context: str,
+    num_branches: int,
+    prior_reflection: str = "",
+    timeout: int = 180,
+) -> list[ThoughtBranch]:
+    """BRANCH phase — generate *num_branches* diverse approaches."""
+
+    context_block = f"\nCONTEXT:\n{context}" if context else ""
+    reflection_block = ""
+    if prior_reflection:
+        reflection_block = (
+            "\nPRIOR REFLECTION (use this to improve on previous attempts):\n"
+            f"{prior_reflection}\n"
+        )
+
+    prompt = _BRANCH_PROMPT.format(
+        num_branches=num_branches,
+        task=task,
+        context_block=context_block,
+        reflection_block=reflection_block,
+    )
+
+    raw = _call_llm(llm, prompt, timeout=timeout)
+    parsed = _parse_json(raw)
+
+    branches: list[ThoughtBranch] = []
+    if isinstance(parsed, list):
+        for idx, item in enumerate(parsed):
+            if not isinstance(item, dict):
+                continue
+            branches.append(
+                ThoughtBranch(
+                    id=f"b{idx}",
+                    name=item.get("name", f"Approach {idx + 1}"),
+                    strategy=item.get("strategy", ""),
+                    rationale=item.get("rationale", ""),
+                    risks=item.get("risks", ""),
+                )
+            )
+
+    # Fallback: if parsing failed, create a single generic branch
+    if not branches:
+        log.warning("Branch phase: JSON parse failed, creating fallback branch")
+        branches.append(
+            ThoughtBranch(
+                id="b0",
+                name="Direct approach",
+                strategy=raw[:500] if raw else "Solve the task directly.",
+                rationale="Fallback — structured branching failed.",
+                risks="Single approach limits exploration.",
+            )
+        )
+
+    return branches
+
+
+def _phase_develop(
+    llm: Any,
+    task: str,
+    context: str,
+    branches: list[ThoughtBranch],
+    timeout: int = 180,
+) -> list[ThoughtBranch]:
+    """DEVELOP phase — full CoT for each branch (parallel)."""
+
+    context_block = f"\nCONTEXT:\n{context}" if context else ""
+
+    prompts = [
+        _DEVELOP_PROMPT.format(
+            task=task,
+            approach_name=b.name,
+            approach_strategy=b.strategy,
+            context_block=context_block,
+        )
+        for b in branches
+    ]
+
+    responses = _call_llm_parallel(llm, prompts, timeout=timeout)
+
+    for branch, raw in zip(branches, responses, strict=True):
+        parsed = _parse_json(raw)
+        if isinstance(parsed, dict):
+            branch.plan = _ensure_str(parsed.get("plan", ""))
+            branch.execution = _ensure_str(parsed.get("execution", ""))
+            branch.solution = _ensure_str(parsed.get("solution", ""))
+            branch.observation = _ensure_str(parsed.get("observation", ""))
+            branch.reflection = _ensure_str(parsed.get("reflection", ""))
+            branch.confidence = _safe_float(parsed.get("confidence", 0))
+            branch.strengths = _ensure_str_list(parsed.get("strengths", []))
+            branch.weaknesses = _ensure_str_list(parsed.get("weaknesses", []))
+        elif raw:
+            # Fallback: treat the entire response as the solution
+            branch.solution = raw
+            branch.confidence = 3.0
+
+    return branches
+
+
+def _phase_converge(
+    llm: Any,
+    task: str,
+    context: str,
+    branches: list[ThoughtBranch],
+    iteration: int,
+    max_iterations: int,
+    timeout: int = 180,
+) -> IterationResult:
+    """CONVERGE phase — evaluate, reflect, synthesize."""
+
+    context_block = f"\nCONTEXT:\n{context}" if context else ""
+
+    # Build the solutions block for the prompt
+    solution_parts = []
+    for b in branches:
+        strengths = ", ".join(_ensure_str_list(b.strengths)) if b.strengths else "not assessed"
+        weaknesses = ", ".join(_ensure_str_list(b.weaknesses)) if b.weaknesses else "not assessed"
+        solution_parts.append(
+            f"### {b.name}\n"
+            f"Strategy: {b.strategy}\n"
+            f"Solution: {b.solution}\n"
+            f"Self-assessed confidence: {b.confidence}/10\n"
+            f"Strengths: {strengths}\n"
+            f"Weaknesses: {weaknesses}\n"
+            f"Reflection: {b.reflection}\n"
+        )
+    solutions_block = "\n".join(solution_parts)
+
+    prompt = _CONVERGE_PROMPT.format(
+        n_solutions=len(branches),
+        task=task,
+        context_block=context_block,
+        solutions_block=solutions_block,
+    )
+
+    raw = _call_llm(llm, prompt, timeout=timeout)
+    parsed = _parse_json(raw)
+
+    # Defaults
+    best_solution = ""
+    synthesis_reasoning = ""
+    confidence = 0.0
+    reflection_summary = ""
+    insights: list[str] = []
+    should_continue = iteration < max_iterations
+    next_focus = ""
+
+    if isinstance(parsed, dict):
+        # Apply evaluation scores back to branches.
+        # Primary: match by index (most reliable).
+        # Fallback: match by name (for LLMs that reorder evaluations).
+        evaluations = parsed.get("evaluations", [])
+        if isinstance(evaluations, list):
+            matched_ids: set[str] = set()
+            # Pass 1: index-based matching
+            for idx, ev in enumerate(evaluations):
+                if not isinstance(ev, dict):
+                    continue
+                if idx < len(branches):
+                    branches[idx].score = _safe_float(ev.get("score", 0))
+                    branches[idx].verdict = _ensure_str(ev.get("verdict", ""))
+                    matched_ids.add(branches[idx].id)
+            # Pass 2: name-based fallback for any unmatched branches
+            for ev in evaluations:
+                if not isinstance(ev, dict):
+                    continue
+                ev_name = _ensure_str(ev.get("name", ""))
+                if not ev_name:
+                    continue
+                ev_name_lower = ev_name.lower().strip()
+                for b in branches:
+                    if b.id in matched_ids:
+                        continue
+                    if b.name.lower().strip() == ev_name_lower:
+                        b.score = _safe_float(ev.get("score", 0))
+                        b.verdict = _ensure_str(ev.get("verdict", ""))
+                        matched_ids.add(b.id)
+                        break
+
+        # Extract reflection
+        refl = parsed.get("reflection", {})
+        if isinstance(refl, dict):
+            parts = [
+                _ensure_str(refl.get("patterns", "")),
+                _ensure_str(refl.get("mistakes", "")),
+                _ensure_str(refl.get("missed", "")),
+                _ensure_str(refl.get("insights", "")),
+            ]
+            reflection_summary = "\n".join(p for p in parts if p)
+            if refl.get("insights"):
+                insights.append(_ensure_str(refl["insights"]))
+
+        # Extract synthesis
+        synth = parsed.get("synthesis", {})
+        if isinstance(synth, dict):
+            best_solution = _ensure_str(synth.get("solution", ""))
+            synthesis_reasoning = _ensure_str(synth.get("reasoning", ""))
+            improvements = synth.get("improvements_made", [])
+            if isinstance(improvements, list):
+                for imp in improvements:
+                    insights.append(_ensure_str(imp))
+
+        confidence = _safe_float(parsed.get("confidence", 0))
+        should_continue = bool(parsed.get("should_continue", should_continue))
+        next_focus = _ensure_str(parsed.get("next_focus", ""))
+    elif raw:
+        # Fallback: use the raw text as the synthesis
+        best_solution = raw
+        confidence = 3.0
+
+    return IterationResult(
+        iteration=iteration,
+        branches=branches,
+        best_solution=best_solution,
+        synthesis_reasoning=synthesis_reasoning,
+        confidence=confidence,
+        reflection_summary=reflection_summary,
+        insights=insights,
+        should_continue=should_continue and (iteration < max_iterations),
+        next_focus=next_focus,
+    )
+
+
+# ── Output formatting ───────────────────────────────────────────────────
+
+
+def _format_report(
+    task: str,
+    iterations: list[IterationResult],
+    total_seconds: float,
+) -> str:
+    """Build a human-readable report from all iterations."""
+
+    lines: list[str] = []
+    lines.append("# Deep Think — Tree-of-Thought Analysis\n")
+    lines.append(f"**Task:** {task}\n")
+
+    for it in iterations:
+        lines.append(f"## Iteration {it.iteration}")
+
+        # Sort branches by score descending
+        ranked = sorted(it.branches, key=lambda b: b.score, reverse=True)
+        lines.append(f"\nApproaches explored ({len(ranked)}):\n")
+        for b in ranked:
+            best_marker = " ★" if b is ranked[0] else ""
+            lines.append(
+                f"- **[{b.score:.1f}/10]** {b.name}{best_marker} "
+                f"— {b.verdict or b.strategy[:80]}"
+            )
+
+        if it.reflection_summary:
+            lines.append(f"\n**Reflection:** {it.reflection_summary}")
+
+        if it.next_focus and it.should_continue:
+            lines.append(f"\n**Next focus:** {it.next_focus}")
+
+        lines.append("")
+
+    # Final solution
+    final = iterations[-1] if iterations else None
+    if final:
+        lines.append("---")
+        lines.append(f"## Final Solution (confidence: {final.confidence:.1f}/10)\n")
+        lines.append(final.best_solution)
+
+        if final.synthesis_reasoning:
+            lines.append(f"\n**Reasoning:** {final.synthesis_reasoning}")
+
+        if final.insights:
+            lines.append("\n**Key insights:**\n")
+            seen = set()
+            for insight in final.insights:
+                if insight and insight not in seen:
+                    seen.add(insight)
+                    lines.append(f"- {insight}")
+
+    total_branches = sum(len(it.branches) for it in iterations)
+    lines.append(
+        f"\n---\n*{len(iterations)} iterations, "
+        f"{total_branches} branches explored, "
+        f"{total_seconds:.1f}s elapsed*"
+    )
+
+    return "\n".join(lines)
+
+
+# ── Main orchestrator ───────────────────────────────────────────────────
+
+
+def deep_think(
+    task: str,
+    context: str = "",
+    max_iterations: int = 3,
+    num_branches: int = 3,
+    beam_width: int = 2,
+) -> str:
+    """
+    Tree-of-Thought with Chain-of-Thought Reflection.
+
+    Explores multiple solution paths in parallel, evaluates and reflects
+    on each, then synthesizes the best elements into an improved solution.
+    Iterates through Plan → Execute → Observe → Reflect → Revise → Retry
+    cycles until convergence or max_iterations.
+
+    Best for complex problems requiring thorough analysis.
+    Makes multiple LLM calls; may take 1-5 minutes.
+
+    Args:
+        task:           Problem description.
+        context:        Additional context or constraints.
+        max_iterations: Maximum reflection-revision cycles (1-5).
+        num_branches:   Parallel approaches per iteration (2-5).
+        beam_width:     Best branches to keep per iteration (1-3).
+
+    Returns:
+        Formatted analysis report with the best solution.
+    """
+    # Guard: configuration must be set
+    if not _config.get("providers") and not _config.get("default_provider"):
+        return (
+            "**Deep Think error:** Not configured. " "Ensure the agent has a provider configured."
+        )
+
+    # Clamp parameters
+    max_iterations = max(1, min(int(max_iterations), 5))
+    num_branches = max(2, min(int(num_branches), 5))
+    beam_width = max(1, min(int(beam_width), num_branches))
+
+    _progress(f"Starting deep analysis — " f"{max_iterations} iterations × {num_branches} branches")
+    start_time = time.time()
+
+    try:
+        llm = _create_llm(temperature=0.7)
+    except Exception as exc:
+        return f"**Deep Think error:** Failed to create LLM — {exc}"
+
+    iterations: list[IterationResult] = []
+    prior_reflection = ""
+
+    for iteration in range(1, max_iterations + 1):
+        iter_start = time.time()
+        _progress(f"Iteration {iteration}/{max_iterations} — branching…")
+
+        # ── BRANCH ──────────────────────────────────────────────────
+        branches = _phase_branch(
+            llm,
+            task,
+            context,
+            num_branches,
+            prior_reflection=prior_reflection,
+        )
+        branch_names = ", ".join(b.name for b in branches)
+        _progress(f"  {len(branches)} approaches: {branch_names}")
+
+        # ── DEVELOP (parallel CoT) ─────────────────────────────────
+        _progress(f"  Developing {len(branches)} solutions in parallel…")
+        branches = _phase_develop(llm, task, context, branches)
+
+        developed = sum(1 for b in branches if b.solution)
+        _progress(f"  {developed}/{len(branches)} solutions produced")
+
+        # ── CONVERGE ────────────────────────────────────────────────
+        _progress("  Evaluating, reflecting, synthesizing…")
+        result = _phase_converge(
+            llm,
+            task,
+            context,
+            branches,
+            iteration=iteration,
+            max_iterations=max_iterations,
+        )
+        iterations.append(result)
+
+        elapsed = time.time() - iter_start
+        _progress(
+            f"  Iteration {iteration} done — "
+            f"confidence {result.confidence:.1f}/10  "
+            f"({elapsed:.1f}s)"
+        )
+
+        # ── BEAM SEARCH: keep only top branches for context ────────
+        ranked = sorted(result.branches, key=lambda b: b.score, reverse=True)
+        kept = ranked[:beam_width]
+        top_names = ", ".join(b.name for b in kept)
+        _progress(f"  Keeping top {beam_width}: {top_names}")
+
+        # ── CONVERGENCE CHECK ──────────────────────────────────────
+        if not result.should_continue:
+            _progress("  Converged — no further iteration needed.")
+            break
+
+        # Require at least 2 iterations before allowing early stop
+        # on high confidence; a hallucinating LLM can self-assess
+        # 9+/10 on the very first attempt.
+        if result.confidence >= 9.5 and iteration >= 2:
+            _progress("  High confidence (≥9.5) — stopping early.")
+            break
+
+        # Build reflection context for next iteration, including the
+        # actual solutions from the surviving branches so the next
+        # iteration can build on them (not start from scratch).
+        surviving_solutions = "\n\n".join(
+            f"### {b.name} (score {b.score:.1f}/10)\n{b.solution}" for b in kept if b.solution
+        )
+        prior_reflection = (
+            f"Previous best confidence: {result.confidence}/10\n"
+            f"Reflection: {result.reflection_summary}\n"
+            f"Focus for improvement: {result.next_focus}\n"
+        )
+        if surviving_solutions:
+            prior_reflection += (
+                f"\nBest solutions from previous iteration "
+                f"(build on these, don't start from scratch):\n"
+                f"{surviving_solutions}\n"
+            )
+
+    total_seconds = time.time() - start_time
+    total_branches = sum(len(it.branches) for it in iterations)
+    _progress(
+        f"Complete — {len(iterations)} iterations, "
+        f"{total_branches} branches, {total_seconds:.1f}s"
+    )
+
+    return _format_report(task, iterations, total_seconds)
+
+
+# ── Pydantic input schema ──────────────────────────────────────────────
+
+
+class DeepThinkInput(BaseModel):
+    """Input schema for the deep_think tool."""
+
+    task: str = Field(description="The task or problem to solve through deep reasoning")
+    context: str = Field(
+        default="",
+        description=(
+            "CRITICAL: This tool runs in isolation — it cannot see your "
+            "conversation history or previous tool results. You MUST paste "
+            "the FULL text of any relevant data (search results, web page "
+            "content, file contents, etc.) into this field verbatim. "
+            "Do NOT pass references like 'see search result 1' or "
+            "'the data from the previous step' — the tool will hallucinate "
+            "if it doesn't have the actual data."
+        ),
+    )
+    max_iterations: int = Field(
+        default=3,
+        description="Maximum reflection-revision cycles (1-5)",
+    )
+    num_branches: int = Field(
+        default=3,
+        description="Number of parallel approaches per iteration (2-5)",
+    )
+    beam_width: int = Field(
+        default=2,
+        description="Number of best paths to keep between iterations (1-3)",
+    )
+
+
+# ── Tool registration ──────────────────────────────────────────────────
+
+TOOL_CONFIG = {
+    "name": "deep_think",
+    "description": (
+        "Deep reasoning engine using Tree-of-Thought with Chain-of-Thought "
+        "Reflection. Explores multiple solution paths in parallel, evaluates "
+        "and reflects on each, then synthesizes the best elements into an "
+        "improved solution. Iterates through Plan → Execute → Observe → "
+        "Reflect → Revise → Retry cycles.\n"
+        "\n"
+        "TRIGGER PHRASES — You MUST call this tool when the user says any of:\n"
+        "  'think deep', 'think deeply', 'deep think', 'analyze thoroughly',\n"
+        "  'think step by step', 'consider all angles', 'explore approaches',\n"
+        "  'thorough analysis', 'deep analysis', 'deep reasoning'.\n"
+        "These are explicit requests for THIS tool, not general instructions.\n"
+        "\n"
+        "⚠ ISOLATION WARNING: This tool runs as an independent reasoning "
+        "engine with its OWN LLM calls. It CANNOT see your conversation "
+        "history, previous tool results, or any data you have gathered. "
+        "You MUST paste ALL relevant data (full search result text, web "
+        "page content, file contents, etc.) into the `context` parameter "
+        "VERBATIM. If you pass references like 'see above results' or "
+        "'search result 1,2,3' instead of the actual text, the tool will "
+        "hallucinate because it has no data to reason about.\n"
+        "\n"
+        "ALSO USE THIS TOOL WHEN:\n"
+        "- The problem has multiple valid approaches and you need to find "
+        "the best one\n"
+        "- Architecture or design decisions with significant trade-offs\n"
+        "- Complex debugging where the root cause is unclear\n"
+        "- Strategy or planning tasks that benefit from exploring alternatives\n"
+        "- Comparing or evaluating multiple options systematically\n"
+        "\n"
+        "Recommended workflow: gather information first (search, http_get, "
+        "etc.), then call deep_think with the full collected data in "
+        "`context`.\n"
+        "\n"
+        "DO NOT use for simple factual questions, quick lookups, or "
+        "straightforward tasks.\n"
+        "Makes multiple LLM calls and may take 1-5 minutes."
+    ),
+    "input_schema": DeepThinkInput,
+    "requires_confirmation": False,
+}
+
+__all__ = ["deep_think", "configure_deep_think", "DeepThinkInput", "TOOL_CONFIG"]

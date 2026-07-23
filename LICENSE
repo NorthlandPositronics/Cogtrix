@@ -1,0 +1,111 @@
+Cogtrix Source-Available License
+Version 1.0, February 2026
+
+Copyright (c) 2026 Northland Positronics (FZE). All rights reserved.
+
+
+1. DEFINITIONS
+
+"Software" means the Cogtrix source code, documentation, configuration
+files, and any other materials contained in this repository.
+
+"Licensor" means Northland Positronics (FZE).
+
+"You" means the individual or entity exercising rights under this License.
+
+
+2. GRANT OF RIGHTS
+
+Subject to the terms and conditions of this License, the Licensor hereby
+grants You a non-exclusive, worldwide, royalty-free, non-transferable,
+non-sublicensable right to:
+
+  a) Use the Software for personal, educational, internal business, or
+     commercial purposes.
+
+  b) View, study, and reference the source code.
+
+  c) Run the Software in its unmodified form.
+
+
+3. RESTRICTIONS
+
+You may NOT, and may not permit others to:
+
+  a) Modify, adapt, alter, translate, or create derivative works based on
+     the Software, in whole or in part.
+
+  b) Rebrand, rename, or otherwise misrepresent the origin, authorship, or
+     identity of the Software.
+
+  c) Redistribute, sublicense, sell, lease, or otherwise transfer the
+     Software, in whole or in part, whether modified or unmodified, without
+     prior written consent from the Licensor.
+
+  d) Remove, alter, or obscure any copyright notices, license texts,
+     trademarks, or other proprietary markings contained in the Software.
+
+  e) Use the name, logo, or trademarks of the Licensor or the Software to
+     endorse or promote products or services without prior written consent.
+
+  f) Incorporate the Software, in whole or in part, into another product or
+     service offered as a competing or substitute offering.
+
+
+4. CONTRIBUTIONS
+
+If You submit any bug report, suggestion, patch, or other contribution to
+the Licensor, You agree that the Licensor may use, modify, and incorporate
+such contribution into the Software without restriction or obligation to
+You, unless a separate written agreement states otherwise.
+
+
+5. DISCLAIMER OF WARRANTY
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE, AND NONINFRINGEMENT. THE LICENSOR DOES
+NOT WARRANT THAT THE SOFTWARE WILL BE ERROR-FREE, UNINTERRUPTED, OR FREE
+OF HARMFUL COMPONENTS.
+
+
+6. LIMITATION OF LIABILITY
+
+IN NO EVENT SHALL THE LICENSOR BE LIABLE FOR ANY DIRECT, INDIRECT,
+INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING BUT
+NOT LIMITED TO PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES, LOSS OF USE,
+DATA, OR PROFITS, OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
+THE SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+
+7. TERMINATION
+
+This License is effective until terminated. Your rights under this License
+terminate automatically and immediately if You fail to comply with any of
+its terms. Upon termination, You must cease all use of the Software and
+destroy all copies in Your possession.
+
+
+8. GENERAL
+
+  a) This License constitutes the entire agreement between You and the
+     Licensor with respect to the Software and supersedes all prior
+     negotiations, representations, or agreements relating to it.
+
+  b) If any provision of this License is held to be unenforceable, the
+     remaining provisions shall remain in full force and effect.
+
+  c) The Licensor reserves the right to release the Software under
+     different license terms or to modify the terms of this License for
+     future versions of the Software. Any such changes will not
+     retroactively affect rights granted under this version of the License.
+
+  d) This License shall be governed by and construed in accordance with the
+     laws of the jurisdiction in which the Licensor is incorporated,
+     without regard to conflict-of-law principles.
+
+
+For licensing inquiries, permissions, or questions, contact:
+Northland Positronics (FZE)

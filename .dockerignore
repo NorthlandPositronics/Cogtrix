@@ -1,0 +1,46 @@
+# Version control
+.git
+.gitignore
+
+# Python artifacts
+__pycache__
+*.py[cod]
+*.egg-info
+.venv
+venv
+
+# IDE / editor
+.vscode
+.idea
+.cursor
+*.swp
+*.swo
+*~
+
+# Environment and config (secrets)
+.env
+.env.local
+.cogtrix.json
+
+# Runtime data
+data/
+*.log
+*.db
+*.sqlite
+*.faiss
+*.pkl
+
+# OS
+.DS_Store
+Thumbs.db
+
+# CI / docs not needed in image
+.github
+docs
+tests
+*.md
+LICENSE
+NOTICE
+Dockerfile
+.dockerignore
+setup.cfg

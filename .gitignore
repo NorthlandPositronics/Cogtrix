@@ -1,0 +1,73 @@
+# ── Python bytecode & build artifacts ─────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# ── Virtual environments ──────────────────────────────────────────
+venv/
+env/
+ENV/
+.venv
+
+# ── IDE & editor ─────────────────────────────────────────────────
+.vscode/
+.idea/
+.cursor
+*.swp
+*.swo
+*~
+
+# ── Cogtrix config files (may contain API keys & secrets) ────────
+# Config search: ./.cogtrix.{json,yml,yaml}, also XDG-style names
+.cogtrix.json
+.cogtrix.yml
+.cogtrix.yaml
+cogtrix.json
+cogtrix.yml
+cogtrix.yaml
+
+# ── Environment & secrets (API keys, credentials) ────────────────
+.env
+.env.*
+*.key
+*.pem
+*.cert
+credentials.json
+secrets.json
+secrets.yaml
+secrets.yml
+
+# ── Runtime data (sessions, history, vector stores) ──────────────
+# The entire data/ directory contains user-specific runtime state:
+# conversation history, readline history, vector DB embeddings.
+data/
+
+# ── Logs (may contain full LLM interactions in debug mode) ───────
+*.log
+
+# ── Databases ────────────────────────────────────────────────────
+*.db
+*.sqlite
+*.sqlite3
+
+# ── OS files ─────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+.coverage

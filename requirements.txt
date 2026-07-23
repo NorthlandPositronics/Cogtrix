@@ -1,0 +1,279 @@
+# Auto-generated from pyproject.toml -- do not edit manually.
+# Regenerate with: uv export --no-hashes --no-header --quiet > requirements.txt
+
+aiohappyeyeballs==2.6.1
+    # via aiohttp
+aiohttp==3.13.3
+    # via langchain-community
+aiosignal==1.4.0
+    # via aiohttp
+annotated-types==0.7.0
+    # via pydantic
+anyio==4.12.1
+    # via
+    #   httpx
+    #   openai
+attrs==25.4.0
+    # via aiohttp
+brotli==1.2.0 ; platform_python_implementation == 'CPython'
+    # via httpx
+brotlicffi==1.2.0.0 ; platform_python_implementation != 'CPython'
+    # via httpx
+certifi==2026.1.4
+    # via
+    #   httpcore
+    #   httpx
+    #   requests
+cffi==2.0.0 ; platform_python_implementation != 'CPython'
+    # via brotlicffi
+charset-normalizer==3.4.4
+    # via requests
+click==8.3.1
+    # via
+    #   ddgs
+    #   nltk
+colorama==0.4.6 ; sys_platform == 'win32'
+    # via
+    #   click
+    #   tqdm
+dataclasses-json==0.6.7
+    # via langchain-community
+ddgs==9.10.0
+    # via cogtrix
+distro==1.9.0
+    # via openai
+faiss-cpu==1.13.2
+    # via cogtrix
+fake-useragent==2.2.0
+    # via ddgs
+frozenlist==1.8.0
+    # via
+    #   aiohttp
+    #   aiosignal
+greenlet==3.3.1 ; platform_machine == 'AMD64' or platform_machine == 'WIN32' or platform_machine == 'aarch64' or platform_machine == 'amd64' or platform_machine == 'ppc64le' or platform_machine == 'win32' or platform_machine == 'x86_64'
+    # via sqlalchemy
+h11==0.16.0
+    # via httpcore
+h2==4.3.0
+    # via httpx
+hpack==4.1.0
+    # via h2
+httpcore==1.0.9
+    # via httpx
+httpx==0.28.1
+    # via
+    #   ddgs
+    #   langgraph-sdk
+    #   langsmith
+    #   ollama
+    #   openai
+httpx-sse==0.4.3
+    # via langchain-community
+hyperframe==6.1.0
+    # via h2
+idna==3.11
+    # via
+    #   anyio
+    #   httpx
+    #   requests
+    #   yarl
+jiter==0.13.0
+    # via openai
+joblib==1.5.3
+    # via nltk
+jsonpatch==1.33
+    # via langchain-core
+jsonpointer==3.0.0
+    # via jsonpatch
+langchain-classic==1.0.1
+    # via langchain-community
+langchain-community==0.4.1
+    # via cogtrix
+langchain-core==1.2.11
+    # via
+    #   cogtrix
+    #   langchain-classic
+    #   langchain-community
+    #   langchain-ollama
+    #   langchain-openai
+    #   langchain-text-splitters
+    #   langgraph
+    #   langgraph-checkpoint
+    #   langgraph-prebuilt
+langchain-ollama==1.0.1
+    # via cogtrix
+langchain-openai==1.1.9
+    # via cogtrix
+langchain-text-splitters==1.1.0
+    # via
+    #   cogtrix
+    #   langchain-classic
+langgraph==1.0.8
+    # via cogtrix
+langgraph-checkpoint==4.0.0
+    # via
+    #   langgraph
+    #   langgraph-prebuilt
+langgraph-prebuilt==1.0.7
+    # via langgraph
+langgraph-sdk==0.3.5
+    # via langgraph
+langsmith==0.7.1
+    # via
+    #   langchain-classic
+    #   langchain-community
+    #   langchain-core
+lxml==6.0.2
+    # via
+    #   ddgs
+    #   python-docx
+markdown-it-py==4.0.0
+    # via rich
+marshmallow==3.26.2
+    # via dataclasses-json
+mdurl==0.1.2
+    # via markdown-it-py
+multidict==6.7.1
+    # via
+    #   aiohttp
+    #   yarl
+mypy-extensions==1.1.0
+    # via typing-inspect
+nltk==3.9.2
+    # via textblob
+nodeenv==1.10.0
+    # via pyright
+numpy==2.4.2
+    # via
+    #   faiss-cpu
+    #   langchain-community
+ollama==0.6.1
+    # via langchain-ollama
+openai==2.14.0
+    # via
+    #   cogtrix
+    #   langchain-openai
+orjson==3.11.7
+    # via
+    #   langgraph-sdk
+    #   langsmith
+ormsgpack==1.12.2
+    # via langgraph-checkpoint
+packaging==26.0
+    # via
+    #   faiss-cpu
+    #   langchain-core
+    #   langsmith
+    #   marshmallow
+primp==0.15.0
+    # via ddgs
+propcache==0.4.1
+    # via
+    #   aiohttp
+    #   yarl
+pycparser==3.0 ; implementation_name != 'PyPy' and platform_python_implementation != 'CPython'
+    # via cffi
+pydantic==2.12.5
+    # via
+    #   cogtrix
+    #   langchain-classic
+    #   langchain-core
+    #   langgraph
+    #   langsmith
+    #   ollama
+    #   openai
+    #   pydantic-settings
+pydantic-core==2.41.5
+    # via pydantic
+pydantic-settings==2.12.0
+    # via langchain-community
+pygments==2.19.2
+    # via rich
+pypdf==6.5.0
+    # via cogtrix
+pyright==1.1.408
+python-dateutil==2.9.0.post0
+    # via cogtrix
+python-docx==1.2.0
+    # via cogtrix
+python-dotenv==1.2.1
+    # via
+    #   cogtrix
+    #   pydantic-settings
+pytz==2025.2
+    # via cogtrix
+pyyaml==6.0.3
+    # via
+    #   langchain-classic
+    #   langchain-community
+    #   langchain-core
+regex==2026.1.15
+    # via
+    #   nltk
+    #   tiktoken
+requests==2.32.5
+    # via
+    #   cogtrix
+    #   langchain-classic
+    #   langchain-community
+    #   langsmith
+    #   requests-toolbelt
+    #   tiktoken
+requests-toolbelt==1.0.0
+    # via langsmith
+rich==14.2.0
+    # via cogtrix
+ruff==0.15.1
+six==1.17.0
+    # via python-dateutil
+sniffio==1.3.1
+    # via openai
+socksio==1.0.0
+    # via httpx
+sqlalchemy==2.0.46
+    # via
+    #   langchain-classic
+    #   langchain-community
+tenacity==9.1.4
+    # via
+    #   langchain-community
+    #   langchain-core
+textblob==0.19.0
+    # via cogtrix
+tiktoken==0.12.0
+    # via langchain-openai
+tqdm==4.67.3
+    # via
+    #   nltk
+    #   openai
+typing-extensions==4.15.0
+    # via
+    #   langchain-core
+    #   openai
+    #   pydantic
+    #   pydantic-core
+    #   pyright
+    #   python-docx
+    #   sqlalchemy
+    #   typing-inspect
+    #   typing-inspection
+typing-inspect==0.9.0
+    # via dataclasses-json
+typing-inspection==0.4.2
+    # via
+    #   pydantic
+    #   pydantic-settings
+urllib3==2.6.3
+    # via requests
+uuid-utils==0.14.0
+    # via
+    #   langchain-core
+    #   langsmith
+xxhash==3.6.0
+    # via
+    #   langgraph
+    #   langsmith
+yarl==1.22.0
+    # via aiohttp
+zstandard==0.25.0
+    # via langsmith
