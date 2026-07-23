@@ -64,7 +64,7 @@ Cogtrix is a modular LangChain-based AI agent built with a layered architecture:
 ┌───────────────┴───────────────┐ ┌───────────────┴───────────────┐
 │        Memory System          │ │        Tool Modules           │
 │       (src/memory/)           │ │       (src/tools/)            │
-│  • Mode managers              │ │  • 60 built-in tools          │
+│  • Mode managers              │ │  • 72 built-in tools          │
 │  • Context preparation        │ │  • Auto-discovery             │
 │  • JSON persistence           │ │  • Pydantic schemas           │
 └───────────────────────────────┘ └───────────────────────────────┘
@@ -216,20 +216,33 @@ src/
 │   ├── configure.py       # Tool config factories: load_tools(), build_tool_catalog(),
 │   │                      #   apply_output_cap(), TOOL_PRESETS, configure_* functions
 │   ├── resolver.py        # resolve_tool_name(): canonical fuzzy tool-name resolver
+│   ├── agent_messaging.py # Agent inbox messaging (2 tools: send_to_agent, read_agent_inbox)
+│   ├── agent_tools.py     # Sub-agent lifecycle (5 tools: spawn_agent, get_task_status, …)
 │   ├── brave_search.py    # Brave Search API
 │   ├── calculator.py      # Math expressions
+│   ├── calendar_tools.py  # Google Calendar integration (gated)
+│   ├── checkpoint.py      # Checkpoint / finding persistence
+│   ├── cron_tools.py      # Scheduled task management (3 tools: cron_add, cron_list, …)
 │   ├── datetime_tool.py   # Date/time utilities
 │   ├── deep_think.py      # Tree-of-Thought reasoning
 │   ├── delegate.py        # Task delegation (2 tools)
+│   ├── email_tools.py     # Email via SMTP/IMAP (gated)
 │   ├── exa_search.py      # Exa semantic search (3 tools)
+│   ├── extend_run.py      # Extend agent recursion limit mid-run
 │   ├── file_ops.py        # File operations (6 tools, incl. patch_file)
+│   ├── generate_tests.py  # Auto test generation (gated)
 │   ├── git_tools.py       # Git operations (7 tools)
+│   ├── github_tools.py    # GitHub API tools (gated)
+│   ├── goal_tools.py      # Goal/subgoal tracking (5 tools: set_goal, add_subgoal, …)
 │   ├── google_search.py   # Google Custom Search API
 │   ├── http_request.py    # HTTP requests with SSRF protection
 │   ├── json_tool.py       # JSON processing
 │   ├── nlp_tools.py       # NLP (sentiment, summarization)
 │   ├── python_exec.py     # Python execution
 │   ├── rag.py             # Knowledge base queries
+│   ├── searxng_search.py  # SearXNG self-hosted search (gated via SEARXNG_BASE_URL)
+│   ├── self_improve.py    # Self-improvement suggestions (gated)
+│   ├── semantic_tool_index.py # Semantic tool description index
 │   ├── serpapi_search.py  # SerpAPI (Google/Bing structured)
 │   ├── shell.py           # Shell commands
 │   ├── tavily_search.py   # Tavily AI search (2 tools)
@@ -1277,7 +1290,7 @@ Continue to step 5 (Memory: update)
 
 **Execution phase trigger:** When a prompt requests file actions (`prompt_requests_action()`) but the agent produced only text with no `write_file` / `append_file` calls (`agent_performed_writes()` returns False), the orchestrator feeds the analysis back to the agent via `run_execution_phase()` so it can act on it. Write tools are available throughout both phases.
 
-All pipeline functions live in `src/orchestration/phases.py`. Runtime defaults are hardcoded (accessed via `getattr` with fallbacks); config-file overrides for the `research_delegate` section are not yet active.
+All pipeline functions live in `src/orchestration/phases.py`. The `research_delegate` section is fully configurable via `.cogtrix.yaml` — all fields (`enabled`, `timeout`, `cap_ratio`, `auto`, `auto_threshold`) are parsed by `src/config.py` and forwarded to the research delegate at runtime.
 
 ---
 
@@ -1442,10 +1455,9 @@ Dependencies are managed via `pyproject.toml` (with `uv`) and exported to `requi
 | Package | Purpose |
 |---------|---------|
 | `ddgs` | DuckDuckGo search |
-| `textblob` | NLP tools |
-| `faiss-cpu` | Vector store |
-| `pypdf` | PDF loading |
-| `python-docx` | DOCX file support |
+| `faiss-cpu` | Vector store (optional, `cogtrix[rag]`) |
+| `pypdf` | PDF loading (optional, `cogtrix[rag]`) |
+| `python-docx` | DOCX file support (optional, `cogtrix[rag]`) |
 | `tiktoken` | Token counting |
 
 ### CLI

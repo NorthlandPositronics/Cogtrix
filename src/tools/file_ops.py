@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field
 _APP_DIR: Path = Path(__file__).resolve().parent.parent.parent
 
 _extra_write_dirs: list[Path] = []
+_extra_read_dirs: list[Path] = []
 
 # Wire COGTRIX_ALLOWED_WRITE_PATHS env var at import time.
 # Comma-separated list of directories where write operations are allowed
@@ -87,10 +88,16 @@ def set_allowed_write_dirs(dirs: list[str] | None) -> None:
     _extra_write_dirs = [Path(d).resolve() for d in (dirs or [])]
 
 
+def set_allowed_read_dirs(dirs: list[str] | None) -> None:
+    """Configure additional directories where file read operations are allowed."""
+    global _extra_read_dirs
+    _extra_read_dirs = [Path(d).resolve() for d in (dirs or [])]
+
+
 class ReadFileInput(BaseModel):
     """Input schema for reading files."""
 
-    path: str = Field(description="Path to the file to read", alias="file_path")
+    path: str | dict = Field(description="Path to the file to read", alias="file_path")
 
     model_config = {"populate_by_name": True}  # accept both "path" and "file_path"
     encoding: str = Field(default="utf-8", description="File encoding (default: utf-8)")
@@ -108,7 +115,7 @@ class ReadFileInput(BaseModel):
 class WriteFileInput(BaseModel):
     """Input schema for writing files."""
 
-    path: str = Field(description="Path to the file to write")
+    path: str | dict = Field(description="Path to the file to write")
     content: str = Field(description="Content to write to the file")
     encoding: str = Field(default="utf-8", description="File encoding (default: utf-8)")
 
@@ -116,7 +123,7 @@ class WriteFileInput(BaseModel):
 class AppendFileInput(BaseModel):
     """Input schema for appending to files."""
 
-    path: str = Field(description="Path to the file to append to")
+    path: str | dict = Field(description="Path to the file to append to")
     content: str = Field(description="Content to append to the file")
     encoding: str = Field(default="utf-8", description="File encoding (default: utf-8)")
 
@@ -124,7 +131,7 @@ class AppendFileInput(BaseModel):
 class ListDirectoryInput(BaseModel):
     """Input schema for listing directory contents."""
 
-    path: str = Field(default=".", description="Path to the directory to list")
+    path: str | dict = Field(default=".", description="Path to the directory to list")
     pattern: str = Field(default="*", description="Glob pattern to filter files (e.g., '*.py')")
     show_hidden: bool = Field(default=False, description="Whether to show hidden files")
 
@@ -132,7 +139,7 @@ class ListDirectoryInput(BaseModel):
 class FileInfoInput(BaseModel):
     """Input schema for getting file information."""
 
-    path: str = Field(description="Path to the file or directory")
+    path: str | dict = Field(description="Path to the file or directory")
 
 
 def _validate_path(path: str, is_write: bool = False) -> tuple[bool, str, Path | None]:
@@ -189,7 +196,7 @@ def _validate_path(path: str, is_write: bool = False) -> tuple[bool, str, Path |
                     except ValueError:
                         pass
                 return False, "Write path must be within the working directory", None
-            # Reads: allow app dir and extra write dirs
+            # Reads: allow app dir, extra write dirs, and extra read dirs
             in_allowed_read = False
             try:
                 p.relative_to(_APP_DIR)
@@ -198,6 +205,13 @@ def _validate_path(path: str, is_write: bool = False) -> tuple[bool, str, Path |
                 pass
             if not in_allowed_read:
                 for extra_dir in _extra_write_dirs:
+                    try:
+                        p.relative_to(extra_dir)
+                        in_allowed_read = True
+                    except ValueError:
+                        pass
+            if not in_allowed_read:
+                for extra_dir in _extra_read_dirs:
                     try:
                         p.relative_to(extra_dir)
                         in_allowed_read = True
@@ -229,6 +243,18 @@ def read_file(
     Returns:
         File contents or error message
     """
+    # Handle alternative parameter name from agent (e.g., absolute_path instead of path)
+    if isinstance(path, dict):
+        # Agent passed extra kwargs - extract actual path
+        if "absolute_path" in path:
+            path = path["absolute_path"]
+        elif "file_path" in path:
+            path = path["file_path"]
+        elif "path" in path:
+            path = path["path"]
+        else:
+            return "Error: Invalid arguments for read_file"
+
     is_valid, error, resolved = _validate_path(path)
     if not is_valid:
         return f"Error: {error}"
@@ -367,7 +393,11 @@ def append_file(path: str, content: str, encoding: str = "utf-8") -> str:
         return f"Error appending to file: {e}"
 
 
-def list_directory(path: str = ".", pattern: str = "*", show_hidden: bool = False) -> str:
+def list_directory(
+    path: str | dict = ".",
+    pattern: str = "*",
+    show_hidden: bool | dict = False,
+) -> str:
     """
     List contents of a directory.
 
@@ -379,6 +409,18 @@ def list_directory(path: str = ".", pattern: str = "*", show_hidden: bool = Fals
     Returns:
         Formatted directory listing or error message
     """
+    # Handle alternative parameter name from agent (e.g., absolute_path instead of path)
+    if isinstance(path, dict):
+        if "absolute_path" in path:
+            path = path["absolute_path"]
+        elif "path" in path:
+            path = path["path"]
+        else:
+            return "Error: Invalid arguments for list_directory"
+    # Handle show_hidden being passed as dict (shouldn't happen but be defensive)
+    if isinstance(show_hidden, dict):
+        show_hidden = show_hidden.get("show_hidden", False)
+
     is_valid, error, resolved = _validate_path(path)
     if not is_valid:
         return f"Error: {error}"
@@ -426,7 +468,7 @@ def list_directory(path: str = ".", pattern: str = "*", show_hidden: bool = Fals
 
 
 class PatchFileInput(BaseModel):
-    path: str = Field(..., description="Path to the file to patch.")
+    path: str | dict = Field(..., description="Path to the file to patch.")
     old_str: str = Field(..., description="Exact string to find in the file (must be unique).")
     new_str: str = Field(..., description="Replacement string.")
 
@@ -499,7 +541,7 @@ def patch_file(path: str, old_str: str, new_str: str) -> str:
     )
 
 
-def file_info(path: str) -> str:
+def file_info(path: str | dict) -> str:
     """
     Get detailed information about a file or directory.
 
@@ -509,6 +551,15 @@ def file_info(path: str) -> str:
     Returns:
         Formatted file information or error message
     """
+    # Handle alternative parameter name from agent (e.g., absolute_path instead of path)
+    if isinstance(path, dict):
+        if "absolute_path" in path:
+            path = path["absolute_path"]
+        elif "path" in path:
+            path = path["path"]
+        else:
+            return "Error: Invalid arguments for file_info"
+
     is_valid, error, resolved = _validate_path(path)
     if not is_valid:
         return f"Error: {error}"
@@ -637,6 +688,7 @@ __all__ = [
     "list_directory",
     "file_info",
     "set_allowed_write_dirs",
+    "set_allowed_read_dirs",
     "ReadFileInput",
     "WriteFileInput",
     "PatchFileInput",

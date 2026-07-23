@@ -50,6 +50,8 @@ data/
 *.log
 *.db
 *.sqlite
+.pytest_cache/
+.pytest_cache/coverage/
 *.faiss
 *.pkl
 
@@ -60,8 +62,6 @@ Thumbs.db
 # CI / build files (not needed at runtime)
 .github
 tests/
-Dockerfile
-.dockerignore
 requirements.txt
 setup.cfg
 mypy_report
@@ -85,5 +85,7 @@ README.md
 docs/adr
 docs/bugs
 docs/prompts
+docs/testing
 docs/ux
 docs/*.pdf
+#docker/

@@ -1092,7 +1092,7 @@ def classify_think_task(task: str, llm: Any) -> ThinkCategory:
     keyword_matches: list[ThinkCategory] = []
     for cat in THINK_CATEGORIES:
         for kw in cat.keywords:
-            if kw.lower() in task_lower:
+            if re.search(r"\b" + re.escape(kw.lower()) + r"\w*", task_lower):
                 keyword_matches.append(cat)
                 break
     if len(keyword_matches) == 1:
@@ -1391,3 +1391,285 @@ def classify_task_complexity(prompt: str) -> TaskComplexity:
         return TaskComplexity.SIMPLE
 
     return TaskComplexity.MODERATE
+
+
+# ── Task ownership classifier ─────────────────────────────────────────────
+#
+# Determines WHO is the intended executor of a prompt: the agent (EXECUTE),
+# the user (INFORM/ADVISE), or ambiguous (AMBIGUOUS).  Runs as a three-layer
+# pipeline: structural regex → optional LLM micro-call → reversibility override.
+
+
+class OwnershipMode(Enum):
+    EXECUTE = auto()
+    INFORM = auto()
+    ADVISE = auto()
+    AMBIGUOUS = auto()
+
+
+@dataclass
+class OwnershipResult:
+    mode: OwnershipMode
+    confidence: float  # 0.0–1.0
+    is_reversible: bool  # False → potentially destructive action
+    raw_signal: str  # which pattern triggered (for logging/debugging)
+    inferred_action: str = ""  # e.g. "install gh" — used in clarifying question
+
+
+# Layer 1 regex patterns
+
+_INFORM_PATTERNS = re.compile(
+    r"""
+    \b(?:
+        how\s+(?:to|do|does|can|could|would|should|is\s+it\s+possible\s+to)
+      | what\s+(?:are\s+the\s+steps|is\s+the\s+(?:process|procedure|way))
+      | explain\s+(?:how|what|why|the\s+process)
+      | tell\s+me\s+(?:about|how|what)
+      | show\s+me\s+(?:how|what)
+      | can\s+(?:I|you|we|one)\s+\w+
+      | is\s+it\s+possible\s+to
+      | what\s+(?:would|does)\s+(?:happen|it\s+take)
+    )\b
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
+_ADVISE_PATTERNS = re.compile(
+    r"""
+    \b(?:
+        should\s+(?:I|we|one)
+      | what\s+(?:would\s+you|do\s+you)\s+(?:recommend|suggest|think|advise)
+      | what(?:'s|\s+is)\s+(?:the\s+)?best\s+(?:way|approach|option|practice)
+      | which\s+(?:is\s+better|would\s+you\s+recommend|should\s+I)
+      | do\s+you\s+(?:recommend|suggest|think\s+I\s+should)
+      | would\s+you\s+recommend
+      | what\s+are\s+(?:the\s+)?(?:pros|options|alternatives|tradeoffs)
+    )\b
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
+_AMBIGUOUS_PATTERNS = re.compile(
+    r"""
+    ^\s*
+    (?:(?:please|can\s+you|could\s+you|would\s+you)\s+)?   # optional politeness prefix (M6)
+    (?:
+        check(?:\s+(?:if|whether|that|on))?\b
+      | look\s+(?:at|into|up)\b
+      | verify\b
+      | confirm\b
+    )
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
+_EXECUTE_IMPERATIVE = re.compile(
+    r"""
+    ^\s*(?:
+        install|uninstall|remove|delete|rm\b
+      | run|execute|start|stop|restart|kill
+      | deploy|provision|migrate|bootstrap
+      | create|make|build|generate
+      | update|upgrade|downgrade|patch
+      | configure|setup|set\s+up
+      | add|append|insert|replace
+      | write|overwrite|save
+      | fix|refactor|modify|change
+      | compile|download|fetch|pull|push|clone
+    )\b
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
+_IRREVERSIBLE_TARGETS = re.compile(
+    r"""
+    \b(?:
+        # Package installation (destructive by nature)
+        install|uninstall|remove\s+package
+      | pip\s+install|pip3?\s+install
+      | apt(?:-get)?\s+install|brew\s+install|yum\s+install|dnf\s+install
+      | npm\s+install\s+-g|yarn\s+global|pnpm\s+(?:add|install)\s+-g
+      | terraform\s+(?:apply|destroy)|kubectl\s+(?:apply|delete)|helm\s+(?:install|upgrade|uninstall)
+        # Data deletion — requires destructive object context (M1 fix: not bare delete/drop)
+      | delete\s+(?:all|the|this|a|my|these|those|every|each|file|folder|dir|table|record|account|user|repo|database|bucket|object)
+      | rm\s+-[rRf]+|rm\s+--recursive|rm\s+--force   # rm with destructive flags (-r, -f, -rf, etc.)
+      | drop\s+(?:table|database|column|schema|index|view)
+        # Infra deployment — scoped to production/destructive contexts
+      | deploy\s+to\s+prod(?:uction)?
+      | push\s+(?:to\s+(?:main|master|prod(?:uction)?)|\-\-force)
+        # Disk/storage operations — require device/data context
+      | format\s+(?:disk|drive|partition|volume|/dev)
+      | wipe\s+(?:disk|drive|data|storage|the\s+drive|all)
+      | destroy\s+(?:cluster|resource|instance|db|database|env(?:ironment)?|stack|infra)
+      | provision\s+(?:server|instance|cluster|node|vm|machine)
+    )\b
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
+
+def _extract_action_phrase(prompt: str) -> str:
+    """Return a short action phrase from *prompt* for use in clarifying questions."""
+    stripped = prompt.strip().rstrip("?.!")
+    first_clause = re.split(r"[,;]", stripped)[0][:60].strip()
+    return first_clause or stripped[:40]
+
+
+def _classify_ownership_layer1(prompt: str) -> OwnershipResult:
+    """Layer 1: structural regex. Always runs; fast path for ~80% of prompts."""
+    p = prompt.strip()
+    irreversible = bool(_IRREVERSIBLE_TARGETS.search(p))
+    action = _extract_action_phrase(p)
+
+    if _INFORM_PATTERNS.search(p):
+        return OwnershipResult(OwnershipMode.INFORM, 0.85, True, "inform_pattern", action)
+    if _ADVISE_PATTERNS.search(p):
+        return OwnershipResult(OwnershipMode.ADVISE, 0.80, True, "advise_pattern", action)
+    if _EXECUTE_IMPERATIVE.search(p):
+        return OwnershipResult(
+            OwnershipMode.EXECUTE, 0.80, not irreversible, "execute_imperative", action
+        )
+    if _AMBIGUOUS_PATTERNS.search(p):
+        return OwnershipResult(
+            OwnershipMode.AMBIGUOUS, 0.50, not irreversible, "ambiguous_pattern", action
+        )
+    return OwnershipResult(OwnershipMode.EXECUTE, 0.45, not irreversible, "default_execute", action)
+
+
+_OWNERSHIP_LLM_PROMPT = """\
+You are a classifier. Given a user message, decide who should execute the action.
+Classify as exactly one of: AGENT, USER, AMBIGUOUS
+- AGENT: user wants the AI to perform the action ("install X", "run X")
+- USER: user wants information to act themselves ("how to X", "explain X")
+- AMBIGUOUS: cannot determine from the message alone
+Respond with ONLY one word: AGENT, USER, or AMBIGUOUS.
+Message: <msg>{prompt}</msg>
+"""
+
+
+def _classify_ownership_layer2(
+    prompt: str, llm: Any, timeout_seconds: int = 10
+) -> OwnershipResult | None:
+    """Layer 2: LLM micro-call with timeout. Only invoked when Layer 1 is uncertain."""
+    # Sanitize: strip angle-brackets, newlines, and classifier label tokens
+    # (AGENT/USER/AMBIGUOUS) to prevent prompt injection biasing ownership mode.
+    sanitized = prompt.replace("<", "(").replace(">", ")").replace("\n", " ").replace("\r", " ")
+    sanitized = re.sub(r"\b(AGENT|USER|AMBIGUOUS)\b", "***", sanitized, flags=re.IGNORECASE)
+    # Truncate at a word boundary so the classifier sees complete tokens
+    _trunc = sanitized[:300]
+    _m = re.match(r".{0,300}\b", _trunc, re.DOTALL)
+    sanitized = _m.group(0).strip() if (_m and _m.group(0).strip()) else _trunc
+    try:
+        import concurrent.futures as _cf
+
+        from langchain_core.messages import HumanMessage
+
+        _msg = HumanMessage(content=_OWNERSHIP_LLM_PROMPT.format(prompt=sanitized))
+        # Use shutdown(wait=False) on timeout so the hung LLM thread does not
+        # block the caller — the `with` context manager would call
+        # shutdown(wait=True) which blocks until the thread finishes.
+        _pool = _cf.ThreadPoolExecutor(max_workers=1)
+        try:
+            _fut = _pool.submit(llm.invoke, [_msg])
+            try:
+                result = _fut.result(timeout=timeout_seconds)
+            except _cf.TimeoutError:
+                _pool.shutdown(wait=False)
+                log.warning(
+                    "Ownership classifier LLM call timed out after %ds — "
+                    "falling back to Layer 1 result",
+                    timeout_seconds,
+                )
+                return None
+        finally:
+            _pool.shutdown(wait=False)
+        content = result.content
+        if isinstance(content, list):
+            content = " ".join(str(c.get("text", c) if isinstance(c, dict) else c) for c in content)
+        label = str(content).strip().upper().split()[0] if content else ""
+    except Exception as exc:
+        log.warning("Ownership classifier LLM call failed: %s", exc)
+        return None
+
+    irreversible = bool(_IRREVERSIBLE_TARGETS.search(prompt))
+    action = _extract_action_phrase(prompt)
+    _map: dict[str, OwnershipResult] = {
+        "USER": OwnershipResult(OwnershipMode.INFORM, 0.80, True, "llm_user", action),
+        "AGENT": OwnershipResult(
+            OwnershipMode.EXECUTE, 0.80, not irreversible, "llm_agent", action
+        ),
+        "AMBIGUOUS": OwnershipResult(
+            OwnershipMode.AMBIGUOUS, 0.60, not irreversible, "llm_ambiguous", action
+        ),
+    }
+    return _map.get(label)
+
+
+def _apply_reversibility_override(
+    result: OwnershipResult, min_confidence: float
+) -> OwnershipResult:
+    """Layer 3: downgrade irreversible EXECUTE at low confidence to ADVISE."""
+    if (
+        result.mode == OwnershipMode.EXECUTE
+        and not result.is_reversible
+        and result.confidence < min_confidence
+    ):
+        return OwnershipResult(
+            OwnershipMode.ADVISE,
+            result.confidence,
+            False,
+            f"reversibility_override({result.raw_signal})",
+            result.inferred_action,
+        )
+    return result
+
+
+def classify_task_ownership(
+    prompt: str,
+    llm: Any | None = None,
+    *,
+    llm_fallback_enabled: bool = False,
+    llm_fallback_confidence_threshold: float = 0.6,
+    reversibility_override_confidence: float = 0.7,
+    llm_timeout_seconds: int = 10,
+) -> OwnershipResult:
+    """Classify who owns the execution of *prompt*.
+
+    Three-layer pipeline: structural regex → optional LLM micro-call →
+    reversibility override.  Returns an OwnershipResult describing the
+    inferred mode (EXECUTE / INFORM / ADVISE / AMBIGUOUS).
+    """
+    result = _classify_ownership_layer1(prompt)
+    log.debug(
+        "Ownership L1: mode=%s confidence=%.2f signal=%s",
+        result.mode.name,
+        result.confidence,
+        result.raw_signal,
+    )
+
+    if (
+        llm_fallback_enabled
+        and llm is not None
+        and (
+            result.mode == OwnershipMode.AMBIGUOUS
+            or result.confidence < llm_fallback_confidence_threshold
+        )
+    ):
+        llm_result = _classify_ownership_layer2(prompt, llm, timeout_seconds=llm_timeout_seconds)
+        if llm_result is not None:
+            result = llm_result
+            log.debug(
+                "Ownership L2 (LLM): mode=%s confidence=%.2f signal=%s",
+                result.mode.name,
+                result.confidence,
+                result.raw_signal,
+            )
+
+    result = _apply_reversibility_override(result, reversibility_override_confidence)
+    log.debug(
+        "Ownership final: mode=%s confidence=%.2f signal=%s",
+        result.mode.name,
+        result.confidence,
+        result.raw_signal,
+    )
+    return result

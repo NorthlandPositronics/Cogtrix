@@ -412,7 +412,7 @@ Handlers receive `self` (the registry instance) which provides access to:
 uv run pytest tests/ -v
 
 # Unit tests only (fast, excludes all integration tests)
-uv run pytest tests/ -q -m "not agent_workflow and not live_llm"
+uv run pytest tests/ -q -m "not agent_workflow and not live_llm and not docker"
 
 # Or with pip/venv
 python -m pytest tests/ -v
@@ -425,6 +425,7 @@ python -m pytest tests/ -v
 | `agent_workflow` | Full agent message lifecycle integration tests | Live LLM endpoint |
 | `live_llm` | Integration tests backed by the local Gemma 3 270M container | Container at `localhost:18080` |
 | `docker` | Tests that require a running Docker daemon | Running Docker daemon |
+| `benchmark` | Concurrency and performance benchmarks (no live LLM required) | — |
 
 To run the live LLM tests locally, start the Gemma container first:
 
@@ -678,21 +679,36 @@ cogtrix/
 │   ├── rag/
 │   │   └── ingest.py         # Document ingestion
 │   │
-│   └── tools/                # Built-in tool modules (60 tools)
+│   └── tools/                # Built-in tool modules
+│       ├── configure.py      # Tool config factories and TOOL_PRESETS
+│       ├── resolver.py       # Fuzzy tool-name resolver
+│       ├── agent_messaging.py # Agent inbox messaging (send_to_agent, read_agent_inbox)
+│       ├── agent_tools.py    # Sub-agent lifecycle (spawn_agent, get_task_status, …)
 │       ├── brave_search.py   # Brave Search API
 │       ├── calculator.py     # Math expressions
+│       ├── calendar_tools.py # Google Calendar integration (gated)
+│       ├── checkpoint.py     # Checkpoint / finding persistence
+│       ├── cron_tools.py     # Scheduled task management (cron_add, cron_list, cron_remove)
 │       ├── datetime_tool.py  # Date/time utilities
 │       ├── deep_think.py     # Tree-of-Thought reasoning
 │       ├── delegate.py       # Task delegation (2 tools)
+│       ├── email_tools.py    # Email via SMTP/IMAP (gated)
 │       ├── exa_search.py     # Exa semantic search (3 tools)
+│       ├── extend_run.py     # Extend agent recursion limit mid-run
 │       ├── file_ops.py       # File operations (6 tools, incl. patch_file)
+│       ├── generate_tests.py # Auto test generation (gated)
 │       ├── git_tools.py      # Git operations (7 tools)
+│       ├── github_tools.py   # GitHub API tools (gated)
+│       ├── goal_tools.py     # Goal/subgoal tracking (set_goal, add_subgoal, …)
 │       ├── google_search.py  # Google Custom Search
 │       ├── http_request.py   # HTTP requests
 │       ├── json_tool.py      # JSON processing
 │       ├── nlp_tools.py      # NLP (sentiment, summarization)
 │       ├── python_exec.py    # Python execution
 │       ├── rag.py            # Knowledge base queries
+│       ├── searxng_search.py # SearXNG self-hosted search (gated via SEARXNG_BASE_URL)
+│       ├── self_improve.py   # Self-improvement suggestions (gated)
+│       ├── semantic_tool_index.py # Semantic tool description index
 │       ├── serpapi_search.py # SerpAPI (Google/Bing)
 │       ├── shell.py          # Shell commands
 │       ├── tavily_search.py  # Tavily AI search (2 tools)

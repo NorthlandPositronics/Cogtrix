@@ -684,6 +684,14 @@ def run_research_delegate(
         "5. Organize output by topic with clear headings.\n"
         "6. If a page is very long, focus on sections containing "
         "configuration syntax, examples, and reference material.\n"
+        "\n"
+        "## Source Diversity Requirements\n\n"
+        "7. Identify the domain/origin of each source (e.g., github.com, wikipedia.org, arxiv.org).\n"
+        "8. Count unique origins, not just source count.\n"
+        "9. If 3+ sources share the same origin, treat them as a single piece of evidence.\n"
+        "10. Explicitly ask: 'What would disprove this claim?'.\n"
+        "11. Report source diversity metrics in your analysis.\n"
+        "12. If diversity is low (< 0.5), indicate uncertainty in your findings.\n"
     )
 
     # Build per-invocation copies of web tools with a high output cap.
@@ -751,6 +759,22 @@ def run_research_delegate(
             num_ctx=alias_cfg.get("context_window") or alias_cfg.get("num_ctx"),
         )
         response_text = run_delegate_agent(llm, research_prompt, "", tools_override=delegate_tools)
+
+        # Source diversity tracking (M6.1)
+        from src.orchestration.research_delegate import SourceTracker
+
+        source_tracker = SourceTracker()
+        for idx, url in enumerate(urls[:_URL_BATCH]):
+            source_tracker.add_source(
+                source_id=f"source_{idx}",
+                url=url,
+                content="",  # Domain-based origin only; per-URL content not available here
+            )
+        diversity_score = source_tracker.diversity_score()
+        dominant_ratio = source_tracker.dominant_origin_ratio()
+        log.info(
+            "Research diversity: score=%.2f, dominant_ratio=%.2f", diversity_score, dominant_ratio
+        )
 
         if response_text.strip():
             log.info("Research delegate returned %d chars", len(response_text))

@@ -270,6 +270,9 @@ class Config:
     # File operations — extra directories allowed for write operations
     allowed_write_paths: list[str] = field(default_factory=list)
 
+    # File operations — extra directories allowed for read operations
+    allowed_read_paths: list[str] = field(default_factory=list)
+
     # Plugin tools — extra directories to scan for file-drop tool modules
     tool_dirs: list[str] = field(default_factory=list)
 
@@ -357,6 +360,48 @@ class Config:
     """When True, research queries are delegated pre-flight when context exceeds the threshold."""
     research_delegate_auto_threshold: float = 0.50
     """Session context ratio (0–1) above which research_delegate_auto activates."""
+
+    # Research diversity settings (M6.1)
+    research_diversity: dict = field(
+        default_factory=lambda: {
+            "enabled": True,
+            "min_diversity_threshold": 0.5,
+            "max_dominant_origin_ratio": 0.7,
+            "require_contradiction_search": True,
+        }
+    )
+    """Source diversity tracking and contradiction detection settings.
+
+    Controls source diversity tracking and contradiction detection for research workflows.
+    Helps identify when multiple sources trace back to the same origin, preventing
+    overconfidence in claims supported only by sources from a single origin.
+    """
+
+    # Decision accountability settings (ADR-0052 M2/M3)
+    decision_accountability_enabled: bool = False
+    """Inject the self-debate prompt and parse structured output (ADR-0052).
+    Off by default — opt in via decision_accountability.enabled in .cogtrix.yaml."""
+    decision_accountability_min_confidence: float = 7.0
+    """Minimum adjusted confidence (0–10) to proceed; below this the agent appends
+    an uncertainty note when decision_accountability_report_uncertainty is True."""
+    decision_accountability_require_counter_plan: bool = True
+    """When True, the accountability prompt requires a counter-plan before acting."""
+    decision_accountability_report_uncertainty: bool = True
+    """When True, append an uncertainty note to responses where should_proceed is False."""
+
+    # ── Task ownership classifier ─────────────────────────────────────────
+    task_ownership_classifier_enabled: bool = True
+    """When True (default), classify task ownership before graph invocation."""
+    task_ownership_classifier_llm_fallback: bool = False
+    """When True, invoke LLM for Layer 2 classification (off by default — adds latency)."""
+    task_ownership_ambiguous_action: str = "ask"
+    """How to handle AMBIGUOUS ownership. Values: 'ask' | 'inform' | 'execute'."""
+
+    # ── Pre-action confirmation gate ─────────────────────────────────────────
+    pre_action_confirmation_enabled: bool = False
+    """When True, inject the pre-action confirmation prompt so the agent asks
+    for consent before irreversible operations. Off by default — opt in via
+    pre_action_confirmation.enabled in .cogtrix.yaml."""
 
     # ── Service key accessors ─────────────────────────────────────
     # These provide a clean API for tool configuration code, reading
@@ -1066,6 +1111,15 @@ def _apply_config_file(config: Config, path: Path) -> None:
         else:
             _log.warning("allowed_write_paths must be a string or list, ignoring")
 
+    # ── Allowed read paths ──────────────────────────────────────
+    if "allowed_read_paths" in data:
+        val = data["allowed_read_paths"]
+        if isinstance(val, str):
+            config.allowed_read_paths = [val]
+        elif isinstance(val, list):
+            config.allowed_read_paths = [str(p) for p in val]
+        else:
+            _log.warning("allowed_read_paths must be a string or list, ignoring")
     # ── Plugin tool directories ───────────────────────────────────
     if "tool_dirs" in data:
         val = data["tool_dirs"]
@@ -1215,6 +1269,54 @@ def _apply_config_file(config: Config, path: Path) -> None:
                 config.research_delegate_auto_threshold = fval
             elif fval is not None:
                 _log.warning("research_delegate.auto_threshold must be in (0, 1], using default")
+
+    # ── Decision accountability (ADR-0052) ────────────────────────
+    da_data = data.get("decision_accountability", {}) or {}
+    if da_data:
+        if "enabled" in da_data:
+            config.decision_accountability_enabled = bool(da_data["enabled"])
+        if "min_confidence_threshold" in da_data:
+            fval = _safe_float(
+                da_data["min_confidence_threshold"],
+                "decision_accountability.min_confidence_threshold",
+            )
+            if fval is not None and 0.0 <= fval <= 10.0:
+                config.decision_accountability_min_confidence = fval
+            elif fval is not None:
+                _log.warning(
+                    "decision_accountability.min_confidence_threshold must be in [0, 10], "
+                    "using default"
+                )
+        if "require_counter_plan" in da_data:
+            config.decision_accountability_require_counter_plan = bool(
+                da_data["require_counter_plan"]
+            )
+        if "report_uncertainty" in da_data:
+            config.decision_accountability_report_uncertainty = bool(da_data["report_uncertainty"])
+
+    # ── Task ownership classifier ─────────────────────────────────────────
+    toc_data = data.get("task_ownership_classifier", {}) or {}
+    if toc_data:
+        if "enabled" in toc_data:
+            config.task_ownership_classifier_enabled = bool(toc_data["enabled"])
+        if "llm_fallback" in toc_data:
+            config.task_ownership_classifier_llm_fallback = bool(toc_data["llm_fallback"])
+        if "ambiguous_action" in toc_data:
+            _toc_val = str(toc_data["ambiguous_action"]).lower().strip()
+            if _toc_val in {"ask", "inform", "execute"}:
+                config.task_ownership_ambiguous_action = _toc_val
+            else:
+                _log.warning(
+                    "task_ownership_classifier.ambiguous_action must be ask/inform/execute;"
+                    " got %r, using default 'ask'",
+                    _toc_val,
+                )
+
+    # ── Pre-action confirmation gate ──────────────────────────────────────────
+    pac_data = data.get("pre_action_confirmation", {}) or {}
+    if pac_data:
+        if "enabled" in pac_data:
+            config.pre_action_confirmation_enabled = bool(pac_data["enabled"])
 
     # ── Audit log ─────────────────────────────────────────────────
     audit_data = data.get("audit_log", {}) or {}
@@ -1435,6 +1537,33 @@ def _set_service(config: Config, name: str, key: str, value: str) -> None:
 def _set_provider_key(config: Config, name: str, api_key: str) -> None:
     """Set the API key for a named provider, creating it if needed."""
     if name in config.providers:
+        from src.providers.defaults import OPENAI_PRESETS
+
+        preset = OPENAI_PRESETS.get(name)
+        if preset:
+            existing_url = config.providers[name].base_url
+            canonical_url = preset["base_url"]
+            if existing_url and existing_url.rstrip("/") != canonical_url.rstrip("/"):
+                import sys
+
+                _log.warning(
+                    "SECURITY: %s_API_KEY applied to provider '%s' whose base_url "
+                    "(%r) differs from the canonical preset URL (%r). "
+                    "If this is unintentional, check providers.%s.base_url in your "
+                    "config file.",
+                    name.upper(),
+                    name,
+                    existing_url,
+                    canonical_url,
+                    name,
+                )
+                print(
+                    f"  [!] WARNING: {name.upper()}_API_KEY applied to provider "
+                    f"'{name}' with non-canonical base_url ({existing_url!r}). "
+                    f"Expected: {canonical_url!r}. Check your config file.",
+                    file=sys.stderr,
+                    flush=True,
+                )
         config.providers[name].api_key = api_key
     else:
         from src.providers.defaults import OPENAI_PRESETS
@@ -1531,6 +1660,8 @@ def _apply_env_vars(config: Config) -> None:
         _set_provider_key(config, "google", env_val)
     if env_val := os.getenv("XAI_API_KEY"):
         _set_provider_key(config, "xai", env_val)
+    if env_val := os.getenv("DEEPSEEK_API_KEY"):
+        _set_provider_key(config, "deepseek", env_val)
 
     # Ollama settings — update or create ollama provider entry
     ollama_url: str | None = None
@@ -1598,6 +1729,9 @@ def _apply_env_vars(config: Config) -> None:
     if env_val := os.getenv("COGTRIX_ALLOWED_WRITE_PATHS"):
         config.allowed_write_paths = [p.strip() for p in env_val.split(":") if p.strip()]
 
+    # Allowed read paths
+    if env_val := os.getenv("COGTRIX_ALLOWED_READ_PATHS"):
+        config.allowed_read_paths = [p.strip() for p in env_val.split(":") if p.strip()]
     # Plugin tool directories
     if env_val := os.getenv("COGTRIX_TOOL_DIRS"):
         config.tool_dirs = [p.strip() for p in env_val.split(":") if p.strip()]
@@ -1651,3 +1785,7 @@ def _apply_cli_args(config: Config, args) -> None:
     # Allowed write paths
     if hasattr(args, "allow_write_path") and args.allow_write_path:
         config.allowed_write_paths = list(args.allow_write_path)
+
+    # Allowed read paths
+    if hasattr(args, "allow_read_path") and args.allow_read_path:
+        config.allowed_read_paths = list(args.allow_read_path)

@@ -30,10 +30,10 @@ ENV/
 .vscode/
 .idea/
 .tmp/
-.cursor
 *.swp
 *.swo
 *~
+*.bak
 
 # ── Cogtrix config files (may contain API keys & secrets) ────────
 # Config search: ./.cogtrix.{json,yml,yaml}, also XDG-style names
@@ -85,6 +85,8 @@ settings/
 CLAUDE.md
 .claude/*
 !.claude/print/
+# OpenCode
+.opencode/
 # OpenAI Codex
 AGENTS.md
 .codex/

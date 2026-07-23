@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.2.5](https://github.com/NorthlandPositronics/Cogtrix/compare/v0.2.4...v0.2.5) (2026-04-25)
+
+
+### Bug Fixes
+
+* sync uv.lock and regenerate requirements.txt ([#30](https://github.com/NorthlandPositronics/Cogtrix/issues/30)) ([#31](https://github.com/NorthlandPositronics/Cogtrix/issues/31)) ([0f86c1a](https://github.com/NorthlandPositronics/Cogtrix/commit/0f86c1ad4357300d60e2d177f3b0a26809b402a4))
+
+## [Unreleased]
+
+### Features
+
+* **decision accountability** — opt-in self-debate framework for autonomous execution (ADR-0052). When `decision_accountability.enabled: true`, the agent generates a structured plan with assumptions and evidence, produces a counter-plan, and appends an uncertainty note when adjusted confidence falls below the threshold. Adds `ACCOUNTABILITY_PROMPT` injection to system prompt and post-response parsing in `graph.py`. Off by default; no breaking changes.
+
+### Documentation
+
+* `docs/CONFIGURATION.md` — new Decision Accountability section with options table, how-it-works, migration note
+* `docs/adr/0052-decision-accountability.md` — status updated to Accepted; all milestones marked complete
+
+---
+
 ## [0.2.4](https://github.com/NorthlandPositronics/Cogtrix/compare/v0.2.3...v0.2.4) (2026-04-06)
 
 

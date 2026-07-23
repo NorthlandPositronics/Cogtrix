@@ -509,6 +509,10 @@ def _detect_environment() -> dict[str, Any]:
     if xai_key:
         env["xai_key"] = xai_key
 
+    deepseek_key = os.environ.get("DEEPSEEK_API_KEY")
+    if deepseek_key:
+        env["deepseek_key"] = deepseek_key
+
     # COGTRIX_OLLAMA accepts "host", "host:port", IPv6, or full URL
     from src.config import _parse_ollama_address
 
@@ -546,6 +550,8 @@ def _print_detections(env: dict[str, Any]) -> None:
         print(f"  {_G(chr(0x2713))} Detected GEMINI_API_KEY")
     if env.get("xai_key"):
         print(f"  {_G(chr(0x2713))} Detected XAI_API_KEY")
+    if env.get("deepseek_key"):
+        print(f"  {_G(chr(0x2713))} Detected DEEPSEEK_API_KEY")
     if env.get("ollama_running"):
         url = env.get("ollama_url", "http://127.0.0.1:11434")
         print(f"  {_G(chr(0x2713))} Detected Ollama at {url}")
@@ -815,6 +821,8 @@ def _bootstrap_llm(
         default_type = "google"
     elif env.get("xai_key"):
         default_type = "xai"
+    elif env.get("deepseek_key"):
+        default_type = "deepseek"
     else:
         default_type = "openai"
 
@@ -823,7 +831,7 @@ def _bootstrap_llm(
     while True:
         selected_type = _ask_choice(
             "Provider type",
-            choices=["ollama", "openai", "anthropic", "google", "xai"],
+            choices=["ollama", "openai", "anthropic", "google", "xai", "deepseek"],
             default=last.get("selected_type") or default_type,
         )
 
@@ -916,7 +924,10 @@ def _bootstrap_llm(
             default_model = last.get("model") or existing_info.get("model") or "gemini-2.5-flash"
             model = _ask_input("Model", default=default_model)
 
-        else:  # xai
+        elif selected_type == "xai":
+            from src.providers.defaults import OPENAI_PRESETS as _P
+
+            _preset = _P["xai"]
             prior_key = last.get("api_key") or (
                 existing_info.get("api_key")
                 if existing_info.get("type") == "openai" and existing_info.get("provider") == "xai"
@@ -933,10 +944,54 @@ def _bootstrap_llm(
                 entered = _ask_input("API key", secret=True)
                 api_key = entered or None
             provider_name = "xai"
-            base_url = "https://api.x.ai/v1"
+            base_url = _preset["base_url"]
             provider_type = "openai"
-            default_model = last.get("model") or existing_info.get("model") or "grok-4.1-fast"
+            default_model = last.get("model") or existing_info.get("model") or _preset["model"]
             model = _ask_input("Model", default=default_model)
+
+        elif selected_type == "deepseek":
+            from src.providers.defaults import OPENAI_PRESETS as _P
+
+            _preset = _P["deepseek"]
+            prior_key = last.get("api_key") or (
+                existing_info.get("api_key")
+                if existing_info.get("type") == "openai"
+                and existing_info.get("provider") == "deepseek"
+                else None
+            )
+            if env.get("deepseek_key"):
+                print(f"  {_G(chr(0x2713))} Using DEEPSEEK_API_KEY from environment")
+                api_key = env["deepseek_key"]
+            elif prior_key:
+                masked = _mask_api_key(prior_key)
+                entered = _ask_input("API key", default=masked, secret=True)
+                api_key = prior_key if entered == masked else (entered or None)
+            else:
+                entered = _ask_input("API key", secret=True)
+                api_key = entered or None
+            provider_name = "deepseek"
+            base_url = _preset["base_url"]
+            provider_type = "openai"
+            default_model = last.get("model") or existing_info.get("model") or _preset["model"]
+            model = _ask_input("Model", default=default_model)
+
+        else:
+            # Should not happen while choices list and elif chain are in sync.
+            # Log loudly and retry rather than crashing the wizard.
+            import logging as _wiz_log
+
+            _wiz_log.getLogger("cogtrix.setup_wizard").error(
+                "Unhandled provider type %r — choices list and elif chain "
+                "are out of sync. Please report this bug.",
+                selected_type,
+            )
+            print(
+                f"\n  [!] Provider type {selected_type!r} is not yet supported "
+                "by the wizard. Please choose a different provider.",
+                flush=True,
+            )
+            last["selected_type"] = None
+            continue
 
         # Persist all entered values so the next retry uses them as defaults
         last = {

@@ -27,6 +27,7 @@ import os
 import threading
 from collections.abc import Generator
 from contextlib import contextmanager
+from urllib.parse import urlparse
 
 from pydantic import BaseModel, Field
 
@@ -85,6 +86,28 @@ def _suppress_native_stderr() -> Generator[None]:
             os.close(saved_fd)
 
 
+def extract_domain(url: str) -> str:
+    """Extract domain from URL for source tracking.
+
+    Args:
+        url: The URL to extract domain from
+
+    Returns:
+        Domain name without www. prefix, or "unknown" if extraction fails
+    """
+    try:
+        parsed = urlparse(url)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            return "unknown"
+        domain = parsed.netloc
+        # Remove www. prefix for consistency
+        if domain.startswith("www."):
+            domain = domain[4:]
+        return domain
+    except Exception:
+        return "unknown"
+
+
 class WebSearchInput(BaseModel):
     """Input schema for web search."""
 
@@ -117,7 +140,7 @@ def search_web(query: str, num_results: int = 5, region: str = "wt-wt") -> str:
         region: Region for search results
 
     Returns:
-        Search results with titles, URLs, and snippets
+        Search results with titles, URLs, snippets, and domain metadata
     """
     if not DDGS_AVAILABLE:
         return "Error: DuckDuckGo search not available. " "Run: uv add duckduckgo-search"
@@ -140,6 +163,9 @@ def search_web(query: str, num_results: int = 5, region: str = "wt-wt") -> str:
             url = result.get("href", result.get("link", "No URL"))
             snippet = result.get("body", result.get("snippet", "No description"))
 
+            # Extract domain metadata for source tracking
+            domain = extract_domain(url)
+
             # Truncate long snippets — keep enough for the LLM to get
             # the key facts without having to fill gaps from memory.
             if len(snippet) > 500:
@@ -147,6 +173,7 @@ def search_web(query: str, num_results: int = 5, region: str = "wt-wt") -> str:
 
             output.append(f"{i}. {title}")
             output.append(f"   URL: {url}")
+            output.append(f"   Domain: {domain}")
             output.append(f"   {snippet}")
             output.append("")
 
@@ -166,7 +193,7 @@ def search_news(query: str, num_results: int = 5, timelimit: str | None = "w") -
         timelimit: Time limit - 'd' (day), 'w' (week), 'm' (month)
 
     Returns:
-        News results with titles, URLs, dates, and snippets
+        News results with titles, URLs, dates, sources, and domain metadata
     """
     if not DDGS_AVAILABLE:
         return "Error: DuckDuckGo search not available. " "Run: uv add duckduckgo-search"
@@ -191,6 +218,9 @@ def search_news(query: str, num_results: int = 5, timelimit: str | None = "w") -
             source = result.get("source", "Unknown source")
             snippet = result.get("body", result.get("snippet", "No description"))
 
+            # Extract domain metadata for source tracking
+            domain = extract_domain(url)
+
             # Truncate long snippets
             if len(snippet) > 500:
                 snippet = snippet[:500] + "..."
@@ -198,6 +228,7 @@ def search_news(query: str, num_results: int = 5, timelimit: str | None = "w") -
             output.append(f"{i}. {title}")
             output.append(f"   Source: {source} | Date: {date}")
             output.append(f"   URL: {url}")
+            output.append(f"   Domain: {domain}")
             output.append(f"   {snippet}")
             output.append("")
 
@@ -215,8 +246,8 @@ TOOL_CONFIGS = [
             "Search the web using DuckDuckGo — a free, privacy-focused "
             "search engine. No API key required.\n"
             "\n"
-            "Returns titles, URLs, and text snippets (up to 500 chars each). "
-            "Supports regional search via the 'region' parameter.\n"
+            "Returns titles, URLs, snippets, and domain metadata for source "
+            "diversity tracking.\n"
             "\n"
             "USE THIS TOOL WHEN:\n"
             "- You need a quick, free web lookup\n"
@@ -234,8 +265,7 @@ TOOL_CONFIGS = [
             "required.\n"
             "\n"
             "Returns news articles with titles, sources, publication dates, "
-            "and snippets. Supports time filtering: 'd' (past day), "
-            "'w' (past week), 'm' (past month).\n"
+            "snippets, and domain metadata for source diversity tracking.\n"
             "\n"
             "USE THIS TOOL WHEN:\n"
             "- You need recent news on a topic\n"
@@ -256,6 +286,7 @@ __all__ = [
     "search_news",
     "WebSearchInput",
     "NewsSearchInput",
+    "extract_domain",
     "TOOL_CONFIG",
     "TOOL_CONFIGS",
 ]

@@ -1,6 +1,6 @@
 # Cogtrix Agent
 
-A modular AI assistant with 60 built-in tools, multi-provider LLM support, and intelligent memory management.
+A modular AI assistant with 72 built-in tools, multi-provider LLM support, and intelligent memory management.
 
 ---
 
@@ -8,11 +8,11 @@ A modular AI assistant with 60 built-in tools, multi-provider LLM support, and i
 
 Cogtrix is an **interactive command-line AI assistant** that connects to large language models (LLMs) and extends them with tools — web search, file operations, code execution, deep reasoning, and more. You type a question or task; the agent reasons about it, calls tools as needed, and delivers the result.
 
-**Works with:** [Ollama](https://ollama.com/) (local, free), OpenAI, Anthropic Claude, Google Gemini, and any OpenAI-compatible API (Groq, Together, vLLM, xAI, etc.)
+**Works with:** [Ollama](https://ollama.com/) (local, free), OpenAI, Anthropic Claude, Google Gemini, DeepSeek, and any OpenAI-compatible API (Groq, Together, vLLM, xAI, etc.)
 
 **Highlights:**
 
-- 60 built-in tools across 6 search providers, file I/O, Git operations, shell, Python, HTTP, NLP, WhatsApp and Telegram messaging, and more
+- 72 built-in tools across 6 search providers, file I/O, Git operations, shell, Python, HTTP, NLP, WhatsApp and Telegram messaging, and more
 - Three memory modes optimized for conversation, coding, or strategic reasoning — with hybrid memory (rolling summary + semantic recall)
 - Deep reasoning engine (Tree-of-Thought with iterative reflection) via `/think`
 - Task delegation across multiple LLM models via `/delegate`
@@ -231,7 +231,7 @@ Arrow keys, Home/End, and input history work out of the box (via `readline`).
 
 ---
 
-## Built-in Tools (60)
+## Built-in Tools (72)
 
 | Category | Tools |
 |----------|-------|
@@ -319,7 +319,7 @@ Pass `api` as the final argument to start the FastAPI server instead of the inte
 
 ## API Server
 
-Cogtrix includes a REST + WebSocket API server built with FastAPI. It exposes 87 REST endpoints and 2 WebSocket streams, powering the React web frontend and enabling programmatic access from any HTTP client.
+Cogtrix includes a REST + WebSocket API server built with FastAPI. It exposes 100 REST endpoints and 2 WebSocket streams, powering the React web frontend and enabling programmatic access from any HTTP client.
 
 ### Starting the API server
 
@@ -364,14 +364,16 @@ WebSocket connections that cannot set custom headers may pass the token as a `?t
 | Route group | Endpoints | Description |
 |-------------|-----------|-------------|
 | `POST /api/v1/auth/*` | 8 | Registration, login, token refresh, logout, profile, API key management |
-| `/api/v1/sessions/*` | 5 | Create, list, get, update, delete sessions |
+| `/api/v1/agents/*` | 2 | List running agents, get agent status |
+| `/api/v1/sessions/*` | 6 | Create, list, get, update, delete sessions |
 | `/api/v1/sessions/{id}/messages/*` | 3 | Send messages, list history, clear history |
 | `/api/v1/sessions/{id}/memory/*` | 3 | Get memory state, switch mode, clear memory |
 | `/api/v1/sessions/{id}/tools/*` | 4 | List, load, enable, disable tools |
-| `/api/v1/config/*` | 12 | Read/write config, provider management, model aliases |
-| `/api/v1/assistant/*` | 23 | Start/stop assistant mode, channel management, phonebook, outbound, campaigns |
+| `/api/v1/config/*` | 15 | Read/write config, provider management, model aliases, setup wizard |
+| `/api/v1/assistant/*` | 24 | Start/stop assistant mode, channel management, phonebook, outbound, campaigns |
 | `/api/v1/assistant/workflows/*` | 11 | Workflow CRUD, per-workflow documents, chat bindings |
-| `/api/v1/users/*` | 4 | User management: list, create, update role, delete (admin) |
+| `/api/v1/tasks/*` | 5 | Create, list, get, cancel tasks; stream task logs |
+| `/api/v1/users/*` | 5 | User management: list, create, update role, delete (admin) |
 | `/api/v1/rag/*` | 5 | Upload documents, list, delete, query knowledge base |
 | `/api/v1/mcp/*` | 5 | List servers, connect, disconnect, restart, list tools |
 | `/api/v1/system/*` | 2 | Server info, shutdown |
@@ -405,9 +407,9 @@ For detailed debugging, run with `--debug` (logs every LLM call, tool input/outp
 | Guide | What you'll learn |
 |-------|-------------------|
 | **[Configuration](docs/CONFIGURATION.md)** | Every config option, environment variables, search providers |
-| **[Providers](docs/PROVIDERS.md)** | Step-by-step: Ollama, OpenAI, Anthropic, Google, Groq, Together, vLLM |
+| **[Providers](docs/PROVIDERS.md)** | Step-by-step: Ollama, OpenAI, Anthropic, Google, DeepSeek, xAI, Groq, Together, vLLM |
 | **[Memory Modes](docs/MEMORY_MODES.md)** | Conversation, code, and reasoning modes + hybrid memory (summary + recall) |
-| **[Tools Reference](docs/TOOLS_REFERENCE.md)** | All 60 tools with parameters and examples |
+| **[Tools Reference](docs/TOOLS_REFERENCE.md)** | All 72 tools with parameters and examples |
 | **[WhatsApp Guide](docs/WHATSAPP_GUIDE.md)** | Use Cogtrix as a WhatsApp assistant (with Docker Compose) |
 | **[Telegram Guide](docs/TELEGRAM_GUIDE.md)** | Use Cogtrix as a Telegram assistant via a bot |
 | **[Assistant Mode](docs/CONFIGURATION.md#assistant-mode)** | Run Cogtrix as a headless WhatsApp/Telegram messaging daemon |
@@ -423,7 +425,7 @@ For detailed debugging, run with `--debug` (logs every LLM call, tool input/outp
 
 - Want to connect OpenAI, Groq, or another LLM? See [Providers](docs/PROVIDERS.md).
 - Want to customize settings, add search API keys, or set up messaging? See [Configuration](docs/CONFIGURATION.md).
-- Want to know what all 60 tools do? See [Tools Reference](docs/TOOLS_REFERENCE.md).
+- Want to know what all 72 tools do? See [Tools Reference](docs/TOOLS_REFERENCE.md).
 
 ---
 
@@ -431,7 +433,7 @@ For detailed debugging, run with `--debug` (logs every LLM call, tool input/outp
 
 ```bash
 uv run pytest tests/ -v
-uv run pytest tests/ -q -m "not agent_workflow and not live_llm"  # unit tests only (fast)
+uv run pytest tests/ -q -m "not agent_workflow and not live_llm and not docker"  # unit tests only (fast)
 uv run pytest tests/ -m live_llm -v --timeout=300                 # live LLM tests (requires Gemma container at localhost:18080)
 ```
 

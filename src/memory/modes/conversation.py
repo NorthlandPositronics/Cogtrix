@@ -283,7 +283,8 @@ class ConversationMemoryManager(BaseMemoryManager):
         return (
             "In conversation mode: answer questions fully, complete requested tasks, "
             "and use tools proactively to gather information you need. "
-            "Don't stop to ask clarifying questions when the task is clear."
+            "For low-risk or reversible tasks where the intent is clear, proceed "
+            "directly without asking for clarification."
         )
 
     def clear(self) -> None:

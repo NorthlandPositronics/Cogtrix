@@ -346,14 +346,14 @@ class TestBug236HealthcheckCLIMode:
 
     def test_dockerfile_healthcheck_checks_sentinel(self):
         """Dockerfile HEALTHCHECK CMD must check for /tmp/.cogtrix-api-mode."""
-        src = Path("Dockerfile").read_text()
+        src = (Path(__file__).parent.parent / "docker" / "Dockerfile").read_text()
         assert (
             "/tmp/.cogtrix-api-mode" in src
         ), "Dockerfile HEALTHCHECK must gate on /tmp/.cogtrix-api-mode sentinel (BUG-236)"
 
     def test_entrypoint_creates_sentinel_in_api_mode(self):
         """docker-entrypoint.sh must create sentinel before exec in API mode."""
-        src = Path("docker-entrypoint.sh").read_text()
+        src = (Path(__file__).parent.parent / "docker" / "docker-entrypoint.sh").read_text()
         assert (
             "touch /tmp/.cogtrix-api-mode" in src
         ), "docker-entrypoint.sh must create /tmp/.cogtrix-api-mode in API mode (BUG-236)"
@@ -404,7 +404,7 @@ class TestBug232WizardAutoStartBehaviour:
     """Wizard auto-start condition must be documented in docker-entrypoint.sh (BUG-232)."""
 
     def test_entrypoint_documents_ollama_network_host_behaviour(self):
-        src = Path("docker-entrypoint.sh").read_text()
+        src = (Path(__file__).parent.parent / "docker" / "docker-entrypoint.sh").read_text()
         assert (
             "network host" in src or "--network host" in src
         ), "docker-entrypoint.sh must document --network host wizard behaviour (BUG-232)"

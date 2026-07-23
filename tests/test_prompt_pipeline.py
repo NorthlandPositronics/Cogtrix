@@ -497,6 +497,36 @@ class TestClassifyThinkTask:
         assert result.name == expected_category
         assert llm.call_count == 0
 
+    def test_orm_substring_does_not_match_information(self) -> None:
+        # "ORM" must not match as a substring inside "information" — regression for
+        # the bug where "find information about Synechron" was classified as database.
+        llm = _FakeLLM("research")
+        result = classify_think_task(
+            "Please find information about Synechron company. "
+            "Their website is synechron.com. The company has office in Abu Dhabi, UAE.",
+            llm,
+        )
+        assert (
+            result.name != "database"
+        ), "keyword 'ORM' must not match inside 'information' — use word-boundary matching"
+
+    def test_orm_still_matches_legitimate_orm_prompt(self) -> None:
+        # ORM as a standalone token must still trigger the database category.
+        llm = _FakeLLM("should not be called")
+        result = classify_think_task("use ORM to query the schema", llm)
+        assert result.name == "database"
+        assert llm.call_count == 0
+
+    def test_morphological_variants_match_keyword_root(self) -> None:
+        # Prefix-match: keyword "refactor" must match "refactoring", "refactored".
+        # Regression for the word-boundary fix that broke morphological variants.
+        llm = _FakeLLM("should not be called")
+        result = classify_think_task("I need help refactoring this module", llm)
+        assert (
+            result.name == "code_analysis"
+        ), "keyword 'refactor' must match 'refactoring' via prefix match"
+        assert llm.call_count == 0
+
     def test_no_keyword_uses_llm(self) -> None:
         llm = _FakeLLM("research")
         result = classify_think_task("what is the most efficient cache eviction policy", llm)

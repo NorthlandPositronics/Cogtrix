@@ -58,6 +58,7 @@ if [ $# -eq 0 ] && [ ! -f /app/.cogtrix.yaml ] && [ ! -f /app/.cogtrix.yml ] && 
        [ -z "$ANTHROPIC_API_KEY" ] && \
        [ -z "$GEMINI_API_KEY" ] && \
        [ -z "$XAI_API_KEY" ] && \
+       [ -z "$DEEPSEEK_API_KEY" ] && \
        [ -z "$COGTRIX_OLLAMA" ] && \
        [ -z "$OLLAMA_BASE_URL" ]; then
         exec python cogtrix.py --setup

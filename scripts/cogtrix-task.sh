@@ -16,8 +16,8 @@
 #   1. <project-dir>/.cogtrix.yaml  — project-local config
 #   2. ~/.cogtrix.yaml              — your personal config
 #   3. ~/.config/cogtrix/config.yaml
-#   OPENAI_API_KEY / ANTHROPIC_API_KEY / GEMINI_API_KEY / XAI_API_KEY are
-#   always forwarded from the host environment.
+#   OPENAI_API_KEY / ANTHROPIC_API_KEY / GEMINI_API_KEY / XAI_API_KEY /
+#   DEEPSEEK_API_KEY are always forwarded from the host environment.
 #
 # Options:
 #   -f <file>        Read the task prompt from a file instead of the command line
@@ -100,7 +100,7 @@ fi
 
 ENV_ARGS=()
 for var in OPENAI_API_KEY ANTHROPIC_API_KEY GEMINI_API_KEY XAI_API_KEY \
-           COGTRIX_OLLAMA OLLAMA_BASE_URL TAVILY_API_KEY EXA_API_KEY; do
+           DEEPSEEK_API_KEY COGTRIX_OLLAMA OLLAMA_BASE_URL TAVILY_API_KEY EXA_API_KEY; do
     [[ -n "${!var:-}" ]] && ENV_ARGS+=(-e "$var=${!var}")
 done
 

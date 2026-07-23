@@ -21,7 +21,13 @@ from src.orchestration.compression import (
     apply_message_compression,
 )
 from src.orchestration.graph import DEFAULT_RECURSION_LIMIT, build_agent_graph
-from src.orchestration.intent import TaskComplexity, classify_task_complexity
+from src.orchestration.intent import (
+    OwnershipMode,
+    OwnershipResult,
+    TaskComplexity,
+    classify_task_complexity,
+    classify_task_ownership,
+)
 from src.orchestration.run_config import AgentRunConfig
 from src.tools.extend_run import ExtendRunState
 
@@ -213,8 +219,8 @@ def format_agent_error(e: Exception) -> str:
         return (
             "**Authentication failed:** "
             "Authentication failed. Please check your API key "
-            "(OPENAI_API_KEY, ANTHROPIC_API_KEY, GEMINI_API_KEY, or XAI_API_KEY "
-            "depending on your provider)."
+            "(OPENAI_API_KEY, ANTHROPIC_API_KEY, GEMINI_API_KEY, XAI_API_KEY, "
+            "or DEEPSEEK_API_KEY depending on your provider)."
         )
 
     if "RateLimitError" in error_type or "rate_limit" in error_str.lower():
@@ -319,18 +325,14 @@ def extract_ai_content(msg: Any) -> str | None:
             return "\n".join(text_parts)
 
     # Thinking/reasoning content (Qwen3, QwQ, DeepSeek-R1, etc.)
-    # Only use this fallback for *final* messages — NOT for tool-calling messages.
-    # A tool-calling AIMessage has content="" plus tool_calls=[...]; its reasoning
-    # is just internal deliberation about which tool to invoke.
-    tool_calls = getattr(msg, "tool_calls", None)
-    has_tool_calls = bool(tool_calls)
-
-    if not has_tool_calls:
-        additional = getattr(msg, "additional_kwargs", None)
-        if additional and isinstance(additional, dict):
-            reasoning = additional.get("reasoning_content") or additional.get("thinking")
-            if reasoning and isinstance(reasoning, str) and reasoning.strip():
-                return reasoning
+    # Return reasoning even when tool_calls are present: a model greeting the user
+    # ("Hello! I'm here to help.") while also calling request_tools is a real pattern,
+    # and suppressing the greeting produces a silent/empty user-facing response.
+    additional = getattr(msg, "additional_kwargs", None)
+    if additional and isinstance(additional, dict):
+        reasoning = additional.get("reasoning_content") or additional.get("thinking")
+        if reasoning and isinstance(reasoning, str) and reasoning.strip():
+            return reasoning
 
     return None
 
@@ -466,8 +468,7 @@ def build_tool_results_response(result: Any) -> str | None:
         return None
 
     parts = [
-        "The model executed tools but did not summarize the results. "
-        "Here is what was gathered:\n"
+        "The model executed tools but did not summarize the results. Here is what was gathered:\n"
     ]
     for name, content in tool_results:
         parts.append(f"\n**{name}:**\n{content}\n")
@@ -661,6 +662,24 @@ def _handle_extend_run(
     return recover_from_step_limit(graph, result, input_messages, invoke_config, log)
 
 
+def _build_ownership_constraint(mode: OwnershipMode) -> str:
+    """Return a system prompt suffix that constrains the agent to INFORM or ADVISE mode."""
+    if mode == OwnershipMode.INFORM:
+        return (
+            "\n\n---\nTASK MODE: INFORMATIONAL\n"
+            "The user has requested information, not execution. Research and explain; "
+            "do not take actions that change system state. Describe what steps would "
+            "be needed rather than executing them."
+        )
+    if mode == OwnershipMode.ADVISE:
+        return (
+            "\n\n---\nTASK MODE: ADVISORY\n"
+            "The user is seeking guidance. Present options with tradeoffs. "
+            "Do not execute — let the user decide."
+        )
+    return ""
+
+
 def run_agent(
     user_input: str,
     history_messages: list,
@@ -690,6 +709,13 @@ def run_agent(
     git_native: bool = False,
     tool_context_limit_pct: float = 0.80,
     tier_cache_enabled: bool = True,
+    checkpoint_store: Any | None = None,
+    decision_accountability_enabled: bool = False,
+    decision_accountability_report_uncertainty: bool = True,
+    decision_accountability_min_confidence: float = 7.0,
+    task_ownership_classifier_enabled: bool = True,
+    task_ownership_classifier_llm_fallback: bool = False,
+    task_ownership_ambiguous_action: str = "ask",
 ) -> str:
     """Run agent using a custom LangGraph StateGraph.
 
@@ -739,6 +765,13 @@ def run_agent(
             git_native=git_native,
             tool_context_limit_pct=tool_context_limit_pct,
             tier_cache_enabled=tier_cache_enabled,
+            checkpoint_store=checkpoint_store,
+            decision_accountability_enabled=decision_accountability_enabled,
+            decision_accountability_report_uncertainty=decision_accountability_report_uncertainty,
+            decision_accountability_min_confidence=decision_accountability_min_confidence,
+            task_ownership_classifier_enabled=task_ownership_classifier_enabled,
+            task_ownership_classifier_llm_fallback=task_ownership_classifier_llm_fallback,
+            task_ownership_ambiguous_action=task_ownership_ambiguous_action,
         )
 
     _compression_min_age = config.compression_min_age
@@ -782,6 +815,62 @@ def run_agent(
                     if _search_tool is not None:
                         _active.append(_search_tool)
                         get_logger().info("Auto-loaded search_web for complex task")
+
+    # ── Task ownership classification ──────────────────────────────────────
+    if getattr(config, "task_ownership_classifier_enabled", True):
+        _toc_llm_fallback = getattr(config, "task_ownership_classifier_llm_fallback", False)
+        _toc_ambiguous_action = getattr(config, "task_ownership_ambiguous_action", "ask")
+
+        _ownership = classify_task_ownership(
+            user_input,
+            llm=config.llm if _toc_llm_fallback else None,
+            llm_fallback_enabled=_toc_llm_fallback,
+            llm_timeout_seconds=min(getattr(config, "llm_timeout", 180), 10),
+        )
+        get_logger().info(
+            "Task ownership: mode=%s confidence=%.2f signal=%s",
+            _ownership.mode.name,
+            _ownership.confidence,
+            _ownership.raw_signal,
+        )
+
+        if _ownership.mode == OwnershipMode.AMBIGUOUS:
+            if _toc_ambiguous_action == "ask":
+                # Let the graph run normally so history, token counts, and
+                # WS events are handled correctly.  Inject a prompt constraint
+                # that guides the agent to ask one clarifying question instead
+                # of executing.  Returning a bare string here would corrupt
+                # conversation history (C1: AMBIGUOUS short-circuit bug).
+                _action = _ownership.inferred_action or user_input[:40]
+                _ambiguous_constraint = (
+                    "\n\n---\nTASK MODE: CLARIFICATION NEEDED\n"
+                    f"The request '{_action}' is ambiguous — it could mean "
+                    "performing an action OR explaining how to do it. "
+                    "Ask the user ONE specific question to determine their "
+                    "intent before doing anything. Do not execute, install, "
+                    "delete, or modify anything until the intent is confirmed."
+                )
+                if config.system_prompt:
+                    config.system_prompt = config.system_prompt + _ambiguous_constraint
+                else:
+                    config.system_prompt = _ambiguous_constraint
+            elif _toc_ambiguous_action == "inform":
+                _ownership = OwnershipResult(
+                    mode=OwnershipMode.INFORM,
+                    confidence=_ownership.confidence,
+                    is_reversible=_ownership.is_reversible,
+                    raw_signal="ambiguous_forced_inform",
+                    inferred_action=_ownership.inferred_action,
+                )
+            # else "execute": fall through without constraint injection
+
+        if _ownership.mode in (OwnershipMode.INFORM, OwnershipMode.ADVISE):
+            _constraint = _build_ownership_constraint(_ownership.mode)
+            if config.system_prompt:
+                config.system_prompt = config.system_prompt + _constraint
+            else:
+                config.system_prompt = _constraint
+
     if _compression_min_age is None:
         _compression_min_age = COMPRESSION_MIN_AGE_CYCLES
     if _compression_min_chars is None:

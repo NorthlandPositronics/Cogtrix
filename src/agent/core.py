@@ -123,6 +123,12 @@ Trust user-stated facts. Don't verify unless they demonstrably fail.
 
 ## Context Budget
 Limited context window. Use `list_directory` first, then read only needed files. Page large files (200 lines). Delegate independent subtasks.
+
+## Clarification Policy
+When an action is irreversible AND the target scope is ambiguous, ask one specific
+question before acting ("Should I delete only *.log files or everything in /tmp/build/?").
+Ask exactly ONE question, then stop. State an assumption and proceed when risk is low
+or one option is a clear default. Never resolve conflicting instructions silently — surface them.
 """
 
 
@@ -308,6 +314,8 @@ def build_system_prompt(
     tool_instructions: str | None = None,
     milestone_instructions: str | None = None,
     active_tool_names: set[str] | None = None,
+    decision_accountability_prompt: str | None = None,
+    pre_action_confirmation_prompt: str | None = None,
 ) -> str:
     """
     Build a complete system prompt with mode-specific additions.
@@ -333,6 +341,10 @@ def build_system_prompt(
             (``delegate_task`` or ``delegate_parallel``) is present.
             When ``None``, the table is included whenever *models* is
             non-empty (backward-compatible default).
+        decision_accountability_prompt: Optional decision accountability block
+            (``ACCOUNTABILITY_PROMPT`` from ``reflection_delegate.py``).
+            Injected last when ``config.decision_accountability["enabled"]``
+            is True (M2 integration point — ADR-0052).
 
     Returns:
         Combined system prompt
@@ -368,6 +380,12 @@ def build_system_prompt(
 
     if milestone_instructions:
         parts.append(milestone_instructions)
+
+    if decision_accountability_prompt:
+        parts.append(decision_accountability_prompt)
+
+    if pre_action_confirmation_prompt:
+        parts.append(pre_action_confirmation_prompt)
 
     return "\n\n".join(parts)
 

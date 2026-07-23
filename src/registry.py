@@ -63,15 +63,21 @@ def _scan_tool_metadata_from_file(file_path: Path) -> list[dict[str, Any]]:
             return _str_value(node.left) + _str_value(node.right)
         return ""
 
-    def _extract_from_dict(dict_node: ast.Dict) -> dict[str, str] | None:
-        result: dict[str, str] = {}
+    def _extract_from_dict(dict_node: ast.Dict) -> dict[str, str | bool] | None:
+        result: dict[str, str | bool] = {}
+        requires_confirmation: bool | None = None
         for key_node, val_node in zip(dict_node.keys, dict_node.values, strict=False):
             if not isinstance(key_node, ast.Constant):
                 continue
             key = key_node.value
             if key in ("name", "description"):
                 result[key] = _str_value(val_node)
+            elif key == "requires_confirmation":
+                if isinstance(val_node, ast.Constant) and isinstance(val_node.value, bool):
+                    requires_confirmation = val_node.value
         if "name" in result:
+            if requires_confirmation is not None:
+                result["requires_confirmation"] = requires_confirmation
             return result
         return None
 
@@ -498,7 +504,9 @@ class ToolRegistry:
                     )
                     self.tools[name] = proxy  # type: ignore[assignment]
                     self._deferred[name] = module_name
-                    self.tool_metadata[name] = {"requires_confirmation": False}
+                    # Use requires_confirmation from AST scan, default to False if not specified
+                    requires_confirmation = entry.get("requires_confirmation", False)
+                    self.tool_metadata[name] = {"requires_confirmation": requires_confirmation}
                     log.debug("Deferred tool stub registered: %s (module: %s)", name, module_name)
 
         # Load external plugins when config is available

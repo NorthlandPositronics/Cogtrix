@@ -39,6 +39,7 @@ class SessionState:
     pinned_tools: set[str] = field(default_factory=set)
     all_tool_descriptions: dict[str, str] = field(default_factory=dict)
     all_tool_originals: dict[str, Any] = field(default_factory=dict)
+    checkpoint_store: Any | None = None  # CheckpointStore for checkpoint tool
 
     def reset_for_new_session(self) -> None:
         """Clear session-scoped state. Preserves no_confirm and tool catalogs."""

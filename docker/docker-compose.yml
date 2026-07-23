@@ -8,7 +8,7 @@
 #
 # Required secrets in config/cogtrix.env:
 #   COGTRIX_JWT_SECRET=<random 32+ char string>
-#   OPENAI_API_KEY=sk-...   (or ANTHROPIC_API_KEY / GEMINI_API_KEY / XAI_API_KEY)
+#   OPENAI_API_KEY=sk-...   (or ANTHROPIC_API_KEY / GEMINI_API_KEY / XAI_API_KEY / DEEPSEEK_API_KEY)
 # ──────────────────────────────────────────────────────────────
 
 services:

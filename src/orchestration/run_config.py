@@ -46,3 +46,14 @@ class AgentRunConfig:
     llm_timeout: int = 180  # per-call LLM request timeout (seconds)
     bound_cache: OrderedDict | None = field(default=None, compare=False, repr=False)
     compression_cache: OrderedDict | None = field(default=None, compare=False, repr=False)
+    checkpoint_store: Any | None = None  # CheckpointStore for checkpoint tool
+    # ADR-0052 — decision accountability feature flags (populated from app Config)
+    decision_accountability_enabled: bool = False
+    decision_accountability_report_uncertainty: bool = True
+    decision_accountability_min_confidence: float = 7.0
+    # Task ownership classifier (populated from app Config)
+    task_ownership_classifier_enabled: bool = True
+    task_ownership_classifier_llm_fallback: bool = False
+    task_ownership_ambiguous_action: str = "ask"
+    # Pre-action confirmation gate (populated from app Config)
+    pre_action_confirmation_enabled: bool = False

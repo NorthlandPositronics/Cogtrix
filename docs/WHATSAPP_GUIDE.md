@@ -338,4 +338,4 @@ curl http://localhost:3000    # Is it reachable?
 
 - [Configuration Reference -- WhatsApp](CONFIGURATION.md#whatsapp-messaging) -- Full option table
 - [Tools Reference -- WhatsApp](TOOLS_REFERENCE.md#whatsapp-messaging) -- Tool parameters
-- [Dockerfile](../Dockerfile) -- Docker image build
+- [Dockerfile](../docker/Dockerfile) -- Docker image build

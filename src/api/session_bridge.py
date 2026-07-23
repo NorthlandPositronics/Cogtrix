@@ -304,10 +304,21 @@ def _build_run_config(
             delegation_models = (
                 getattr(app_cfg, "delegate_allowed_models", None) if app_cfg else None
             )
+            from src.orchestration.reflection_delegate import (
+                ACCOUNTABILITY_PROMPT,
+                PRE_ACTION_CONFIRMATION_PROMPT,
+            )
+
+            _da_enabled = app_cfg.decision_accountability_enabled if app_cfg is not None else False
+            _pac_enabled = app_cfg.pre_action_confirmation_enabled if app_cfg is not None else False
             system_prompt = build_system_prompt(
                 models=models_dict,
                 delegation_models=delegation_models,
                 active_tool_names=tool_names,
+                decision_accountability_prompt=(ACCOUNTABILITY_PROMPT if _da_enabled else None),
+                pre_action_confirmation_prompt=(
+                    PRE_ACTION_CONFIRMATION_PROMPT if _pac_enabled else None
+                ),
             )
         except Exception as exc:
             log.warning("Could not build system prompt: %s", exc)
@@ -344,6 +355,27 @@ def _build_run_config(
         session_state=session_state,
         bound_cache=OrderedDict(),
         compression_cache=OrderedDict(),
+        decision_accountability_enabled=(
+            app_cfg.decision_accountability_enabled if app_cfg is not None else False
+        ),
+        decision_accountability_report_uncertainty=(
+            app_cfg.decision_accountability_report_uncertainty if app_cfg is not None else True
+        ),
+        decision_accountability_min_confidence=(
+            app_cfg.decision_accountability_min_confidence if app_cfg is not None else 7.0
+        ),
+        task_ownership_classifier_enabled=(
+            app_cfg.task_ownership_classifier_enabled if app_cfg is not None else True
+        ),
+        task_ownership_classifier_llm_fallback=(
+            app_cfg.task_ownership_classifier_llm_fallback if app_cfg is not None else False
+        ),
+        task_ownership_ambiguous_action=(
+            app_cfg.task_ownership_ambiguous_action if app_cfg is not None else "ask"
+        ),
+        pre_action_confirmation_enabled=(
+            app_cfg.pre_action_confirmation_enabled if app_cfg is not None else False
+        ),
     )
 
 

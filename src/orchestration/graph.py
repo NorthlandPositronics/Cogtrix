@@ -282,7 +282,22 @@ def _detect_tool_request(messages: list, start_idx: int = 0) -> ToolManagementRe
 
     if not all_add and not all_remove:
         return None
-    return ToolManagementRequest(add=all_add, remove=all_remove)
+    # Deduplicate and strip empty strings so LLM-generated garbage (e.g.
+    # duplicate names, empty strings from JSON coercion) produces a clear
+    # no-op or guidance line rather than a silent failure.
+    seen_add: set[str] = set()
+    deduped_add: list[str] = []
+    for n in all_add:
+        if n and n not in seen_add:
+            seen_add.add(n)
+            deduped_add.append(n)
+    seen_rem: set[str] = set()
+    deduped_rem: list[str] = []
+    for n in all_remove:
+        if n and n not in seen_rem:
+            seen_rem.add(n)
+            deduped_rem.append(n)
+    return ToolManagementRequest(add=deduped_add, remove=deduped_rem)
 
 
 def _detect_invalid_tool_calls(
@@ -559,6 +574,7 @@ def build_agent_graph(
     config: AgentRunConfig | None = None,
     bound_cache: OrderedDict | None = None,
     compression_cache_in: dict[str, str] | None = None,
+    checkpoint_store: Any | None = None,
 ) -> Any:
     """Build a custom LangGraph StateGraph for the Cogtrix agent.
 
@@ -614,9 +630,17 @@ def build_agent_graph(
             compression_min_chars = config.compression_min_chars
         if hasattr(config, "tool_context_limit_pct"):
             tool_context_limit_pct = config.tool_context_limit_pct
+        if hasattr(config, "checkpoint_store"):
+            checkpoint_store = config.checkpoint_store
         _tier_cache_enabled = getattr(config, "tier_cache_enabled", True)
+        _da_enabled = getattr(config, "decision_accountability_enabled", False)
+        _da_report_uncertainty = getattr(config, "decision_accountability_report_uncertainty", True)
+        _da_min_confidence = getattr(config, "decision_accountability_min_confidence", 7.0)
     else:
         _tier_cache_enabled = False
+        _da_enabled = False
+        _da_report_uncertainty = True
+        _da_min_confidence = 7.0
 
     if active_tools_list is None:
         active_tools_list = []
@@ -733,7 +757,11 @@ def build_agent_graph(
     # ── Checkpoint store ──────────────────────────────────────────────
     from src.tools.checkpoint import CheckpointStore, create_checkpoint_tool
 
-    _checkpoint_store: CheckpointStore = CheckpointStore()
+    if checkpoint_store is not None:
+        _checkpoint_store: CheckpointStore = checkpoint_store
+    else:
+        _checkpoint_store = CheckpointStore()
+
     _checkpoint_tool = create_checkpoint_tool(_checkpoint_store)
     if _checkpoint_tool is not None and active_tools_list is not None:
         _existing_names = {getattr(t, "name", "") for t in active_tools_list}
@@ -845,6 +873,42 @@ def build_agent_graph(
                 _bound_cache.move_to_end(fingerprint)
             else:
                 tool_list = list(active_tools_list) if active_tools_list else []
+                # Deduplicate by name — guards against duplicate entries that arise when
+                # tool-budget enforcement removes a tool from active_names but not from
+                # active_tools_list, and request_tools later re-adds it from available.
+                # Without this, providers that enforce unique tool names (DeepSeek,
+                # OpenAI strict mode) return 400 "Tool names must be unique".
+                # Keep the LAST occurrence of each tool name — request_tools always
+                # appends so the last entry is the most recently loaded instance,
+                # which has the current output_cap and confirmation state.
+                _seen_names_rev: set[str] = set()
+                deduped_rev: list = []
+                for _t in reversed(tool_list):
+                    _tname = getattr(_t, "name", "")
+                    if _tname not in _seen_names_rev:
+                        _seen_names_rev.add(_tname)
+                        deduped_rev.append(_t)
+                    else:
+                        _graph_log.warning(
+                            "Duplicate tool name %r in active_tools_list — "
+                            "dropping extra instance to avoid API 400. "
+                            "Check budget-enforcement and request_tools paths.",
+                            _tname,
+                        )
+                        # Also repair the live list so downstream code stays consistent
+                        try:
+                            active_tools_list.remove(_t)
+                        except ValueError:
+                            pass
+                tool_list = list(reversed(deduped_rev))
+                # If dedup removed duplicates the fingerprint (computed before the
+                # lock from the stale list) may differ from the clean tool_list.
+                # Recompute from the actual bound list so the cache key is stable
+                # and future turns with a clean list get a cache hit (F5).
+                clean_fingerprint = tuple(getattr(t, "name", "") for t in tool_list)
+                if clean_fingerprint != fingerprint:
+                    _cached_fingerprint[0] = clean_fingerprint
+                    fingerprint = clean_fingerprint
                 if len(_bound_cache) >= 8:
                     _bound_cache.popitem(last=False)
                 _bound_cache[fingerprint] = llm.bind_tools(tool_list) if tool_list else llm
@@ -1088,6 +1152,64 @@ def build_agent_graph(
                         content=warning,
                         id=getattr(response, "id", None),
                     )
+        # ── Decision accountability parsing (ADR-0052 M2) ────────────────────
+        # When the feature is enabled, extract any structured plan/counter-plan
+        # from the agent response, log it, and append an uncertainty note when
+        # the adjusted confidence falls below the configured threshold.
+        if _da_enabled:
+            from src.orchestration.reflection_delegate import (
+                UNCERTAINTY_NOTE_PREFIX,
+                extract_decision_justification,
+            )
+
+            try:
+                _raw_content = getattr(response, "content", "") or ""
+                # Multimodal providers (e.g. Anthropic) may return list-of-parts.
+                # Flatten to str before the delimiter parser runs.
+                if isinstance(_raw_content, list):
+                    _da_content = " ".join(
+                        str(c.get("text", c) if isinstance(c, dict) else c) for c in _raw_content
+                    )
+                else:
+                    _da_content = str(_raw_content)
+
+                _da_result = extract_decision_justification(_da_content)
+                if _da_result is not None:
+                    _has_tool_calls = bool(getattr(response, "tool_calls", None))
+                    _graph_log.info(
+                        "decision_accountability: confidence=%.1f adjustment=%.1f "
+                        "flaws=%d should_proceed=%s%s",
+                        _da_result["confidence"],
+                        _da_result["confidence_adjustment"],
+                        len(_da_result["flaws"]),
+                        _da_result["should_proceed"],
+                        " (note suppressed: tool-calls present)" if _has_tool_calls else "",
+                    )
+                    if (
+                        not _da_result["should_proceed"]
+                        and _da_report_uncertainty
+                        and not _has_tool_calls
+                    ):
+                        _flaw_suffix = (
+                            f" with {len(_da_result['flaws'])} critical flaw(s): "
+                            + "; ".join(_da_result["flaws"][:2])
+                            if _da_result["flaws"]
+                            else ""
+                        )
+                        _adj_conf = _da_result["confidence"] + _da_result["confidence_adjustment"]
+                        _uncertainty_note = (
+                            f"\n\n{UNCERTAINTY_NOTE_PREFIX} confidence "
+                            f"{_da_result['confidence']:.1f}/10{_flaw_suffix}. "
+                            f"Adjusted confidence {_adj_conf:.1f}/10 is below "
+                            f"threshold {_da_min_confidence:.1f}. Proceeding with caution."
+                        )
+                        response = AIMessage(
+                            content=_da_content + _uncertainty_note,
+                            id=getattr(response, "id", None),
+                        )
+            except Exception as _da_exc:  # noqa: BLE001 — DA is non-critical; never crash a turn
+                _graph_log.warning("decision_accountability parsing failed: %s", _da_exc)
+
         return {"messages": [response]}
 
     def handle_phantom(state: CogtrixState) -> dict:
@@ -1187,8 +1309,7 @@ def build_agent_graph(
         log.warning("Duplicate tool call detected: %s (returning cached result)", tool_name)
         return ToolMessage(
             content=(
-                "[Duplicate call — returning cached result. "
-                "Do NOT repeat this call.]\n\n" + cached
+                "[Duplicate call — returning cached result. Do NOT repeat this call.]\n\n" + cached
             ),
             tool_call_id=call["id"],
             name=tool_name,
@@ -1224,16 +1345,28 @@ def build_agent_graph(
             _tool_call_counts[tool_name] = count
             if count > _TOOL_BUDGET_HARD:
                 # Remove from active set AND add to denials so the model
-                # can't re-load it via request_tools(add=[...])
+                # can't re-load it via request_tools(add=[...]).
+                # Also remove from active_tools_list so bind_tools stops
+                # advertising the disabled tool to the LLM, and so
+                # _reset_for_new_run doesn't silently re-enable it by
+                # rebuilding _tool_lookup from the stale list (root cause
+                # of the "Tool names must be unique" 400 on re-add).
                 _tool_lookup.pop(tool_name, None)
                 _active_names.discard(tool_name)
                 session_state.denials.add(tool_name)
+                try:
+                    _disabled_obj = next(
+                        t for t in active_tools_list if getattr(t, "name", "") == tool_name
+                    )
+                    active_tools_list.remove(_disabled_obj)
+                except StopIteration:
+                    pass
                 _tool_version[0] += 1  # force bind_tools refresh
                 return ToolMessage(
                     content=(
                         f"Tool '{tool_name}' has been disabled after {_TOOL_BUDGET_HARD} calls "
-                        f"this turn. Please synthesize your findings into a final response now "
-                        f"using the data you already have."
+                        f"and is no longer available. Please synthesize your findings into a "
+                        f"final response now using the data you already have."
                     ),
                     tool_call_id=call["id"],
                     name=tool_name,
@@ -1614,7 +1747,17 @@ def build_agent_graph(
                         )
                         if resolved and source == "available":
                             rname = resolved
-                    if rname in _available_tools_ref[0] and rname not in tools_activated:
+                    _existing_active = {getattr(t, "name", "") for t in active_tools_list}
+                    if rname in session_state.denials:
+                        guidance_lines.append(
+                            f"'{rname}' has been disabled this session and cannot be re-loaded."
+                        )
+                        continue
+                    if (
+                        rname in _available_tools_ref[0]
+                        and rname not in tools_activated
+                        and rname not in _existing_active  # guard: never create duplicates
+                    ):
                         tool_obj = _available_tools_ref[0].pop(rname)
                         tool_catalog.pop(rname, None)
                         if isinstance(tool_obj, _LazyToolProxy):

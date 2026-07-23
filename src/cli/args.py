@@ -349,6 +349,12 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="DIR",
         help="Allow file writes to DIR (repeatable)",
     )
+    tool_group.add_argument(
+        "--allow-read-path",
+        action="append",
+        metavar="DIR",
+        help="Allow file reads from DIR (repeatable)",
+    )
 
     # ── RAG ──────────────────────────────────────────────────────────
     rag_group = parser.add_argument_group("RAG")

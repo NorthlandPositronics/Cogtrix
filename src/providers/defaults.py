@@ -60,6 +60,12 @@ OPENAI_PRESETS: dict[str, dict[str, Any]] = {
         "model": "llama-3.3-70b-versatile",
         "env_key": "GROQ_API_KEY",
     },
+    "deepseek": {
+        "label": "DeepSeek",
+        "base_url": "https://api.deepseek.com/v1",
+        "model": "deepseek-chat",
+        "env_key": "DEEPSEEK_API_KEY",
+    },
 }
 
 # ── All supported native provider types ──────────────────────────────

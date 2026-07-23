@@ -16,6 +16,148 @@ except ImportError:
     ChatOpenAI = None  # type: ignore[misc, assignment]
     CHAT_AVAILABLE = False
 
+
+# ── DeepSeek reasoning-model wrapper ─────────────────────────────────
+#
+# DeepSeek's reasoning models (deepseek-reasoner / any model that uses
+# thinking mode) require that the assistant's `reasoning_content` field
+# be echoed back verbatim in the next API call.  LangChain's ChatOpenAI
+# serialisation silently drops it, causing a 400 error on the second
+# tool-round or any multi-turn exchange.
+#
+# This subclass injects `reasoning_content` back into assistant message
+# dicts whenever the original AIMessage carried it in additional_kwargs.
+
+if CHAT_AVAILABLE:
+
+    class _DeepSeekChatModel(ChatOpenAI):  # type: ignore[misc]
+        """ChatOpenAI subclass that preserves reasoning_content for DeepSeek.
+
+        DeepSeek reasoning models require the assistant's `reasoning_content`
+        to be echoed back in subsequent API calls.  LangChain's two-step failure:
+          1. _convert_dict_to_message() never extracts reasoning_content from the
+             API response dict, so AIMessage.additional_kwargs never has it.
+          2. _get_request_payload() therefore has nothing to re-inject.
+
+        Fix — Part A (_create_chat_result): extract reasoning_content from the
+        raw API response *before* LangChain discards it, then store it in
+        AIMessage.additional_kwargs so Part B can re-inject it.
+
+        Fix — Part B (_get_request_payload): on the next API call, walk message
+        pairs in lockstep and inject reasoning_content into assistant dicts.
+        """
+
+        def _create_chat_result(self, response: Any, generation_info: Any = None) -> Any:
+            # ── Part A: capture reasoning_content from raw API response ──────
+            # Extract BEFORE calling super(), which discards it via
+            # _convert_dict_to_message(). OpenAI SDK stores unknown fields in
+            # __pydantic_extra__ (extra="allow"), so model_dump() includes them.
+            rc_by_index: dict[int, str] = {}
+            try:
+                choices = (
+                    response.get("choices", [])
+                    if isinstance(response, dict)
+                    else getattr(response, "choices", [])
+                )
+                for i, choice in enumerate(choices):
+                    msg = (
+                        choice.get("message", {})
+                        if isinstance(choice, dict)
+                        else getattr(choice, "message", None)
+                    )
+                    if msg is None:
+                        continue
+                    rc = (
+                        msg.get("reasoning_content")
+                        if isinstance(msg, dict)
+                        else (
+                            getattr(msg, "reasoning_content", None)
+                            or (getattr(msg, "__pydantic_extra__", None) or {}).get(
+                                "reasoning_content"
+                            )
+                        )
+                    )
+                    if rc:
+                        rc_by_index[i] = rc
+            except (AttributeError, KeyError, TypeError, IndexError):
+                pass  # introspection failure — super() path still runs
+            except Exception as _exc:
+                import logging as _logging
+
+                _logging.getLogger("cogtrix.providers.openai").warning(
+                    "DeepSeek _create_chat_result: unexpected error capturing "
+                    "reasoning_content: %s",
+                    _exc,
+                )
+
+            result = super()._create_chat_result(response, generation_info)
+
+            # Store captured reasoning_content in the corresponding AIMessage
+            for i, gen in enumerate(result.generations):
+                if i in rc_by_index and hasattr(gen, "message"):
+                    gen.message.additional_kwargs["reasoning_content"] = rc_by_index[i]
+
+            return result
+
+        def _convert_chunk_to_generation_chunk(
+            self, chunk: Any, default_chunk_class: Any, base_generation_info: Any
+        ) -> Any:
+            # ── Part C: capture reasoning_content from streaming delta chunks ──
+            # Streaming uses _convert_chunk_to_generation_chunk instead of
+            # _create_chat_result, so reasoning_content must be captured here.
+            result = super()._convert_chunk_to_generation_chunk(
+                chunk, default_chunk_class, base_generation_info
+            )
+            if result is None:
+                return result
+            try:
+                delta = chunk.get("delta", {}) if isinstance(chunk, dict) else {}
+                rc = delta.get("reasoning_content") if isinstance(delta, dict) else None
+                if rc and hasattr(result, "message"):
+                    result.message.additional_kwargs["reasoning_content"] = rc
+            except (AttributeError, KeyError, TypeError):
+                pass
+            return result
+
+        def _get_request_payload(self, input_: Any, *, stop: Any = None, **kwargs: Any) -> dict:
+            # ── Part B: re-inject reasoning_content into outgoing message dicts ─
+            payload = super()._get_request_payload(input_, stop=stop, **kwargs)
+            try:
+                msgs = getattr(self, "_convert_input", lambda x: x)(input_)
+                if hasattr(msgs, "to_messages"):
+                    msgs = msgs.to_messages()
+                if isinstance(msgs, list):
+                    # Handle both standard chat completions ("messages") and
+                    # Responses API ("input") payload shapes (M4).
+                    for key in ("messages", "input"):
+                        msg_dicts = payload.get(key, [])
+                        if msg_dicts:
+                            for msg, msg_dict in zip(msgs, msg_dicts, strict=False):
+                                rc = getattr(msg, "additional_kwargs", {}).get("reasoning_content")
+                                if (
+                                    rc
+                                    and isinstance(msg_dict, dict)
+                                    and msg_dict.get("role") == "assistant"
+                                ):
+                                    msg_dict["reasoning_content"] = rc
+                            break  # only process the first key that has entries
+            except (AttributeError, KeyError, TypeError):
+                pass  # introspection failure — payload still sent without reasoning_content
+            except Exception as _exc:
+                import logging as _logging
+
+                _logging.getLogger("cogtrix.providers.openai").warning(
+                    "DeepSeek _get_request_payload: unexpected error re-injecting "
+                    "reasoning_content: %s",
+                    _exc,
+                )
+            return payload
+
+else:
+    _DeepSeekChatModel = None  # type: ignore[assignment,misc]
+
+_DEEPSEEK_BASE_URL = "api.deepseek.com"
+
 try:
     from langchain_openai import OpenAIEmbeddings
 
@@ -67,7 +209,12 @@ def create_chat_model(
     elif api_key:
         llm_kwargs["api_key"] = api_key
     llm_kwargs.update(kwargs)
-    return ChatOpenAI(**llm_kwargs)
+    cls = (
+        _DeepSeekChatModel
+        if (base_url and _DEEPSEEK_BASE_URL in base_url and _DeepSeekChatModel is not None)
+        else ChatOpenAI
+    )
+    return cls(**llm_kwargs)
 
 
 def create_embeddings(

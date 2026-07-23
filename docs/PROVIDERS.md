@@ -11,6 +11,7 @@ Step-by-step guides for configuring LLM providers. If you're new to Cogtrix, sta
 - [Groq](#groq)
 - [Together AI](#together-ai)
 - [xAI (Grok)](#xai-grok)
+- [DeepSeek](#deepseek)
 - [Local vLLM](#local-vllm)
 - [Anthropic Claude](#anthropic-claude)
 - [Google Gemini](#google-gemini)
@@ -32,6 +33,7 @@ Not sure where to start? Use this table:
 | **Full control, own GPU server** | **vLLM** | 15 minutes |
 | **Claude models (reasoning, long context)** | **Anthropic** | 2 minutes (need API key) |
 | **Gemini models (multimodal, fast)** | **Google** | 2 minutes (need API key) |
+| **DeepSeek V3 / R1 reasoning, low cost** | **DeepSeek** | 2 minutes (need API key) |
 
 Cogtrix defaults to Ollama on `localhost:11434`. If you already have Ollama running, you don't need to configure anything — just run `uv run python cogtrix.py`.
 
@@ -198,7 +200,7 @@ Fast inference with open-source models.
 
 2. Configure (`.cogtrix.yaml`) with the key in the `api_key` field:
 
-   > **Note:** Cogtrix does not read `GROQ_API_KEY` from the environment. The key must be set in the config file's `api_key` field (or provided via `--setup`). Only `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, and `XAI_API_KEY` are read automatically.
+   > **Note:** Cogtrix does not read `GROQ_API_KEY` from the environment. The key must be set in the config file's `api_key` field (or provided via `--setup`). Only `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `XAI_API_KEY`, and `DEEPSEEK_API_KEY` are read automatically.
    ```yaml
    providers:
      groq:
@@ -290,6 +292,50 @@ models:
     provider: xai
     model: grok-4.1-fast
 ```
+
+---
+
+## DeepSeek
+
+DeepSeek offers a hosted API with an OpenAI-compatible endpoint. Both
+`deepseek-chat` (V3, general purpose) and `deepseek-reasoner` (R1,
+chain-of-thought) are supported.
+
+### Setup
+
+Export your API key:
+
+```bash
+export DEEPSEEK_API_KEY=sk-...
+```
+
+When `DEEPSEEK_API_KEY` is set, Cogtrix automatically creates a `deepseek`
+provider pointing to `https://api.deepseek.com/v1` with `deepseek-chat` as the
+default model.
+
+### Configuration
+
+```yaml
+providers:
+  deepseek:
+    type: openai
+    base_url: https://api.deepseek.com/v1
+    api_key: "sk-..."  # your DeepSeek API key
+
+models:
+  default: deepseek
+  deepseek:
+    provider: deepseek
+    model: deepseek-chat     # or deepseek-reasoner for R1
+```
+
+> **Note:** `deepseek-reasoner` (R1) returns a `reasoning_content` field in
+> every assistant message. DeepSeek's API requires this field to be echoed back
+> in subsequent calls — LangChain's standard `ChatOpenAI` wrapper silently drops
+> it. Cogtrix handles this transparently via an internal subclass
+> (`_DeepSeekChatModel` in `src/providers/openai.py`) that captures and
+> re-injects the field on every round-trip, including streaming. No extra
+> configuration is needed.
 
 ---
 

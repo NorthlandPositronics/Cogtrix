@@ -1252,6 +1252,28 @@ class TestResolveWizardProvider:
         native, url, key = self._fn("xai", api_key="direct-key", env={"XAI_API_KEY": "env-key"})
         assert key == "direct-key"
 
+    def test_deepseek_preset_resolves_to_openai(self):
+        native, url, key = self._fn("deepseek", api_key="ds-key")
+        assert native == "openai"
+        assert url == "https://api.deepseek.com/v1"
+        assert key == "ds-key"
+
+    def test_deepseek_preset_key_resolved_from_env(self):
+        native, url, key = self._fn("deepseek", env={"DEEPSEEK_API_KEY": "env-ds-key"})
+        assert native == "openai"
+        assert key == "env-ds-key"
+
+    def test_deepseek_preset_explicit_key_overrides_env(self):
+        native, url, key = self._fn(
+            "deepseek", api_key="direct-key", env={"DEEPSEEK_API_KEY": "env-key"}
+        )
+        assert key == "direct-key"
+
+    def test_deepseek_preset_custom_base_url_takes_priority(self):
+        native, url, key = self._fn("deepseek", base_url="http://my-deepseek-proxy")
+        assert native == "openai"
+        assert url == "http://my-deepseek-proxy"
+
     def test_unknown_provider_returned_unchanged(self):
         native, url, key = self._fn("unknownprovider", api_key="k", base_url="http://x")
         assert native == "unknownprovider"
@@ -1371,6 +1393,78 @@ class TestWizardStep0PresetResolution:
         assert captured_model == [
             "llama-3.3-70b-versatile"
         ], f"unexpected model: {captured_model!r}"
+
+    def test_step0_deepseek_resolves_to_openai(self, client, tokens):
+        """provider_type='deepseek' must pass native_type='openai' to _wizard_test_connection."""
+        wid = self._start_wizard(client, tokens)
+        captured: list[str] = []
+
+        def _capture(provider_type, model, api_key, base_url):
+            captured.append(provider_type)
+            return MagicMock(), None
+
+        with (
+            patch("src.api.routes.config._wizard_test_connection", side_effect=_capture),
+            patch("src.api.routes.config._wizard_load_docs", return_value="docs"),
+            patch("src.api.routes.config._wizard_invoke_llm", return_value="Q?"),
+        ):
+            r = client.post(
+                f"/api/v1/config/wizard/{wid}/step",
+                headers=_ah(tokens),
+                json={"data": {"provider_type": "deepseek", "api_key": "sk-ds"}},
+            )
+
+        assert r.status_code == 200, r.text
+        assert captured == ["openai"], f"expected openai, got {captured!r}"
+
+    def test_step0_deepseek_uses_preset_base_url(self, client, tokens):
+        """Step 0 with 'deepseek' must forward DeepSeek's base_url to _wizard_test_connection."""
+        wid = self._start_wizard(client, tokens)
+        captured_url: list[str | None] = []
+
+        def _capture(provider_type, model, api_key, base_url):
+            captured_url.append(base_url)
+            return MagicMock(), None
+
+        with (
+            patch("src.api.routes.config._wizard_test_connection", side_effect=_capture),
+            patch("src.api.routes.config._wizard_load_docs", return_value="docs"),
+            patch("src.api.routes.config._wizard_invoke_llm", return_value="Q?"),
+        ):
+            r = client.post(
+                f"/api/v1/config/wizard/{wid}/step",
+                headers=_ah(tokens),
+                json={"data": {"provider_type": "deepseek", "api_key": "sk-ds"}},
+            )
+
+        assert r.status_code == 200, r.text
+        assert captured_url == [
+            "https://api.deepseek.com/v1"
+        ], f"unexpected base_url: {captured_url!r}"
+
+    def test_step0_deepseek_uses_preset_default_model_when_none_given(self, client, tokens):
+        """Step 0 with 'deepseek' and no model must use deepseek-chat as default."""
+        wid = self._start_wizard(client, tokens)
+        captured_model: list[str] = []
+
+        def _capture(provider_type, model, api_key, base_url):
+            captured_model.append(model)
+            return MagicMock(), None
+
+        with (
+            patch("src.api.routes.config._wizard_test_connection", side_effect=_capture),
+            patch("src.api.routes.config._wizard_load_docs", return_value="docs"),
+            patch("src.api.routes.config._wizard_invoke_llm", return_value="Q?"),
+        ):
+            r = client.post(
+                f"/api/v1/config/wizard/{wid}/step",
+                headers=_ah(tokens),
+                # no "model" field — must default to preset model
+                json={"data": {"provider_type": "deepseek", "api_key": "sk-ds"}},
+            )
+
+        assert r.status_code == 200, r.text
+        assert captured_model == ["deepseek-chat"], f"unexpected model: {captured_model!r}"
 
     def test_step0_bootstrap_info_type_is_native(self, client, tokens):
         """ws['bootstrap_info']['type'] must be 'openai', not 'groq'."""

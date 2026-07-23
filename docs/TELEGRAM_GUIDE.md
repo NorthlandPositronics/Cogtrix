@@ -457,4 +457,4 @@ You can use **both simultaneously** -- configure both `services.whatsapp` and `s
 - [Configuration Reference -- Telegram](CONFIGURATION.md#telegram-messaging) -- Full option table
 - [Tools Reference -- Telegram](TOOLS_REFERENCE.md#telegram-messaging) -- Tool parameters
 - [WhatsApp Guide](WHATSAPP_GUIDE.md) -- Set up WhatsApp alongside Telegram
-- [Dockerfile](../Dockerfile) -- Docker image build
+- [Dockerfile](../docker/Dockerfile) -- Docker image build

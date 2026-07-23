@@ -9,6 +9,7 @@ This page covers every way to configure Cogtrix — from the simplest environmen
   - [Providers Section](#providers-section)
   - [Models Section](#models-section)
   - [Research Delegate Section](#research-delegate-section)
+  - [Decision Accountability](#decision-accountability)
   - [Prompt Optimizer](#prompt-optimizer)
   - [Context Compression](#context-compression)
   - [MCP Servers](#mcp-servers)
@@ -95,7 +96,7 @@ providers:
 |--------|------|----------|-------------|
 | `type` | string | Yes | Provider type: `"openai"`, `"ollama"`, `"anthropic"`, or `"google"` (case-insensitive) |
 | `base_url` | string | No | API endpoint URL |
-| `api_key` | string | No | API key. Omit or leave empty for unauthenticated OpenAI-compatible endpoints (vLLM, LM Studio). Required for OpenAI, Groq, Together, Anthropic, Google, and xAI. Not used by Ollama. |
+| `api_key` | string | No | API key. Omit or leave empty for unauthenticated OpenAI-compatible endpoints (vLLM, LM Studio). Required for OpenAI, Groq, Together, Anthropic, Google, xAI, and DeepSeek. Not used by Ollama. |
 | `tool_instructions` | string | No | Custom tool-call formatting instructions appended to the system prompt. Not injected by default — `bind_tools()` handles formatting at the API level. Set a non-empty string only for providers that need explicit guidance. |
 
 #### Provider Types
@@ -107,7 +108,7 @@ providers:
 | `anthropic` | Anthropic Claude | `claude-sonnet-4-5` | SDK default |
 | `google` | Google Gemini | `gemini-2.5-flash` | SDK default |
 
-**xAI (Grok)** uses `type: openai` with `base_url: "https://api.x.ai/v1"`. The setup wizard offers it as a named choice.
+**xAI (Grok)** and **DeepSeek** use `type: openai` with a custom `base_url` (`https://api.x.ai/v1` and `https://api.deepseek.com/v1` respectively). The setup wizard offers both as named choices and auto-detects `XAI_API_KEY` / `DEEPSEEK_API_KEY` from the environment.
 
 Optional dependencies: `langchain-anthropic` (`uv pip install "cogtrix[anthropic]"`), `langchain-google-genai` (`uv pip install "cogtrix[google]"`).
 
@@ -323,6 +324,8 @@ research_delegate:
 | `enabled` | bool | `true` | Enable/disable the research delegate pipeline |
 | `cap_ratio` | float | `0.85` | Proportion of `max_context_tokens` allocated to the delegate's tool output cap. Higher values let the delegate load more page content. Clamped to 0.50–0.95. |
 | `timeout` | int | `300` | Maximum seconds for the delegate agent to run. Clamped to 60–600. |
+| `auto` | bool | `false` | When `true`, automatically trigger the research delegate whenever the agent's tool output exceeds `auto_threshold` of the context window. |
+| `auto_threshold` | float | `0.50` | Fraction of context used by tool output that triggers automatic delegation when `auto: true`. |
 
 **How it works:**
 
@@ -338,6 +341,84 @@ research_delegate:
 - Set `enabled: false` if you don't use web research with deep thinking, or if you want to save LLM calls on a metered API.
 - Increase `cap_ratio` toward `0.95` if the delegate's output is being truncated and you have a large context window.
 - Increase `timeout` if the delegate is timing out on slow models or large pages.
+
+### Decision Accountability
+
+Decision accountability adds an explicit self-debate layer to the agent's reasoning. When enabled, the agent is instructed to produce a structured plan with assumptions and evidence, then generate a counter-plan ("why this might be wrong") before acting. Responses where the adjusted confidence falls below the threshold receive an uncertainty note so you can review before proceeding.
+
+**Off by default** — this feature is opt-in. Enable it for high-stakes autonomous work (code changes, shell commands, API calls) where traceable reasoning matters.
+
+```yaml
+decision_accountability:
+  enabled: true
+```
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `enabled` | bool | `false` | Enable the self-debate prompt and response parsing. Off by default — opt in when you need traceable reasoning. |
+| `min_confidence_threshold` | float | `7.0` | Adjusted confidence (0–10) below which the agent appends an uncertainty note. Adjusted confidence = base confidence − 1.0 per identified critical flaw. |
+| `require_counter_plan` | bool | `true` | When true, the accountability prompt instructs the agent to always produce a counter-plan before acting. |
+| `report_uncertainty` | bool | `true` | When true, responses where adjusted confidence falls below the threshold receive a visible `⚠️ Decision accountability:` note. |
+
+**How it works:**
+
+1. When `enabled: true`, Cogtrix appends the accountability block to the system prompt at session start. The block instructs the agent to structure each action plan using named delimiters (`---PLAN---`, `---ASSUMPTIONS---`, `---EVIDENCE---`, `---CONFIDENCE---`, `---COUNTER-PLAN---`, `---FLAWS---`).
+2. After every model response, Cogtrix parses this structure from the response text.
+3. The confidence score is adjusted: each identified critical flaw reduces it by 1.0.
+4. When the adjusted confidence falls below `min_confidence_threshold` and `report_uncertainty: true`, a note is appended to the response:
+
+```
+⚠️ Decision accountability: confidence 5.0/10 with 2 critical flaw(s): Missing validation;
+No rollback path. Adjusted confidence 3.0/10 is below threshold 7.0. Proceeding with caution.
+```
+
+5. The full structured output (plan, assumptions, evidence, counter-plan, flaws, confidence) is logged at INFO level under `decision_accountability:` for auditing.
+
+**Interaction with `/think`:**
+
+Decision accountability and Deep Think (`/think`) are independent features. Deep Think explores multiple solution branches in parallel. Decision accountability adds a plan/counter-plan layer to every agent action turn. Both can be active at the same time.
+
+**When to use:**
+
+- Enable for agents running autonomously on sensitive tasks (file edits, git operations, deployments).
+- Keep disabled for conversational sessions, simple lookups, or when using fast/small models where the extra prompt tokens would hurt performance.
+- The additional ~600 tokens in the system prompt add roughly 0.2–0.5s to TTFT depending on provider; no extra LLM calls are made (the agent reasons within its own response).
+
+### Task Ownership Classifier
+
+The task ownership classifier analyses each user prompt before the agent starts to determine whether the request asks the agent to *execute* an action or *explain* how to do it. This prevents the agent from acting when the user only wants information (e.g. "check how to install gh" should explain, not install).
+
+**On by default.** Disable only if you want the agent to always proceed without ownership analysis.
+
+```yaml
+task_ownership_classifier:
+  enabled: true            # set to false to disable entirely
+  llm_fallback: false      # when true, calls the LLM for ambiguous prompts (adds latency)
+  ambiguous_action: ask    # what to do when ownership is ambiguous: ask | inform | execute
+```
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `enabled` | bool | `true` | Enable pre-prompt ownership classification. |
+| `llm_fallback` | bool | `false` | Use an LLM micro-call for borderline cases. Improves accuracy at the cost of added latency. Off by default. |
+| `ambiguous_action` | string | `"ask"` | How to handle a prompt whose ownership cannot be determined. `ask` — inject a clarification constraint into the system prompt and run the agent normally; the agent asks one focused question and does not execute until intent is confirmed; `inform` — treat as informational; `execute` — treat as execution request. |
+
+### Pre-Action Confirmation
+
+When enabled, the agent is instructed to state what it is about to do and ask "Shall I proceed?" before any irreversible operation (delete, install, deploy to production, drop table, overwrite data).
+
+**Off by default** — opt in for autonomous workflows where you want explicit consent gates before destructive actions.
+
+```yaml
+pre_action_confirmation:
+  enabled: true
+```
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `enabled` | bool | `false` | Inject the pre-action confirmation prompt. The agent will pause and ask before irreversible operations. |
+
+**Exception:** If the user's message already contains explicit execution consent ("go ahead", "yes do it", "proceed", "confirmed"), the agent skips the confirmation step.
 
 ### Prompt Optimizer
 
@@ -448,9 +529,33 @@ docker run -it -e COGTRIX_ALLOWED_WRITE_PATHS="/app:/data" -w /tmp ghcr.io/north
 cogtrix.py --allow-write-path /data/output --allow-write-path /shared/workspace
 ```
 
-Read operations are not affected — they already allow access to both the working directory and the application install directory.
+Read operations default to the working directory and application install directory. To allow reads from additional directories, use `allowed_read_paths`.
 
 **Priority:** CLI (`--allow-write-path`) > env var (`COGTRIX_ALLOWED_WRITE_PATHS`) > config file.
+
+### Allowed Read Paths
+
+By default, file read operations (`read_file`, `list_directory`) are restricted to the current working directory and the application install directory. You can extend this with additional directories for read access:
+
+```yaml
+allowed_read_paths:
+  - /workspace
+  - /data/external
+```
+
+This is especially useful in Docker deployments where the project is mounted at a different location than the working directory. For example, if you mount your project at `/workspace` but the container's working directory is `/app`:
+
+```bash
+# Via environment variable (colon-separated)
+docker run -v /home/user/project:/workspace:ro \
+    -e COGTRIX_ALLOWED_READ_PATHS=/workspace \
+    cogtrix --prompt "Analyze /workspace/docs"
+
+# Via CLI flag (repeatable)
+cogtrix.py --allow-read-path /workspace
+```
+
+**Priority:** CLI (`--allow-read-path`) > env var (`COGTRIX_ALLOWED_READ_PATHS`) > config file.
 
 ### MCP Servers
 
@@ -613,6 +718,25 @@ Cogtrix includes six search providers. DuckDuckGo is always available with no se
 | Brave | `brave_search` | Included (`requests`) | `BRAVE_API_KEY` | 2 000/month |
 | Google | `google_search` | Included (`requests`) | `GOOGLE_API_KEY` + `GOOGLE_CSE_ID` | 100/day |
 | SerpAPI | `serpapi_search` | `google-search-results` | `SERPAPI_API_KEY` | 100/month |
+| SearXNG | `searxng_search` | Included (`requests`) | `SEARXNG_BASE_URL` | Self-hosted |
+
+**Configuring SearXNG:**
+
+[SearXNG](https://docs.searxng.org/) is a self-hosted meta-search engine. To enable it, set `SEARXNG_BASE_URL` to your instance URL:
+
+```bash
+export SEARXNG_BASE_URL=http://localhost:8888
+```
+
+Or in config YAML:
+
+```yaml
+services:
+  searxng:
+    base_url: http://localhost:8888
+```
+
+The `searxng_search` tool becomes available automatically once the URL is configured.
 
 **Installing optional search packages:**
 
@@ -626,7 +750,7 @@ uv sync --extra search
 pip install tavily-python exa-py google-search-results
 ```
 
-Brave and Google use only `requests`, which is already a core dependency.
+Brave, Google, and SearXNG use only `requests`, which is already a core dependency.
 
 #### Legacy service format
 
@@ -1118,12 +1242,14 @@ Rate limit violations are recorded but do not increment the security violation c
 | `COGTRIX_SESSION` | Session ID | `my-project` |
 | `COGTRIX_MEMORY_MODE` | Memory mode | `code` |
 | `COGTRIX_DATA_DIR` | Root directory for data storage | `./data` |
+| `COGTRIX_ALLOWED_READ_PATHS` | Colon-separated list of absolute directory paths the agent is allowed to read. When set, restricts file read operations to these directories. | `/workspace:/data/external` |
 | `COGTRIX_ALLOWED_WRITE_PATHS` | Colon-separated extra write-allowed paths | `/app:/data` |
 | `COGTRIX_OLLAMA` | Ollama server address (`host` or `host:port`) | `192.168.1.100` or `192.168.1.100:8080` |
 | `OPENAI_API_KEY` | OpenAI API key | `sk-...` |
 | `ANTHROPIC_API_KEY` | Anthropic API key | `sk-ant-...` |
 | `GEMINI_API_KEY` | Google Gemini API key | `AIza...` |
 | `XAI_API_KEY` | xAI (Grok) API key | `xai-...` |
+| `DEEPSEEK_API_KEY` | DeepSeek API key | `sk-...` |
 | `OLLAMA_BASE_URL` | Ollama server URL (legacy, full URL) | `http://192.168.1.100:11434` |
 | `OPENWEATHER_API_KEY` | OpenWeather API key | `abc123` |
 | `COGTRIX_EMBEDDING_PROVIDER` | RAG embedding provider | `openai` |
@@ -1134,6 +1260,7 @@ Rate limit violations are recorded but do not increment the security violation c
 | `GOOGLE_API_KEY` | Google Custom Search API key | `AIza...` |
 | `GOOGLE_CSE_ID` | Google Programmable Search Engine ID | `abc123...` |
 | `SERPAPI_API_KEY` | SerpAPI search API key | `...` |
+| `SEARXNG_BASE_URL` | SearXNG instance URL. When set, enables the `searxng_search` tool. | `http://localhost:8888` |
 | `COGTRIX_WHATSAPP_URL` | Waha server URL | `http://localhost:3000` |
 | `COGTRIX_WHATSAPP_API_KEY` | Waha API key | `yoursecretkey` |
 | `COGTRIX_WHATSAPP_SESSION` | Waha session name | `default` |
@@ -1267,7 +1394,7 @@ python cogtrix.py --setup --setup-docs https://example.com/cogtrix-config-docs
 
 **How the wizard works:**
 
-1. **Scripted bootstrap** — detects `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `XAI_API_KEY`, and Ollama at `localhost:11434`. Prompts for provider type (`ollama`, `openai`, `anthropic`, `google`, or `xai`), model name, and API key if needed. Tests LLM connectivity before proceeding.
+1. **Scripted bootstrap** — detects `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `XAI_API_KEY`, `DEEPSEEK_API_KEY`, and Ollama at `localhost:11434`. Prompts for provider type (`ollama`, `openai`, `anthropic`, `google`, `xai`, or `deepseek`), model name, and API key if needed. Tests LLM connectivity before proceeding.
 2. **LLM conversation** — loads the configuration reference (bundled or fetched), loads any existing config from the standard search paths, and runs an interactive Q&A loop. The wizard LLM asks targeted questions and produces a complete YAML config in a code fence when it has enough information. Type `quit` at any prompt to cancel.
 3. **Validation and write** — extracts the YAML from the LLM response, injects the real API key collected during bootstrap, validates the result via an internal config round-trip, shows a masked preview for confirmation, and writes the file.
 
@@ -1280,7 +1407,7 @@ python cogtrix.py --setup --setup-docs https://example.com/cogtrix-config-docs
 - API keys entered during bootstrap are injected into the final YAML, so the LLM never sees the actual key value.
 - The output file is shown after writing: `Config written to: ~/.cogtrix.yaml`.
 
-**Docker auto-start:** When running the official container image, the container automatically launches the setup wizard if all of the following are true: (1) no config file exists at `/app/.cogtrix.yaml` or `/app/.cogtrix.json`, (2) none of `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `XAI_API_KEY`, `COGTRIX_OLLAMA`, or `OLLAMA_BASE_URL` is set, and (3) stdin is a TTY. This simplifies first-run setup:
+**Docker auto-start:** When running the official container image, the container automatically launches the setup wizard if all of the following are true: (1) no command-line arguments were passed to the container, (2) no config file exists at `/app/.cogtrix.yaml` or `/app/.cogtrix.json`, (3) none of `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `XAI_API_KEY`, `DEEPSEEK_API_KEY`, `COGTRIX_OLLAMA`, or `OLLAMA_BASE_URL` is set, and (4) stdin is a TTY. This simplifies first-run setup:
 
 ```bash
 docker run -it -v ~/.cogtrix.yaml:/app/.cogtrix.yaml ghcr.io/northlandpositronics/cogtrix:latest
@@ -1389,6 +1516,14 @@ research_delegate:
   enabled: true
   cap_ratio: 0.85
   timeout: 300
+
+# ─── Decision Accountability ────────────────────────────────────
+# Off by default. Enable for high-stakes autonomous work.
+decision_accountability:
+  enabled: false
+  min_confidence_threshold: 7.0
+  require_counter_plan: true
+  report_uncertainty: true
 
 # ─── Prompt Optimizer ────────────────────────────────────────────
 prompt_optimizer: true
@@ -1571,6 +1706,13 @@ mcp_servers:
     "timeout": 300
   },
 
+  "decision_accountability": {
+    "enabled": false,
+    "min_confidence_threshold": 7.0,
+    "require_counter_plan": true,
+    "report_uncertainty": true
+  },
+
   "prompt_optimizer": true,
 
   "context_compression": {
@@ -1677,6 +1819,19 @@ models:
 |-----|-----|
 | `--provider ollama` | `--model <alias>` |
 | `-p ollama` | `-m <alias>` |
+
+### New feature: Decision Accountability (ADR-0052)
+
+**No migration required.** The feature is opt-in (`enabled: false` by default) and adds no breaking changes to existing configuration.
+
+To enable, add the following to your `.cogtrix.yaml`:
+
+```yaml
+decision_accountability:
+  enabled: true
+```
+
+If you have an existing config that previously contained a `decision_accountability` key with a dict value (from a pre-release build that used a different schema), replace it with the scalar fields shown above. The old dict form is no longer read by the parser.
 
 ---
 

@@ -102,6 +102,10 @@ from src.orchestration.phases import (  # noqa: F401
     was_deep_think_called,
     was_delegation_called,
 )
+from src.orchestration.reflection_delegate import (
+    ACCOUNTABILITY_PROMPT,
+    PRE_ACTION_CONFIRMATION_PROMPT,
+)
 from src.orchestration.runner import (  # noqa: F401
     ToolCallLogger,
     build_tool_results_response,
@@ -140,6 +144,7 @@ from src.tools.configure import (
     configure_email_tool,
     configure_exa_tool,
     configure_file_ops_tool,
+    configure_file_read_dirs,
     configure_google_search_tool,
     configure_python_exec_tool,
     configure_rag_tool,
@@ -700,6 +705,7 @@ _PROVIDER_ENV_VARS: dict[str, str] = {
     "gemini": "GEMINI_API_KEY",
     "xai": "XAI_API_KEY",
     "groq": "GROQ_API_KEY",
+    "deepseek": "DEEPSEEK_API_KEY",
     "mistral": "MISTRAL_API_KEY",
     "cohere": "COHERE_API_KEY",
     "together": "TOGETHER_API_KEY",
@@ -1104,8 +1110,8 @@ def _export_html(turns: list[tuple[str, str]], session_id: str, timestamp: str) 
 </head>
 <body>
 <h1>Cogtrix Session: {esc(session_id)}</h1>
-<div class="meta">Exported: {esc(ts_display)} &nbsp;&middot;&nbsp; {len(turns)} turn{'s' if len(turns) != 1 else ''}</div>
-{''.join(turns_html)}
+<div class="meta">Exported: {esc(ts_display)} &nbsp;&middot;&nbsp; {len(turns)} turn{"s" if len(turns) != 1 else ""}</div>
+{"".join(turns_html)}
 </body>
 </html>
 """
@@ -1903,7 +1909,7 @@ class SlashCommandRegistry:
             _ttotal = _timeout_info.get("total", 0)
             _timeout_note_plain = f" ⚠ Timed out — {_done}/{_ttotal} items."
         print(f"✓ {prefix} {summary_str}{_timeout_note_plain}")
-        print(f"  Context reduced by ~{reduction}%" f" ({before_chars:,} → {after_chars:,} chars)")
+        print(f"  Context reduced by ~{reduction}% ({before_chars:,} → {after_chars:,} chars)")
         return "continue"
 
     def _cmd_retry(self, _args: str) -> str:
@@ -2213,8 +2219,7 @@ class SlashCommandRegistry:
             label = f"{n} turn{'s' if n != 1 else ''}"
             if console is not None:
                 console.print(
-                    f"  [green]\u2713[/green] Exported to [cyan]{path}[/cyan] "
-                    f"[dim]({label})[/dim]"
+                    f"  [green]\u2713[/green] Exported to [cyan]{path}[/cyan] [dim]({label})[/dim]"
                 )
             else:
                 print(f"  \u2713 Exported to {path} ({label})")
@@ -2265,7 +2270,7 @@ class SlashCommandRegistry:
                     lines_out.append(f"  {name_fmt} [dim]{detail}[/dim]{marker}")
             lines_out.append("")
             lines_out.append(
-                "[dim]Switch: [bold]/model[/bold] <name>   " "(e.g. [bold]/model fast[/bold])[/dim]"
+                "[dim]Switch: [bold]/model[/bold] <name>   (e.g. [bold]/model fast[/bold])[/dim]"
             )
             console.print(
                 Panel(
@@ -2507,7 +2512,7 @@ class SlashCommandRegistry:
                 else "tools will prompt for confirmation"
             )
             console.print(
-                f"[{color}]Auto-approve [bold]{state}[/bold][/{color}] " f"[dim]({desc})[/dim]"
+                f"[{color}]Auto-approve [bold]{state}[/bold][/{color}] [dim]({desc})[/dim]"
             )
         else:
             desc = (
@@ -4762,6 +4767,24 @@ def run_single_prompt(
                     parallel_tool_execution=config.parallel_tool_execution if config else True,
                     git_native=config.git_native if config else False,
                     tool_context_limit_pct=config.tool_context_limit_pct if config else 0.80,
+                    decision_accountability_enabled=(
+                        config.decision_accountability_enabled if config else False
+                    ),
+                    decision_accountability_report_uncertainty=(
+                        config.decision_accountability_report_uncertainty if config else True
+                    ),
+                    decision_accountability_min_confidence=(
+                        config.decision_accountability_min_confidence if config else 7.0
+                    ),
+                    task_ownership_classifier_enabled=(
+                        config.task_ownership_classifier_enabled if config else True
+                    ),
+                    task_ownership_classifier_llm_fallback=(
+                        config.task_ownership_classifier_llm_fallback if config else False
+                    ),
+                    task_ownership_ambiguous_action=(
+                        config.task_ownership_ambiguous_action if config else "ask"
+                    ),
                 )
         finally:
             _spinner.stop()
@@ -4873,7 +4896,7 @@ def run_single_prompt(
             and not agent_performed_writes(agent_msgs)
         ):
             log.info(
-                "Prompt requests file actions but none were performed " "— running execution phase"
+                "Prompt requests file actions but none were performed — running execution phase"
             )
             _spinner.start()
             try:
@@ -5099,6 +5122,7 @@ def main():
                 "ANTHROPIC_API_KEY",
                 "GEMINI_API_KEY",
                 "XAI_API_KEY",
+                "DEEPSEEK_API_KEY",
                 "COGTRIX_OLLAMA",
                 "OLLAMA_BASE_URL",
             )
@@ -5112,7 +5136,7 @@ def main():
         from src.setup_wizard import run_setup_wizard
 
         if console is not None:
-            console.print("\n  [bold]No configuration found.[/bold] " "Starting setup wizard...\n")
+            console.print("\n  [bold]No configuration found.[/bold] Starting setup wizard...\n")
         else:
             print("\n  No configuration found. Starting setup wizard...\n")
 
@@ -5243,6 +5267,7 @@ def main():
     configure_deep_think_tool(config)
 
     configure_file_ops_tool(config)
+    configure_file_read_dirs(config)
 
     # Wire cron tools: LLM factory always reflects the current llm variable
     # (which is a mutable reference updated on model/provider switches).
@@ -5283,6 +5308,7 @@ def main():
         configure_google_search_tool(cfg)
         configure_python_exec_tool(cfg)
         configure_file_ops_tool(cfg)
+        configure_file_read_dirs(cfg)
         configure_rag_tool(cfg)
         configure_email_tool(cfg)
         cap = _compute_tool_output_cap(ctx_tokens)
@@ -5373,13 +5399,28 @@ def main():
         atexit.register(lambda: _mcp_manager.close_all() if _mcp_manager else None)
     elif not MCP_AVAILABLE and config.mcp_servers:
         log.warning(
-            "mcp_servers configured but 'mcp' package not installed; " "run: uv pip install mcp"
+            "mcp_servers configured but 'mcp' package not installed; run: uv pip install mcp"
         )
 
     # ── Apply tool presets ───────────────────────────────────────
     # Build the full catalog before splitting (for request_tools description).
     _session.all_tool_descriptions = build_tool_catalog(registry.tools)
     _session.all_tool_originals = dict(registry.tools)
+
+    # Create and register checkpoint tool (must be done before wrapping with safety)
+    from src.tools.checkpoint import CheckpointStore, create_checkpoint_tool
+
+    _checkpoint_store = CheckpointStore()
+    _checkpoint_tool = create_checkpoint_tool(_checkpoint_store)
+    if _checkpoint_tool is not None:
+        registry.tools["checkpoint"] = _checkpoint_tool
+        _session.all_tool_descriptions["checkpoint"] = getattr(_checkpoint_tool, "description", "")
+        _session.all_tool_originals["checkpoint"] = _checkpoint_tool
+        registry.tool_metadata["checkpoint"] = {"requires_confirmation": False}
+        _session.loaded_tools.add("checkpoint")
+        _session.pinned_tools.add("checkpoint")
+        _session.checkpoint_store = _checkpoint_store
+        log.debug("Registered checkpoint tool in registry")
 
     # Split into active (full schemas in agent) and available (on-demand)
     available_tools: dict[str, Any] = {}
@@ -5563,6 +5604,12 @@ def main():
             delegation_models=config.delegate_allowed_models,
             tool_instructions=provider_config.tool_instructions,
             active_tool_names={getattr(t, "name", "") for t in tools} | set(available_tools),
+            decision_accountability_prompt=(
+                ACCOUNTABILITY_PROMPT if config.decision_accountability_enabled else None
+            ),
+            pre_action_confirmation_prompt=(
+                PRE_ACTION_CONFIRMATION_PROMPT if config.pre_action_confirmation_enabled else None
+            ),
         )
         if _project_context:
             system_prompt = f"## Project Context (from COGTRIX.md)\n\n{_project_context}\n\n---\n\n{system_prompt}"
@@ -5603,9 +5650,10 @@ def main():
                 _auto_route_enabled = False
 
         # Token budget for context trimming (from model context_window or default)
-        from src.agent.core import _DEFAULT_CONTEXT_WINDOW
+        # Using the local constant since _DEFAULT_CONTEXT_WINDOW is not defined in agent/core.py
+        DEFAULT_CONTEXT_WINDOW = 32_768
 
-        max_context_tokens = model_config.context_window or _DEFAULT_CONTEXT_WINDOW
+        max_context_tokens = model_config.context_window or DEFAULT_CONTEXT_WINDOW
 
         # Cap individual tool outputs to prevent context overflow.
         # Applied to active tools; on-demand tools get capped when
@@ -5667,6 +5715,27 @@ def main():
                             parallel_tool_execution=(
                                 _tq_config.parallel_tool_execution if _tq_config else True
                             ),
+                            checkpoint_store=_session.checkpoint_store,
+                            decision_accountability_enabled=(
+                                config.decision_accountability_enabled if config else False
+                            ),
+                            decision_accountability_report_uncertainty=(
+                                config.decision_accountability_report_uncertainty
+                                if config
+                                else True
+                            ),
+                            decision_accountability_min_confidence=(
+                                config.decision_accountability_min_confidence if config else 7.0
+                            ),
+                            task_ownership_classifier_enabled=(
+                                config.task_ownership_classifier_enabled if config else True
+                            ),
+                            task_ownership_classifier_llm_fallback=(
+                                config.task_ownership_classifier_llm_fallback if config else False
+                            ),
+                            task_ownership_ambiguous_action=(
+                                config.task_ownership_ambiguous_action if config else "ask"
+                            ),
                         )
                         return result or "[no output]"
                     except Exception as _exc:  # noqa: BLE001
@@ -5682,7 +5751,7 @@ def main():
         mode_info = f", mode: {config.memory_mode}"
         prov_model = f"{provider_config.name}: {actual_model}"
         if console:
-            console.print(f"[green]✓ Agent ready[/green] " f"[dim]({prov_model}{mode_info})[/dim]")
+            console.print(f"[green]✓ Agent ready[/green] [dim]({prov_model}{mode_info})[/dim]")
         else:
             print(f"✓ Agent ready ({prov_model}{mode_info})")
 
@@ -5943,6 +6012,14 @@ def main():
                 delegation_models=config.delegate_allowed_models,
                 tool_instructions=provider_config.tool_instructions,
                 active_tool_names={getattr(t, "name", "") for t in tools} | set(available_tools),
+                decision_accountability_prompt=(
+                    ACCOUNTABILITY_PROMPT if config.decision_accountability_enabled else None
+                ),
+                pre_action_confirmation_prompt=(
+                    PRE_ACTION_CONFIRMATION_PROMPT
+                    if config.pre_action_confirmation_enabled
+                    else None
+                ),
             )
             if _project_context:
                 system_prompt = f"## Project Context (from COGTRIX.md)\n\n{_project_context}\n\n---\n\n{system_prompt}"
@@ -6148,6 +6225,16 @@ def main():
                                 tool_instructions=provider_config.tool_instructions,
                                 active_tool_names={getattr(t, "name", "") for t in tools}
                                 | set(available_tools),
+                                decision_accountability_prompt=(
+                                    ACCOUNTABILITY_PROMPT
+                                    if config.decision_accountability_enabled
+                                    else None
+                                ),
+                                pre_action_confirmation_prompt=(
+                                    PRE_ACTION_CONFIRMATION_PROMPT
+                                    if config.pre_action_confirmation_enabled
+                                    else None
+                                ),
                             )
                             if _project_context:
                                 system_prompt = f"## Project Context (from COGTRIX.md)\n\n{_project_context}\n\n---\n\n{system_prompt}"
@@ -6157,7 +6244,7 @@ def main():
                             old_llm = llm
                             llm = new_llm
                             max_context_tokens = (
-                                model_config.context_window or _DEFAULT_CONTEXT_WINDOW
+                                model_config.context_window or DEFAULT_CONTEXT_WINDOW
                             )
                             slash_cmds.max_context_tokens = max_context_tokens
                             _cleanup_resources.append(llm)
@@ -6196,10 +6283,7 @@ def main():
                                     f"[dim]({model_config.provider})[/dim][/green]"
                                 )
                             else:
-                                print(
-                                    f"Switched to model {actual_model} "
-                                    f"({model_config.provider})"
-                                )
+                                print(f"Switched to model {actual_model} ({model_config.provider})")
                             log.info(
                                 f"Live model switch: {actual_model} "
                                 f"(provider: {model_config.provider})"
@@ -6251,6 +6335,16 @@ def main():
                                 tool_instructions=provider_config.tool_instructions,
                                 active_tool_names={getattr(t, "name", "") for t in tools}
                                 | set(available_tools),
+                                decision_accountability_prompt=(
+                                    ACCOUNTABILITY_PROMPT
+                                    if config.decision_accountability_enabled
+                                    else None
+                                ),
+                                pre_action_confirmation_prompt=(
+                                    PRE_ACTION_CONFIRMATION_PROMPT
+                                    if config.pre_action_confirmation_enabled
+                                    else None
+                                ),
                             )
                             if _project_context:
                                 system_prompt = f"## Project Context (from COGTRIX.md)\n\n{_project_context}\n\n---\n\n{system_prompt}"
@@ -6280,12 +6374,8 @@ def main():
                                     f"[dim]({msg_count} messages)[/dim][/green]"
                                 )
                             else:
-                                print(
-                                    f"Switched to session {new_session} " f"({msg_count} messages)"
-                                )
-                            log.info(
-                                f"Live session switch: {new_session} " f"({msg_count} messages)"
-                            )
+                                print(f"Switched to session {new_session} ({msg_count} messages)")
+                            log.info(f"Live session switch: {new_session} ({msg_count} messages)")
                         except Exception as exc:
                             restored = session_orch.rollback(_snap)
                             memory_manager = restored["memory_manager"]
@@ -6321,16 +6411,14 @@ def main():
                             _session.pinned_tools.add(load_name)
                             if console is not None:
                                 console.print(
-                                    f"[green]Tool [bold]{load_name}[/bold] "
-                                    f"loaded (pinned).[/green]"
+                                    f"[green]Tool [bold]{load_name}[/bold] loaded (pinned).[/green]"
                                 )
                             else:
                                 print(f"Tool '{load_name}' loaded (pinned).")
                         else:
                             if console is not None:
                                 console.print(
-                                    f"[yellow]Tool '{load_name}' is not available "
-                                    f"to load.[/yellow]"
+                                    f"[yellow]Tool '{load_name}' is not available to load.[/yellow]"
                                 )
                             else:
                                 print(f"Tool '{load_name}' is not available to load.")
@@ -6348,7 +6436,7 @@ def main():
                             tools[:] = [t for t in tools if getattr(t, "name", None) != unload_name]
                             if console is not None:
                                 console.print(
-                                    f"[green]Tool [bold]{unload_name}[/bold] " f"unloaded.[/green]"
+                                    f"[green]Tool [bold]{unload_name}[/bold] unloaded.[/green]"
                                 )
                             else:
                                 print(f"Tool '{unload_name}' unloaded.")
@@ -6375,6 +6463,15 @@ def main():
                     elif isinstance(result, str) and result.startswith("deep_think:"):
                         # ── Hybrid /think: gather → analyze → synthesize ──
                         think_task = result.split(":", 1)[1]
+                        # Echo the user's /think command so it stays visible
+                        # during the multi-minute Stage 1/2 run.  Normal prompts
+                        # reach print_user_turn via the main handler, but slash
+                        # commands hit `continue` before that path — so we must
+                        # echo explicitly here.
+                        if console is not None:
+                            from src.ui.turns import print_user_turn
+
+                            print_user_turn(console, user_input)
                         try:
                             from datetime import date as _date
 
@@ -6441,6 +6538,7 @@ def main():
                                     on_tool_expansion=_tool_expansion_ui,
                                     parallel_tool_execution=config.parallel_tool_execution,
                                     git_native=_git_native,
+                                    checkpoint_store=_session.checkpoint_store,
                                 )
                             finally:
                                 _spinner.stop()
@@ -6624,7 +6722,7 @@ def main():
                                 _cleanup_resources.remove(llm)
                             llm = new_llm
                             max_context_tokens = (
-                                model_config.context_window or _DEFAULT_CONTEXT_WINDOW
+                                model_config.context_window or DEFAULT_CONTEXT_WINDOW
                             )
                             _cleanup_resources.append(llm)
                             _cron_llm_ref[:] = [llm]
@@ -6640,6 +6738,16 @@ def main():
                                 tool_instructions=provider_config.tool_instructions,
                                 active_tool_names={getattr(t, "name", "") for t in tools}
                                 | set(available_tools),
+                                decision_accountability_prompt=(
+                                    ACCOUNTABILITY_PROMPT
+                                    if config.decision_accountability_enabled
+                                    else None
+                                ),
+                                pre_action_confirmation_prompt=(
+                                    PRE_ACTION_CONFIRMATION_PROMPT
+                                    if config.pre_action_confirmation_enabled
+                                    else None
+                                ),
                             )
                             if _project_context:
                                 system_prompt = f"## Project Context (from COGTRIX.md)\n\n{_project_context}\n\n---\n\n{system_prompt}"
@@ -6955,6 +7063,13 @@ def main():
                         git_native=_git_native,
                         tool_context_limit_pct=config.tool_context_limit_pct,
                         tier_cache_enabled=config.tier_cache_enabled,
+                        checkpoint_store=_session.checkpoint_store,
+                        decision_accountability_enabled=config.decision_accountability_enabled,
+                        decision_accountability_report_uncertainty=config.decision_accountability_report_uncertainty,
+                        decision_accountability_min_confidence=config.decision_accountability_min_confidence,
+                        task_ownership_classifier_enabled=config.task_ownership_classifier_enabled,
+                        task_ownership_classifier_llm_fallback=config.task_ownership_classifier_llm_fallback,
+                        task_ownership_ambiguous_action=config.task_ownership_ambiguous_action,
                     )
                 log.debug(
                     "⏱ run_agent total: %.0fms",

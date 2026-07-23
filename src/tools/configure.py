@@ -365,6 +365,13 @@ def configure_file_ops_tool(config: Config) -> None:
     set_allowed_write_dirs(config.allowed_write_paths)
 
 
+def configure_file_read_dirs(config: Config) -> None:
+    """Configure file operations tool with allowed read directories."""
+    from src.tools.file_ops import set_allowed_read_dirs
+
+    set_allowed_read_dirs(config.allowed_read_paths)
+
+
 def configure_cron_tool(
     config: Config,
     llm_factory: Callable[[], Any] | None = None,

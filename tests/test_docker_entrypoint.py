@@ -23,18 +23,18 @@ ROOT = Path(__file__).parent.parent
 
 
 def _dockerfile_text() -> str:
-    return (ROOT / "Dockerfile").read_text()
+    return (ROOT / "docker" / "Dockerfile").read_text()
 
 
 def _entrypoint_text() -> str:
-    return (ROOT / "docker-entrypoint.sh").read_text()
+    return (ROOT / "docker" / "docker-entrypoint.sh").read_text()
 
 
 class TestEntrypointAlembicInvocation:
     """BUG-DOCKER-001 — alembic must be called as CLI binary, not python -m alembic."""
 
     def _entrypoint_text(self) -> str:
-        return (ROOT / "docker-entrypoint.sh").read_text()
+        return (ROOT / "docker" / "docker-entrypoint.sh").read_text()
 
     def test_does_not_use_python_m_alembic(self) -> None:
         assert "python -m alembic" not in self._entrypoint_text(), (
@@ -54,7 +54,7 @@ class TestDockerfilePythonVersionAlignment:
     """BUG-DOCKER-002 — Dockerfile base image must match requires-python in pyproject.toml."""
 
     def _dockerfile_text(self) -> str:
-        return (ROOT / "Dockerfile").read_text()
+        return (ROOT / "docker" / "Dockerfile").read_text()
 
     def _required_minor(self) -> str:
         """Return the minor version required by pyproject.toml, e.g. '3.13'."""
@@ -219,13 +219,14 @@ class TestEntrypointLogic:
         text = _entrypoint_text()
         assert "-t 0" in text, "Wizard guard must check '[ -t 0 ]' (stdin is a TTY)"
 
-    def test_wizard_checks_all_six_api_key_env_vars(self) -> None:
+    def test_wizard_checks_all_api_key_env_vars(self) -> None:
         text = _entrypoint_text()
         expected_vars = [
             "OPENAI_API_KEY",
             "ANTHROPIC_API_KEY",
             "GEMINI_API_KEY",
             "XAI_API_KEY",
+            "DEEPSEEK_API_KEY",
             "COGTRIX_OLLAMA",
             "OLLAMA_BASE_URL",
         ]
