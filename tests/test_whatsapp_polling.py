@@ -5,6 +5,8 @@ Covers WahaClient.get_chat_messages() and WhatsAppChannel.poll().
 
 from __future__ import annotations
 
+import collections
+import threading
 import time
 from unittest.mock import MagicMock, patch
 
@@ -1093,3 +1095,215 @@ class TestFetchErrorBackoff:
         assert result[0].chat_id == "bbb@c.us"
         assert "aaa@c.us" in ch._chat_errors
         assert "bbb@c.us" not in ch._chat_errors
+
+
+# ---------------------------------------------------------------------------
+# BUG-104: _prefetch_lids() must hold _lid_cache_lock during scan
+# ---------------------------------------------------------------------------
+
+
+def _make_lid_channel() -> WhatsAppChannel:
+    cfg = {"waha_url": "http://localhost:3000", "session": "default"}
+    with patch.object(WahaClient, "__init__", lambda self, **kw: None):
+        ch = WhatsAppChannel(cfg)
+    ch._client = MagicMock()
+    ch._client.resolve_lid.return_value = "+491234567890"
+    return ch
+
+
+def _make_lid_message(from_number: str, body: str = "hi") -> Message:
+    return Message(id="m1", timestamp=1000, from_number=from_number, body=body)
+
+
+class TestPrefetchLidsLock:
+    """Regression tests for BUG-104: _prefetch_lids() must hold _lid_cache_lock during scan.
+
+    Before the fix, _prefetch_lids() read self._lid_cache without holding _lid_cache_lock,
+    creating a data race with concurrent _resolve_lid() pool threads that mutate the
+    OrderedDict. After the fix, the cache-scan loop is wrapped with the lock.
+    """
+
+    def test_prefetch_lids_uses_cached_entry(self) -> None:
+        """A cached, non-expired entry must not trigger an HTTP resolution call."""
+        ch = _make_lid_channel()
+        lid = "999@lid"
+        ch._lid_cache[lid] = ("+491111111111", float("inf"))
+        msgs = [_make_lid_message(lid)]
+
+        ch._prefetch_lids(msgs)
+
+        ch._client.resolve_lid.assert_not_called()
+
+    def test_prefetch_lids_resolves_missing_lid(self) -> None:
+        """A missing cache entry must trigger an HTTP resolution call."""
+        ch = _make_lid_channel()
+        lid = "888@lid"
+        msgs = [_make_lid_message(lid)]
+
+        ch._prefetch_lids(msgs)
+
+        ch._client.resolve_lid.assert_called_once_with(lid)
+
+    def test_prefetch_lids_resolves_expired_lid(self) -> None:
+        """An expired cache entry must trigger an HTTP resolution call."""
+        ch = _make_lid_channel()
+        lid = "777@lid"
+        past = time.monotonic() - 1.0
+        ch._lid_cache[lid] = (None, past)
+        msgs = [_make_lid_message(lid)]
+
+        ch._prefetch_lids(msgs)
+
+        ch._client.resolve_lid.assert_called_once_with(lid)
+
+    def test_prefetch_lids_skips_non_lid_numbers(self) -> None:
+        """Non-@lid message numbers must not trigger resolution."""
+        ch = _make_lid_channel()
+        msgs = [_make_lid_message("123@c.us")]
+
+        ch._prefetch_lids(msgs)
+
+        ch._client.resolve_lid.assert_not_called()
+
+    def test_prefetch_lids_acquires_lock_then_releases_before_pool(self) -> None:
+        """The scan lock must be released before pool threads call _resolve_lid.
+
+        We verify this by patching _resolve_lid to assert that _lid_cache_lock
+        is NOT held when it runs (it acquires it itself — if the scan held it
+        over the pool call we'd deadlock, since threading.Lock is not reentrant).
+        """
+        ch = _make_lid_channel()
+        lid = "666@lid"
+        msgs = [_make_lid_message(lid), _make_lid_message("555@lid")]
+
+        lock_held_during_resolve = threading.Event()
+        original_resolve = ch._resolve_lid
+
+        def _patched_resolve(lid_: str) -> str | None:
+            acquired = ch._lid_cache_lock.acquire(blocking=False)
+            if acquired:
+                lock_held_during_resolve.set()
+                ch._lid_cache_lock.release()
+            return original_resolve(lid_)
+
+        with patch.object(ch, "_resolve_lid", side_effect=_patched_resolve):
+            ch._prefetch_lids(msgs)
+
+        assert lock_held_during_resolve.is_set(), (
+            "_lid_cache_lock was still held when _resolve_lid ran — "
+            "scan lock was not released before pool dispatch."
+        )
+
+    def test_prefetch_lids_concurrent_with_resolve_lid_no_corruption(self) -> None:
+        """Run _prefetch_lids and _resolve_lid concurrently; cache must remain valid."""
+        ch = _make_lid_channel()
+        ch._client.resolve_lid.return_value = "+490000000000"
+
+        errors: list[str] = []
+
+        def do_prefetch() -> None:
+            for i in range(50):
+                lid = f"{(i % 10)}@lid"
+                msgs = [_make_lid_message(lid)]
+                try:
+                    ch._prefetch_lids(msgs)
+                except Exception as exc:
+                    errors.append(f"prefetch: {exc}")
+
+        def do_resolve() -> None:
+            for i in range(50):
+                lid = f"{(i % 10)}@lid"
+                try:
+                    ch._resolve_lid(lid)
+                except Exception as exc:
+                    errors.append(f"resolve: {exc}")
+
+        threads = [threading.Thread(target=do_prefetch), threading.Thread(target=do_resolve)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10.0)
+
+        assert not errors, f"Concurrent access produced errors: {errors}"
+        assert isinstance(ch._lid_cache, collections.OrderedDict)
+
+
+# ---------------------------------------------------------------------------
+# Auto-unarchive protection (BUG-222)
+# ---------------------------------------------------------------------------
+
+
+class TestAutoUnarchiveProtection:
+    """When ignore_archived is True and an incoming message auto-unarchives a
+    chat, the bot should re-archive it and not reply."""
+
+    def test_auto_unarchived_chat_is_rearchived(self) -> None:
+        """Chat archived on poll N, auto-unarchived on poll N+1 → re-archived, skipped."""
+        ch = _make_channel()
+        msg1 = _make_message(id="msg-1", timestamp=1000)
+        msg2 = _make_message(id="msg-2", timestamp=1001, body="New message")
+
+        # Poll 1: chat is archived → skipped, added to _archived_snapshot
+        overview_archived = _make_overview(chat_id="123@c.us", last_message=msg1, archived=True)
+        ch._client.get_chats_overview.return_value = [overview_archived]
+        result1 = ch.poll()
+        assert result1 == []
+        assert "123@c.us" in ch._archived_snapshot
+
+        # Poll 2: same chat now unarchived (auto-unarchive) with a NEW message
+        overview_unarchived = _make_overview(chat_id="123@c.us", last_message=msg2, archived=False)
+        ch._client.get_chats_overview.return_value = [overview_unarchived]
+        result2 = ch.poll()
+        assert result2 == []
+        ch._client.archive_chat.assert_called_with("123@c.us")
+        ch._client.get_chat_messages.assert_not_called()
+
+    def test_manually_unarchived_chat_passes_through(self) -> None:
+        """Chat archived on poll N, manually unarchived on poll N+1 (no new
+        message) → NOT re-archived, passes through normally."""
+        ch = _make_channel()
+        msg1 = _make_message(id="msg-1", timestamp=1000, body="Old message")
+
+        # Poll 1: chat is archived
+        overview_archived = _make_overview(chat_id="123@c.us", last_message=msg1, archived=True)
+        ch._client.get_chats_overview.return_value = [overview_archived]
+        ch.poll()
+        assert "123@c.us" in ch._archived_snapshot
+
+        # Poll 2: same chat unarchived with SAME last_message (user unarchived manually)
+        overview_unarchived = _make_overview(chat_id="123@c.us", last_message=msg1, archived=False)
+        ch._client.get_chats_overview.return_value = [overview_unarchived]
+        ch._client.get_chat_messages.return_value = [msg1]
+
+        ch.poll()
+        # Should NOT re-archive — user deliberately unarchived
+        ch._client.archive_chat.assert_not_called()
+
+    def test_auto_unarchive_cleared_after_one_cycle(self) -> None:
+        """After re-archiving, the chat stays in _archived_snapshot for
+        subsequent polls (persistent suppression while archived)."""
+        ch = _make_channel()
+        msg1 = _make_message(id="msg-1", timestamp=1000)
+        msg2 = _make_message(id="msg-2", timestamp=1001)
+        msg3 = _make_message(id="msg-3", timestamp=1002, body="Third")
+
+        # Poll 1: archived
+        ch._client.get_chats_overview.return_value = [
+            _make_overview(chat_id="123@c.us", last_message=msg1, archived=True)
+        ]
+        ch.poll()
+
+        # Poll 2: auto-unarchived with new message → re-archived
+        ch._client.get_chats_overview.return_value = [
+            _make_overview(chat_id="123@c.us", last_message=msg2, archived=False)
+        ]
+        ch.poll()
+        assert "123@c.us" in ch._archived_snapshot
+
+        # Poll 3: still archived (re-archive succeeded) → still skipped
+        ch._client.get_chats_overview.return_value = [
+            _make_overview(chat_id="123@c.us", last_message=msg3, archived=True)
+        ]
+        result3 = ch.poll()
+        assert result3 == []
+        assert "123@c.us" in ch._archived_snapshot

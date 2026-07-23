@@ -9,7 +9,9 @@ event loop's queue so the WebSocket drain task can forward them to the client.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import threading
 import time
 from typing import Any
 
@@ -37,6 +39,7 @@ class WebSocketCallbackHandler(BaseCallbackHandler):
         self._queue = ws_queue
         self._loop = loop
         self._tool_starts: dict[str, float] = {}  # str(run_id) -> start_time
+        self._tool_starts_lock = threading.Lock()  # guards _tool_starts against concurrent access
         self.input_tokens: int = 0
         self.output_tokens: int = 0
         self.tool_call_count: int = 0
@@ -46,14 +49,24 @@ class WebSocketCallbackHandler(BaseCallbackHandler):
     # ------------------------------------------------------------------
 
     def _enqueue(self, msg_type: str, payload: dict[str, Any]) -> None:
-        """Thread-safe enqueue via run_coroutine_threadsafe."""
+        """Thread-safe enqueue via call_soon_threadsafe.
+
+        Uses put_nowait so that a full queue (no active WS drain task) drops
+        the message rather than blocking or growing the queue unboundedly
+        (BUG-FORGE-004).
+        """
+        item = {"type": msg_type, "payload": payload}
         try:
-            asyncio.run_coroutine_threadsafe(
-                self._queue.put({"type": msg_type, "payload": payload}),
-                self._loop,
-            )
-        except Exception as exc:  # pragma: no cover
-            log.debug("WebSocketCallbackHandler._enqueue failed: %s", exc)
+            self._loop.call_soon_threadsafe(self._try_put_nowait, item)
+        except RuntimeError:
+            pass  # event loop closed
+
+    def _try_put_nowait(self, item: dict) -> None:
+        """Synchronous put_nowait called from the event loop thread."""
+        try:
+            self._queue.put_nowait(item)
+        except asyncio.QueueFull:
+            pass
 
     # ------------------------------------------------------------------
     # LLM events
@@ -61,10 +74,23 @@ class WebSocketCallbackHandler(BaseCallbackHandler):
 
     def on_llm_new_token(self, token: str, **kwargs: Any) -> None:
         """Forward a streaming token to the WebSocket."""
-        self._enqueue("token", {"text": token})
+        # BUG-218: final is True only when tool calls have been seen AND none
+        # are currently in-flight — avoids marking intermediate reasoning tokens
+        # between tool calls as final.
+        with self._tool_starts_lock:
+            is_final = self.tool_call_count > 0 and len(self._tool_starts) == 0
+        self._enqueue("token", {"text": token, "final": is_final})
 
     def on_llm_end(self, response: Any, **kwargs: Any) -> None:
-        """Accumulate token usage from each LLM call."""
+        """Accumulate token usage from each LLM call.
+
+        Handles three token-count locations used by different providers:
+        1. ``llm_output.token_usage``  — OpenAI (prompt_tokens / completion_tokens)
+        2. ``llm_output.usage``        — some OpenAI-compat providers (same keys)
+        3. ``generation.message.usage_metadata`` — LangChain standard field;
+           may be a dict (most providers) or an object with attributes (older
+           LangChain versions) — both are handled via duck-typing (BUG-FORGE-003).
+        """
         llm_output = getattr(response, "llm_output", None)
         if llm_output:
             usage = llm_output.get("token_usage") or llm_output.get("usage")
@@ -80,8 +106,12 @@ class WebSocketCallbackHandler(BaseCallbackHandler):
                     if msg:
                         um = getattr(msg, "usage_metadata", None)
                         if um:
-                            self.input_tokens += getattr(um, "input_tokens", 0)
-                            self.output_tokens += getattr(um, "output_tokens", 0)
+                            if isinstance(um, dict):
+                                self.input_tokens += um.get("input_tokens", 0)
+                                self.output_tokens += um.get("output_tokens", 0)
+                            else:
+                                self.input_tokens += getattr(um, "input_tokens", 0)
+                                self.output_tokens += getattr(um, "output_tokens", 0)
 
     def on_llm_error(self, error: BaseException | str, **kwargs: Any) -> None:
         """Forward an LLM-level error to the WebSocket."""
@@ -101,16 +131,15 @@ class WebSocketCallbackHandler(BaseCallbackHandler):
     ) -> None:
         """Notify the WebSocket that a tool invocation has started."""
         key = str(run_id) if run_id is not None else ""
-        self._tool_starts[key] = time.time()
-        self.tool_call_count += 1
+        with self._tool_starts_lock:
+            self._tool_starts[key] = time.time()
+            self.tool_call_count += 1
         tool_name: str = serialized.get("name", "unknown") if serialized else "unknown"
         if isinstance(input_str, dict):
             tool_input: dict = input_str
         else:
             try:
-                import json as _json
-
-                parsed = _json.loads(input_str)
+                parsed = json.loads(input_str)
                 tool_input = parsed if isinstance(parsed, dict) else {}
             except Exception:
                 tool_input = {}
@@ -126,7 +155,8 @@ class WebSocketCallbackHandler(BaseCallbackHandler):
     def on_tool_end(self, output: Any, *, run_id: Any = None, **kwargs: Any) -> None:
         """Notify the WebSocket that a tool invocation completed successfully."""
         key = str(run_id) if run_id is not None else ""
-        start = self._tool_starts.pop(key, time.time())
+        with self._tool_starts_lock:
+            start = self._tool_starts.pop(key, time.time())
         duration_ms = int((time.time() - start) * 1000)
         tool_name: str = kwargs.get("name", "unknown")
         self._enqueue(
@@ -144,7 +174,8 @@ class WebSocketCallbackHandler(BaseCallbackHandler):
     ) -> None:
         """Notify the WebSocket that a tool invocation failed."""
         key = str(run_id) if run_id is not None else ""
-        start = self._tool_starts.pop(key, time.time())
+        with self._tool_starts_lock:
+            start = self._tool_starts.pop(key, time.time())
         duration_ms = int((time.time() - start) * 1000)
         tool_name: str = kwargs.get("name", "unknown")
         self._enqueue(

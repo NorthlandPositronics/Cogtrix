@@ -6,10 +6,12 @@ memory state, provider/model settings, and tool configuration.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+from src.api.schemas.common import ensure_utc
 
 # ---------------------------------------------------------------------------
 # Enumerations
@@ -57,11 +59,6 @@ class TokenCounts(BaseModel):
 class SessionConfig(BaseModel):
     """Mutable session configuration settable at creation and via PATCH."""
 
-    provider: str | None = Field(
-        default=None,
-        description="Provider alias from the providers registry (e.g. 'ollama', 'openai').",
-        examples=["openai"],
-    )
     model: str | None = Field(
         default=None,
         description="Model alias from the models registry or raw model name.",
@@ -151,17 +148,25 @@ class SessionOut(BaseModel):
         description="UTC timestamp when the session was archived (null if active).",
     )
 
+    _ensure_utc = field_validator("created_at", "updated_at", "archived_at", mode="before")(
+        ensure_utc
+    )
+
 
 # ---------------------------------------------------------------------------
 # Request bodies
 # ---------------------------------------------------------------------------
 
 
+def _default_session_name() -> str:
+    return datetime.now(UTC).strftime("Session %Y-%m-%d %H:%M")
+
+
 class SessionCreateRequest(BaseModel):
     """Request body for POST /api/v1/sessions."""
 
     name: str = Field(
-        default="New session",
+        default_factory=_default_session_name,
         max_length=256,
         description="Human-readable name for the new session.",
         examples=["Research — climate policy"],

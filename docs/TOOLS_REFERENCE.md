@@ -1,6 +1,6 @@
 # Cogtrix Tools Reference
 
-Complete documentation of all 52 built-in tools. You don't need to memorize these — the agent picks the right tool automatically based on your request. This page is a reference for when you want to know exactly what's available, what parameters a tool accepts, or how to configure optional providers.
+Complete documentation of all 51 built-in tools. You don't need to memorize these — the agent picks the right tool automatically based on your request. This page is a reference for when you want to know exactly what's available, what parameters a tool accepts, or how to configure optional providers.
 
 **Quick orientation:**
 
@@ -53,6 +53,8 @@ When prompted for confirmation:
 ### On-Demand Loading
 
 All tools start in an on-demand pool. The agent requests only the tools it needs for the current task through an internal `request_tools` meta-tool. When the agent calls `request_tools`, the requested tools are activated before the next turn. The agent can also release tools it no longer needs.
+
+Agent-loaded tools are automatically unloaded at the start of each new prompt cycle so the LLM starts fresh. Tools loaded manually via `/tools load`, `--activate-tools`, or the API are **pinned** and persist across prompt cycles until explicitly unloaded with `/tools unload`.
 
 You don't need to manage this yourself — the agent decides which tools to load based on your request. See [Tool Loading](CONFIGURATION.md#tool-loading) for details.
 
@@ -119,7 +121,7 @@ Execute Python code in a restricted environment with persistent state.
 
 **Core Modules:**
 
-`math`, `random`, `string`, `re`, `json`, `datetime`, `collections`, `itertools`, `functools`, `operator`, `statistics`, `decimal`, `fractions`, `csv`, `dataclasses`, `enum`, `uuid`, `copy`, `typing`, `base64`, `hashlib`, `textwrap`, `time`, `cmath`, `bisect`, `heapq`
+`math`, `random`, `string`, `re`, `json`, `datetime`, `collections`, `itertools`, `functools`, `operator`, `statistics`, `decimal`, `fractions`, `csv`, `dataclasses`, `enum`, `uuid`, `typing`, `base64`, `hashlib`, `textwrap`, `time`, `cmath`, `bisect`, `heapq`
 
 **Optional Modules (if installed):**
 
@@ -304,15 +306,25 @@ Evaluate mathematical expressions safely.
 | `expression` | string | Yes | Math expression to evaluate |
 
 **Supported Functions:**
-- Basic: `+`, `-`, `*`, `/`, `**`, `%`
-- Functions: `sqrt`, `sin`, `cos`, `tan`, `log`, `log10`, `exp`
-- Constants: `pi`, `e`
+- Basic operators: `+`, `-`, `*`, `/`, `**`, `%`
+- Built-in: `abs`, `round`, `min`, `max`, `sum`
+- Powers & logarithms: `sqrt`, `pow`, `exp`, `log`, `log10`, `log2`
+- Trigonometric: `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2`
+- Hyperbolic: `sinh`, `cosh`, `tanh`
+- Angular conversion: `degrees`, `radians`
+- Rounding: `ceil`, `floor`, `trunc`
+- Other: `factorial`, `gcd`
+- Constants: `pi`, `e`, `tau`, `inf`
+
+**Safety limits:** factorial capped at 1,558; exponents capped at magnitude 1,000.
 
 **Examples:**
 ```
 sqrt(16) + 2**3        → 12.0
 sin(pi/2)              → 1.0
 log(100, 10)           → 2.0
+factorial(5)           → 120
+ceil(3.2)              → 4
 ```
 
 ---
@@ -574,6 +586,7 @@ Search the web using DuckDuckGo (no API key needed).
 |-----------|------|----------|-------------|
 | `query` | string | Yes | Search query |
 | `num_results` | int | No | Maximum results (default: 5) |
+| `region` | string | No | Region for results (default: `"wt-wt"` worldwide). Examples: `"us-en"`, `"uk-en"` |
 
 **Returns:** List of results with title, URL, and snippet
 
@@ -589,6 +602,7 @@ Search recent news using DuckDuckGo.
 |-----------|------|----------|-------------|
 | `query` | string | Yes | Search query |
 | `num_results` | int | No | Maximum results (default: 5) |
+| `timelimit` | string | No | Time filter (default: `"w"` for past week). Values: `"d"` (day), `"w"` (week), `"m"` (month) |
 
 **Returns:** List of news articles with title, URL, date, and source
 
@@ -643,7 +657,7 @@ AI-native semantic web search using neural embeddings. Understands the *meaning*
 | `query` | string | Yes | — | Natural-language search query |
 | `num_results` | int | No | `5` | Number of results (1-10) |
 | `include_text` | bool | No | `true` | Include extracted page text |
-| `search_type` | string | No | `"auto"` | `"auto"`, `"neural"` (semantic), or `"keyword"` |
+| `search_type` | string | No | `"auto"` | `"auto"`, `"neural"` (semantic), `"fast"` (low-latency), `"deep"` (thorough), or `"instant"` (cached) |
 
 **Returns:** Results with title, URL, relevance score, and extracted page text
 
@@ -936,7 +950,8 @@ WhatsApp tools enforce contact restrictions before any message is sent or receiv
 |-------------|----------|
 | `none` (default) | All contacts allowed |
 | `allow` | Only contacts in the list can send/receive (legacy value `whitelist` is auto-mapped to `allow`) |
-| `blacklist` | Contacts in the list are blocked |
+| `ignore` | Skip listed contacts — no response sent, message kept on the platform |
+| `blacklist` | Contacts in the list are blocked (message deleted, chat archived) |
 
 Phonebook nicknames (e.g. `"alice"`) are resolved to E.164 numbers automatically and are case-insensitive.
 
@@ -1024,7 +1039,8 @@ Telegram tools enforce contact restrictions before any message is sent or receiv
 |-------------|----------|
 | `none` (default) | All contacts allowed |
 | `allow` | Only contacts in the list can send/receive (legacy value `whitelist` is auto-mapped to `allow`) |
-| `blacklist` | Contacts in the list are blocked |
+| `ignore` | Skip listed contacts — no response sent, message kept on the platform |
+| `blacklist` | Contacts in the list are blocked (message deleted) |
 
 Phonebook nicknames are resolved to chat IDs automatically and are case-insensitive.
 
@@ -1066,7 +1082,7 @@ Schedule a reply for delayed delivery instead of sending immediately.
 > `queue_reply`, `edit_last_reply`, `list_scheduled_messages`,
 > `edit_scheduled_message`, `cancel_scheduled_message`, `defer_processing`,
 > and `suppress_reply`. These are injected per-call and documented in the
-> [Architecture Guide](../ARCHITECTURE.md).
+> [Architecture Guide](ARCHITECTURE.md).
 
 ---
 
@@ -1074,9 +1090,11 @@ Schedule a reply for delayed delivery instead of sending immediately.
 
 ### query_knowledge_base
 
-Search the knowledge base for information from uploaded documents.
+Search the knowledge base for information from uploaded documents. Searches all available FAISS indexes — both the global CLI index (`data/vectordb/faiss_index/`) and per-document API indexes (`data/api/uploads/{doc_id}/vectordb/faiss_index/`).
 
-**Requires:** Vector store built with `python cogtrix.py --ingest`
+**Requires:** Vector store built with `python cogtrix.py --ingest` or documents uploaded via the API
+
+**Auto-activation:** When a knowledge base exists, this tool is automatically pinned as active at startup (no need to load it via `request_tools`). Its description dynamically shows the number of indexes and total size.
 
 **Parameters:**
 
@@ -1107,18 +1125,19 @@ Delegate a single task to another LLM model.
 | `json_schema` | string | No | — | Expected JSON structure (if `response_format="json"`) |
 | `provider` | string | No | — | Provider name or alias |
 | `model` | string | No | — | Model alias or model name |
-| `timeout` | int | No | `60` | Timeout in seconds (10-300) |
+| `timeout` | int | No | `60` | Timeout in seconds (10-600) |
 | `temperature` | float | No | `0.7` | Model temperature (0.0-2.0) |
+| `use_tools` | bool | No | `true` | Give the delegate access to tools. Set `false` for LLM-only tasks. |
 
 **Model Resolution:**
 ```
 model: "fast"                    → Uses string alias from config
-model: "deep"                    → Uses object alias (with num_ctx, temperature)
+model: "deep"                    → Uses object alias (with context_window, temperature)
 model: "ollama/qwen3:8b"         → Direct provider/model
 model: "openai/gpt-4.1"           → Direct provider/model
 ```
 
-Object entries can override `num_ctx`, `temperature`, and `timeout` per model. Note: `num_ctx` is only effective for Ollama-type providers and is silently ignored for others. See [CONFIGURATION.md](CONFIGURATION.md#models) for model entry format details and [Delegate Section](CONFIGURATION.md#delegate-section) for `allowed_models` restrictions.
+Object entries can override `context_window`, `temperature`, and `timeout` per model. Note: `context_window` is forwarded to Ollama as `num_ctx` and silently ignored for other providers. See [CONFIGURATION.md](CONFIGURATION.md#models) for model entry format details and [Delegate Section](CONFIGURATION.md#delegate-section) for `allowed_models` restrictions.
 
 ---
 
@@ -1141,7 +1160,8 @@ Run multiple tasks in parallel across LLM models.
   "context": "Article text here...",
   "provider": "ollama",
   "temperature": 0.5,
-  "response_format": "text"
+  "response_format": "text",
+  "use_tools": true
 }
 ```
 

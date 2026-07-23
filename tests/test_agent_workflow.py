@@ -55,7 +55,7 @@ from src.agent.core import (
     create_llm_from_provider_config,
     prepare_messages_with_context,
 )
-from src.config import Config, ProviderConfig, load_config
+from src.config import Config, ModelConfig, ProviderConfig, load_config
 from src.memory.json_store import JsonFileMemoryStore
 from src.memory.modes.conversation import ConversationMemoryManager
 from src.registry import ToolRegistry
@@ -153,74 +153,36 @@ def cogtrix_config() -> Config:
 def _resolve_provider_config(
     config: Config,
     model_or_alias: str,
-) -> ProviderConfig:
-    """Turn a model name/alias into a usable ProviderConfig.
+) -> tuple[ProviderConfig, ModelConfig]:
+    """Turn a model name/alias into a (ProviderConfig, ModelConfig) pair.
 
-    Handles three cases:
-    1. ``model_or_alias`` matches a named provider → use it directly.
-    2. ``model_or_alias`` matches a model_alias → resolve the alias.
-    3. Fall back to the default provider and set the model explicitly.
+    Tries ``config.resolve_llm_config_for()`` first (handles registry aliases
+    and ``"provider/model"`` shorthand), then falls back to treating the value
+    as a literal model name on the default provider.
     """
-    # Case 1: named provider
-    if model_or_alias in config.providers:
-        return config.providers[model_or_alias]
+    from src.config import ConfigError
 
-    # Case 2: model alias → resolve
-    aliases = config.models or {}
-    if model_or_alias in aliases:
-        alias_val = aliases[model_or_alias]
-        if isinstance(alias_val, dict):
-            prov_name = alias_val.get("provider", config.provider)
-            prov_cfg = config.providers.get(prov_name)
-            if prov_cfg is None:
-                pytest.skip(f"Alias '{model_or_alias}' references unknown provider '{prov_name}'")
-            return ProviderConfig(
-                name=prov_name,
-                type=prov_cfg.type,
-                base_url=prov_cfg.base_url,
-                api_key=prov_cfg.api_key,
-                model=alias_val.get("model", prov_cfg.model),
-                temperature=alias_val.get("temperature", prov_cfg.temperature),
-                num_ctx=alias_val.get("num_ctx", prov_cfg.num_ctx),
-            )
-        if isinstance(alias_val, str) and "/" in alias_val:
-            prov_name, model_name = alias_val.split("/", 1)
-            prov_cfg = config.providers.get(prov_name)
-            if prov_cfg is None:
-                pytest.skip(f"Alias '{model_or_alias}' references unknown provider '{prov_name}'")
-            return ProviderConfig(
-                name=prov_name,
-                type=prov_cfg.type,
-                base_url=prov_cfg.base_url,
-                api_key=prov_cfg.api_key,
-                model=model_name,
-                temperature=prov_cfg.temperature,
-                num_ctx=prov_cfg.num_ctx,
-            )
-
-    # Case 3: use as literal model name on the default provider
     try:
-        base_prov = config.get_provider_config()
-    except ValueError:
+        return config.resolve_llm_config_for(model_or_alias)
+    except ConfigError:
+        pass
+
+    # Fall back: literal model name on the default provider
+    try:
+        pc = config.get_provider_config()
+    except (ValueError, ConfigError):
         pytest.skip(f"No default provider configured and '{model_or_alias}' is not an alias")
-    return ProviderConfig(
-        name=base_prov.name,
-        type=base_prov.type,
-        base_url=base_prov.base_url,
-        api_key=base_prov.api_key,
-        model=model_or_alias,
-        temperature=base_prov.temperature,
-        num_ctx=base_prov.num_ctx,
-    )
+    mc = ModelConfig(provider=pc.name, model=model_or_alias)
+    return pc, mc
 
 
 @pytest.fixture(scope="module")
-def gpt_oss_provider(cogtrix_config) -> ProviderConfig:
+def gpt_oss_provider(cogtrix_config) -> tuple[ProviderConfig, ModelConfig]:
     return _resolve_provider_config(cogtrix_config, "gpt-oss")
 
 
 @pytest.fixture(scope="module")
-def qwen3_coder_provider(cogtrix_config) -> ProviderConfig:
+def qwen3_coder_provider(cogtrix_config) -> tuple[ProviderConfig, ModelConfig]:
     return _resolve_provider_config(cogtrix_config, "qwen3-coder")
 
 
@@ -249,9 +211,14 @@ def safe_tools() -> list:
     return [t for name, t in all_tools.items() if name in safe_names]
 
 
-def _build_agent(provider_config: ProviderConfig, tools: list, prompt: str | None = None):
-    """Build a LangGraph ReAct agent from a ProviderConfig."""
-    llm = create_llm_from_provider_config(provider_config)
+def _build_agent(
+    provider_model: tuple[ProviderConfig, ModelConfig],
+    tools: list,
+    prompt: str | None = None,
+):
+    """Build a LangGraph ReAct agent from a (ProviderConfig, ModelConfig) pair."""
+    pc, mc = provider_model
+    llm = create_llm_from_provider_config(pc, mc)
     system_prompt = prompt or build_system_prompt()
     return create_react_agent(model=llm, tools=tools, prompt=system_prompt)
 

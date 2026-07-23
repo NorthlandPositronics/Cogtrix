@@ -115,11 +115,6 @@ class TestScheduleReplyState:
 class TestCreateScheduleReplyTool:
     """Tool factory and closure behavior."""
 
-    def test_tool_name(self):
-        state = ScheduleReplyState()
-        tool = create_schedule_reply_tool(state)
-        assert tool.name == "schedule_reply"
-
     def test_calling_tool_sets_state(self):
         state = ScheduleReplyState()
         tool = create_schedule_reply_tool(state)
@@ -864,11 +859,6 @@ class TestQueueReplyState:
 
 class TestCreateQueueReplyTool:
     """create_queue_reply_tool factory and closure behavior."""
-
-    def test_tool_name(self):
-        state = QueueReplyState()
-        tool = create_queue_reply_tool(state)
-        assert tool.name == "queue_reply"
 
     def test_single_call_appends_item(self):
         state = QueueReplyState()

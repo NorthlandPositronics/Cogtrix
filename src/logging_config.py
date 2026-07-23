@@ -130,14 +130,17 @@ def setup_logging(
 
     # Create log directory if needed
     log_path = Path(log_file)
-    if log_path.parent and not log_path.parent.exists():
-        log_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        if log_path.parent and not log_path.parent.exists():
+            log_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # File handler
-    file_handler = logging.FileHandler(log_file, encoding="utf-8")
-    file_handler.setLevel(logging.DEBUG if debug else logging.INFO)
-    file_handler.setFormatter(CogtrixFormatter(debug=debug))
-    logger.addHandler(file_handler)
+        # File handler
+        file_handler = logging.FileHandler(log_file, encoding="utf-8")
+        file_handler.setLevel(logging.DEBUG if debug else logging.INFO)
+        file_handler.setFormatter(CogtrixFormatter(debug=debug))
+        logger.addHandler(file_handler)
+    except OSError as exc:
+        print(f"Warning: could not set up log file {log_file!r}: {exc}", file=sys.stderr)
 
     # Optional console handler
     if console_output:

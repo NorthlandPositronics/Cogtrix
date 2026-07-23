@@ -1,7 +1,5 @@
 """Thread safety tests for BUG-039 (config dict atomic swap) and BUG-048 (stderr lock)."""
 
-import threading
-
 
 class TestConfigAtomicSwap:
     """BUG-039: configure_* functions must replace the dict reference atomically."""
@@ -59,8 +57,3 @@ class TestStderrLock:
         from src.tools.web_search import _stderr_lock
 
         assert _stderr_lock is not None
-
-    def test_stderr_lock_is_threading_lock(self) -> None:
-        from src.tools.web_search import _stderr_lock
-
-        assert isinstance(_stderr_lock, type(threading.Lock()))

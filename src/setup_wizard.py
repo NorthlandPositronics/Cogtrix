@@ -197,10 +197,11 @@ $existing_config
 ## Bootstrap Provider
 
 The user already has a working LLM connection with these settings:
-- Provider: $bootstrap_provider
+- Provider name: $bootstrap_provider
 - Model: $bootstrap_model
 
-Include this as the primary provider in the generated config.
+Include this as a provider entry (connection info only) and create a model entry \
+referencing it in the generated config. Use ``models.default`` to set it as active.
 
 ## Instructions
 
@@ -217,7 +218,11 @@ YAML block enclosed in ```yaml``` and ``` markers.
 - Include comments in the YAML explaining each section.
 - Never include actual API keys in the output \u2014 use placeholder values like \
 "your-api-key-here" and tell the user to replace them.
-- If editing an existing config, preserve settings the user does not want to change.\
+- If editing an existing config, preserve settings the user does not want to change.
+- Providers should contain only connection info (type, base_url, api_key). \
+Model settings (model name, temperature, context_window, max_tokens) go in the models section.
+- Use ``models.default: <alias>`` to set the active model.
+- Do not use top-level ``provider`` or ``model`` keys — those are deprecated.\
 """)
 
 
@@ -244,8 +249,8 @@ def run_setup_wizard(
         existing_info = _extract_config_info(existing_yaml)
         if existing_info:
             print(
-                f"    provider: {existing_info.get('provider', '?')}, "
-                f"model: {existing_info.get('model', '?')}"
+                f"    model: {existing_info.get('model', '?')} "
+                f"({existing_info.get('provider', '?')})"
             )
         choice = _ask_choice(
             "Mode",
@@ -354,24 +359,48 @@ def _extract_config_info(yaml_content: str) -> dict[str, Any]:
         if not isinstance(data, dict):
             return {}
         info: dict[str, Any] = {}
-        provider_name = data.get("provider")
-        if provider_name:
-            info["provider"] = provider_name
-        model = data.get("model")
-        if model:
-            info["model"] = model
-        # Try to get type and model from providers section
-        providers = data.get("providers", data.get("inference", {}))
-        if isinstance(providers, dict) and provider_name and provider_name in providers:
-            pcfg = providers[provider_name]
-            if isinstance(pcfg, dict):
-                info["type"] = pcfg.get("type", "openai")
-                if not model:
-                    info["model"] = pcfg.get("model")
-                if pcfg.get("base_url"):
-                    info["base_url"] = pcfg["base_url"]
-                if pcfg.get("api_key"):
-                    info["api_key"] = pcfg["api_key"]
+
+        # New format: models.default → model alias → model entry → provider
+        models = data.get("models", {})
+        if isinstance(models, dict):
+            default_alias = models.get("default")
+            if isinstance(default_alias, str) and default_alias in models:
+                model_entry = models[default_alias]
+                if isinstance(model_entry, dict):
+                    info["model"] = model_entry.get("model")
+                    provider_name = model_entry.get("provider")
+                    if provider_name:
+                        info["provider"] = provider_name
+                        providers = data.get("providers", data.get("inference", {}))
+                        if isinstance(providers, dict) and provider_name in providers:
+                            pcfg = providers[provider_name]
+                            if isinstance(pcfg, dict):
+                                info["type"] = pcfg.get("type", "openai")
+                                if pcfg.get("base_url"):
+                                    info["base_url"] = pcfg["base_url"]
+                                if pcfg.get("api_key"):
+                                    info["api_key"] = pcfg["api_key"]
+
+        # Legacy fallback: top-level provider/model
+        if not info.get("provider"):
+            provider_name = data.get("provider")
+            if provider_name:
+                info["provider"] = provider_name
+            model = data.get("model")
+            if model:
+                info["model"] = model
+            providers = data.get("providers", data.get("inference", {}))
+            if isinstance(providers, dict) and provider_name and provider_name in providers:
+                pcfg = providers[provider_name]
+                if isinstance(pcfg, dict):
+                    info["type"] = pcfg.get("type", "openai")
+                    if not info.get("model"):
+                        info["model"] = pcfg.get("model")
+                    if pcfg.get("base_url"):
+                        info["base_url"] = pcfg["base_url"]
+                    if pcfg.get("api_key"):
+                        info["api_key"] = pcfg["api_key"]
+
         return info
     except Exception:
         return {}
@@ -412,18 +441,18 @@ def _test_connection(
     """Test LLM connectivity. Returns the LLM instance on success, None on failure."""
 
     from src.agent.core import create_llm_from_provider_config
-    from src.config import ProviderConfig
+    from src.config import ModelConfig, ProviderConfig
 
     pc = ProviderConfig(
         name=provider_type,
         type=provider_type,
-        model=model,
         api_key=api_key,
         base_url=base_url,
     )
+    mc = ModelConfig(provider=provider_type, model=model)
 
     try:
-        llm = create_llm_from_provider_config(pc)
+        llm = create_llm_from_provider_config(pc, mc)
     except Exception as exc:
         print(f"  {_R(chr(0x2717))} Provider setup failed: {exc}")
         return None
@@ -896,26 +925,34 @@ def _inject_bootstrap(data: dict[str, Any], bootstrap_info: dict[str, Any]) -> N
     model = bootstrap_info["model"]
     base_url = bootstrap_info.get("base_url")
 
+    # Ensure provider entry has connection info only (no model fields)
     providers = data.setdefault("providers", {})
     provider_cfg = providers.setdefault(provider, {})
     provider_cfg["type"] = bootstrap_info["type"]
-    provider_cfg["model"] = model
     if api_key:
         provider_cfg["api_key"] = api_key
     if base_url:
         provider_cfg["base_url"] = base_url
+    # Remove any legacy model field from provider entry
+    provider_cfg.pop("model", None)
+    provider_cfg.pop("temperature", None)
+    provider_cfg.pop("num_ctx", None)
+    provider_cfg.pop("context_window", None)
+    provider_cfg.pop("max_tokens", None)
 
-    data["provider"] = provider
-
-    # Create a default model entry in the models registry
+    # Ensure a default model entry exists in the models registry
     models = data.setdefault("models", {})
-    if "default" not in models:
-        models["default"] = {
+    alias = "default_model"
+    if alias not in models:
+        models[alias] = {
             "provider": provider,
             "model": model,
         }
-    if "model" not in data:
-        data["model"] = "default"
+    models["default"] = alias
+
+    # Remove legacy top-level fields
+    data.pop("provider", None)
+    data.pop("model", None)
 
 
 def _mask_secrets(yaml_text: str) -> str:

@@ -55,13 +55,13 @@ def parse_arguments():
         f"\n"
         f"  {B('Interactive (default):')}\n"
         f"    cogtrix.py                                 {D('Start interactive session')}\n"
-        f"    cogtrix.py -p ollama -m qwen3:8b          {D('Use Ollama with a specific model')}\n"
+        f"    cogtrix.py -m qwen3:8b                     {D('Use a specific model')}\n"
         f"    cogtrix.py -m reasoning -M reasoning       {D('Model alias + memory mode')}\n"
         f"    cogtrix.py -s project-alpha                {D('Named session (preserves history)')}\n"
         f"\n"
         f"  {B('Config file:')}\n"
         f"    cogtrix.py -c /etc/cogtrix/prod.yaml       {D('Use explicit config file')}\n"
-        f"    cogtrix.py -c config.yml -p my-server      {D('Config file + CLI override')}\n"
+        f"    cogtrix.py -c config.yml -m my-model        {D('Config file + model override')}\n"
         f"\n"
         f"  {B('Non-interactive (scripting):')}\n"
         f"    cogtrix.py --prompt \"What is 2+2?\"         {D('Single prompt, print result, exit')}\n"
@@ -72,6 +72,10 @@ def parse_arguments():
         f"  {B('Assistant mode:')}\n"
         f"    cogtrix.py --assistant                     {D('Start headless messaging daemon')}\n"
         f"    cogtrix.py --assistant --log --debug       {D('Assistant with debug logging')}\n"
+        f"\n"
+        f"  {B('Tool activation:')}\n"
+        f"    cogtrix.py --activate-tools web_search     {D('Pin a tool as active at startup')}\n"
+        f"    cogtrix.py --activate-tools shell,write_file {D('Pin multiple tools')}\n"
         f"\n"
         f"  {B('Safety and output:')}\n"
         f"    cogtrix.py -y                              {D('Skip all tool confirmations')}\n"
@@ -105,14 +109,13 @@ def parse_arguments():
         f"{B('configuration priority')} {D('(highest to lowest):')}\n"
         f"\n"
         f"  1. Command-line arguments\n"
-        f"  2. Environment variables {D('(COGTRIX_PROVIDER, COGTRIX_MODEL, etc.)')}\n"
+        f"  2. Environment variables {D('(COGTRIX_MODEL, COGTRIX_SESSION, etc.)')}\n"
         f"  3. Config file {D('(JSON or YAML \u2014 see search order above)')}\n"
         f"  4. Built-in defaults\n"
         f"\n"
         f"{B('environment variables:')}\n"
         f"\n"
-        f"  COGTRIX_PROVIDER       LLM provider name\n"
-        f"  COGTRIX_MODEL          Model name or alias\n"
+        f"  COGTRIX_MODEL          Model alias from config\n"
         f"  COGTRIX_SESSION        Session ID\n"
         f"  COGTRIX_MEMORY_MODE    Memory mode {D('(conversation/code/reasoning)')}\n"
         f"  OPENAI_API_KEY         OpenAI API key\n"
@@ -149,12 +152,6 @@ def parse_arguments():
 
     # ── Core ─────────────────────────────────────────────────────────
     core_group = parser.add_argument_group("Core")
-    core_group.add_argument(
-        "-p",
-        "--provider",
-        metavar="NAME",
-        help="LLM provider name (default: from config)",
-    )
     core_group.add_argument(
         "-m",
         "--model",
@@ -273,6 +270,12 @@ def parse_arguments():
         type=str,
         metavar="LIST",
         help="all, none, minimal, or comma-separated",
+    )
+    tool_group.add_argument(
+        "--activate-tools",
+        type=str,
+        metavar="LIST",
+        help="Comma-separated tools to pin as active on startup",
     )
     tool_group.add_argument(
         "--allow-write-path",

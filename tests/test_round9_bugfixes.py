@@ -103,8 +103,8 @@ def test_run_agent_no_dead_code_comment() -> None:
     )
 
 
-def test_run_agent_has_exactly_two_returns() -> None:
-    """_run_agent() must have exactly 2 return statements (except + normal path)."""
+def test_run_agent_has_exactly_three_returns() -> None:
+    """_run_agent() must have exactly 3 return statements (UserCancelledRun + except + normal path)."""
     src_text = pathlib.Path("src/assistant/handler.py").read_text()
     tree = ast.parse(src_text)
 
@@ -129,8 +129,8 @@ def test_run_agent_has_exactly_two_returns() -> None:
     for stmt in method_body:
         _Visitor().visit(stmt)
 
-    assert len(all_returns) == 2, (
-        f"Expected 2 return statements in _run_agent (except + normal), "
+    assert len(all_returns) == 3, (
+        f"Expected 3 return statements in _run_agent (UserCancelledRun + except + normal), "
         f"got {len(all_returns)}. Dead code conditional may be present."
     )
 

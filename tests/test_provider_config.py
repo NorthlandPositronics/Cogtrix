@@ -28,10 +28,7 @@ class TestProviderConfig:
         assert cfg.name == "test"
         assert cfg.type == "openai"
         assert cfg.base_url is None
-        assert cfg.model is None
         assert cfg.api_key is None
-        assert cfg.temperature is None
-        assert cfg.num_ctx is None
 
     def test_get_base_url_openai_default(self):
         """Test OpenAI provider returns None for default URL."""
@@ -53,19 +50,21 @@ class TestProviderConfig:
         assert cfg.get_base_url() == "http://custom:8000/v1"
 
     def test_get_model_openai_default(self):
-        """Test OpenAI default model."""
-        cfg = ProviderConfig(name="openai", type="openai")
-        assert cfg.get_model() == "gpt-4.1-mini"
+        """Test OpenAI default model from providers registry."""
+        from src.providers import get_default_model
+
+        assert get_default_model("openai") == "gpt-4.1-mini"
 
     def test_get_model_ollama_default(self):
-        """Test Ollama default model."""
-        cfg = ProviderConfig(name="ollama", type="ollama")
-        assert cfg.get_model() == "qwen3:8b"
+        """Test Ollama default model from providers registry."""
+        from src.providers import get_default_model
+
+        assert get_default_model("ollama") == "qwen3:8b"
 
     def test_get_model_custom(self):
-        """Test custom model is returned."""
-        cfg = ProviderConfig(name="custom", type="openai", model="gpt-4.1")
-        assert cfg.get_model() == "gpt-4.1"
+        """Test custom model stored in ModelConfig."""
+        mc = ModelConfig(provider="custom", model="gpt-4.1")
+        assert mc.model == "gpt-4.1"
 
     def test_to_dict_hides_api_key(self):
         """Test that to_dict masks the API key."""
@@ -101,8 +100,19 @@ class TestProviderConfig:
         d = cfg.to_dict()
         assert d["tool_instructions"] == "Custom instructions"
 
-    def test_temperature_and_num_ctx_parsed_from_providers(self):
-        """temperature and num_ctx are parsed as provider-level defaults."""
+    def test_invalid_provider_type_raises(self):
+        """Test ProviderConfig rejects unknown provider types."""
+        with pytest.raises(ConfigError, match="not a recognized provider type"):
+            ProviderConfig(name="bad", type="nonexistent_provider")
+
+    def test_to_dict_no_api_key(self):
+        """Test that to_dict returns None when no API key set."""
+        cfg = ProviderConfig(name="test", type="openai")
+        d = cfg.to_dict()
+        assert d["api_key"] is None
+
+    def test_temperature_and_num_ctx_auto_migrated_to_models(self):
+        """temperature and num_ctx from providers section are auto-migrated to models registry."""
         config = Config()
         providers_data = {
             "spark": {
@@ -114,8 +124,51 @@ class TestProviderConfig:
             }
         }
         _parse_providers_section(config, providers_data)
-        assert config.providers["spark"].temperature == 0.7
-        assert config.providers["spark"].num_ctx == 32768
+        assert "gpt-oss" in config.models
+        assert config.models["gpt-oss"].temperature == 0.7
+        assert config.models["gpt-oss"].context_window == 32768
+
+    def test_auto_migration_skipped_when_model_exists_in_registry(self):
+        """Auto-migration from provider section is skipped when provider name already in models."""
+        config = Config()
+        config.models["spark"] = ModelConfig(provider="spark", model="existing-model")
+        providers_data = {
+            "spark": {
+                "type": "openai",
+                "base_url": "http://spark:8080/v1",
+                "model": "gpt-oss",
+            }
+        }
+        _parse_providers_section(config, providers_data)
+        assert "spark" in config.providers
+        assert config.models["spark"].model == "existing-model"
+
+    def test_auto_migration_skipped_when_no_model_in_provider(self):
+        """Auto-migration is skipped when provider section has no model field."""
+        config = Config()
+        providers_data = {
+            "spark": {
+                "type": "openai",
+                "base_url": "http://spark:8080/v1",
+            }
+        }
+        _parse_providers_section(config, providers_data)
+        assert "spark" in config.providers
+        assert "spark" not in config.models
+
+    def test_auto_migration_max_tokens(self):
+        """max_tokens from provider section is auto-migrated to models registry."""
+        config = Config()
+        providers_data = {
+            "openai": {
+                "type": "openai",
+                "model": "gpt-4o",
+                "max_tokens": 4096,
+            }
+        }
+        _parse_providers_section(config, providers_data)
+        assert "gpt-4o" in config.models
+        assert config.models["gpt-4o"].max_tokens == 4096
 
 
 class TestModelConfig:
@@ -126,7 +179,7 @@ class TestModelConfig:
         mc = ModelConfig(provider="ollama", model="qwen3:8b")
         assert mc.provider == "ollama"
         assert mc.model == "qwen3:8b"
-        assert mc.num_ctx is None
+        assert mc.context_window is None
         assert mc.temperature is None
 
     def test_model_config_with_all_fields(self):
@@ -134,10 +187,10 @@ class TestModelConfig:
         mc = ModelConfig(
             provider="openai",
             model="gpt-4.1",
-            num_ctx=16384,
+            context_window=16384,
             temperature=0.2,
         )
-        assert mc.num_ctx == 16384
+        assert mc.context_window == 16384
         assert mc.temperature == 0.2
 
     def test_model_config_invalid_temperature_high(self):
@@ -151,9 +204,9 @@ class TestModelConfig:
             ModelConfig(provider="ollama", model="test", temperature=-0.1)
 
     def test_model_config_invalid_num_ctx(self):
-        """Test ModelConfig rejects num_ctx < 256."""
-        with pytest.raises(ConfigError, match="num_ctx"):
-            ModelConfig(provider="ollama", model="test", num_ctx=100)
+        """Test ModelConfig rejects context_window < 256."""
+        with pytest.raises(ConfigError, match="context_window"):
+            ModelConfig(provider="ollama", model="test", context_window=100)
 
     def test_model_config_boundary_temperature(self):
         """Test ModelConfig accepts boundary temperature values."""
@@ -163,9 +216,31 @@ class TestModelConfig:
         assert mc2.temperature == 2.0
 
     def test_model_config_boundary_num_ctx(self):
-        """Test ModelConfig accepts minimum valid num_ctx."""
-        mc = ModelConfig(provider="ollama", model="test", num_ctx=256)
-        assert mc.num_ctx == 256
+        """Test ModelConfig accepts minimum valid context_window."""
+        mc = ModelConfig(provider="ollama", model="test", context_window=256)
+        assert mc.context_window == 256
+
+    def test_model_config_invalid_max_tokens_zero(self):
+        """Test ModelConfig rejects max_tokens < 1."""
+        with pytest.raises(ConfigError, match="max_tokens"):
+            ModelConfig(provider="ollama", model="test", max_tokens=0)
+
+    def test_model_config_invalid_max_tokens_negative(self):
+        """Test ModelConfig rejects negative max_tokens."""
+        with pytest.raises(ConfigError, match="max_tokens"):
+            ModelConfig(provider="ollama", model="test", max_tokens=-10)
+
+    def test_model_config_valid_max_tokens(self):
+        """Test ModelConfig accepts valid max_tokens."""
+        mc = ModelConfig(provider="ollama", model="test", max_tokens=1)
+        assert mc.max_tokens == 1
+        mc2 = ModelConfig(provider="ollama", model="test", max_tokens=4096)
+        assert mc2.max_tokens == 4096
+
+    def test_model_config_none_max_tokens(self):
+        """Test ModelConfig accepts None max_tokens (default)."""
+        mc = ModelConfig(provider="ollama", model="test")
+        assert mc.max_tokens is None
 
 
 class TestConfigProviders:
@@ -178,9 +253,9 @@ class TestConfigProviders:
             name="my-server",
             type="ollama",
             base_url="http://192.168.1.100:11434",
-            model="llama4:scout",
         )
-        config.provider = "my-server"
+        config.models["my-server"] = ModelConfig(provider="my-server", model="llama4:scout")
+        config.active_model_alias = "my-server"
 
         prov_cfg = config.get_provider_config()
         assert prov_cfg.name == "my-server"
@@ -210,7 +285,7 @@ class TestConfigProviders:
         """Test get_model_config returns ModelConfig when found."""
         config = Config()
         config.models["fast"] = ModelConfig(provider="ollama", model="qwen3:8b")
-        config.model = "fast"
+        config.active_model_alias = "fast"
 
         mc = config.get_model_config()
         assert mc is not None
@@ -220,7 +295,7 @@ class TestConfigProviders:
     def test_get_model_config_not_found(self):
         """Test get_model_config returns None for unknown model names."""
         config = Config()
-        config.model = "literal-model-name"
+        config.active_model_alias = "literal-model-name"
         mc = config.get_model_config()
         assert mc is None
 
@@ -239,7 +314,7 @@ class TestProvidersConfigFile:
     """Tests for parsing providers from config file."""
 
     def test_parse_providers_section(self):
-        """Test parsing providers section."""
+        """Test parsing providers section; model fields are auto-migrated to models registry."""
         config = Config()
         providers_data = {
             "gpu-server": {
@@ -261,12 +336,15 @@ class TestProvidersConfigFile:
 
         assert "openai" in config.providers
         assert config.providers["openai"].type == "openai"
-        assert config.providers["openai"].model == "gpt-4.1"
+
+        assert "llama4:scout" in config.models
+        assert config.models["llama4:scout"].model == "llama4:scout"
+        assert "gpt-4.1" in config.models
+        assert config.models["gpt-4.1"].model == "gpt-4.1"
 
     def test_load_config_with_providers(self):
         """Test loading config file with providers section."""
         config_data = {
-            "provider": "gpu-server",
             "providers": {
                 "gpu-server": {
                     "type": "ollama",
@@ -290,7 +368,7 @@ class TestProvidersConfigFile:
             with patch("src.config.find_config_file", return_value=Path(config_path)):
                 config = load_config()
 
-            assert config.provider == "gpu-server"
+            assert config.active_model_alias is not None
             assert "gpu-server" in config.providers
             assert "groq" in config.providers
             assert config.providers["groq"].api_key == "gsk-test"
@@ -340,9 +418,8 @@ class TestModelResolution:
     """Tests for model resolution from models registry."""
 
     def test_model_from_provider_config(self):
-        """Test that model is resolved from provider config."""
+        """Test that model in provider YAML is auto-migrated to models registry."""
         config_data = {
-            "provider": "custom",
             "providers": {
                 "custom": {
                     "type": "ollama",
@@ -359,14 +436,14 @@ class TestModelResolution:
             with patch("src.config.find_config_file", return_value=Path(config_path)):
                 config = load_config()
 
-            assert config.model == "custom-model:7b"
+            assert "custom-model:7b" in config.models
+            assert config.models["custom-model:7b"].model == "custom-model:7b"
         finally:
             Path(config_path).unlink()
 
     def test_cli_model_overrides_provider_config(self):
-        """Test that CLI model overrides provider config model."""
+        """Test that CLI --model sets active_model_alias."""
         config_data = {
-            "provider": "custom",
             "providers": {
                 "custom": {
                     "type": "ollama",
@@ -383,7 +460,7 @@ class TestModelResolution:
 
             class MockArgs:
                 provider = None
-                model = "cli-model"
+                model = "custom"
                 session = None
                 memory_mode = None
                 debug = False
@@ -392,15 +469,13 @@ class TestModelResolution:
             with patch("src.config.find_config_file", return_value=Path(config_path)):
                 config = load_config(MockArgs())
 
-            assert config.model == "cli-model"
+            assert config.active_model_alias == "custom"
         finally:
             Path(config_path).unlink()
 
     def test_model_name_resolves_from_registry(self):
         """Test that model name in models registry resolves provider and model."""
         config_data = {
-            "provider": "ollama",
-            "model": "fast",
             "providers": {
                 "ollama": {"type": "ollama", "model": "qwen3:8b"},
                 "openai": {"type": "openai", "model": "gpt-4.1-mini", "api_key": "sk-x"},
@@ -408,6 +483,7 @@ class TestModelResolution:
             "models": {
                 "fast": {"provider": "ollama", "model": "qwen3:4b"},
                 "reasoning": {"provider": "openai", "model": "gpt-4.1", "temperature": 0.2},
+                "default": "fast",
             },
         }
 
@@ -419,21 +495,22 @@ class TestModelResolution:
             with patch("src.config.find_config_file", return_value=Path(config_path)):
                 config = load_config()
 
-            assert config.model == "qwen3:4b"
-            assert config.provider == "ollama"
+            assert config.active_model_alias == "fast"
+            pc, mc = config.resolve_llm_config()
+            assert mc.model == "qwen3:4b"
+            assert pc.type == "ollama"
         finally:
             Path(config_path).unlink()
 
     def test_model_registry_merges_params_into_provider(self):
-        """Test that num_ctx from ModelConfig is merged via resolve_provider_config()."""
+        """Test that num_ctx from ModelConfig is available via resolve_llm_config()."""
         config_data = {
-            "provider": "ollama",
-            "model": "big",
             "providers": {
                 "ollama": {"type": "ollama", "model": "qwen3:8b"},
             },
             "models": {
                 "big": {"provider": "ollama", "model": "qwen3:32b", "num_ctx": 65536},
+                "default": "big",
             },
         }
 
@@ -445,21 +522,16 @@ class TestModelResolution:
             with patch("src.config.find_config_file", return_value=Path(config_path)):
                 config = load_config()
 
-            assert config.model == "qwen3:32b"
-            # provider in config.providers is NOT mutated
-            assert config.providers["ollama"].num_ctx is None
-            # resolve_provider_config() returns a clone with model params merged
-            resolved = config.resolve_provider_config()
-            assert resolved.num_ctx == 65536
-            assert resolved.model == "qwen3:32b"
+            pc, mc = config.resolve_llm_config()
+            assert mc.model == "qwen3:32b"
+            assert mc.context_window == 65536
+            assert config.providers["ollama"].base_url is None
         finally:
             Path(config_path).unlink()
 
-    def test_resolve_provider_config_does_not_mutate_original(self):
-        """Verify that resolve_provider_config() returns a clone, not the original."""
+    def test_resolve_llm_config_does_not_mutate_original(self):
+        """Verify that resolve_llm_config() returns a copy of ProviderConfig."""
         config_data = {
-            "provider": "ollama",
-            "model": "big",
             "providers": {
                 "ollama": {"type": "ollama", "model": "qwen3:8b"},
             },
@@ -470,6 +542,7 @@ class TestModelResolution:
                     "num_ctx": 32768,
                     "temperature": 0.5,
                 },
+                "default": "big",
             },
         }
 
@@ -482,17 +555,14 @@ class TestModelResolution:
                 config = load_config()
 
             original = config.providers["ollama"]
-            resolved = config.resolve_provider_config()
+            pc, mc = config.resolve_llm_config()
 
-            # Clone has merged values
-            assert resolved.num_ctx == 32768
-            assert resolved.temperature == 0.5
-            assert resolved.model == "qwen3:32b"
+            assert mc.context_window == 32768
+            assert mc.temperature == 0.5
+            assert mc.model == "qwen3:32b"
 
-            # Original is unchanged
-            assert original.num_ctx is None
-            assert original.temperature is None
-            assert original.model == "qwen3:8b"
+            assert pc is not original
+            assert original.base_url is None
         finally:
             Path(config_path).unlink()
 
@@ -528,7 +598,7 @@ class TestParseModelsSection:
         """Test parsing models in dict format."""
         config = Config()
         config.providers["ollama"] = ProviderConfig(name="ollama", type="ollama")
-        config.provider = "ollama"
+        config.active_model_alias = "ollama"
 
         models_data = {
             "fast": {"provider": "ollama", "model": "qwen3:4b"},
@@ -547,12 +617,12 @@ class TestParseModelsSection:
 
         assert "reasoning" in config.models
         assert config.models["reasoning"].temperature == 0.2
-        assert config.models["reasoning"].num_ctx == 16384
+        assert config.models["reasoning"].context_window == 16384
 
     def test_parse_models_string_format_with_slash(self):
         """Test parsing models in 'provider/model' string format."""
         config = Config()
-        config.provider = "ollama"
+        config.active_model_alias = "ollama"
         models_data = {"fast": "ollama/qwen3:4b"}
         _parse_models_section(config, models_data)
 
@@ -563,12 +633,11 @@ class TestParseModelsSection:
     def test_parse_models_string_format_plain(self):
         """Test parsing models in plain string format (uses current provider)."""
         config = Config()
-        config.provider = "ollama"
+        config.active_model_alias = "ollama"
         models_data = {"quick": "qwen3:4b"}
         _parse_models_section(config, models_data)
 
         assert "quick" in config.models
-        assert config.models["quick"].provider == "ollama"
         assert config.models["quick"].model == "qwen3:4b"
 
     def test_parse_models_missing_provider_warns(self, caplog):
@@ -583,25 +652,36 @@ class TestParseModelsSection:
 
 
 class TestDefaultProvider:
-    """Tests for default-provider-is-ollama behavior."""
+    """Tests for default provider behavior."""
 
-    def test_default_provider_is_ollama(self):
-        """Test that the default provider is Ollama (works without API keys)."""
-        config = Config()
-        assert config.provider == "ollama"
+    def test_default_provider_is_ollama_with_env(self):
+        """Test that COGTRIX_OLLAMA env var auto-creates an ollama provider."""
+        env = {"COGTRIX_OLLAMA": "localhost"}
+        with (
+            patch("src.config.find_config_file", return_value=None),
+            patch.dict("os.environ", env, clear=False),
+        ):
+            config = load_config()
+        assert config.active_model_alias is not None
+        pc = config.get_active_provider()
+        assert pc.type == "ollama"
 
     def test_default_model_resolved_to_ollama(self):
-        """Test that load_config uses Ollama provider when no config exists.
-
-        config.model stays None when there are no configured providers;
-        the actual model is resolved from the provider default at LLM
-        creation time via resolve_provider_config().
-        """
-        with patch("src.config.find_config_file", return_value=None):
-            config = load_config()
-        assert config.provider == "ollama"
-        # model is None because there are no configured providers to query
-        assert config.model is None
+        """Test that a config with an ollama provider resolves correctly."""
+        config_data = {
+            "providers": {"ollama": {"type": "ollama", "model": "qwen3:8b"}},
+        }
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            json.dump(config_data, f)
+            config_path = f.name
+        try:
+            with patch("src.config.find_config_file", return_value=Path(config_path)):
+                config = load_config()
+            pc, mc = config.resolve_llm_config()
+            assert pc.type == "ollama"
+            assert mc.model is not None
+        finally:
+            Path(config_path).unlink()
 
 
 class TestParseOllamaAddress:
@@ -693,9 +773,10 @@ class TestResolveEmbeddingConfig:
     def test_resolve_fallback_to_active_provider(self):
         """Test resolve_embedding_config falls back to active provider."""
         config = Config()
-        config.provider = "openai"
         config.providers["openai"] = ProviderConfig(name="openai", type="openai", api_key="sk-x")
-        config.rag.model = None  # not set
+        config.models["default"] = ModelConfig(provider="openai", model="gpt-4.1-mini")
+        config.active_model_alias = "default"
+        config.rag.model = None
 
         emb_type, emb_model, emb_base_url, emb_api_key = config.resolve_embedding_config()
         assert emb_type == "openai"
@@ -704,8 +785,9 @@ class TestResolveEmbeddingConfig:
     def test_resolve_model_not_in_registry_falls_back(self):
         """Test resolve_embedding_config falls back when rag.model not found in registry."""
         config = Config()
-        config.provider = "ollama"
         config.providers["ollama"] = ProviderConfig(name="ollama", type="ollama")
+        config.models["default"] = ModelConfig(provider="ollama", model="qwen3:8b")
+        config.active_model_alias = "default"
         config.rag.model = "nonexistent-model"
 
         emb_type, emb_model, emb_base_url, emb_api_key = config.resolve_embedding_config()
@@ -826,9 +908,10 @@ class TestConfigureRagVectordbDir:
         import src.tools.rag as _rag_mod
 
         original = _rag_mod._rag_config["vectordb_dir"]
+        test_dir = "data/test_vectordb"
         try:
-            _rag_mod.configure_rag({"vectordb_dir": "/tmp/test_vectordb"})
-            assert _rag_mod._rag_config["vectordb_dir"] == "/tmp/test_vectordb"
+            _rag_mod.configure_rag({"vectordb_dir": test_dir})
+            assert _rag_mod._rag_config["vectordb_dir"] == test_dir
         finally:
             _rag_mod.configure_rag({"vectordb_dir": original})
 
@@ -836,28 +919,38 @@ class TestConfigureRagVectordbDir:
         """configure_rag() without vectordb_dir leaves the existing value intact."""
         import src.tools.rag as _rag_mod
 
-        _rag_mod.configure_rag({"vectordb_dir": "/tmp/before"})
-        _rag_mod.configure_rag({"embedding_provider": "ollama"})
-        assert _rag_mod._rag_config["vectordb_dir"] == "/tmp/before"
-        _rag_mod.configure_rag({"vectordb_dir": str(_rag_mod.configure_rag.__module__)})
+        original = _rag_mod._rag_config["vectordb_dir"]
+        test_dir = "data/test_before"
+        try:
+            _rag_mod.configure_rag({"vectordb_dir": test_dir})
+            _rag_mod.configure_rag({"embedding_provider": "ollama"})
+            assert _rag_mod._rag_config["vectordb_dir"] == test_dir
+        finally:
+            _rag_mod.configure_rag({"vectordb_dir": original})
 
-    def test_query_knowledge_base_uses_configured_dir(self, tmp_path):
+    def test_query_knowledge_base_uses_configured_dir(self):
         """query_knowledge_base() checks the configured vectordb_dir, not the default."""
         from src.tools.rag import configure_rag, query_knowledge_base
 
-        missing_dir = str(tmp_path / "nonexistent_index")
-        configure_rag({"vectordb_dir": missing_dir})
-        result = query_knowledge_base("test question")
-        assert "No knowledge base found" in result
+        original = __import__("src.tools.rag", fromlist=["_rag_config"])._rag_config["vectordb_dir"]
+        try:
+            configure_rag({"vectordb_dir": "data/nonexistent_test_index"})
+            result = query_knowledge_base("test question")
+            assert "No knowledge base found" in result
+        finally:
+            configure_rag({"vectordb_dir": original})
 
-    def test_get_knowledge_base_info_uses_configured_dir(self, tmp_path):
+    def test_get_knowledge_base_info_uses_configured_dir(self):
         """get_knowledge_base_info() checks the configured vectordb_dir, not the default."""
         from src.tools.rag import configure_rag, get_knowledge_base_info
 
-        missing_dir = str(tmp_path / "nonexistent_index")
-        configure_rag({"vectordb_dir": missing_dir})
-        result = get_knowledge_base_info()
-        assert "No knowledge base found" in result
+        original = __import__("src.tools.rag", fromlist=["_rag_config"])._rag_config["vectordb_dir"]
+        try:
+            configure_rag({"vectordb_dir": "data/nonexistent_test_index"})
+            result = get_knowledge_base_info()
+            assert "No knowledge base found" in result
+        finally:
+            configure_rag({"vectordb_dir": original})
 
 
 class TestNegativeValueValidation:
@@ -972,42 +1065,32 @@ class TestProviderTypeCaseInsensitive:
 
 
 class TestResolveModelRespectsCliProvider:
-    """Tests that _resolve_model() respects CLI --provider override (Bug n2)."""
+    """Tests that model alias switching works correctly."""
 
-    def test_resolve_model_respects_cli_provider(self):
-        """When _cli_provider_override=True, provider from ModelConfig is not applied."""
-        from src.config import Config, ModelConfig, ProviderConfig, _resolve_model
-
+    def test_resolve_model_respects_active_alias(self):
+        """active_model_alias correctly resolves to models registry entry."""
         config = Config()
         config.providers["ollama"] = ProviderConfig(name="ollama", type="ollama")
         config.providers["openai"] = ProviderConfig(name="openai", type="openai", api_key="sk-x")
         config.models["reasoning"] = ModelConfig(provider="openai", model="gpt-4.1")
-        config.provider = "ollama"
-        config.model = "reasoning"
-        config._cli_provider_override = True
+        config.active_model_alias = "reasoning"
 
-        _resolve_model(config)
+        pc, mc = config.resolve_llm_config()
+        assert mc.model == "gpt-4.1"
+        assert pc.type == "openai"
 
-        assert config.provider == "ollama"
-        assert config.model == "gpt-4.1"
-        assert config._active_model is not None
-
-    def test_resolve_model_switches_provider_without_cli_override(self):
-        """Without CLI override, _resolve_model() updates provider from ModelConfig."""
-        from src.config import Config, ModelConfig, ProviderConfig, _resolve_model
-
+    def test_resolve_model_switches_provider_via_alias(self):
+        """Switching active_model_alias changes the resolved provider."""
         config = Config()
         config.providers["ollama"] = ProviderConfig(name="ollama", type="ollama")
         config.providers["openai"] = ProviderConfig(name="openai", type="openai", api_key="sk-x")
+        config.models["fast"] = ModelConfig(provider="ollama", model="qwen3:4b")
         config.models["reasoning"] = ModelConfig(provider="openai", model="gpt-4.1")
-        config.provider = "ollama"
-        config.model = "reasoning"
-        config._cli_provider_override = False
+        config.active_model_alias = "reasoning"
 
-        _resolve_model(config)
-
-        assert config.provider == "openai"
-        assert config.model == "gpt-4.1"
+        pc, mc = config.resolve_llm_config()
+        assert pc.type == "openai"
+        assert mc.model == "gpt-4.1"
 
 
 class TestCreateEmbeddingsFromConfig:
@@ -1074,86 +1157,72 @@ class TestCreateEmbeddingsFromConfig:
 
 
 class TestProviderConfigValidation:
-    """Tests for ProviderConfig.__post_init__ validation (BUG-056)."""
+    """Tests for ProviderConfig and ModelConfig validation (BUG-056)."""
 
     def test_valid_temperature_accepted(self):
-        """Valid temperature in [0.0, 2.0] is accepted."""
-        cfg = ProviderConfig(name="test", type="openai", temperature=1.0)
-        assert cfg.temperature == 1.0
+        """Valid temperature in [0.0, 2.0] is accepted by ModelConfig."""
+        mc = ModelConfig(provider="test", model="m", temperature=1.0)
+        assert mc.temperature == 1.0
 
     def test_temperature_zero_accepted(self):
         """Boundary value temperature=0.0 is accepted."""
-        cfg = ProviderConfig(name="test", type="openai", temperature=0.0)
-        assert cfg.temperature == 0.0
+        mc = ModelConfig(provider="test", model="m", temperature=0.0)
+        assert mc.temperature == 0.0
 
     def test_temperature_two_accepted(self):
         """Boundary value temperature=2.0 is accepted."""
-        cfg = ProviderConfig(name="test", type="openai", temperature=2.0)
-        assert cfg.temperature == 2.0
+        mc = ModelConfig(provider="test", model="m", temperature=2.0)
+        assert mc.temperature == 2.0
 
     def test_temperature_too_high_raises(self):
         """temperature > 2.0 raises ConfigError."""
-        from src.config import ConfigError
-
-        with pytest.raises(ConfigError, match="temperature"):
-            ProviderConfig(name="test", type="openai", temperature=5.0)
+        with pytest.raises(ConfigError, match="Temperature"):
+            ModelConfig(provider="test", model="m", temperature=5.0)
 
     def test_temperature_negative_raises(self):
         """temperature < 0.0 raises ConfigError."""
-        from src.config import ConfigError
-
-        with pytest.raises(ConfigError, match="temperature"):
-            ProviderConfig(name="test", type="openai", temperature=-0.1)
+        with pytest.raises(ConfigError, match="Temperature"):
+            ModelConfig(provider="test", model="m", temperature=-0.1)
 
     def test_num_ctx_positive_accepted(self):
-        """Positive num_ctx is accepted."""
-        cfg = ProviderConfig(name="test", type="ollama", num_ctx=8192)
-        assert cfg.num_ctx == 8192
+        """Positive context_window is accepted."""
+        mc = ModelConfig(provider="test", model="m", context_window=8192)
+        assert mc.context_window == 8192
 
     def test_num_ctx_zero_raises(self):
-        """num_ctx=0 raises ConfigError."""
-        from src.config import ConfigError
-
-        with pytest.raises(ConfigError, match="num_ctx"):
-            ProviderConfig(name="test", type="ollama", num_ctx=0)
+        """context_window=0 raises ConfigError."""
+        with pytest.raises(ConfigError, match="context_window"):
+            ModelConfig(provider="test", model="m", context_window=0)
 
     def test_num_ctx_negative_raises(self):
-        """Negative num_ctx raises ConfigError."""
-        from src.config import ConfigError
-
-        with pytest.raises(ConfigError, match="num_ctx"):
-            ProviderConfig(name="test", type="ollama", num_ctx=-1)
+        """Negative context_window raises ConfigError."""
+        with pytest.raises(ConfigError, match="context_window"):
+            ModelConfig(provider="test", model="m", context_window=-1)
 
     def test_max_tokens_positive_accepted(self):
         """Positive max_tokens is accepted."""
-        cfg = ProviderConfig(name="test", type="openai", max_tokens=2048)
-        assert cfg.max_tokens == 2048
+        mc = ModelConfig(provider="test", model="m", max_tokens=2048)
+        assert mc.max_tokens == 2048
 
     def test_max_tokens_zero_raises(self):
         """max_tokens=0 raises ConfigError."""
-        from src.config import ConfigError
-
         with pytest.raises(ConfigError, match="max_tokens"):
-            ProviderConfig(name="test", type="openai", max_tokens=0)
+            ModelConfig(provider="test", model="m", max_tokens=0)
 
     def test_max_tokens_negative_raises(self):
         """Negative max_tokens raises ConfigError."""
-        from src.config import ConfigError
-
         with pytest.raises(ConfigError, match="max_tokens"):
-            ProviderConfig(name="test", type="openai", max_tokens=-100)
+            ModelConfig(provider="test", model="m", max_tokens=-100)
 
     def test_none_fields_no_validation(self):
         """None values for optional fields skip validation entirely."""
-        cfg = ProviderConfig(name="test", type="openai")
-        assert cfg.temperature is None
-        assert cfg.num_ctx is None
-        assert cfg.max_tokens is None
+        mc = ModelConfig(provider="test", model="m")
+        assert mc.temperature is None
+        assert mc.context_window is None
+        assert mc.max_tokens is None
 
     def test_invalid_type_raises(self):
         """Unknown provider type raises ConfigError."""
-        from src.config import ConfigError
-
         with pytest.raises(ConfigError, match="not a recognized provider type"):
             ProviderConfig(name="test", type="bogus")
 
@@ -1163,44 +1232,44 @@ class TestProviderConfigValidation:
             cfg = ProviderConfig(name="test", type=ptype)
             assert cfg.type == ptype
 
-    def test_invalid_temperature_in_providers_section_skips(self):
-        """temperature: 5.0 in providers config logs a warning and skips the entry."""
-        from src.config import Config
-
+    def test_invalid_temperature_in_providers_section_skips_model_migration(self):
+        """temperature: 5.0 in providers model migration logs a warning and skips."""
         config = Config()
         providers_data = {
             "bad": {
                 "type": "openai",
+                "model": "gpt-4",
                 "temperature": 5.0,
             }
         }
         _parse_providers_section(config, providers_data)
-        assert "bad" not in config.providers
+        assert "bad" in config.providers
+        assert "bad" not in config.models
 
-    def test_invalid_num_ctx_in_providers_section_skips(self):
-        """num_ctx: -1 in providers config logs a warning and skips the entry."""
-        from src.config import Config
-
+    def test_invalid_num_ctx_in_providers_section_skips_model_migration(self):
+        """num_ctx: -1 in providers model migration logs a warning and skips."""
         config = Config()
         providers_data = {
             "bad": {
                 "type": "ollama",
+                "model": "qwen3:8b",
                 "num_ctx": -1,
             }
         }
         _parse_providers_section(config, providers_data)
-        assert "bad" not in config.providers
+        assert "bad" in config.providers
+        assert "bad" not in config.models
 
-    def test_invalid_max_tokens_in_providers_section_skips(self):
-        """max_tokens: 0 in providers config logs a warning and skips the entry."""
-        from src.config import Config
-
+    def test_invalid_max_tokens_in_providers_section_skips_model_migration(self):
+        """max_tokens: 0 in providers model migration logs a warning and skips."""
         config = Config()
         providers_data = {
             "bad": {
                 "type": "openai",
+                "model": "gpt-4",
                 "max_tokens": 0,
             }
         }
         _parse_providers_section(config, providers_data)
-        assert "bad" not in config.providers
+        assert "bad" in config.providers
+        assert "bad" not in config.models

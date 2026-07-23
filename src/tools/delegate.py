@@ -17,6 +17,8 @@ from pydantic import BaseModel, Field
 
 from src.logging_config import get_logger, log_delegation
 
+log = get_logger()
+
 # LangChain imports with graceful fallback
 try:
     from langchain_core.messages import HumanMessage, SystemMessage
@@ -127,8 +129,8 @@ def _emit_status(message: str) -> None:
     if cb is not None:
         try:
             cb(message)
-        except Exception:
-            pass
+        except Exception as exc:
+            log.debug("Status callback error: %s", exc)
 
 
 @dataclass
@@ -395,11 +397,11 @@ def resolve_model_alias(provider: str | None, model: str | None) -> tuple:
 
     Supports two alias formats:
     1. String: "provider/model" or just "model"
-    2. Object: {"provider": "...", "model": "...", "timeout": 300, "temperature": 0.5, "num_ctx": 32768}
+    2. Object: {"provider": "...", "model": "...", "timeout": 300, "temperature": 0.5, "context_window": 32768}
 
     Returns:
         Tuple of (resolved_provider, resolved_model, alias_config)
-        where alias_config is a dict with optional 'timeout', 'temperature', 'num_ctx' overrides
+        where alias_config is a dict with optional 'timeout', 'temperature', 'context_window' overrides
     """
     aliases = _delegate_config.get("models", {})
     alias_config: dict[str, Any] = {}
@@ -410,14 +412,18 @@ def resolve_model_alias(provider: str | None, model: str | None) -> tuple:
             alias_config["timeout"] = alias_value["timeout"]
         if "temperature" in alias_value:
             alias_config["temperature"] = alias_value["temperature"]
-        if "num_ctx" in alias_value:
-            alias_config["num_ctx"] = alias_value["num_ctx"]
+        if "context_window" in alias_value:
+            alias_config["context_window"] = alias_value["context_window"]
+        elif "context_length" in alias_value:
+            alias_config["context_window"] = alias_value["context_length"]
+        elif "num_ctx" in alias_value:
+            alias_config["context_window"] = alias_value["num_ctx"]
 
     # Check if model is an alias
     if model and model in aliases:
         alias_value = aliases[model]
 
-        # Object format: {"provider": "...", "model": "...", "timeout": 300, "num_ctx": 32768}
+        # Object format: {"provider": "...", "model": "...", "timeout": 300, "context_window": 32768}
         if isinstance(alias_value, dict):
             resolved_provider = alias_value.get("provider", provider)
             resolved_model = alias_value.get("model", model)
@@ -469,7 +475,7 @@ def create_delegate_llm(
         provider: Provider name (e.g., 'openai', 'ollama', 'anthropic', 'my-server')
         model: Model name (overrides provider config default)
         temperature: Sampling temperature
-        num_ctx: Context window size (Ollama only)
+        num_ctx: Context window size in tokens (Ollama only)
 
     Returns:
         LLM instance
@@ -489,8 +495,10 @@ def create_delegate_llm(
     if provider in providers:
         prov_cfg = providers[provider]
         prov_type = prov_cfg.get("type", provider)
+        # model must come from caller (resolved via alias); providers carry only
+        # connection info in the new format.  The legacy "model" key in prov_cfg
+        # is kept as a fallback for old config dict shapes.
         final_model = model or prov_cfg.get("model")
-        final_num_ctx = num_ctx if num_ctx is not None else prov_cfg.get("num_ctx")
 
         return create_chat_model(
             prov_type,
@@ -498,7 +506,7 @@ def create_delegate_llm(
             api_key=prov_cfg.get("api_key"),
             base_url=prov_cfg.get("base_url"),
             temperature=temperature,
-            num_ctx=final_num_ctx,
+            num_ctx=num_ctx,
         )
 
     # Provider not in named config — raise a clear error
@@ -568,13 +576,16 @@ def _validate_json_response(response: str) -> tuple:
     # so prose written before the fence is tolerated
     fence_idx = text.find("```json")
     if fence_idx != -1:
-        text = text[fence_idx:]
-    if text.startswith("```json"):
-        text = text[7:]
+        text = text[fence_idx + 7 :]
+        # Find the matching closing fence (first ``` after the opening)
+        close_idx = text.find("```")
+        if close_idx != -1:
+            text = text[:close_idx]
     elif text.startswith("```"):
         text = text[3:]
-    if text.endswith("```"):
-        text = text[:-3]
+        close_idx = text.find("```")
+        if close_idx != -1:
+            text = text[:close_idx]
     text = text.strip()
 
     try:
@@ -591,12 +602,27 @@ def resolve_delegate_defaults(
     """Apply default provider/model when values are still ``None``.
 
     Call **after** alias resolution so defaults only fill in gaps.
+    Resolves through ``default_model_alias`` → models dict when present;
+    falls back to legacy ``default_provider``/``default_model`` keys.
 
     Returns:
         ``(provider, model)`` with no ``None`` values.
     """
-    resolved_provider: str = provider or str(_delegate_config.get("default_provider", "ollama"))
-    resolved_model: str = model or str(_delegate_config.get("default_model") or "default")
+    if provider and model:
+        return provider, model
+
+    alias = _delegate_config.get("default_model_alias")
+    models = _delegate_config.get("models", {})
+
+    if alias and alias in models:
+        entry = models[alias]
+        resolved_provider: str = provider or entry.get("provider", "ollama")
+        resolved_model: str = model or entry.get("model", alias)
+    else:
+        # Alias not in models — try legacy keys, then treat alias as literal model name
+        resolved_provider = provider or str(_delegate_config.get("default_provider", "ollama"))
+        resolved_model = model or str(_delegate_config.get("default_model") or alias or "default")
+
     return resolved_provider, resolved_model
 
 
@@ -761,7 +787,7 @@ def _execute_single_task(
     circuit_breaker = _get_circuit_breaker(provider, model)
     cooldown = _delegate_config.get("circuit_breaker_cooldown", 300)
     with _circuit_breaker_lock:
-        is_available, unavailable_reason = circuit_breaker.check_availability(cooldown)
+        is_available, unavailable_reason = circuit_breaker._check_availability_locked(cooldown)
 
     if not is_available:
         log.info(f"Delegation blocked: {target_model} - circuit breaker open")
@@ -918,7 +944,7 @@ def delegate_task(
     if error:
         return f"**Delegation blocked:** {error}"
 
-    # Resolve aliases first to get any timeout/temperature/num_ctx overrides
+    # Resolve aliases first to get any timeout/temperature/context_window overrides
     resolved_provider, resolved_model, alias_config = resolve_model_alias(provider, model)
 
     # Apply alias overrides (alias config takes precedence over parameters)
@@ -926,7 +952,7 @@ def delegate_task(
         timeout = alias_config["timeout"]
     if "temperature" in alias_config:
         temperature = alias_config["temperature"]
-    num_ctx = alias_config.get("num_ctx")
+    num_ctx = alias_config.get("context_window") or alias_config.get("num_ctx")
 
     # Fill in defaults for anything still None after alias resolution
     resolved_provider, resolved_model = resolve_delegate_defaults(resolved_provider, resolved_model)
@@ -1059,7 +1085,7 @@ def delegate_parallel(
         if "temperature" in alias_cfg:
             temp = alias_cfg["temperature"]
         temp = max(0.0, min(2.0, temp))
-        num_ctx = alias_cfg.get("num_ctx")
+        num_ctx = alias_cfg.get("context_window") or alias_cfg.get("num_ctx")
 
         prov, mdl = resolve_delegate_defaults(prov, mdl)
 
@@ -1091,6 +1117,7 @@ def delegate_parallel(
             try:
                 remaining = timeout - (time.time() - start_time)
                 if remaining <= 0:
+                    future.cancel()
                     results.append(
                         (
                             i,

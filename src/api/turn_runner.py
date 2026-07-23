@@ -66,9 +66,12 @@ def _extract_token_counts(ws_callback: Any) -> dict[str, int]:
 
 
 async def _enqueue_agent_state(session: ApiSession, state: str) -> None:
-    """Enqueue an agent_state message on the session queue."""
+    """Set session.agent_state and enqueue an agent_state message on the session queue."""
+    session.agent_state = state
     try:
-        await session.ws_queue.put({"type": "agent_state", "payload": {"state": state}})
+        session.ws_queue.put_nowait({"type": "agent_state", "payload": {"state": state}})
+    except asyncio.QueueFull:
+        log.debug("Queue full, dropping agent_state for session %s", session.id)
     except Exception as exc:  # pragma: no cover
         log.debug("Could not enqueue agent_state for session %s: %s", session.id, exc)
 
@@ -114,6 +117,9 @@ async def _run_think_pipeline(
         )
         return response_text
 
+    if session.cancel_event.is_set():
+        raise asyncio.CancelledError("Cancel requested between pipeline phases")
+
     called = was_deep_think_called(agent_msgs)
     if called and deep_think_had_good_context(agent_msgs):
         return response_text
@@ -149,6 +155,9 @@ async def _run_think_pipeline(
             except Exception as exc:
                 log.warning("Research delegate failed: %s", exc)
 
+    if session.cancel_event.is_set():
+        raise asyncio.CancelledError("Cancel requested between pipeline phases")
+
     try:
         await _enqueue_agent_state(session, "deep_thinking")
         result = await asyncio.to_thread(
@@ -158,8 +167,13 @@ async def _run_think_pipeline(
             tool_data,
             log,
             research_context=research_output or None,
+            llm=llm,
         )
+        if session.cancel_event.is_set():
+            raise asyncio.CancelledError("Cancel requested between pipeline phases")
         return result
+    except asyncio.CancelledError:
+        raise
     except Exception as exc:
         log.warning("force_deep_think failed: %s", exc)
         return response_text
@@ -187,13 +201,23 @@ async def _run_delegate_pipeline(
     if was_delegation_called(agent_msgs):
         return response_text
 
+    if session.cancel_event.is_set():
+        raise asyncio.CancelledError("Cancel requested between pipeline phases")
+
     log.info("Forcing parallel delegation for API turn")
     tool_data = collect_tool_outputs(agent_msgs)
 
     try:
         await _enqueue_agent_state(session, "delegating")
+        _delegation_llm = getattr(run_config, "llm", None) if run_config else None
         forced = await asyncio.to_thread(
-            force_delegation, user_input, response_text, tool_data, run_config, log
+            force_delegation,
+            user_input,
+            response_text,
+            tool_data,
+            run_config,
+            log,
+            _delegation_llm,
         )
         if forced and forced != response_text:
             return forced
@@ -253,19 +277,38 @@ async def _run_message_turn_inner(
     from src.orchestration.runner import run_agent
 
     turn_start = time.monotonic()
-    session.agent_state = "thinking"
     await _enqueue_agent_state(session, "thinking")
+
+    # Clear ephemeral per-prompt state: remove agent-loaded (non-pinned) tools
+    # from loaded_tools and reset deny_all — matching the CLI prompt boundary
+    # behaviour (BUG-198).
+    if session.session_state is not None:
+        session.session_state.reset_for_new_prompt()
 
     loop = asyncio.get_running_loop()
     ws_callback = WebSocketCallbackHandler(session.ws_queue, loop)
     confirmation_ui = ApiConfirmationUI(session.ws_queue, loop)
 
+    # Publish the confirmation UI on the session so the WebSocket handler can route
+    # tool_confirm messages to it.  The field is cleared in the finally block so stale
+    # UI references never linger between turns (BUG-FORGE-001).
+    session.active_confirmation_ui = confirmation_ui
+
     # Build a per-turn copy of the run config with the confirmation UI wired in.
     # Never mutate the shared session.run_config — concurrent REST + WebSocket turns
     # would race on the same object (BUG-117).
+    # Deep-copy mutable fields so tool expansion in process_tools doesn't mutate the
+    # session-level lists/dicts (BUG-134).
     run_config = session.run_config
     if run_config is not None:
-        run_config = dataclasses.replace(run_config, confirmation_ui=confirmation_ui)
+        run_config = dataclasses.replace(
+            run_config,
+            confirmation_ui=confirmation_ui,
+            active_tools_list=(
+                list(run_config.active_tools_list) if run_config.active_tools_list else []
+            ),
+            available_tools=dict(run_config.available_tools) if run_config.available_tools else {},
+        )
 
     # Read history from memory manager.
     history_messages = _build_history(session.memory_manager, text)
@@ -281,90 +324,101 @@ async def _run_message_turn_inner(
 
     agent_msgs: list = []
     try:
-        response_text: str = await asyncio.to_thread(
-            run_agent,
-            text,
-            history_messages,
-            tool_registry,
-            approvals,
-            callbacks=[ws_callback],
-            config=run_config,
-            result_messages=agent_msgs,
-        )
-    except asyncio.CancelledError:
+        try:
+            response_text: str = await asyncio.to_thread(
+                run_agent,
+                text,
+                history_messages,
+                tool_registry,
+                approvals,
+                callbacks=[ws_callback],
+                config=run_config,
+                result_messages=agent_msgs,
+            )
+        except asyncio.CancelledError:
+            session.agent_state = "idle"
+            await _enqueue_agent_state(session, "idle")
+            try:
+                session.ws_queue.put_nowait(
+                    {
+                        "type": "error",
+                        "payload": {"code": "CANCELLED", "message": "Agent turn cancelled."},
+                    }
+                )
+            except asyncio.QueueFull:
+                log.warning("Queue full, dropping CANCELLED error for session %s", session.id)
+            raise
+        except Exception as exc:
+            log.exception("Agent turn failed for session %s: %s", session.id, exc)
+            session.agent_state = "error"
+            await _enqueue_agent_state(session, "error")
+            try:
+                session.ws_queue.put_nowait(
+                    {"type": "error", "payload": {"code": "AGENT_ERROR", "message": str(exc)}}
+                )
+            except asyncio.QueueFull:
+                log.warning("Queue full, dropping AGENT_ERROR for session %s", session.id)
+            session.agent_state = "idle"
+            await _enqueue_agent_state(session, "idle")
+            return
+
+        # ── Think / delegate post-processing ──────────────────────────
+        if mode == "think" and response_text:
+            response_text = await _run_think_pipeline(
+                session, text, response_text, agent_msgs, run_config
+            )
+        elif mode == "delegate" and response_text:
+            response_text = await _run_delegate_pipeline(
+                session, text, response_text, agent_msgs, run_config
+            )
+
+        # Update memory with the new exchange.
+        if session.memory_manager is not None:
+            try:
+                # update() is the public API for all BaseMemoryManager subclasses.
+                # save() performs file I/O — run both off the event loop thread.
+                mm = session.memory_manager
+
+                def _update_and_save() -> None:
+                    mm.update(text, response_text)
+                    mm.save()
+
+                await asyncio.to_thread(_update_and_save)
+            except Exception as exc:
+                log.warning("Memory update failed for session %s: %s", session.id, exc)
+
+        # Persist AI message to DB.
+        ai_message_id = str(uuid.uuid4())
+        if db is not None:
+            try:
+                from src.api.db.repositories.messages import MessageRepository
+
+                msg_repo = MessageRepository(db)
+                ai_msg = await msg_repo.create(
+                    session_id=session.id,
+                    role="assistant",
+                    content_json=json.dumps({"text": response_text}),
+                )
+                ai_message_id = ai_msg.id
+                await db.commit()
+            except Exception as exc:
+                log.warning("Could not persist AI message for session %s: %s", session.id, exc)
+                try:
+                    await db.rollback()
+                except Exception:
+                    pass
+
+        # Update session token counts from the callback accumulator.
+        token_counts = _extract_token_counts(ws_callback)
+        session.token_counts["input_tokens"] += token_counts.get("input_tokens", 0)
+        session.token_counts["output_tokens"] += token_counts.get("output_tokens", 0)
+
+        duration_ms = int((time.monotonic() - turn_start) * 1000)
+        session.last_activity = time.time()
         session.agent_state = "idle"
         await _enqueue_agent_state(session, "idle")
-        await session.ws_queue.put(
-            {"type": "error", "payload": {"code": "CANCELLED", "message": "Agent turn cancelled."}}
-        )
-        raise
-    except Exception as exc:
-        log.exception("Agent turn failed for session %s: %s", session.id, exc)
-        session.agent_state = "error"
-        await _enqueue_agent_state(session, "error")
-        await session.ws_queue.put(
-            {"type": "error", "payload": {"code": "AGENT_ERROR", "message": str(exc)}}
-        )
-        return
 
-    # ── Think / delegate post-processing ──────────────────────────
-    if mode == "think" and response_text:
-        response_text = await _run_think_pipeline(
-            session, text, response_text, agent_msgs, run_config
-        )
-    elif mode == "delegate" and response_text:
-        response_text = await _run_delegate_pipeline(
-            session, text, response_text, agent_msgs, run_config
-        )
-
-    # Update memory with the new exchange.
-    if session.memory_manager is not None:
-        try:
-            # update() is the public API for all BaseMemoryManager subclasses.
-            # save() performs file I/O — run both off the event loop thread.
-            mm = session.memory_manager
-
-            def _update_and_save() -> None:
-                mm.update(text, response_text)
-                mm.save()
-
-            await asyncio.to_thread(_update_and_save)
-        except Exception as exc:
-            log.warning("Memory update failed for session %s: %s", session.id, exc)
-
-    # Persist AI message to DB.
-    ai_message_id = str(uuid.uuid4())
-    if db is not None:
-        try:
-            from src.api.db.repositories.messages import MessageRepository
-
-            msg_repo = MessageRepository(db)
-            ai_msg = await msg_repo.create(
-                session_id=session.id,
-                role="assistant",
-                content_json=json.dumps({"text": response_text}),
-            )
-            ai_message_id = ai_msg.id
-            await db.commit()
-        except Exception as exc:
-            log.warning("Could not persist AI message for session %s: %s", session.id, exc)
-            try:
-                await db.rollback()
-            except Exception:
-                pass
-
-    # Update session token counts from the callback accumulator.
-    token_counts = _extract_token_counts(ws_callback)
-    session.token_counts["input_tokens"] += token_counts.get("input_tokens", 0)
-    session.token_counts["output_tokens"] += token_counts.get("output_tokens", 0)
-
-    duration_ms = int((time.monotonic() - turn_start) * 1000)
-    session.last_activity = time.time()
-    session.agent_state = "idle"
-    await _enqueue_agent_state(session, "idle")
-
-    await session.ws_queue.put(
-        {
+        done_msg = {
             "type": "done",
             "payload": {
                 "message_id": ai_message_id,
@@ -376,4 +430,11 @@ async def _run_message_turn_inner(
                 "tool_calls": token_counts.get("tool_call_count", 0),
             },
         }
-    )
+        try:
+            await asyncio.wait_for(session.ws_queue.put(done_msg), timeout=5.0)
+        except (TimeoutError, asyncio.QueueFull):
+            log.warning("Queue full/timeout, dropping done message for session %s", session.id)
+    finally:
+        # Clear the active confirmation UI so stale references never linger
+        # after the turn completes or is cancelled (BUG-FORGE-001).
+        session.active_confirmation_ui = None

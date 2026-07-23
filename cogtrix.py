@@ -11,14 +11,12 @@ import os
 import sys
 import time as _time_mod
 import warnings
-from copy import copy
 from pathlib import Path
 from typing import Any
 
 from src._version import __copyright__, __version__  # noqa: F401
 from src.agent.core import (
     build_system_prompt,
-    create_llm_from_provider_config,
     format_milestone_instructions,
 )
 from src.agent.safety import UserCancelledRun
@@ -100,7 +98,6 @@ from src.orchestration.runner import (  # noqa: F401
     extract_ai_content,
     extract_response,
     format_agent_error,
-    has_phantom_tool_call,
     invalidate_llm_caches,
     is_valid_response,
     log_tool_calls_from_result,
@@ -115,10 +112,12 @@ from src.prompt.optimizer import (
 from src.prompt.optimizer import (
     set_progress_callback as set_optimizer_callback,
 )
+from src.providers import create_chat_model_from_configs
 from src.registry import ToolRegistry
 from src.tools.configure import (
     TOOL_OUTPUT_CAP_MIN_CHARS,
     TOOL_PRESETS,
+    _update_rag_tool_description,
     apply_output_cap,
     apply_tool_preset,
     build_tool_catalog,
@@ -137,6 +136,7 @@ from src.tools.configure import (
     create_request_tools_tool,
     filter_unconfigured_tools,
     load_tools,
+    rag_should_auto_activate,
 )
 from src.tools.report_progress import (
     create_report_progress_tool,
@@ -283,7 +283,6 @@ _tool_logger = ToolCallLogger()
 _is_valid_response = is_valid_response
 _format_agent_error = format_agent_error
 _extract_ai_content = extract_ai_content
-_has_phantom_tool_call = has_phantom_tool_call
 _extract_response = extract_response
 _build_tool_results_response = build_tool_results_response
 _log_tool_calls_from_result = log_tool_calls_from_result
@@ -699,21 +698,20 @@ class SlashCommandRegistry:
         msg_count = stats.get("total_messages", mm.get_message_count())
 
         try:
-            provider_cfg = cfg.get_provider_config()
-        except (ValueError, KeyError, AttributeError) as exc:
+            provider_cfg, model_cfg = cfg.resolve_llm_config()
+        except (ValueError, KeyError, AttributeError, ConfigError) as exc:
             if console is not None:
                 console.print(f"[red]Provider configuration error:[/red] {exc}")
             else:
                 print(f"Provider configuration error: {exc}")
             return "continue"
-        model = cfg.model or provider_cfg.get_model()
 
         sp = self.system_prompt
         mm_mcp = self.mcp_manager
         if console is not None and Panel is not None:
-            _info_rich(cfg, provider_cfg, model, stats, msg_count, sp, mm_mcp)
+            _info_rich(cfg, provider_cfg, model_cfg, stats, msg_count, sp, mm_mcp)
         else:
-            _info_plain(cfg, provider_cfg, model, stats, msg_count, sp, mm_mcp)
+            _info_plain(cfg, provider_cfg, model_cfg, stats, msg_count, sp, mm_mcp)
         return "continue"
 
     @staticmethod
@@ -757,11 +755,15 @@ class SlashCommandRegistry:
             )
             if term in all_known:
                 _session.denials.add(term)
+                _session.pinned_tools.discard(term)
+                _session.loaded_tools.discard(term)
                 print(f"Tool '{term}' disabled for this session.")
             else:
                 matches = [n for n in all_known if term in n]
                 if len(matches) == 1:
                     _session.denials.add(matches[0])
+                    _session.pinned_tools.discard(matches[0])
+                    _session.loaded_tools.discard(matches[0])
                     print(f"Tool '{matches[0]}' disabled for this session.")
                 elif len(matches) > 1:
                     print(f"Ambiguous: matches {matches}. Be more specific.")
@@ -775,7 +777,13 @@ class SlashCommandRegistry:
                 print("Usage: /tools load <tool-name>")
                 return "continue"
             if term in reg.tools:
-                print(f"Tool '{term}' is already loaded.")
+                if term not in _session.pinned_tools:
+                    # Promote agent-loaded tool to pinned
+                    _session.pinned_tools.add(term)
+                    _session.loaded_tools.add(term)
+                    print(f"Tool '{term}' pinned (was agent-loaded, now persists).")
+                else:
+                    print(f"Tool '{term}' is already loaded and pinned.")
                 return "continue"
             if term in _session.denials:
                 print(f"Tool '{term}' is disabled. Use '/tools enable {term}' first.")
@@ -794,6 +802,27 @@ class SlashCommandRegistry:
                     print(f"Tool '{active_matches[0]}' is already loaded.")
                 else:
                     print(f"Unknown or unavailable tool '{term}'.")
+            return "continue"
+
+        if args.startswith("unload") and (len(args) == 6 or args[6] == " "):
+            term = args[6:].strip()
+            if not term:
+                print("Usage: /tools unload <tool-name>")
+                return "continue"
+            if term in _session.pinned_tools:
+                return f"unload_tool:{term}"
+            # Fuzzy match against pinned tools
+            matches = [n for n in _session.pinned_tools if term in n]
+            if len(matches) == 1:
+                return f"unload_tool:{matches[0]}"
+            if len(matches) > 1:
+                print(f"Ambiguous: matches {matches}. Be more specific.")
+            elif term in _session.loaded_tools:
+                print(
+                    f"Tool '{term}' was loaded by the agent and will be " "auto-unloaded next turn."
+                )
+            else:
+                print(f"Tool '{term}' is not currently loaded.")
             return "continue"
 
         active_names: set[str] = set(reg.tools.keys())
@@ -975,12 +1004,12 @@ class SlashCommandRegistry:
             return f"switch_model:{target}"
 
         # ── No argument: show current model + available aliases ────
+        alias = cfg.active_model_alias
         try:
-            provider_cfg = cfg.get_provider_config()
-        except (ValueError, KeyError, AttributeError):
-            provider_cfg = None
-
-        current = cfg.model or (provider_cfg.get_model() if provider_cfg else "unknown")
+            _active_mc = cfg.get_active_model()
+            current = alias or _active_mc.model
+        except (ValueError, KeyError, AttributeError, ConfigError):
+            current = alias or "unknown"
         models = cfg.models or {}
 
         if console is not None:
@@ -990,7 +1019,7 @@ class SlashCommandRegistry:
                 lines_out.append("")
                 for mname, mcfg in models.items():
                     detail = f"{mcfg.provider}/{mcfg.model}"
-                    is_current = mcfg.provider == cfg.provider and mcfg.model == cfg.model
+                    is_current = mname == alias
                     if is_current:
                         name_fmt = f"[bold green]{mname:<16s}[/bold green]"
                         marker = " [green]● active[/green]"
@@ -1016,11 +1045,7 @@ class SlashCommandRegistry:
                 print()
                 for mname, mcfg in models.items():
                     detail = f"{mcfg.provider}/{mcfg.model}"
-                    marker = (
-                        " ● active"
-                        if (mcfg.provider == cfg.provider and mcfg.model == cfg.model)
-                        else ""
-                    )
+                    marker = " ● active" if mname == alias else ""
                     print(f"    {mname:<16s} {detail}{marker}")
             print("\n  Switch: /model <name>   (e.g. /model fast)")
             print()
@@ -1035,49 +1060,48 @@ class SlashCommandRegistry:
             return "continue"
 
         if args:
-            target = args.strip()
-            available = cfg.list_providers()
-            if target not in available:
-                if console is not None:
-                    console.print(f"[red]Unknown provider:[/red] [bold]{target}[/bold]")
-                    console.print(f"[dim]Available: {', '.join(available)}[/dim]")
-                else:
-                    print(f"Unknown provider: {target}")
-                    print(f"Available: {', '.join(available)}")
-                return "continue"
-            if target == cfg.provider:
-                if console is not None:
-                    console.print(f"[dim]Already using provider [bold]{target}[/bold].[/dim]")
-                else:
-                    print(f"Already using provider {target}.")
-                return "continue"
-            return f"switch_provider:{target}"
+            if console is not None:
+                console.print(
+                    "[dim]Provider switching is no longer supported. "
+                    "Use [bold]/model[/bold] <alias> to switch models — "
+                    "the provider is derived from the model configuration.[/dim]"
+                )
+            else:
+                print("Provider switching is no longer supported.")
+                print(
+                    "Use /model <alias> to switch models — "
+                    "the provider is derived from the model configuration."
+                )
+            return "continue"
 
-        # ── No argument: show current provider + available ones ────
+        # ── No argument: show available providers (read-only) ────
         available = cfg.list_providers()
+        try:
+            active_provider = cfg.get_active_model().provider
+        except (ValueError, KeyError, AttributeError, ConfigError):
+            active_provider = None
         if console is not None:
             lines_out = []
             for pname in available:
                 try:
                     pcfg = cfg.get_provider_config(pname)
                     ptype = pcfg.type
-                    pmodel = pcfg.get_model()
-                    detail = f"{ptype}, model: {pmodel}"
+                    base_url = getattr(pcfg, "base_url", None)
+                    detail = f"type: {ptype}"
+                    if base_url:
+                        detail += f", url: {base_url}"
                 except (ValueError, KeyError):
                     detail = "unconfigured"
-                is_current = pname == cfg.provider
+                is_current = pname == active_provider
                 if is_current:
                     name_fmt = f"[bold green]{pname:<20s}[/bold green]"
-                    marker = " [green]● active[/green]"
+                    marker = " [green]● active model's provider[/green]"
                 else:
                     name_fmt = f"[bold]{pname:<20s}[/bold]"
                     marker = ""
                 lines_out.append(f"  {name_fmt} [dim]{detail}[/dim]{marker}")
             lines_out.append("")
-            lines_out.append(
-                "[dim]Switch: [bold]/provider[/bold] <name>   "
-                "(e.g. [bold]/provider ollama[/bold])[/dim]"
-            )
+            lines_out.append("[dim]Use [bold]/model[/bold] <alias> to switch models.[/dim]")
             body = "\n".join(lines_out)
             console.print()
             console.print(Panel(body, title="Providers", border_style="cyan", padding=(1, 2)))
@@ -1085,14 +1109,17 @@ class SlashCommandRegistry:
         else:
             print("\n  Providers:")
             for pname in available:
-                marker = " ● active" if pname == cfg.provider else ""
+                marker = " ● active model's provider" if pname == active_provider else ""
                 try:
                     pcfg = cfg.get_provider_config(pname)
-                    detail = f"{pcfg.type}, model: {pcfg.get_model()}"
+                    base_url = getattr(pcfg, "base_url", None)
+                    detail = f"type: {pcfg.type}"
+                    if base_url:
+                        detail += f", url: {base_url}"
                 except (ValueError, KeyError):
                     detail = "unconfigured"
                 print(f"    {pname:<20s} {detail}{marker}")
-            print("\n  Switch: /provider <name>   (e.g. /provider ollama)")
+            print("\n  Use /model <alias> to switch models.")
             print()
         return "continue"
 
@@ -1484,6 +1511,10 @@ def _tool_status_tag(name: str, reg: Any, rich_mode: bool = False, on_demand: bo
         if rich_mode:
             return mcp_tag + "[red]\\[disabled] [/red]"
         return mcp_tag + "[disabled] "
+    if name in _session.pinned_tools:
+        if rich_mode:
+            return mcp_tag + "[bright_green]\\[pinned]   [/bright_green]"
+        return mcp_tag + "[pinned]   "
     if name in _session.loaded_tools:
         if rich_mode:
             return mcp_tag + "[bright_green]\\[loaded]   [/bright_green]"
@@ -1730,7 +1761,7 @@ def _mode_plain(cfg: Any, modes: dict[str, str], wm_sizes: dict[str, int | None]
 def _info_rich(
     cfg: Any,
     provider_cfg: Any,
-    model: str,
+    model_cfg: Any,
     stats: dict,
     msg_count: int,
     system_prompt: str | None = None,
@@ -1740,13 +1771,19 @@ def _info_rich(
     if console is None or Panel is None:  # pragma: no cover
         return
 
+    alias = cfg.active_model_alias or model_cfg.model
     # ── Connection section ────────────────────────────────────
     lines: list[str] = []
     lines.append("[bold cyan]Connection[/bold cyan]")
-    lines.append(f"  [bold]Provider[/bold]      {cfg.provider} [dim]({provider_cfg.type})[/dim]")
-    lines.append(f"  [bold]Model[/bold]         {model}")
-    if provider_cfg.num_ctx:
-        lines.append(f"  [bold]Context size[/bold]  {provider_cfg.num_ctx:,} tokens")
+    lines.append(
+        f"  [bold]Model[/bold]         {alias} "
+        f"[dim]({model_cfg.provider}/{model_cfg.model})[/dim]"
+    )
+    lines.append(
+        f"  [bold]Provider[/bold]      {model_cfg.provider} [dim]({provider_cfg.type})[/dim]"
+    )
+    if model_cfg.context_window:
+        lines.append(f"  [bold]Context size[/bold]  {model_cfg.context_window:,} tokens")
     if system_prompt:
         sp_chars = len(system_prompt)
         sp_tokens = sp_chars // 4  # rough estimate
@@ -1792,19 +1829,20 @@ def _info_rich(
 def _info_plain(
     cfg: Any,
     provider_cfg: Any,
-    model: str,
+    model_cfg: Any,
     stats: dict,
     msg_count: int,
     system_prompt: str | None = None,
     mcp_manager: Any = None,
 ) -> None:
     """Render /info output as plain text."""
+    alias = cfg.active_model_alias or model_cfg.model
     print("\n  Session Information")
     print("  " + "-" * 38)
-    print(f"  Provider      {cfg.provider} ({provider_cfg.type})")
-    print(f"  Model         {model}")
-    if provider_cfg.num_ctx:
-        print(f"  Context size  {provider_cfg.num_ctx:,} tokens")
+    print(f"  Model         {alias} ({model_cfg.provider}/{model_cfg.model})")
+    print(f"  Provider      {model_cfg.provider} ({provider_cfg.type})")
+    if model_cfg.context_window:
+        print(f"  Context size  {model_cfg.context_window:,} tokens")
     if system_prompt:
         sp_chars = len(system_prompt)
         sp_tokens = sp_chars // 4
@@ -1915,7 +1953,7 @@ def _build_slash_commands() -> SlashCommandRegistry:
                 "Usage: /info\n\n"
                 "Displays current session information:\n"
                 "  - Provider and model\n"
-                "  - Context window size (num_ctx)\n"
+                "  - Context window size (context_window)\n"
                 "  - Memory mode and working memory size\n"
                 "  - Session ID and message count\n"
                 "  - Mode-specific tracking (entities, files, decisions)"
@@ -1930,23 +1968,29 @@ def _build_slash_commands() -> SlashCommandRegistry:
             handler=SlashCommandRegistry._cmd_tools,
             short_help="List / manage tools",
             long_help=(
-                "Usage: /tools [search | load <name> | enable <name> | disable <name>]\n\n"
+                "Usage: /tools [search | load | unload | enable | disable]\n\n"
                 "Without arguments, lists all tools grouped by category\n"
                 "with status tags:\n"
                 "  [confirm]        Requires user approval before running\n"
                 "  [auto-approved]  Confirmation skipped (/approve active)\n"
-                "  [loaded]         Dynamically loaded during the session\n"
+                "  [pinned]         Manually loaded — persists across turns\n"
+                "  [loaded]         Loaded by the agent — auto-unloaded next turn\n"
                 "  [on-demand]      Available but not yet loaded\n"
                 "  [disabled]       Blocked — will not load or execute\n\n"
                 "Subcommands:\n"
-                "  /tools load <name>      Load an on-demand tool immediately\n"
+                "  /tools load <name>      Load and pin a tool (persists across turns)\n"
+                "  /tools unload <name>    Unload a pinned tool\n"
                 "  /tools enable <name>    Re-enable a disabled tool\n"
                 "  /tools disable <name>   Disable a tool for this session\n\n"
+                "Tools loaded by the agent via request_tools are automatically\n"
+                "unloaded at the start of each new prompt. Manually loaded tools\n"
+                "stay active until you /tools unload them.\n\n"
                 "With any other text, filters tools by name.\n\n"
                 "Examples:\n"
                 "  /tools                     List all tools by category\n"
                 "  /tools search              Show search-related tools\n"
-                "  /tools load exa_search     Load exa_search into active set\n"
+                "  /tools load exa_search     Pin exa_search into active set\n"
+                "  /tools unload exa_search   Unpin and unload exa_search\n"
                 "  /tools disable shell       Disable execute_shell_command\n"
                 "  /tools enable shell        Re-enable it"
             ),
@@ -2093,18 +2137,19 @@ def _build_slash_commands() -> SlashCommandRegistry:
         SlashCommand(
             name="provider",
             handler=SlashCommandRegistry._cmd_provider,
-            short_help="Show / switch LLM provider",
+            short_help="List configured LLM providers",
             long_help=(
-                "Usage: /provider [name]\n\n"
-                "Without arguments, lists all configured providers and\n"
-                "highlights the active one.  With a name, switches to\n"
-                "that provider immediately.\n\n"
-                "The LLM is rebuilt with the new provider's settings\n"
-                "(model, base_url, temperature, etc.).\n\n"
-                "Examples:\n"
+                "Usage: /provider\n\n"
+                "Lists all configured providers with their type and\n"
+                "base URL.  The provider used by the active model is\n"
+                "highlighted.\n\n"
+                "Providers define connection endpoints only (type,\n"
+                "base_url, api_key).  To change which provider is\n"
+                "used, switch to a model that references it:\n"
+                "  /model <alias>\n\n"
+                "Example:\n"
                 "  /provider                 List providers\n"
-                "  /provider spark-cluster   Switch to spark-cluster\n"
-                "  /p ollama                 Switch to ollama"
+                "  /p                        Same (short alias)"
             ),
             aliases=["p"],
         )
@@ -2287,22 +2332,26 @@ def check_config(config: Config) -> int:
     if not console:
         print("\nConfiguration Check\n")
         try:
-            pc = config.resolve_provider_config()
-            print(f"  Provider: {config.provider} ({pc.type})")
-            actual_model = config.model or pc.get_model()
+            pc, mc = config.resolve_llm_config()
+            print(f"  Provider: {mc.provider} ({pc.type})")
+            actual_model = mc.model
             print(f"  Model: {actual_model}")
             if pc.base_url:
                 print(f"  Base URL: {pc.base_url}")
             if pc.api_key:
                 print("  API Key: ***configured***")
-        except ValueError as e:
+        except (ValueError, Exception) as e:
             print(f"  Error: {e}")
             return 1
+        try:
+            _active_provider = config.get_active_model().provider
+        except Exception:
+            _active_provider = None
         for name in config.list_providers():
-            current = " (current)" if name == config.provider else ""
+            current = " (current)" if name == _active_provider else ""
             try:
                 prov = config.get_provider_config(name)
-                print(f"  - {name}: {prov.type}/{prov.get_model()}{current}")
+                print(f"  - {name}: {prov.type}{current}")
             except ValueError:
                 print(f"  - {name}: built-in{current}")
         print("\n  Configuration valid\n")
@@ -2316,14 +2365,22 @@ def check_config(config: Config) -> int:
     else:
         console.print("[yellow]ℹ[/yellow] No config file found (using defaults)")
 
+    try:
+        _check_pc, _check_mc = config.resolve_llm_config()
+        _check_provider_name = _check_mc.provider
+    except Exception:
+        _check_pc, _check_mc, _check_provider_name = None, None, "unknown"
+
     # Provider check
-    console.print(f"\n[bold]Provider:[/bold] {config.provider}")
+    console.print(f"\n[bold]Provider:[/bold] {_check_provider_name}")
 
     try:
-        provider_config = config.resolve_provider_config()
+        if _check_pc is None or _check_mc is None:
+            raise ValueError("Could not resolve LLM configuration")
+        provider_config = _check_pc
+        model_config = _check_mc
         console.print(f"  Type: {provider_config.type}")
-        # Show the resolved model (from -m or alias), not provider default
-        actual_model = config.model or provider_config.get_model()
+        actual_model = model_config.model
         console.print(f"  Model: {actual_model}")
         if provider_config.base_url:
             console.print(f"  Base URL: {provider_config.base_url}")
@@ -2339,10 +2396,10 @@ def check_config(config: Config) -> int:
                     "  [yellow]⚠ API Key: not configured "
                     "(set in config or OPENAI_API_KEY env var)[/yellow]"
                 )
-        if provider_config.num_ctx:
-            console.print(f"  Context Size: {provider_config.num_ctx}")
-        if provider_config.temperature is not None:
-            console.print(f"  Temperature: {provider_config.temperature}")
+        if model_config.context_window:
+            console.print(f"  Context Size: {model_config.context_window}")
+        if model_config.temperature is not None:
+            console.print(f"  Temperature: {model_config.temperature}")
     except ValueError as e:
         console.print(f"  [red]✗ Error: {e}[/red]")
         return 1
@@ -2350,10 +2407,10 @@ def check_config(config: Config) -> int:
     # List all providers
     console.print("\n[bold]Available Providers:[/bold]")
     for name in config.list_providers():
-        current = " [cyan](current)[/cyan]" if name == config.provider else ""
+        current = " [cyan](current)[/cyan]" if name == _check_provider_name else ""
         try:
             prov = config.get_provider_config(name)
-            console.print(f"  • {name}: {prov.type}/{prov.get_model()}{current}")
+            console.print(f"  • {name}: {prov.type}{current}")
         except ValueError:
             console.print(f"  • {name}: [dim]built-in[/dim]{current}")
 
@@ -2974,6 +3031,9 @@ def main():
         else:
             print(f"  Logging to: {log_file_display}{debug_str}")
 
+    # Dump full resolved config at DEBUG level
+    config.dump_debug(log)
+
     # Memory manager setup
     memory_store = JsonFileMemoryStore(str(config.resolve_data_path("history")))
 
@@ -3149,6 +3209,40 @@ def main():
         if available_tools:
             # Apply preset: only active tools stay in registry
             registry.tools = active_dict
+
+        # Auto-activate query_knowledge_base when a knowledge base exists
+        if rag_should_auto_activate() and "query_knowledge_base" in available_tools:
+            rag_tool = available_tools.pop("query_knowledge_base")
+            _update_rag_tool_description(rag_tool)
+            registry.tools["query_knowledge_base"] = rag_tool
+            _session.loaded_tools.add("query_knowledge_base")
+            _session.pinned_tools.add("query_knowledge_base")
+
+    # Pin tools requested via --activate-tools
+    _activate_tools_arg = getattr(args, "activate_tools", None)
+    if _activate_tools_arg:
+        for _aname in (n.strip() for n in _activate_tools_arg.split(",")):
+            if not _aname:
+                continue
+            if _aname in available_tools:
+                _atool = available_tools.pop(_aname)
+                registry.tools[_aname] = _atool
+                _session.loaded_tools.add(_aname)
+                _session.pinned_tools.add(_aname)
+                log.debug("Pinned tool via --activate-tools: %s", _aname)
+            elif _aname in registry.tools:
+                _session.loaded_tools.add(_aname)
+                _session.pinned_tools.add(_aname)
+            elif _aname in _session.all_tool_originals:
+                # Tool exists but was excluded (e.g. --tools none); promote it
+                _atool = _session.all_tool_originals[_aname]
+                registry.tools[_aname] = _atool
+                _session.loaded_tools.add(_aname)
+                _session.pinned_tools.add(_aname)
+                log.debug("Pinned tool via --activate-tools (from originals): %s", _aname)
+            else:
+                log.warning("--activate-tools: unknown tool '%s' (skipped)", _aname)
+
     # else: all tools remain active (custom filter or no preset)
 
     # ── Startup banner with full summary ─────────────────────────
@@ -3238,9 +3332,9 @@ def main():
     # Give delegate agents access to ALL tools (active + on-demand)
     configure_delegate_tools(tools, available_tools)
 
-    # Get provider configuration
+    # Get provider and model configuration
     try:
-        provider_config = config.resolve_provider_config()
+        provider_config, model_config = config.resolve_llm_config()
     except ValueError as e:
         print(f"\n⚠️  {e}")
         print(f"   Available providers: {', '.join(config.list_providers())}")
@@ -3273,24 +3367,28 @@ def main():
             models=config.models,
             delegation_models=config.delegate_allowed_models,
             tool_instructions=provider_config.tool_instructions,
+            active_tool_names={getattr(t, "name", "") for t in tools} | set(available_tools),
         )
         log.debug(f"System prompt length: {len(system_prompt)} chars")
         log.debug(f"Mode additions: {mode_adds if mode_adds else 'None'}")
+        log.debug("=== System prompt ===\n%s\n=== End system prompt ===", system_prompt)
 
-        # Create LLM from provider config.
+        # Create LLM from provider and model configs.
         # Apply a default max_tokens cap for the main agent to prevent
         # runaway generations (e.g. 12K+ token phantom tool calls).
         # Deep think and delegate are uncapped — they set their own limits.
         _DEFAULT_MAX_TOKENS = 4096
-        if provider_config.max_tokens is None:
-            provider_config = copy(provider_config)
-            provider_config.max_tokens = _DEFAULT_MAX_TOKENS
-        llm = create_llm_from_provider_config(provider_config)
+        if model_config.max_tokens is None:
+            from copy import copy as _copy
 
-        # Token budget for context trimming (from provider num_ctx or default)
+            model_config = _copy(model_config)
+            model_config.max_tokens = _DEFAULT_MAX_TOKENS
+        llm = create_chat_model_from_configs(provider_config, model_config)
+
+        # Token budget for context trimming (from model context_window or default)
         from src.agent.core import _DEFAULT_CONTEXT_WINDOW
 
-        max_context_tokens = provider_config.num_ctx or _DEFAULT_CONTEXT_WINDOW
+        max_context_tokens = model_config.context_window or _DEFAULT_CONTEXT_WINDOW
 
         # Cap individual tool outputs to prevent context overflow.
         # Applied to active tools; on-demand tools get capped when
@@ -3311,10 +3409,10 @@ def main():
         # Register LLM for cleanup on exit
         _cleanup_resources.append(llm)
 
-        # Use actual model name (resolved from provider config), not CLI alias
-        actual_model = provider_config.get_model()
+        # Use actual model name (resolved from model config), not CLI alias
+        actual_model = model_config.model
         mode_info = f", mode: {config.memory_mode}"
-        prov_model = f"{config.provider}: {actual_model}"
+        prov_model = f"{provider_config.name}: {actual_model}"
         if console:
             console.print(f"[green]✓ Agent ready[/green] " f"[dim]({prov_model}{mode_info})[/dim]")
         else:
@@ -3325,12 +3423,16 @@ def main():
             session_id=config.session,
             message_count=_startup_msg_count,
             memory_mode=config.memory_mode,
-            provider=config.provider,
+            provider=provider_config.name,
             model=actual_model,
         )
 
     except ImportError as e:
-        prov = config.provider
+        prov = (
+            model_config.provider
+            if model_config
+            else provider_config.name if provider_config else "unknown"
+        )
         log_error(e, context=f"Provider '{prov}' not available", include_trace=True)
         print(f"\n⚠️  Provider '{prov}' not available: {e}")
         print("   Please install the required package.")
@@ -3339,7 +3441,7 @@ def main():
         log_error(e, context="Failed to initialize agent", include_trace=True)
         friendly = _friendly_error(
             e,
-            provider=config.provider,
+            provider=provider_config.name if provider_config else "unknown",
             base_url=provider_config.get_base_url() if provider_config else "",
         )
         print(f"\n⚠️  {friendly}")
@@ -3565,6 +3667,8 @@ def main():
                                 models=config.models,
                                 delegation_models=config.delegate_allowed_models,
                                 tool_instructions=provider_config.tool_instructions,
+                                active_tool_names={getattr(t, "name", "") for t in tools}
+                                | set(available_tools),
                             )
 
                             # Re-apply tool presets for the new mode:
@@ -3578,7 +3682,21 @@ def main():
                                 )
                                 if available_tools:
                                     registry.tools = active_dict
-                                _session.loaded_tools.clear()
+                                # Re-apply RAG auto-activation
+                                if (
+                                    rag_should_auto_activate()
+                                    and "query_knowledge_base" in available_tools
+                                ):
+                                    _rag = available_tools.pop("query_knowledge_base")
+                                    _update_rag_tool_description(_rag)
+                                    registry.tools["query_knowledge_base"] = _rag
+                                    _session.loaded_tools.add("query_knowledge_base")
+                                    _session.pinned_tools.add("query_knowledge_base")
+                                # Re-promote pinned tools that landed in available
+                                for _pname in list(_session.pinned_tools):
+                                    if _pname in available_tools:
+                                        registry.tools[_pname] = available_tools.pop(_pname)
+                                _session.loaded_tools &= _session.pinned_tools
                                 # Re-wrap tools with safety interceptors
                                 tools.clear()
                                 for tn, tl in registry.tools.items():
@@ -3629,7 +3747,9 @@ def main():
                         new_model = result.split(":", 1)[1]
                         _snap = session_orch.snapshot(
                             system_prompt=system_prompt,
+                            available_tools=available_tools,
                         )
+                        _prev_alias = config.active_model_alias
                         try:
                             # Cross-provider model resolution
                             alias, mc = config.find_model_entry(new_model)
@@ -3648,15 +3768,15 @@ def main():
                                     if alias:
                                         resolved_msg += f", alias={alias}"
                                     print(resolved_msg)
-                            config.model = alias if alias else new_model
+                            config.active_model_alias = alias if alias else new_model
                             _resolve_model(config)
 
-                            # Get updated provider config (clone with model params merged)
-                            provider_config = config.resolve_provider_config()
-                            actual_model = config.model or provider_config.get_model()
+                            # Get updated provider and model config
+                            provider_config, model_config = config.resolve_llm_config()
+                            actual_model = model_config.model
 
                             # Create new LLM
-                            new_llm = create_llm_from_provider_config(provider_config)
+                            new_llm = create_chat_model_from_configs(provider_config, model_config)
 
                             mode_adds = memory_manager.get_system_prompt_additions()
                             system_prompt = build_system_prompt(
@@ -3664,13 +3784,17 @@ def main():
                                 models=config.models,
                                 delegation_models=config.delegate_allowed_models,
                                 tool_instructions=provider_config.tool_instructions,
+                                active_tool_names={getattr(t, "name", "") for t in tools}
+                                | set(available_tools),
                             )
                             slash_cmds.system_prompt = system_prompt
 
                             # All potential failures are past — now atomically swap
                             old_llm = llm
                             llm = new_llm
-                            max_context_tokens = provider_config.num_ctx or _DEFAULT_CONTEXT_WINDOW
+                            max_context_tokens = (
+                                model_config.context_window or _DEFAULT_CONTEXT_WINDOW
+                            )
                             _cleanup_resources.append(llm)
 
                             # Update hybrid memory LLM reference
@@ -3697,108 +3821,35 @@ def main():
                                 _cleanup_resources.remove(old_llm)
 
                             if console is not None:
-                                prov = config.provider
                                 console.print(
                                     f"[green]Switched to model "
                                     f"[bold]{actual_model}[/bold] "
-                                    f"[dim]({prov})[/dim][/green]"
+                                    f"[dim]({model_config.provider})[/dim][/green]"
                                 )
                             else:
-                                print(f"Switched to model {actual_model} " f"({config.provider})")
+                                print(
+                                    f"Switched to model {actual_model} "
+                                    f"({model_config.provider})"
+                                )
                             log.info(
                                 f"Live model switch: {actual_model} "
-                                f"(provider: {config.provider})"
+                                f"(provider: {model_config.provider})"
                             )
                         except Exception as exc:
+                            config.active_model_alias = _prev_alias
                             restored = session_orch.rollback(_snap)
                             system_prompt = restored["system_prompt"]
-                            provider_config = config.resolve_provider_config()
+                            available_tools = restored["available_tools"]
                             log.error(f"Model switch failed: {exc}")
-                            friendly = _friendly_error(exc, provider=config.provider)
+                            try:
+                                provider_config, _ = config.resolve_llm_config()
+                                friendly = _friendly_error(exc, provider=provider_config.name)
+                            except Exception:
+                                friendly = str(exc)
                             if console is not None:
                                 console.print(f"[red]Model switch failed:[/red] {friendly}")
                             else:
                                 print(f"Model switch failed: {friendly}")
-
-                    elif isinstance(result, str) and result.startswith("switch_provider:"):
-                        new_provider = result.split(":", 1)[1]
-                        _snap = session_orch.snapshot(
-                            system_prompt=system_prompt,
-                        )
-                        try:
-                            config.provider = new_provider
-                            config._active_model = None
-                            provider_config = config.resolve_provider_config()
-
-                            # Update model to the new provider's default
-                            config.model = provider_config.get_model()
-
-                            # Create new LLM
-                            new_llm = create_llm_from_provider_config(provider_config)
-
-                            mode_adds = memory_manager.get_system_prompt_additions()
-                            system_prompt = build_system_prompt(
-                                mode_additions=mode_adds,
-                                models=config.models,
-                                delegation_models=config.delegate_allowed_models,
-                                tool_instructions=provider_config.tool_instructions,
-                            )
-                            slash_cmds.system_prompt = system_prompt
-
-                            # All potential failures are past — now atomically swap
-                            old_llm = llm
-                            llm = new_llm
-                            max_context_tokens = provider_config.num_ctx or _DEFAULT_CONTEXT_WINDOW
-                            _cleanup_resources.append(llm)
-
-                            # Update hybrid memory LLM reference
-                            memory_manager.set_llm(llm)
-
-                            # Reconfigure all tools for new provider
-                            _reconfigure_all_tools(config, max_context_tokens, tools)
-
-                            # Rebuild compression LLM for new provider/model
-                            if config.context_compression:
-                                try:
-                                    compression_llm = create_compression_llm(
-                                        config.context_compression_model, config
-                                    )
-                                except Exception:
-                                    compression_llm = None
-                            else:
-                                compression_llm = None
-
-                            # Close old LLM last — it's no longer referenced
-                            _close_llm(old_llm)
-                            invalidate_llm_caches()
-                            if old_llm in _cleanup_resources:
-                                _cleanup_resources.remove(old_llm)
-
-                            actual_model = provider_config.get_model()
-                            if console is not None:
-                                console.print(
-                                    f"[green]Switched to provider "
-                                    f"[bold]{new_provider}[/bold] "
-                                    f"[dim](model: {actual_model})[/dim][/green]"
-                                )
-                            else:
-                                print(
-                                    f"Switched to provider {new_provider} "
-                                    f"(model: {actual_model})"
-                                )
-                            log.info(
-                                f"Live provider switch: {new_provider} " f"(model: {actual_model})"
-                            )
-                        except Exception as exc:
-                            restored = session_orch.rollback(_snap)
-                            system_prompt = restored["system_prompt"]
-                            provider_config = config.resolve_provider_config()
-                            log.error(f"Provider switch failed: {exc}")
-                            friendly = _friendly_error(exc, provider=new_provider)
-                            if console is not None:
-                                console.print(f"[red]Provider switch failed:[/red] {friendly}")
-                            else:
-                                print(f"Provider switch failed: {friendly}")
 
                     elif isinstance(result, str) and result.startswith("switch_session:"):
                         new_session = result.split(":", 1)[1]
@@ -3829,6 +3880,8 @@ def main():
                                 models=config.models,
                                 delegation_models=config.delegate_allowed_models,
                                 tool_instructions=provider_config.tool_instructions,
+                                active_tool_names={getattr(t, "name", "") for t in tools}
+                                | set(available_tools),
                             )
                             # Success — commit the new memory manager
                             memory_manager = new_mm
@@ -3888,12 +3941,14 @@ def main():
                                 load_name, tool_obj
                             )
                             _session.loaded_tools.add(load_name)
+                            _session.pinned_tools.add(load_name)
                             if console is not None:
                                 console.print(
-                                    f"[green]Tool [bold]{load_name}[/bold] loaded.[/green]"
+                                    f"[green]Tool [bold]{load_name}[/bold] "
+                                    f"loaded (pinned).[/green]"
                                 )
                             else:
-                                print(f"Tool '{load_name}' loaded.")
+                                print(f"Tool '{load_name}' loaded (pinned).")
                         else:
                             if console is not None:
                                 console.print(
@@ -3902,6 +3957,43 @@ def main():
                                 )
                             else:
                                 print(f"Tool '{load_name}' is not available to load.")
+
+                    elif isinstance(result, str) and result.startswith("unload_tool:"):
+                        unload_name = result.split(":", 1)[1]
+                        if unload_name in _session.pinned_tools:
+                            _session.pinned_tools.discard(unload_name)
+                            _session.loaded_tools.discard(unload_name)
+                            # Return tool to on-demand pool
+                            _orig = _session.all_tool_originals.get(unload_name)
+                            if _orig is not None:
+                                available_tools[unload_name] = _orig
+                            registry.tools.pop(unload_name, None)
+                            tools[:] = [t for t in tools if getattr(t, "name", None) != unload_name]
+                            if console is not None:
+                                console.print(
+                                    f"[green]Tool [bold]{unload_name}[/bold] " f"unloaded.[/green]"
+                                )
+                            else:
+                                print(f"Tool '{unload_name}' unloaded.")
+                        elif unload_name in _session.loaded_tools:
+                            if console is not None:
+                                console.print(
+                                    f"[yellow]Tool '{unload_name}' was loaded by the "
+                                    f"agent and will be auto-unloaded next turn.[/yellow]"
+                                )
+                            else:
+                                print(
+                                    f"Tool '{unload_name}' was loaded by the agent "
+                                    "and will be auto-unloaded next turn."
+                                )
+                        else:
+                            if console is not None:
+                                console.print(
+                                    f"[yellow]Tool '{unload_name}' is not "
+                                    f"currently loaded.[/yellow]"
+                                )
+                            else:
+                                print(f"Tool '{unload_name}' is not currently loaded.")
 
                     elif isinstance(result, str) and result.startswith("deep_think:"):
                         # ── Hybrid /think: gather → analyze → synthesize ──
@@ -4043,7 +4135,11 @@ def main():
                             prefill_next_input(f"/think {think_task}")
                         except Exception as exc:
                             _spinner.stop()
-                            friendly = _friendly_error(exc, provider=config.provider)
+                            try:
+                                _exc_prov = config.get_active_model().provider
+                            except Exception:
+                                _exc_prov = provider_config.name if provider_config else "unknown"
+                            friendly = _friendly_error(exc, provider=_exc_prov)
                             if console is not None:
                                 console.print(f"[red]Deep Think failed:[/red] {friendly}")
                             else:
@@ -4111,7 +4207,11 @@ def main():
                             prefill_next_input(f"/delegate {delegate_task_text}")
                         except Exception as exc:
                             _spinner.stop()
-                            friendly = _friendly_error(exc, provider=config.provider)
+                            try:
+                                _exc_prov = config.get_active_model().provider
+                            except Exception:
+                                _exc_prov = provider_config.name if provider_config else "unknown"
+                            friendly = _friendly_error(exc, provider=_exc_prov)
                             if console is not None:
                                 console.print(f"[red]Delegation failed:[/red] {friendly}")
                             else:
@@ -4132,14 +4232,16 @@ def main():
                         # Reload config and rebuild LLM connection
                         try:
                             config = load_config(args)
-                            provider_config = config.resolve_provider_config()
-                            new_llm = create_llm_from_provider_config(provider_config)
+                            provider_config, model_config = config.resolve_llm_config()
+                            new_llm = create_chat_model_from_configs(provider_config, model_config)
                             _close_llm(llm)
                             invalidate_llm_caches()
                             if llm in _cleanup_resources:
                                 _cleanup_resources.remove(llm)
                             llm = new_llm
-                            max_context_tokens = provider_config.num_ctx or _DEFAULT_CONTEXT_WINDOW
+                            max_context_tokens = (
+                                model_config.context_window or _DEFAULT_CONTEXT_WINDOW
+                            )
                             _cleanup_resources.append(llm)
 
                             memory_manager.set_llm(llm)
@@ -4151,6 +4253,8 @@ def main():
                                 models=config.models,
                                 delegation_models=config.delegate_allowed_models,
                                 tool_instructions=provider_config.tool_instructions,
+                                active_tool_names={getattr(t, "name", "") for t in tools}
+                                | set(available_tools),
                             )
                             slash_cmds.system_prompt = system_prompt
 
@@ -4165,20 +4269,25 @@ def main():
                                 compression_llm = None
 
                             slash_cmds.config = config
-                            actual_model = provider_config.get_model()
+                            actual_model = model_config.model
+                            _reload_prov = provider_config.name
                             if console is not None:
                                 console.print(
                                     f"\n[green]Config reloaded — using "
-                                    f"[bold]{config.provider}[/bold] "
+                                    f"[bold]{_reload_prov}[/bold] "
                                     f"[dim](model: {actual_model})[/dim][/green]"
                                 )
                             else:
                                 print(
-                                    f"\nConfig reloaded — using {config.provider} "
+                                    f"\nConfig reloaded — using {_reload_prov} "
                                     f"(model: {actual_model})"
                                 )
                         except Exception as exc:
-                            friendly = _friendly_error(exc, provider=config.provider)
+                            try:
+                                _exc_prov = config.get_active_model().provider
+                            except Exception:
+                                _exc_prov = provider_config.name if provider_config else "unknown"
+                            friendly = _friendly_error(exc, provider=_exc_prov)
                             if console is not None:
                                 console.print(
                                     f"[yellow]Config reload failed:[/yellow] {friendly}\n"
@@ -4222,11 +4331,22 @@ def main():
             # Start new request tracking
             new_request_id()
 
-            # Reset blanket-forbid flag at the start of each prompt
-            # cycle, before prepare_context() — if the previous cycle
-            # raised inside prepare_context(), the flag would otherwise
-            # stick and block all tools on the next cycle.
+            # Reset per-prompt state and unload agent-loaded (non-pinned)
+            # tools so the LLM starts each turn with a clean tool set.
+            _prev_loaded = set(_session.loaded_tools)
             _session.reset_for_new_prompt()
+            _unloaded = _prev_loaded - _session.loaded_tools
+            if _unloaded:
+                for _uname in _unloaded:
+                    # Return tool to on-demand pool
+                    _orig = _session.all_tool_originals.get(_uname)
+                    if _orig is not None:
+                        available_tools[_uname] = _orig
+                    registry.tools.pop(_uname, None)
+                # Remove from active tools list
+                _unloaded_names = _unloaded
+                tools[:] = [t for t in tools if getattr(t, "name", None) not in _unloaded_names]
+                log.debug("Auto-unloaded %d agent-loaded tools: %s", len(_unloaded), _unloaded)
 
             # Log user message
             log_user_message(user_input)
@@ -4242,6 +4362,7 @@ def main():
             _agent_t0 = _time_mod.monotonic()
             _spinner.start()
             try:
+                _t0_prep = _time_mod.monotonic()
                 # Run prepare_context and optimize_prompt concurrently when optimizer is enabled.
                 # The two operations are independent: the optimizer rewrites the prompt text
                 # while prepare_context reads conversation history — no data dependency.
@@ -4267,6 +4388,11 @@ def main():
                 else:
                     context = memory_manager.prepare_context(user_input)
 
+                log.debug(
+                    "⏱ prepare_context: %.0fms",
+                    (_time_mod.monotonic() - _t0_prep) * 1000,
+                )
+
                 # Debug: log context details
                 log.debug(
                     f"Context: mode={context.mode}, "
@@ -4280,6 +4406,7 @@ def main():
 
                 _acc = _TokenAccumulator()
                 _agent_cbs = (callbacks or []) + [_acc]
+                _t0_agent = _time_mod.monotonic()
                 output = run_agent(
                     user_input,
                     context.messages,
@@ -4306,6 +4433,10 @@ def main():
                     confirmation_ui=_rich_ui,
                     on_tool_expansion=_tool_expansion_ui,
                     parallel_tool_execution=config.parallel_tool_execution,
+                )
+                log.debug(
+                    "⏱ run_agent total: %.0fms",
+                    (_time_mod.monotonic() - _t0_agent) * 1000,
                 )
                 _spinner.stop()
 
@@ -4506,7 +4637,11 @@ def main():
                 _spinner.stop()
                 _cleanup_milestones(_progress_tool_interactive, tools, _active_milestones)
                 log_error(e, context="Agent execution error", include_trace=True)
-                friendly = _friendly_error(e, provider=config.provider)
+                try:
+                    _exc_prov = config.get_active_model().provider
+                except Exception:
+                    _exc_prov = provider_config.name if provider_config else "unknown"
+                friendly = _friendly_error(e, provider=_exc_prov)
                 if console:
                     console.print(f"[red]Error:[/red] {friendly}")
                 else:
@@ -4535,12 +4670,26 @@ def main():
             print(f"\nError: {e}")
             sys.exit(1)
 
-    # Persist memory on exit — ensure any background summarization
-    # completes and the full history (including the last turn) is saved.
+    # Cancel any in-flight background summarization and persist memory,
+    # then force-exit.  Python's internal _python_exit() joins ALL
+    # ThreadPoolExecutor threads, including those running background
+    # summarization LLM calls — this blocks exit for 5-10+ seconds.
+    # By running cleanup explicitly and calling os._exit(), we avoid
+    # that wait entirely.
     try:
-        memory_manager.save()
+        memory_manager.shutdown()
     except Exception:  # noqa: BLE001
         pass  # best-effort; process is exiting
+    _cleanup()
+    save_input_history()
+    if _escape_monitor is not None and _escape_monitor.available:
+        try:
+            _escape_monitor._restore_terminal()
+        except Exception:  # noqa: BLE001
+            pass
+    import os as _os_exit
+
+    _os_exit._exit(0)
 
 
 if __name__ == "__main__":

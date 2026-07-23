@@ -6,6 +6,7 @@ Supports multiple embedding providers via the ``src.providers`` registry.
 
 import os
 from pathlib import Path
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -33,6 +34,7 @@ _rag_config: dict[str, str | None] = {
     "base_url": _DEFAULT_OLLAMA_BASE_URL,
     "api_key": None,
     "vectordb_dir": str(VECTOR_DIR),
+    "api_uploads_dir": None,
 }
 
 
@@ -86,6 +88,52 @@ def _get_embeddings():
     return create_embeddings(provider, model=model, base_url=base_url, api_key=api_key)
 
 
+def _has_faiss_index(directory: Path) -> bool:
+    """Return True if *directory* contains at least one FAISS index file."""
+    return directory.is_dir() and (
+        (directory / "index.faiss").exists() or any(directory.glob("*.faiss"))
+    )
+
+
+def _collect_faiss_dirs() -> list[Path]:
+    """Return all FAISS index directories to search.
+
+    Checks both:
+    1. The global CLI-ingest path (``_rag_config["vectordb_dir"]``).
+    2. Per-document indexes created by the API ingestion pipeline
+       (``_rag_config["api_uploads_dir"]/{doc_id}/vectordb/faiss_index``).
+    """
+    dirs: list[Path] = []
+
+    # Global CLI-ingest index — verify actual index files exist (BUG-200)
+    global_dir = Path(_rag_config["vectordb_dir"] or str(VECTOR_DIR))
+    if _has_faiss_index(global_dir):
+        dirs.append(global_dir)
+
+    # Per-document API indexes
+    api_uploads = _rag_config.get("api_uploads_dir")
+    if api_uploads:
+        uploads_path = Path(api_uploads).resolve()
+        if uploads_path.is_dir():
+            for doc_dir in uploads_path.iterdir():
+                # Skip symlinks to prevent traversal to attacker-controlled dirs
+                if doc_dir.is_symlink():
+                    continue
+                resolved = doc_dir.resolve()
+                if not resolved.is_relative_to(uploads_path):
+                    continue
+                idx = resolved / "vectordb" / "faiss_index"
+                # Containment check on the resolved idx path prevents symlink
+                # traversal via intermediate components like vectordb (BUG-191)
+                idx_resolved = idx.resolve()
+                if not idx_resolved.is_relative_to(uploads_path):
+                    continue
+                if _has_faiss_index(idx):
+                    dirs.append(idx)
+
+    return sorted(dirs)
+
+
 def query_knowledge_base(
     question: str,
     k: int = 4,
@@ -103,8 +151,8 @@ def query_knowledge_base(
     if not FAISS_AVAILABLE:
         return "Error: FAISS not available. Install: pip install faiss-cpu"
 
-    vector_dir = Path(_rag_config["vectordb_dir"] or str(VECTOR_DIR))
-    if not vector_dir.exists():
+    faiss_dirs = _collect_faiss_dirs()
+    if not faiss_dirs:
         return (
             "No knowledge base found. Please build it first.\n\n"
             "Steps:\n"
@@ -120,24 +168,50 @@ def query_knowledge_base(
         # Get embeddings from environment/config
         embeddings = _get_embeddings()
 
-        # Load the vector store
-        store = FAISS.load_local(
-            str(vector_dir),
-            embeddings,
-            allow_dangerous_deserialization=True,
-        )
+        # Search all available FAISS indexes and merge results.
+        # Use similarity_search_with_score for cross-index relevance
+        # ranking (BUG-193) — FAISS L2 distance: lower = more similar.
+        scored_docs: list[tuple[Any, float]] = []
+        errors: list[str] = []
+        for vector_dir in faiss_dirs:
+            try:
+                store = FAISS.load_local(
+                    str(vector_dir),
+                    embeddings,
+                    allow_dangerous_deserialization=True,
+                )
+                pairs = store.similarity_search_with_score(question, k=k)
+                scored_docs.extend(pairs)
+            except Exception as exc:
+                errors.append(f"{vector_dir}: {exc}")
+                continue
 
-        # Perform similarity search
-        docs = store.similarity_search(question, k=k)
-
-        if not docs:
+        if not scored_docs:
+            if errors:
+                return (
+                    "Error querying knowledge base. "
+                    f"All {len(errors)} index(es) failed:\n" + "\n".join(f"  - {e}" for e in errors)
+                )
             return "No relevant documents found for your question."
+
+        # Sort by score ascending (lower L2 distance = more relevant)
+        scored_docs.sort(key=lambda x: x[1])
+
+        # Deduplicate by full content hash and take top k
+        seen: set[str] = set()
+        unique_docs = []
+        for doc, _score in scored_docs:
+            key = doc.page_content.strip()
+            if key not in seen:
+                seen.add(key)
+                unique_docs.append(doc)
+        all_docs = unique_docs[:k]
 
         # Format results
         results = []
-        results.append(f"Found {len(docs)} relevant document(s):\n")
+        results.append(f"Found {len(all_docs)} relevant document(s):\n")
 
-        for i, doc in enumerate(docs, 1):
+        for i, doc in enumerate(all_docs, 1):
             meta = doc.metadata or {}
             source = meta.get("source", "unknown")
 
@@ -175,18 +249,22 @@ def get_knowledge_base_info() -> str:
     Returns:
         Information about the vector store or status message
     """
-    vector_dir = Path(_rag_config["vectordb_dir"] or str(VECTOR_DIR))
-    if not vector_dir.exists():
+    faiss_dirs = _collect_faiss_dirs()
+    if not faiss_dirs:
         return "No knowledge base found. Run 'python cogtrix.py --ingest' to create one."
 
     try:
-        # Check for index files
-        index_files = list(vector_dir.glob("*"))
+        # Collect index files across all FAISS directories
+        index_files: list[Path] = []
+        for d in faiss_dirs:
+            index_files.extend(d.glob("*"))
         if not index_files:
             return "Knowledge base directory exists but appears empty."
 
         info = []
-        info.append(f"Knowledge base location: {vector_dir.absolute()}")
+        info.append(f"Knowledge base indexes: {len(faiss_dirs)}")
+        for d in faiss_dirs:
+            info.append(f"  - {d.absolute()}")
         info.append(f"Index files: {len(index_files)}")
 
         # Show file sizes
@@ -212,6 +290,63 @@ def get_knowledge_base_info() -> str:
         return f"Error getting knowledge base info: {e}"
 
 
+def knowledge_base_exists() -> bool:
+    """Return True if at least one FAISS index is available."""
+    return bool(_collect_faiss_dirs())
+
+
+def knowledge_base_stats() -> tuple[int, int]:
+    """Return (index_count, total_size_bytes) across all FAISS indexes."""
+    dirs = _collect_faiss_dirs()
+    total_size = 0
+    for d in dirs:
+        try:
+            for f in d.iterdir():
+                try:
+                    if f.is_file():
+                        total_size += f.stat().st_size
+                except OSError:
+                    pass
+        except OSError:
+            pass
+    return len(dirs), total_size
+
+
+def _build_description() -> str:
+    """Build a dynamic tool description based on index state."""
+    dirs = _collect_faiss_dirs()
+    if not dirs:
+        return (
+            "Search the knowledge base for information. "
+            "Use this to find answers from uploaded documents."
+        )
+    count = len(dirs)
+    total_size = 0
+    for d in dirs:
+        try:
+            for f in d.iterdir():
+                try:
+                    if f.is_file():
+                        total_size += f.stat().st_size
+                except OSError:
+                    pass
+        except OSError:
+            pass
+    if total_size < 1024 * 1024:
+        size_str = f"{total_size / 1024:.0f} KB"
+    else:
+        size_str = f"{total_size / (1024 * 1024):.1f} MB"
+    if count == 1:
+        return (
+            f"Search your knowledge base ({size_str} indexed). "
+            "Use this to find answers from ingested documents before searching the web."
+        )
+    return (
+        f"Search your knowledge base ({count} document indexes, {size_str} total). "
+        "Use this to find answers from ingested documents before searching the web."
+    )
+
+
 # Main tool config
 TOOL_CONFIG = {
     "name": "query_knowledge_base",
@@ -227,6 +362,8 @@ __all__ = [
     "query_knowledge_base",
     "get_knowledge_base_info",
     "configure_rag",
+    "knowledge_base_exists",
+    "knowledge_base_stats",
     "KnowledgeQueryInput",
     "TOOL_CONFIG",
 ]

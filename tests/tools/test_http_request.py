@@ -4,6 +4,8 @@ import json
 import socket
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from src.tools.http_request import (
     _BLOCKED_HEADERS,
     _MAX_TIMEOUT,
@@ -30,124 +32,57 @@ def _make_mock_response(status_code: int = 200, text: str = "ok") -> MagicMock:
     return resp
 
 
-class TestHttpGetTimeoutClamping:
-    def test_large_timeout_is_clamped_to_max(self) -> None:
-        captured: list[int] = []
+def _fake_follow_redirects_factory(captured: list[int]):  # type: ignore[no-untyped-def]
+    def fake_follow_redirects(session, method, url, **kwargs):  # type: ignore[no-untyped-def]
+        captured.append(kwargs["timeout"])
+        return _make_mock_response()
 
-        def fake_follow_redirects(session, method, url, **kwargs):  # type: ignore[no-untyped-def]
-            captured.append(kwargs["timeout"])
-            return _make_mock_response()
-
-        with (
-            patch("src.tools.http_request.REQUESTS_AVAILABLE", True),
-            patch("src.tools.http_request._follow_redirects", side_effect=fake_follow_redirects),
-            patch("src.tools.http_request._check_recent_failure", return_value=None),
-        ):
-            result = http_get("https://example.com", timeout=999)
-
-        assert len(captured) == 1
-        assert captured[0] == _MAX_TIMEOUT
-        assert "Error" not in result
-
-    def test_zero_timeout_is_clamped_to_one(self) -> None:
-        captured: list[int] = []
-
-        def fake_follow_redirects(session, method, url, **kwargs):  # type: ignore[no-untyped-def]
-            captured.append(kwargs["timeout"])
-            return _make_mock_response()
-
-        with (
-            patch("src.tools.http_request.REQUESTS_AVAILABLE", True),
-            patch("src.tools.http_request._follow_redirects", side_effect=fake_follow_redirects),
-            patch("src.tools.http_request._check_recent_failure", return_value=None),
-        ):
-            http_get("https://example.com", timeout=0)
-
-        assert captured[0] == 1
-
-    def test_negative_timeout_is_clamped_to_one(self) -> None:
-        captured: list[int] = []
-
-        def fake_follow_redirects(session, method, url, **kwargs):  # type: ignore[no-untyped-def]
-            captured.append(kwargs["timeout"])
-            return _make_mock_response()
-
-        with (
-            patch("src.tools.http_request.REQUESTS_AVAILABLE", True),
-            patch("src.tools.http_request._follow_redirects", side_effect=fake_follow_redirects),
-            patch("src.tools.http_request._check_recent_failure", return_value=None),
-        ):
-            http_get("https://example.com", timeout=-5)
-
-        assert captured[0] == 1
-
-    def test_in_range_timeout_is_unchanged(self) -> None:
-        captured: list[int] = []
-
-        def fake_follow_redirects(session, method, url, **kwargs):  # type: ignore[no-untyped-def]
-            captured.append(kwargs["timeout"])
-            return _make_mock_response()
-
-        with (
-            patch("src.tools.http_request.REQUESTS_AVAILABLE", True),
-            patch("src.tools.http_request._follow_redirects", side_effect=fake_follow_redirects),
-            patch("src.tools.http_request._check_recent_failure", return_value=None),
-        ):
-            http_get("https://example.com", timeout=30)
-
-        assert captured[0] == 30
+    return fake_follow_redirects
 
 
-class TestHttpPostTimeoutClamping:
-    def test_large_timeout_is_clamped_to_max(self) -> None:
-        captured: list[int] = []
+@pytest.mark.parametrize(
+    "timeout_in, expected",
+    [
+        (999, _MAX_TIMEOUT),
+        (0, 1),
+        (-5, 1),
+        (30, 30),
+    ],
+)
+def test_http_get_timeout_clamping(timeout_in: int, expected: int) -> None:
+    captured: list[int] = []
+    with (
+        patch("src.tools.http_request.REQUESTS_AVAILABLE", True),
+        patch(
+            "src.tools.http_request._follow_redirects",
+            side_effect=_fake_follow_redirects_factory(captured),
+        ),
+        patch("src.tools.http_request._check_recent_failure", return_value=None),
+    ):
+        http_get("https://example.com", timeout=timeout_in)
+    assert captured[0] == expected
 
-        def fake_follow_redirects(session, method, url, **kwargs):  # type: ignore[no-untyped-def]
-            captured.append(kwargs["timeout"])
-            return _make_mock_response()
 
-        with (
-            patch("src.tools.http_request.REQUESTS_AVAILABLE", True),
-            patch("src.tools.http_request._follow_redirects", side_effect=fake_follow_redirects),
-            patch("src.tools.http_request._check_recent_failure", return_value=None),
-        ):
-            result = http_post("https://example.com", data='{"key": "value"}', timeout=86400)
-
-        assert len(captured) == 1
-        assert captured[0] == _MAX_TIMEOUT
-        assert "Error" not in result
-
-    def test_zero_timeout_is_clamped_to_one(self) -> None:
-        captured: list[int] = []
-
-        def fake_follow_redirects(session, method, url, **kwargs):  # type: ignore[no-untyped-def]
-            captured.append(kwargs["timeout"])
-            return _make_mock_response()
-
-        with (
-            patch("src.tools.http_request.REQUESTS_AVAILABLE", True),
-            patch("src.tools.http_request._follow_redirects", side_effect=fake_follow_redirects),
-            patch("src.tools.http_request._check_recent_failure", return_value=None),
-        ):
-            http_post("https://example.com", data='{"key": "value"}', timeout=0)
-
-        assert captured[0] == 1
-
-    def test_in_range_timeout_is_unchanged(self) -> None:
-        captured: list[int] = []
-
-        def fake_follow_redirects(session, method, url, **kwargs):  # type: ignore[no-untyped-def]
-            captured.append(kwargs["timeout"])
-            return _make_mock_response()
-
-        with (
-            patch("src.tools.http_request.REQUESTS_AVAILABLE", True),
-            patch("src.tools.http_request._follow_redirects", side_effect=fake_follow_redirects),
-            patch("src.tools.http_request._check_recent_failure", return_value=None),
-        ):
-            http_post("https://example.com", data='{"key": "value"}', timeout=60)
-
-        assert captured[0] == 60
+@pytest.mark.parametrize(
+    "timeout_in, expected",
+    [
+        (86400, _MAX_TIMEOUT),
+        (0, 1),
+        (60, 60),
+    ],
+)
+def test_http_post_timeout_clamping(timeout_in: int, expected: int) -> None:
+    captured: list[int] = []
+    with (
+        patch("src.tools.http_request.REQUESTS_AVAILABLE", True),
+        patch(
+            "src.tools.http_request._follow_redirects",
+            side_effect=_fake_follow_redirects_factory(captured),
+        ),
+        patch("src.tools.http_request._check_recent_failure", return_value=None),
+    ):
+        http_post("https://example.com", data='{"key": "value"}', timeout=timeout_in)
+    assert captured[0] == expected
 
 
 class TestIsBlockedIp:
@@ -358,14 +293,6 @@ class TestDnsPinning:
 
 class TestParseHeaders:
     """Tests for _parse_headers — blocked-header stripping and CRLF sanitization."""
-
-    def test_blocked_headers_set_is_defined(self) -> None:
-        assert "host" in _BLOCKED_HEADERS
-        assert "x-forwarded-for" in _BLOCKED_HEADERS
-        assert "x-real-ip" in _BLOCKED_HEADERS
-        assert "x-forwarded-host" in _BLOCKED_HEADERS
-        assert "x-forwarded-proto" in _BLOCKED_HEADERS
-        assert "x-forwarded-server" in _BLOCKED_HEADERS
 
     def test_host_header_stripped(self) -> None:
         headers_json = json.dumps({"Host": "evil.internal", "Accept": "text/plain"})

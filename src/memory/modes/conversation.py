@@ -201,7 +201,7 @@ class ConversationMemoryManager(BaseMemoryManager):
         self._messages.append(human_msg)
 
         # --- Append the agent's messages ---------------------------
-        if agent_messages:
+        if agent_messages is not None:
             # agent_messages already contains the full chain
             # (AI tool_calls, ToolMessages, final AI).
             # Stamp the final AI message with the current time.

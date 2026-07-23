@@ -531,7 +531,7 @@ class TestScheduledMessages:
         resp = client.patch(
             f"/api/v1/assistant/scheduled/{uuid.uuid4()}",
             json={"text": "Updated"},
-            headers=_user_headers(),
+            headers=_admin_headers(),
         )
         assert resp.status_code == 409
 
@@ -546,7 +546,7 @@ class TestScheduledMessages:
             resp = c.patch(
                 f"/api/v1/assistant/scheduled/{uuid.uuid4()}",
                 json={"text": "Updated"},
-                headers=_user_headers(),
+                headers=_admin_headers(),
             )
             app.state.assistant_service = None
 
@@ -565,7 +565,7 @@ class TestScheduledMessages:
             resp = c.patch(
                 f"/api/v1/assistant/scheduled/{msg.id}",
                 json={"text": "Updated text"},
-                headers=_user_headers(),
+                headers=_admin_headers(),
             )
             app.state.assistant_service = None
 
@@ -575,7 +575,7 @@ class TestScheduledMessages:
     def test_cancel_scheduled_not_running(self, client):
         resp = client.delete(
             f"/api/v1/assistant/scheduled/{uuid.uuid4()}",
-            headers=_user_headers(),
+            headers=_admin_headers(),
         )
         assert resp.status_code == 409
 
@@ -589,7 +589,7 @@ class TestScheduledMessages:
             app.state.assistant_service = svc
             resp = c.delete(
                 f"/api/v1/assistant/scheduled/{uuid.uuid4()}",
-                headers=_user_headers(),
+                headers=_admin_headers(),
             )
             app.state.assistant_service = None
 
@@ -607,7 +607,7 @@ class TestScheduledMessages:
             app.state.assistant_service = svc
             resp = c.delete(
                 f"/api/v1/assistant/scheduled/{msg.id}",
-                headers=_user_headers(),
+                headers=_admin_headers(),
             )
             app.state.assistant_service = None
 
@@ -751,8 +751,62 @@ class TestContacts:
         items = resp.json()["data"]
         assert len(items) == 2
         names = {item["name"] for item in items}
-        assert "alice" in names
-        assert "bob" in names
+        assert "Alice" in names
+        assert "Bob" in names
+        # Verify channels are populated
+        for item in items:
+            assert "whatsapp" in item["channels"]
+
+    def test_list_contacts_with_contact_prompts(self):
+        from src.api.app import app
+
+        svc = _make_mock_service()
+        svc._config.services = {
+            "whatsapp": {
+                "phonebook": {
+                    "Alice": "+1234567890",
+                },
+                "contact_prompts": {
+                    "Alice": "You are Alice's personal assistant.",
+                },
+            }
+        }
+
+        with TestClient(app) as c:
+            app.state.assistant_service = svc
+            resp = c.get("/api/v1/assistant/contacts", headers=_user_headers())
+            app.state.assistant_service = None
+
+        assert resp.status_code == 200
+        items = resp.json()["data"]
+        assert len(items) == 1
+        assert items[0]["name"] == "Alice"
+        assert items[0]["prompt"] == "You are Alice's personal assistant."
+        assert items[0]["channels"] == ["whatsapp"]
+
+    def test_list_contacts_multi_channel(self):
+        from src.api.app import app
+
+        svc = _make_mock_service()
+        svc._config.services = {
+            "whatsapp": {
+                "phonebook": {"Alice": "+1234567890"},
+            },
+            "telegram": {
+                "phonebook": {"Alice": "alice_tg"},
+            },
+        }
+
+        with TestClient(app) as c:
+            app.state.assistant_service = svc
+            resp = c.get("/api/v1/assistant/contacts", headers=_user_headers())
+            app.state.assistant_service = None
+
+        assert resp.status_code == 200
+        items = resp.json()["data"]
+        assert len(items) == 1
+        assert set(items[0]["channels"]) == {"whatsapp", "telegram"}
+        assert len(items[0]["identifiers"]) == 2
 
     def test_list_contacts_requires_auth(self, client):
         resp = client.get("/api/v1/assistant/contacts")

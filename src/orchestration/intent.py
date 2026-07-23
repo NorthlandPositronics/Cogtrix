@@ -111,7 +111,6 @@ THINK_CATEGORIES: tuple[ThinkCategory, ...] = (
             "industry report",
             "trend",
             "breaking",
-            "today",
         ),
         gather_template=(
             "Today is {today}. Research the following topic using web search "
@@ -1051,6 +1050,8 @@ THINK_CATEGORIES: tuple[ThinkCategory, ...] = (
     ),
 )
 
+_THINK_CAT_BY_NAME: dict[str, ThinkCategory] = {c.name: c for c in THINK_CATEGORIES}
+
 # Default fallback used when no category matches.
 THINK_DEFAULT_CATEGORY = ThinkCategory(
     name="general",
@@ -1086,8 +1087,6 @@ def classify_think_task(task: str, llm: Any) -> ThinkCategory:
     when 0 or 2+ categories match.  Falls back to the ``general`` default
     only if the LLM returns an unrecognised label.
     """
-    _cat_by_name: dict[str, ThinkCategory] = {c.name: c for c in THINK_CATEGORIES}
-
     task_lower = task.lower()
     keyword_matches: list[ThinkCategory] = []
     for cat in THINK_CATEGORIES:
@@ -1135,10 +1134,10 @@ def classify_think_task(task: str, llm: Any) -> ThinkCategory:
         label = label.strip("\"'.,;:!() ")
         # Normalise spaces → underscores so "code analysis" matches "code_analysis"
         label = label.replace(" ", "_")
-        if label in _cat_by_name:
-            return _cat_by_name[label]
+        if label in _THINK_CAT_BY_NAME:
+            return _THINK_CAT_BY_NAME[label]
     except Exception as exc:
-        log.warning("Think task classification failed: %s", exc)
+        log.warning("Think task classification failed: %s", exc, exc_info=True)
 
     return THINK_DEFAULT_CATEGORY
 
@@ -1156,13 +1155,13 @@ DEEP_THINK_TRIGGERS = re.compile(
       | thorough\s+analysis          # "thorough analysis"
       | deep\s+analysis              # "deep analysis"
       | deep\s+reasoning             # "deep reasoning"
-      | reason\s+through.*?carefully # "reason through ... carefully"
-      | analyze.*?in\s+depth         # "analyze ... in depth"
+      | reason\s+through.{0,80}?carefully # "reason through ... carefully"
+      | analyze.{0,80}?in\s+depth         # "analyze ... in depth"
       | carefully\s+analyze          # "carefully analyze"
-      | think.*?(?:this\s+)?through  # "think through", "think this through"
+      | think\s+(?:this\s+)?through  # "think through", "think this through"
       | comprehensive\s+analysis     # "comprehensive analysis"
       | think\s+carefully            # "think carefully"
-      | examine.*?thorough(?:ly)?    # "examine ... thoroughly"
+      | examine.{0,80}?thorough(?:ly)?    # "examine ... thoroughly"
       | best\s+analysis              # "best analysis"
     )\b
     """,
@@ -1192,14 +1191,14 @@ DELEGATION_TRIGGERS = re.compile(
       | \b\w+\s+(?:vs\.?|versus)\s+\w+\b
 
         # "compare X and Y", "compare X, Y, and Z"
-      | \bcompare\s+.{3,}?\band\b
+      | \bcompare\s+.{3,80}?\band\b
 
         # "for each of" / "each of the/these" (parallel independent items)
       | \bfor\s+each\s+of\b
       | \beach\s+of\s+(?:the|these)\b
 
         # "translate .* into A, B, and C"
-      | \btranslate\s+.{3,}?\binto\s+.{3,}?\band\b
+      | \btranslate\s+.{3,80}?\binto\s+.{3,80}?\band\b
 
         # "pros and cons"
       | \bpros\s+and\s+cons\b

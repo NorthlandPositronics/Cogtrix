@@ -41,7 +41,7 @@ The engine is a standalone tool (`src/tools/deep_think.py`) that makes multiple 
 /think Design a caching strategy for 50 microservices with mixed read/write workloads
 ```
 
-This calls `deep_think()` directly, bypassing the agent's tool selection. The result is displayed in a rich panel and saved to session memory so subsequent conversation has context.
+This runs a two-stage pipeline. First, the task is classified into one of 23 categories via `classify_think_task()`, which selects a domain-specific gather prompt. The agent then runs a Stage 1 pass using its tools to gather relevant information. Stage 2 feeds the gathered context into `deep_think()` for structured analysis. The result is displayed in a rich panel and saved to session memory so subsequent conversation has context.
 
 ### 2. Agent (automatic)
 
@@ -178,7 +178,7 @@ A meta-analyst prompt receives all developed solutions (with their strategies, s
 
 After each CONVERGE phase, the engine decides whether to iterate:
 
-1. **Converged** — The LLM's `should_continue` is `false`, or confidence >= 9.0. Stop.
+1. **Converged** — The LLM's `should_continue` is `false`, or confidence >= 9.5 (from iteration 2 onwards). Stop.
 2. **Budget exceeded** — Maximum iterations reached. Stop.
 3. **Continue** — Build a reflection context from the current results and start a new BRANCH phase.
 
@@ -239,14 +239,14 @@ This makes the engine resilient to LLMs that wrap JSON in markdown, add explanat
 
 ### Parallel Execution
 
-The DEVELOP phase fires all N branch prompts simultaneously using `ThreadPoolExecutor` (capped at 5 workers). Each call has an individual timeout, and the executor itself has a 2x timeout. Failed calls return empty strings — the engine continues with whatever branches succeeded.
+The DEVELOP phase fires all N branch prompts simultaneously using `ThreadPoolExecutor` (effective concurrency capped at 4 by a module-level semaphore). Each call has an individual timeout, and the executor itself has a 2x timeout. Failed calls return empty strings — the engine continues with whatever branches succeeded.
 
 ### LLM Creation
 
-Deep Think creates its own LLM instance using the same provider configuration as the main agent. It supports both `openai` and `ollama` provider types, including:
-- Custom `base_url` for remote servers
-- `api_key` for OpenAI-compatible providers
-- `num_ctx` for Ollama context window sizing
+Deep Think creates its own LLM instance using the same provider configuration as the main agent. It supports all four provider types (`openai`, `ollama`, `anthropic`, `google`) via the provider registry, including:
+- Custom `base_url` for remote/self-hosted servers
+- `api_key` for API-authenticated providers
+- `context_window` for context window sizing (forwarded to Ollama as `num_ctx`)
 - Configurable `temperature` (default: 0.7 for creative diversity)
 
 ---
@@ -357,10 +357,10 @@ When deep thinking is triggered on a task that involved web research, the orches
 ### How It Works
 
 1. The main agent performs initial web research (searches, page fetches) with the standard output cap.
-2. The orchestrator detects that web tools were used (`_agent_used_web_tools()`) and extracts the URLs the agent visited (`_extract_fetched_urls()`).
+2. The orchestrator detects that web tools were used (`agent_used_web_tools()`) and extracts the URLs the agent visited (`extract_fetched_urls()`).
 3. A **research delegate** sub-agent is spawned with the same provider/model configuration. Its web tools are temporarily patched to allow output up to **85% of the model's context window** (configurable via `research_delegate.cap_ratio`).
 4. The delegate re-fetches the URLs and is instructed to extract **verbatim specifications** — exact schemas, field names, code examples, file paths — without summarizing.
-5. The delegate's structured output is passed to `_force_deep_think()` as `research_context`, where it takes priority over the raw tool outputs.
+5. The delegate's structured output is passed to `force_deep_think()` as `research_context`, where it takes priority over the raw tool outputs.
 
 ### Why This Matters
 
@@ -381,17 +381,17 @@ The research delegate is enabled by default and configurable via the [`research_
 
 Deep Think uses the active provider configuration from your config file (`.cogtrix.yaml` or `.cogtrix.json`). It creates its own LLM instance using the same provider type, base URL, model, API key, and context window settings as the main agent.
 
-No additional configuration is required. The tool is auto-registered by the tool registry on startup and initialized via `_configure_deep_think_tool()` in the main entry point.
+No additional configuration is required. The tool is auto-registered by the tool registry on startup and initialized via `configure_deep_think_tool()` in the main entry point.
 
 ### Provider Configuration Used
 
 | Setting | Source | Fallback |
 |---------|--------|----------|
 | Provider type | `providers.<name>.type` | `"ollama"` |
-| Model | CLI `-m` flag or `providers.<name>.model` | `gpt-4.1-mini` (OpenAI) / `qwen3:8b` (Ollama) |
+| Model | Active model alias (`models.default` or CLI `-m`) | `gpt-4.1-mini` (OpenAI) / `qwen3:8b` (Ollama) |
 | Base URL | `providers.<name>.base_url` | Provider defaults |
-| API key | `providers.<name>.api_key` or `OPENAI_API_KEY` env var | — |
-| Context window | `providers.<name>.num_ctx` | Provider default |
+| API key | `providers.<name>.api_key` or env var (e.g. `OPENAI_API_KEY`) | — |
+| Context window | `models.<alias>.context_window` | Provider default |
 | Temperature | Hardcoded | `0.7` |
 
 ---
@@ -485,7 +485,7 @@ All LLM call failures are logged at WARNING level via the `cogtrix` logger.
 
 ### Concurrency
 
-The DEVELOP phase runs up to 5 parallel LLM calls. For Ollama providers, actual parallelism depends on the server's `OLLAMA_NUM_PARALLEL` setting (default: 1 for most models). Cloud APIs generally handle parallel requests well.
+The DEVELOP phase runs up to 4 parallel LLM calls (limited by a module-level semaphore shared across all sessions). For Ollama providers, actual parallelism depends on the server's `OLLAMA_NUM_PARALLEL` setting (default: 1 for most models). Cloud APIs generally handle parallel requests well.
 
 ---
 

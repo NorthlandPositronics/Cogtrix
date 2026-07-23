@@ -65,19 +65,19 @@ def _suppress_native_stderr() -> Generator[None]:
     This catches output from native (Rust/C) libraries that bypass
     Python's ``sys.stderr`` and write directly to file descriptor 2.
 
-    The lock is held only during the dup2 calls, not during the search,
+    The lock is held only during the dup/dup2 calls, not during the search,
     so concurrent searches are not serialized.
     """
     try:
-        saved_fd = os.dup(2)
+        with _stderr_lock:
+            saved_fd = os.dup(2)
+            devnull_fd = os.open(os.devnull, os.O_WRONLY)
+            os.dup2(devnull_fd, 2)
+            os.close(devnull_fd)
     except OSError:
         yield
         return
     try:
-        with _stderr_lock:
-            devnull_fd = os.open(os.devnull, os.O_WRONLY)
-            os.dup2(devnull_fd, 2)
-            os.close(devnull_fd)
         yield
     finally:
         with _stderr_lock:

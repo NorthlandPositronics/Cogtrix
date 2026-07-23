@@ -184,6 +184,8 @@ services:
 | `ignore_archived` | bool | `true` | Skip archived chats during polling |
 | `ignore_older_than` | string | -- | Skip messages older than this duration (e.g. `"24h"`, `"7d"`) |
 | `lid_negative_ttl` | float | `300.0` | Seconds to cache a failed LID resolution before retrying |
+| `overview_limit` | int | `50` | Max chats returned by the overview call per poll cycle |
+| `message_fetch_limit` | int | `50` | Max messages fetched per chat per poll cycle |
 
 ### Environment variables
 
@@ -219,7 +221,7 @@ Several optimisations reduce latency and load on the Waha server:
 - **Pre-filtering** — `_can_skip_chat()` evaluates the contact filter against chat overview data alone, skipping the full message HTTP fetch for chats that cannot pass the filter. Groups and `blacklist` mode always fetch (side-effects require the full message).
 - **Batch LID resolution** — `_prefetch_lids()` collects all unresolved `@lid` identifiers from a polling batch and resolves them in parallel before any message is processed.
 - **Adaptive polling** — the poll interval grows when no new messages arrive and shrinks again on activity, reducing idle HTTP traffic.
-- **Error backoff** — per-chat exponential backoff (starting at 30 s, capped at `_FETCH_ERROR_MAX`) prevents hammering Waha when a chat's message fetch consistently fails.
+- **Error backoff** — per-chat exponential backoff (starting at 30 s, capped at 300 seconds) prevents hammering Waha when a chat's message fetch consistently fails.
 
 ### Rate limiting
 

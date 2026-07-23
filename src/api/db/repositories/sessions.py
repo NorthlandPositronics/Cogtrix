@@ -156,3 +156,21 @@ class SessionRepository:
             )
         )
         return result.scalar_one()
+
+    async def name_exists_for_user(
+        self, user_id: str, name: str, *, exclude_id: str | None = None
+    ) -> bool:
+        """Check if an active (non-archived) session with this name exists for the user."""
+        query = (
+            select(func.count())
+            .select_from(ApiSessionRecord)
+            .where(
+                ApiSessionRecord.user_id == user_id,
+                ApiSessionRecord.name == name,
+                ApiSessionRecord.archived_at.is_(None),
+            )
+        )
+        if exclude_id is not None:
+            query = query.where(ApiSessionRecord.id != exclude_id)
+        result = await self._db.execute(query)
+        return result.scalar_one() > 0

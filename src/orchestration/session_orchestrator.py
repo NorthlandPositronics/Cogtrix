@@ -14,9 +14,7 @@ class SessionSnapshot:
     """Captured state before a switch attempt, for rollback on failure."""
 
     # Config fields
-    model: str | None = None
-    provider: str | None = None
-    active_model: Any = None
+    active_model_alias: str | None = None
     memory_mode: str | None = None
     memory_config: Any = None
     session: str | None = None
@@ -70,9 +68,7 @@ class SessionOrchestrator:
         """
         cfg = self._config
         return SessionSnapshot(
-            model=cfg.model,
-            provider=cfg.provider,
-            active_model=getattr(cfg, "_active_model", None),
+            active_model_alias=cfg.active_model_alias,
             memory_mode=cfg.memory_mode,
             memory_config=cfg.memory_config,
             session=cfg.session,
@@ -102,10 +98,7 @@ class SessionOrchestrator:
         cfg = self._config
 
         # Restore config-level fields
-        cfg.model = snap.model
-        cfg.provider = snap.provider
-        if hasattr(cfg, "_active_model"):
-            cfg._active_model = snap.active_model
+        cfg.active_model_alias = snap.active_model_alias
         cfg.memory_mode = snap.memory_mode
         cfg.memory_config = snap.memory_config
         cfg.session = snap.session

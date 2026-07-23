@@ -44,6 +44,8 @@ from src.api.routes import (
     sessions,
     system,
     tools,
+    users,
+    workflows,
 )
 from src.api.schemas.common import APIError, APIResponse
 
@@ -93,6 +95,29 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
         - Flush any pending log records.
     """
     # ---- startup ----
+
+    # Set up Cogtrix logging from env vars (set by __main__.py or docker env).
+    # This is a no-op when __main__.py already called setup_logging() — the
+    # logger will already have handlers and this just ensures coverage for
+    # bare ``uvicorn src.api.app:app`` invocations.
+    try:
+        from src.logging_config import setup_logging
+
+        log_file = os.environ.get("COGTRIX_API_LOG_FILE")
+        debug = bool(os.environ.get("COGTRIX_DEBUG"))
+        if log_file is not None or debug:
+            if log_file is None:
+                log_file = "cogtrix-api.log"
+            setup_logging(log_file=log_file, debug=debug, console_output=True, verbose=debug)
+        else:
+            # Ensure the cogtrix logger is at INFO level even without --log/--debug
+            # so that log records propagate to the WebSocket log stream handler.
+            cogtrix_logger = logging.getLogger("cogtrix")
+            if cogtrix_logger.level == logging.WARNING or cogtrix_logger.level == 0:
+                cogtrix_logger.setLevel(logging.INFO)
+    except Exception:
+        pass  # logging setup is best-effort
+
     log.info("Cogtrix API starting up")
 
     # Validate JWT secret
@@ -113,27 +138,48 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     log.info("Database tables ready")
 
     # Load Cogtrix config
+    cfg = None
     try:
-        from src.config import Config
+        from src.config import load_config
 
-        cfg = Config()
+        cfg = load_config()
         app.state.config = cfg
-        log.info("Config loaded (provider=%s)", getattr(cfg, "provider", "unknown"))
+        log.info(
+            "Config loaded (provider=%s, file=%s)",
+            getattr(cfg, "provider", "unknown"),
+            cfg.config_file_path or "defaults",
+        )
     except Exception as exc:
         log.warning("Could not load Cogtrix config: %s", exc)
         app.state.config = None
+
+    # Propagate data_dir to env so API route helpers (_get_uploads_dir)
+    # use the same root as configure_rag_tool() when COGTRIX_DATA_DIR
+    # is not explicitly set.
+    if cfg is not None and not os.environ.get("COGTRIX_DATA_DIR"):
+        os.environ["COGTRIX_DATA_DIR"] = cfg.data_dir
 
     # Initialize tool registry
     try:
         from src.registry import ToolRegistry
 
         tool_registry = ToolRegistry()
-        tool_registry.scan_tools()
+        tool_registry.load_all_tools()
         app.state.tool_registry = tool_registry
         log.info("Tool registry initialized (%d tools discovered)", len(tool_registry.tools))
     except Exception as exc:
         log.warning("Could not initialize tool registry: %s", exc)
         app.state.tool_registry = None
+
+    # Configure RAG tool with embedding settings from config
+    if cfg is not None:
+        try:
+            from src.tools.configure import configure_rag_tool
+
+            configure_rag_tool(cfg)
+            log.debug("RAG tool configured with embedding settings from config")
+        except Exception as exc:
+            log.warning("Could not configure RAG tool: %s", exc)
 
     # Initialize session registry (Phase 2)
     try:
@@ -146,6 +192,17 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     except Exception as exc:
         log.warning("Could not initialize session registry: %s", exc)
         app.state.session_registry = None
+
+    # Initialize workflow registry
+    try:
+        from src.assistant.workflows import WorkflowRegistry
+
+        _data_dir = os.environ.get("COGTRIX_DATA_DIR", "data")
+        app.state.workflow_registry = WorkflowRegistry(data_dir=_data_dir)
+        log.info("Workflow registry initialized")
+    except Exception as exc:
+        log.warning("Could not initialize workflow registry: %s", exc)
+        app.state.workflow_registry = None
 
     # Placeholders for Phase 2+ state
     app.state.assistant_service = None
@@ -254,13 +311,16 @@ async def _http_exception_handler(request: Request, exc: Exception) -> JSONRespo
 
 async def _validation_exception_handler(request: Request, exc: Exception) -> JSONResponse:
     """Convert Pydantic / FastAPI validation errors to the standard error envelope."""
+    from src.api.validation import translate_validation_errors
+
     validation_exc = exc  # type: ignore[assignment]
     details: dict = {}
     if hasattr(validation_exc, "errors"):
         try:
-            details = {"errors": validation_exc.errors()}  # type: ignore[union-attr]
-        except Exception:
-            pass
+            raw_errors = validation_exc.errors()  # type: ignore[union-attr]
+            details = translate_validation_errors(raw_errors)
+        except Exception as exc_inner:
+            log.debug("Validation error translation failed: %s", exc_inner)
 
     envelope = APIResponse(
         data=None,
@@ -319,7 +379,7 @@ def create_app() -> FastAPI:
             "Powers the React web frontend with full access to sessions, "
             "messages, tools, memory, MCP servers, assistant mode, RAG, and system controls."
         ),
-        version="1.0.0",
+        version="1.1.0",
         openapi_url="/api/v1/openapi.json",
         docs_url="/api/v1/docs",
         redoc_url="/api/v1/redoc",
@@ -354,6 +414,8 @@ def create_app() -> FastAPI:
     app.include_router(assistant.router, prefix=api_prefix)
     app.include_router(rag.router, prefix=api_prefix)
     app.include_router(system.router, prefix=api_prefix)
+    app.include_router(users.router, prefix=api_prefix)
+    app.include_router(workflows.router, prefix=api_prefix)
 
     # WebSocket routers — prefixed /ws/v1 (embedded in route modules)
     app.include_router(messages.ws_router)

@@ -51,11 +51,16 @@ router = APIRouter(prefix="/rag", tags=["RAG / Documents"])
 
 _MAX_FILE_BYTES = 50 * 1024 * 1024  # 50 MB
 
-_ALLOWED_EXTENSIONS: frozenset[str] = frozenset(
-    {".pdf", ".txt", ".md", ".csv", ".docx", ".html", ".htm"}
-)
+_ALLOWED_EXTENSIONS: frozenset[str] = frozenset({".pdf", ".txt", ".md", ".markdown", ".csv"})
 
-_UPLOADS_DIR = Path("data/api/uploads")
+
+def _get_uploads_dir() -> Path:
+    """Resolve uploads directory using COGTRIX_DATA_DIR if set."""
+    import os
+
+    data_dir = os.environ.get("COGTRIX_DATA_DIR", "data")
+    return Path(data_dir, "api", "uploads").resolve()
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -97,7 +102,7 @@ def _doc_to_out(doc: RagDocument) -> DocumentOut:
     ``content_type`` and ``size_bytes`` are derived at read time from the
     uploaded file on disk — no extra DB columns are required.
     """
-    upload_dir = _UPLOADS_DIR / doc.id
+    upload_dir = _get_uploads_dir() / doc.id
     # Find the uploaded file
     size_bytes = 0
     if upload_dir.exists():
@@ -186,7 +191,7 @@ async def ingest_document(
 
     # Persist to disk
     doc_id = str(uuid.uuid4())
-    upload_dir = _UPLOADS_DIR / doc_id
+    upload_dir = _get_uploads_dir() / doc_id
     upload_dir.mkdir(parents=True, exist_ok=True)
     file_path = upload_dir / filename
     file_path.write_bytes(data)
@@ -333,7 +338,8 @@ async def get_document(
                 "message": "The requested RAG document does not exist.",
             },
         )
-    return APIResponse(data=_doc_to_out(doc))
+    out = await asyncio.to_thread(_doc_to_out, doc)
+    return APIResponse(data=out)
 
 
 @router.delete(
@@ -370,7 +376,7 @@ async def delete_document(
         )
 
     # Delete uploaded file and vectordb from disk
-    upload_dir = _UPLOADS_DIR / document_id
+    upload_dir = _get_uploads_dir() / document_id
     if upload_dir.exists():
         shutil.rmtree(upload_dir, ignore_errors=True)
         log.info("rag_delete: removed upload dir %s", upload_dir)
@@ -465,14 +471,15 @@ def _search_faiss(
         from src.tools.rag import _get_embeddings
 
         embeddings = _get_embeddings()
-    except Exception:
+    except Exception as exc:
+        log.debug("RAG embeddings unavailable for search: %s", exc)
         return [], 0
 
     all_chunks: list[tuple[float, RAGChunkOut]] = []
     docs_searched = 0
 
     for doc in indexed_docs:
-        vectordb_dir = _UPLOADS_DIR / doc.id / "vectordb" / "faiss_index"
+        vectordb_dir = _get_uploads_dir() / doc.id / "vectordb" / "faiss_index"
         if not vectordb_dir.exists():
             continue
         try:

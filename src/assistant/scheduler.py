@@ -448,15 +448,18 @@ def create_edit_scheduled_tool(
         full_id = _resolve_message_id(scheduler, message_id)
         if full_id is None:
             return f"No pending message found with ID starting with '{message_id}'."
-        # Authorization: callers may only edit messages belonging to their own chat (BUG-041)
-        if caller_chat_id:
-            with scheduler._lock:
-                msg_obj = scheduler._queue.get(full_id)
-            if msg_obj and msg_obj.chat_id != caller_chat_id:
-                return f"No pending message found with ID starting with '{message_id}'."
         new_send_at = time.time() + reschedule_minutes * 60 if reschedule_minutes else None
-        ok = scheduler.edit_message(full_id, new_text=new_text, new_send_at=new_send_at)
+        ok = scheduler.edit_message(
+            full_id,
+            new_text=new_text,
+            new_send_at=new_send_at,
+            caller_chat_id=caller_chat_id,
+        )
         if not ok:
+            # Return the same "not found" response regardless of whether the failure
+            # is due to auth or the message being gone — prevents info disclosure.
+            if caller_chat_id:
+                return f"No pending message found with ID starting with '{message_id}'."
             return (
                 f"Could not edit message {message_id} — "
                 "it may have already been sent or cancelled."
@@ -494,14 +497,12 @@ def create_cancel_scheduled_tool(
         full_id = _resolve_message_id(scheduler, message_id)
         if full_id is None:
             return f"No pending message found with ID starting with '{message_id}'."
-        # Authorization: callers may only cancel messages belonging to their own chat (BUG-041)
-        if caller_chat_id:
-            with scheduler._lock:
-                msg_obj = scheduler._queue.get(full_id)
-            if msg_obj and msg_obj.chat_id != caller_chat_id:
-                return f"No pending message found with ID starting with '{message_id}'."
-        ok = scheduler.cancel_message(full_id)
+        ok = scheduler.cancel_message(full_id, caller_chat_id=caller_chat_id)
         if not ok:
+            # Return the same "not found" response regardless of whether the failure
+            # is due to auth or the message being gone — prevents info disclosure.
+            if caller_chat_id:
+                return f"No pending message found with ID starting with '{message_id}'."
             return (
                 f"Could not cancel message {message_id} — "
                 "it may have already been sent or cancelled."
@@ -615,6 +616,7 @@ class MessageScheduler:
         self._dispatch_interval = dispatch_interval
         self._queue: dict[str, ScheduledMessage] = {}
         self._lock = threading.Lock()
+        self._save_lock = threading.Lock()
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -745,12 +747,23 @@ class MessageScheduler:
         return result
 
     def edit_message(
-        self, msg_id: str, new_text: str | None = None, new_send_at: float | None = None
+        self,
+        msg_id: str,
+        new_text: str | None = None,
+        new_send_at: float | None = None,
+        caller_chat_id: str = "",
     ) -> bool:
-        """Edit a pending message's text and/or scheduled time. Returns True on success."""
+        """Edit a pending message's text and/or scheduled time. Returns True on success.
+
+        When ``caller_chat_id`` is provided the ownership check and the mutation run
+        under the same lock acquisition, eliminating the TOCTOU window that existed
+        when callers checked ownership separately before calling this method (BUG-139).
+        """
         with self._lock:
             msg = self._queue.get(msg_id)
             if msg is None or msg.status != "pending":
+                return False
+            if caller_chat_id and msg.chat_id != caller_chat_id:
                 return False
             if new_text is not None:
                 msg.text = new_text
@@ -759,11 +772,17 @@ class MessageScheduler:
         self.save()
         return True
 
-    def cancel_message(self, msg_id: str) -> bool:
-        """Cancel a specific pending message by ID. Returns True on success."""
+    def cancel_message(self, msg_id: str, caller_chat_id: str = "") -> bool:
+        """Cancel a specific pending message by ID. Returns True on success.
+
+        When ``caller_chat_id`` is provided the ownership check and the status
+        mutation run under the same lock acquisition (BUG-139).
+        """
         with self._lock:
             msg = self._queue.get(msg_id)
             if msg is None or msg.status != "pending":
+                return False
+            if caller_chat_id and msg.chat_id != caller_chat_id:
                 return False
             msg.status = "cancelled"
         self.save()
@@ -793,9 +812,10 @@ class MessageScheduler:
         """Persist the queue to disk atomically."""
         if self._persist_path is None:
             return
-        with self._lock:
-            snapshot = {mid: m.to_dict() for mid, m in self._queue.items()}
-        self._atomic_write(snapshot)
+        with self._save_lock:
+            with self._lock:
+                snapshot = {mid: m.to_dict() for mid, m in self._queue.items()}
+            self._atomic_write(snapshot)
 
     # ------------------------------------------------------------------
     # Private helpers
@@ -886,6 +906,7 @@ class MessageScheduler:
                     # re-check status under lock before modifying
                     if self._queue.get(msg.id) and self._queue[msg.id].status == "pending":
                         self._queue[msg.id].send_at = new_send_at
+                self.save()
                 log.debug("Deferred message %s to %.0f due to quiet hours", msg.id, new_send_at)
                 continue
 
@@ -944,6 +965,10 @@ class MessageScheduler:
                     current.attempts,
                     current.max_attempts,
                 )
+        # Persist retry-state updates immediately so a crash between _send_message
+        # and the trailing save() in _dispatch_due cannot reset attempt counters
+        # and allow more retries than max_attempts (ARCH-301).
+        self.save()
 
     def _cleanup_old(self) -> None:
         """Remove terminal-state messages older than 24 hours."""

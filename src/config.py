@@ -38,7 +38,7 @@ YAML example::
       fast:
         provider: ollama
         model: qwen3:8b
-        num_ctx: 32768
+        context_window: 32768
       reasoning:
         provider: openai
         model: gpt-4.1
@@ -114,31 +114,15 @@ _XDG_CONFIG_NAMES = ["cogtrix.json", "cogtrix.yml", "cogtrix.yaml"]
 
 @dataclass
 class ProviderConfig:
-    """Configuration for a single LLM provider."""
+    """Configuration for a single LLM provider (connection info only)."""
 
     name: str
     type: str  # "openai", "ollama", "anthropic", or "google"
     base_url: str | None = None
-    model: str | None = None
     api_key: str | None = None
-    # Provider-level defaults; overridden by model-level settings from ModelConfig
-    temperature: float | None = None
-    num_ctx: int | None = None  # Context window size (tokens) for any provider
-    max_tokens: int | None = None  # Max output tokens per LLM call
     tool_instructions: str | None = None
 
     def __post_init__(self) -> None:
-        if self.temperature is not None and not (0.0 <= self.temperature <= 2.0):
-            raise ConfigError(
-                f"providers.{self.name}.temperature must be between 0.0 and 2.0, "
-                f"got {self.temperature}"
-            )
-        if self.num_ctx is not None and self.num_ctx < 256:
-            raise ConfigError(f"providers.{self.name}.num_ctx must be >= 256, got {self.num_ctx}")
-        if self.max_tokens is not None and self.max_tokens <= 0:
-            raise ConfigError(
-                f"providers.{self.name}.max_tokens must be > 0, got {self.max_tokens}"
-            )
         if self.type:
             from src.providers.defaults import PROVIDER_TYPES
 
@@ -156,25 +140,13 @@ class ProviderConfig:
 
         return get_default_base_url(self.type)
 
-    def get_model(self) -> str:
-        """Get model with defaults for known types."""
-        if self.model:
-            return self.model
-        from src.providers import get_default_model
-
-        return get_default_model(self.type)
-
     def to_dict(self) -> dict[str, Any]:
         """Serialize to dictionary."""
         return {
             "name": self.name,
             "type": self.type,
             "base_url": self.base_url,
-            "model": self.model,
-            "api_key": "***" if self.api_key else None,  # Don't expose key
-            "temperature": self.temperature,
-            "num_ctx": self.num_ctx,
-            "max_tokens": self.max_tokens,
+            "api_key": "***" if self.api_key else None,
             "tool_instructions": self.tool_instructions,
         }
 
@@ -185,15 +157,15 @@ class ModelConfig:
 
     provider: str  # references a key in Config.providers
     model: str  # actual model name at the provider
-    num_ctx: int | None = None
+    context_window: int | None = None
     temperature: float | None = None
     max_tokens: int | None = None  # Max output tokens per LLM call
 
     def __post_init__(self) -> None:
         if self.temperature is not None and not (0.0 <= self.temperature <= 2.0):
             raise ConfigError(f"Temperature must be between 0.0 and 2.0, got {self.temperature}")
-        if self.num_ctx is not None and self.num_ctx < 256:
-            raise ConfigError(f"Context window (num_ctx) must be >= 256, got {self.num_ctx}")
+        if self.context_window is not None and self.context_window < 256:
+            raise ConfigError(f"context_window must be >= 256, got {self.context_window}")
         if self.max_tokens is not None and self.max_tokens < 1:
             raise ConfigError(f"max_tokens must be >= 1, got {self.max_tokens}")
 
@@ -221,8 +193,6 @@ class Config:
     """Application configuration with defaults."""
 
     # General settings
-    provider: str = "ollama"
-    model: str | None = None
     session: str = "default"
     data_dir: str = "data"
 
@@ -276,11 +246,8 @@ class Config:
     # Track where config was loaded from (for display)
     config_file_path: Path | None = None
 
-    # Internal: resolved model config from the models registry (set by _resolve_model)
-    _active_model: "ModelConfig | None" = field(default=None, repr=False)
-
-    # Internal: True when --provider was explicitly passed via CLI
-    _cli_provider_override: bool = field(default=False, repr=False)
+    # The model alias that is currently active (from models.default or CLI --model)
+    active_model_alias: str | None = field(default=None, repr=False)
 
     # Embedding overrides populated from env vars (read by cogtrix.py)
     embedding_provider_override: str | None = None
@@ -338,6 +305,86 @@ class Config:
         """Return the full assistant service config dict (may be empty)."""
         return self.services.get("assistant", {})
 
+    def dump_debug(self, log: Any) -> None:
+        """Log all resolved configuration parameters at DEBUG level.
+
+        Masks API keys and secrets.  Called once at startup when debug
+        mode is active so the operator can see the exact config the
+        application is using after all sources (file, env, CLI) have
+        been merged.
+        """
+        if not log.isEnabledFor(logging.DEBUG):
+            return
+
+        def _mask(val: str | None) -> str:
+            if not val:
+                return "(none)"
+            if len(val) <= 8:
+                return "***"
+            return val[:4] + "..." + val[-4:]
+
+        lines = [
+            "=== Resolved configuration ===",
+            f"  config_file:          {self.config_file_path or '(none)'}",
+            f"  session:              {self.session}",
+            f"  data_dir:             {self.data_dir}",
+            f"  active_model_alias:   {self.active_model_alias or '(none)'}",
+            f"  memory_mode:          {self.memory_mode}",
+            f"  prompt_optimizer:     {self.prompt_optimizer}",
+            f"  parallel_tool_exec:   {self.parallel_tool_execution}",
+            f"  context_compression:  {self.context_compression}",
+            f"    min_age:            {self.context_compression_min_age}",
+            f"    min_chars:          {self.context_compression_min_chars}",
+            f"    model:              {self.context_compression_model or '(default)'}",
+            f"  delegate_enabled:     {self.delegate_enabled}",
+            f"    timeout:            {self.delegate_default_timeout}",
+            f"    allowed_models:     {self.delegate_allowed_models}",
+            f"  research_delegate:    {self.research_delegate_enabled}",
+            f"  debug:                {self.debug}",
+            f"  verbose:              {self.verbose}",
+            f"  log_file:             {self.log_file}",
+        ]
+        # Providers
+        lines.append("  providers:")
+        for name, pc in self.providers.items():
+            lines.append(
+                f"    {name}: type={pc.type}, "
+                f"base_url={pc.get_base_url() or '(default)'}, "
+                f"api_key={_mask(pc.api_key)}"
+            )
+        # Models
+        lines.append("  models:")
+        for name, mc in self.models.items():
+            lines.append(
+                f"    {name}: provider={mc.provider}, model={mc.model}, "
+                f"temp={mc.temperature}, context_window={mc.context_window}, "
+                f"max_tokens={mc.max_tokens}"
+            )
+        # RAG
+        lines.append(
+            f"  rag: docs_dir={self.rag.docs_dir}, "
+            f"vectordb_dir={self.rag.vectordb_dir}, "
+            f"chunk_size={self.rag.chunk_size}, "
+            f"model={self.rag.model or '(none)'}"
+        )
+        # Memory modes
+        if self.memory_modes:
+            lines.append("  memory_modes:")
+            for mode_name, mode_cfg in self.memory_modes.items():
+                lines.append(f"    {mode_name}: {mode_cfg}")
+        # MCP servers
+        if self.mcp_servers:
+            lines.append(f"  mcp_servers: {list(self.mcp_servers.keys())}")
+        # Services (names only, no secrets)
+        if self.services:
+            svc_names = [
+                f"{k}(api_key={_mask(v.get('api_key'))})" if "api_key" in v else k
+                for k, v in self.services.items()
+            ]
+            lines.append(f"  services: {', '.join(svc_names)}")
+
+        log.debug("\n".join(lines))
+
     def resolve_data_path(self, subpath: str) -> Path:
         """Resolve a data subpath against ``data_dir``.
 
@@ -364,13 +411,13 @@ class Config:
         result_resolved = result.resolve()
         if not result_resolved.is_relative_to(base_resolved):
             raise ConfigError(f"Path traversal detected in data path: {subpath!r}")
-        return result
+        return result_resolved
 
     def get_provider_config(self, name: str | None = None) -> ProviderConfig:
         """Get configuration for a provider by name.
 
         Args:
-            name: Provider name (uses self.provider if None)
+            name: Provider name (uses active model's provider if None)
 
         Returns:
             ProviderConfig for the requested provider
@@ -378,7 +425,7 @@ class Config:
         Raises:
             ValueError: If provider is not configured
         """
-        provider_name = name or self.provider
+        provider_name = name or self.get_active_model().provider
         if provider_name in self.providers:
             return self.providers[provider_name]
         raise ValueError(f"Unknown provider: '{provider_name}'. Available: {self.list_providers()}")
@@ -389,7 +436,7 @@ class Config:
 
     def get_model_config(self, name: str | None = None) -> ModelConfig | None:
         """Look up a model in the models registry. Returns None if not found."""
-        model_name = name or self.model
+        model_name = name or self.active_model_alias
         if model_name and model_name in self.models:
             return self.models[model_name]
         return None
@@ -415,7 +462,7 @@ class Config:
                 model_name,
                 mc.provider,
             )
-        pc = self.get_provider_config()
+        pc = self.get_active_provider()
         return pc.type, None, pc.get_base_url(), pc.api_key
 
     def find_model_entry(self, target: str) -> "tuple[str | None, ModelConfig | None]":
@@ -424,7 +471,6 @@ class Config:
         Resolution order:
         1. Exact alias key in self.models.
         2. Scan self.models values for .model == target (first match).
-        3. Scan self.providers values for .model == target (synthesize ModelConfig).
 
         Returns (alias_or_None, ModelConfig_or_None). Both are None when not found.
         """
@@ -433,31 +479,82 @@ class Config:
         for alias, mc in self.models.items():
             if mc.model == target:
                 return alias, mc
-        for pname, pc in self.providers.items():
-            if pc.model == target:
-                return None, ModelConfig(provider=pname, model=target)
         return None, None
 
-    def resolve_provider_config(self) -> "ProviderConfig":
-        """Get provider config with active model params merged.
+    def get_active_model(self) -> "ModelConfig":
+        """Resolve the active model from the models registry.
 
-        Returns a **clone** of the provider config so the original in
-        ``self.providers`` is never mutated.  Model-specific ``num_ctx``
-        and ``temperature`` from the active ``ModelConfig`` are merged
-        into the clone.
+        Uses ``active_model_alias`` if set. Falls back to the first model
+        in the registry when no alias is configured.
+
+        Raises:
+            ConfigError: If the alias is set but not found, or no models exist.
+        """
+        if self.active_model_alias:
+            mc = self.models.get(self.active_model_alias)
+            if mc is None:
+                raise ConfigError(
+                    f"Active model alias '{self.active_model_alias}' not found in models registry. "
+                    f"Available: {', '.join(sorted(self.models)) or '(none)'}"
+                )
+            return mc
+        if self.models:
+            first_alias = next(iter(self.models))
+            return self.models[first_alias]
+        raise ConfigError("No models configured and no active_model_alias set.")
+
+    def get_active_provider(self) -> "ProviderConfig":
+        """Get the provider config for the active model.
+
+        Resolves through ``get_active_model().provider``.
+        """
+        mc = self.get_active_model()
+        return self.get_provider_config(mc.provider)
+
+    def resolve_llm_config(self) -> "tuple[ProviderConfig, ModelConfig]":
+        """Resolve the active LLM configuration as a (provider, model) pair.
+
+        Returns a **copy** of the provider config so the original in
+        ``self.providers`` is never mutated. The ``ModelConfig`` is returned
+        as-is (it has no mutable shared state).
         """
         from copy import copy
 
-        pc = copy(self.get_provider_config())
-        pc.model = self.model or pc.model
-        if self._active_model:
-            if self._active_model.num_ctx is not None:
-                pc.num_ctx = self._active_model.num_ctx
-            if self._active_model.temperature is not None:
-                pc.temperature = self._active_model.temperature
-            if self._active_model.max_tokens is not None:
-                pc.max_tokens = self._active_model.max_tokens
-        return pc
+        mc = self.get_active_model()
+        pc = copy(self.get_provider_config(mc.provider))
+        return pc, mc
+
+    def resolve_llm_config_for(self, alias: str) -> "tuple[ProviderConfig, ModelConfig]":
+        """Resolve a named model alias to a (provider, model) pair.
+
+        Used by compression, delegate, knowledge extraction, and other
+        subsystems that need to create an LLM for a specific model alias.
+
+        Supports both registry aliases and ``"provider/model"`` shorthand.
+
+        Raises:
+            ConfigError: If the alias is not found and not in shorthand format.
+        """
+        from copy import copy
+
+        # Check models registry first
+        mc = self.models.get(alias)
+        if mc is not None:
+            pc = copy(self.get_provider_config(mc.provider))
+            return pc, mc
+
+        # Try "provider/model" shorthand
+        if "/" in alias:
+            provider_name, model_name = alias.split("/", 1)
+            pc = copy(self.get_provider_config(provider_name))
+            mc = ModelConfig(provider=provider_name, model=model_name)
+            return pc, mc
+
+        raise ConfigError(
+            f"Model alias '{alias}' not found in models registry and is not "
+            f"in 'provider/model' format. Available aliases: "
+            f"{', '.join(sorted(self.models)) or '(none)'}"
+        )
 
 
 def find_config_file() -> Path | None:
@@ -519,6 +616,8 @@ def load_config(cli_args=None) -> Config:
 
     # 1. Determine config file (explicit path has priority over search)
     explicit_path = getattr(cli_args, "config_file", None) if cli_args else None
+    if not explicit_path:
+        explicit_path = os.environ.get("COGTRIX_CONFIG_FILE")
     if explicit_path:
         config_file = Path(explicit_path)
         if not config_file.exists():
@@ -538,44 +637,46 @@ def load_config(cli_args=None) -> Config:
     if cli_args:
         _apply_cli_args(config, cli_args)
 
-    # 5. Resolve model name against the models registry
+    # 5. Resolve model alias against the models registry
     _resolve_model(config)
 
-    # 6. Resolve final model based on provider if not explicitly set
-    if config.model is None:
-        try:
-            provider_cfg = config.get_provider_config()
-            config.model = provider_cfg.get_model()
-        except ValueError:
-            # Provider not configured — leave model as None; it will be
-            # resolved from the provider's default when the LLM is created.
-            pass
+    # 6. If active_model_alias is still None, generate a default from first provider
+    if config.active_model_alias is None and config.providers:
+        first_prov = next(iter(config.providers.values()))
+        from src.providers import get_default_model
+
+        default_model = get_default_model(first_prov.type)
+        _synth = f"{first_prov.name}/{default_model}"
+        if _synth not in config.models:
+            config.models[_synth] = ModelConfig(provider=first_prov.name, model=default_model)
+        config.active_model_alias = _synth
 
     return config
 
 
 def _resolve_model(config: Config) -> None:
-    """Resolve model name against the models registry.
+    """Resolve active_model_alias against the models registry.
 
-    If config.model matches a key in config.models, update config.provider
-    and store the resolved ModelConfig.  If not found, treat as a literal
-    model name on the current provider.
+    If the alias matches a key in config.models, the resolution succeeds.
+    If not found but models exist, log a warning.
     """
-    if not config.model:
-        config._active_model = None
+    if not config.active_model_alias:
         return
 
-    mc = config.get_model_config()
-    if mc is None:
-        # Literal model name — no ModelConfig to merge
-        config._active_model = None
+    if config.active_model_alias in config.models:
         return
 
-    # Resolve from models registry — skip provider override when CLI --provider was used
-    if not config._cli_provider_override:
-        config.provider = mc.provider
-    config.model = mc.model
-    config._active_model = mc
+    # Alias not found — may be a literal model name; try to find it
+    for alias, mc in config.models.items():
+        if mc.model == config.active_model_alias:
+            config.active_model_alias = alias
+            return
+
+    if config.models:
+        _log.warning(
+            "active_model_alias '%s' not found in models registry",
+            config.active_model_alias,
+        )
 
 
 def _is_yaml_file(path: Path) -> bool:
@@ -702,10 +803,9 @@ def _apply_config_file(config: Config, path: Path) -> None:
     data = _parse_config_file(path)
 
     # ── General settings (top-level) ─────────────────────────────────
-    if "provider" in data:
-        config.provider = data["provider"]
-    if "model" in data:
-        config.model = data["model"]
+    # Capture legacy top-level provider/model for post-processing below
+    _legacy_provider = data.get("provider")
+    _legacy_model = data.get("model")
     if "session" in data:
         config.session = data["session"]
     if "data_dir" in data:
@@ -883,6 +983,20 @@ def _apply_config_file(config: Config, path: Path) -> None:
             elif fval is not None:
                 _log.warning("research_delegate.cap_ratio must be in (0, 1], using default")
 
+    # ── Legacy top-level provider/model → derive active_model_alias ──
+    if config.active_model_alias is None and (_legacy_provider or _legacy_model):
+        for alias, mc in config.models.items():
+            if mc.provider == _legacy_provider and mc.model == _legacy_model:
+                config.active_model_alias = alias
+                break
+        if config.active_model_alias is None and _legacy_model:
+            _synth_alias = _legacy_model
+            if _synth_alias not in config.models and _legacy_provider:
+                config.models[_synth_alias] = ModelConfig(
+                    provider=_legacy_provider, model=_legacy_model
+                )
+            config.active_model_alias = _synth_alias
+
 
 def _parse_providers_section(config: Config, providers_data: dict[str, Any]) -> None:
     """Parse the providers section into ProviderConfig objects."""
@@ -909,39 +1023,67 @@ def _parse_providers_section(config: Config, providers_data: dict[str, Any]) -> 
             )
             continue
 
-        raw_temperature = provider_data.get("temperature")
-        raw_num_ctx = provider_data.get("num_ctx")
-        raw_max_tokens = provider_data.get("max_tokens")
         try:
             config.providers[name] = ProviderConfig(
                 name=name,
                 type=provider_type,
                 base_url=provider_data.get("base_url"),
-                model=provider_data.get("model"),
                 api_key=provider_data.get("api_key"),
                 tool_instructions=provider_data.get("tool_instructions"),
-                temperature=(
-                    _safe_float(raw_temperature, f"providers.{name}.temperature")
-                    if raw_temperature is not None
-                    else None
-                ),
-                num_ctx=(
-                    _safe_int(raw_num_ctx, f"providers.{name}.num_ctx")
-                    if raw_num_ctx is not None
-                    else None
-                ),
-                max_tokens=(
-                    _safe_int(raw_max_tokens, f"providers.{name}.max_tokens")
-                    if raw_max_tokens is not None
-                    else None
-                ),
             )
         except (ConfigError, ValueError, TypeError) as exc:
             _log.warning("Skipping provider '%s': %s", name, exc)
+            continue
+
+        # Auto-migrate model settings from provider section → models registry
+        _prov_model = provider_data.get("model")
+        if _prov_model:
+            # Prefer model_name as alias; fall back to provider/model_name on collision
+            _alias = str(_prov_model)
+            if _alias in config.models:
+                _alias = f"{name}/{_prov_model}"
+            if _alias not in config.models and name not in config.models:
+                _prov_temp = provider_data.get("temperature")
+                _prov_ctx = (
+                    provider_data.get("context_window")
+                    or provider_data.get("context_length")
+                    or provider_data.get("num_ctx")
+                )
+                _prov_max = provider_data.get("max_tokens")
+                try:
+                    config.models[_alias] = ModelConfig(
+                        provider=name,
+                        model=_prov_model,
+                        temperature=(
+                            _safe_float(_prov_temp, f"providers.{name}.temperature")
+                            if _prov_temp is not None
+                            else None
+                        ),
+                        context_window=(
+                            _safe_int(_prov_ctx, f"providers.{name}.context_window")
+                            if _prov_ctx is not None
+                            else None
+                        ),
+                        max_tokens=(
+                            _safe_int(_prov_max, f"providers.{name}.max_tokens")
+                            if _prov_max is not None
+                            else None
+                        ),
+                    )
+                except (ConfigError, ValueError, TypeError) as exc:
+                    _log.warning("Could not auto-migrate model from provider '%s': %s", name, exc)
 
 
 def _parse_models_section(config: Config, models_data: dict[str, Any]) -> None:
     """Parse the models section into ModelConfig objects."""
+    # Handle models.default — selects the active model alias
+    if "default" in models_data:
+        default_val = models_data.pop("default")
+        if isinstance(default_val, str) and default_val:
+            config.active_model_alias = default_val
+        else:
+            _log.warning("models.default must be a non-empty string, ignoring")
+
     for name, model_data in models_data.items():
         if isinstance(model_data, dict):
             provider = model_data.get("provider")
@@ -949,16 +1091,20 @@ def _parse_models_section(config: Config, models_data: dict[str, Any]) -> None:
             if not provider or not model:
                 _log.warning("Model '%s' missing required 'provider' or 'model' field", name)
                 continue
-            raw_num_ctx = model_data.get("num_ctx")
+            raw_ctx = (
+                model_data.get("context_window")
+                or model_data.get("context_length")
+                or model_data.get("num_ctx")
+            )
             raw_temperature = model_data.get("temperature")
             raw_max_tokens = model_data.get("max_tokens")
             try:
                 config.models[name] = ModelConfig(
                     provider=provider,
                     model=model,
-                    num_ctx=(
-                        _safe_int(raw_num_ctx, f"models.{name}.num_ctx")
-                        if raw_num_ctx is not None
+                    context_window=(
+                        _safe_int(raw_ctx, f"models.{name}.context_window")
+                        if raw_ctx is not None
                         else None
                     ),
                     temperature=(
@@ -980,8 +1126,9 @@ def _parse_models_section(config: Config, models_data: dict[str, Any]) -> None:
                 parts = model_data.split("/", 1)
                 config.models[name] = ModelConfig(provider=parts[0], model=parts[1])
             else:
-                # Just model name — use current provider
-                config.models[name] = ModelConfig(provider=config.provider, model=model_data)
+                # Just model name — use first provider as fallback
+                _fallback_prov = next(iter(config.providers), "ollama")
+                config.models[name] = ModelConfig(provider=_fallback_prov, model=model_data)
 
 
 def _set_service(config: Config, name: str, key: str, value: str) -> None:
@@ -1006,8 +1153,9 @@ def _set_provider_key(config: Config, name: str, api_key: str) -> None:
                 type="openai",
                 api_key=api_key,
                 base_url=preset["base_url"],
-                model=preset["model"],
             )
+            if name not in config.models:
+                config.models[name] = ModelConfig(provider=name, model=preset["model"])
         else:
             from src.providers import PROVIDER_TYPES
 
@@ -1073,10 +1221,8 @@ def _parse_ollama_address(value: str) -> str:
 def _apply_env_vars(config: Config) -> None:
     """Apply settings from environment variables."""
     # General settings
-    if env_val := os.getenv("COGTRIX_PROVIDER"):
-        config.provider = env_val
     if env_val := os.getenv("COGTRIX_MODEL"):
-        config.model = env_val
+        config.active_model_alias = env_val
     if env_val := os.getenv("COGTRIX_SESSION"):
         config.session = env_val
     if env_val := os.getenv("COGTRIX_DATA_DIR"):
@@ -1162,10 +1308,9 @@ def _apply_env_vars(config: Config) -> None:
 def _apply_cli_args(config: Config, args) -> None:
     """Apply settings from command line arguments."""
     if hasattr(args, "provider") and args.provider:
-        config.provider = args.provider
-        config._cli_provider_override = True
+        _log.warning("--provider is deprecated; use --model <alias> instead")
     if hasattr(args, "model") and args.model:
-        config.model = args.model
+        config.active_model_alias = args.model
     if hasattr(args, "session") and args.session:
         config.session = args.session
     if hasattr(args, "data_dir") and args.data_dir:

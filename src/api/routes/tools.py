@@ -117,7 +117,12 @@ def _tool_to_out(
 def _classify_tool_status(name: str, session_state: Any) -> str:
     if name in session_state.denials:
         return "disabled"
-    if name in session_state.approvals:
+    if name in getattr(session_state, "pinned_tools", set()):
+        return "pinned"
+    # Only report "auto_approved" when the tool is actually loaded —
+    # an approval on an on-demand tool just means it won't need confirmation
+    # when eventually expanded, not that it's active.
+    if name in session_state.approvals and name in session_state.loaded_tools:
         return "auto_approved"
     if name in session_state.loaded_tools:
         return "active"
@@ -371,33 +376,73 @@ async def patch_session_tools(
                 },
             )
 
-    if body.load:
-        for name in body.load:
-            _assert_tool_exists(name)
-            ss.loaded_tools.add(name)
+    # Acquire turn_lock before mutating run_config to prevent racing with an
+    # in-flight agent turn that reads active_tools_list / available_tools
+    # (BUG-196 — consistent with patch_session in sessions.py).
+    async with live_session.turn_lock:
+        rc = getattr(live_session, "run_config", None)
 
-    if body.unload:
-        for name in body.unload:
-            ss.loaded_tools.discard(name)
+        if body.load:
+            for name in body.load:
+                _assert_tool_exists(name)
+                ss.loaded_tools.add(name)
+                ss.pinned_tools.add(name)
+                # Move tool from available to active in run_config so the LLM
+                # sees it in its bound schema on the next turn.
+                if rc is not None:
+                    avail = getattr(rc, "available_tools", None) or {}
+                    if name in avail:
+                        tool_obj = avail.pop(name)
+                        atl = getattr(rc, "active_tools_list", None)
+                        if atl is not None:
+                            atl.append(tool_obj)
 
-    if body.enable:
-        for name in body.enable:
-            ss.denials.discard(name)
+        if body.unload:
+            for name in body.unload:
+                ss.loaded_tools.discard(name)
+                ss.pinned_tools.discard(name)
+                # Return tool from active back to available in run_config.
+                if rc is not None:
+                    atl = getattr(rc, "active_tools_list", None) or []
+                    avail = getattr(rc, "available_tools", None)
+                    for i, t in enumerate(atl):
+                        if getattr(t, "name", None) == name:
+                            atl.pop(i)
+                            if avail is not None:
+                                orig = ss.all_tool_originals.get(name, t)
+                                avail[name] = orig
+                            break
 
-    if body.disable:
-        for name in body.disable:
-            _assert_tool_exists(name)
-            ss.denials.add(name)
-            ss.loaded_tools.discard(name)
+        if body.enable:
+            for name in body.enable:
+                ss.denials.discard(name)
 
-    if body.auto_approve:
-        for name in body.auto_approve:
-            _assert_tool_exists(name)
-            ss.approvals.add(name)
+        if body.disable:
+            for name in body.disable:
+                _assert_tool_exists(name)
+                ss.denials.add(name)
+                ss.loaded_tools.discard(name)
+                ss.pinned_tools.discard(name)
+                # Also remove from run_config active tools so the LLM can't invoke it.
+                if rc is not None:
+                    atl = getattr(rc, "active_tools_list", None) or []
+                    avail = getattr(rc, "available_tools", None)
+                    for i, t in enumerate(atl):
+                        if getattr(t, "name", None) == name:
+                            atl.pop(i)
+                            if avail is not None:
+                                orig = ss.all_tool_originals.get(name, t)
+                                avail[name] = orig
+                            break
 
-    if body.revoke_approval:
-        for name in body.revoke_approval:
-            ss.approvals.discard(name)
+        if body.auto_approve:
+            for name in body.auto_approve:
+                _assert_tool_exists(name)
+                ss.approvals.add(name)
+
+        if body.revoke_approval:
+            for name in body.revoke_approval:
+                ss.approvals.discard(name)
 
     items = [
         _tool_to_summary(n, t, registry, _classify_tool_status(n, ss))

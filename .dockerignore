@@ -54,19 +54,28 @@ Thumbs.db
 tests
 Dockerfile
 .dockerignore
+requirements.txt
 setup.cfg
 mypy_report
 htmlcov
+.pytest_cache
+.mypy_cache
+.ruff_cache
+node_modules
 LICENSE
 NOTICE
 
 # Root-level markdown (dev-only)
+AGENTS.md
 CLAUDE.md
-README.md
 CHANGELOG.md
+CODE_OF_CONDUCT.md
+CONTRIBUTING.md
+README.md
 
-# Docs: keep user-facing docs/*.md, exclude audit/dev subdirs
+# Docs: keep user-facing docs/*.md and API reference; exclude dev-only subdirs and binaries
 docs/adr
 docs/bugs
 docs/prompts
 docs/ux
+docs/*.pdf

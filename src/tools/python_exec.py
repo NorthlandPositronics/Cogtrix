@@ -397,7 +397,7 @@ SAFE_MODULES = {
     "unicodedata",
     "hashlib",
     "hmac",
-    "copy",
+    # "copy" removed: deepcopy calls __reduce_ex__ via C code, bypassing sandbox
     "pprint",
     "typing",
     # Additional safe modules

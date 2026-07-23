@@ -10,8 +10,9 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
+from src.api.schemas.common import ensure_utc
 from src.api.schemas.session import MemoryMode
 
 # ---------------------------------------------------------------------------
@@ -79,6 +80,8 @@ class MemoryStateOut(BaseModel):
         ...,
         description="UTC timestamp of the last memory update.",
     )
+
+    _ensure_utc = field_validator("updated_at", mode="before")(ensure_utc)
 
 
 # ---------------------------------------------------------------------------

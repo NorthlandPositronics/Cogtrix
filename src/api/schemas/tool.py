@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field
 # Enumerations
 # ---------------------------------------------------------------------------
 
-ToolStatus = Literal["active", "on_demand", "disabled", "auto_approved"]
+ToolStatus = Literal["active", "on_demand", "disabled", "auto_approved", "pinned"]
 
 
 # ---------------------------------------------------------------------------
@@ -59,7 +59,8 @@ class ToolOut(BaseModel):
     """Full tool representation including parameter schema.
 
     ``status`` reflects the tool's current state within the session:
-    - 'active'       — loaded in the agent's active tool set
+    - 'active'       — loaded in the agent's active tool set (agent-loaded, ephemeral)
+    - 'pinned'       — manually loaded via API or CLI (persists across prompt cycles)
     - 'on_demand'    — available in the catalog, not yet loaded
     - 'disabled'     — blocked for this session
     - 'auto_approved'— active and pre-approved (no confirmation required)

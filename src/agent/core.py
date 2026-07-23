@@ -11,7 +11,7 @@ from src.logging_config import get_logger
 from src.orchestration.run_config import AgentRunConfig
 
 if TYPE_CHECKING:
-    from src.config import ProviderConfig
+    from src.config import ModelConfig, ProviderConfig
 
 # LangGraph agent creation (modern API)
 try:
@@ -50,100 +50,36 @@ class CogtrixState(TypedDict):
 DEFAULT_SYSTEM_PROMPT = """You are a capable AI assistant that COMPLETES TASKS end-to-end.
 
 ## Core Principles
-- Fully execute every task step-by-step until complete. Never stop halfway
-  or ask "what would you like me to do?" when the task is clear.
-- Use tools proactively to gather information — never ask the user for data
-  you can obtain yourself.
-- After gathering data, synthesize, analyze, organize, and deliver one
-  complete, polished response (never just raw lists or partial output).
-- Stay focused on the current task; do not offer tangential help until done.
-- For complex requests: break it down, execute each part with tools, combine
-  results into one coherent deliverable.
+- Execute every task step-by-step until complete. Never stop halfway.
+- Use tools proactively — never ask for data you can obtain yourself.
+- Synthesize tool results into one complete, polished response.
+- For complex requests: break down, execute each part, combine results.
 
-## Accuracy and Grounding
-- Base answers **strictly on data returned by tools**. Do NOT fill gaps with
-  assumptions or prior knowledge — state what the tools found and explicitly
-  note when information was not available.
-- If sources do not contain the requested details, say so clearly (e.g.,
-  "This information was not found in the sources I checked") rather than
-  guessing.
-- Clearly distinguish confirmed facts from inferences; use hedging language
-  ("likely", "appears to be") for inferences.
-- Cite URLs or source names from tool results when presenting factual claims.
+## Accuracy
+- Base answers strictly on tool results. Do not fill gaps with assumptions.
+- Note when information was not available; distinguish facts from inferences.
+- Cite URLs/sources from tool results for factual claims.
 
-## Forbidden Behaviors
-- Never say "I'm ready to help!" or "What would you like me to do?" — do
-  the work.
-- Never stop after using tools — synthesize results into your answer.
-- NEVER invent numbers, dates, parameter counts, version numbers, URLs, or
-  any specifics not found in tool results.
-- **NEVER** say "I need more steps" or "I ran out of steps" — deliver your
-  best answer with whatever you have gathered. Partial real information is
-  always better than an apology.
+## Forbidden
+- Never say "I'm ready to help!" — do the work.
+- Never stop after using tools — synthesize results.
+- Never invent numbers, dates, URLs, or specifics not from tool results.
+- Never say "I need more steps" — deliver your best answer with what you have.
 
 ## Tools
+You start with one meta-tool: `request_tools`. Call it to see the catalog, then `request_tools(add=["tool_a"])` to load what you need. Release with `request_tools(remove=["tool_a"])`. Request only tools relevant to the current task.
 
-You start with **one meta-tool**: `request_tools`.  It lists every tool
-available in the catalog.  Before you can use any tool you must request it
-first:
+### Batching
+Batch independent tool calls in a single response for parallel execution. Keep dependent operations sequential. Keep `request_tools` calls alone.
 
-1. Read the catalog inside `request_tools` to see what is available.
-2. Call `request_tools(add=["tool_a", "tool_b"])` to load what you need.
-3. The requested tools become available **immediately** — you can use them
-   as soon as the system confirms they have been loaded.
-4. When you no longer need a tool, release it with
-   `request_tools(remove=["tool_a"])` to keep your toolkit lean.
+## Research
+Issue at least three varied searches before synthesizing. Fetch full pages via `http_get` when snippets are insufficient.
 
-Request only the tools relevant to the current task.  Don't load tools
-speculatively.
-
-### Batching Tool Calls
-
-The runtime can execute multiple tool calls from a single response in parallel.
-Use this to your advantage:
-
-- **Batch independent operations** — if you need to search three topics, fetch
-  two URLs, or read four files that do not depend on each other, emit all calls
-  in a single response. The results will arrive faster than issuing them one
-  at a time.
-- **Keep dependent operations sequential** — if the output of one tool call is
-  an input to the next (e.g., first search for a URL, then fetch that URL), emit
-  them in separate responses.
-- **`request_tools` is always alone** — never mix `request_tools` with other
-  tool calls in the same response; tool activation must complete before the
-  newly loaded tools can be used.
-
-## Search and Research Persistence
-
-When a task requires gathering information from the web:
-- Issue at least three searches with varied queries before synthesising a final answer. A single search rarely captures the full picture.
-- If initial results are sparse, ambiguous, or contradict each other, search again with a rephrased or more specific query.
-- Prefer to confirm facts from two independent sources when accuracy matters.
-- Only stop searching when you have enough evidence to answer with confidence, or when repeated searches return no new information.
-- When search snippets are insufficient, use `http_get` to fetch the full content of the most promising URLs. Do not rely solely on snippets — they often omit the specific data you need; fetch at least the top 2–3 most relevant pages.
-
-## User-Provided Constraints
-
-When the user states a fact in their prompt (e.g., "the Docker image is already
-built", "use version 3.2", "the file is at /tmp/data.csv"):
-
-- **Trust it.** Do not verify, re-search, or second-guess unless the fact
-  demonstrably fails (e.g., the file doesn't exist when you try to read it).
-- If a user-stated fact turns out to be wrong, note the discrepancy once and
-  proceed with the corrected information — do not retry the original assertion.
-- Never override user constraints with your own assumptions.
+## User Constraints
+Trust user-stated facts. Don't verify unless they demonstrably fail.
 
 ## Context Budget
-
-You have a **limited context window**.  Every tool output consumes part of it.
-
-**Be strategic:**
-- Prefer `list_directory` first, then read only the files you need.
-- Don't read entire large files — use `start_line` and `max_lines` to page
-  (e.g. 200 lines at a time).
-- If output shows "[truncated]", read only the needed section instead of
-  re-reading everything.
-- Delegate independent subtasks to free up your own context.
+Limited context window. Use `list_directory` first, then read only needed files. Page large files (200 lines). Delegate independent subtasks.
 """
 
 
@@ -220,8 +156,8 @@ def _format_model_detail(value: Any) -> str:
         extras: list[str] = []
         if value.temperature is not None:
             extras.append(f"temp={value.temperature}")
-        if value.num_ctx is not None:
-            extras.append(f"ctx={value.num_ctx}")
+        if value.context_window is not None:
+            extras.append(f"ctx={value.context_window}")
         detail = f"{value.provider}/{value.model}"
         if extras:
             detail += f" ({', '.join(extras)})"
@@ -232,7 +168,9 @@ def _format_model_detail(value: Any) -> str:
         extras = []
         if "temperature" in value:
             extras.append(f"temp={value['temperature']}")
-        if "num_ctx" in value:
+        if "context_window" in value:
+            extras.append(f"ctx={value['context_window']}")
+        elif "num_ctx" in value:
             extras.append(f"ctx={value['num_ctx']}")
         detail = f"{provider}/{model}"
         if extras:
@@ -316,6 +254,9 @@ def format_milestone_instructions(milestones: list) -> str:
     return "\n".join(lines)
 
 
+_DELEGATE_TOOL_NAMES: frozenset[str] = frozenset({"delegate_task", "delegate_parallel"})
+
+
 def build_system_prompt(
     base_prompt: str | None = None,
     mode_additions: str | None = None,
@@ -323,6 +264,7 @@ def build_system_prompt(
     delegation_models: list[str] | None = None,
     tool_instructions: str | None = None,
     milestone_instructions: str | None = None,
+    active_tool_names: set[str] | None = None,
 ) -> str:
     """
     Build a complete system prompt with mode-specific additions.
@@ -342,6 +284,12 @@ def build_system_prompt(
         milestone_instructions: Optional milestone progress section
             generated by ``format_milestone_instructions()``.  When
             non-None, appended after ``tool_instructions``.
+        active_tool_names: Set of tool names currently active or available
+            to the agent (active + on-demand pool).  When provided, the
+            models table is only included if a delegation tool
+            (``delegate_task`` or ``delegate_parallel``) is present.
+            When ``None``, the table is included whenever *models* is
+            non-empty (backward-compatible default).
 
     Returns:
         Combined system prompt
@@ -350,9 +298,16 @@ def build_system_prompt(
 
     parts = [base]
 
-    models_section = _format_models_table(
-        models or {},
-        delegation_models=delegation_models,
+    delegation_accessible = active_tool_names is None or bool(
+        active_tool_names & _DELEGATE_TOOL_NAMES
+    )
+    models_section = (
+        _format_models_table(
+            models or {},
+            delegation_models=delegation_models,
+        )
+        if delegation_accessible
+        else ""
     )
     if models_section:
         parts.append(models_section)
@@ -566,7 +521,7 @@ def prepare_messages_with_context(
         user_input: Current user input
         context_prefix: Mode-specific context to inject
         max_context_tokens: Token budget for the full prompt (from
-            ``ProviderConfig.num_ctx`` or a sensible default).  When set,
+            ``ModelConfig.context_window`` or a sensible default).  When set,
             the function trims history to leave room for the LLM response.
 
     Returns:
@@ -598,16 +553,22 @@ def prepare_messages_with_context(
     return result
 
 
-def create_llm_from_provider_config(provider_config: "ProviderConfig") -> Any:
+def create_llm_from_provider_config(
+    provider_config: "ProviderConfig",
+    model_config: "ModelConfig | None" = None,
+) -> Any:
     """
-    Create an LLM instance from a ProviderConfig.
+    Create an LLM instance from a ProviderConfig and optional ModelConfig.
 
     Delegates to the centralized ``src.providers`` registry which
     supports openai, ollama, anthropic, google, and OpenAI-compatible
     providers (xAI, vLLM, Groq, etc.).
 
     Args:
-        provider_config: Provider configuration object
+        provider_config: Provider connection configuration.
+        model_config: Model settings (model name, temperature, etc.).
+            When omitted, a default ModelConfig is synthesized from the
+            provider's default model.
 
     Returns:
         LLM instance ready for use
@@ -616,18 +577,25 @@ def create_llm_from_provider_config(provider_config: "ProviderConfig") -> Any:
         ImportError: If required packages are not installed
         ValueError: If provider type is not supported
     """
+    from src.config import ModelConfig as _ModelConfig
+    from src.providers import create_chat_model_from_configs, get_default_model
+
     log = get_logger()
 
-    from src.providers import create_chat_model_from_config
+    if model_config is None:
+        model_config = _ModelConfig(
+            provider=provider_config.name,
+            model=get_default_model(provider_config.type),
+        )
 
     log.debug(
         "Creating LLM from config: name=%s, type=%s, model=%s",
         provider_config.name,
         provider_config.type,
-        provider_config.get_model(),
+        model_config.model,
     )
 
-    llm = create_chat_model_from_config(provider_config)
+    llm = create_chat_model_from_configs(provider_config, model_config)
 
     log.debug("LLM created: %s", type(llm).__name__)
     return llm

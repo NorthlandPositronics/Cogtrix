@@ -290,20 +290,22 @@ def json_to_text(json_str: str) -> str:
         Human-readable text representation
     """
 
-    def _to_text(obj, prefix=""):
+    def _to_text(obj, prefix="", depth: int = 0, max_depth: int = 50):
+        if depth > max_depth:
+            return [f"{prefix}... (max depth {max_depth} exceeded)"]
         lines = []
         if isinstance(obj, dict):
             for key, value in obj.items():
                 if isinstance(value, (dict, list)):
                     lines.append(f"{prefix}{key}:")
-                    lines.extend(_to_text(value, prefix + "  "))
+                    lines.extend(_to_text(value, prefix + "  ", depth + 1, max_depth))
                 else:
                     lines.append(f"{prefix}{key}: {value}")
         elif isinstance(obj, list):
             for i, item in enumerate(obj):
                 if isinstance(item, (dict, list)):
                     lines.append(f"{prefix}[{i + 1}]:")
-                    lines.extend(_to_text(item, prefix + "  "))
+                    lines.extend(_to_text(item, prefix + "  ", depth + 1, max_depth))
                 else:
                     lines.append(f"{prefix}- {item}")
         else:

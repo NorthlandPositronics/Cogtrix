@@ -5,6 +5,7 @@ Enhanced with working directory and configurable timeout options.
 
 import os
 import shlex
+import signal
 import subprocess  # nosec B404
 from pathlib import Path
 
@@ -46,6 +47,9 @@ def execute_shell_command(
     Returns:
         Command output (stdout) or error message (stderr)
     """
+    if not cmd or not cmd.strip():
+        return "Error: No command provided."
+
     # Validate and clamp timeout
     timeout = min(max(1, timeout), 300)
 
@@ -66,35 +70,46 @@ def execute_shell_command(
         if needs_shell:
             # Use shell=True so pipes, redirects, etc. work correctly.
             # Safety is enforced by the confirmation prompt (requires_confirmation=True).
-            result = subprocess.run(  # nosec B602
+            proc = subprocess.Popen(  # nosec B602
                 cmd,
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
-                timeout=timeout,
-                check=False,
                 cwd=cwd,
                 shell=True,  # nosec B602
+                start_new_session=True,
             )
         else:
             # Simple command — use shlex.split for cleaner execution
             cmd_parts = shlex.split(cmd)
-            result = subprocess.run(  # nosec B603
+            proc = subprocess.Popen(  # nosec B603
                 cmd_parts,
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
-                timeout=timeout,
-                check=False,  # Don't raise on non-zero exit
                 cwd=cwd,
+                start_new_session=True,
             )
 
+        try:
+            stdout, stderr = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            # Kill the entire process group so grandchild processes are cleaned up
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except OSError:
+                proc.kill()
+            proc.wait()
+            return f"Error: Command execution timed out after {timeout} seconds"
+
         # Combine stdout and stderr
-        output = result.stdout
-        if result.stderr:
-            output += f"\n[stderr]\n{result.stderr}"
+        output = stdout
+        if stderr:
+            output += f"\n[stderr]\n{stderr}"
 
         # Include exit code if non-zero
-        if result.returncode != 0:
-            output += f"\n[exit code: {result.returncode}]"
+        if proc.returncode != 0:
+            output += f"\n[exit code: {proc.returncode}]"
 
         _SAFETY_CAP = 50_000
         if len(output) > _SAFETY_CAP:
@@ -107,12 +122,10 @@ def execute_shell_command(
 
         if output.strip():
             return output
-        if result.returncode != 0:
-            return f"Command failed with no output (exit code: {result.returncode})"
-        return f"Command executed successfully (exit code: {result.returncode})"
+        if proc.returncode != 0:
+            return f"Command failed with no output (exit code: {proc.returncode})"
+        return f"Command executed successfully (exit code: {proc.returncode})"
 
-    except subprocess.TimeoutExpired:
-        return f"Error: Command execution timed out after {timeout} seconds"
     except FileNotFoundError:
         cmd_name = cmd.split()[0] if cmd.split() else cmd
         return f"Error: Command not found: {cmd_name}"

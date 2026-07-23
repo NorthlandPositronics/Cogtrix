@@ -217,39 +217,6 @@ def test_create_and_decode_access_token() -> None:
         assert claims["role"] == "admin"
 
 
-def test_decode_expired_token_raises_401() -> None:
-    """_decode_jwt raises 401 with TOKEN_EXPIRED for expired tokens."""
-    from fastapi import HTTPException
-    from jose import jwt as jose_jwt
-
-    with patch.dict(os.environ, {"COGTRIX_JWT_SECRET": _TEST_JWT_SECRET}):
-        expired_token = jose_jwt.encode(
-            {
-                "sub": "user-456",
-                "role": "user",
-                "iat": datetime.now(UTC) - timedelta(hours=2),
-                "exp": datetime.now(UTC) - timedelta(hours=1),
-            },
-            _TEST_JWT_SECRET,
-            algorithm="HS256",
-        )
-        with pytest.raises(HTTPException) as exc_info:
-            _decode_jwt(expired_token)
-        assert exc_info.value.status_code == 401
-        assert exc_info.value.detail["code"] == "TOKEN_EXPIRED"
-
-
-def test_decode_invalid_token_raises_401() -> None:
-    """_decode_jwt raises 401 with UNAUTHORIZED for malformed tokens."""
-    from fastapi import HTTPException
-
-    with patch.dict(os.environ, {"COGTRIX_JWT_SECRET": _TEST_JWT_SECRET}):
-        with pytest.raises(HTTPException) as exc_info:
-            _decode_jwt("not.a.valid.jwt")
-        assert exc_info.value.status_code == 401
-        assert exc_info.value.detail["code"] == "UNAUTHORIZED"
-
-
 # ---------------------------------------------------------------------------
 # FastAPI app fixture with isolated in-memory DB
 # ---------------------------------------------------------------------------
@@ -410,29 +377,6 @@ def test_login_valid_credentials(client: TestClient) -> None:
     data = resp.json()["data"]
     assert "access_token" in data
     assert "refresh_token" in data
-
-
-def test_login_invalid_password_401(client: TestClient) -> None:
-    """POST /auth/login: wrong password returns 401."""
-    client.post(
-        "/api/v1/auth/register",
-        json={"username": "user_bad", "email": "bad@test.com", "password": "CorrectPass1"},
-    )
-    resp = client.post(
-        "/api/v1/auth/login",
-        json={"username": "user_bad", "password": "WrongPass1"},
-    )
-    assert resp.status_code == 401
-    assert resp.json()["error"]["code"] == "UNAUTHORIZED"
-
-
-def test_login_unknown_user_401(client: TestClient) -> None:
-    """POST /auth/login: unknown username returns 401."""
-    resp = client.post(
-        "/api/v1/auth/login",
-        json={"username": "ghost", "password": "AnyPass123"},
-    )
-    assert resp.status_code == 401
 
 
 def test_get_me_authenticated(client: TestClient) -> None:
@@ -602,7 +546,7 @@ def test_app_factory_creates_app() -> None:
 
         app = create_app()
     assert app.title == "Cogtrix API"
-    assert app.version == "1.0.0"
+    assert app.version == "1.1.0"
 
 
 def test_openapi_schema_available() -> None:

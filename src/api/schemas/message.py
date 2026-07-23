@@ -10,7 +10,9 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+from src.api.schemas.common import ensure_utc
 
 # ---------------------------------------------------------------------------
 # Tool call sub-objects (embedded in AI messages)
@@ -97,6 +99,8 @@ class MessageOut(BaseModel):
         ...,
         description="UTC timestamp when the message was created.",
     )
+
+    _ensure_utc = field_validator("created_at", mode="before")(ensure_utc)
 
 
 # ---------------------------------------------------------------------------

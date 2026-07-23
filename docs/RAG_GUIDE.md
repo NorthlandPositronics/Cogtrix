@@ -91,7 +91,6 @@ You: What does the policy say about remote work?
 | Markdown | `.md`, `.markdown` | Plain text with formatting |
 | Text | `.txt` | Plain text files |
 | CSV | `.csv` | Tabular data |
-| DOCX | `.docx` | Microsoft Word documents |
 
 ### Best Practices
 
@@ -102,7 +101,7 @@ You: What does the policy say about remote work?
 
 ### Directory Structure
 
-Place all files directly in the docs directory — **subdirectories are not traversed**.
+Place files in the docs directory — **subdirectories are traversed recursively**.
 
 ```
 docs/
@@ -174,6 +173,16 @@ python cogtrix.py --ingest
 ---
 
 ## Querying
+
+### Auto-Activation
+
+When a knowledge base exists (either a global CLI index or per-document API indexes), the `query_knowledge_base` tool is **automatically pinned as active** at startup. The agent can use it immediately without loading it via `request_tools`. The tool description dynamically shows the number of indexes and their total size.
+
+The tool searches all available FAISS indexes:
+- **Global CLI index** — built via `--ingest`, stored at `data/vectordb/faiss_index/`
+- **Per-document API indexes** — created when documents are uploaded via the API, stored at `data/api/uploads/{doc_id}/vectordb/faiss_index/`
+
+Results from all indexes are merged and deduplicated by content (first 200 characters).
 
 ### In Conversation
 
@@ -424,7 +433,7 @@ python cogtrix.py --ingest --docs-dir ./legal --vectordb-dir ./data/legal-vector
 python cogtrix.py --ingest --docs-dir ./tech --vectordb-dir ./data/tech-vectordb
 ```
 
-Note: Currently, only one knowledge base can be queried at a time (the one in config).
+All available indexes (global CLI index and per-document API indexes) are searched automatically and results are merged.
 
 ### Programmatic Access
 

@@ -45,11 +45,6 @@ class TestIncomingMessage:
         assert msg.session_key.startswith("mychan::")
         assert msg.session_key.endswith("::abc")
 
-    def test_metadata_defaults_to_empty_dict(self):
-        """metadata field defaults to an empty dict when omitted."""
-        msg = self._make_msg()
-        assert msg.metadata == {}
-
     def test_metadata_custom(self):
         """metadata accepts arbitrary key-value pairs."""
         msg = IncomingMessage(

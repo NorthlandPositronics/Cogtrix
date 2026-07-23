@@ -31,6 +31,7 @@ def _make_tg_channel(config: dict | None = None) -> TelegramChannel:
         cfg.update(config)
     ch = TelegramChannel(cfg, long_poll_timeout=0)
     ch._client = MagicMock(spec=TelegramBotClient)
+    ch._seeded = True  # bypass cold-start drain loop in tests
     return ch
 
 

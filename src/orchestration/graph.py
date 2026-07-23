@@ -11,6 +11,7 @@ import concurrent.futures
 import json as _json
 import re
 import threading
+import time
 import types
 import typing
 from collections import OrderedDict
@@ -57,7 +58,7 @@ def _get_tool_executor() -> concurrent.futures.ThreadPoolExecutor:
                     max_workers=_PARALLEL_TOOL_WORKERS,
                     thread_name_prefix="tool",
                 )
-                atexit.register(_TOOL_EXECUTOR.shutdown, wait=False)
+                atexit.register(_TOOL_EXECUTOR.shutdown, wait=False, cancel_futures=True)
     return _TOOL_EXECUTOR
 
 
@@ -108,6 +109,14 @@ def _detect_tool_request(messages: list, start_idx: int = 0) -> ToolManagementRe
                 # Legacy fallback: bare ``names`` list → treat as add
                 if not add_names and not remove_names:
                     add_names = args.get("names", [])
+
+                # Normalize bare strings to single-element lists so
+                # {"add": "web_search"} works the same as {"add": ["web_search"]}
+                # (BUG-204).
+                if isinstance(add_names, str):
+                    add_names = [add_names]
+                if isinstance(remove_names, str):
+                    remove_names = [remove_names]
 
                 if isinstance(add_names, list):
                     all_add.extend(str(n) for n in add_names)
@@ -201,6 +210,28 @@ def _strip_failed_tool_messages(messages: list, tool_names: set[str]) -> list:
     return final
 
 
+_FUZZY_ARG_BLOCKLIST: frozenset[str] = frozenset(
+    {
+        "data",
+        "name",
+        "port",
+        "code",
+        "type",
+        "text",
+        "path",
+        "file",
+        "mode",
+        "size",
+        "body",
+        "host",
+        "user",
+        "role",
+        "args",
+        "keys",
+    }
+)
+
+
 def _correct_tool_args(tool: Any, args: dict) -> dict:
     """Best-effort correction of misnamed tool arguments.
 
@@ -254,8 +285,9 @@ def _correct_tool_args(tool: Any, args: dict) -> dict:
                 shorter_len = min(len(unk_lower), len(exp_lower))
                 longer_len = max(len(unk_lower), len(exp_lower))
                 if (
-                    shorter_len >= 4
-                    and shorter_len / longer_len >= 0.4
+                    shorter_len >= 5
+                    and shorter_len / longer_len >= 0.5
+                    and unk_lower not in _FUZZY_ARG_BLOCKLIST
                     and (unk_lower in exp_lower or exp_lower in unk_lower)
                 ):
                     ratio = 1.0
@@ -265,7 +297,7 @@ def _correct_tool_args(tool: Any, args: dict) -> dict:
                     best_ratio = ratio
                     best = exp
                     tied = False
-                elif ratio == best_ratio and ratio >= _REMAP_THRESHOLD:
+                elif abs(ratio - best_ratio) < 1e-9 and ratio >= _REMAP_THRESHOLD:
                     tied = True
             if best is not None and best_ratio >= _REMAP_THRESHOLD and not tied:
                 corrected[best] = corrected.pop(unk)
@@ -353,13 +385,6 @@ def build_agent_graph(
             max_context_tokens = config.max_context_tokens
         if config.preset_tools is not None:
             preset_tools = config.preset_tools
-        context_compression = config.context_compression
-        if config.compression_min_age is not None:
-            compression_min_age = config.compression_min_age
-        if config.compression_min_chars is not None:
-            compression_min_chars = config.compression_min_chars
-        if config.compression_llm is not None:
-            compression_llm = config.compression_llm
         if config.tool_call_guard is not None:
             tool_call_guard = config.tool_call_guard
         if config.session_state is not None:
@@ -369,6 +394,13 @@ def build_agent_graph(
         if config.on_tool_expansion is not None:
             on_tool_expansion = config.on_tool_expansion
         parallel_tool_execution = config.parallel_tool_execution
+        context_compression = config.context_compression
+        if config.compression_llm is not None:
+            compression_llm = config.compression_llm
+        if config.compression_min_age is not None:
+            compression_min_age = config.compression_min_age
+        if config.compression_min_chars is not None:
+            compression_min_chars = config.compression_min_chars
 
     if active_tools_list is None:
         active_tools_list = []
@@ -384,9 +416,6 @@ def build_agent_graph(
     expansion_count = [0]
     auto_expansion_count = [0]
     call_count = [0]
-    compression_cache: dict[str, str] = (
-        compression_cache_in if compression_cache_in is not None else {}
-    )
     _MAX_PHANTOM_RETRIES = 3
     _MAX_TOOL_EXPANSIONS = 3
     request_tools_noop_count = [0]
@@ -414,13 +443,24 @@ def build_agent_graph(
         if max_context_tokens
         else TOOL_OUTPUT_CAP_MIN_CHARS
     )
-    _sys_msg = SystemMessage(content=system_prompt)
+    _sys_msg = SystemMessage(content=system_prompt) if system_prompt else None
     _tool_lookup: dict[str, Any] = {getattr(t, "name", ""): t for t in active_tools_list}
     _tool_lookup.pop("", None)
     _active_names: set[str] = set(_tool_lookup.keys())
     tool_catalog: dict[str, str] = build_tool_catalog(available_tools)
 
+    _compression_cache: dict[str, str] = (
+        compression_cache_in if compression_cache_in is not None else {}
+    )
+
+    _graph_log = get_logger()
+
     def call_model(state: CogtrixState, config: RunnableConfig) -> dict:
+        if llm is None:
+            raise RuntimeError(
+                "LLM not configured — check provider settings, API keys, and config file"
+            )
+        _cm_t0 = time.monotonic()
         call_count[0] += 1
         if _tool_version[0] != _last_tool_version[0]:
             _cached_fingerprint[0] = (
@@ -438,20 +478,23 @@ def build_agent_graph(
                 _bound_cache.popitem(last=False)
             _bound_cache[fingerprint] = llm.bind_tools(tool_list) if tool_list else llm
         model = _bound_cache[fingerprint]
-        if context_compression:
-            full_messages = [_sys_msg] + list(state["messages"])
-            full_messages = apply_message_compression(
-                full_messages,
+        _graph_log.debug("⏱ call_model bind_tools: %.0fms", (time.monotonic() - _cm_t0) * 1000)
+        msgs = list(state["messages"])
+        _comp_llm = compression_llm or llm
+        if context_compression and _comp_llm is not None and call_count[0] > 1:
+            msgs = apply_message_compression(
+                msgs,
                 call_count=call_count[0],
-                compression_cache=compression_cache,
-                llm=compression_llm or llm,
+                compression_cache=_compression_cache,
+                llm=_comp_llm,
                 max_context_tokens=max_context_tokens,
                 min_age_cycles=compression_min_age,
                 min_chars=compression_min_chars,
             )
-        else:
-            full_messages = [_sys_msg, *state["messages"]]
+        full_messages = [_sys_msg, *msgs] if _sys_msg is not None else list(msgs)
+        _cm_t1 = time.monotonic()
         response = model.invoke(full_messages, config)
+        _graph_log.debug("⏱ call_model model.invoke: %.0fms", (time.monotonic() - _cm_t1) * 1000)
         return {"messages": [response]}
 
     def handle_phantom(state: CogtrixState) -> dict:
@@ -728,14 +771,19 @@ def build_agent_graph(
                             "args": corrected_args,
                         }
                         result = tool_obj.invoke(corrected_input, config)
+                        # Store cache key under the resolved name so
+                        # deduplication works for both alias and canonical
+                        # name (BUG-198).
+                        resolved_call = {**call, "name": match}
                         if isinstance(result, ToolMessage):
                             _store_call_result(
-                                call, result.content if isinstance(result.content, str) else ""
+                                resolved_call,
+                                result.content if isinstance(result.content, str) else "",
                             )
                             result_msgs.append(result)
                         else:
                             text = str(result) if result is not None else ""
-                            _store_call_result(call, text)
+                            _store_call_result(resolved_call, text)
                             result_msgs.append(
                                 ToolMessage(
                                     content=text,
@@ -815,7 +863,20 @@ def build_agent_graph(
             futures = [(call, pool.submit(_invoke_one, call, config)) for call in parallel_calls]
             for call, future in futures:
                 try:
-                    result_msgs.append(future.result())
+                    # 10-minute timeout prevents indefinite hangs from stuck
+                    # tool calls (BUG-202).  On timeout, produce an error
+                    # ToolMessage so LangGraph's 1:1 tool_call_id mapping
+                    # is preserved.
+                    result_msgs.append(future.result(timeout=600))
+                except (TimeoutError, concurrent.futures.TimeoutError):
+                    log.warning("Tool '%s' timed out after 600s", call["name"])
+                    result_msgs.append(
+                        ToolMessage(
+                            content=f"Error: tool '{call['name']}' timed out after 10 minutes",
+                            tool_call_id=call["id"],
+                            name=call["name"],
+                        )
+                    )
                 except UserCancelledRun:
                     cancel_requested = True
                     result_msgs.append(

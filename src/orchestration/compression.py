@@ -10,6 +10,7 @@ import atexit
 import concurrent.futures
 import re
 import secrets
+import threading
 from typing import Any
 
 from src.logging_config import get_logger
@@ -28,10 +29,21 @@ COMPRESSION_MIN_CHARS = 2_000
 _COMPRESSION_THRESHOLD_RATIO = 0.72
 _FALLBACK_MAX_CHARS = 30_000
 
-_COMPRESSION_POOL = concurrent.futures.ThreadPoolExecutor(
-    max_workers=4, thread_name_prefix="compress"
-)
-atexit.register(_COMPRESSION_POOL.shutdown, wait=False)
+_COMPRESSION_POOL: concurrent.futures.ThreadPoolExecutor | None = None
+_COMPRESSION_POOL_LOCK = threading.Lock()
+
+
+def _get_compression_pool() -> concurrent.futures.ThreadPoolExecutor:
+    """Return the module-level compression pool, creating it on first use."""
+    global _COMPRESSION_POOL
+    if _COMPRESSION_POOL is None:
+        with _COMPRESSION_POOL_LOCK:
+            if _COMPRESSION_POOL is None:
+                _COMPRESSION_POOL = concurrent.futures.ThreadPoolExecutor(
+                    max_workers=4, thread_name_prefix="compress"
+                )
+                atexit.register(_COMPRESSION_POOL.shutdown, wait=False, cancel_futures=True)
+    return _COMPRESSION_POOL
 
 
 def _content_len(msg: Any) -> int:
@@ -208,15 +220,45 @@ def apply_message_compression(
             content, tool_name, _ = eligible[idx]
             try:
                 return idx, compress_tool_message(content, tool_name, llm)
-            except Exception:
+            except Exception as exc:
+                log.debug("Compression failed for tool %s: %s", tool_name, exc)
                 return idx, truncate_tool_output(
                     content, min(len(content) * 3 // 4, _FALLBACK_MAX_CHARS)
                 )
 
-        futures = {_COMPRESSION_POOL.submit(_compress_one, i): i for i in eligible}
-        for future in concurrent.futures.as_completed(futures):
-            idx, compressed = future.result()
-            compressed_results[idx] = compressed
+        pool = _get_compression_pool()
+        futures = {pool.submit(_compress_one, i): i for i in eligible}
+        total_timeout = 60 * len(eligible)
+        try:
+            for future in concurrent.futures.as_completed(futures, timeout=total_timeout):
+                idx = futures[future]
+                try:
+                    _, compressed = future.result(timeout=120)
+                except (TimeoutError, concurrent.futures.TimeoutError):
+                    content = eligible[idx][0]
+                    log.warning(
+                        "Compression LLM timeout for tool message at index %d"
+                        " — falling back to truncation",
+                        idx,
+                    )
+                    compressed = truncate_tool_output(
+                        content, min(len(content) * 3 // 4, _FALLBACK_MAX_CHARS)
+                    )
+                compressed_results[idx] = compressed
+        except (TimeoutError, concurrent.futures.TimeoutError):
+            not_done = len(futures) - len(compressed_results)
+            log.warning(
+                "Compression pool timed out (%ds) — %d message(s) not compressed,"
+                " using truncation",
+                total_timeout,
+                not_done,
+            )
+            for _future, idx in futures.items():
+                if idx not in compressed_results:
+                    content = eligible[idx][0]
+                    compressed_results[idx] = truncate_tool_output(
+                        content, min(len(content) * 3 // 4, _FALLBACK_MAX_CHARS)
+                    )
 
         # Update cache sequentially — no concurrent writes.
         for idx, compressed in compressed_results.items():
@@ -266,33 +308,39 @@ def create_compression_llm(model_ref: str, config: Any) -> Any:
     """
     log = get_logger()
     try:
-        from copy import copy
-
         from src.agent.core import create_llm_from_provider_config
+        from src.config import ModelConfig
 
         provider_name: str | None = None
         model_name: str | None = None
+        mc = None
 
-        mc = config.get_model_config(model_ref)
-        if mc is not None:
-            provider_name = mc.provider
-            model_name = mc.model
+        resolved_mc = config.get_model_config(model_ref)
+        if resolved_mc is not None:
+            provider_name = resolved_mc.provider
+            model_name = resolved_mc.model
+            mc = resolved_mc
         elif "/" in model_ref:
             provider_name, model_name = model_ref.split("/", 1)
         else:
-            provider_name = config.provider
+            try:
+                active_mc = config.get_active_model()
+                provider_name = active_mc.provider
+            except Exception:
+                provider_name = next(iter(config.providers), "ollama")
             model_name = model_ref
 
-        prov_cfg = copy(config.get_provider_config(provider_name))
-        if model_name:
-            prov_cfg.model = model_name
-        if mc is not None:
-            if mc.num_ctx is not None:
-                prov_cfg.num_ctx = mc.num_ctx
-            if mc.temperature is not None:
-                prov_cfg.temperature = mc.temperature
+        prov_cfg = config.get_provider_config(provider_name)
+        model_cfg = (
+            mc
+            if mc is not None
+            else ModelConfig(
+                provider=provider_name or "ollama",
+                model=model_name or "",
+            )
+        )
 
-        llm = create_llm_from_provider_config(prov_cfg)
+        llm = create_llm_from_provider_config(prov_cfg, model_cfg)
         log.info("Compression LLM created: %s/%s", provider_name, model_name)
         return llm
     except Exception as exc:

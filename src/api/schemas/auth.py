@@ -5,7 +5,10 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, field_validator
+
+from src.api.schemas.common import ensure_utc
+from src.api.schemas.validators import validate_password_complexity
 
 # ---------------------------------------------------------------------------
 # Enumerations
@@ -44,9 +47,11 @@ class RegisterRequest(BaseModel):
         ...,
         min_length=8,
         max_length=128,
-        description="Password (8–128 chars; bcrypt hashed server-side).",
+        description="Password (8–128 chars; must include lowercase, uppercase, digit, and special character).",
         examples=["s3cur3P@ss"],
     )
+
+    _password_complexity = field_validator("password")(validate_password_complexity)
 
 
 class LoginRequest(BaseModel):
@@ -134,6 +139,8 @@ class UserOut(BaseModel):
         description="UTC timestamp of account creation.",
     )
 
+    _ensure_utc = field_validator("created_at", mode="before")(ensure_utc)
+
 
 # ---------------------------------------------------------------------------
 # API keys (programmatic access)
@@ -194,4 +201,8 @@ class APIKeyOut(BaseModel):
     last_used_at: datetime | None = Field(
         default=None,
         description="UTC timestamp of the last authenticated request using this key.",
+    )
+
+    _ensure_utc = field_validator("created_at", "expires_at", "last_used_at", mode="before")(
+        ensure_utc
     )

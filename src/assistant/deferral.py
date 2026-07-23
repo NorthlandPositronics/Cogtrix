@@ -319,17 +319,18 @@ class DeferralManager:
 
         with self._lock:
             existing = self._records.get(session_key)
-            if existing is not None and existing.status == "pending":
+            if existing is not None and existing.status in ("pending", "firing"):
                 # Merge: extend fire_at to the later of the two timers
                 existing.fire_at = max(existing.fire_at, fire_at)
                 existing.pending_messages.append(self._msg_to_dict(msg))
                 existing.deferral_depth = depth
                 record_id = existing.id
                 log.debug(
-                    "Merged deferral for %s (depth=%d, fire_at=%.0f)",
+                    "Merged deferral for %s (depth=%d, fire_at=%.0f, status=%s)",
                     session_key,
                     depth,
                     existing.fire_at,
+                    existing.status,
                 )
             else:
                 record = DeferredRecord(
@@ -355,15 +356,15 @@ class DeferralManager:
         return record_id
 
     def add_message(self, msg: Any) -> bool:  # IncomingMessage at runtime
-        """Append *msg* to any pending deferred record for its session_key.
+        """Append *msg* to any pending or firing deferred record for its session_key.
 
         Returns True if the message was appended (a deferred record is pending
-        for this chat), False otherwise.
+        or firing for this chat), False otherwise.
         """
         session_key = msg.session_key
         with self._lock:
             record = self._records.get(session_key)
-            if record is None or record.status != "pending":
+            if record is None or record.status not in ("pending", "firing"):
                 return False
             record.pending_messages.append(self._msg_to_dict(msg))
 
@@ -568,6 +569,8 @@ class DeferralManager:
                 return
             current.status = "firing"
 
+        self.save()
+
         channel = self._channels.get(record.channel)
         if channel is None:
             log.warning(
@@ -636,6 +639,7 @@ class DeferralManager:
                 session_key,
                 exc,
                 _BACKOFF_SECONDS,
+                exc_info=True,
             )
             with self._lock:
                 current = self._records.get(session_key)

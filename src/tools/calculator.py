@@ -6,6 +6,7 @@ Supports basic arithmetic and common mathematical functions.
 import ast
 import math
 import operator
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -20,6 +21,18 @@ class CalculatorInput(BaseModel):
     )
 
 
+def _safe_factorial(n: int) -> int:
+    if n > 1558:
+        raise ValueError("factorial argument too large to display (max 1558)")
+    return math.factorial(n)
+
+
+def _safe_pow(base: Any, exp: Any) -> Any:
+    if isinstance(exp, (int, float)) and abs(exp) >= 1_000:
+        raise ValueError("exponent magnitude too large (max 999)")
+    return operator.pow(base, exp)
+
+
 # Supported operators
 OPERATORS = {
     ast.Add: operator.add,
@@ -28,16 +41,10 @@ OPERATORS = {
     ast.Div: operator.truediv,
     ast.FloorDiv: operator.floordiv,
     ast.Mod: operator.mod,
-    ast.Pow: operator.pow,
+    ast.Pow: _safe_pow,
     ast.USub: operator.neg,
     ast.UAdd: operator.pos,
 }
-
-
-def _safe_factorial(n: int) -> int:
-    if n > 1558:
-        raise ValueError("factorial argument too large to display (max 1558)")
-    return math.factorial(n)
 
 
 # Supported functions

@@ -57,14 +57,16 @@ def _get_append_lock(path: str) -> _RefLock:
             _append_locks[path] = ref_lock
         with ref_lock._ref_lock:
             ref_lock.ref_count += 1
-        while len(_append_locks) > _APPEND_LOCK_MAX:
-            oldest_key, candidate = next(iter(_append_locks.items()))
-            with candidate._ref_lock:
-                if candidate.ref_count == 0:
-                    _append_locks.popitem(last=False)
-                else:
-                    _append_locks.move_to_end(oldest_key)
-                    break
+        skipped = 0
+        max_skip = min(len(_append_locks), 32)
+        while len(_append_locks) >= _APPEND_LOCK_MAX and skipped < max_skip:
+            key, lock_ref = next(iter(_append_locks.items()))
+            with lock_ref._ref_lock:
+                if lock_ref.ref_count > 0:
+                    _append_locks.move_to_end(key)
+                    skipped += 1
+                    continue
+                del _append_locks[key]
         return ref_lock
 
 
@@ -391,7 +393,7 @@ def list_directory(path: str = ".", pattern: str = "*", show_hidden: bool = Fals
             if item.is_dir():
                 entries.append(f"[DIR]  {name}/")
             else:
-                size = item.stat().st_size
+                size = item.lstat().st_size
                 if size < 1024:
                     size_str = f"{size} B"
                 elif size < 1024 * 1024:

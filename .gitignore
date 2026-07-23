@@ -29,6 +29,7 @@ ENV/
 # ── IDE & editor ─────────────────────────────────────────────────
 .vscode/
 .idea/
+.tmp/
 .cursor
 *.swp
 *.swo

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from sqlalchemy import case, func, insert, literal, select
+from sqlalchemy import case, delete, func, insert, literal, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.db.models import User
@@ -84,3 +84,20 @@ class UserRepository:
         )
         result = await self._db.execute(stmt)
         return result.scalar_one()
+
+    async def list_all(self) -> list[User]:
+        """Return all users ordered by creation time."""
+        result = await self._db.execute(select(User).order_by(User.created_at))
+        return list(result.scalars().all())
+
+    async def update_role(self, user_id: str, role: str) -> User | None:
+        """Update the role of the user with the given UUID; return the updated user or None."""
+        stmt = update(User).where(User.id == user_id).values(role=role).returning(User)
+        result = await self._db.execute(stmt)
+        return result.scalar_one_or_none()
+
+    async def delete(self, user_id: str) -> bool:
+        """Delete the user with the given UUID; return True if a row was deleted."""
+        stmt = delete(User).where(User.id == user_id)
+        result = await self._db.execute(stmt)
+        return result.rowcount > 0

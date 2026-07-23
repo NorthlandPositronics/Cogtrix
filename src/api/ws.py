@@ -119,6 +119,13 @@ class TokenPayload(BaseModel):
         description="Incremental token text to append to the response buffer.",
         examples=[" Paris"],
     )
+    final: bool = Field(
+        default=False,
+        description=(
+            "True when tokens are generated after at least one tool call has completed "
+            "(final response phase); False for preamble tokens before tools run."
+        ),
+    )
 
 
 class ToolStartPayload(BaseModel):
@@ -184,7 +191,17 @@ class ToolConfirmRequestPayload(BaseModel):
 class AgentStatePayload(BaseModel):
     """Payload for type='agent_state' — agent state machine transition."""
 
-    state: Literal["idle", "thinking", "researching", "writing", "done", "error"] = Field(
+    state: Literal[
+        "idle",
+        "thinking",
+        "analyzing",
+        "researching",
+        "deep_thinking",
+        "writing",
+        "delegating",
+        "done",
+        "error",
+    ] = Field(
         ...,
         description="New agent state.",
         examples=["thinking"],
@@ -389,16 +406,21 @@ class ConnectionManager:
         async with self._lock:
             seq = self._seq.get(session_id, 0)
             self._seq[session_id] = seq + 1
-            buf = self._buffers.setdefault(session_id, deque())
+            self._buffers.setdefault(session_id, deque())
             ws = self._connections.get(session_id)
 
         # CPU-bound serialisation outside the lock so other coroutines can send.
         json_str = self._build_message(session_id, message_type, payload, seq)
 
         # Phase 2: append to replay buffer (separate brief lock acquisition).
+        # Re-fetch buf from _buffers instead of using the Phase-1 reference — a
+        # concurrent connect() call may have replaced the deque between the two
+        # lock acquisitions, and appending to the stale deque would lose this
+        # message from replay_missed.
         async with self._lock:
-            buf.append((seq, datetime.now(UTC).timestamp(), json_str))
-            self._prune_buffer(buf)
+            current_buf = self._buffers.setdefault(session_id, deque())
+            current_buf.append((seq, datetime.now(UTC).timestamp(), json_str))
+            self._prune_buffer(current_buf)
 
         # Network I/O always outside the lock.
         if ws is not None:

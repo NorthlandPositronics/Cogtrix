@@ -25,11 +25,13 @@ async def create_and_start_assistant(
     appropriate HTTP or log-level response.
     """
     from src.assistant.service import AssistantService
-    from src.providers import create_chat_model_from_config
+    from src.providers import create_chat_model_from_configs
 
-    # create_chat_model_from_config may perform network I/O (e.g. Ollama API
+    # Resolve the LLM config from the app Config object and build the LLM.
+    # create_chat_model_from_configs may perform network I/O (e.g. Ollama API
     # introspection); run it off the event loop thread to prevent stalls.
-    llm = await asyncio.to_thread(create_chat_model_from_config, config)
+    pc, mc = config.resolve_llm_config()
+    llm = await asyncio.to_thread(create_chat_model_from_configs, pc, mc)
     tools_dict: dict[str, Any] = dict(tool_registry.tools)
     svc = AssistantService(
         config=config,
@@ -63,32 +65,32 @@ def shutdown_assistant_sync(svc: Any) -> None:
     try:
         if poller is not None:
             poller.stop()
-    except Exception:
-        pass
+    except Exception as exc:
+        log.warning("Error stopping poller: %s", exc)
     try:
         if scheduler is not None:
             scheduler.stop()
             scheduler.save()
-    except Exception:
-        pass
+    except Exception as exc:
+        log.warning("Error stopping scheduler: %s", exc)
     try:
         if deferral_mgr is not None:
             deferral_mgr.stop()
             deferral_mgr.save()
-    except Exception:
-        pass
+    except Exception as exc:
+        log.warning("Error stopping deferral manager: %s", exc)
     try:
         if executor is not None:
             executor.shutdown(wait=True, cancel_futures=False)
-    except Exception:
-        pass
+    except Exception as exc:
+        log.warning("Error shutting down executor: %s", exc)
     try:
         if session_mgr is not None:
             session_mgr.save_all()
-    except Exception:
-        pass
+    except Exception as exc:
+        log.warning("Error saving sessions: %s", exc)
     try:
         if knowledge_store is not None:
             knowledge_store.save()
-    except Exception:
-        pass
+    except Exception as exc:
+        log.warning("Error saving knowledge store: %s", exc)

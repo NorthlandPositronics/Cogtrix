@@ -100,6 +100,7 @@ def force_delegation(
     tool_outputs: str,
     config: Any,
     log: Any,
+    llm: Any = None,
 ) -> str:
     """
     Programmatically invoke delegation when the agent failed to use it
@@ -145,7 +146,7 @@ def force_delegation(
         from langchain_core.messages import HumanMessage as _HM
 
         # Use the primary LLM to decompose
-        llm = build_llm_for_decomposition(config)
+        llm = llm if llm is not None else build_llm_for_decomposition(config)
         if llm is None:
             log.warning("Cannot build LLM for task decomposition")
             return agent_response
@@ -199,12 +200,20 @@ def force_delegation(
             log.warning("Task decomposition produced no subtasks")
             return agent_response
 
-        # Add context from what the agent already gathered
+        # Add context from what the agent already gathered.
+        # Wrap untrusted content in nonce delimiters to prevent prompt injection
+        # via adversarial web content or echoed LLM output (BUG-148 / ARCH-403).
+        _MAX_DELEGATION_CONTEXT = 12_000
         combined_context = ""
         if tool_outputs.strip():
-            combined_context += tool_outputs + "\n\n"
+            safe_tool_outputs = f"<tool_data_{_nonce}>{tool_outputs}</tool_data_{_nonce}>"
+            combined_context += safe_tool_outputs + "\n\n"
         if agent_response.strip():
-            combined_context += "Previous analysis:\n" + agent_response
+            safe_response = f"<prior_response_{_nonce}>{agent_response}</prior_response_{_nonce}>"
+            combined_context += "Previous analysis:\n" + safe_response
+
+        if len(combined_context) > _MAX_DELEGATION_CONTEXT:
+            combined_context = combined_context[:_MAX_DELEGATION_CONTEXT] + "\n[... truncated]"
 
         if combined_context.strip():
             for t in tasks:
@@ -219,7 +228,7 @@ def force_delegation(
     except ImportError:
         log.warning("Required imports for forced delegation not available")
     except Exception as exc:
-        log.error(f"Forced delegation failed: {exc}")
+        log.error("Forced delegation failed: %s", exc, exc_info=True)
 
     return agent_response
 
@@ -234,15 +243,15 @@ def build_llm_for_decomposition(config: Any) -> Any:
     try:
         from src.providers import create_chat_model
 
-        provider_cfg = config.get_provider_config()
+        pc, mc = config.resolve_llm_config()
         return create_chat_model(
-            provider_cfg.type,
-            model=provider_cfg.get_model(),
-            api_key=provider_cfg.api_key,
-            base_url=provider_cfg.get_base_url(),
+            pc.type,
+            model=mc.model,
+            api_key=pc.api_key,
+            base_url=pc.get_base_url(),
             temperature=0.3,
-            num_ctx=provider_cfg.num_ctx if provider_cfg.type == "ollama" else None,
-            max_tokens=provider_cfg.max_tokens,
+            num_ctx=mc.context_window if pc.type == "ollama" else None,
+            max_tokens=mc.max_tokens,
         )
     except Exception as exc:
         log.debug("Failed to build decomposition LLM: %s", exc)
@@ -588,7 +597,12 @@ def run_research_delegate(
             timeout,
         )
 
-        llm = create_delegate_llm(prov, mdl, temperature=0.3, num_ctx=alias_cfg.get("num_ctx"))
+        llm = create_delegate_llm(
+            prov,
+            mdl,
+            temperature=0.3,
+            num_ctx=alias_cfg.get("context_window") or alias_cfg.get("num_ctx"),
+        )
         response_text = run_delegate_agent(llm, research_prompt, "", tools_override=delegate_tools)
 
         if response_text.strip():
@@ -599,7 +613,7 @@ def run_research_delegate(
             return ""
 
     except Exception as exc:  # noqa: BLE001
-        log.warning("Research delegate error: %s", exc)
+        log.warning("Research delegate error: %s", exc, exc_info=True)
         return ""
 
 
@@ -610,6 +624,7 @@ def force_deep_think(
     log: Any,
     *,
     research_context: str | None = None,
+    llm: Any = None,
 ) -> str:
     """
     Programmatically invoke the deep_think tool when the agent failed
@@ -651,20 +666,26 @@ def force_deep_think(
     if not task:
         task = user_input
 
+    import secrets as _secrets
+
+    _dt_nonce = _secrets.token_hex(8)
+    safe_task = f"<user_input_{_dt_nonce}>{task}</user_input_{_dt_nonce}>"
+
     try:
         result = deep_think(
-            task=task,
+            task=safe_task,
             context=full_context,
             max_iterations=3,
             num_branches=3,
             beam_width=2,
+            llm=llm,
         )
         if result and result.strip():
             return result
         log.warning("deep_think returned empty result, using agent response")
         return agent_response
     except Exception as e:  # noqa: BLE001 — must not crash
-        log.warning(f"Programmatic deep_think failed: {e}")
+        log.warning("Programmatic deep_think failed: %s", e, exc_info=True)
         return agent_response
 
 

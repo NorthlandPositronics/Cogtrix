@@ -3,6 +3,8 @@
 import threading
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from src.tools.delegate import (
     _MAX_CIRCUIT_BREAKERS,
     TOOL_CONFIGS,
@@ -50,38 +52,39 @@ class TestConfiguration:
         assert provider == "ollama"
         assert model == "gemma3:12b"
 
-    def test_resolve_alias_with_provider_model(self):
-        """Test resolving alias with provider/model format."""
-        configure_delegate(
-            {
-                "models": {
-                    "smart": "openai/gpt-4",
-                    "code": "ollama/qwen3-coder:30b-a3b",
-                }
-            }
-        )
-
-        provider, model, alias_config = _resolve_model_alias(None, "smart")
-        assert provider == "openai"
-        assert model == "gpt-4"
-
-        provider, model, alias_config = _resolve_model_alias(None, "code")
-        assert provider == "ollama"
-        assert model == "qwen3-coder:30b-a3b"
-
-    def test_resolve_alias_model_only(self):
-        """Test resolving alias that's just a model name."""
-        configure_delegate(
-            {
-                "models": {
-                    "default": "gemma3:12b",
-                }
-            }
-        )
-
-        provider, model, alias_config = _resolve_model_alias("ollama", "default")
-        assert provider == "ollama"
-        assert model == "gemma3:12b"
+    @pytest.mark.parametrize(
+        "models_cfg, input_provider, alias, expected_provider, expected_model",
+        [
+            (
+                {"smart": "openai/gpt-4", "code": "ollama/qwen3-coder:30b-a3b"},
+                None,
+                "smart",
+                "openai",
+                "gpt-4",
+            ),
+            (
+                {"smart": "openai/gpt-4", "code": "ollama/qwen3-coder:30b-a3b"},
+                None,
+                "code",
+                "ollama",
+                "qwen3-coder:30b-a3b",
+            ),
+            ({"default": "gemma3:12b"}, "ollama", "default", "ollama", "gemma3:12b"),
+        ],
+    )
+    def test_resolve_alias(
+        self,
+        models_cfg: dict,
+        input_provider: str | None,
+        alias: str,
+        expected_provider: str,
+        expected_model: str,
+    ) -> None:
+        """Test resolving model aliases with various provider/model configurations."""
+        configure_delegate({"models": models_cfg})
+        provider, model, _ = _resolve_model_alias(input_provider, alias)
+        assert provider == expected_provider
+        assert model == expected_model
 
     def test_no_alias_passthrough(self):
         """Test that non-alias values pass through unchanged."""

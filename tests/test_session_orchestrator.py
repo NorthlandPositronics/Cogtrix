@@ -8,18 +8,15 @@ from src.orchestration.session_orchestrator import SessionOrchestrator, SessionS
 
 
 def _make_orchestrator(
-    model: str = "gpt-4.1-mini",
-    provider: str = "openai",
+    active_model_alias: str = "gpt-4.1-mini",
     memory_mode: str = "conversation",
     session: str = "default",
 ) -> tuple[SessionOrchestrator, MagicMock, MagicMock]:
     config = MagicMock()
-    config.model = model
-    config.provider = provider
+    config.active_model_alias = active_model_alias
     config.memory_mode = memory_mode
     config.memory_config = {}
     config.session = session
-    config._active_model = None
 
     slash_cmds = MagicMock()
     slash_cmds.system_prompt = "system"
@@ -33,11 +30,10 @@ def _make_orchestrator(
 class TestSessionOrchestratorSnapshot:
     def test_snapshot_captures_config_fields(self) -> None:
         orch, config, _ = _make_orchestrator(
-            model="gpt-4.1-mini", provider="openai", memory_mode="conversation"
+            active_model_alias="gpt-4.1-mini", memory_mode="conversation"
         )
         snap = orch.snapshot()
-        assert snap.model == "gpt-4.1-mini"
-        assert snap.provider == "openai"
+        assert snap.active_model_alias == "gpt-4.1-mini"
         assert snap.memory_mode == "conversation"
 
     def test_snapshot_captures_runtime_objects(self) -> None:
@@ -66,16 +62,14 @@ class TestSessionOrchestratorSnapshot:
 
 class TestSessionOrchestratorRollback:
     def test_rollback_restores_config_fields(self) -> None:
-        orch, config, slash_cmds = _make_orchestrator(model="gpt-4.1-mini", provider="openai")
+        orch, config, slash_cmds = _make_orchestrator(active_model_alias="gpt-4.1-mini")
         snap = orch.snapshot()
 
-        config.model = "claude-sonnet-4-5"
-        config.provider = "anthropic"
+        config.active_model_alias = "claude-sonnet"
 
         orch.rollback(snap)
 
-        assert config.model == "gpt-4.1-mini"
-        assert config.provider == "openai"
+        assert config.active_model_alias == "gpt-4.1-mini"
 
     def test_rollback_empty_tools_clears_live_list(self) -> None:
         """Rollback with snap.tools=[] correctly clears the live tools list (BUG-1845)."""

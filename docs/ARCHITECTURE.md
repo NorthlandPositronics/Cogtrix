@@ -10,6 +10,7 @@ This document describes how Cogtrix is built: the layers, components, and data f
 - [Data Flow](#data-flow)
 - [Extension Points](#extension-points)
 - [Security Model](#security-model)
+- [Dependencies](#dependencies)
 
 ---
 
@@ -18,14 +19,17 @@ This document describes how Cogtrix is built: the layers, components, and data f
 Cogtrix is a modular LangChain-based AI agent built with a layered architecture:
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                      CLI Interface Layer                         │
-│        (cogtrix.py ~4500 LOC + src/cli/ + src/ui/)              │
-│  • Interactive & non-interactive modes  • Slash command system   │
-│  • Session management  • Tool management (load/enable/disable)  │
-└─────────────────────────────────┬───────────────────────────────┘
-                                  │
-┌─────────────────────────────────┴───────────────────────────────┐
+┌──────────────────────────────────┐ ┌──────────────────────────────────┐
+│      CLI Interface Layer         │ │      API Layer (src/api/)        │
+│  (cogtrix.py + src/cli/ +        │ │  FastAPI REST + WebSocket        │
+│   src/ui/)                       │ │  JWT auth  •  Session registry   │
+│  • Interactive & batch modes     │ │  Token streaming  •  DB layer    │
+│  • Slash commands                │ │  (aiosqlite / asyncpg)           │
+│  • Tool management               │ │                                  │
+└────────────────┬─────────────────┘ └─────────────────┬────────────────┘
+                 └──────────────────┬──────────────────┘
+                                    │
+┌───────────────────────────────────┴─────────────────────────────┐
 │                     Configuration Layer                          │
 │                       (src/config.py)                            │
 │  • Multi-provider config  • Priority resolution  • Validation    │
@@ -60,7 +64,7 @@ Cogtrix is a modular LangChain-based AI agent built with a layered architecture:
 ┌───────────────┴───────────────┐ ┌───────────────┴───────────────┐
 │        Memory System          │ │        Tool Modules           │
 │       (src/memory/)           │ │       (src/tools/)            │
-│  • Mode managers              │ │  • 52 built-in tools          │
+│  • Mode managers              │ │  • 51 built-in tools          │
 │  • Context preparation        │ │  • Auto-discovery             │
 │  • JSON persistence           │ │  • Pydantic schemas           │
 └───────────────────────────────┘ └───────────────────────────────┘
@@ -72,6 +76,7 @@ Cogtrix is a modular LangChain-based AI agent built with a layered architecture:
 │  • Shared knowledge store  • Session lifecycle management       │
 │  • Security guardrails  (input/output/rate-limit/encoding/      │
 │    tool-call/auto-blacklist/LLM judge)                          │
+│  • Workflow system (per-chat prompt, knowledge base, tool policy)│
 └─────────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────────┐
@@ -115,6 +120,57 @@ src/
 ├── agent/
 │   ├── core.py            # CogtrixState schema, system prompt builder, LLM factory
 │   └── safety.py          # SafeTool wrapper, create_safe_tool_wrapper(), ConfirmationUI protocol
+├── api/
+│   ├── app.py             # FastAPI application factory (create_app()), CORS, lifespan, routers
+│   ├── auth.py            # JWT validation (HS256), get_current_user, require_admin, validate_api_key
+│   ├── session_bridge.py  # ApiSession dataclass, ApiSessionRegistry (warm/evict/save_all)
+│   ├── confirmation.py    # ApiConfirmationUI — WebSocket tool confirmation replacing CLI Rich panel
+│   ├── turn_runner.py     # run_message_turn(): normal/think/delegate modes via asyncio.to_thread
+│   ├── callbacks.py       # WebSocketCallbackHandler: token/tool_start/tool_end streaming
+│   ├── ws.py              # ConnectionManager, ServerMessage/ClientMessage envelopes, replay buffer
+│   ├── pagination.py      # encode_cursor/decode_cursor/paginate_list, compound keyset cursors
+│   ├── validation.py      # Request validation helpers
+│   ├── assistant_lifecycle.py  # Assistant start/stop for API mode
+│   ├── __main__.py        # uvicorn entry point
+│   ├── db/
+│   │   ├── engine.py      # Async SQLAlchemy engine (aiosqlite/asyncpg), get_db() dependency
+│   │   ├── models.py      # ORM models: User, ApiSessionRecord, Message, RefreshToken, ApiKey
+│   │   └── repositories/
+│   │       ├── users.py      # UserRepository (atomic first-user admin election)
+│   │       ├── sessions.py   # SessionRepository
+│   │       ├── messages.py   # MessageRepository
+│   │       ├── tokens.py     # RefreshTokenRepository
+│   │       └── api_keys.py   # ApiKeyRepository
+│   ├── routes/
+│   │   ├── auth.py        # Registration, login, refresh, logout, profile, API key CRUD (8 endpoints)
+│   │   ├── sessions.py    # Session lifecycle: create, list, get, update, delete (5 endpoints)
+│   │   ├── messages.py    # Send message, list history, clear history; WebSocket stream (4 endpoints)
+│   │   ├── memory.py      # Get memory state, switch mode, clear memory (3 endpoints)
+│   │   ├── tools.py       # List tools, load, enable, disable (4 endpoints)
+│   │   ├── config.py      # Read/write config sections, provider management, model aliases (12 endpoints)
+│   │   ├── assistant.py   # Start/stop assistant, channel management, phonebook (16 endpoints)
+│   │   ├── workflows.py   # Workflow CRUD, per-workflow docs, chat bindings (11 endpoints)
+│   │   ├── users.py       # User management: list, create, update role, delete (4 admin endpoints)
+│   │   ├── rag.py         # Upload documents, list, delete, query knowledge base (5 endpoints)
+│   │   ├── mcp.py         # List servers, connect, disconnect, restart, list tools (5 endpoints)
+│   │   ├── system.py      # Server info, shutdown; live log WebSocket (2 REST + 1 WS endpoint)
+│   │   └── health.py      # Liveness (/health) and readiness (/health/ready) probes (2 endpoints)
+│   ├── schemas/
+│   │   ├── auth.py        # Auth request/response models
+│   │   ├── session.py     # Session models
+│   │   ├── message.py     # Message models
+│   │   ├── memory.py      # Memory models
+│   │   ├── tool.py        # Tool models
+│   │   ├── config.py      # Config models
+│   │   ├── assistant.py   # Assistant models
+│   │   ├── rag.py         # RAG models
+│   │   ├── mcp.py         # MCP models
+│   │   ├── system.py      # System models
+│   │   ├── user.py        # User management models
+│   │   ├── workflow.py    # Workflow models
+│   │   └── common.py      # APIResponse[T] envelope, CursorPage[T], APIError
+│   └── tasks/
+│       └── rag.py         # Background task helper for async document ingestion
 ├── cli/
 │   ├── args.py            # parse_arguments(), ColorHelpFormatter, ANSI color helpers
 │   ├── banner.py          # print_startup(), LOGO_LINES
@@ -144,42 +200,47 @@ src/
 │   │   └── telegram.py    # Telegram Bot API
 │   ├── session.py         # ChatSession + ChatSessionManager
 │   ├── handler.py         # Message → agent → reply pipeline
+│   ├── datamarking.py     # Microsoft Spotlighting: per-call random token injection
 │   ├── poller.py          # Per-channel polling threads
 │   ├── knowledge.py       # Cross-chat fact extraction + recall
 │   ├── guardrails.py      # Security guardrails (input/output/rate-limit/LLM judge)
 │   ├── deferral.py        # DeferralManager — deferred re-processing passes
 │   ├── scheduler.py       # MessageScheduler — deferred reply delivery
+│   ├── workflows.py       # WorkflowRegistry: YAML definitions, bindings, auto-detect
 │   └── service.py         # Main orchestrator (AssistantService)
 ├── rag/
 │   ├── __init__.py        # RAG module
 │   └── ingest.py          # Document ingestion
-└── tools/
-    ├── configure.py       # Tool config factories: load_tools(), build_tool_catalog(),
-    │                      #   apply_output_cap(), TOOL_PRESETS, configure_* functions
-    ├── resolver.py        # resolve_tool_name(): canonical fuzzy tool-name resolver
-    ├── brave_search.py    # Brave Search API
-    ├── calculator.py      # Math expressions
-    ├── datetime_tool.py   # Date/time utilities
-    ├── deep_think.py      # Tree-of-Thought reasoning
-    ├── delegate.py        # Task delegation
-    ├── exa_search.py      # Exa semantic search (3 tools)
-    ├── file_ops.py        # File operations
-    ├── google_search.py   # Google Custom Search API
-    ├── http_request.py    # HTTP requests with SSRF protection
-    ├── json_tool.py       # JSON processing
-    ├── nlp_tools.py       # NLP (sentiment, summarization)
-    ├── python_exec.py     # Python execution
-    ├── rag.py             # Knowledge base queries
-    ├── serpapi_search.py  # SerpAPI (Google/Bing structured)
-    ├── shell.py           # Shell commands
-    ├── tavily_search.py   # Tavily AI search (2 tools)
-    ├── text_tools.py      # Text processing
-    ├── weather.py         # Weather information
-    ├── web_search.py      # DuckDuckGo search
-    ├── whatsapp.py        # WhatsApp messaging (4 tools)
-    ├── _whatsapp_client.py # Waha HTTP client
-    ├── telegram.py        # Telegram messaging (4 tools)
-    └── _telegram_client.py # Telegram Bot API client
+├── tools/
+│   ├── configure.py       # Tool config factories: load_tools(), build_tool_catalog(),
+│   │                      #   apply_output_cap(), TOOL_PRESETS, configure_* functions
+│   ├── resolver.py        # resolve_tool_name(): canonical fuzzy tool-name resolver
+│   ├── brave_search.py    # Brave Search API
+│   ├── calculator.py      # Math expressions
+│   ├── datetime_tool.py   # Date/time utilities
+│   ├── deep_think.py      # Tree-of-Thought reasoning
+│   ├── delegate.py        # Task delegation
+│   ├── exa_search.py      # Exa semantic search (3 tools)
+│   ├── file_ops.py        # File operations
+│   ├── google_search.py   # Google Custom Search API
+│   ├── http_request.py    # HTTP requests with SSRF protection
+│   ├── json_tool.py       # JSON processing
+│   ├── nlp_tools.py       # NLP (sentiment, summarization)
+│   ├── python_exec.py     # Python execution
+│   ├── rag.py             # Knowledge base queries
+│   ├── serpapi_search.py  # SerpAPI (Google/Bing structured)
+│   ├── shell.py           # Shell commands
+│   ├── tavily_search.py   # Tavily AI search (2 tools)
+│   ├── text_tools.py      # Text processing
+│   ├── weather.py         # Weather information
+│   ├── web_search.py      # DuckDuckGo search
+│   ├── whatsapp.py        # WhatsApp messaging (4 tools)
+│   ├── _whatsapp_client.py # Waha HTTP client
+│   ├── telegram.py        # Telegram messaging (4 tools)
+│   ├── _telegram_client.py # Telegram Bot API client
+│   └── report_progress.py # Report progress updates during long tasks
+└── utils/
+    └── atomic_write.py    # atomic_write_json() context manager for safe crash-proof JSON writes
 ```
 
 ---
@@ -198,25 +259,20 @@ class ProviderConfig:
     name: str
     type: str              # "openai", "ollama", "anthropic", or "google"
     base_url: Optional[str]
-    model: Optional[str]
     api_key: Optional[str]
-    # Runtime-only fields — NOT parsed from the providers section.
-    # Populated by _resolve_model() when a ModelConfig is applied.
-    temperature: Optional[float]
-    num_ctx: Optional[int]
     tool_instructions: Optional[str]
 
 @dataclass
 class ModelConfig:
     provider: str              # references a key in Config.providers
     model: str                 # actual model name at the provider
-    num_ctx: Optional[int]
+    context_window: Optional[int]
     temperature: Optional[float]
+    max_tokens: Optional[int]
 
 @dataclass
 class Config:
-    provider: str
-    model: Optional[str]
+    active_model_alias: Optional[str]
     session: str
     providers: Dict[str, ProviderConfig]
     models: Dict[str, ModelConfig]
@@ -236,9 +292,11 @@ class Config:
 | `find_config_file()` | Locate `.cogtrix.{json,yml,yaml}` in cwd, home, or `~/.config/cogtrix/` |
 | `Config.get_provider_config(name)` | Get provider configuration by name |
 | `Config.list_providers()` | List all available provider names |
+| `Config.resolve_llm_config()` | Returns `(ProviderConfig_copy, ModelConfig)` for the active model |
+| `Config.resolve_llm_config_for(alias)` | Same but for a named alias or `provider/model` shorthand |
 | `Config.resolve_embedding_config()` | Resolve `rag.model` via the `models` registry to `(provider_type, model, base_url, api_key)` |
 
-`ProviderConfig` validates inputs at construction time via `__post_init__`: `temperature` must be in `[0.0, 2.0]`, `num_ctx` must be `>= 256`, `max_tokens` must be `> 0`, and `type` must be a recognized provider type — all violations raise `ConfigError`. The `num_ctx` field is gated to Ollama-type providers only in the provider registry; it is silently dropped for OpenAI, Anthropic, and Google.
+`ProviderConfig` validates `type` at construction time via `__post_init__` — unrecognized types raise `ConfigError`. `ModelConfig` validates inference parameters: `temperature` must be in `[0.0, 2.0]`, `context_window` must be `>= 256`, `max_tokens` must be `>= 1` — all violations raise `ConfigError`. The `context_window` field is forwarded to Ollama as `num_ctx` by the provider registry; it is silently dropped for OpenAI, Anthropic, and Google.
 
 ### 2. CLI Interface (`cogtrix.py` + `src/cli/`)
 
@@ -290,7 +348,7 @@ User Input
 | `/delegate` | `/d` | Force task delegation across models |
 | `/mode` | `/M` | Show / switch memory mode |
 | `/model` | `/m` | Show / switch LLM model |
-| `/provider` | `/p` | Show / switch LLM provider |
+| `/provider` | `/p` | List configured providers (read-only) |
 | `/session` | `/s` | Show / switch session |
 | `/setup` | | Launch the interactive setup wizard |
 | `/approve` | `/a` | Auto-approve all tool confirmations |
@@ -331,6 +389,7 @@ class AgentRunConfig:
     session_state: Any = None
     confirmation_ui: Any | None = None
     on_tool_expansion: Any | None = None
+    parallel_tool_execution: bool = True
 ```
 
 Individual kwargs are preserved in `run_agent()` for backward compatibility; when `config` is `None`, a temporary `AgentRunConfig` is assembled from the flat kwargs.
@@ -482,7 +541,7 @@ In assistant mode, each call receives its own `SessionState(no_confirm=True)` to
 
 #### 3h. Session Orchestrator (`src/orchestration/session_orchestrator.py`)
 
-`SessionOrchestrator` provides snapshot/rollback semantics for provider, model, mode, and session switches. It captures mutable state before a switch attempt and can restore it if the switch fails (for example, if the new provider fails to authenticate).
+`SessionOrchestrator` provides snapshot/rollback semantics for model, mode, and session switches. It captures mutable state before a switch attempt and can restore it if the switch fails (for example, if the new model fails to initialize).
 
 ```python
 class SessionOrchestrator:
@@ -491,7 +550,7 @@ class SessionOrchestrator:
     def rollback(self, snap: SessionSnapshot, *, tools_list) -> dict[str, Any]
 ```
 
-`SessionSnapshot` captures: `model`, `provider`, `active_model`, `memory_mode`, `memory_config`, `session`, `system_prompt`, `memory_manager`, `registry_tools`, `available_tools`, and `tools`. The orchestrator does not perform switches itself — all switch logic remains in `cogtrix.py`; the orchestrator only captures and restores state.
+`SessionSnapshot` captures: `active_model_alias`, `memory_mode`, `memory_config`, `session`, `system_prompt`, `memory_manager`, `registry_tools`, `available_tools`, and `tools`. The orchestrator does not perform switches itself — all switch logic remains in `cogtrix.py`; the orchestrator only captures and restores state.
 
 ### 4. Agent Core (`src/agent/core.py`)
 
@@ -503,7 +562,7 @@ Defines the state schema, system prompt builder, and LLM factory. The actual gra
 |--------|---------|
 | `CogtrixState` | TypedDict with `messages: Annotated[Sequence[BaseMessage], add_messages]` |
 | `build_system_prompt(mode_additions, tool_instructions)` | Generate system prompt with mode context |
-| `create_llm_from_provider_config(config)` | LLM factory from ProviderConfig |
+| `create_llm_from_provider_config(config)` | Legacy LLM factory (delegates use only) |
 | `build_agent_executor(tools, ...)` | Legacy ReAct agent builder (used by delegates) |
 | `prepare_messages_with_context(...)` | Token-aware trimming before messages are sent to the LLM |
 | `DEFAULT_TOOL_INSTRUCTIONS` | Raw-JSON tool-call formatting (opt-in via `tool_instructions` config) |
@@ -868,14 +927,23 @@ Incoming Message (from channel.poll())
     │
     ▼
 ┌─────────────────────────────────────┐
-│ 3. Memory: prepare_context()        │
+│ 3. Workflow: resolve()              │
+│    - Explicit binding → contact     │
+│      prompt → auto-detect → default │
+│    - Sets system prompt, knowledge  │
+│      base, and tool policy          │
+└─────────────────────────────────────┘
+    │
+    ▼
+┌─────────────────────────────────────┐
+│ 4. Memory: prepare_context()        │
 │    - Load per-chat history          │
 │    - Build context prefix           │
 └─────────────────────────────────────┘
     │
     ▼
 ┌─────────────────────────────────────┐
-│ 4. Knowledge: recall()              │
+│ 5. Knowledge: recall()              │
 │    - Semantic search (FAISS) or     │
 │      keyword fallback               │
 │    - Inject "Known facts" into      │
@@ -884,7 +952,7 @@ Incoming Message (from channel.poll())
     │
     ▼
 ┌─────────────────────────────────────┐
-│ 5. Agent: run_agent()               │
+│ 6. Agent: run_agent()               │
 │    - Same pipeline as interactive   │
 │    - Excluded tools filtered out    │
 │    - SessionState(no_confirm=True)  │
@@ -892,7 +960,7 @@ Incoming Message (from channel.poll())
     │
     ▼
 ┌─────────────────────────────────────┐
-│ 6. Guardrails: record + sanitize    │
+│ 7. Guardrails: record + sanitize    │
 │    - Record message for rate limit  │
 │    - Strip PII, images, HTML, URLs  │
 │    - Redact banned strings          │
@@ -900,7 +968,7 @@ Incoming Message (from channel.poll())
     │
     ▼
 ┌─────────────────────────────────────┐
-│ 7. Memory: update() + save()        │
+│ 8. Memory: update() + save()        │
 │    - Persist sanitized response     │
 │    - Per-chat history stored after  │
 │      PII/URL stripping              │
@@ -908,7 +976,7 @@ Incoming Message (from channel.poll())
     │
     ▼
 ┌─────────────────────────────────────┐
-│ 8. Knowledge: extract_and_store()   │
+│ 9. Knowledge: extract_and_store()   │
 │    - Dispatched to background pool  │
 │      (max 2 workers) — non-blocking │
 │    - LLM extracts entity-centric    │
@@ -918,7 +986,7 @@ Incoming Message (from channel.poll())
     │
     ▼
 ┌─────────────────────────────────────┐
-│ 9. Truncate + channel.send()        │
+│10. Truncate + channel.send()        │
 │    - Cap at max_response_length     │
 │    - Send reply via channel         │
 └─────────────────────────────────────┘
@@ -976,6 +1044,67 @@ so only sanitized content is stored in conversation history. Tool call inspectio
 Performance without the LLM judge is under 0.5ms total — negligible compared to LLM
 inference latency (1–30s). The `GuardrailPipeline` is constructed in `service.py` with an
 optional judge LLM and injected into `MessageHandler`.
+
+**Workflow System (`src/assistant/workflows.py`):**
+
+`WorkflowRegistry` loads YAML workflow definitions from `data/workflows/<id>/workflow.yaml`. Each workflow bundles:
+
+- **System prompt** — replaces the global system prompt for bound chats
+- **Per-workflow knowledge base** — FAISS index built from documents uploaded to `data/workflows/<id>/documents/`
+- **Tool policy** — lists of excluded and additionally approved tools
+
+Chat-to-workflow resolution order:
+
+1. **Explicit binding** — `data/workflows/bindings.json` maps `session_key` → `workflow_id`
+2. **Contact prompts fallback** — ephemeral, not persisted (backward compat)
+3. **Auto-detect** — keyword/regex scoring against incoming message; binding is persisted on match
+4. **No match** — global defaults (base system prompt, no workflow knowledge base)
+
+Thread-safe via `threading.RLock`. `MessageHandler` accepts `workflow_registry` and delegates resolution via `WorkflowRegistry.resolve()`. API CRUD at `/api/v1/assistant/workflows/` (11 endpoints).
+
+### 13. API Layer (`src/api/`)
+
+A FastAPI application that exposes Cogtrix capabilities over HTTP and WebSocket. It is the backend for the React web frontend and supports programmatic access via API keys. For the full endpoint reference and WebSocket protocol, see [docs/api/](api/).
+
+**Application factory:** `app.py` exports `create_app()`, which mounts all routers under `/api/v1` (REST) and `/ws/v1` (WebSocket), configures CORS, and registers a lifespan context manager that initialises the database, tool registry, and session registry on startup and flushes them on shutdown.
+
+**Authentication:** `auth.py` issues HS256 JWTs (1-hour access tokens, 30-day refresh tokens) via `COGTRIX_JWT_SECRET` (minimum 32 chars). FastAPI dependencies `get_current_user` and `require_admin` enforce auth on protected routes. `validate_api_key` handles static API keys stored in the database.
+
+**Session lifecycle:**
+
+```
+POST /api/v1/sessions           → creates ApiSessionRecord in DB (idle)
+First request to session        → get_or_warm() loads memory + builds LLM + AgentRunConfig
+POST …/messages  or  WS message → run_message_turn() executes one agent turn
+Idle 30+ minutes                → ApiSessionRegistry.evict_idle() saves + removes
+Process shutdown                → save_all() flushes all live sessions
+```
+
+**Turn execution (`turn_runner.py`):** `run_message_turn()` runs `run_agent()` via `asyncio.to_thread` (never blocks the event loop). Three execution modes are supported: `normal` (standard agent run), `think` (deep reasoning via `force_deep_think`), and `delegate` (parallel sub-agent delegation via `force_delegation`). Intermediate agent states (`analyzing`, `deep_thinking`, `researching`, `delegating`) are streamed to the WebSocket for frontend progress visibility.
+
+**WebSocket streaming (`ws.py`):** `ConnectionManager` maintains one WebSocket per session; a second connection gracefully displaces the first. Messages are typed via `ServerMessage` / `ClientMessage` Pydantic envelopes. A 30-second reconnect buffer with sequence-based replay handles brief disconnections. Server message types include `token`, `tool_start`, `tool_end`, `tool_confirm_request`, `agent_state`, `memory_update`, `error`, `done`, and `pong`.
+
+**Tool confirmation (`confirmation.py`):** `ApiConfirmationUI` implements the `ConfirmationUI` Protocol from `safety.py` over WebSocket, replacing the CLI Rich panel. `read_choice()` polls at 0.5 s intervals with a 5-minute timeout (defaults to deny).
+
+**Database layer (`db/`):** Async SQLAlchemy with `aiosqlite` by default; switch to `asyncpg` via `COGTRIX_DB_URL`. ORM models: `User`, `ApiSessionRecord`, `Message`, `RefreshToken`, `ApiKey`. All access goes through repository classes in `db/repositories/`. Schema migrations use Alembic in production; `Base.metadata.create_all` is available for development.
+
+**Key patterns:**
+
+| Pattern | Detail |
+|---------|--------|
+| Response envelope | `APIResponse[T]`: `{"data": T \| null, "error": APIError \| null}` |
+| Paginated lists | `CursorPage[T]`: opaque base64url cursors; compound `(created_at, id)` keyset for stable ordering |
+| Blocking I/O | All memory, LLM init, file stat, config I/O, and network calls run via `asyncio.to_thread` |
+| Duplicate warm | Per-session `asyncio.Event` in `ApiSessionRegistry` prevents concurrent `warm_session()` races |
+| Thread safety | `WebSocketCallbackHandler` uses `call_soon_threadsafe` + `_try_put_nowait` for per-token enqueue |
+
+**Interactive docs:** Swagger UI at `/api/v1/docs`; ReDoc at `/api/v1/redoc`; OpenAPI schema at `/api/v1/openapi.json`.
+
+### 14. Utilities (`src/utils/`)
+
+Shared helpers used by multiple packages across the codebase.
+
+**`atomic_write.py`** — `atomic_write_json(path)` is a context manager that yields a `(tmp_path, fd)` pair. On clean exit it renames the temporary file to the target path, making the write atomic from the OS perspective. On any `BaseException` the rename is skipped, leaving the target file intact. Used by `src/assistant/scheduler.py`, `src/assistant/knowledge.py`, `src/assistant/deferral.py`, `src/tools/file_ops.py`, and `src/memory/manager.py` to prevent corrupt JSON on process crash or signal.
 
 ---
 
@@ -1173,7 +1302,7 @@ The agent core is interface-agnostic. The orchestration layer provides a clean `
 ```python
 from src.config import load_config
 from src.registry import ToolRegistry
-from src.agent.core import create_llm_from_provider_config
+from src.providers import create_chat_model_from_configs
 from src.orchestration.runner import run_agent
 from src.orchestration.run_config import AgentRunConfig
 from src.orchestration.session_state import SessionState
@@ -1188,8 +1317,8 @@ registry.load_all_tools()
 tools = list(registry.tools.values())
 
 # Create LLM
-provider_config = config.get_provider_config()
-llm = create_llm_from_provider_config(provider_config)
+provider_config, model_config = config.resolve_llm_config()
+llm = create_chat_model_from_configs(provider_config, model_config)
 
 # Setup memory
 memory_store = JsonFileMemoryStore()

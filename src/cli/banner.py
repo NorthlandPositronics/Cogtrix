@@ -1,6 +1,9 @@
+import logging
 from typing import Any
 
 from src._version import __copyright__, __version__
+
+log = logging.getLogger("cogtrix")
 
 try:
     from rich import box as rich_box
@@ -54,15 +57,22 @@ def startup_rich(config: Any, **extra: Any) -> None:
     if _console is None or Align is None or Group is None or Text is None:  # pragma: no cover
         return
 
-    # Provider / model line
-    prov_cfg = None
+    # Resolve model alias + derived provider
+    alias = getattr(config, "active_model_alias", None)
     try:
-        prov_cfg = config.get_provider_config()
-    except ValueError:
+        mc = config.get_active_model()
+        model = mc.model
+        provider_name = mc.provider
+    except Exception as exc:
+        log.debug("Failed to resolve active model for banner: %s", exc)
+        model = "?"
+        provider_name = "?"
+    prov_type = "?"
+    try:
+        pc = config.get_provider_config(provider_name)
+        prov_type = pc.type
+    except (ValueError, KeyError):
         pass
-
-    model = config.model or (prov_cfg.get_model() if prov_cfg else "?")
-    prov_type = prov_cfg.type if prov_cfg else "?"
 
     # ── Build renderables ─────────────────────────────────────
     parts: list = []
@@ -75,17 +85,15 @@ def startup_rich(config: Any, **extra: Any) -> None:
     # Left-aligned config section (with leading indent)
     lbl = 12  # label column width
     info = Text()
-    info.append(f"    {'Provider':<{lbl}}: ", style="bold")
-    info.append(f"{config.provider} ")
-    info.append(f"({prov_type})", style="dim")
-    info.append(f"\n    {'Model':<{lbl}}: {model}", style="bold")
-    # re-apply: the bold covered the whole line; build per-line instead
-    info = Text()
-    info.append(f"    {'Provider':<{lbl}}", style="bold")
-    info.append(f": {config.provider} ")
-    info.append(f"({prov_type})\n", style="dim")
     info.append(f"    {'Model':<{lbl}}", style="bold")
-    info.append(f": {model}\n")
+    if alias and alias != model:
+        info.append(f": {alias} ")
+        info.append(f"({model})\n", style="dim")
+    else:
+        info.append(f": {model}\n")
+    info.append(f"    {'Provider':<{lbl}}", style="bold")
+    info.append(f": {provider_name} ")
+    info.append(f"({prov_type})\n", style="dim")
     info.append(f"    {'Mode':<{lbl}}", style="bold")
     info.append(f": {config.memory_mode}\n")
     if config.config_file_path:
@@ -148,18 +156,28 @@ def startup_plain(config: Any, **extra: Any) -> None:
         print(f"  {logo_line}")
     print()
 
-    prov_cfg = None
+    alias = getattr(config, "active_model_alias", None)
     try:
-        prov_cfg = config.get_provider_config()
-    except ValueError:
+        mc = config.get_active_model()
+        model = mc.model
+        provider_name = mc.provider
+    except Exception as exc:
+        log.debug("Failed to resolve active model for banner: %s", exc)
+        model = "?"
+        provider_name = "?"
+    prov_type = "?"
+    try:
+        pc = config.get_provider_config(provider_name)
+        prov_type = pc.type
+    except (ValueError, KeyError):
         pass
 
-    model = config.model or (prov_cfg.get_model() if prov_cfg else "?")
-    prov_type = prov_cfg.type if prov_cfg else "?"
-
     lbl = 12
-    print(f"  {'Provider':<{lbl}}: {config.provider} ({prov_type})")
-    print(f"  {'Model':<{lbl}}: {model}")
+    if alias and alias != model:
+        print(f"  {'Model':<{lbl}}: {alias} ({model})")
+    else:
+        print(f"  {'Model':<{lbl}}: {model}")
+    print(f"  {'Provider':<{lbl}}: {provider_name} ({prov_type})")
     print(f"  {'Mode':<{lbl}}: {config.memory_mode}")
     if config.config_file_path:
         print(f"  {'Config':<{lbl}}: {config.config_file_path}")

@@ -85,23 +85,32 @@ class ApiConfirmationUI:
             self._cancel_requested = False
             confirmation_id = self._confirmation_id
 
+        msg = {
+            "type": "tool_confirm_request",
+            "payload": {
+                "confirmation_id": confirmation_id,
+                "tool": tool_name,
+                "parameters": tool_input,
+                "message": f"Tool '{tool_name}' requires confirmation",
+            },
+        }
         try:
-            asyncio.run_coroutine_threadsafe(
-                self._queue.put(
-                    {
-                        "type": "tool_confirm_request",
-                        "payload": {
-                            "confirmation_id": confirmation_id,
-                            "tool": tool_name,
-                            "parameters": tool_input,
-                            "message": f"Tool '{tool_name}' requires confirmation",
-                        },
-                    }
-                ),
-                self._loop,
-            )
+            # Use put_nowait() to avoid blocking the event loop if the queue is full.
+            # run_coroutine_threadsafe is called from the agent thread (inside
+            # asyncio.to_thread); blocking on put() would stall the event loop thread.
+            asyncio.run_coroutine_threadsafe(self._enqueue_nowait(msg), self._loop)
         except Exception as exc:  # pragma: no cover
             log.warning("ApiConfirmationUI.render_prompt enqueue failed: %s", exc)
+
+    async def _enqueue_nowait(self, msg: dict) -> None:
+        """Enqueue msg without blocking; drops silently on QueueFull."""
+        try:
+            self._queue.put_nowait(msg)
+        except asyncio.QueueFull:
+            log.warning(
+                "ApiConfirmationUI: ws_queue full, dropping tool_confirm_request for %s",
+                msg.get("payload", {}).get("confirmation_id", "?"),
+            )
 
     def read_choice(self) -> str:
         """Block the agent thread until the WebSocket handler resolves the confirmation.
@@ -122,8 +131,16 @@ class ApiConfirmationUI:
             _POLL_INTERVAL = 0.5  # seconds per poll cycle
             while time.monotonic() < deadline:
                 if event.wait(timeout=_POLL_INTERVAL):
+                    with self._lock:
+                        if self._pending_event is not event:
+                            break  # displaced by a new render_prompt call
+                        cancelled = self._cancel_requested
+                    if cancelled:
+                        break
                     break
                 with self._lock:
+                    if self._pending_event is not event:
+                        break  # displaced by a new render_prompt call
                     cancelled = self._cancel_requested
                 if cancelled:
                     break

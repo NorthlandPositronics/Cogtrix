@@ -35,7 +35,7 @@ Not sure where to start? Use this table:
 
 Cogtrix defaults to Ollama on `localhost:11434`. If you already have Ollama running, you don't need to configure anything — just run `uv run python cogtrix.py`.
 
-You can configure multiple providers and switch between them at runtime with `/provider <name>`.
+You can configure multiple providers and switch between models at runtime with `/model <alias>`.
 
 ---
 
@@ -67,7 +67,7 @@ Provider type values are case-insensitive (`"OpenAI"`, `"OLLAMA"`, etc. all work
 
 3. Run:
    ```bash
-   uv run python cogtrix.py -p openai
+   uv run python cogtrix.py --model openai
    ```
 
 ### Configuration
@@ -75,17 +75,21 @@ Provider type values are case-insensitive (`"OpenAI"`, `"OLLAMA"`, etc. all work
 **Environment variable only:**
 ```bash
 export OPENAI_API_KEY="sk-..."
-uv run python cogtrix.py -p openai -m gpt-4.1
+uv run python cogtrix.py --model gpt4
 ```
 
 **Config file:**
 ```yaml
-provider: openai
 providers:
   openai:
     type: openai
-    model: gpt-4.1
     api_key: "sk-..."
+
+models:
+  default: gpt4
+  gpt4:
+    provider: openai
+    model: gpt-4.1
 ```
 
 ### Available Models
@@ -136,11 +140,15 @@ export COGTRIX_OLLAMA="192.168.1.100:8080"     # custom port
 Or use a config file:
 
 ```yaml
-provider: ollama
 providers:
   ollama:
     type: ollama
     base_url: "http://192.168.1.100:11434"
+
+models:
+  default: local
+  local:
+    provider: ollama
     model: qwen3:8b
 ```
 
@@ -160,15 +168,21 @@ providers:
 ### Multiple Ollama Servers
 
 ```yaml
-provider: gpu-server
 providers:
   gpu-server:
     type: ollama
     base_url: "http://192.168.1.100:11434"
-    model: qwen3:8b
   cpu-server:
     type: ollama
     base_url: "http://192.168.1.101:11434"
+
+models:
+  default: gpu
+  gpu:
+    provider: gpu-server
+    model: qwen3:8b
+  cpu:
+    provider: cpu-server
     model: qwen3:8b
 ```
 
@@ -182,20 +196,29 @@ Fast inference with open-source models.
 
 1. Get an API key from [console.groq.com](https://console.groq.com/keys)
 
-2. Configure (`.cogtrix.yaml`):
+2. Set the environment variable (or use `api_key` in config):
+   ```bash
+   export GROQ_API_KEY=gsk-...
+   ```
+
+3. Configure (`.cogtrix.yaml`):
    ```yaml
-   provider: groq
    providers:
      groq:
        type: openai
        base_url: "https://api.groq.com/openai/v1"
-       api_key: "gsk-..."
+       api_key: "gsk-..."  # your Groq API key
+
+   models:
+     default: groq
+     groq:
+       provider: groq
        model: llama-3.3-70b-versatile
    ```
 
-3. Run:
+4. Run:
    ```bash
-   uv run python cogtrix.py -p groq
+   uv run python cogtrix.py --model groq
    ```
 
 ### Available Models
@@ -219,12 +242,16 @@ Wide model selection with competitive pricing.
 
 2. Configure (`.cogtrix.yaml`):
    ```yaml
-   provider: together
    providers:
      together:
        type: openai
        base_url: "https://api.together.xyz/v1"
        api_key: "..."
+
+   models:
+     default: together
+     together:
+       provider: together
        model: meta-llama/Llama-3-70b-chat-hf
    ```
 
@@ -258,7 +285,13 @@ providers:
   xai:
     type: openai
     base_url: https://api.x.ai/v1
-    api_key_env: XAI_API_KEY
+    api_key: "xai-..."  # your xAI API key
+
+models:
+  default: grok
+  grok:
+    provider: xai
+    model: grok-4.1-fast
 ```
 
 ---
@@ -283,11 +316,15 @@ Run models locally with vLLM server.
 
 3. Configure (`.cogtrix.yaml`):
    ```yaml
-   provider: vllm
    providers:
      vllm:
        type: openai
        base_url: "http://localhost:8000/v1"
+
+   models:
+     default: vllm
+     vllm:
+       provider: vllm
        model: meta-llama/Llama-3-8b-chat-hf
    ```
 
@@ -306,9 +343,9 @@ Run models locally with vLLM server.
    export ANTHROPIC_API_KEY="sk-ant-..."
    ```
 
-3. Run:
+3. Run (the API key auto-creates the provider; the first available provider is used by default):
    ```bash
-   uv run python cogtrix.py -p anthropic
+   uv run python cogtrix.py
    ```
 
 ### Configuration
@@ -316,17 +353,21 @@ Run models locally with vLLM server.
 **Environment variable only:**
 ```bash
 export ANTHROPIC_API_KEY="sk-ant-..."
-uv run python cogtrix.py -p anthropic -m claude-sonnet-4-5
+uv run python cogtrix.py --model claude
 ```
 
 **Config file:**
 ```yaml
-provider: anthropic
 providers:
   anthropic:
     type: anthropic
-    model: claude-sonnet-4-5
     api_key: "sk-ant-..."
+
+models:
+  default: claude
+  claude:
+    provider: anthropic
+    model: claude-sonnet-4-5
 ```
 
 ### Available Models
@@ -354,9 +395,9 @@ providers:
    export GEMINI_API_KEY="..."
    ```
 
-3. Run:
+3. Run (the API key auto-creates the provider; the first available provider is used by default):
    ```bash
-   uv run python cogtrix.py -p google
+   uv run python cogtrix.py
    ```
 
 ### Configuration
@@ -364,17 +405,21 @@ providers:
 **Environment variable only:**
 ```bash
 export GEMINI_API_KEY="..."
-uv run python cogtrix.py -p google -m gemini-2.5-flash
+uv run python cogtrix.py --model gemini
 ```
 
 **Config file:**
 ```yaml
-provider: google
 providers:
   google:
     type: google
-    model: gemini-2.5-flash
     api_key: "..."
+
+models:
+  default: gemini
+  gemini:
+    provider: google
+    model: gemini-2.5-flash
 ```
 
 ### Available Models
@@ -391,68 +436,67 @@ providers:
 Configure multiple providers for different use cases:
 
 ```yaml
-provider: ollama-local
-
 providers:
   ollama-local:
     type: ollama
-    model: qwen3:8b
   ollama-gpu:
     type: ollama
     base_url: "http://gpu-server:11434"
-    model: qwen3:8b
   openai:
     type: openai
-    model: gpt-4.1-mini
   groq:
     type: openai
     base_url: "https://api.groq.com/openai/v1"
     api_key: "gsk-..."
-    model: llama-3.3-70b-versatile
 
 models:
+  default: local
+  local:
+    provider: ollama-local
+    model: qwen3:8b
   fast: groq/llama-3.3-70b-versatile
   smart: openai/gpt-4.1
-  local: ollama-local/qwen3:8b
-  coder: ollama-gpu/qwen3-coder:30b-a3b
+  coder:
+    provider: ollama-gpu
+    model: qwen3-coder:30b-a3b
 
 delegate:
   enabled: true
   allowed_models: [fast, smart, coder]
 ```
 
-### Switching Providers
+### Switching Models
 
 **At startup:**
 
 ```bash
-# Use local Ollama
-uv run python cogtrix.py -p ollama-local
+# Use local model
+uv run python cogtrix.py --model local
 
-# Use GPU server
-uv run python cogtrix.py -p ollama-gpu
+# Use GPU coder model
+uv run python cogtrix.py --model coder
 
-# Use OpenAI
-uv run python cogtrix.py -p openai
+# Use OpenAI smart model
+uv run python cogtrix.py --model smart
 
-# Use Groq
-uv run python cogtrix.py -p groq
+# Use Groq fast model
+uv run python cogtrix.py --model fast
 ```
 
 **At runtime** (during an interactive session):
 
 ```
-You: /provider openai
-Switched to provider openai (model: gpt-4.1)
+You: /model smart
+Switched to model smart (openai / gpt-4.1)
 
-You: /p groq
-Switched to provider groq (model: llama-3.3-70b-versatile)
+You: /m fast
+Switched to model fast (groq / llama-3.3-70b-versatile)
 
-You: /model gpt-4.1-mini
-Switched to model gpt-4.1-mini (openai)
+You: /m local
+Switched to model local (ollama-local / qwen3:8b)
 ```
 
-The `/provider` (or `/p`) and `/model` (or `/m`) commands rebuild the LLM and agent immediately. If the switch fails (e.g., invalid model name), the previous configuration is automatically restored.
+The `/model` (or `/m`) command rebuilds the LLM and agent immediately. If the switch fails (e.g., invalid alias), the previous configuration is automatically restored. The `/provider` command is read-only — it lists configured providers and their connection details.
 
 ---
 

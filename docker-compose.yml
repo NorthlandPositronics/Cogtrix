@@ -1,0 +1,116 @@
+---
+# --------------------------------------------------------------
+# docker-compose.yml (updated – config file path can be supplied via env var)
+# --------------------------------------------------------------
+
+services:
+  # ----------------------------------------------------------
+  # Cogtrix – init container
+  # ----------------------------------------------------------
+  cogtrix-init:
+    image: alpine
+    container_name: cogtrix-init
+    command: >
+      sh -c "mkdir -m 770 -p /data/history /data/knowledge /data/log /data/output /data/documents
+      && chown -R 1000:1000 /data"
+    volumes:
+      - cogtrix-data:/data
+      - cogtrix-knowledge:/data/knowledge
+    restart: "no"
+    network_mode: "none"
+
+  # ----------------------------------------------------------
+  # Cogtrix API – FastAPI backend
+  # ----------------------------------------------------------
+  cogtrix:
+    image: cogtrix:latest
+    container_name: cogtrix
+    restart: unless-stopped
+    env_file:
+      - ./config/cogtrix.env
+    environment:
+      COGTRIX_WHATSAPP_URL: "http://waha:3000"
+      COGTRIX_ALLOWED_WRITE_PATHS: "/data/cogtrix/log,/data/cogtrix/output"
+    user: "1000:1000"
+    command: api
+    expose:
+      - 8000
+    volumes:
+      - cogtrix-data:/data/cogtrix
+      - cogtrix-knowledge:/data/cogtrix/knowledge
+      - ./data/log:/data/cogtrix/log
+      - ./data/output:/data/cogtrix/output
+      - ./data/prompts:/data/cogtrix/prompts:ro
+      - ./data/documents:/data/cogtrix/documents
+      - ./config/cogtrix.yml:/app/.cogtrix.yaml:ro
+    networks:
+      - cogtrix-net
+    depends_on:
+      cogtrix-init:
+        condition: service_completed_successfully
+      waha:
+        condition: service_started
+
+  # ----------------------------------------------------------
+  # Cogtrix Web UI – React frontend (nginx)
+  # ----------------------------------------------------------
+  cogtrix-webui:
+    image: cogtrix-webui:latest
+    container_name: cogtrix-webui
+    restart: unless-stopped
+    environment:
+      BACKEND_HOST: cogtrix
+      BACKEND_PORT: 8000
+    ports:
+      - "80:80"
+    networks:
+      - cogtrix-net
+    depends_on:
+      - cogtrix
+
+  # ----------------------------------------------------------
+  # Waha – WhatsApp Business API gateway
+  # ----------------------------------------------------------
+  waha:
+    image: devlikeapro/waha
+    container_name: waha-gateway
+    restart: unless-stopped
+    env_file:
+      - ./config/waha.env
+    environment:
+      WHATSAPP_DEFAULT_ENGINE: WEBJS
+    ports:
+      - "3000:3000"
+    expose:
+      - 3000
+    volumes:
+      - waha-data:/app/.sessions
+    networks:
+      - cogtrix-net
+
+  # ----------------------------------------------------------
+  #  MCP Filesystem server (SSE bridge via supergateway)
+  # ----------------------------------------------------------
+  mcp-filesystem:
+    image: supercorp/supergateway
+    container_name: mcp-filesystem
+    restart: unless-stopped
+    command: >
+      --stdio "npx -y @modelcontextprotocol/server-filesystem /data"
+      --port 8000
+    expose:
+      - 8000
+    volumes:
+      - mcp-workspace:/data
+    networks:
+      - cogtrix-net
+
+volumes:
+  waha-data:
+  cogtrix-data:
+  cogtrix-knowledge:
+  mcp-workspace:
+
+networks:
+  cogtrix-net:
+    driver: bridge

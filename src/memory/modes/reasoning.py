@@ -488,7 +488,7 @@ class ReasoningMemoryManager(BaseMemoryManager):
         self._messages.append(human_msg)
 
         # --- Append the agent's messages ---------------------------
-        if agent_messages:
+        if agent_messages is not None:
             for m in agent_messages:
                 self._messages.append(m)
             last = agent_messages[-1]
@@ -537,6 +537,8 @@ class ReasoningMemoryManager(BaseMemoryManager):
             "technical": [],
             "non_negotiables": [],
         }
+        self._turn_count = 0
+        self._section_ts = {}
 
     def get_message_count(self) -> int:
         """Return total number of messages stored."""

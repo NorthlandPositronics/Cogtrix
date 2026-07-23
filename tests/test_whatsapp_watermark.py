@@ -40,6 +40,7 @@ def _make_channel(config: dict | None = None):
         ch._overview_limit = 50
         ch._SNAPSHOT_TTL = 60.0 * 60
         ch._WATERMARK_TTL = 7 * 24 * 3600.0
+        ch._message_fetch_limit = 50
         ch._FETCH_ERROR_BASE = 30.0
         ch._chat_errors = {}
         ch._client = MagicMock()

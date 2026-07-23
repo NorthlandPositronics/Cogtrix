@@ -1,6 +1,6 @@
 # Cogtrix Agent
 
-A modular AI assistant with 52 built-in tools, multi-provider LLM support, and intelligent memory management.
+A modular AI assistant with 51 built-in tools, multi-provider LLM support, and intelligent memory management.
 
 ---
 
@@ -12,12 +12,13 @@ Cogtrix is an **interactive command-line AI assistant** that connects to large l
 
 **Highlights:**
 
-- 52 built-in tools across 6 search providers, file I/O, shell, Python, HTTP, NLP, WhatsApp and Telegram messaging, and more
+- 51 built-in tools across 6 search providers, file I/O, shell, Python, HTTP, NLP, WhatsApp and Telegram messaging, and more
 - Three memory modes optimized for conversation, coding, or strategic reasoning — with hybrid memory (rolling summary + semantic recall)
 - Deep reasoning engine (Tree-of-Thought with iterative reflection) via `/think`
 - Task delegation across multiple LLM models via `/delegate`
 - Safety layer with human confirmation for sensitive operations
 - Headless assistant mode — run as a WhatsApp/Telegram daemon with per-chat context isolation and shared knowledge
+- Workflow system — bundle system prompts, knowledge bases, and tool policies into reusable workflows with auto-detection
 - Works out of the box with zero configuration if Ollama is running
 
 ---
@@ -55,7 +56,7 @@ ollama pull qwen3:8b
 
 That's it. No config file needed — Cogtrix connects to `localhost:11434` automatically.
 
-> **Using OpenAI instead?** `export OPENAI_API_KEY="sk-..." && python cogtrix.py -p openai`
+> **Using OpenAI instead?** `export OPENAI_API_KEY="sk-..." && python cogtrix.py`
 > **Using another provider?** See [Providers Guide](docs/PROVIDERS.md).
 
 ### 3. Run
@@ -118,7 +119,8 @@ The agent decides which tools to call, chains them together, and delivers a comp
 
 ```bash
 python cogtrix.py                            # Ollama default
-python cogtrix.py -p openai -m gpt-4.1       # OpenAI
+python cogtrix.py -m gpt4                    # Named model alias from config
+python cogtrix.py -m gpt-4.1                 # Specific model alias from config
 python cogtrix.py -M code                    # Code development memory mode
 python cogtrix.py -M reasoning               # Strategic planning mode
 python cogtrix.py --prompt "Summarize X"     # Single prompt, then exit
@@ -126,6 +128,7 @@ python cogtrix.py --prompt "Query" -o out.md # Save response to file
 python cogtrix.py -m fast                    # Use a model alias from config
 python cogtrix.py -y                         # Auto-approve all tool confirmations
 python cogtrix.py -c ~/my-config.yaml        # Use a specific config file
+python cogtrix.py --activate-tools web_search,shell  # Pin tools as active on startup
 python cogtrix.py --debug                    # Full debug logging
 python cogtrix.py --assistant                  # Headless messaging daemon (WhatsApp/Telegram)
 python cogtrix.py --assistant --debug          # Assistant mode with debug logging
@@ -140,56 +143,58 @@ Cogtrix works with zero configuration when Ollama is running on localhost. For a
 **YAML** (`.cogtrix.yaml` — recommended, easier to read):
 
 ```yaml
-provider: my-server
-
 providers:
   my-server:
     type: ollama
     base_url: "http://192.168.1.100:11434"
-    model: qwen3:8b
   openai:
     type: openai
-    model: gpt-4.1-mini
+
+models:
+  default: local
+  local:
+    provider: my-server
+    model: qwen3:8b
+  fast: my-server/qwen3:8b
+  smart: openai/gpt-4.1
 
 services:
   tavily:
     api_key: "tvly-..."
-
-models:
-  fast: my-server/qwen3:8b
-  smart: openai/gpt-4.1
 ```
 
 **JSON** (`.cogtrix.json`):
 
 ```json
 {
-  "provider": "my-server",
   "providers": {
     "my-server": {
       "type": "ollama",
-      "base_url": "http://192.168.1.100:11434",
-      "model": "qwen3:8b"
+      "base_url": "http://192.168.1.100:11434"
     },
     "openai": {
-      "type": "openai",
-      "model": "gpt-4.1-mini"
+      "type": "openai"
     }
+  },
+  "models": {
+    "default": "local",
+    "local": {
+      "provider": "my-server",
+      "model": "qwen3:8b"
+    },
+    "fast": "my-server/qwen3:8b",
+    "smart": "openai/gpt-4.1"
   },
   "services": {
     "tavily": { "api_key": "tvly-..." }
-  },
-  "models": {
-    "fast": "my-server/qwen3:8b",
-    "smart": "openai/gpt-4.1"
   }
 }
 ```
 
 **Configuration is loaded from** (highest priority first):
 
-1. Command-line flags (`-p`, `-m`, `-M`, `-c`, etc.)
-2. Environment variables (`COGTRIX_PROVIDER`, `COGTRIX_MODEL`, `COGTRIX_OLLAMA`, `OPENAI_API_KEY`, etc.)
+1. Command-line flags (`-m`, `-M`, `-c`, etc.)
+2. Environment variables (`COGTRIX_MODEL`, `COGTRIX_OLLAMA`, `OPENAI_API_KEY`, etc.)
 3. Config file — pass a specific path with `-c ~/my-config.yaml`, or Cogtrix searches for `.cogtrix.json` / `.cogtrix.yaml` / `.cogtrix.yml` in the current directory, home directory, and `~/.config/cogtrix/`
 4. Built-in defaults — Ollama on localhost, conversation mode, 25-message history
 
@@ -208,7 +213,7 @@ Full reference: **[Configuration Guide](docs/CONFIGURATION.md)**
 | `/delegate <task>` | `/d` | Force task delegation across models |
 | `/mode [name]` | `/M` | Show / switch memory mode |
 | `/model [name]` | `/m` | Show / switch LLM model |
-| `/provider [name]` | `/p` | Show / switch LLM provider |
+| `/provider` | `/p` | List configured providers (read-only) |
 | `/session [id]` | `/s` | Show / switch session |
 | `/setup` | — | Launch interactive setup wizard |
 | `/approve` | `/a` | Toggle tool auto-approval (also: `-y` at startup) |
@@ -219,16 +224,17 @@ Full reference: **[Configuration Guide](docs/CONFIGURATION.md)**
 | `/verbose` | `/v` | Toggle verbose logging |
 | `/mcp [restart]` | — | List or restart MCP server connections |
 | `/quit` | `/exit`, `/q` | Exit |
+| `!<command>` | — | Execute a shell command inline (e.g. `!ls -la`) |
 
 Arrow keys, Home/End, and input history work out of the box (via `readline`).
 
 ---
 
-## Built-in Tools (52)
+## Built-in Tools (51)
 
 | Category | Tools |
 |----------|-------|
-| **Search** (11) | DuckDuckGo (free), Tavily, Exa, Brave, Google, SerpAPI |
+| **Search** (10) | DuckDuckGo (free), Tavily, Exa, Brave, Google, SerpAPI |
 | **Files** (5) | `read_file`, `write_file`, `append_file`, `list_directory`, `file_info` |
 | **System** (2) | `execute_shell_command`, `execute_python` |
 | **Text & NLP** (10) | word count, find/replace, URLs, emails, compare, sentiment, summarize, keywords |
@@ -311,23 +317,24 @@ Pass `api` as the final argument to start the FastAPI server instead of the inte
 
 ## API Server
 
-Cogtrix includes a REST + WebSocket API server built with FastAPI. It exposes 65 REST endpoints and 2 WebSocket streams, powering the React web frontend and enabling programmatic access from any HTTP client.
+Cogtrix includes a REST + WebSocket API server built with FastAPI. It exposes 80 REST endpoints and 2 WebSocket streams, powering the React web frontend and enabling programmatic access from any HTTP client.
 
 ### Starting the API server
-
-**Directly with uvicorn:**
 
 ```bash
 # Generate a strong secret (required)
 export COGTRIX_JWT_SECRET="$(python -c 'import secrets; print(secrets.token_hex(32))')"
 
+# Recommended — using the CLI entry point
+python -m src.api
+python -m src.api --debug                      # debug logging
+python -m src.api --log                        # info logging to cogtrix-api.log
+python -m src.api --config-file prod.yaml      # explicit config file
+python -m src.api --host 0.0.0.0 --port 9000   # custom bind address
+python -m src.api --reload                     # auto-reload (development)
+
+# Alternative — direct uvicorn
 uvicorn src.api.app:app --host 0.0.0.0 --port 8000
-```
-
-**With dev auto-reload:**
-
-```bash
-uvicorn src.api.app:app --reload --port 8000
 ```
 
 Once running, interactive API docs are available at `http://localhost:8000/api/v1/docs` (Swagger UI) and `http://localhost:8000/api/v1/redoc` (ReDoc).
@@ -340,6 +347,7 @@ Once running, interactive API docs are available at `http://localhost:8000/api/v
 | `COGTRIX_API_HOST` | No | `0.0.0.0` | Bind host for uvicorn (Docker entrypoint) |
 | `COGTRIX_API_PORT` | No | `8000` | Bind port for uvicorn (Docker entrypoint) |
 | `COGTRIX_API_WORKERS` | No | `1` | Number of uvicorn worker processes (Docker entrypoint) |
+| `COGTRIX_CONFIG_FILE` | No | Auto-detected | Path to config file (JSON or YAML) |
 | `COGTRIX_DB_URL` | No | `sqlite+aiosqlite:///./data/api/cogtrix.db` | SQLAlchemy async database URL. Use `postgresql+asyncpg://` in production |
 | `COGTRIX_CORS_ORIGINS` | No | Localhost + `app.cogtrix.ai` | Comma-separated list of allowed CORS origins |
 
@@ -360,6 +368,8 @@ WebSocket connections that cannot set custom headers may pass the token as a `?t
 | `/api/v1/sessions/{id}/tools/*` | 4 | List, load, enable, disable tools |
 | `/api/v1/config/*` | 12 | Read/write config, provider management, model aliases |
 | `/api/v1/assistant/*` | 16 | Start/stop assistant mode, channel management, phonebook |
+| `/api/v1/assistant/workflows/*` | 11 | Workflow CRUD, per-workflow documents, chat bindings |
+| `/api/v1/users/*` | 4 | User management: list, create, update role, delete (admin) |
 | `/api/v1/rag/*` | 5 | Upload documents, list, delete, query knowledge base |
 | `/api/v1/mcp/*` | 5 | List servers, connect, disconnect, restart, list tools |
 | `/api/v1/system/*` | 2 | Server info, shutdown |
@@ -393,9 +403,9 @@ For detailed debugging, run with `--debug` (logs every LLM call, tool input/outp
 | Guide | What you'll learn |
 |-------|-------------------|
 | **[Configuration](docs/CONFIGURATION.md)** | Every config option, environment variables, search providers |
-| **[Providers](docs/PROVIDERS.md)** | Step-by-step: Ollama, OpenAI, Groq, Together, vLLM |
+| **[Providers](docs/PROVIDERS.md)** | Step-by-step: Ollama, OpenAI, Anthropic, Google, Groq, Together, vLLM |
 | **[Memory Modes](docs/MEMORY_MODES.md)** | Conversation, code, and reasoning modes + hybrid memory (summary + recall) |
-| **[Tools Reference](docs/TOOLS_REFERENCE.md)** | All 52 tools with parameters and examples |
+| **[Tools Reference](docs/TOOLS_REFERENCE.md)** | All 51 tools with parameters and examples |
 | **[WhatsApp Guide](docs/WHATSAPP_GUIDE.md)** | Use Cogtrix as a WhatsApp assistant (with Docker Compose) |
 | **[Telegram Guide](docs/TELEGRAM_GUIDE.md)** | Use Cogtrix as a Telegram assistant via a bot |
 | **[Assistant Mode](docs/CONFIGURATION.md#assistant-mode)** | Run Cogtrix as a headless WhatsApp/Telegram messaging daemon |
@@ -411,7 +421,7 @@ For detailed debugging, run with `--debug` (logs every LLM call, tool input/outp
 
 - Want to connect OpenAI, Groq, or another LLM? See [Providers](docs/PROVIDERS.md).
 - Want to customize settings, add search API keys, or set up messaging? See [Configuration](docs/CONFIGURATION.md).
-- Want to know what all 52 tools do? See [Tools Reference](docs/TOOLS_REFERENCE.md).
+- Want to know what all 51 tools do? See [Tools Reference](docs/TOOLS_REFERENCE.md).
 
 ---
 

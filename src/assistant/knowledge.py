@@ -16,7 +16,6 @@ import json
 import logging
 import threading
 import time
-from copy import copy
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -36,6 +35,9 @@ def _get_extraction_pool() -> _cf.ThreadPoolExecutor:
                 max_workers=_EXTRACTION_MAX_WORKERS,
                 thread_name_prefix="knowledge-extract",
             )
+            import atexit
+
+            atexit.register(_extraction_pool.shutdown, wait=False, cancel_futures=True)
     return _extraction_pool
 
 
@@ -278,7 +280,7 @@ class SharedKnowledgeStore:
                 self._faiss_save_timer.cancel()
                 self._faiss_save_timer = None
 
-        if self._vectorstore is not None and self._embeddings_ready.is_set():
+        if self._vectorstore is not None:
             self._write_faiss_index()
 
     # ------------------------------------------------------------------
@@ -413,8 +415,8 @@ class SharedKnowledgeStore:
                 fn = OllamaEmbeddings(model="nomic-embed-text")
                 fn.embed_query("ping")
                 tag = "ollama/nomic-embed-text"
-            except Exception:
-                pass
+            except Exception as exc:
+                log.debug("Knowledge store: Ollama fallback unavailable: %s", exc)
 
         if fn is None:
             log.debug("Knowledge store: no embedding provider — using keyword recall")
@@ -538,37 +540,11 @@ def create_extraction_llm(model_ref: str, config: Any) -> Any | None:
     then builds a LangChain LLM.  Returns None on any failure.
     """
     try:
-        from src.agent.core import create_llm_from_provider_config
+        from src.providers import create_chat_model_from_configs
 
-        models = getattr(config, "models", None) or {}
-        provider_name: str | None = None
-        model_name: str | None = None
-
-        if model_ref in models:
-            model_entry = models[model_ref]
-            if hasattr(model_entry, "provider"):
-                provider_name = model_entry.provider
-                model_name = model_entry.model
-            elif isinstance(model_entry, dict):
-                provider_name = model_entry.get("provider", config.provider)
-                model_name = model_entry.get("model")
-            elif isinstance(model_entry, str) and "/" in model_entry:
-                provider_name, model_name = model_entry.split("/", 1)
-            else:
-                provider_name = config.provider
-                model_name = str(model_entry)
-        elif "/" in model_ref:
-            provider_name, model_name = model_ref.split("/", 1)
-        else:
-            provider_name = config.provider
-            model_name = model_ref
-
-        prov_cfg = copy(config.get_provider_config(provider_name))
-        if model_name:
-            prov_cfg.model = model_name
-
-        llm = create_llm_from_provider_config(prov_cfg)
-        log.info("Extraction LLM created: %s/%s", provider_name, model_name)
+        pc, mc = config.resolve_llm_config_for(model_ref)
+        llm = create_chat_model_from_configs(pc, mc)
+        log.info("Extraction LLM created: %s/%s", mc.provider, mc.model)
         return llm
     except Exception as exc:
         log.warning("Failed to create extraction LLM '%s': %s", model_ref, exc)

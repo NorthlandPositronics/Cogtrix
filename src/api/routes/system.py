@@ -92,9 +92,9 @@ async def system_info(
     },
 )
 async def toggle_debug(
-    body: DebugToggleRequest,
     request: Request,
     current_user: TokenData = Depends(require_admin),
+    body: DebugToggleRequest | None = None,
 ) -> APIResponse[SystemInfoOut]:
     """Toggle debug/verbose logging at runtime (admin only).
 
@@ -102,11 +102,17 @@ async def toggle_debug(
     Error codes: UNAUTHORIZED, TOKEN_EXPIRED, FORBIDDEN.
     """
     cfg = getattr(request.app.state, "config", None)
-    level = logging.DEBUG if body.debug else logging.INFO
+    if body is None or body.debug is None:
+        # No body or no explicit debug value — toggle current debug state
+        current_debug = getattr(cfg, "debug", False) if cfg else False
+        target_debug = not current_debug
+    else:
+        target_debug = body.debug
+    level = logging.DEBUG if target_debug else logging.INFO
     logging.getLogger("cogtrix").setLevel(level)
     if cfg is not None:
-        cfg.debug = body.debug
-        if body.verbose is not None:
+        cfg.debug = target_debug
+        if body is not None and body.verbose is not None:
             cfg.verbose = body.verbose
     return APIResponse(data=_make_system_info(request))
 
@@ -133,7 +139,9 @@ class _WSLogHandler(logging.Handler):
                 "level": record.levelname,
                 "logger": record.name,
                 "message": self.format(record),
-                "timestamp": datetime.fromtimestamp(record.created, tz=UTC).isoformat(),
+                "timestamp": datetime.fromtimestamp(record.created, tz=UTC)
+                .isoformat()
+                .replace("+00:00", "Z"),
             }
 
             def _safe_put() -> None:
@@ -142,7 +150,10 @@ class _WSLogHandler(logging.Handler):
                 except asyncio.QueueFull:
                     pass  # drop the record rather than crashing the event loop
 
-            self._loop.call_soon_threadsafe(_safe_put)
+            try:
+                self._loop.call_soon_threadsafe(_safe_put)
+            except RuntimeError:
+                pass  # event loop closed (reload, shutdown)
         except Exception:
             pass
 
@@ -202,8 +213,10 @@ async def log_stream_websocket(
     loop = asyncio.get_running_loop()
     handler = _WSLogHandler(queue, numeric_level, loop)
     handler.setFormatter(logging.Formatter("%(message)s"))
-    root_logger = logging.getLogger()
-    root_logger.addHandler(handler)
+    # Attach to the cogtrix logger (not root) so records from cogtrix.*
+    # subloggers are captured reliably regardless of root logger level.
+    target_logger = logging.getLogger("cogtrix")
+    target_logger.addHandler(handler)
 
     async def _drain() -> None:
         while True:
@@ -227,7 +240,7 @@ async def log_stream_websocket(
                 break
     finally:
         drain_task.cancel()
-        root_logger.removeHandler(handler)
+        target_logger.removeHandler(handler)
         try:
             await websocket.close()
         except Exception:

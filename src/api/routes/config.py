@@ -20,9 +20,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+import uuid
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Request, status
 
 from src.api.auth import TokenData, get_current_user, require_admin
 from src.api.schemas.common import APIResponse
@@ -34,7 +35,6 @@ from src.api.schemas.config import (
     ModelSwitchRequest,
     ProviderHealthOut,
     ProviderOut,
-    ProviderSwitchRequest,
     WizardStartRequest,
     WizardStepOut,
     WizardStepRequest,
@@ -54,54 +54,34 @@ def _get_config(request: Request) -> Any:
     return getattr(request.app.state, "config", None)
 
 
-def _provider_to_out(name: str, pc: Any, active_name: str) -> ProviderOut:
+def _provider_to_out(name: str, pc: Any) -> ProviderOut:
     return ProviderOut(
         name=name,
         type=getattr(pc, "type", name),
         base_url=getattr(pc, "base_url", None),
-        model=getattr(pc, "model", None),
         has_api_key=bool(getattr(pc, "api_key", None)),
-        temperature=getattr(pc, "temperature", None),
-        max_tokens=getattr(pc, "max_tokens", None),
-        is_active=(name == active_name),
     )
 
 
 def _model_to_out(alias: str, mc: Any, cfg: Any) -> ModelOut:
-    active_model = getattr(cfg, "model", None)
+    active_alias = getattr(cfg, "active_model_alias", None)
     return ModelOut(
         alias=alias,
         provider=getattr(mc, "provider", ""),
         model_name=getattr(mc, "model", alias),
-        num_ctx=getattr(mc, "num_ctx", None),
+        num_ctx=getattr(mc, "context_window", None),
         temperature=getattr(mc, "temperature", None),
         max_tokens=getattr(mc, "max_tokens", None),
-        is_active=(alias == active_model),
+        is_active=(alias == active_alias),
     )
 
 
 def _config_to_out(cfg: Any, raw_yaml: str | None = None) -> ConfigOut:
     providers_out: list[ProviderOut] = []
-    active_provider = (getattr(cfg, "provider", "ollama") if cfg else None) or "ollama"
     if cfg is not None:
         cfg_providers = getattr(cfg, "providers", {}) or {}
         for name, pc in cfg_providers.items():
-            providers_out.append(_provider_to_out(name, pc, active_provider))
-        # Include active provider placeholder if it has no explicit config entry
-        if active_provider not in cfg_providers:
-            providers_out.insert(
-                0,
-                ProviderOut(
-                    name=active_provider,
-                    type=active_provider,
-                    base_url=None,
-                    model=getattr(cfg, "model", None),
-                    has_api_key=False,
-                    temperature=None,
-                    max_tokens=None,
-                    is_active=True,
-                ),
-            )
+            providers_out.append(_provider_to_out(name, pc))
 
     models_out: list[ModelOut] = []
     if cfg is not None:
@@ -109,10 +89,21 @@ def _config_to_out(cfg: Any, raw_yaml: str | None = None) -> ConfigOut:
             models_out.append(_model_to_out(alias, mc, cfg))
 
     cfg_path = getattr(cfg, "config_file_path", None) if cfg else None
+    active_alias = getattr(cfg, "active_model_alias", None) if cfg else None
+
+    _raw_sys_prompt = getattr(cfg, "system_prompt", None) if cfg else None
+    _sys_prompt = _raw_sys_prompt if isinstance(_raw_sys_prompt, str) and _raw_sys_prompt else None
+    _services = getattr(cfg, "services", None) if cfg else None
+    _guardrails: dict | None = None
+    if isinstance(_services, dict):
+        _asst = _services.get("assistant")
+        if isinstance(_asst, dict):
+            _gr = _asst.get("guardrails")
+            if isinstance(_gr, dict):
+                _guardrails = _gr
 
     return ConfigOut(
-        provider=active_provider,
-        model=getattr(cfg, "model", None) if cfg else None,
+        active_model=active_alias,
         memory_mode=(getattr(cfg, "memory_mode", "conversation") if cfg else None)
         or "conversation",
         prompt_optimizer=bool(getattr(cfg, "prompt_optimizer", True) if cfg else True),
@@ -126,6 +117,8 @@ def _config_to_out(cfg: Any, raw_yaml: str | None = None) -> ConfigOut:
         providers=providers_out,
         models=models_out,
         raw_yaml=raw_yaml,
+        system_prompt=_sys_prompt,
+        guardrails=_guardrails,
     )
 
 
@@ -262,10 +255,11 @@ async def reload_config(
 
     warnings_list: list[str] = []
     try:
-        from src.config import Config
+        from src.config import load_config
 
-        # Config() reads from disk; run it off the event loop thread.
-        new_cfg = await asyncio.to_thread(Config)
+        # load_config() reads the config file, applies env vars, and resolves
+        # model aliases — Config() alone would create an empty default config.
+        new_cfg = await asyncio.to_thread(load_config)
         request.app.state.config = new_cfg
         cfg_path = getattr(new_cfg, "config_file_path", None)
         return APIResponse(
@@ -333,62 +327,45 @@ async def get_provider(
     Error codes: UNAUTHORIZED, TOKEN_EXPIRED, NOT_FOUND.
     """
     cfg = _get_config(request)
-    active_name = (getattr(cfg, "provider", "ollama") if cfg else None) or "ollama"
     providers = (getattr(cfg, "providers", {}) if cfg else None) or {}
     if provider_name not in providers:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail={"code": "NOT_FOUND", "message": f"Provider '{provider_name}' not found."},
         )
-    return APIResponse(data=_provider_to_out(provider_name, providers[provider_name], active_name))
+    return APIResponse(data=_provider_to_out(provider_name, providers[provider_name]))
 
 
 @router.post(
     "/provider",
-    summary="Switch active provider",
+    summary="Switch active provider — deprecated",
     description=(
-        "Switch the globally active LLM provider. "
-        "All new sessions and existing sessions that use the global default will use "
-        "the new provider from the next agent turn. "
-        "Invalidates the LLM bind-tools cache. Admin only."
+        "Deprecated: provider switching is no longer supported. "
+        "Use POST /config/model to switch models instead."
     ),
     response_model=APIResponse[ConfigOut],
     responses={
-        200: {"description": "Provider switched; updated config snapshot returned."},
+        410: {"description": "Endpoint removed (GONE)."},
         401: {"description": "Not authenticated."},
         403: {"description": "Admin required (FORBIDDEN)."},
-        404: {"description": "Provider not found (NOT_FOUND)."},
-        503: {"description": "Provider unreachable (PROVIDER_UNREACHABLE)."},
     },
 )
 async def switch_provider(
-    body: ProviderSwitchRequest,
     request: Request,
+    body: Any = Body(default=None),
     current_user: TokenData = Depends(require_admin),
 ) -> APIResponse[ConfigOut]:
-    """Switch the globally active LLM provider (admin only).
+    """Switch provider endpoint — deprecated.
 
-    Auth: admin bearer token required.
-    Error codes: UNAUTHORIZED, TOKEN_EXPIRED, FORBIDDEN, NOT_FOUND, PROVIDER_UNREACHABLE.
+    Provider switching is no longer supported. Use POST /config/model instead.
     """
-    cfg = _get_config(request)
-    providers = (getattr(cfg, "providers", {}) if cfg else None) or {}
-    _known_types = {"ollama", "openai", "anthropic", "google"}
-    if body.provider not in providers and body.provider not in _known_types:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail={"code": "NOT_FOUND", "message": f"Provider '{body.provider}' not found."},
-        )
-    if cfg is not None:
-        cfg.provider = body.provider
-    try:
-        from src.orchestration.runner import invalidate_llm_caches
-
-        invalidate_llm_caches()
-    except Exception as exc:
-        log.debug("invalidate_llm_caches: %s", exc)
-    raw_yaml = await _read_raw_yaml(cfg)
-    return APIResponse(data=_config_to_out(cfg, raw_yaml=raw_yaml))
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail={
+            "code": "GONE",
+            "message": "Provider switching is no longer supported. Use POST /config/model to switch models.",
+        },
+    )
 
 
 @router.post(
@@ -424,11 +401,19 @@ async def check_provider_health(
     pc = providers[provider_name]
     t0 = time.monotonic()
     try:
-        from src.providers import create_chat_model_from_config
+        from src.providers import create_chat_model, get_default_model
 
-        # create_chat_model_from_config may perform network I/O (e.g. Ollama API
+        prov_type = getattr(pc, "type", provider_name)
+        default_model = get_default_model(prov_type)
+        # create_chat_model may perform network I/O (e.g. Ollama API
         # introspection); run it off the event loop thread to prevent stalls.
-        await asyncio.to_thread(create_chat_model_from_config, pc)
+        await asyncio.to_thread(
+            create_chat_model,
+            prov_type,
+            model=default_model,
+            api_key=getattr(pc, "api_key", None),
+            base_url=getattr(pc, "get_base_url", lambda: None)(),
+        )
         latency_ms = int((time.monotonic() - t0) * 1000)
         return APIResponse(
             data=ProviderHealthOut(
@@ -513,7 +498,10 @@ async def switch_model(
     """
     cfg = _get_config(request)
     if cfg is not None:
-        cfg.model = body.model
+        cfg.active_model_alias = body.model
+        from src.config import _resolve_model
+
+        _resolve_model(cfg)
     try:
         from src.orchestration.runner import invalidate_llm_caches
 
@@ -525,8 +513,23 @@ async def switch_model(
 
 
 # ---------------------------------------------------------------------------
-# Setup wizard — REST adaptation is non-trivial; return 501 for now
+# Setup wizard — in-memory session store with 3-step flow
 # ---------------------------------------------------------------------------
+
+
+_wizard_sessions: dict[str, dict[str, Any]] = {}
+_WIZARD_TTL = 1800  # 30 minutes
+
+
+def _get_wizard(wizard_id: str) -> dict[str, Any] | None:
+    """Return wizard session or None if expired/missing."""
+    session = _wizard_sessions.get(wizard_id)
+    if session is None:
+        return None
+    if time.monotonic() - session["created_mono"] > _WIZARD_TTL:
+        _wizard_sessions.pop(wizard_id, None)
+        return None
+    return session
 
 
 @router.post(
@@ -548,6 +551,7 @@ async def switch_model(
 )
 async def start_wizard(
     body: WizardStartRequest,
+    request: Request,
     current_user: TokenData = Depends(require_admin),
 ) -> APIResponse[WizardStepOut]:
     """Start a setup wizard session and return the first step (admin only).
@@ -555,12 +559,41 @@ async def start_wizard(
     Auth: admin bearer token required.
     Error codes: UNAUTHORIZED, TOKEN_EXPIRED, FORBIDDEN.
     """
-    raise HTTPException(
-        status_code=status.HTTP_501_NOT_IMPLEMENTED,
-        detail={
-            "code": "NOT_IMPLEMENTED",
-            "message": "Setup wizard REST API is not yet implemented.",
-        },
+    wid = str(uuid.uuid4())
+
+    # Detect environment (non-blocking)
+    env = await asyncio.to_thread(_wizard_detect_env)
+
+    # Load existing config if editing
+    existing_yaml = ""
+    if body.edit_existing:
+        existing_yaml = await asyncio.to_thread(_wizard_load_existing)
+
+    _wizard_sessions[wid] = {
+        "created_mono": time.monotonic(),
+        "step": 0,
+        "env": env,
+        "existing_yaml": existing_yaml,
+        "bootstrap_info": None,
+        "llm": None,
+        "messages": [],
+        "docs_url": body.docs_url,
+    }
+
+    return APIResponse(
+        data=WizardStepOut(
+            wizard_id=wid,
+            step=0,
+            total_steps=3,
+            step_name="Connect to LLM",
+            question=(
+                "Select a provider and provide connection details. "
+                "Send data: {provider_type, api_key?, base_url?, model}"
+            ),
+            yaml_preview=None,
+            complete=False,
+            warnings=[],
+        )
     )
 
 
@@ -583,19 +616,160 @@ async def start_wizard(
 async def advance_wizard(
     wizard_id: str,
     body: WizardStepRequest,
+    request: Request,
     current_user: TokenData = Depends(require_admin),
 ) -> APIResponse[WizardStepOut]:
     """Advance the wizard one step and return the next question or completion (admin only).
 
     Auth: admin bearer token required.
-    Error codes: UNAUTHORIZED, TOKEN_EXPIRED, FORBIDDEN, NOT_FOUND, WIZARD_STEP_ERROR, CONFIG_INVALID.
+    Error codes: UNAUTHORIZED, TOKEN_EXPIRED, FORBIDDEN, NOT_FOUND, WIZARD_STEP_ERROR.
     """
+    ws = _get_wizard(wizard_id)
+    if ws is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "NOT_FOUND", "message": "Wizard session not found or expired."},
+        )
+
+    step = ws["step"]
+
+    # ── Step 0: Connect to LLM ──
+    if step == 0:
+        data = body.data or {}
+        provider_type = data.get("provider_type", "openai")
+        api_key = data.get("api_key")
+        base_url = data.get("base_url")
+        model = data.get("model")
+
+        if not model:
+            from src.providers import get_default_model
+
+            model = get_default_model(provider_type)
+
+        # Test connection off the event loop
+        try:
+            llm = await asyncio.to_thread(
+                _wizard_test_connection, provider_type, model, api_key, base_url
+            )
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail={
+                    "code": "WIZARD_STEP_ERROR",
+                    "message": f"Connection failed: {exc}",
+                },
+            ) from exc
+
+        # Determine provider name
+        provider_name = data.get("provider_name", provider_type)
+        ws["bootstrap_info"] = {
+            "provider": provider_name,
+            "model": model,
+            "api_key": api_key,
+            "base_url": base_url,
+            "type": provider_type,
+        }
+        ws["llm"] = llm
+
+        # Build system prompt and start conversation
+        docs = await asyncio.to_thread(_wizard_load_docs, ws.get("docs_url"))
+        from src.setup_wizard import _WIZARD_SYSTEM_PROMPT
+
+        system_prompt = _WIZARD_SYSTEM_PROMPT.substitute(
+            docs=docs,
+            existing_config=ws["existing_yaml"] or "No existing configuration.",
+            bootstrap_provider=provider_name,
+            bootstrap_model=model,
+        )
+
+        # Get first LLM question
+        from langchain_core.messages import AIMessage, SystemMessage
+
+        messages = [SystemMessage(content=system_prompt)]
+        ai_text = await asyncio.to_thread(_wizard_invoke_llm, llm, messages)
+        messages.append(AIMessage(content=ai_text))
+        ws["messages"] = messages
+        ws["step"] = 1
+
+        return APIResponse(
+            data=WizardStepOut(
+                wizard_id=wizard_id,
+                step=1,
+                total_steps=3,
+                step_name="Configure",
+                question=ai_text,
+                yaml_preview=None,
+                complete=False,
+                warnings=[],
+            )
+        )
+
+    # ── Step 1: Configure (Q&A loop) ──
+    if step == 1:
+        from langchain_core.messages import AIMessage, HumanMessage
+
+        user_answer = body.answer or ""
+        if not user_answer.strip():
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail={
+                    "code": "WIZARD_STEP_ERROR",
+                    "message": "An answer is required for this step.",
+                },
+            )
+
+        # Check if user wants to accept the config (data.accept = true)
+        data = body.data or {}
+        if data.get("accept") and ws["messages"]:
+            # Look for YAML in the last AI message
+            last_ai = ws["messages"][-1].content if hasattr(ws["messages"][-1], "content") else ""
+            from src.setup_wizard import _has_yaml_block
+
+            if _has_yaml_block(last_ai):
+                ws["step"] = 2
+                return await _wizard_save(wizard_id, ws, request)
+
+        messages = ws["messages"]
+        messages.append(HumanMessage(content=user_answer))
+
+        llm = ws["llm"]
+        ai_text = await asyncio.to_thread(_wizard_invoke_llm, llm, messages)
+        messages.append(AIMessage(content=ai_text))
+
+        from src.setup_wizard import _has_yaml_block
+
+        yaml_preview = None
+        warnings: list[str] = []
+        if _has_yaml_block(ai_text):
+            try:
+                from src.setup_wizard import _extract_yaml, _mask_secrets
+
+                raw_yaml = _extract_yaml(ai_text)
+                yaml_preview = _mask_secrets(raw_yaml)
+            except Exception:
+                pass
+            warnings.append("YAML config detected. Send data: {accept: true} to save it.")
+
+        return APIResponse(
+            data=WizardStepOut(
+                wizard_id=wizard_id,
+                step=1,
+                total_steps=3,
+                step_name="Configure",
+                question=ai_text,
+                yaml_preview=yaml_preview,
+                complete=False,
+                warnings=warnings,
+            )
+        )
+
+    # ── Step 2: Save ──
+    if step == 2:
+        return await _wizard_save(wizard_id, ws, request)
+
     raise HTTPException(
-        status_code=status.HTTP_501_NOT_IMPLEMENTED,
-        detail={
-            "code": "NOT_IMPLEMENTED",
-            "message": "Setup wizard REST API is not yet implemented.",
-        },
+        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        detail={"code": "WIZARD_STEP_ERROR", "message": "Invalid wizard step."},
     )
 
 
@@ -620,10 +794,166 @@ async def cancel_wizard(
     Auth: admin bearer token required.
     Error codes: UNAUTHORIZED, TOKEN_EXPIRED, FORBIDDEN, NOT_FOUND.
     """
-    raise HTTPException(
-        status_code=status.HTTP_501_NOT_IMPLEMENTED,
-        detail={
-            "code": "NOT_IMPLEMENTED",
-            "message": "Setup wizard REST API is not yet implemented.",
-        },
+    ws = _wizard_sessions.pop(wizard_id, None)
+    if ws is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "NOT_FOUND", "message": "Wizard session not found or expired."},
+        )
+    return APIResponse(data=None)
+
+
+# ---------------------------------------------------------------------------
+# Wizard helpers (blocking — called via asyncio.to_thread)
+# ---------------------------------------------------------------------------
+
+
+def _wizard_detect_env() -> dict[str, Any]:
+    """Detect available providers from environment."""
+    from src.setup_wizard import _detect_environment
+
+    return _detect_environment()
+
+
+def _wizard_load_existing() -> str:
+    """Load existing config YAML if found."""
+    from src.setup_wizard import _load_existing_config
+
+    content, _path = _load_existing_config()
+    return content
+
+
+def _wizard_load_docs(url: str | None) -> str:
+    """Load configuration docs."""
+    from src.setup_wizard import _load_docs
+
+    return _load_docs(url)
+
+
+def _wizard_test_connection(
+    provider_type: str, model: str, api_key: str | None, base_url: str | None
+) -> Any:
+    """Test LLM connection. Returns LLM on success, raises on failure."""
+    from src.setup_wizard import _test_connection
+
+    llm = _test_connection(provider_type, model, api_key, base_url)
+    if llm is None:
+        raise RuntimeError(f"Could not connect to {provider_type}/{model}")
+    return llm
+
+
+def _wizard_invoke_llm(llm: Any, messages: list[Any]) -> str:
+    """Invoke the LLM with messages. Returns the AI response text."""
+    response = llm.invoke(messages)
+    return response.content if hasattr(response, "content") else str(response)
+
+
+async def _wizard_save(
+    wizard_id: str, ws: dict[str, Any], request: Request
+) -> APIResponse[WizardStepOut]:
+    """Extract YAML from conversation, validate, write, and reload config."""
+    from src.setup_wizard import _extract_yaml, _has_yaml_block, _mask_secrets
+
+    # Find the last AI message with YAML
+    last_yaml_text = ""
+    for msg in reversed(ws["messages"]):
+        text = msg.content if hasattr(msg, "content") else str(msg)
+        if _has_yaml_block(text):
+            last_yaml_text = text
+            break
+
+    if not last_yaml_text:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "code": "WIZARD_STEP_ERROR",
+                "message": "No YAML configuration found in conversation.",
+            },
+        )
+
+    warnings: list[str] = []
+    try:
+        raw_yaml = _extract_yaml(last_yaml_text)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"code": "WIZARD_STEP_ERROR", "message": str(exc)},
+        ) from exc
+
+    # Validate and write
+    try:
+        await asyncio.to_thread(_wizard_validate_and_write, raw_yaml, ws["bootstrap_info"])
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"code": "CONFIG_INVALID", "message": f"Config validation failed: {exc}"},
+        ) from exc
+
+    # Reload config into app state
+    try:
+        from src.config import load_config
+
+        new_cfg = await asyncio.to_thread(load_config)
+        request.app.state.config = new_cfg
+        log.info("Config reloaded after wizard save")
+    except Exception as exc:
+        warnings.append(f"Config saved but reload failed: {exc}")
+
+    # Cleanup wizard session
+    _wizard_sessions.pop(wizard_id, None)
+
+    return APIResponse(
+        data=WizardStepOut(
+            wizard_id=wizard_id,
+            step=2,
+            total_steps=3,
+            step_name="Save",
+            question=None,
+            yaml_preview=_mask_secrets(raw_yaml),
+            complete=True,
+            warnings=warnings,
+        )
     )
+
+
+def _wizard_validate_and_write(raw_yaml: str, bootstrap_info: dict[str, Any]) -> str:
+    """Validate YAML and write config file. Returns the masked YAML preview."""
+    import tempfile
+    from pathlib import Path
+
+    import yaml
+
+    from src.setup_wizard import _inject_bootstrap
+
+    data = yaml.safe_load(raw_yaml)
+    if not isinstance(data, dict):
+        raise ValueError("Generated config is not a valid YAML mapping")
+
+    _inject_bootstrap(data, bootstrap_info)
+
+    # Validate via round-trip
+    tmp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".yaml", delete=False, encoding="utf-8"
+        ) as tmp:
+            tmp_path = Path(tmp.name)
+            yaml.dump(data, tmp, default_flow_style=False, sort_keys=False)
+
+        from src.config import Config, _apply_config_file
+
+        test_config = Config()
+        _apply_config_file(test_config, tmp_path)
+    finally:
+        if tmp_path is not None:
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    # Write the final config
+    output_path = Path.home() / ".cogtrix.yaml"
+    yaml_text = yaml.dump(data, default_flow_style=False, sort_keys=False)
+    output_path.write_text(yaml_text, encoding="utf-8")
+
+    return yaml_text

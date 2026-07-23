@@ -11,6 +11,7 @@ import asyncio
 import logging
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from sqlalchemy import update
 
@@ -19,8 +20,13 @@ from src.api.db.models import RagDocument
 
 log = logging.getLogger("cogtrix.api.tasks.rag")
 
-# Upload storage root — relative to cwd at startup
-_UPLOADS_DIR = Path("data/api/uploads")
+
+def _get_uploads_dir() -> Path:
+    """Resolve uploads directory using COGTRIX_DATA_DIR if set."""
+    import os
+
+    data_dir = os.environ.get("COGTRIX_DATA_DIR", "data")
+    return Path(data_dir, "api", "uploads").resolve()
 
 
 def _run_ingest(doc_id: str, file_path: Path) -> tuple[bool, int, str | None]:
@@ -32,11 +38,29 @@ def _run_ingest(doc_id: str, file_path: Path) -> tuple[bool, int, str | None]:
     from src.rag.ingest import IngestConfig, ingest_documents
 
     docs_dir = file_path.parent
-    vectordb_dir = _UPLOADS_DIR / doc_id / "vectordb"
+    vectordb_dir = _get_uploads_dir() / doc_id / "vectordb"
+
+    # Resolve embedding provider from app config so the API path uses the
+    # same provider as the CLI (instead of defaulting to Ollama).
+    emb_kwargs: dict[str, Any] = {}
+    try:
+        from src.config import load_config
+
+        cfg = load_config()
+        emb_type, emb_model, emb_base_url, emb_api_key = cfg.resolve_embedding_config()
+        emb_kwargs = {
+            "embedding_provider": emb_type,
+            "embedding_model": emb_model,
+            "base_url": emb_base_url,
+            "api_key": emb_api_key,
+        }
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Could not resolve embedding config; using defaults: %s", exc)
 
     config = IngestConfig(
         docs_dir=docs_dir,
         vectordb_dir=vectordb_dir,
+        **emb_kwargs,
     )
     try:
         result = ingest_documents(config)

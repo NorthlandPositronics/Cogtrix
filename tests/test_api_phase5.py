@@ -85,8 +85,8 @@ class TestDocumentUpload:
                 "src.api.routes.rag.ingest_document_task",
                 new=AsyncMock(return_value=None),
             ),
-            patch("src.api.routes.rag._UPLOADS_DIR", tmp_path),
-            patch("src.api.tasks.rag._UPLOADS_DIR", tmp_path),
+            patch("src.api.routes.rag._get_uploads_dir", return_value=tmp_path),
+            patch("src.api.tasks.rag._get_uploads_dir", return_value=tmp_path),
         ):
             resp = client.post(
                 "/api/v1/rag/documents",
@@ -108,7 +108,7 @@ class TestDocumentUpload:
                 "src.api.routes.rag.ingest_document_task",
                 new=AsyncMock(return_value=None),
             ),
-            patch("src.api.routes.rag._UPLOADS_DIR", tmp_path),
+            patch("src.api.routes.rag._get_uploads_dir", return_value=tmp_path),
         ):
             resp = client.post(
                 "/api/v1/rag/documents",
@@ -126,7 +126,7 @@ class TestDocumentUpload:
                 "src.api.routes.rag.ingest_document_task",
                 new=AsyncMock(return_value=None),
             ),
-            patch("src.api.routes.rag._UPLOADS_DIR", tmp_path),
+            patch("src.api.routes.rag._get_uploads_dir", return_value=tmp_path),
         ):
             resp = client.post(
                 "/api/v1/rag/documents",
@@ -204,7 +204,7 @@ class TestDocumentListing:
                 "src.api.routes.rag.ingest_document_task",
                 new=AsyncMock(return_value=None),
             ),
-            patch("src.api.routes.rag._UPLOADS_DIR", tmp_path),
+            patch("src.api.routes.rag._get_uploads_dir", return_value=tmp_path),
         ):
             seed_resp = client.post(
                 "/api/v1/rag/documents",
@@ -258,7 +258,7 @@ class TestDocumentListing:
                 "src.api.routes.rag.ingest_document_task",
                 new=AsyncMock(return_value=None),
             ),
-            patch("src.api.routes.rag._UPLOADS_DIR", tmp_path),
+            patch("src.api.routes.rag._get_uploads_dir", return_value=tmp_path),
         ):
             upload_resp = client.post(
                 "/api/v1/rag/documents",
@@ -300,7 +300,7 @@ class TestDocumentListing:
                 "src.api.routes.rag.ingest_document_task",
                 new=AsyncMock(return_value=None),
             ),
-            patch("src.api.routes.rag._UPLOADS_DIR", tmp_path),
+            patch("src.api.routes.rag._get_uploads_dir", return_value=tmp_path),
         ):
             client.post(
                 "/api/v1/rag/documents",
@@ -336,7 +336,7 @@ class TestDocumentListing:
                 "src.api.routes.rag.ingest_document_task",
                 new=AsyncMock(return_value=None),
             ),
-            patch("src.api.routes.rag._UPLOADS_DIR", tmp_path),
+            patch("src.api.routes.rag._get_uploads_dir", return_value=tmp_path),
         ):
             client.post(
                 "/api/v1/rag/documents",
@@ -366,7 +366,7 @@ class TestDocumentDelete:
                 "src.api.routes.rag.ingest_document_task",
                 new=AsyncMock(return_value=None),
             ),
-            patch("src.api.routes.rag._UPLOADS_DIR", tmp_path),
+            patch("src.api.routes.rag._get_uploads_dir", return_value=tmp_path),
         ):
             seed_resp = client.post(
                 "/api/v1/rag/documents",
@@ -402,7 +402,7 @@ class TestDocumentDelete:
                 "src.api.routes.rag.ingest_document_task",
                 new=AsyncMock(return_value=None),
             ),
-            patch("src.api.routes.rag._UPLOADS_DIR", tmp_path),
+            patch("src.api.routes.rag._get_uploads_dir", return_value=tmp_path),
         ):
             seed_resp = client.post(
                 "/api/v1/rag/documents",
@@ -518,7 +518,7 @@ class TestDocumentContentType:
                 "src.api.routes.rag.ingest_document_task",
                 new=AsyncMock(return_value=None),
             ),
-            patch("src.api.routes.rag._UPLOADS_DIR", tmp_path),
+            patch("src.api.routes.rag._get_uploads_dir", return_value=tmp_path),
         ):
             resp = client.post(
                 "/api/v1/rag/documents",
@@ -536,7 +536,7 @@ class TestDocumentContentType:
                 "src.api.routes.rag.ingest_document_task",
                 new=AsyncMock(return_value=None),
             ),
-            patch("src.api.routes.rag._UPLOADS_DIR", tmp_path),
+            patch("src.api.routes.rag._get_uploads_dir", return_value=tmp_path),
         ):
             resp = client.post(
                 "/api/v1/rag/documents",

@@ -38,11 +38,11 @@ _INJECTION_PATTERNS: list[re.Pattern[str]] = [
         r"override\s+(previous|all|your)\b",
         r"forget\s+(everything|all|previous|your)\b",
         r"(drop|clear|reset|erase|wipe)\s+(all|everything|previous|prior|your|the)\b",
-        r"(drop|clear|reset|erase|wipe)\s+.*\b(context|history|memory|instructions?|rules?|prompts?)\b",
+        r"(drop|clear|reset|erase|wipe)\s+.{0,200}\b(context|history|memory|instructions?|rules?|prompts?)\b",
         r"now\s+you\s+are\s+(a|an|the|my)\b",
         r"from\s+now\s+on\s+you\s+(are|will|should|must)\b",
         r"stop\s+being\s+(a|an|the)\b",
-        r"\bDAN\b.*\bmode\b",
+        r"\bDAN\b.{0,200}\bmode\b",
         r"jailbreak",
         r"do\s+anything\s+now",
         r"\[system\]",
@@ -425,7 +425,7 @@ class ChatRateLimiter:
     def check_and_record(self, chat_id: str) -> GuardrailResult:
         """Check rate limits and record the message atomically under a single lock."""
         with self._lock:
-            if len(self._windows) > 1000:
+            if len(self._windows) > 100:
                 self._cleanup_stale()
 
             window = self._windows.get(chat_id)
@@ -495,7 +495,7 @@ class ViolationTracker:
             return GuardrailResult(is_safe=True)
 
         with self._lock:
-            if len(self._violations) > 1000:
+            if len(self._violations) > 100:
                 self._cleanup_stale()
 
             timestamps = self._violations.get(chat_id)

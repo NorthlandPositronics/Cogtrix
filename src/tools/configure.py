@@ -9,6 +9,7 @@ from __future__ import annotations
 import importlib
 import sys
 from collections.abc import Callable
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from src.logging_config import get_logger
@@ -117,24 +118,21 @@ def load_tools(tool_filter: str | None = None) -> ToolRegistry:
 def apply_output_cap(tool: Any, max_chars: int) -> Any:
     """Wrap *tool* so its output never exceeds *max_chars*.
 
-    Works by patching the tool's ``func`` (or ``_run``) **in place** to
-    post-process the return value.  The cap applies to all consumers of
-    the tool object, including delegates.
+    Returns a shallow copy of *tool* with a patched ``func`` (or ``_run``)
+    so concurrent sessions that hold a reference to the original are not
+    affected by the mutation.
 
     Idempotent: stores the unwrapped function as ``tool._uncapped_func``
     on the first call and always re-wraps from it, preventing nested
     cap wrappers when called multiple times (startup, expansion, delegate).
     """
+    import copy
     import functools
 
     original_func = getattr(tool, "_uncapped_func", None)
     if original_func is None:
         original_func = getattr(tool, "func", None) or getattr(tool, "_run", None)
         if original_func is None:
-            return tool
-        try:
-            tool._uncapped_func = original_func
-        except (AttributeError, TypeError):
             return tool
 
     @functools.wraps(original_func)
@@ -144,11 +142,16 @@ def apply_output_cap(tool: Any, max_chars: int) -> Any:
             return truncate_tool_output(result, max_chars)
         return result
 
-    if hasattr(tool, "func"):
-        tool.func = _capped
-    else:
-        tool._run = _capped
-    return tool
+    try:
+        tool_copy = copy.copy(tool)
+        tool_copy._uncapped_func = original_func
+        if hasattr(tool_copy, "func"):
+            tool_copy.func = _capped
+        else:
+            tool_copy._run = _capped
+        return tool_copy
+    except (AttributeError, TypeError):
+        return tool
 
 
 def configure_delegate_tool(
@@ -164,18 +167,8 @@ def configure_delegate_tool(
             providers_dict[name] = {
                 "type": prov_cfg.type,
                 "base_url": prov_cfg.base_url,
-                "model": prov_cfg.model,
                 "api_key": prov_cfg.api_key,
-                "num_ctx": prov_cfg.num_ctx,
             }
-
-        try:
-            resolved = config.resolve_provider_config()
-            if config.provider in providers_dict:
-                providers_dict[config.provider]["num_ctx"] = resolved.num_ctx
-                providers_dict[config.provider]["model"] = resolved.model
-        except ValueError:
-            pass
 
         allowed = config.delegate_allowed_providers or config.list_providers()
 
@@ -184,15 +177,15 @@ def configure_delegate_tool(
             models_dict[mname] = {
                 "provider": mcfg.provider,
                 "model": mcfg.model,
-                "num_ctx": mcfg.num_ctx,
+                "context_window": mcfg.context_window,
                 "temperature": mcfg.temperature,
+                "max_tokens": mcfg.max_tokens,
             }
 
         delegate_config = {
             "enabled": config.delegate_enabled,
             "default_timeout": config.delegate_default_timeout,
-            "default_provider": config.provider,
-            "default_model": config.model,
+            "default_model_alias": config.active_model_alias,
             "allowed_providers": allowed,
             "allowed_models": config.delegate_allowed_models,
             "models": models_dict,
@@ -235,24 +228,24 @@ def configure_deep_think_tool(config: Config) -> None:
             providers_dict[name] = {
                 "type": prov_cfg.type,
                 "base_url": prov_cfg.base_url,
-                "model": prov_cfg.model,
                 "api_key": prov_cfg.api_key,
-                "num_ctx": prov_cfg.num_ctx,
             }
 
-        try:
-            resolved = config.resolve_provider_config()
-            if config.provider in providers_dict:
-                providers_dict[config.provider]["num_ctx"] = resolved.num_ctx
-                providers_dict[config.provider]["model"] = resolved.model
-        except ValueError:
-            pass
+        models_dict: dict[str, Any] = {}
+        for mname, mcfg in config.models.items():
+            models_dict[mname] = {
+                "provider": mcfg.provider,
+                "model": mcfg.model,
+                "context_window": mcfg.context_window,
+                "temperature": mcfg.temperature,
+                "max_tokens": mcfg.max_tokens,
+            }
 
         configure_deep_think(
             {
                 "providers": providers_dict,
-                "default_provider": config.provider,
-                "default_model": config.model,
+                "models": models_dict,
+                "default_model_alias": config.active_model_alias,
             }
         )
     except ImportError:
@@ -344,21 +337,78 @@ def configure_file_ops_tool(config: Config) -> None:
 
 
 def configure_rag_tool(config: Config) -> None:
-    """Configure the RAG tool with runtime settings from config."""
+    """Configure the RAG tool with runtime settings from config.
+
+    After setting embedding parameters, updates the tool description with
+    live index stats and sets ``_rag_auto_activate`` so callers can check
+    whether to promote the tool from on-demand to active.
+    """
     try:
-        from src.tools.rag import configure_rag
+        from src.tools.rag import TOOL_CONFIG as _rag_tool_config
+        from src.tools.rag import (
+            _build_description,
+            configure_rag,
+            knowledge_base_exists,
+        )
 
         emb_type, emb_model, emb_base_url, emb_api_key = config.resolve_embedding_config()
-        rag_config = {
+        rag_config: dict[str, str | None] = {
             "embedding_provider": emb_type,
             "embedding_model": emb_model,
             "base_url": emb_base_url,
             "api_key": emb_api_key,
             "vectordb_dir": str(config.resolve_data_path(config.rag.vectordb_dir) / "faiss_index"),
         }
+
+        # Resolve the API uploads directory so the RAG tool can also search
+        # per-document FAISS indexes created by the API ingestion pipeline.
+        import os
+
+        data_dir = os.environ.get("COGTRIX_DATA_DIR", config.data_dir)
+        api_uploads = Path(data_dir, "api", "uploads").resolve()
+        rag_config["api_uploads_dir"] = str(api_uploads)
+
         configure_rag(rag_config)
+
+        # Update tool description with live index stats so the LLM
+        # sees doc count / size in both the active tool schema and
+        # the on-demand catalog.
+        desc = _build_description()
+        _rag_tool_config["description"] = desc
+
+        # Set auto-activate flag so the tool is promoted from on-demand
+        # to active when a knowledge base exists.
+        global _rag_auto_activate
+        _rag_auto_activate = knowledge_base_exists()
+    except (ImportError, OSError):
+        pass
+
+
+def _update_rag_tool_description(tool: Any) -> None:
+    """Update the description on an already-registered RAG StructuredTool.
+
+    Called after :func:`configure_rag_tool` has set ``TOOL_CONFIG["description"]``
+    with live index stats.
+    """
+    try:
+        from src.tools.rag import TOOL_CONFIG as _rag_tool_config
+
+        desc = _rag_tool_config.get("description")
+        if desc and hasattr(tool, "description"):
+            tool.description = desc
     except ImportError:
         pass
+
+
+_rag_auto_activate: bool = False
+
+
+def rag_should_auto_activate() -> bool:
+    """Return True if the RAG tool should be in the active set.
+
+    Set by :func:`configure_rag_tool` after checking for existing indexes.
+    """
+    return _rag_auto_activate
 
 
 def filter_unconfigured_tools(registry: ToolRegistry) -> None:

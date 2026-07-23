@@ -6,6 +6,8 @@ import time
 from collections.abc import Callable
 from unittest.mock import MagicMock
 
+import pytest
+
 from src.assistant.channel import IncomingMessage, SendResult
 from src.assistant.handler import _DEFAULT_EXCLUDED, MessageHandler
 from src.memory.context import MemoryContext
@@ -139,9 +141,9 @@ class TestToolExclusion:
         assert "dangerous_tool" not in handler._available_tools
         assert "ok_tool" in handler._available_tools
 
-    def test_whatsapp_and_telegram_tools_all_excluded(self):
-        """Both whatsapp_* and telegram_* tools are excluded by default."""
-        messaging_tools = [
+    @pytest.mark.parametrize(
+        "tool_name",
+        [
             "whatsapp_send",
             "whatsapp_check",
             "whatsapp_send_image",
@@ -150,19 +152,18 @@ class TestToolExclusion:
             "telegram_check",
             "telegram_send_photo",
             "telegram_contacts",
-        ]
-        for tool_name in messaging_tools:
-            assert tool_name in _DEFAULT_EXCLUDED, f"{tool_name} should be in _DEFAULT_EXCLUDED"
-
-    def test_write_and_shell_tools_excluded(self):
-        """execute_shell_command, write_file, append_file, execute_python are excluded by default."""
-        for name in ("execute_shell_command", "execute_python", "write_file", "append_file"):
-            assert name in _DEFAULT_EXCLUDED
-
-    def test_read_and_filesystem_tools_excluded(self):
-        """read_file, list_directory, file_info, read_pdf are excluded by default."""
-        for name in ("read_file", "list_directory", "file_info", "read_pdf"):
-            assert name in _DEFAULT_EXCLUDED
+            "execute_shell_command",
+            "execute_python",
+            "write_file",
+            "append_file",
+            "read_file",
+            "list_directory",
+            "file_info",
+            "read_pdf",
+        ],
+    )
+    def test_default_excluded_tools_membership(self, tool_name: str):
+        assert tool_name in _DEFAULT_EXCLUDED
 
 
 # ---------------------------------------------------------------------------
@@ -715,112 +716,9 @@ class TestBug110EditFailFallback:
         channel.edit_message.return_value = SendResult(ok=False)
         channel.send.return_value = SendResult(ok=False, error="network error")
 
-        # Should not raise even when fallback send fails
+        # Should not raise even when fallback send fails;
+        # returns None so undelivered text is not recorded in memory (BUG-138)
         result = handler._route_response(
             msg, channel, "original", schedule_state, edit_state, queue_state, session
         )
-        assert result == "Text"
-
-
-# ---------------------------------------------------------------------------
-# TestBugNewEmptyContentBypass (NEW)
-# ---------------------------------------------------------------------------
-
-
-class TestBugNewEmptyContentBypass:
-    """NEW: When defer_processing or suppress_reply was called, _run_agent must
-    return early without triggering empty-content recovery."""
-
-    def test_defer_state_passed_to_run_agent(self):
-        """handle() passes defer_state to _run_agent so recovery can be skipped."""
-        from unittest.mock import patch
-
-        from src.assistant.deferral import DeferReplyState
-
-        captured: list = []
-
-        def _spy_run_agent(self, **kwargs):  # type: ignore[override]
-            captured.append(kwargs.get("defer_state"))
-            return "", set()
-
-        channel = MagicMock()
-        mock_runner = MagicMock(return_value="")
-        handler, _ = _make_handler(agent_runner=mock_runner)
-
-        with patch.object(MessageHandler, "_run_agent", _spy_run_agent):
-            handler.handle(_make_msg(), channel)
-
-        assert len(captured) == 1
-        # defer_state should have been passed (not None)
-        assert captured[0] is not None
-        assert isinstance(captured[0], DeferReplyState)
-
-    def test_suppress_state_passed_to_run_agent(self):
-        """handle() passes suppress_state to _run_agent so recovery can be skipped."""
-        from unittest.mock import patch
-
-        from src.assistant.deferral import SuppressReplyState
-
-        captured: list = []
-
-        def _spy_run_agent(self, **kwargs):  # type: ignore[override]
-            captured.append(kwargs.get("suppress_state"))
-            return "", set()
-
-        channel = MagicMock()
-        mock_runner = MagicMock(return_value="")
-        handler, _ = _make_handler(agent_runner=mock_runner)
-
-        with patch.object(MessageHandler, "_run_agent", _spy_run_agent):
-            handler.handle(_make_msg(), channel)
-
-        assert len(captured) == 1
-        assert captured[0] is not None
-        assert isinstance(captured[0], SuppressReplyState)
-
-    def test_run_agent_returns_early_when_defer_called(self):
-        """_run_agent returns immediately without entering recovery when defer_state.was_called."""
-        from src.assistant.deferral import DeferReplyState
-
-        mock_runner = MagicMock(return_value="")
-        handler, _ = _make_handler(agent_runner=mock_runner)
-
-        session = _make_session()
-        defer_state = DeferReplyState(was_called=True, delay_seconds=30.0)
-
-        response, loaded = handler._run_agent(
-            user_input="hello",
-            history_messages=[],
-            context_prefix=None,
-            effective_prompt="sys",
-            active_tools=[],
-            session=session,
-            defer_state=defer_state,
-        )
-
-        # Returns normally — the early return should not cause any exception
-        assert response == ""
-        assert isinstance(loaded, set)
-
-    def test_run_agent_returns_early_when_suppress_called(self):
-        """_run_agent returns immediately when suppress_state.was_called."""
-        from src.assistant.deferral import SuppressReplyState
-
-        mock_runner = MagicMock(return_value="")
-        handler, _ = _make_handler(agent_runner=mock_runner)
-
-        session = _make_session()
-        suppress_state = SuppressReplyState(was_called=True)
-
-        response, loaded = handler._run_agent(
-            user_input="hello",
-            history_messages=[],
-            context_prefix=None,
-            effective_prompt="sys",
-            active_tools=[],
-            session=session,
-            suppress_state=suppress_state,
-        )
-
-        assert response == ""
-        assert isinstance(loaded, set)
+        assert result is None

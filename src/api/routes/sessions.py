@@ -184,6 +184,7 @@ async def _check_session_access(
     responses={
         201: {"description": "Session created."},
         401: {"description": "Not authenticated (UNAUTHORIZED or TOKEN_EXPIRED)."},
+        409: {"description": "Duplicate session name (SESSION_NAME_DUPLICATE)."},
         422: {"description": "Request body validation failed (VALIDATION_ERROR)."},
     },
 )
@@ -199,6 +200,16 @@ async def create_session(
     Error codes: UNAUTHORIZED, TOKEN_EXPIRED, VALIDATION_ERROR.
     """
     repo = SessionRepository(db)
+
+    # Enforce session name uniqueness per user
+    if await repo.name_exists_for_user(current_user.user_id, body.name):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "SESSION_NAME_DUPLICATE",
+                "message": f"A session named '{body.name}' already exists.",
+            },
+        )
 
     config_dict = body.config.model_dump(exclude_none=True)
     config_json = json.dumps(config_dict)
@@ -370,7 +381,7 @@ async def patch_session(
     # the persistent cache, which would re-pollute it with stale entries if
     # we allowed the patch to proceed concurrently.
     registry_early = _get_registry(request)
-    live_session_early = registry_early.get_cached(session_id) if registry_early else None
+    live_session_early = (await registry_early.get_cached(session_id)) if registry_early else None
     if live_session_early is not None and body.config is not None:
         if live_session_early.turn_task is not None and not live_session_early.turn_task.done():
             raise HTTPException(
@@ -388,6 +399,14 @@ async def patch_session(
     updates: dict[str, Any] = {}
 
     if body.name is not None:
+        if await repo.name_exists_for_user(record.user_id, body.name, exclude_id=session_id):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "code": "SESSION_NAME_DUPLICATE",
+                    "message": f"A session named '{body.name}' already exists.",
+                },
+            )
         updates["name"] = body.name
 
     if body.config is not None:
@@ -413,31 +432,39 @@ async def patch_session(
         await db.commit()
         await db.refresh(record)
 
-    # If provider/model changed, rebuild the LLM in the live session
-    registry = _get_registry(request)
-    live_session = (await registry.get_cached(session_id)) if registry else None
+    # If model changed, rebuild the LLM in the live session.
+    # Reuse the registry reference and live_session already fetched above for the
+    # 409 check — avoids a second lookup that could return a different object after
+    # the blocking LLM build (BUG-API-007).
+    # Hold turn_lock while mutating live_session.llm / live_session.run_config so
+    # a concurrent agent turn cannot observe a partially-updated session state
+    # (BUG-FORGE-002).
+    live_session = live_session_early
 
     if live_session is not None and body.config is not None:
-        provider_changed = body.config.provider is not None
         model_changed = body.config.model is not None
-        if provider_changed or model_changed:
+        if model_changed:
             try:
                 from src.api.session_bridge import _build_llm, _build_run_config  # noqa: PLC0415
                 from src.orchestration.runner import invalidate_llm_caches
 
                 new_config = json.loads(record.config_json) if record.config_json else {}
-                # _build_llm may perform network I/O (e.g. Ollama API introspection);
-                # run it off the event loop thread to prevent stalls.
+                # Build the LLM outside the lock — network I/O must not hold the lock.
                 new_llm = await asyncio.to_thread(_build_llm, new_config, request.app.state)
-                live_session.llm = new_llm
-                live_session.config = new_config
-                new_run_config = _build_run_config(
-                    new_llm,
-                    live_session.session_state,
-                    new_config,
-                    request.app.state,
-                )
-                live_session.run_config = new_run_config
+                # Swap the live session state atomically under turn_lock so an
+                # in-flight agent turn cannot observe a half-updated session.
+                # _build_run_config is called inside the lock so it reads the
+                # just-built LLM and cannot race with an in-flight turn.
+                async with live_session.turn_lock:
+                    new_run_config = _build_run_config(
+                        new_llm,
+                        live_session.session_state,
+                        new_config,
+                        request.app.state,
+                    )
+                    live_session.llm = new_llm
+                    live_session.config = new_config
+                    live_session.run_config = new_run_config
                 invalidate_llm_caches()
                 log.debug("Rebuilt LLM for session %s after provider/model change", session_id)
             except Exception as exc:
@@ -489,11 +516,12 @@ async def delete_session(
                 # Unblock any agent thread blocked in read_choice() before
                 # cancelling the task; otherwise it can stay blocked for up
                 # to 5 minutes waiting for a WebSocket confirmation that will
-                # never arrive.
-                if live_session.run_config is not None:
-                    _conf_ui = getattr(live_session.run_config, "confirmation_ui", None)
-                    if _conf_ui is not None and hasattr(_conf_ui, "cancel"):
-                        _conf_ui.cancel()
+                # never arrive.  Use active_confirmation_ui — the per-turn UI
+                # published by turn_runner — not the stale run_config template
+                # (BUG-FORGE-001).
+                _conf_ui = getattr(live_session, "active_confirmation_ui", None)
+                if _conf_ui is not None and hasattr(_conf_ui, "cancel"):
+                    _conf_ui.cancel()
                 live_session.turn_task.cancel()
                 try:
                     await live_session.turn_task

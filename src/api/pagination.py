@@ -13,9 +13,16 @@ def encode_cursor(value: str) -> str:
 def decode_cursor(cursor: str) -> str:
     """Decode a base64url cursor back to the original value.
 
+    Restores missing base64 padding before decoding so that unpadded cursors
+    (produced by some clients that strip trailing ``=``) are accepted.
+
     Raises ValueError on malformed input.
     """
-    return base64.urlsafe_b64decode(cursor.encode()).decode()
+    try:
+        padded = cursor + "=" * (-len(cursor) % 4)
+        return base64.urlsafe_b64decode(padded.encode()).decode()
+    except Exception as exc:
+        raise ValueError(f"Malformed cursor: {exc}") from exc
 
 
 def paginate_list(

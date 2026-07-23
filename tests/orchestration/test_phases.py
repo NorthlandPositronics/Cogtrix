@@ -9,17 +9,18 @@ from src.orchestration.phases import build_llm_for_decomposition
 
 class TestBuildLlmForDecomposition:
     def _make_config(self, provider_type: str = "openai") -> MagicMock:
-        provider_cfg = MagicMock()
-        provider_cfg.type = provider_type
-        provider_cfg.api_key = None
-        provider_cfg.base_url = None
-        provider_cfg.num_ctx = None
-        provider_cfg.max_tokens = None
-        provider_cfg.get_model.return_value = "gpt-4.1-mini"
-        provider_cfg.get_base_url.return_value = None
+        pc = MagicMock()
+        pc.type = provider_type
+        pc.api_key = None
+        pc.get_base_url.return_value = None
+
+        mc = MagicMock()
+        mc.model = "gpt-4.1-mini"
+        mc.context_window = None
+        mc.max_tokens = None
 
         config = MagicMock()
-        config.get_provider_config.return_value = provider_cfg
+        config.resolve_llm_config.return_value = (pc, mc)
         return config
 
     def test_calls_create_chat_model(self):
@@ -42,7 +43,7 @@ class TestBuildLlmForDecomposition:
 
     def test_returns_none_on_exception(self):
         config = MagicMock()
-        config.get_provider_config.side_effect = RuntimeError("boom")
+        config.resolve_llm_config.side_effect = RuntimeError("boom")
 
         result = build_llm_for_decomposition(config)
         assert result is None

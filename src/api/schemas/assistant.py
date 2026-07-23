@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+from src.api.schemas.common import ensure_utc
 
 # ---------------------------------------------------------------------------
 # Service status
@@ -130,6 +132,8 @@ class ScheduledMessageOut(BaseModel):
         description="Delivery status.",
     )
 
+    _ensure_utc = field_validator("send_at", "created_at", mode="before")(ensure_utc)
+
 
 class ScheduledMessageEditRequest(BaseModel):
     """Request body for PATCH /api/v1/assistant/scheduled/{id}."""
@@ -167,6 +171,8 @@ class DeferredRecordOut(BaseModel):
     max_depth: int = Field(..., description="Maximum allowed deferral depth.", examples=[3])
     status: Literal["pending", "firing"] = Field(..., description="Record state.")
     created_at: datetime = Field(..., description="UTC creation timestamp.")
+
+    _ensure_utc = field_validator("fire_at", "created_at", mode="before")(ensure_utc)
 
 
 # ---------------------------------------------------------------------------
@@ -258,6 +264,9 @@ class KnowledgeFactOut(BaseModel):
         description="Channel name that produced this fact.",
     )
     created_at: datetime = Field(..., description="UTC extraction timestamp.")
+
+    _ensure_utc = field_validator("created_at", mode="before")(ensure_utc)
+
     relevance_score: float | None = Field(
         default=None,
         description="Cosine similarity score from the last retrieval (null when listed directly).",
@@ -282,3 +291,189 @@ class KnowledgeSearchRequest(BaseModel):
         description="Maximum number of facts to return.",
         examples=[10],
     )
+
+
+# ---------------------------------------------------------------------------
+# Outbound messaging
+# ---------------------------------------------------------------------------
+
+
+class OutboundRequest(BaseModel):
+    """Request body for POST /api/v1/assistant/outbound."""
+
+    contact_name: str = Field(
+        ...,
+        min_length=1,
+        max_length=256,
+        description="Phonebook contact name to message.",
+        examples=["Alice"],
+    )
+    instructions: str = Field(
+        ...,
+        min_length=1,
+        max_length=8192,
+        description="Operator instructions for the agent (what to tell the contact).",
+        examples=["Ask Alice about her availability next week for the project review."],
+    )
+    channel: str | None = Field(
+        default=None,
+        description=(
+            "Preferred channel ('whatsapp' or 'telegram'). "
+            "If null, uses the first available channel for this contact."
+        ),
+        examples=["whatsapp"],
+    )
+
+
+class OutboundResponse(BaseModel):
+    """Response body for POST /api/v1/assistant/outbound."""
+
+    session_key: str = Field(
+        ...,
+        description="Chat session key used for this outbound message.",
+        examples=["whatsapp::+1234567890@c.us"],
+    )
+    channel: str = Field(..., description="Channel used.", examples=["whatsapp"])
+    chat_id: str = Field(
+        ..., description="Resolved chat identifier.", examples=["+1234567890@c.us"]
+    )
+    contact_name: str = Field(..., description="Contact name from the request.", examples=["Alice"])
+    response_text: str = Field(
+        ...,
+        description="The agent-generated message that was sent to the contact.",
+    )
+    message_id: str | None = Field(
+        default=None,
+        description="Channel message ID of the sent message; null if delivery failed.",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Campaigns (Level 2 outbound)
+# ---------------------------------------------------------------------------
+
+CampaignStatus = Literal["draft", "active", "paused", "completed", "cancelled"]
+CampaignTargetStatus = Literal["pending", "active", "completed", "failed", "escalated"]
+
+
+class CampaignTargetIn(BaseModel):
+    """A target contact for a campaign."""
+
+    contact_name: str = Field(
+        ...,
+        min_length=1,
+        max_length=256,
+        description="Phonebook contact name.",
+        examples=["Alice"],
+    )
+    channel: str | None = Field(
+        default=None,
+        description="Preferred channel. If null, auto-resolved from phonebook.",
+        examples=["whatsapp"],
+    )
+
+
+class CampaignTargetOut(BaseModel):
+    """Per-target progress within a campaign."""
+
+    contact_name: str = Field(..., description="Contact name.", examples=["Alice"])
+    channel: str = Field(..., description="Channel name.", examples=["whatsapp"])
+    chat_id: str = Field(..., description="Resolved chat identifier.", examples=["+123@c.us"])
+    status: CampaignTargetStatus = Field(..., description="Target status.")
+    follow_ups_sent: int = Field(..., description="Number of follow-ups sent.", examples=[0])
+    last_outbound_at: datetime | None = Field(
+        default=None, description="Last outbound message timestamp."
+    )
+    last_reply_at: datetime | None = Field(
+        default=None, description="Last reply received timestamp."
+    )
+    completion_reason: str | None = Field(
+        default=None, description="Reason for completion/failure/escalation."
+    )
+
+
+class CampaignCreateRequest(BaseModel):
+    """Request body for POST /api/v1/assistant/campaigns."""
+
+    name: str = Field(
+        ...,
+        min_length=1,
+        max_length=256,
+        description="Campaign name.",
+        examples=["Spring bike sale outreach"],
+    )
+    goal: str = Field(
+        ...,
+        min_length=1,
+        max_length=1024,
+        description="What the campaign is trying to achieve.",
+        examples=["Schedule a meeting to discuss new bike models"],
+    )
+    instructions: str = Field(
+        ...,
+        min_length=1,
+        max_length=8192,
+        description="Operator instructions for the agent.",
+        examples=["Reach out about our new bike models and the spring sale."],
+    )
+    targets: list[CampaignTargetIn] = Field(
+        ...,
+        min_length=1,
+        max_length=100,
+        description="Contacts to target.",
+    )
+    max_follow_ups: int = Field(
+        default=3,
+        ge=0,
+        le=20,
+        description="Maximum follow-ups per target before escalation.",
+    )
+    follow_up_interval_hours: float = Field(
+        default=24.0,
+        ge=0.5,
+        le=720.0,
+        description="Hours between follow-up attempts.",
+    )
+    auto_launch: bool = Field(
+        default=False,
+        description="If true, launch immediately after creation.",
+    )
+
+
+class CampaignUpdateRequest(BaseModel):
+    """Request body for PATCH /api/v1/assistant/campaigns/{id}."""
+
+    name: str | None = Field(default=None, max_length=256)
+    goal: str | None = Field(default=None, max_length=1024)
+    instructions: str | None = Field(default=None, max_length=8192)
+    status: CampaignStatus | None = Field(
+        default=None,
+        description="Set to 'paused' or 'cancelled' to change campaign state.",
+    )
+    max_follow_ups: int | None = Field(default=None, ge=0, le=20)
+    follow_up_interval_hours: float | None = Field(default=None, ge=0.5, le=720.0)
+
+
+class CampaignOut(BaseModel):
+    """Full campaign representation."""
+
+    id: str = Field(..., description="Campaign UUID.")
+    name: str = Field(..., description="Campaign name.")
+    goal: str = Field(..., description="Campaign goal.")
+    instructions: str = Field(..., description="Operator instructions.")
+    targets: list[CampaignTargetOut] = Field(..., description="Per-target progress.")
+    max_follow_ups: int = Field(..., description="Max follow-ups per target.")
+    follow_up_interval_hours: float = Field(..., description="Hours between follow-ups.")
+    status: CampaignStatus = Field(..., description="Campaign status.")
+    created_at: datetime = Field(..., description="UTC creation timestamp.")
+    updated_at: datetime = Field(..., description="UTC last update timestamp.")
+
+    @field_validator("created_at", "updated_at", mode="before")
+    @classmethod
+    def _coerce_and_ensure_utc(cls, v: Any) -> Any:
+        if isinstance(v, (int, float)):
+            from datetime import UTC
+            from datetime import datetime as _dt
+
+            return _dt.fromtimestamp(v, tz=UTC)
+        return ensure_utc(v)

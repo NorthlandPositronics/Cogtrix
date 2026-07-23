@@ -11,9 +11,19 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any, Generic, TypeVar
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 T = TypeVar("T")
+
+
+def _serialize_datetime(dt: datetime, _info: Any = None) -> str:
+    """Serialize datetime to ISO 8601 with Z suffix for UTC."""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    s = dt.isoformat()
+    if s.endswith("+00:00"):
+        s = s[:-6] + "Z"
+    return s
 
 
 # ---------------------------------------------------------------------------
@@ -23,6 +33,21 @@ T = TypeVar("T")
 
 def _now_utc() -> datetime:
     return datetime.now(UTC)
+
+
+def ensure_utc(v: datetime) -> datetime:
+    """Attach UTC tzinfo to naive datetimes returned by SQLite.
+
+    SQLite stores datetimes as plain strings and SQLAlchemy returns them
+    without tzinfo even when the column uses ``DateTime(timezone=True)``.
+    Pydantic then serialises them without the ``Z`` suffix, causing
+    JavaScript's ``new Date()`` to interpret them as local time instead of
+    UTC.  This validator is applied to all ``*Out`` schemas that carry
+    DB-sourced datetime fields.
+    """
+    if v is not None and v.tzinfo is None:
+        return v.replace(tzinfo=UTC)
+    return v
 
 
 def _new_request_id() -> str:
@@ -97,6 +122,10 @@ class APIResponse(BaseModel, Generic[T]):
     The generic type parameter ``T`` constrains ``data`` in typed contexts.
     """
 
+    model_config = ConfigDict(
+        json_encoders={datetime: _serialize_datetime},
+    )
+
     data: T | None = Field(
         default=None,
         description="Response payload on success; null on error.",
@@ -163,6 +192,7 @@ ERROR_CODES = {
     "INVALID_CURSOR": "The pagination cursor is malformed or expired.",
     # Conflict
     "SESSION_ALREADY_EXISTS": "A session with this ID already exists.",
+    "SESSION_NAME_DUPLICATE": "A session with this name already exists for this user.",
     "TOOL_ALREADY_ACTIVE": "The tool is already in the active set.",
     "TOOL_ALREADY_DISABLED": "The tool is already disabled.",
     # Business logic

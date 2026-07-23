@@ -99,7 +99,7 @@ The tool is automatically discovered:
 
 ```bash
 uv run python cogtrix.py
-# ✓ Loaded 35 tool(s):
+# ✓ Loaded 51 tool(s):
 #   - my_tool
 ```
 
@@ -328,18 +328,13 @@ class CustomMemoryManager(BaseMemoryManager):
 
 ### Step 2: Register in Factory
 
-Edit `src/memory/factory.py`:
+Edit `src/memory/modes/__init__.py` to register your mode:
 
 ```python
-from .modes.custom import CustomMemoryManager
+from .custom import CustomMemoryManager
+from ..factory import MemoryFactory
 
-class MemoryFactory:
-    _modes = {
-        "conversation": ConversationMemoryManager,
-        "code": CodeDevelopmentMemoryManager,
-        "reasoning": ReasoningMemoryManager,
-        "custom": CustomMemoryManager,  # Add your mode
-    }
+MemoryFactory.register("custom", CustomMemoryManager)
 ```
 
 ### Step 3: Use the Mode
@@ -403,7 +398,6 @@ Handlers receive `self` (the registry instance) which provides access to:
 | `"quit"` | Exit the application |
 | `"switch_mode:<name>"` | Switch memory mode at runtime |
 | `"switch_model:<name>"` | Switch LLM model at runtime |
-| `"switch_provider:<name>"` | Switch LLM provider at runtime |
 | `"switch_session:<id>"` | Switch session at runtime |
 | `"rebuild_callbacks"` | Rebuild observability callbacks |
 
@@ -440,6 +434,7 @@ Create `tests/tools/test_my_tool.py`:
 
 ```python
 import pytest
+from pydantic import ValidationError
 from src.tools.my_tool import my_tool, MyToolInput
 
 
@@ -459,7 +454,7 @@ class TestMyTool:
         assert input_obj.max_results == 10
     
     def test_invalid_input(self):
-        with pytest.raises(ValueError):
+        with pytest.raises(ValidationError):
             MyToolInput(query="", max_results=-1)
 ```
 
@@ -477,7 +472,7 @@ uv run black cogtrix.py src/ tests/
 uv run ruff check cogtrix.py src/ tests/
 
 # Type check with pyright
-uv run pyright cogtrix.py src/ tests/
+uv run pyright cogtrix.py src/
 
 # Security scan with bandit
 uv run bandit -r src/ cogtrix.py -q
@@ -541,6 +536,7 @@ cogtrix/
 │
 ├── src/
 │   ├── config.py             # Configuration management
+│   ├── _version.py           # __version__ and __copyright__ (single source of truth)
 │   ├── registry.py           # Tool discovery & registration
 │   ├── logging_config.py     # Logging infrastructure
 │   ├── setup_wizard.py       # Interactive --setup wizard
@@ -578,6 +574,9 @@ cogtrix/
 │   │   ├── poller.py        # Per-channel polling threads
 │   │   ├── knowledge.py     # Cross-chat knowledge store
 │   │   ├── guardrails.py    # Security guardrails (input/output/rate-limit/LLM judge)
+│   │   ├── datamarking.py   # Microsoft Spotlighting prompt injection defense
+│   │   ├── scheduler.py     # MessageScheduler — deferred reply delivery
+│   │   ├── deferral.py      # DeferralManager — deferred re-processing
 │   │   └── service.py       # Main orchestrator
 │   │
 │   ├── memory/
@@ -606,7 +605,7 @@ cogtrix/
 │   ├── rag/
 │   │   └── ingest.py         # Document ingestion
 │   │
-│   └── tools/                # Built-in tool modules (52 tools)
+│   └── tools/                # Built-in tool modules (51 tools)
 │       ├── brave_search.py   # Brave Search API
 │       ├── calculator.py     # Math expressions
 │       ├── datetime_tool.py  # Date/time utilities
@@ -629,7 +628,10 @@ cogtrix/
 │       ├── whatsapp.py       # WhatsApp messaging
 │       ├── _whatsapp_client.py # Waha HTTP client
 │       ├── telegram.py       # Telegram messaging
-│       └── _telegram_client.py # Telegram Bot API client
+│       ├── _telegram_client.py # Telegram Bot API client
+│       ├── report_progress.py # Progress updates for long tasks
+│       ├── resolver.py       # Canonical fuzzy tool-name resolver
+│       └── configure.py      # Tool config factories
 │
 ├── tests/
 │   ├── memory/               # Memory mode tests

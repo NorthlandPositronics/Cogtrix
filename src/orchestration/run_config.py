@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections import OrderedDict
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -16,6 +17,12 @@ class AgentRunConfig:
 
     Bundled to reduce parameter counts in run_agent / build_agent_graph /
     run_execution_phase and to make omissions visible as AttributeError.
+
+    ``bound_cache`` and ``compression_cache`` are per-session LRU caches.
+    When non-None, ``run_agent`` uses them exclusively and skips the
+    module-level globals — this prevents cross-session cache poisoning in
+    API mode where multiple sessions run concurrently with different LLMs.
+    CLI mode leaves both fields as ``None`` and falls back to the module globals.
     """
 
     llm: Any = None
@@ -33,3 +40,5 @@ class AgentRunConfig:
     confirmation_ui: ConfirmationUI | None = None
     on_tool_expansion: Any | None = None
     parallel_tool_execution: bool = True
+    bound_cache: OrderedDict | None = field(default=None, compare=False, repr=False)
+    compression_cache: OrderedDict | None = field(default=None, compare=False, repr=False)

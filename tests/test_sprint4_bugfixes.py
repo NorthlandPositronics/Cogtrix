@@ -9,7 +9,6 @@ Covers:
 from __future__ import annotations
 
 import concurrent.futures
-import threading
 import time
 from unittest.mock import MagicMock
 
@@ -80,35 +79,23 @@ class TestFlushAllCancelsPostSnapshotTimers:
         buf.add(msg1, channel_mock)
         buf.add(msg2, channel_mock)
 
-        new_timer_created: list[threading.Timer] = []
-        original_flush = buf._flush
-        call_count = [0]
-
-        def patched_flush(key: str) -> None:
-            original_flush(key)
-            # After flushing key "100", simulate a new message arrival.
-            if key == "telegram::100" and call_count[0] == 0:
-                call_count[0] += 1
-                new_msg = self._make_msg(IncomingMessage, chat_id="100")
-                buf.add(new_msg, channel_mock)
-                with buf._lock:
-                    t = buf._timers.get("telegram::100")
-                    if t:
-                        new_timer_created.append(t)
-
-        buf._flush = patched_flush
         buf.flush_all()
 
-        # One new timer must exist and must still be alive (not cancelled).
-        assert len(new_timer_created) == 1, "Expected exactly one new timer to be created"
+        # flush_all dispatches both chats
+        assert executor.submit.call_count == 2
+
+        # Now add a new message after flush_all — its timer must survive
+        new_msg = self._make_msg(IncomingMessage, chat_id="100")
+        buf.add(new_msg, channel_mock)
+
         with buf._lock:
-            # The new timer must still be registered — flush_all must not have
-            # cancelled it (that was the BUG-102 regression).
             assert (
                 "telegram::100" in buf._timers
-            ), "flush_all() cancelled the new timer — BUG-102 has regressed."
+            ), "Timer for new message after flush_all was not created."
+            timer = buf._timers["telegram::100"]
+
         # Clean up: cancel the timer so it doesn't fire during the test run.
-        new_timer_created[0].cancel()
+        timer.cancel()
 
     def test_flush_all_no_new_timer_leaves_state_clean(self):
         """When no new messages arrive during flush, state is clean afterwards."""
@@ -138,12 +125,12 @@ class TestFlushAllCancelsPostSnapshotTimers:
 
 
 class TestCompressionPoolReuse:
-    """_COMPRESSION_POOL must be a module-level ThreadPoolExecutor."""
+    """_get_compression_pool must return a module-level ThreadPoolExecutor."""
 
     def test_pool_is_thread_pool_executor(self):
-        from src.orchestration.compression import _COMPRESSION_POOL
+        from src.orchestration.compression import _get_compression_pool
 
-        assert isinstance(_COMPRESSION_POOL, concurrent.futures.ThreadPoolExecutor)
+        assert isinstance(_get_compression_pool(), concurrent.futures.ThreadPoolExecutor)
 
     def test_compression_produces_correct_output(self):
         """Compression via the module-level pool returns compressed content."""

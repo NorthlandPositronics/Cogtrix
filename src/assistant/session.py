@@ -30,6 +30,7 @@ class ChatSession:
     lock: threading.Lock = field(default_factory=threading.Lock)
     guardrail_violations: int = 0
     last_sent_message_id: str | None = None
+    workflow_id: str | None = None
 
 
 class ChatSessionManager:

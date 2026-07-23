@@ -70,7 +70,7 @@ Full conversation (e.g. 80 messages over time)
 ├─ Messages 1–44  → Covered by rolling summary (compressed text)
 │                   + stored in vector index for semantic recall
 │
-├─ Messages 45–55  → Pending batch (will be summarized when ≥ 6 accumulate)
+├─ Messages 45–55  → Pending batch (will be summarized when ≥ 10 accumulate)
 │
 └─ Messages 56–80  → Sliding window (sent verbatim to the LLM)
 
@@ -482,7 +482,7 @@ memory:
     reasoning:
       working_memory_size: 30
       max_decisions: 20
-      max_goals: 10
+      max_alternatives: 10
       summarization: true
       vector_recall_k: 3
       prefix_max_stale_turns: 3  # Turns before a stale section is omitted from prefix
@@ -492,7 +492,7 @@ memory:
 |--------|---------|-------------|
 | `working_memory_size` | 30 | Number of messages to keep |
 | `max_decisions` | 20 | Maximum decisions to track |
-| `max_goals` | 10 | Maximum goals to track |
+| `max_alternatives` | 10 | Maximum alternatives to track |
 | `summarization` | `true` | Enable rolling summary of older messages |
 | `vector_recall_k` | 3 | Semantically similar past exchanges to retrieve |
 | `prefix_max_stale_turns` | 3 | Turns a prefix section can go unmodified before being omitted from the context prefix (section-freshness gating) |
@@ -590,15 +590,17 @@ python cogtrix.py -M conversation -s research
 All modes save to the same JSON format:
 
 ```
-data/history/{session_id}.json          ← Message history + mode tracking
-data/history/{session_id}_hybrid.json   ← Summary text + coverage index
-data/vectordb/sessions/{session_id}/    ← FAISS vector index (if embeddings available)
+data/history/{session_id}.json              ← Message history + session metadata
+data/history/{session_id}_hybrid.json       ← Summary text + coverage index
+data/history/{session_id}_mode_state.json   ← Mode-specific state (goals, decisions, etc.)
+data/vectordb/sessions/{session_id}/        ← FAISS vector index (if embeddings available)
 ```
 
 The history file contains:
 - Full message history (each message includes a UTC `timestamp` field)
-- Mode-specific tracking data
 - Session metadata
+
+The mode state file contains mode-specific tracking data (goals, decisions, reasoning chains, code tasks, conversation entities, turn counters, and section timestamps) persisted via `_save_mode_meta()` and restored on session restart via `_restore_mode_state()`.
 
 Memory is automatically loaded when resuming a session:
 

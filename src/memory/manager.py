@@ -9,12 +9,14 @@ Includes hybrid memory support:
   semantic retrieval, improving long-term awareness
 """
 
+import atexit
 import json
 import logging
 import re
 import threading
 import time
 from abc import ABC, abstractmethod
+from concurrent.futures import Future, ThreadPoolExecutor
 from copy import copy as _shallow_copy
 from datetime import UTC, datetime
 from pathlib import Path
@@ -25,11 +27,12 @@ from src.memory.context import MemoryContext
 
 # Optional LangChain types — imported lazily in helpers
 try:
-    from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
+    from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 except ImportError:  # pragma: no cover
     BaseMessage = None  # type: ignore[misc, assignment]
     HumanMessage = None  # type: ignore[misc, assignment]
     AIMessage = None  # type: ignore[misc, assignment]
+    ToolMessage = None  # type: ignore[misc, assignment]
 
 log = logging.getLogger("cogtrix")
 
@@ -48,6 +51,21 @@ _MIN_MEANINGFUL_CHARS_FOR_SUMMARY = 5000  # ignore tiny exchanges
 
 _SESSION_ID_MAX_LEN = 200
 _SLOW_PATH_MAX_FAILURES = 3
+
+_SUMMARIZATION_POOL: ThreadPoolExecutor | None = None
+_SUMMARIZATION_POOL_LOCK = threading.Lock()
+
+
+def _get_summarization_pool() -> ThreadPoolExecutor:
+    global _SUMMARIZATION_POOL
+    if _SUMMARIZATION_POOL is None:
+        with _SUMMARIZATION_POOL_LOCK:
+            if _SUMMARIZATION_POOL is None:
+                _SUMMARIZATION_POOL = ThreadPoolExecutor(
+                    max_workers=4, thread_name_prefix="summarize"
+                )
+                atexit.register(_SUMMARIZATION_POOL.shutdown, wait=False, cancel_futures=True)
+    return _SUMMARIZATION_POOL
 
 
 def _sanitize_session_id(session_id: str) -> str:
@@ -69,10 +87,7 @@ def _sanitize_session_id(session_id: str) -> str:
     if len(sanitized) > _SESSION_ID_MAX_LEN:
         sanitized = sanitized[:_SESSION_ID_MAX_LEN]
         # Don't split a percent-encoded triplet (e.g. %2E)
-        if sanitized.endswith("%"):
-            sanitized = sanitized[:-1]
-        elif len(sanitized) >= 2 and sanitized[-2] == "%":
-            sanitized = sanitized[:-2]
+        sanitized = re.sub(r"%[0-9A-Fa-f]?$", "", sanitized)
     if not sanitized:
         return "default"
     return sanitized
@@ -192,7 +207,7 @@ class BaseMemoryManager(ABC):
 
         # ── Background slow-path threading ───────────────────────────
         self._hybrid_lock = threading.Lock()
-        self._bg_thread: threading.Thread | None = None
+        self._bg_future: Future | None = None
         self._slow_path_failures: int = 0
 
     # ── Hybrid memory wiring ────────────────────────────────────────
@@ -340,10 +355,13 @@ class BaseMemoryManager(ABC):
         if not self.config.get("summarization", True):
             return
 
-        total = len(messages)
-        window_start = max(0, total - window_size)
+        with self._hybrid_lock:
+            summary_idx = self._summary_msg_idx
+            failures = self._slow_path_failures
+            total = len(messages)
+            window_start = max(0, total - window_size)
 
-        unsummarized_start = min(self._summary_msg_idx, total)
+        unsummarized_start = min(summary_idx, total)
         unsummarized_end = window_start
 
         if unsummarized_start >= unsummarized_end:
@@ -376,8 +394,7 @@ class BaseMemoryManager(ABC):
         ):
             return
 
-        with self._hybrid_lock:
-            slow_path_disabled = self._slow_path_failures >= _SLOW_PATH_MAX_FAILURES
+        slow_path_disabled = failures >= _SLOW_PATH_MAX_FAILURES
         if slow_path_disabled:
             log.warning(
                 "Background memory slow-path disabled after %d consecutive failures — "
@@ -386,21 +403,16 @@ class BaseMemoryManager(ABC):
             )
             return
 
-        if self._bg_thread is not None and self._bg_thread.is_alive():
-            log.debug("Background memory thread still running — skipping")
+        if self._bg_future is not None and not self._bg_future.done():
+            log.debug("Background memory job still running — skipping")
             return
 
         batch = [_shallow_copy(m) for m in messages[unsummarized_start:unsummarized_end]]
         unsummarized_end_snapshot = unsummarized_end
 
-        t = threading.Thread(
-            target=self._run_slow_path,
-            args=(batch, unsummarized_end_snapshot),
-            daemon=True,
-            name="memory-slow-path",
+        self._bg_future = _get_summarization_pool().submit(
+            self._run_slow_path, batch, unsummarized_end_snapshot
         )
-        self._bg_thread = t
-        t.start()
 
     def _run_slow_path(self, batch: list[Any], unsummarized_end: int) -> None:
         """Background: run summarization LLM + vector embedding + disk save."""
@@ -443,9 +455,12 @@ class BaseMemoryManager(ABC):
 
     def join_background(self, timeout: float = 60.0) -> None:
         """Block until any running background memory job completes."""
-        t = self._bg_thread
-        if t is not None and t.is_alive():
-            t.join(timeout=timeout)
+        fut = self._bg_future
+        if fut is not None and not fut.done():
+            try:
+                fut.result(timeout=timeout)
+            except Exception:
+                pass
 
     def _build_hybrid_prefix(self, user_input: str) -> str | None:
         """Build the hybrid-memory portion of the context prefix.
@@ -461,8 +476,13 @@ class BaseMemoryManager(ABC):
         if summary:
             parts.append(f"Conversation summary (older context):\n{summary}")
 
-        # Vector recall
-        if self._vector_store is not None and self._vector_store.ready:
+        # Vector recall — skip for trivial inputs (greetings, single words)
+        # to avoid a wasted embedding API call (~200ms+ round trip)
+        if (
+            self._vector_store is not None
+            and self._vector_store.ready
+            and len(user_input.split()) >= 3
+        ):
             recall_k = self.config.get("vector_recall_k", 3)
             recalled = self._vector_store.recall(user_input, k=recall_k)
             if recalled:
@@ -783,21 +803,21 @@ class BaseMemoryManager(ABC):
 
         result: list[Any] = []
         for msg in messages:
-            # Determine type name
-            if isinstance(msg, dict):
-                mt = msg.get("type", "")
-            else:
-                mt = type(msg).__name__.lower()
-
             # ToolMessages: pass through unchanged (no timestamp prefix)
-            if mt in ("tool", "toolmessage"):
+            if ToolMessage is not None and isinstance(msg, ToolMessage):
+                result.append(msg)
+                continue
+            if isinstance(msg, dict) and msg.get("type", "") in ("tool", "toolmessage"):
                 result.append(msg)
                 continue
 
             # Intermediate AI steps (tool_calls, empty/minimal text): keep as-is
-            if mt in ("ai", "aimessage") and BaseMemoryManager._has_tool_calls(msg):
-                result.append(msg)
-                continue
+            if (AIMessage is not None and isinstance(msg, AIMessage)) or (
+                isinstance(msg, dict) and msg.get("type", "") in ("ai", "aimessage")
+            ):
+                if BaseMemoryManager._has_tool_calls(msg):
+                    result.append(msg)
+                    continue
 
             # No timestamp stored → keep as-is
             ts = BaseMemoryManager._get_msg_ts(msg)
@@ -805,25 +825,23 @@ class BaseMemoryManager(ABC):
                 result.append(msg)
                 continue
 
-            # Build compact display string (with seconds, marked UTC)
+            # Build compact display string — _now_ts() always produces YYYY-MM-DDTHH:MM:SSZ
             try:
-                raw = ts.rstrip("Z")
-                dt = datetime.fromisoformat(raw)
-                display = dt.strftime(TS_DISPLAY_FORMAT) + " UTC"
-            except (ValueError, TypeError):
+                display = ts[:10] + " " + ts[11:19] + " UTC"
+            except (IndexError, TypeError):
                 display = ts
 
             prefix = f"[{display}] "
 
             if HumanMessage is not None and isinstance(msg, HumanMessage):
-                result.append(HumanMessage(content=prefix + _str_content(msg)))
+                result.append(msg.model_copy(update={"content": prefix + _str_content(msg)}))
             elif AIMessage is not None and isinstance(msg, AIMessage):
                 # Don't prefix AI messages — the LLM mimics the timestamp
                 # pattern and outputs it in new responses.
                 result.append(msg)
                 continue
             elif isinstance(msg, dict) and "content" in msg:
-                if mt in ("ai", "aimessage"):
+                if msg.get("type", "") in ("ai", "aimessage"):
                     result.append(msg)
                     continue
                 result.append({**msg, "content": prefix + _str_content(msg)})
@@ -841,12 +859,25 @@ class BaseMemoryManager(ABC):
         Subclasses should call ``super().save()`` to persist vector store
         and hybrid summary meta.
         """
-        t = self._bg_thread
-        if t is None or not t.is_alive():
+        fut = self._bg_future
+        if fut is None or fut.done():
             self._save_hybrid_meta()
         self._save_mode_meta()
         if self._vector_store is not None:
             self._vector_store.save()
+
+    def shutdown(self) -> None:
+        """Cancel background work and save final state.
+
+        Called once at process exit.  The caller is expected to use
+        ``os._exit()`` afterward to prevent Python's internal
+        ``_python_exit()`` from blocking on ThreadPoolExecutor threads.
+        """
+        fut = self._bg_future
+        if fut is not None and not fut.done():
+            fut.cancel()
+        self._bg_future = None
+        self.save()
 
     def clear(self) -> None:  # noqa: B027
         """

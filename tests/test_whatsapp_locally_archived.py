@@ -42,12 +42,14 @@ def _make_channel(filter_mode: str = "blacklist", contacts: list[str] | None = N
         ch._WATERMARK_TTL = 604800.0
         ch._seen_ids = {}
         ch._SEEN_TTL = 600.0
+        ch._message_fetch_limit = 50
         ch._FETCH_ERROR_BASE = 30.0
         ch._FETCH_ERROR_MAX = 300.0
         ch._chat_errors = {}
         ch._ignore_archived = True
         ch._ignore_older_than = None
         ch._locally_archived = set()
+        ch._archived_snapshot = set()
         ch._client = MagicMock()
         ch._session_check_interval = 60.0
         ch._last_session_check = 0.0

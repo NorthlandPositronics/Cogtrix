@@ -6,6 +6,8 @@ This page covers every way to configure Cogtrix — from the simplest environmen
 
 - [Configuration Priority](#configuration-priority)
 - [Configuration File](#configuration-file)
+  - [Providers Section](#providers-section)
+  - [Models Section](#models-section)
   - [Research Delegate Section](#research-delegate-section)
   - [Prompt Optimizer](#prompt-optimizer)
   - [Context Compression](#context-compression)
@@ -13,13 +15,16 @@ This page covers every way to configure Cogtrix — from the simplest environmen
   - [Tool Loading](#tool-loading)
   - [Assistant Mode](#assistant-mode)
   - [Contact Prompts](#contact-prompts)
+  - [Workflows](#workflows)
   - [Scheduled Reply Delivery](#scheduled-reply-delivery)
+  - [Deferred Message Processing](#deferred-message-processing)
   - [Response Timing / Quiet Hours](#response-timing--quiet-hours)
   - [Assistant Guardrails](#assistant-guardrails)
 - [Environment Variables](#environment-variables)
 - [Command Line Arguments](#command-line-arguments)
   - [Setup Wizard](#setup-wizard)
 - [Complete Configuration Example](#complete-configuration-example)
+- [Migration Guide](#migration-guide)
 - [Debugging & Logging](#debugging--logging)
 
 ---
@@ -51,36 +56,35 @@ Within each directory, JSON is checked first, then `.yml`, then `.yaml`.
 ### General Settings
 
 ```yaml
-provider: ollama
-model: qwen3:8b
 session: default
 ```
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `provider` | string | `"ollama"` | Active provider name |
-| `model` | string | Provider-specific | Model to use (overrides provider default) |
 | `session` | string | `"default"` | Session ID for memory persistence |
+
+The active model is selected via `models.default` (see [Models Section](#models-section)). The legacy top-level `provider` and `model` keys still work but are deprecated — they are auto-migrated at load time.
 
 ### Providers Section
 
-Define named LLM providers with custom configurations:
+Providers hold connection info only — the type, endpoint, and credentials needed to reach an LLM API. Model settings (model name, temperature, context window, max tokens) live in the [Models Section](#models-section) instead.
 
 ```yaml
 providers:
-  my-ollama:
-    type: ollama
-    base_url: "http://192.168.1.100:11434"
-    model: qwen3:8b
+  spark-cluster:
+    type: openai
+    base_url: "http://192.168.70.254:8080/v1"
+    api_key: "sk-..."
   openai:
     type: openai
-    model: gpt-4.1-mini
     api_key: "sk-..."
+  local:
+    type: ollama
+    base_url: "http://localhost:11434"
   groq:
     type: openai
     base_url: "https://api.groq.com/openai/v1"
     api_key: "gsk-..."
-    model: llama-3.3-70b-versatile
 ```
 
 > **Note:** The key `"providers"` is preferred. The legacy key `"inference"` still works as an alias for backward compatibility.
@@ -91,7 +95,6 @@ providers:
 |--------|------|----------|-------------|
 | `type` | string | Yes | Provider type: `"openai"`, `"ollama"`, `"anthropic"`, or `"google"` (case-insensitive) |
 | `base_url` | string | No | API endpoint URL |
-| `model` | string | No | Default model for this provider |
 | `api_key` | string | No | API key (all providers except Ollama) |
 | `tool_instructions` | string | No | Custom tool-call formatting instructions appended to the system prompt. Not injected by default — `bind_tools()` handles formatting at the API level. Set a non-empty string only for providers that need explicit guidance. |
 
@@ -157,7 +160,7 @@ Configure document ingestion for knowledge base:
 ```yaml
 rag:
   docs_dir: docs
-  vectordb_dir: data/vectordb
+  vectordb_dir: vectordb
   chunk_size: 2000
   chunk_overlap: 200
   model: embed-local
@@ -166,7 +169,7 @@ rag:
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `docs_dir` | string | `"docs"` | Source documents directory |
-| `vectordb_dir` | string | `"data/vectordb"` | Vector database output directory |
+| `vectordb_dir` | string | `"vectordb"` | Vector database output directory |
 | `chunk_size` | int | `2000` | Text chunk size in characters |
 | `chunk_overlap` | int | `200` | Overlap between chunks |
 | `model` | string | `null` | Model name from the `models` registry to use for embeddings. Falls back to the active provider when not set. |
@@ -175,70 +178,96 @@ rag:
 
 See [RAG_GUIDE.md](RAG_GUIDE.md) for detailed setup instructions.
 
-### Models
+### Models Section
 
-The `models` registry gives short names to `provider/model` combinations. They are used by:
+The `models` registry assigns short names to specific `provider/model` combinations. All model settings (model name, temperature, context window, max output tokens) live here. Providers hold only connection info.
 
-- The **`-m` CLI flag** — start Cogtrix with any model name: `python cogtrix.py -m fast`
-- The **`/model` command** — switch at runtime: `/model coder`
-- The **delegation tools** — the agent uses model names to pick the best model for a subtask
-- The **`rag.model` field** — reference an embedding model by name
-
-Define models at the **top level** of your config (preferred) or inside `delegate` for backward compatibility:
+The `models.default` key selects which model alias is active when Cogtrix starts. It is the primary way to choose which model to use.
 
 ```yaml
 models:
-  fast: my-server/qwen3:8b
-  smart: openai/gpt-4.1
-  coder:
-    provider: my-server
-    model: qwen3-coder
-    temperature: 0.3
-  reasoning:
-    provider: local-gpu
-    model: qwen3:32b
-    num_ctx: 32768
-    temperature: 0.3
-  embed-local:
-    provider: local-gpu
-    model: nomic-embed-text
+  default: oss              # active model alias at startup
+
+  oss:
+    provider: spark-cluster
+    model: gpt-oss
+    temperature: 0.5
+
+  gpt-4o:
+    provider: openai
+    model: gpt-4o
+    temperature: 0.7
+
+  local-qwen:
+    provider: local
+    model: qwen3:8b
+    context_window: 131072
+
+  embed:
+    provider: spark-cluster
+    model: qwen3-embedding
+    temperature: 0.0
+
+  regular: spark-cluster/gpt-oss   # string shorthand
 ```
+
+The `models` registry is used by:
+
+- **`models.default`** — selects the active model alias at startup
+- The **`-m` CLI flag** — start Cogtrix with any model alias: `python cogtrix.py -m gpt-4o`
+- The **`/model` command** — switch at runtime: `/model local-qwen`
+- The **delegation tools** — the agent uses model aliases to pick the best model for a subtask
+- The **`rag.model` field** — reference an embedding model by alias
+- The **`context_compression.model` field** — reference a compression model by alias
 
 > **Backward compatibility:** The key `model_aliases` still works in config files as an alias for `models`. New configs should use `models`.
 
 #### Model Entry Formats
 
-**String format** — `"provider/model"` or just `"model"`:
+**String shorthand** — `"provider/model"` creates a minimal model entry with no overrides:
 
 ```yaml
-fast: my-server/qwen3:8b
+models:
+  regular: spark-cluster/gpt-oss
+  fast: local/qwen3:8b
 ```
 
-**Object format** — with additional overrides (`num_ctx`, `temperature`):
+**Object format** — full control over all model-level settings:
 
 ```yaml
-coder:
-  provider: my-server
-  model: qwen3-coder
-  temperature: 0.3
+models:
+  coder:
+    provider: local
+    model: qwen3-coder
+    temperature: 0.3
+    context_window: 32768
+    max_tokens: 8192
 ```
 
-The object format fields `num_ctx` and `temperature` are model-level settings. They are applied at resolution time and override any defaults from the provider config. The `provider` field references a key in the `providers` section.
+#### Model Object Fields
 
-> **Note:** `num_ctx` is only effective for Ollama-type providers. It is silently ignored for OpenAI, Anthropic, and Google providers (which manage context windows via their own API parameters).
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `provider` | string | Yes | References a key in the `providers` section |
+| `model` | string | Yes | Model name as the provider expects it |
+| `temperature` | float | No | Sampling temperature, 0.0–2.0 |
+| `context_window` | int | No | Context window size in tokens (>= 256). Forwarded to Ollama as `num_ctx`; silently ignored for OpenAI, Anthropic, and Google. Accepted aliases: `context_length`, `num_ctx`. |
+| `max_tokens` | int | No | Maximum output tokens per LLM call (>= 1) |
 
 #### Using Models
 
 ```bash
-python cogtrix.py -m fast       # Resolves to my-server/qwen3:8b
-python cogtrix.py -m coder      # Resolves to my-server/qwen3-coder with temperature=0.3
+python cogtrix.py -m oss          # Use the "oss" model alias
+python cogtrix.py -m local-qwen   # Use local-qwen with its configured context_window
 ```
 
 At runtime:
 ```
-You: /model fast
-Switched to model qwen3:8b (my-server)
+You: /model gpt-4o
+Switched to model gpt-4o (openai)
 ```
+
+The `/model` command lists all aliases with an active marker (`*`) next to the current selection. The `/provider` command is read-only — use `/model` to switch models.
 
 ### Delegate Section
 
@@ -351,6 +380,7 @@ context_compression:
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `context_compression` | bool or object | `true` | Enable/disable context compression, or configure thresholds |
+| `enabled` | bool | `true` | Enable/disable compression when using the object form |
 | `model` | string | `null` | Model alias or `provider/model` string for a dedicated compression LLM. Uses the main agent LLM when not set. |
 | `min_age` | int | `6` | Number of `call_model` cycles a ToolMessage must survive before it becomes eligible for compression |
 | `min_chars` | int | `2000` | Minimum character length of a ToolMessage's content to qualify for compression |
@@ -533,6 +563,21 @@ python cogtrix.py --tools "search_web,calculate"  # Specific tools
 
 When `--tools` is used, all specified tools are active immediately (no on-demand pool).
 
+#### Pinning tools with `--activate-tools`
+
+Use `--activate-tools` to pin specific tools as active on startup while keeping the on-demand system for everything else:
+
+```bash
+python cogtrix.py --activate-tools web_search,shell
+python cogtrix.py --activate-tools query_knowledge_base -M code
+```
+
+Pinned tools stay active across prompt cycles — they are not auto-unloaded between turns. You can unpin them interactively with `/tools unload <name>`.
+
+#### Two-tier tool loading
+
+Tools loaded by the agent via `request_tools` during a turn are **agent-loaded** — they are automatically unloaded at the start of the next prompt cycle so the LLM doesn't carry stale tools between turns. Tools loaded manually (via `/tools load`, `--activate-tools`, or the API `PATCH /sessions/{id}/tools` endpoint) are **pinned** — they persist across prompt cycles until explicitly unloaded.
+
 ### Services Section
 
 Configure API keys for external services (search providers, weather, etc.) in a single place:
@@ -643,6 +688,7 @@ services:
 | `rate_limit` | int | `30` | Max outbound messages per hour (0 = unlimited) |
 | `max_message_length` | int | `4096` | Truncate outgoing messages to this length |
 | `overview_limit` | int | `50` | Maximum number of chats returned per overview poll cycle. A warning is logged when the response reaches this limit, indicating that some chats may have been missed. |
+| `message_fetch_limit` | int | `50` | Maximum number of messages fetched per chat per poll cycle. Prevents silent message loss when a chat receives more messages than the limit between poll intervals. |
 | `ignore_archived` | bool | `true` | Skip archived chats during polling. When enabled, chats marked as archived in WhatsApp are not fetched or processed. |
 | `ignore_older_than` | string | — | Skip messages older than this duration. Accepts human-readable strings like `"24h"`, `"30m"`, `"7d"`, `"1d12h"`. Disabled by default (all messages processed). |
 | `lid_negative_ttl` | float | `300.0` | Cache duration (seconds) for failed LID-to-phone resolutions |
@@ -785,7 +831,7 @@ services:
 | `idle_timeout` | float | `3600` | Seconds of inactivity before a session is evicted to disk |
 | `max_response_length` | int | `4000` | Truncate agent responses to this length |
 | `system_prompt` | string | `null` | Custom system prompt (null = built-in messaging persona) |
-| `excluded_tools` | array | `[]` | Additional tools to exclude. Messaging tools, shell, write, and read tools are always excluded. Queue management tools (`schedule_reply`, `edit_last_reply`, `list_scheduled_messages`, `edit_scheduled_message`, `cancel_scheduled_message`) can also be added here. |
+| `excluded_tools` | array | `[]` | Additional tools to exclude. Messaging tools, shell, write, and read tools are always excluded. Queue management tools (`schedule_reply`, `queue_reply`, `edit_last_reply`, `list_scheduled_messages`, `edit_scheduled_message`, `cancel_scheduled_message`) and deferral tools (`defer_processing`, `suppress_reply`) can also be added here. |
 | `debounce_seconds` | float | `3.0` | Quiet window in seconds before rapid messages from the same chat are batched into a single agent turn. Increase to tolerate longer bursts; decrease for faster single-message response. |
 | `dispatch_interval` | float | `30.0` | Seconds between scheduler checks for due messages |
 | `channels.{name}.enabled` | bool | `true` | Enable/disable a specific channel |
@@ -829,7 +875,7 @@ services:
 2. New messages are passed to `MessageBuffer`, which resets a per-chat debounce timer. When the timer expires (after `debounce_seconds` of silence from that chat), all buffered messages are concatenated and dispatched as a single agent turn via `handle_batch()`. A single message with no follow-ups dispatches immediately after the quiet window.
 3. Each incoming message (or batch) is checked by the `GuardrailPipeline` (rate limit, input validation, injection detection). Blocked messages receive a canned reply without reaching the agent.
 4. Each `(channel, chat_id)` pair gets an independent `ConversationMemoryManager` — no context blending between chats.
-5. The agent runs with the same tool pipeline as interactive mode (minus excluded tools). Five message management tools are injected per turn: `schedule_reply`, `edit_last_reply` (only when a prior message ID is available), `list_scheduled_messages`, `edit_scheduled_message`, and `cancel_scheduled_message`.
+5. The agent runs with the same tool pipeline as interactive mode (minus excluded tools). Up to eight message management tools are injected per turn: `schedule_reply`, `queue_reply`, `edit_last_reply` (only when a prior message ID is available), `list_scheduled_messages`, `edit_scheduled_message`, `cancel_scheduled_message`, `defer_processing` (only when deferral is enabled and below max depth), and `suppress_reply` (only during re-processing passes).
 6. After each turn, durable facts are extracted and stored in a shared knowledge store (`data/knowledge/facts.json`).
 7. On each new message, relevant facts are recalled and injected into the agent's context — enabling cross-chat knowledge without exposing raw conversation history.
 8. The agent response is routed by `_route_response`: edit and schedule paths run independently — both can fire in the same turn. Output is sanitized (PII redaction, URL stripping, banned string removal) in each delivery branch before being sent and before being written to memory.
@@ -857,19 +903,72 @@ services:
 
 **Matching:** the handler looks up the incoming message's phone number / chat ID in `phonebook` to find a contact name, then checks `contact_prompts` for that name. If no match is found, or the resolved prompt is empty, the default assistant system prompt is used unchanged.
 
-**File paths:** a value that starts with `/` or `~` is treated as a file path and its contents are loaded at message-handling time. All other values are used as inline prompt text.
+**File paths:** a value that starts with `/`, `~`, `./`, or `../` is treated as a file path. Relative paths are resolved against the `data_dir` and must remain inside it (path containment enforced). All other values are used as inline prompt text.
+
+### Workflows
+
+Workflows bundle a system prompt, a per-workflow FAISS knowledge base, and a tool policy into a named, reusable unit. A chat can be bound to a workflow manually, via auto-detection, or inherited from a `contact_prompts` entry. Workflows are stored as YAML files in `data/workflows/<id>/workflow.yaml`.
+
+**Workflow definition (`data/workflows/bike-sales/workflow.yaml`):**
+
+```yaml
+id: "bike-sales"                     # Required. URL-safe slug (must match directory name).
+name: "Bike Sales Assistant"         # Required. Human-readable label.
+description: "Specialist assistant for bike sales inquiries"
+
+system_prompt: |                     # Optional. Overrides global system_prompt.
+  You are a specialist bike sales advisor...
+# system_prompt_file: prompts/bike.txt  # Alternative: path to a file (resolved against data_dir).
+
+knowledge_base: true                 # If true, per-workflow FAISS index at
+                                     # data/workflows/bike-sales/vectordb/faiss_index/
+                                     # is searched alongside the global index.
+
+tool_policy:
+  excluded_tools: []                 # Tools to block for this workflow.
+  additional_approved_tools: []      # Tools auto-approved without confirmation.
+
+auto_detect:
+  enabled: false
+  keywords: ["bike", "bicycle"]      # Case-insensitive substring matches.
+  patterns: ["\\bbike\\b"]           # Python regex patterns.
+  min_confidence: 1                  # Keyword matches needed to trigger.
+```
+
+**Chat-to-workflow bindings** are stored in `data/workflows/bindings.json` and managed via the API or auto-detection:
+
+```json
+{
+  "whatsapp::14155551234@c.us": "bike-sales",
+  "telegram::987654321": "support-desk"
+}
+```
+
+**Resolution order** (first match wins):
+
+1. **Explicit binding** — `bindings.json` entry for this `session_key`
+2. **Contact prompt fallback** — if a `contact_prompts` entry exists for the sender, it is used as an ephemeral workflow (not persisted)
+3. **Auto-detect** — if any workflow has `auto_detect.enabled: true`, incoming messages are scored against keywords and regex patterns; the highest-scoring workflow above `min_confidence` is assigned and persisted as a binding
+4. **No match** — global `system_prompt` and default tool policy apply
+
+**API management:** 11 CRUD endpoints at `/api/v1/assistant/workflows/` — create, list, get, update, delete workflows; upload and manage per-workflow documents; bind and unbind chats. See the [API Reference](api/openapi.yaml) for details.
+
+**Per-workflow knowledge base:** when `knowledge_base: true`, upload documents to `data/workflows/<id>/docs/` via the API. A FAISS index is built at `data/workflows/<id>/vectordb/faiss_index/` and searched alongside the global index when the `query_knowledge_base` tool runs for a chat bound to that workflow.
 
 ### Scheduled Reply Delivery
 
-Five message management tools are injected automatically when assistant mode is active — no extra config is required to enable them. They can be blocked via `excluded_tools` if not needed.
+Up to eight message management tools are injected automatically when assistant mode is active — no extra config is required to enable them. They can be blocked via `excluded_tools` if not needed.
 
 | Tool | Purpose |
 |------|---------|
 | `schedule_reply` | Queue a reply for deferred delivery. Provide the full reply text and a delay in minutes (1–1440). |
+| `queue_reply` | Append a message after the queue tail for this chat. Supports multiple calls per turn with optional `gap_minutes` spacing. |
 | `edit_last_reply` | Edit/replace the most recently sent message in this chat. Only available after at least one reply has been sent in the session. |
 | `list_scheduled_messages` | List pending queued messages. Filter by `recipient` (phone/name substring), `chat_id` (exact), or `contact_name` (phonebook key). Returns short IDs for use with the edit and cancel tools. |
 | `edit_scheduled_message` | Update the text and/or reschedule the delivery time of a pending message (identified by short ID prefix). |
 | `cancel_scheduled_message` | Cancel a specific pending message so it will not be delivered. |
+| `defer_processing` | Postpone the reasoning pass without sending any reply. Only injected when deferral is enabled and below max depth. |
+| `suppress_reply` | Send nothing and skip memory update. Only injected during re-processing passes. |
 
 The agent decides when to use these tools based on instructions in its system prompt (or a `contact_prompts` entry).
 
@@ -885,6 +984,61 @@ The agent decides when to use these tools based on instructions in its system pr
 
 - `edit_last_reply` calls `Channel.edit_message()` on the channel that originally sent the message. WhatsApp and Telegram both support message editing; channels that do not implement it return a failure result (the tool reports the error to the agent but does not raise an exception).
 - Only one edit per agent turn is allowed (idempotency guard). If the agent calls `edit_last_reply` multiple times in a single turn, only the first call takes effect.
+
+### Deferred Message Processing
+
+The deferral system lets the agent postpone its reasoning pass via the `defer_processing` tool. Messages arriving during a deferral are coalesced with the original batch and re-processed together when the timer fires.
+
+```yaml
+services:
+  assistant:
+    deferral:
+      enabled: true
+      max_depth: 3
+      check_interval: 10
+      stale_threshold: 7200
+```
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `enabled` | bool | `true` | Enable/disable the deferral system |
+| `max_depth` | int | `3` | Maximum re-processing depth (prevents infinite deferral loops) |
+| `check_interval` | float | `10.0` | Seconds between checks for due deferrals |
+| `stale_threshold` | float | `7200.0` | Seconds before a deferred record is considered stale and cancelled |
+
+Deferred records are persisted to `data/assistant/deferrals.json` and survive restarts. Records in `"firing"` state are reset to `"pending"` on reload (at-least-once semantics).
+
+### Outbound Campaigns
+
+The campaign system enables multi-contact outbound messaging with automatic follow-ups, escalation, and goal classification. Campaigns are managed via the API (`/api/v1/assistant/campaigns/*`) and tracked in `data/assistant/campaigns.json`.
+
+```yaml
+services:
+  assistant:
+    campaigns:
+      enabled: true
+      check_interval: 60
+```
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `enabled` | bool | `true` | Enable/disable the campaign system |
+| `check_interval` | float | `60.0` | Seconds between follow-up check passes |
+
+**Campaign lifecycle:**
+
+1. **Create** — `POST /api/v1/assistant/campaigns` with name, goal, instructions, and target contacts
+2. **Launch** — `POST /api/v1/assistant/campaigns/{id}/launch` sends initial outbound to all pending targets (or set `auto_launch: true` on create)
+3. **Track** — incoming replies from campaign targets are tracked automatically; the `report_campaign_outcome` tool is injected so the agent can classify each target as `completed`, `failed`, or `in_progress`
+4. **Follow-up** — the background thread sends follow-ups to non-responsive targets after `follow_up_interval_hours` (default 24h); escalates after `max_follow_ups` (default 3)
+5. **Complete** — campaign auto-completes when all targets reach a terminal state (completed, failed, or escalated)
+
+**Per-campaign settings** (set at creation time):
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `max_follow_ups` | int | `3` | Maximum follow-ups per target before escalation (0–20) |
+| `follow_up_interval_hours` | float | `24.0` | Hours between follow-up attempts (0.5–720) |
 
 ### Response Timing / Quiet Hours
 
@@ -959,8 +1113,8 @@ Rate limit violations are recorded but do not increment the security violation c
 
 | Variable | Description | Example |
 |----------|-------------|---------|
-| `COGTRIX_PROVIDER` | LLM provider | `ollama` |
-| `COGTRIX_MODEL` | Model name | `qwen3:8b` |
+| `COGTRIX_CONFIG_FILE` | Path to a specific config file (bypasses automatic search) | `/etc/cogtrix/config.yaml` |
+| `COGTRIX_MODEL` | Active model alias (sets `models.default` at runtime) | `oss` |
 | `COGTRIX_SESSION` | Session ID | `my-project` |
 | `COGTRIX_MEMORY_MODE` | Memory mode | `code` |
 | `COGTRIX_DATA_DIR` | Root directory for data storage | `./data` |
@@ -984,6 +1138,12 @@ Rate limit violations are recorded but do not increment the security violation c
 | `COGTRIX_WHATSAPP_API_KEY` | Waha API key | `yoursecretkey` |
 | `COGTRIX_WHATSAPP_SESSION` | Waha session name | `default` |
 | `COGTRIX_TELEGRAM_TOKEN` | Telegram bot token | `123456:ABC-DEF...` |
+| `COGTRIX_JWT_SECRET` | JWT signing secret for API mode (min 32 chars, required) | `your-secret-key-at-least-32-chars` |
+| `COGTRIX_DB_URL` | Database URL for API mode (default: SQLite `aiosqlite`) | `postgresql+asyncpg://user:pass@host/db` |
+| `COGTRIX_CORS_ORIGINS` | Comma-separated CORS allowed origins for API mode | `http://localhost:5173,https://app.example.com` |
+| `COGTRIX_API_HOST` | API server bind host (default `0.0.0.0`) | `127.0.0.1` |
+| `COGTRIX_API_PORT` | API server bind port (default `8000`) | `3001` |
+| `COGTRIX_API_WORKERS` | Number of uvicorn workers (default `1`) | `4` |
 
 ---
 
@@ -997,17 +1157,19 @@ python cogtrix.py [OPTIONS]
 
 | Option | Short | Description |
 |--------|-------|-------------|
-| `--provider NAME` | `-p` | LLM provider name |
-| `--model NAME` | `-m` | Model name or model alias from config |
+| `--model NAME` | `-m` | Active model alias from the `models` registry |
 | `--session ID` | `-s` | Session ID for memory persistence |
 | `--memory-mode MODE` | `-M` | Memory mode: `conversation`, `code`, `reasoning` |
 | `--config-file FILE` | `-c` | Path to a specific config file (JSON or YAML). Bypasses the automatic config file search. |
+| `--data-dir PATH` | | Root directory for data storage (history, vectordb, assistant state) |
 | `--no-confirm` | `-y` | Skip all tool safety confirmations (auto-approve file writes, shell commands, etc.) |
 | `--output FILE` | `-o` | Save responses to file. Non-interactive: single write. Interactive: append each exchange as Markdown. |
 | `--debug` | | Enable debug mode (auto-enables `--log` and `--verbose`) |
 | `--verbose` | `-v` | Log full LLM interactions: tokens, thinking, tool calls |
 | `--log [FILE]` | | Enable logging to file (default: `cogtrix.log`) |
 | `--tools LIST` | | Comma-separated tools to load (default: all) |
+| `--activate-tools LIST` | | Comma-separated tools to pin as active on startup |
+| `--assistant` | | Run as a headless WhatsApp/Telegram messaging daemon |
 | `--check-config` | | Validate configuration and exit |
 
 ### Non-interactive Mode
@@ -1038,6 +1200,16 @@ python cogtrix.py --tools minimal                 # Basic set (file ops + calcul
 python cogtrix.py --tools "search_web,calculate"  # Specific tools only
 ```
 
+### Pinning Tools at Startup
+
+Pin specific on-demand tools as active without changing the overall tool filter:
+
+```bash
+python cogtrix.py --activate-tools web_search,shell,write_file
+```
+
+Pinned tools persist across prompt cycles (unlike agent-loaded tools which are cleared between turns). Unpin interactively with `/tools unload <name>`.
+
 ### RAG Ingestion Options
 
 ```bash
@@ -1049,7 +1221,7 @@ python cogtrix.py --ingest [OPTIONS]
 | `--ingest` | Build vector database and exit |
 | `--docs-dir PATH` | Documents directory |
 | `--vectordb-dir PATH` | Vector database output directory |
-| `--embedding-provider NAME` | Embedding provider: `openai`, `ollama`, or `google` |
+| `--embedding-provider NAME` | Embedding provider: `openai` or `ollama` |
 | `--embedding-model NAME` | Embedding model name |
 
 ### Setup Wizard
@@ -1089,27 +1261,23 @@ Below is a full configuration in both YAML and JSON. Both formats are functional
 ### YAML (`.cogtrix.yaml`)
 
 ```yaml
-provider: my-server
 session: default
 
-# ─── LLM Providers ──────────────────────────────────────────────
+# ─── LLM Providers (connection info only) ───────────────────────
 providers:
   my-server:
     type: ollama
     base_url: "http://192.168.1.100:11434"
-    model: qwen3:8b
   openai:
     type: openai
-    model: gpt-4.1
+    api_key: "sk-..."
   groq:
     type: openai
     base_url: "https://api.groq.com/openai/v1"
     api_key: "gsk-..."
-    model: llama-3.3-70b-versatile
   local-gpu:
     type: ollama
     base_url: "http://192.168.1.101:11434"
-    model: qwen3-coder:30b-a3b
 
 # ─── External Services ──────────────────────────────────────────
 services:
@@ -1136,8 +1304,12 @@ services:
 
 # ─── Models (chat + embedding) ───────────────────────────────────
 models:
+  default: fast             # active model alias at startup
   fast: my-server/qwen3:8b
-  smart: openai/gpt-4.1
+  smart:
+    provider: openai
+    model: gpt-4.1
+    temperature: 0.7
   coder:
     provider: local-gpu
     model: qwen3-coder:30b-a3b
@@ -1168,7 +1340,7 @@ memory:
 # ─── RAG ────────────────────────────────────────────────────────
 rag:
   docs_dir: docs
-  vectordb_dir: data/vectordb
+  vectordb_dir: vectordb
   model: embed-local
 
 # ─── Delegation ─────────────────────────────────────────────────
@@ -1242,29 +1414,25 @@ mcp_servers:
 
 ```json
 {
-  "provider": "my-server",
   "session": "default",
 
   "providers": {
     "my-server": {
       "type": "ollama",
-      "base_url": "http://192.168.1.100:11434",
-      "model": "qwen3:8b"
+      "base_url": "http://192.168.1.100:11434"
     },
     "openai": {
       "type": "openai",
-      "model": "gpt-4.1"
+      "api_key": "sk-..."
     },
     "groq": {
       "type": "openai",
       "base_url": "https://api.groq.com/openai/v1",
-      "api_key": "gsk-...",
-      "model": "llama-3.3-70b-versatile"
+      "api_key": "gsk-..."
     },
     "local-gpu": {
       "type": "ollama",
-      "base_url": "http://192.168.1.101:11434",
-      "model": "qwen3-coder:30b-a3b"
+      "base_url": "http://192.168.1.101:11434"
     }
   },
 
@@ -1323,8 +1491,13 @@ mcp_servers:
   },
 
   "models": {
+    "default": "fast",
     "fast": "my-server/qwen3:8b",
-    "smart": "openai/gpt-4.1",
+    "smart": {
+      "provider": "openai",
+      "model": "gpt-4.1",
+      "temperature": 0.7
+    },
     "coder": {
       "provider": "local-gpu",
       "model": "qwen3-coder:30b-a3b",
@@ -1347,7 +1520,7 @@ mcp_servers:
 
   "rag": {
     "docs_dir": "docs",
-    "vectordb_dir": "data/vectordb",
+    "vectordb_dir": "vectordb",
     "model": "embed-local"
   },
 
@@ -1384,7 +1557,7 @@ mcp_servers:
 }
 ```
 
-> **Note:** Both examples use `"providers"` (preferred). The legacy key `"inference"` still works as an alias.
+> **Note:** Both examples use `"providers"` (preferred). The legacy key `"inference"` still works as an alias. `models.default` sets the active model alias; the deprecated top-level `provider` and `model` keys are auto-migrated on load.
 
 ---
 
@@ -1405,6 +1578,70 @@ The interactive prompt supports full line editing via Python's `readline` module
 - **Ctrl+W** — Delete previous word
 
 This works out of the box on Linux and macOS. On Windows, install `pyreadline3` for equivalent functionality.
+
+---
+
+## Migration Guide
+
+### Migrating from the old provider/model format
+
+In earlier versions, model settings (model name, temperature, `context_window`) were placed inside the provider entry, and the active model was selected via top-level `provider` and `model` keys:
+
+```yaml
+# Old format — still accepted but deprecated
+provider: my-server
+model: qwen3:8b
+
+providers:
+  my-server:
+    type: ollama
+    base_url: "http://192.168.1.100:11434"
+    model: qwen3:8b
+    temperature: 0.5
+```
+
+**What changed:** Providers now hold only connection info. All model settings live in the `models` registry. The active model is selected via `models.default`.
+
+**New format:**
+
+```yaml
+# New format
+providers:
+  my-server:
+    type: ollama
+    base_url: "http://192.168.1.100:11434"
+
+models:
+  default: main
+  main:
+    provider: my-server
+    model: qwen3:8b
+    temperature: 0.5
+```
+
+**Auto-migration:** Old configs continue to work without changes. When Cogtrix loads a config that has model fields (`model`, `temperature`, `context_window`) inside a provider entry, they are automatically migrated to the `models` registry as a new entry named after that provider. Similarly, top-level `provider` and `model` keys are mapped to `models.default` by matching against existing registry entries. A log warning is emitted for each migrated field.
+
+**Recommended steps to update manually:**
+
+1. Move `model`, `temperature`, `context_window`, and `max_tokens` out of each provider entry and into a named entry in the `models` section.
+2. Set `models.default` to the alias you want active at startup.
+3. Remove the top-level `provider` and `model` keys.
+4. Update `--provider` CLI usage to `--model <alias>`.
+5. Replace the `COGTRIX_PROVIDER` environment variable with `COGTRIX_MODEL=<alias>`.
+
+### Environment variable changes
+
+| Old | New | Notes |
+|-----|-----|-------|
+| `COGTRIX_PROVIDER=ollama` | `COGTRIX_MODEL=my-alias` | Set any model alias defined in `models` |
+| `COGTRIX_MODEL=qwen3:8b` | `COGTRIX_MODEL=my-alias` | Now expects a registry alias, not a bare model name |
+
+### CLI flag changes
+
+| Old | New |
+|-----|-----|
+| `--provider ollama` | `--model <alias>` |
+| `-p ollama` | `-m <alias>` |
 
 ---
 

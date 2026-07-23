@@ -431,7 +431,7 @@ async def test_create_session_default_name(http_client) -> None:
         headers={"Authorization": f"Bearer {token}"},
     )
     assert resp.status_code == 201
-    assert resp.json()["data"]["name"] == "New session"
+    assert resp.json()["data"]["name"].startswith("Session ")
 
 
 # ---------------------------------------------------------------------------
@@ -683,7 +683,7 @@ async def test_patch_session_config(http_client) -> None:
 
     create_resp = client.post(
         "/api/v1/sessions",
-        json={"name": "Session", "config": {"provider": "openai", "max_steps": 10}},
+        json={"name": "Session", "config": {"model": "gpt-4o", "max_steps": 10}},
         headers={"Authorization": f"Bearer {token}"},
     )
     session_id = create_resp.json()["data"]["id"]
@@ -696,7 +696,7 @@ async def test_patch_session_config(http_client) -> None:
     assert patch_resp.status_code == 200
     cfg = patch_resp.json()["data"]["config"]
     assert cfg["max_steps"] == 25
-    assert cfg.get("provider") == "openai"  # preserved from original config
+    assert cfg.get("model") == "gpt-4o"  # preserved from original config
 
 
 @pytest.mark.asyncio

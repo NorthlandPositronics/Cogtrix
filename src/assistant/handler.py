@@ -10,10 +10,12 @@ from __future__ import annotations
 
 import logging
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
 from src.agent.core import AgentRunner
+from src.agent.safety import UserCancelledRun
 from src.assistant.channel import Channel, IncomingMessage
 from src.assistant.datamarking import apply_datamark as _apply_datamark
 from src.assistant.datamarking import datamark_history as _datamark_history
@@ -133,6 +135,8 @@ class MessageHandler:
         scheduler: MessageScheduler | None = None,
         deferral_mgr: DeferralManager | None = None,
         datamarking_enabled: Any = _UNSET,
+        workflow_registry: Any = None,
+        campaign_mgr: Any = None,
     ) -> None:
         self._session_mgr = session_mgr
         self._llm = llm
@@ -149,6 +153,8 @@ class MessageHandler:
         self._max_response_length: int = config.get("max_response_length", 4000)
         self._scheduler: MessageScheduler | None = scheduler
         self._deferral_mgr: DeferralManager | None = deferral_mgr
+        self._workflow_registry: Any = workflow_registry
+        self._campaign_mgr: Any = campaign_mgr
 
         if datamarking_enabled is _UNSET:
             guardrail_cfg = config.get("guardrails", {})
@@ -227,7 +233,9 @@ class MessageHandler:
                 result.reason,
                 session.guardrail_violations,
             )
-            channel.send(msg.chat_id, _BLOCKED_RESPONSE)
+            send_result = channel.send(msg.chat_id, _BLOCKED_RESPONSE)
+            if send_result.ok and send_result.message_id:
+                session.last_sent_message_id = send_result.message_id
             return False
         return True
 
@@ -255,14 +263,32 @@ class MessageHandler:
         self,
         msg: IncomingMessage,
         context: Any,
-        combined_prefix: str | None,
-    ) -> tuple[str, str, list]:
+        session: Any = None,
+    ) -> tuple[str, str, list, set[str], set[str]]:
         """Resolve effective prompt and apply datamarking to input and history.
 
-        Returns ``(effective_prompt, user_input_for_agent, history_for_agent)``.
+        Returns ``(effective_prompt, user_input_for_agent, history_for_agent,
+        workflow_excluded, workflow_approved)``.
         """
-        contact_prompt = self._resolve_contact_prompt(msg)
-        effective_prompt = contact_prompt if contact_prompt else self._system_prompt
+        workflow_excluded: set[str] = set()
+        workflow_approved: set[str] = set()
+
+        if self._workflow_registry is not None:
+            resolved = self._workflow_registry.resolve(
+                session_key=msg.session_key,
+                msg_text=msg.text or "",
+                sender_id=msg.sender_id or "",
+                resolved_phone=msg.resolved_phone or "",
+            )
+            effective_prompt = resolved.system_prompt or self._system_prompt
+            if session is not None and resolved.workflow_id:
+                session.workflow_id = resolved.workflow_id
+            if resolved.tool_policy is not None:
+                workflow_excluded = set(resolved.tool_policy.excluded_tools)
+                workflow_approved = set(resolved.tool_policy.additional_approved_tools)
+        else:
+            contact_prompt = self._resolve_contact_prompt(msg)
+            effective_prompt = contact_prompt if contact_prompt else self._system_prompt
 
         dm_marker: str | None = None
         if self._datamarking_enabled:
@@ -273,7 +299,13 @@ class MessageHandler:
         history_for_agent = (
             _datamark_history(context.messages, dm_marker) if dm_marker else context.messages
         )
-        return effective_prompt, user_input_for_agent, history_for_agent
+        return (
+            effective_prompt,
+            user_input_for_agent,
+            history_for_agent,
+            workflow_excluded,
+            workflow_approved,
+        )
 
     def _run_agent(
         self,
@@ -284,8 +316,8 @@ class MessageHandler:
         effective_prompt: str,
         active_tools: list[Any],
         session: Any,
-        defer_state: DeferReplyState | None = None,
-        suppress_state: SuppressReplyState | None = None,
+        extra_excluded: set[str] | None = None,
+        extra_approvals: set[str] | None = None,
     ) -> tuple[str, set[str]]:
         """Invoke the agent runner and return (response, loaded_tools)."""
         from src.orchestration.run_config import AgentRunConfig
@@ -294,10 +326,16 @@ class MessageHandler:
             call_session_state = SessionState(
                 no_confirm=True,
             )
+            available = dict(self._available_tools)
+            if extra_excluded:
+                available = {k: v for k, v in available.items() if k not in extra_excluded}
+            call_approvals = set(self._approvals)
+            if extra_approvals:
+                call_approvals |= extra_approvals
             run_config = AgentRunConfig(
                 llm=self._llm,
                 system_prompt=effective_prompt,
-                available_tools=dict(self._available_tools),
+                available_tools=available,
                 active_tools_list=active_tools,
                 max_context_tokens=self._max_context_tokens,
                 compression_llm=self._compression_llm,
@@ -309,10 +347,13 @@ class MessageHandler:
                 user_input=user_input,
                 history_messages=history_messages,
                 registry=self._registry,
-                approvals=set(self._approvals),
+                approvals=call_approvals,
                 context_prefix=context_prefix,
                 config=run_config,
             )
+        except UserCancelledRun:
+            log.info("Agent run cancelled for %s", session.session_key)
+            return "", set()
         except Exception as exc:
             log.error("Agent error for session %s: %s", session.session_key, exc)
             response = "I encountered an error processing your message. Please try again."
@@ -329,7 +370,7 @@ class MessageHandler:
         edit_state: EditReplyState,
         queue_state: QueueReplyState,
         session: Any,
-    ) -> str:
+    ) -> str | None:
         """Route the response to scheduled or immediate delivery and return the text for memory."""
         edited_text: str | None = None
         if edit_state.was_called and session.last_sent_message_id:
@@ -413,6 +454,7 @@ class MessageHandler:
             session.last_sent_message_id = result.message_id
         elif not result.ok:
             log.warning("Failed to send fallback reply to %s via %s", msg.chat_id, channel.name)
+            return None  # Don't record undelivered text in memory
         return fallback_text
 
     def handle_batch(
@@ -548,8 +590,30 @@ class MessageHandler:
             if is_reprocessing and "suppress_reply" not in self._excluded_tools:
                 active_tools.append(create_suppress_reply_tool(suppress_state))
 
-            effective_prompt, user_input, history = self._prepare_agent_call(
-                msg, context, combined_prefix
+            # Inject report_campaign_outcome when this chat is an active campaign target
+            campaign_outcome_state: Any = None
+            _active_campaign: Any = None
+            _active_target: Any = None
+            if self._campaign_mgr is not None:
+                match = self._campaign_mgr.get_active_campaign_for_chat(msg.channel, msg.chat_id)
+                if match is not None:
+                    _active_campaign, _active_target = match
+                    from src.assistant.campaign import (
+                        CampaignOutcomeState,
+                        create_campaign_outcome_tool,
+                    )
+
+                    campaign_outcome_state = CampaignOutcomeState()
+                    tool = create_campaign_outcome_tool(
+                        campaign_outcome_state, _active_campaign.goal
+                    )
+                    if tool is not None:
+                        active_tools.append(tool)
+                    # Notify campaign manager that the contact replied
+                    self._campaign_mgr.on_reply(msg.channel, msg.chat_id)
+
+            effective_prompt, user_input, history, wf_excluded, wf_approved = (
+                self._prepare_agent_call(msg, context, session=session)
             )
             response, turn_loaded_tools = self._run_agent(
                 user_input=user_input,
@@ -558,8 +622,8 @@ class MessageHandler:
                 effective_prompt=effective_prompt,
                 active_tools=active_tools,
                 session=session,
-                defer_state=defer_state,
-                suppress_state=suppress_state,
+                extra_excluded=wf_excluded or None,
+                extra_approvals=wf_approved or None,
             )
             if turn_loaded_tools:
                 log.debug(
@@ -589,6 +653,14 @@ class MessageHandler:
             response_for_memory = self._route_response(
                 msg, channel, response, schedule_state, edit_state, queue_state, session
             )
+            # _route_response returns None only when an edit fallback send fails and
+            # no text was delivered.  Skip memory update in that case — storing a None
+            # response would corrupt conversation history and crash knowledge extraction.
+            if response_for_memory is None:
+                log.warning(
+                    "Skipping memory update for %s: no response was delivered", session.session_key
+                )
+                return
 
             # Memory records the response regardless of delivery success
             # (at-least-once memory semantics).
@@ -596,7 +668,26 @@ class MessageHandler:
                 session.memory_manager.update(msg.text, response_for_memory)
                 session.memory_manager.save()
             except Exception as exc:
-                log.warning("Failed to update memory for session %s: %s", session.session_key, exc)
+                log.warning(
+                    "Failed to update memory for session %s: %s",
+                    session.session_key,
+                    exc,
+                    exc_info=True,
+                )
+
+            # Process campaign outcome if the agent reported one
+            if (
+                campaign_outcome_state is not None
+                and campaign_outcome_state.was_called
+                and _active_campaign is not None
+                and self._campaign_mgr is not None
+            ):
+                self._campaign_mgr.mark_target_outcome(
+                    _active_campaign.id,
+                    msg.chat_id,
+                    campaign_outcome_state.outcome,
+                    campaign_outcome_state.reason,
+                )
 
             do_extract = self._knowledge_store is not None and session.guardrail_violations == 0
             sanitized_for_knowledge = (
@@ -608,3 +699,100 @@ class MessageHandler:
                 self._knowledge_store.extract_and_store(sanitized_for_knowledge, response_for_memory)  # type: ignore[union-attr]
             except Exception as exc:
                 log.debug("Knowledge extraction failed: %s", exc)
+
+    def handle_outbound(
+        self,
+        contact_name: str,
+        instructions: str,
+        channel: Channel,
+        chat_id: str,
+    ) -> tuple[str, str | None]:
+        """Run agent for an operator-initiated outbound message.
+
+        Operator instructions bypass input guardrails; output guardrails still apply.
+        Memory records ``[Operator instruction] {instructions}`` as the user turn.
+
+        Args:
+            contact_name: Phonebook contact name (for logging and agent framing).
+            instructions: Operator instructions — the agent's task.
+            channel: Channel to send the response through.
+            chat_id: Resolved chat identifier on the channel.
+
+        Returns:
+            ``(response_text, message_id)`` — the sanitized agent response and
+            the channel message ID (None if delivery failed).
+        """
+        framed_text = (
+            f"[Operator instruction — initiate conversation with {contact_name}]\n"
+            f"{instructions}"
+        )
+        synthetic_msg = IncomingMessage(
+            channel=channel.name,
+            chat_id=chat_id,
+            message_id=f"outbound-{uuid.uuid4().hex[:12]}",
+            sender_id="operator",
+            sender_name="Operator",
+            text=framed_text,
+            timestamp=time.time(),
+            metadata={"outbound": True},
+        )
+
+        session = self._session_mgr.get_or_create(synthetic_msg)
+        with session.lock:
+            session.last_activity = time.monotonic()
+            context, combined_prefix = self._prepare_context(synthetic_msg, session)
+
+            effective_prompt, user_input, history, wf_excluded, wf_approved = (
+                self._prepare_agent_call(synthetic_msg, context, session=session)
+            )
+
+            active_tools: list[Any] = list(self._active_tools)
+
+            response, turn_loaded_tools = self._run_agent(
+                user_input=user_input,
+                history_messages=history,
+                context_prefix=combined_prefix,
+                effective_prompt=effective_prompt,
+                active_tools=active_tools,
+                session=session,
+                extra_excluded=wf_excluded or None,
+                extra_approvals=wf_approved or None,
+            )
+
+            if turn_loaded_tools:
+                log.debug(
+                    "Outbound session %s: tools auto-loaded: %s",
+                    session.session_key,
+                    turn_loaded_tools,
+                )
+
+            response = self._guardrails.sanitize_output(response)
+            if len(response) > self._max_response_length:
+                response = response[: self._max_response_length - 3] + "..."
+
+            message_id: str | None = None
+            result = channel.send(chat_id, response)
+            if result.ok and result.message_id:
+                session.last_sent_message_id = result.message_id
+                message_id = result.message_id
+            elif not result.ok:
+                log.warning(
+                    "Failed to send outbound message to %s via %s: %s",
+                    chat_id,
+                    channel.name,
+                    result.error,
+                )
+
+            memory_user_text = f"[Operator instruction] {instructions}"
+            try:
+                session.memory_manager.update(memory_user_text, response)
+                session.memory_manager.save()
+            except Exception as exc:
+                log.warning(
+                    "Failed to update memory for outbound session %s: %s",
+                    session.session_key,
+                    exc,
+                    exc_info=True,
+                )
+
+        return response, message_id

@@ -77,8 +77,7 @@ def _make_tool_registry() -> MagicMock:
 
 def _make_config() -> MagicMock:
     cfg = MagicMock()
-    cfg.provider = "ollama"
-    cfg.model = None
+    cfg.active_model_alias = None
     cfg.memory_mode = "conversation"
     cfg.prompt_optimizer = True
     cfg.parallel_tool_execution = True
@@ -295,7 +294,7 @@ class TestSessionToolEndpoints:
             )
         assert resp.status_code == 200
         items = {item["name"]: item["status"] for item in resp.json()["data"]}
-        assert items["test_tool"] == "active"
+        assert items["test_tool"] == "pinned"
 
     def test_patch_session_tools_disable(self) -> None:
         sid = str(uuid.uuid4())
@@ -338,7 +337,8 @@ class TestSessionToolEndpoints:
             )
         assert resp.status_code == 200
         items = {item["name"]: item["status"] for item in resp.json()["data"]}
-        assert items["test_tool"] == "auto_approved"
+        # Tool is approved but not loaded — status should be on_demand
+        assert items["test_tool"] == "on_demand"
 
     def test_patch_session_tools_revoke_approval(self) -> None:
         sid = str(uuid.uuid4())
@@ -554,7 +554,7 @@ class TestConfigEndpoints:
             )
         assert resp.status_code == 200
         data = resp.json()["data"]
-        assert data["provider"] == "ollama"
+        assert "active_model" in data
         assert data["prompt_optimizer"] is True
         assert data["context_compression"] is True
 
@@ -651,9 +651,13 @@ class TestConfigEndpoints:
                 json={},
                 headers={"Authorization": f"Bearer {admin_token}"},
             )
-        assert resp.status_code == 501
+        assert resp.status_code == 201
+        body = resp.json()
+        assert "data" in body
+        assert body["data"]["step"] == 0
+        assert "wizard_id" in body["data"]
 
-    def test_wizard_step_returns_501(self) -> None:
+    def test_wizard_step_unknown_id_returns_404(self) -> None:
         from fastapi.testclient import TestClient as _TC
 
         from src.api.app import create_app
@@ -667,9 +671,9 @@ class TestConfigEndpoints:
                 json={"answer": "ollama"},
                 headers={"Authorization": f"Bearer {admin_token}"},
             )
-        assert resp.status_code == 501
+        assert resp.status_code == 404
 
-    def test_wizard_cancel_returns_501(self) -> None:
+    def test_wizard_cancel_unknown_id_returns_404(self) -> None:
         from fastapi.testclient import TestClient as _TC
 
         from src.api.app import create_app
@@ -682,7 +686,7 @@ class TestConfigEndpoints:
                 f"/api/v1/config/wizard/{wid}",
                 headers={"Authorization": f"Bearer {admin_token}"},
             )
-        assert resp.status_code == 501
+        assert resp.status_code == 404
 
     def test_get_provider_not_found(self) -> None:
         with _api_client() as (client, registry, config, admin_token, _):
@@ -702,12 +706,13 @@ class TestConfigEndpoints:
                 json={"provider": "openai"},
                 headers={"Authorization": f"Bearer {admin_token}"},
             )
-        assert resp.status_code == 200
+        assert resp.status_code == 410
 
     def test_switch_model(self) -> None:
         with (
             _api_client() as (client, registry, config, admin_token, _),
             patch("src.orchestration.runner.invalidate_llm_caches", return_value=None),
+            patch("src.config._resolve_model"),
         ):
             resp = client.post(
                 "/api/v1/config/model",
@@ -715,7 +720,7 @@ class TestConfigEndpoints:
                 headers={"Authorization": f"Bearer {admin_token}"},
             )
         assert resp.status_code == 200
-        assert config.model == "gpt-4.1-mini"
+        assert config.active_model_alias == "gpt-4.1-mini"
 
 
 # ---------------------------------------------------------------------------

@@ -28,7 +28,8 @@ from src.api.auth import (
     TokenData,
     create_access_token,
     get_current_user,
-    pwd_context,
+    hash_password,
+    verify_password,
 )
 from src.api.db import get_db
 from src.api.db.repositories.api_keys import ApiKeyRepository
@@ -133,7 +134,7 @@ async def register(
     # The unique-constraint check above reduces DB load but is not sufficient
     # on its own — a concurrent registration that slips through is caught here
     # by the database unique constraint, producing an IntegrityError.
-    password_hash = pwd_context.hash(body.password)
+    password_hash = hash_password(body.password)
     try:
         user = await user_repo.create_with_role_election(
             user_id=str(uuid.uuid4()),
@@ -151,6 +152,7 @@ async def register(
         ) from exc
 
     token_pair = await _create_token_pair(user.id, user.role, db)
+    await db.commit()
     return APIResponse(data=token_pair)
 
 
@@ -193,10 +195,11 @@ async def login(
     if user is None:
         raise _invalid
 
-    if not pwd_context.verify(body.password, user.password_hash):
+    if not verify_password(body.password, user.password_hash):
         raise _invalid
 
     token_pair = await _create_token_pair(user.id, user.role, db)
+    await db.commit()
     return APIResponse(data=token_pair)
 
 
@@ -262,6 +265,7 @@ async def refresh(
         )
 
     token_pair = await _create_token_pair(user.id, user.role, db)
+    await db.commit()
     return APIResponse(data=token_pair)
 
 
@@ -286,6 +290,7 @@ async def logout(
     """
     token_repo = RefreshTokenRepository(db)
     await token_repo.revoke_all_for_user(current_user.user_id)
+    await db.commit()
     return APIResponse(data=None)
 
 
@@ -419,6 +424,7 @@ async def create_api_key(
         expires_at=expires_at,
     )
 
+    await db.commit()
     return APIResponse(
         data=APIKeyOut(
             id=key_record.id,
@@ -472,4 +478,5 @@ async def revoke_api_key(
         )
 
     await key_repo.revoke(key_id)
+    await db.commit()
     return APIResponse(data=None)

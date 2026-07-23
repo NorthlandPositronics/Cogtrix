@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field
 
 
 class ProviderOut(BaseModel):
-    """A configured LLM provider."""
+    """A configured LLM provider (connection info only)."""
 
     name: str = Field(
         ...,
@@ -29,28 +29,9 @@ class ProviderOut(BaseModel):
         description="API base URL (null uses the provider default).",
         examples=["https://api.openai.com/v1"],
     )
-    model: str | None = Field(
-        default=None,
-        description="Default model name for this provider.",
-        examples=["gpt-4.1-mini"],
-    )
     has_api_key: bool = Field(
         ...,
         description="True when an API key is configured (key value is never returned).",
-    )
-    temperature: float | None = Field(
-        default=None,
-        description="Default sampling temperature (0.0–2.0).",
-        examples=[0.7],
-    )
-    max_tokens: int | None = Field(
-        default=None,
-        description="Default max output tokens per call.",
-        examples=[4096],
-    )
-    is_active: bool = Field(
-        ...,
-        description="True when this is the currently selected provider.",
     )
 
 
@@ -67,16 +48,6 @@ class ProviderHealthOut(BaseModel):
     error: str | None = Field(
         default=None,
         description="Error description when unreachable; null on success.",
-    )
-
-
-class ProviderSwitchRequest(BaseModel):
-    """Request body for POST /api/v1/config/provider."""
-
-    provider: str = Field(
-        ...,
-        description="Provider alias to switch to.",
-        examples=["anthropic"],
     )
 
 
@@ -105,7 +76,7 @@ class ModelOut(BaseModel):
     )
     num_ctx: int | None = Field(
         default=None,
-        description="Context window size (tokens); null uses provider default.",
+        description="Context window size (tokens); null uses provider default. Also accepted as context_window in config files.",
         examples=[131072],
     )
     temperature: float | None = Field(
@@ -140,14 +111,10 @@ class ModelSwitchRequest(BaseModel):
 class ConfigOut(BaseModel):
     """Current application configuration snapshot (sensitive fields masked)."""
 
-    provider: str = Field(
-        ...,
-        description="Active provider alias.",
-        examples=["ollama"],
-    )
-    model: str | None = Field(
+    active_model: str | None = Field(
         default=None,
-        description="Active model alias; null uses provider default.",
+        description="Active model alias from the models registry; null uses provider default.",
+        examples=["oss"],
     )
     memory_mode: str = Field(
         ...,
@@ -183,6 +150,14 @@ class ConfigOut(BaseModel):
     raw_yaml: str | None = Field(
         default=None,
         description="Raw YAML of the config file (admin only; null for regular users).",
+    )
+    system_prompt: str | None = Field(
+        default=None,
+        description="Active system prompt (null if using default).",
+    )
+    guardrails: dict | None = Field(
+        default=None,
+        description="Active guardrail configuration (assistant mode).",
     )
 
 

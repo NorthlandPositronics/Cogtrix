@@ -43,7 +43,10 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from src.logging_config import get_logger
 from src.tools._telegram_client import REQUESTS_AVAILABLE, TelegramBotClient
+
+log = get_logger()
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -100,8 +103,8 @@ def _load_config() -> TelegramConfig:
             cfg.phonebook = tg.get("phonebook", cfg.phonebook)
             cfg.rate_limit = tg.get("rate_limit", cfg.rate_limit)
             cfg.max_message_length = tg.get("max_message_length", cfg.max_message_length)
-    except Exception:
-        pass
+    except Exception as exc:
+        log.warning("Failed to parse Telegram config: %s", exc)
 
     # 2) Environment overrides (highest priority)
     if token := os.getenv("COGTRIX_TELEGRAM_TOKEN"):

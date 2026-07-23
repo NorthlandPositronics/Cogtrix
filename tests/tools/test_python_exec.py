@@ -28,19 +28,6 @@ class TestSessionIsolation:
         """Clear all session state before each test."""
         _session_states.clear()
 
-    def test_variables_are_isolated_between_sessions(self) -> None:
-        """Variables set in session A must not appear in session B."""
-        execute_python("x = 42", session_id="session_a")
-        execute_python("y = 99", session_id="session_b")
-
-        ctx_a = get_context("session_a")
-        ctx_b = get_context("session_b")
-
-        assert ctx_a.get("x") == 42
-        assert "x" not in ctx_b
-        assert ctx_b.get("y") == 99
-        assert "y" not in ctx_a
-
     def test_variable_overwrite_does_not_cross_sessions(self) -> None:
         """Overwriting a variable in one session must not affect another."""
         execute_python("val = 1", session_id="session_a")

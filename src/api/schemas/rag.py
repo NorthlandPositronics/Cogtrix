@@ -5,7 +5,9 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+from src.api.schemas.common import ensure_utc
 
 IngestStatus = Literal["pending", "processing", "indexed", "failed"]
 
@@ -55,6 +57,8 @@ class DocumentOut(BaseModel):
         ...,
         description="UTC timestamp when the upload was received.",
     )
+
+    _ensure_utc = field_validator("ingested_at", "created_at", mode="before")(ensure_utc)
 
 
 class RAGSearchRequest(BaseModel):

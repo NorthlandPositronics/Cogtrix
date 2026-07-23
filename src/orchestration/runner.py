@@ -16,7 +16,11 @@ from typing import Any
 from src.agent.core import prepare_messages_with_context
 from src.agent.safety import UserCancelledRun
 from src.logging_config import get_logger, log_tool_call
-from src.orchestration.compression import COMPRESSION_MIN_AGE_CYCLES, COMPRESSION_MIN_CHARS
+from src.orchestration.compression import (
+    COMPRESSION_MIN_AGE_CYCLES,
+    COMPRESSION_MIN_CHARS,
+    apply_message_compression,
+)
 from src.orchestration.graph import DEFAULT_RECURSION_LIMIT, build_agent_graph
 from src.orchestration.run_config import AgentRunConfig
 
@@ -43,7 +47,12 @@ def advance_llm_generation() -> None:
 
 
 def invalidate_llm_caches() -> None:
-    """Clear all LLM-related caches — call on provider/model switch."""
+    """Clear all module-level LLM-related caches — call on provider/model switch.
+
+    This is a no-op for API sessions that supply per-session caches via
+    ``AgentRunConfig.bound_cache`` / ``AgentRunConfig.compression_cache``;
+    those sessions manage their own cache lifecycle independently.
+    """
     global _llm_generation
     with _bound_cache_lock:
         _llm_generation += 1
@@ -78,7 +87,7 @@ class ToolCallLogger:
         if now - self._last_evict < self._EVICT_INTERVAL:
             return
         self._last_evict = now
-        cutoff = time.time() - self._STALE_TIMEOUT
+        cutoff = now - self._STALE_TIMEOUT
         stale_keys = [k for k, ts in self._tool_start_times.items() if ts < cutoff]
         for k in stale_keys:
             self._tool_start_times.pop(k, None)
@@ -88,7 +97,7 @@ class ToolCallLogger:
         key = call_id or tool_name
         with self._lock:
             self._evict_stale()
-            self._tool_start_times[key] = time.time()
+            self._tool_start_times[key] = time.monotonic()
         log_tool_call(tool_name, inputs=tool_input)
 
     def on_tool_end(self, tool_name: str, output: str, call_id: str = "") -> None:
@@ -97,7 +106,7 @@ class ToolCallLogger:
         duration = None
         with self._lock:
             if key in self._tool_start_times:
-                duration = time.time() - self._tool_start_times.pop(key)
+                duration = time.monotonic() - self._tool_start_times.pop(key)
         log_tool_call(tool_name, output=output, duration=duration)
 
     def on_tool_error(self, tool_name: str, error: str, call_id: str = "") -> None:
@@ -216,7 +225,7 @@ def format_agent_error(e: Exception) -> str:
                 "- `/clear` — clear conversation history and start fresh\n"
                 "- Switch to a model with a larger context window (`/model <name>`)\n"
                 "- Use a shorter prompt\n"
-                "- Increase `num_ctx` in the provider config (Ollama only)"
+                "- Increase `context_window` in the model config (Ollama only)"
             )
         return f"**Invalid request:** {_sanitize_sdk_error(error_str)}"
 
@@ -561,6 +570,12 @@ def run_agent(
         _compression_min_chars = COMPRESSION_MIN_CHARS
 
     log = get_logger()
+    _t = [time.monotonic()]
+
+    def _mark(label: str) -> None:
+        now = time.monotonic()
+        log.debug("⏱ %s: %.0fms", label, (now - _t[0]) * 1000)
+        _t[0] = now
 
     try:
         input_messages = prepare_messages_with_context(
@@ -569,6 +584,7 @@ def run_agent(
             context_prefix=context_prefix,
             max_context_tokens=config.max_context_tokens,
         )
+        _mark("prepare_messages")
 
         log.debug("Sending %d messages to agent", len(input_messages))
         if log.isEnabledFor(logging.DEBUG):
@@ -585,20 +601,40 @@ def run_agent(
         if callbacks:
             invoke_config["callbacks"] = callbacks
 
-        global _persistent_bound_cache, _persistent_compression_cache, _cached_llm_id
+        # Decide whether to use per-session caches (API mode) or module globals (CLI mode).
+        # Per-session caches are set by session_bridge._build_run_config(); when present
+        # they are fully isolated so concurrent sessions with different LLMs cannot
+        # poison each other's bind_tools / compression results.
+        use_per_session_caches = (
+            config.bound_cache is not None and config.compression_cache is not None
+        )
 
-        current_llm_id = (id(config.llm), _llm_generation)
-        llm_changed: bool
-        with _bound_cache_lock:
-            llm_changed = _cached_llm_id is not None and _cached_llm_id != current_llm_id
-            if llm_changed:
-                _persistent_bound_cache.clear()
-            _cached_llm_id = current_llm_id
-            local_bound_cache = OrderedDict(_persistent_bound_cache)
-        with _compression_cache_lock:
-            if llm_changed:
-                _persistent_compression_cache.clear()
-            local_compression_cache = OrderedDict(_persistent_compression_cache)
+        if use_per_session_caches:
+            # API mode: snapshot local copies from per-session caches; merge back after.
+            # Asserts narrow the type for Pyright — the boolean guard already guarantees
+            # these are non-None when use_per_session_caches is True.
+            assert config.bound_cache is not None  # noqa: S101
+            assert config.compression_cache is not None  # noqa: S101
+            local_bound_cache = OrderedDict(config.bound_cache)
+            local_compression_cache = OrderedDict(config.compression_cache)
+            current_llm_id = (id(config.llm), 0)
+        else:
+            global _persistent_bound_cache, _persistent_compression_cache, _cached_llm_id
+
+            llm_changed: bool
+            with _bound_cache_lock:
+                current_llm_id = (id(config.llm), _llm_generation)
+                llm_changed = _cached_llm_id is not None and _cached_llm_id != current_llm_id
+                if llm_changed:
+                    _persistent_bound_cache.clear()
+                _cached_llm_id = current_llm_id
+                local_bound_cache = OrderedDict(_persistent_bound_cache)
+            with _compression_cache_lock:
+                if llm_changed:
+                    _persistent_compression_cache.clear()
+                local_compression_cache = OrderedDict(_persistent_compression_cache)
+
+        _mark("cache_setup")
 
         graph = build_agent_graph(
             config=config,
@@ -609,6 +645,19 @@ def run_agent(
             bound_cache=local_bound_cache,
             compression_cache_in=local_compression_cache,
         )
+        _mark("build_graph")
+
+        if config.context_compression:
+            input_messages = apply_message_compression(
+                input_messages,
+                call_count=0,
+                compression_cache=local_compression_cache,
+                llm=config.compression_llm or config.llm,
+                max_context_tokens=config.max_context_tokens,
+                min_age_cycles=_compression_min_age,
+                min_chars=_compression_min_chars,
+            )
+        _mark("compression")
 
         hit_recursion_limit = False
         prior_msg_count = len(input_messages)
@@ -625,6 +674,7 @@ def run_agent(
             except RecursionError:
                 hit_recursion_limit = True
                 log.warning("Agent hit the recursion limit")
+            _mark("graph.stream")
 
             log_tool_calls_from_result(result, prior_count=prior_msg_count)
 
@@ -648,24 +698,41 @@ def run_agent(
 
             return recover_from_step_limit(graph, result, input_messages, invoke_config, log)
         finally:
-            with _bound_cache_lock:
-                if _cached_llm_id == current_llm_id:
-                    for key, value in local_bound_cache.items():
-                        _persistent_bound_cache[key] = value
-                        _persistent_bound_cache.move_to_end(key)
-                    while len(_persistent_bound_cache) > _MAX_BOUND_CACHE_SIZE:
-                        _persistent_bound_cache.popitem(last=False)
-            with _compression_cache_lock:
-                # Re-check _cached_llm_id inside this lock — another thread may
-                # have called invalidate_llm_caches() between releasing
-                # _bound_cache_lock above and acquiring _compression_cache_lock here,
-                # which would make our local_compression_cache stale for the new LLM.
-                if _cached_llm_id == current_llm_id:
-                    for key, value in local_compression_cache.items():
-                        _persistent_compression_cache[key] = value
-                        _persistent_compression_cache.move_to_end(key)
-                    while len(_persistent_compression_cache) > _MAX_COMPRESSION_CACHE_SIZE:
-                        _persistent_compression_cache.popitem(last=False)
+            if use_per_session_caches:
+                # Merge local snapshots back into the per-session caches.
+                # Asserts narrow OrderedDict | None for Pyright — the boolean guard
+                # already guarantees non-None when use_per_session_caches is True.
+                assert config.bound_cache is not None  # noqa: S101
+                assert config.compression_cache is not None  # noqa: S101
+                for key, value in local_bound_cache.items():
+                    config.bound_cache[key] = value
+                    config.bound_cache.move_to_end(key)
+                while len(config.bound_cache) > _MAX_BOUND_CACHE_SIZE:
+                    config.bound_cache.popitem(last=False)
+                for key, value in local_compression_cache.items():
+                    config.compression_cache[key] = value
+                    config.compression_cache.move_to_end(key)
+                while len(config.compression_cache) > _MAX_COMPRESSION_CACHE_SIZE:
+                    config.compression_cache.popitem(last=False)
+            else:
+                with _bound_cache_lock:
+                    if _cached_llm_id == current_llm_id:
+                        for key, value in local_bound_cache.items():
+                            _persistent_bound_cache[key] = value
+                            _persistent_bound_cache.move_to_end(key)
+                        while len(_persistent_bound_cache) > _MAX_BOUND_CACHE_SIZE:
+                            _persistent_bound_cache.popitem(last=False)
+                with _compression_cache_lock:
+                    # Re-check _cached_llm_id inside this lock — another thread may
+                    # have called invalidate_llm_caches() between releasing
+                    # _bound_cache_lock above and acquiring _compression_cache_lock here,
+                    # which would make our local_compression_cache stale for the new LLM.
+                    if _cached_llm_id == current_llm_id:
+                        for key, value in local_compression_cache.items():
+                            _persistent_compression_cache[key] = value
+                            _persistent_compression_cache.move_to_end(key)
+                        while len(_persistent_compression_cache) > _MAX_COMPRESSION_CACHE_SIZE:
+                            _persistent_compression_cache.popitem(last=False)
 
     except UserCancelledRun:
         raise

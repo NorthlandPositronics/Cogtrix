@@ -345,7 +345,7 @@ class CodeDevelopmentMemoryManager(BaseMemoryManager):
         self._messages.append(human_msg)
 
         # --- Append the agent's messages ---------------------------
-        if agent_messages:
+        if agent_messages is not None:
             for m in agent_messages:
                 self._messages.append(m)
             last = agent_messages[-1]

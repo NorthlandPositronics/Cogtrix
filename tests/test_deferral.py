@@ -1669,3 +1669,169 @@ class TestBug109ReprocessNoDuplicate:
         assert (
             "timeout=0.05" in source
         ), "service.py does not contain 'timeout=0.05' — BUG-109 fix not applied"
+
+
+# ---------------------------------------------------------------------------
+# BUG-103: _fire_record must use explicit if/raise RuntimeError, not assert
+# ---------------------------------------------------------------------------
+
+
+class TestFireRecordAssertGuard:
+    """Regression tests for BUG-103: _fire_record must use explicit if/raise RuntimeError.
+
+    assert statements are silently stripped by Python in optimised mode (-O /
+    PYTHONOPTIMIZE=1). If _reprocess_callback is None when _fire_record runs, the
+    assert would be a no-op and the next line would raise TypeError caught as a
+    generic callback failure. After the fix, an explicit RuntimeError is raised.
+    """
+
+    def _make_manager_no_cb(self, tmp_path: Path, channels: dict | None = None) -> DeferralManager:
+        return DeferralManager(
+            persist_path=tmp_path / "deferrals.json",
+            reprocess_callback=None,
+            channels=channels or {},
+            check_interval=3600.0,
+        )
+
+    def _make_record(self, now: float) -> DeferredRecord:
+        return DeferredRecord(
+            id="rec-1",
+            channel="telegram",
+            chat_id="42",
+            fire_at=now - 1.0,
+            created_at=now - 60.0,
+            pending_messages=[
+                {
+                    "channel": "telegram",
+                    "chat_id": "42",
+                    "message_id": "m1",
+                    "sender_id": "u1",
+                    "sender_name": "Alice",
+                    "text": "Hello",
+                    "timestamp": now,
+                    "metadata": {},
+                    "resolved_phone": None,
+                }
+            ],
+            deferral_depth=0,
+            status="pending",
+        )
+
+    def test_fire_record_raises_runtime_error_when_no_callback(self, tmp_path: Path) -> None:
+        """_fire_record must produce a RuntimeError log when callback is None."""
+        import src.assistant.deferral as deferral_mod
+
+        channel = MagicMock()
+        channel.name = "telegram"
+        channel.send.return_value = SendResult(ok=True, message_id="sent-1")
+        channel.is_ready.return_value = True
+        mgr = self._make_manager_no_cb(tmp_path, channels={"telegram": channel})
+        assert mgr._reprocess_callback is None
+
+        now = time.time()
+        rec = self._make_record(now)
+        with mgr._lock:
+            mgr._records["telegram::42"] = rec
+
+        captured_errors: list[str] = []
+        original_error = deferral_mod.log.error
+
+        def _capture(msg: str, *args: object, **kwargs: object) -> None:
+            captured_errors.append(msg % args if args else msg)
+            original_error(msg, *args, **kwargs)
+
+        deferral_mod.log.error = _capture  # type: ignore[method-assign]
+        try:
+            mgr._fire_record("telegram::42", rec, time.monotonic())
+        finally:
+            deferral_mod.log.error = original_error  # type: ignore[method-assign]
+
+        assert captured_errors, "_fire_record did not log an error when callback was None"
+        combined = " ".join(captured_errors)
+        assert (
+            "RuntimeError" in combined or "no reprocess callback" in combined.lower()
+        ), f"Expected RuntimeError or descriptive message in error log, got: {combined!r}"
+
+    def test_fire_record_guard_is_not_assert(self) -> None:
+        """Verify that _fire_record does not use 'assert' for the callback guard."""
+        import inspect
+
+        source = inspect.getsource(DeferralManager._fire_record)
+        assert (
+            "assert self._reprocess_callback" not in source
+        ), "_fire_record still uses 'assert self._reprocess_callback' — BUG-103 has regressed."
+        assert (
+            "RuntimeError" in source
+        ), "_fire_record does not contain an explicit RuntimeError raise."
+
+    def test_fire_record_calls_callback_when_set(self, tmp_path: Path) -> None:
+        """_fire_record must call the reprocess callback when it is properly configured."""
+        called_with: list[tuple] = []
+
+        channel = MagicMock()
+        channel.name = "telegram"
+        channel.send.return_value = SendResult(ok=True, message_id="sent-1")
+        channel.is_ready.return_value = True
+
+        def callback(messages: list, ch: object, depth: int) -> None:
+            called_with.append((messages, ch, depth))
+
+        mgr = DeferralManager(
+            persist_path=tmp_path / "deferrals.json",
+            reprocess_callback=callback,
+            channels={"telegram": channel},
+            check_interval=3600.0,
+        )
+
+        now = time.time()
+        rec = DeferredRecord(
+            id="rec-2",
+            channel="telegram",
+            chat_id="42",
+            fire_at=now - 1.0,
+            created_at=now - 60.0,
+            pending_messages=[
+                {
+                    "channel": "telegram",
+                    "chat_id": "42",
+                    "message_id": "m1",
+                    "sender_id": "u1",
+                    "sender_name": "Alice",
+                    "text": "Hello",
+                    "timestamp": now,
+                    "metadata": {},
+                    "resolved_phone": None,
+                }
+            ],
+            deferral_depth=1,
+            status="pending",
+        )
+        with mgr._lock:
+            mgr._records["telegram::42"] = rec
+
+        mgr._fire_record("telegram::42", rec, time.monotonic())
+
+        assert len(called_with) == 1, f"Callback was not called exactly once: {called_with}"
+        _messages_arg, channel_arg, depth_arg = called_with[0]
+        assert channel_arg is channel
+        assert depth_arg == 1
+
+    def test_start_raises_when_callback_not_set(self, tmp_path: Path) -> None:
+        """start() must raise RuntimeError if set_reprocess_callback was never called."""
+        import pytest
+
+        mgr = self._make_manager_no_cb(tmp_path)
+        with pytest.raises(RuntimeError, match="set_reprocess_callback"):
+            mgr.start()
+
+    def test_start_succeeds_after_set_reprocess_callback(self, tmp_path: Path) -> None:
+        """start() must succeed after set_reprocess_callback is called."""
+        mgr = self._make_manager_no_cb(tmp_path)
+
+        def cb(messages: list, channel: object, depth: int) -> None:
+            pass
+
+        mgr.set_reprocess_callback(cb)
+        mgr.start()
+        assert mgr._thread is not None and mgr._thread.is_alive()
+        mgr.stop()

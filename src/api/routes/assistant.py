@@ -4,6 +4,7 @@ Endpoints:
     GET    /api/v1/assistant/status                    — get service status
     POST   /api/v1/assistant/start                     — start the assistant service (admin)
     POST   /api/v1/assistant/stop                      — stop the assistant service (admin)
+    POST   /api/v1/assistant/outbound                  — send an outbound message (admin)
     GET    /api/v1/assistant/chats                     — list active chat sessions (paginated)
     GET    /api/v1/assistant/chats/{key}/messages      — per-chat conversation history
     GET    /api/v1/assistant/scheduled                 — list scheduled messages (paginated)
@@ -17,22 +18,34 @@ Endpoints:
     GET    /api/v1/assistant/knowledge                 — list knowledge store facts (paginated)
     POST   /api/v1/assistant/knowledge/search          — semantic search over facts
     DELETE /api/v1/assistant/knowledge/{fact_id}       — delete a fact (admin)
+    GET    /api/v1/assistant/campaigns                 — list campaigns
+    POST   /api/v1/assistant/campaigns                 — create a campaign (admin)
+    GET    /api/v1/assistant/campaigns/{id}             — get a campaign
+    PATCH  /api/v1/assistant/campaigns/{id}             — update a campaign (admin)
+    DELETE /api/v1/assistant/campaigns/{id}             — delete a campaign (admin)
+    POST   /api/v1/assistant/campaigns/{id}/launch      — launch a campaign (admin)
 """
 
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from datetime import UTC, datetime
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 
 from src.api.auth import TokenData, get_current_user, require_admin
 from src.api.pagination import decode_cursor, encode_cursor
 from src.api.schemas.assistant import (
     AssistantStartRequest,
     AssistantStatusOut,
+    CampaignCreateRequest,
+    CampaignOut,
+    CampaignStatus,
+    CampaignTargetOut,
+    CampaignUpdateRequest,
     ChannelStatusOut,
     ChatSessionOut,
     ContactOut,
@@ -40,12 +53,17 @@ from src.api.schemas.assistant import (
     GuardrailStatusOut,
     KnowledgeFactOut,
     KnowledgeSearchRequest,
+    OutboundRequest,
+    OutboundResponse,
     ScheduledMessageEditRequest,
     ScheduledMessageOut,
     ViolationRecordOut,
 )
 from src.api.schemas.common import APIResponse, CursorPage
 from src.api.schemas.message import MessageOut
+from src.logging_config import get_logger
+
+log = get_logger()
 
 router = APIRouter(prefix="/assistant", tags=["Assistant Mode"])
 
@@ -214,18 +232,19 @@ async def get_status(
     },
 )
 async def start_assistant(
-    body: AssistantStartRequest,
     request: Request,
     current_user: TokenData = Depends(require_admin),
+    body: AssistantStartRequest | None = None,
 ) -> APIResponse[AssistantStatusOut]:
     """Start the assistant daemon (admin only).
 
     Auth: admin bearer token required.
     Error codes: UNAUTHORIZED, TOKEN_EXPIRED, FORBIDDEN, ASSISTANT_ALREADY_RUNNING.
     """
+    effective_body = body or AssistantStartRequest()
     svc = _get_service(request)
     if svc is not None:
-        if not body.force_restart:
+        if not effective_body.force_restart:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail={
@@ -236,8 +255,8 @@ async def start_assistant(
         # Stop the existing service before restarting
         try:
             svc.stop() if hasattr(svc, "stop") else None
-        except Exception:
-            pass
+        except Exception as exc:
+            log.warning("Failed to stop existing assistant service: %s", exc)
         request.app.state.assistant_service = None
 
     # Try to construct and start AssistantService from app.state
@@ -295,6 +314,86 @@ async def stop_assistant(
 
     request.app.state.assistant_service = None
     out = AssistantStatusOut(status="stopped", channels=[], started_at=None, uptime_s=None)
+    return APIResponse(data=out)
+
+
+@router.post(
+    "/outbound",
+    summary="Send an outbound message",
+    description=(
+        "Instruct the assistant to initiate a conversation with a phonebook contact. "
+        "The agent runs with the operator's instructions and sends the generated "
+        "response to the contact. Admin only."
+    ),
+    response_model=APIResponse[OutboundResponse],
+    responses={
+        200: {"description": "Message sent successfully."},
+        400: {"description": "Contact not found or channel not available (BAD_REQUEST)."},
+        401: {"description": "Not authenticated."},
+        403: {"description": "Admin required (FORBIDDEN)."},
+        409: {"description": "Service not running (ASSISTANT_NOT_RUNNING)."},
+    },
+)
+async def send_outbound(
+    request: Request,
+    body: OutboundRequest,
+    current_user: TokenData = Depends(require_admin),
+) -> APIResponse[OutboundResponse]:
+    """Send an operator-initiated outbound message to a contact (admin only).
+
+    Auth: admin bearer token required.
+    Error codes: UNAUTHORIZED, TOKEN_EXPIRED, FORBIDDEN, ASSISTANT_NOT_RUNNING,
+    CONTACT_NOT_FOUND, CHANNEL_NOT_AVAILABLE.
+    """
+    svc = _require_service(request)
+
+    handler = getattr(svc, "_handler", None)
+    if handler is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"code": "INTERNAL_ERROR", "message": "Handler not available."},
+        )
+
+    services_config: dict = getattr(handler, "_services_config", {})
+    contact_name = body.contact_name
+    active_channel_names = {getattr(ch, "name", "") for ch in getattr(svc, "_channels", [])}
+
+    target_channel_name, target_chat_id = _resolve_contact(
+        contact_name, body.channel, services_config, active_channel_names
+    )
+
+    # Find the live Channel object
+    channel_obj = None
+    for ch in getattr(svc, "_channels", []):
+        if getattr(ch, "name", None) == target_channel_name:
+            channel_obj = ch
+            break
+
+    if channel_obj is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "CHANNEL_NOT_AVAILABLE",
+                "message": f"Channel '{target_channel_name}' is not active.",
+            },
+        )
+
+    response_text, message_id = await asyncio.to_thread(
+        handler.handle_outbound,
+        contact_name=contact_name,
+        instructions=body.instructions,
+        channel=channel_obj,
+        chat_id=target_chat_id,
+    )
+
+    out = OutboundResponse(
+        session_key=f"{target_channel_name}::{target_chat_id}",
+        channel=target_channel_name,
+        chat_id=target_chat_id,
+        contact_name=contact_name,
+        response_text=response_text,
+        message_id=message_id,
+    )
     return APIResponse(data=out)
 
 
@@ -696,12 +795,12 @@ async def edit_scheduled(
     message_id: str,
     body: ScheduledMessageEditRequest,
     request: Request,
-    current_user: TokenData = Depends(get_current_user),
+    current_user: TokenData = Depends(require_admin),
 ) -> APIResponse[ScheduledMessageOut]:
     """Edit a pending scheduled message's text or delivery time.
 
-    Auth: bearer token required.
-    Error codes: UNAUTHORIZED, TOKEN_EXPIRED, SCHEDULED_MSG_NOT_FOUND.
+    Auth: admin bearer token required.
+    Error codes: UNAUTHORIZED, TOKEN_EXPIRED, FORBIDDEN, SCHEDULED_MSG_NOT_FOUND.
     """
     svc = _require_service(request)
     scheduler = getattr(svc, "_scheduler", None)
@@ -770,12 +869,12 @@ async def edit_scheduled(
 async def cancel_scheduled(
     message_id: str,
     request: Request,
-    current_user: TokenData = Depends(get_current_user),
+    current_user: TokenData = Depends(require_admin),
 ) -> APIResponse[None]:
     """Cancel a pending scheduled message.
 
-    Auth: bearer token required.
-    Error codes: UNAUTHORIZED, TOKEN_EXPIRED, SCHEDULED_MSG_NOT_FOUND.
+    Auth: admin bearer token required.
+    Error codes: UNAUTHORIZED, TOKEN_EXPIRED, FORBIDDEN, SCHEDULED_MSG_NOT_FOUND.
     """
     svc = _require_service(request)
     scheduler = getattr(svc, "_scheduler", None)
@@ -942,6 +1041,9 @@ async def list_contacts(
 ) -> APIResponse[list[ContactOut]]:
     """Return the merged phonebook from all channels.
 
+    Each contact includes identifiers across channels, the per-contact
+    system prompt (if configured), and which channels it appears in.
+
     Auth: bearer token required.
     Error codes: UNAUTHORIZED, TOKEN_EXPIRED.
     """
@@ -949,32 +1051,56 @@ async def list_contacts(
     if svc is None:
         return APIResponse(data=[])
 
-    # Gather services config for phonebook resolution
     config = getattr(svc, "_config", None)
     services_cfg: dict[str, Any] = {}
     if config is not None and hasattr(config, "services"):
         services_cfg = config.services or {}
 
-    try:
-        from src.assistant.scheduler import _merge_phonebooks
+    # Build a merged view: name → {identifiers, channels, prompt}
+    _STRIP_SUFFIXES = ("@c.us", "@s.whatsapp.net")
+    merged: dict[str, dict[str, Any]] = {}
 
-        merged = _merge_phonebooks(services_cfg)
-    except Exception:
-        merged = {}
+    for channel_key in ("whatsapp", "telegram"):
+        ch_cfg = services_cfg.get(channel_key, {})
+        if not isinstance(ch_cfg, dict):
+            continue
+        phonebook = ch_cfg.get("phonebook", {})
+        if not isinstance(phonebook, dict):
+            continue
+        contact_prompts = ch_cfg.get("contact_prompts", {})
+        if not isinstance(contact_prompts, dict):
+            contact_prompts = {}
+
+        for name, identifier in phonebook.items():
+            key = str(name).strip().lower()
+            normalized = str(identifier).strip()
+            for suffix in _STRIP_SUFFIXES:
+                normalized = normalized.replace(suffix, "")
+
+            entry = merged.setdefault(
+                key, {"name": str(name).strip(), "identifiers": [], "channels": [], "prompt": None}
+            )
+            if normalized not in entry["identifiers"]:
+                entry["identifiers"].append(normalized)
+            if channel_key not in entry["channels"]:
+                entry["channels"].append(channel_key)
+            # Per-contact prompt — use original (un-lowered) name for lookup
+            if entry["prompt"] is None and str(name) in contact_prompts:
+                entry["prompt"] = str(contact_prompts[str(name)])
 
     contacts: list[ContactOut] = []
-    for name, identifiers in merged.items():
+    for entry in merged.values():
         contacts.append(
             ContactOut(
-                name=name,
-                identifiers=identifiers,
-                channels=[],
-                prompt=None,
+                name=entry["name"],
+                identifiers=entry["identifiers"],
+                channels=entry["channels"],
+                prompt=entry["prompt"],
                 filter_mode=None,
             )
         )
 
-    contacts.sort(key=lambda c: c.name)
+    contacts.sort(key=lambda c: c.name.lower())
     return APIResponse(data=contacts)
 
 
@@ -1116,8 +1242,8 @@ async def remove_from_blacklist(
     # Persist the update
     try:
         violation_tracker.save()
-    except Exception:
-        pass
+    except Exception as exc:
+        log.warning("Failed to persist violation tracker: %s", exc)
 
     return APIResponse(data=None)
 
@@ -1347,7 +1473,384 @@ async def delete_fact(
 
     try:
         knowledge_store.save()
-    except Exception:
-        pass
+    except Exception as exc:
+        log.warning("Failed to persist knowledge store: %s", exc)
 
     return APIResponse(data=None)
+
+
+# ---------------------------------------------------------------------------
+# Campaigns (Level 2 outbound)
+# ---------------------------------------------------------------------------
+
+
+_CAMPAIGN_ID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+
+
+def _validate_campaign_id(campaign_id: str) -> None:
+    """Reject campaign IDs that don't look like UUIDs."""
+    if not _CAMPAIGN_ID_RE.match(campaign_id):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": "BAD_REQUEST", "message": "Invalid campaign ID format."},
+        )
+
+
+def _get_campaign_mgr(request: Request) -> Any:
+    """Return the CampaignManager from the running service, or raise 409."""
+    svc = _require_service(request)
+    mgr = getattr(svc, "_campaign_mgr", None)
+    if mgr is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "CAMPAIGNS_NOT_AVAILABLE",
+                "message": "Campaign manager is not available.",
+            },
+        )
+    return mgr
+
+
+def _resolve_contact(
+    contact_name: str,
+    preferred_channel: str | None,
+    services_config: dict[str, Any],
+    active_channel_names: set[str],
+) -> tuple[str, str]:
+    """Resolve a single phonebook contact to (channel_name, chat_id).
+
+    Raises HTTPException if the contact is not found or the preferred
+    channel is not available.
+    """
+    found: list[tuple[str, str]] = []
+    for ch_name in ("whatsapp", "telegram"):
+        ch_cfg = services_config.get(ch_name, {})
+        phonebook: dict[str, Any] = ch_cfg.get("phonebook", {})
+        for name, identifier in phonebook.items():
+            if str(name).lower() == contact_name.lower():
+                ident = str(identifier).strip()
+                if ch_name == "whatsapp" and not ident.endswith(
+                    ("@c.us", "@g.us", "@s.whatsapp.net")
+                ):
+                    ident = ident + "@c.us"
+                found.append((ch_name, ident))
+                break
+
+    if not found:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "CONTACT_NOT_FOUND",
+                "message": f"Contact '{contact_name}' not found in any channel phonebook.",
+            },
+        )
+
+    if preferred_channel:
+        match = [(ch, cid) for ch, cid in found if ch == preferred_channel]
+        if not match:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": "CHANNEL_NOT_AVAILABLE",
+                    "message": (
+                        f"Contact '{contact_name}' is not configured "
+                        f"on channel '{preferred_channel}'."
+                    ),
+                },
+            )
+        return match[0]
+
+    # Prefer a channel that is actually active
+    active = [(ch, cid) for ch, cid in found if ch in active_channel_names]
+    return active[0] if active else found[0]
+
+
+def _resolve_targets(
+    targets_in: list[Any],
+    services_config: dict[str, Any],
+    channels: list[Any],
+) -> list[dict[str, str]]:
+    """Resolve CampaignTargetIn entries to (contact_name, channel, chat_id) dicts.
+
+    Raises HTTPException if a contact cannot be resolved.
+    """
+    active_channel_names = {getattr(ch, "name", "") for ch in channels}
+    resolved: list[dict[str, str]] = []
+    for target_in in targets_in:
+        ch_name, chat_id = _resolve_contact(
+            target_in.contact_name,
+            target_in.channel,
+            services_config,
+            active_channel_names,
+        )
+        resolved.append(
+            {"contact_name": target_in.contact_name, "channel": ch_name, "chat_id": chat_id}
+        )
+    return resolved
+
+
+def _campaign_to_out(campaign: Any) -> CampaignOut:
+    """Convert a Campaign dataclass to a CampaignOut schema."""
+    targets_out = []
+    for t in campaign.targets:
+        targets_out.append(
+            CampaignTargetOut(
+                contact_name=t.contact_name,
+                channel=t.channel,
+                chat_id=t.chat_id,
+                status=t.status,
+                follow_ups_sent=t.follow_ups_sent,
+                last_outbound_at=(_ts_to_dt(t.last_outbound_at) if t.last_outbound_at else None),
+                last_reply_at=_ts_to_dt(t.last_reply_at) if t.last_reply_at else None,
+                completion_reason=t.completion_reason,
+            )
+        )
+    return CampaignOut(
+        id=campaign.id,
+        name=campaign.name,
+        goal=campaign.goal,
+        instructions=campaign.instructions,
+        targets=targets_out,
+        max_follow_ups=campaign.max_follow_ups,
+        follow_up_interval_hours=campaign.follow_up_interval_hours,
+        status=campaign.status,
+        created_at=campaign.created_at,
+        updated_at=campaign.updated_at,
+    )
+
+
+@router.get(
+    "/campaigns",
+    summary="List campaigns",
+    description="List all outbound campaigns, optionally filtered by status.",
+    response_model=APIResponse[list[CampaignOut]],
+    responses={
+        200: {"description": "Campaign list returned."},
+        401: {"description": "Not authenticated."},
+        409: {"description": "Service not running."},
+    },
+)
+async def list_campaigns(
+    request: Request,
+    status_filter: CampaignStatus | None = Query(default=None, description="Filter by status."),
+    current_user: TokenData = Depends(get_current_user),
+) -> APIResponse[list[CampaignOut]]:
+    """List all campaigns.
+
+    Auth: bearer token required.
+    """
+    mgr = _get_campaign_mgr(request)
+    campaigns = mgr.list_all(status_filter=status_filter)
+    return APIResponse(data=[_campaign_to_out(c) for c in campaigns])
+
+
+@router.post(
+    "/campaigns",
+    summary="Create a campaign",
+    description=(
+        "Create a new multi-contact outbound campaign. "
+        "Set auto_launch=true to send initial messages immediately. Admin only."
+    ),
+    response_model=APIResponse[CampaignOut],
+    responses={
+        200: {"description": "Campaign created."},
+        400: {"description": "Contact not found or channel not available."},
+        401: {"description": "Not authenticated."},
+        403: {"description": "Admin required."},
+        409: {"description": "Service not running."},
+    },
+)
+async def create_campaign(
+    request: Request,
+    body: CampaignCreateRequest,
+    current_user: TokenData = Depends(require_admin),
+) -> APIResponse[CampaignOut]:
+    """Create a new outbound campaign (admin only).
+
+    Auth: admin bearer token required.
+    """
+    import uuid
+
+    svc = _require_service(request)
+    mgr = _get_campaign_mgr(request)
+    handler = getattr(svc, "_handler", None)
+    services_config: dict[str, Any] = getattr(handler, "_services_config", {}) if handler else {}
+    channels = getattr(svc, "_channels", [])
+
+    resolved = _resolve_targets(body.targets, services_config, channels)
+
+    from src.assistant.campaign import Campaign, CampaignTarget
+
+    targets = [
+        CampaignTarget(
+            contact_name=r["contact_name"],
+            channel=r["channel"],
+            chat_id=r["chat_id"],
+        )
+        for r in resolved
+    ]
+
+    campaign = Campaign(
+        id=str(uuid.uuid4()),
+        name=body.name,
+        goal=body.goal,
+        instructions=body.instructions,
+        targets=targets,
+        max_follow_ups=body.max_follow_ups,
+        follow_up_interval_hours=body.follow_up_interval_hours,
+    )
+    await asyncio.to_thread(mgr.create, campaign)
+
+    if body.auto_launch:
+        await asyncio.to_thread(mgr.launch, campaign.id)
+
+    return APIResponse(data=_campaign_to_out(mgr.get(campaign.id) or campaign))
+
+
+@router.get(
+    "/campaigns/{campaign_id}",
+    summary="Get a campaign",
+    description="Get details of a specific campaign including per-target progress.",
+    response_model=APIResponse[CampaignOut],
+    responses={
+        200: {"description": "Campaign returned."},
+        401: {"description": "Not authenticated."},
+        404: {"description": "Campaign not found."},
+        409: {"description": "Service not running."},
+    },
+)
+async def get_campaign(
+    request: Request,
+    campaign_id: str,
+    current_user: TokenData = Depends(get_current_user),
+) -> APIResponse[CampaignOut]:
+    """Get a campaign by ID.
+
+    Auth: bearer token required.
+    """
+    _validate_campaign_id(campaign_id)
+    mgr = _get_campaign_mgr(request)
+    campaign = mgr.get(campaign_id)
+    if campaign is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "CAMPAIGN_NOT_FOUND", "message": "Campaign not found."},
+        )
+    return APIResponse(data=_campaign_to_out(campaign))
+
+
+@router.patch(
+    "/campaigns/{campaign_id}",
+    summary="Update a campaign",
+    description="Update campaign settings or status (pause/cancel). Admin only.",
+    response_model=APIResponse[CampaignOut],
+    responses={
+        200: {"description": "Campaign updated."},
+        401: {"description": "Not authenticated."},
+        403: {"description": "Admin required."},
+        404: {"description": "Campaign not found."},
+        409: {"description": "Service not running."},
+    },
+)
+async def update_campaign(
+    request: Request,
+    campaign_id: str,
+    body: CampaignUpdateRequest,
+    current_user: TokenData = Depends(require_admin),
+) -> APIResponse[CampaignOut]:
+    """Update a campaign (admin only).
+
+    Auth: admin bearer token required.
+    """
+    _validate_campaign_id(campaign_id)
+    mgr = _get_campaign_mgr(request)
+    updates = body.model_dump(exclude_none=True)
+    if not updates:
+        campaign = mgr.get(campaign_id)
+    else:
+        campaign = await asyncio.to_thread(mgr.update, campaign_id, **updates)
+    if campaign is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "CAMPAIGN_NOT_FOUND", "message": "Campaign not found."},
+        )
+    return APIResponse(data=_campaign_to_out(campaign))
+
+
+@router.delete(
+    "/campaigns/{campaign_id}",
+    summary="Delete a campaign",
+    description="Delete a campaign permanently. Admin only.",
+    response_model=APIResponse[None],
+    responses={
+        200: {"description": "Campaign deleted."},
+        401: {"description": "Not authenticated."},
+        403: {"description": "Admin required."},
+        404: {"description": "Campaign not found."},
+        409: {"description": "Service not running."},
+    },
+)
+async def delete_campaign(
+    request: Request,
+    campaign_id: str,
+    current_user: TokenData = Depends(require_admin),
+) -> APIResponse[None]:
+    """Delete a campaign (admin only).
+
+    Auth: admin bearer token required.
+    """
+    _validate_campaign_id(campaign_id)
+    mgr = _get_campaign_mgr(request)
+    if not await asyncio.to_thread(mgr.delete, campaign_id):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "CAMPAIGN_NOT_FOUND", "message": "Campaign not found."},
+        )
+    return APIResponse(data=None)
+
+
+@router.post(
+    "/campaigns/{campaign_id}/launch",
+    summary="Launch a campaign",
+    description=(
+        "Send initial outbound messages to all pending targets in the campaign. "
+        "Campaign status changes from 'draft' to 'active'. Admin only."
+    ),
+    response_model=APIResponse[CampaignOut],
+    responses={
+        200: {"description": "Campaign launched; per-target results in response."},
+        401: {"description": "Not authenticated."},
+        403: {"description": "Admin required."},
+        404: {"description": "Campaign not found."},
+        409: {"description": "Service not running or campaign not in draft/paused state."},
+    },
+)
+async def launch_campaign(
+    request: Request,
+    campaign_id: str,
+    current_user: TokenData = Depends(require_admin),
+) -> APIResponse[CampaignOut]:
+    """Launch a campaign — send initial outbound to all targets (admin only).
+
+    Auth: admin bearer token required.
+    """
+    _validate_campaign_id(campaign_id)
+    mgr = _get_campaign_mgr(request)
+    campaign = mgr.get(campaign_id)
+    if campaign is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "CAMPAIGN_NOT_FOUND", "message": "Campaign not found."},
+        )
+    if campaign.status not in ("draft", "paused"):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "CAMPAIGN_NOT_LAUNCHABLE",
+                "message": f"Campaign is '{campaign.status}', must be 'draft' or 'paused'.",
+            },
+        )
+
+    await asyncio.to_thread(mgr.launch, campaign_id)
+    updated = mgr.get(campaign_id)
+    return APIResponse(data=_campaign_to_out(updated or campaign))

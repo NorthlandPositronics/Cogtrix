@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from src.agent.core import AgentRunner
+from src.assistant.campaign import CampaignManager
 from src.assistant.channel import Channel
 from src.assistant.deferral import DeferralManager
 from src.assistant.guardrails import GuardrailPipeline
@@ -92,7 +93,16 @@ class AssistantService:
             config.services.get("assistant", {}) if hasattr(config, "services") else {}
         )
         max_concurrent: int = asst_cfg.get("max_concurrent", 4)
-        effective_prompt = self._build_system_prompt(asst_cfg, system_prompt, cli_system_prompt)
+        effective_prompt = self._build_system_prompt(
+            asst_cfg,
+            system_prompt,
+            cli_system_prompt,
+            data_dir=getattr(config, "data_dir", "data"),
+        )
+        log.debug(
+            "=== Assistant system prompt ===\n%s\n=== End system prompt ===",
+            effective_prompt,
+        )
 
         know_cfg: dict[str, Any] = asst_cfg.get("knowledge", {})
         self._knowledge_store: SharedKnowledgeStore | None = None
@@ -168,6 +178,39 @@ class AssistantService:
         else:
             self._deferral_mgr = None
 
+        from src.assistant.workflows import WorkflowRegistry
+
+        services_config_full: dict[str, Any] = (
+            config.services if hasattr(config, "services") else {}
+        )
+        merged_phonebook: dict[str, str] = {}
+        merged_contact_prompts: dict[str, str] = {}
+        for ch_name in ("whatsapp", "telegram"):
+            ch_cfg = services_config_full.get(ch_name, {})
+            pb = ch_cfg.get("phonebook", {})
+            if isinstance(pb, dict):
+                for name, ident in pb.items():
+                    key = str(ident).replace("@c.us", "").replace("@s.whatsapp.net", "")
+                    merged_phonebook[key] = str(name)
+            cp = ch_cfg.get("contact_prompts", {})
+            if isinstance(cp, dict):
+                merged_contact_prompts.update(cp)
+        data_dir = getattr(config, "data_dir", "data")
+        self._workflow_registry = WorkflowRegistry(
+            data_dir=data_dir,
+            contact_prompts=merged_contact_prompts,
+            phonebook=merged_phonebook,
+        )
+
+        campaign_path = Path(top_data_dir) / "assistant" / "campaigns.json"
+        campaign_cfg: dict[str, Any] = asst_cfg.get("campaigns", {})
+        self._campaign_mgr: CampaignManager | None = None
+        if campaign_cfg.get("enabled", True):
+            self._campaign_mgr = CampaignManager(
+                persist_path=campaign_path,
+                check_interval=float(campaign_cfg.get("check_interval", 60.0)),
+            )
+
         self._handler = MessageHandler(
             session_mgr=self._session_mgr,
             config=asst_cfg,
@@ -187,10 +230,17 @@ class AssistantService:
                     "parallel_tool_execution", getattr(config, "parallel_tool_execution", True)
                 )
             ),
-            services_config=config.services if hasattr(config, "services") else {},
+            services_config=services_config_full,
             scheduler=self._scheduler,
             deferral_mgr=self._deferral_mgr,
+            workflow_registry=self._workflow_registry,
+            campaign_mgr=self._campaign_mgr,
         )
+
+        # Wire campaign manager dependencies after handler construction
+        if self._campaign_mgr is not None:
+            self._campaign_mgr.set_handler(self._handler)
+            self._campaign_mgr.set_channels(channels_map)
 
         # Wire the reprocess callback now that both handler and executor exist.
         # BUG-105: submit handle_batch to the executor so the dispatch thread does
@@ -216,8 +266,19 @@ class AssistantService:
                     is_reprocessing=True,
                     deferral_depth=depth + 1,
                 )
+
+                def _log_future_exc(f: Any) -> None:
+                    exc = f.exception()
+                    if exc is not None:
+                        log.error(
+                            "DeferralManager: reprocess handle_batch raised: %s",
+                            exc,
+                            exc_info=exc,
+                        )
+
+                fut.add_done_callback(_log_future_exc)
                 # Use a near-zero timeout to catch immediate executor rejection or
-                # a synchronous coding error, but not a slow LLM response (BUG-109).
+                # a synchronous coding error raised before any I/O (BUG-109).
                 try:
                     fut.result(timeout=0.05)
                 except TimeoutError:
@@ -255,6 +316,8 @@ class AssistantService:
         self._scheduler.start()
         if self._deferral_mgr is not None:
             self._deferral_mgr.start()
+        if self._campaign_mgr is not None:
+            self._campaign_mgr.start()
         self._stop_event.wait()
 
     def _handle_shutdown(self, _signum: int, _frame: Any) -> None:
@@ -268,6 +331,9 @@ class AssistantService:
         if self._deferral_mgr is not None:
             self._deferral_mgr.stop()
             self._deferral_mgr.save()
+        if self._campaign_mgr is not None:
+            self._campaign_mgr.stop()
+            self._campaign_mgr.save()
         self._executor.shutdown(wait=True, cancel_futures=False)
         self._session_mgr.save_all()
         if self._knowledge_store is not None:
@@ -337,7 +403,10 @@ class AssistantService:
 
     @staticmethod
     def _build_system_prompt(
-        asst_cfg: dict[str, Any], _fallback_prompt: str, cli_prompt: str | None = None
+        asst_cfg: dict[str, Any],
+        _fallback_prompt: str,
+        cli_prompt: str | None = None,
+        data_dir: str | None = None,
     ) -> str:
         if cli_prompt:
             return cli_prompt
@@ -348,11 +417,34 @@ class AssistantService:
 
         prompt_file: str | None = asst_cfg.get("system_prompt_file")
         if prompt_file:
-            from pathlib import Path
+            path = Path(prompt_file).expanduser().resolve()
 
-            path = Path(prompt_file)
+            if data_dir is not None:
+                cwd = Path.cwd().resolve()
+                resolved_data_dir = Path(data_dir).resolve()
+                if not (path.is_relative_to(cwd) or path.is_relative_to(resolved_data_dir)):
+                    log.warning(
+                        "system_prompt_file %s is outside allowed directories, skipping", path
+                    )
+                    return _ASSISTANT_SYSTEM_PROMPT
+
+            try:
+                size = path.stat().st_size
+            except OSError as exc:
+                log.warning("Cannot stat system_prompt_file %s: %s", path, exc)
+                return _ASSISTANT_SYSTEM_PROMPT
+
+            _MAX_PROMPT_FILE_BYTES = 1_048_576
+            if size > _MAX_PROMPT_FILE_BYTES:
+                log.warning("system_prompt_file %s is too large (%d bytes), skipping", path, size)
+                return _ASSISTANT_SYSTEM_PROMPT
+
             if path.exists():
-                content = path.read_text(encoding="utf-8").strip()
+                try:
+                    content = path.read_text(encoding="utf-8").strip()
+                except OSError as exc:
+                    log.warning("Failed to read system_prompt_file %s: %s", path, exc)
+                    return _ASSISTANT_SYSTEM_PROMPT
                 if content:
                     log.info("Loaded assistant system prompt from %s", path)
                     return content

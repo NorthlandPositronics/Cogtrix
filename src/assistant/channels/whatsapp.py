@@ -159,7 +159,9 @@ class WhatsAppChannel(Channel):
         self._ignore_archived: bool = bool(config.get("ignore_archived", True))
         self._ignore_older_than: float | None = parse_duration(config.get("ignore_older_than"))
         self._locally_archived: set[str] = set()
+        self._archived_snapshot: set[str] = set()
         self._chat_errors: dict[str, tuple[int, float]] = {}
+        self._message_fetch_limit: int = int(config.get("message_fetch_limit", 50))
         self._FETCH_ERROR_BASE: float = 30.0
         self._FETCH_ERROR_MAX: float = 300.0
         self._session_check_interval: float = 60.0
@@ -305,16 +307,46 @@ class WhatsAppChannel(Channel):
         result: list[IncomingMessage] = []
 
         changed_chats: list[ChatOverview] = []
+        new_archived_snapshot: set[str] = set()
         for chat in chats:
             if chat.id in self._locally_archived:
                 if not chat.archived:
                     try:
                         self._client.archive_chat(chat.id)
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        log.debug("Failed to archive chat %s: %s", chat.id, exc)
                 continue
             if self._ignore_archived and chat.archived:
+                new_archived_snapshot.add(chat.id)
+                # Record the last_message so we can distinguish auto-unarchive
+                # (new message) from manual unarchive (same message) later.
+                if chat.last_message is not None:
+                    self._overview_snapshot[chat.id] = chat.last_message.id
+                    self._snapshot_timestamps[chat.id] = now
                 continue
+            # Auto-unarchived by an incoming message: the chat was archived on
+            # the previous poll but now appears non-archived AND has a new
+            # last_message.  Re-archive it and skip — the user archived it
+            # intentionally; WhatsApp auto-unarchived on the incoming message.
+            # If last_message is unchanged, the user manually unarchived the
+            # chat (deliberate) so we let it through.
+            if self._ignore_archived and chat.id in self._archived_snapshot:
+                prev_last = self._overview_snapshot.get(chat.id)
+                cur_last = chat.last_message.id if chat.last_message else None
+                if cur_last is not None and cur_last != prev_last:
+                    log.debug(
+                        "Chat %s was auto-unarchived by incoming message — re-archiving",
+                        chat.id,
+                    )
+                    try:
+                        self._client.archive_chat(chat.id)
+                    except Exception as exc:
+                        log.debug("Failed to re-archive chat %s: %s", chat.id, exc)
+                    # Update snapshot so we don't keep re-archiving the same message
+                    self._overview_snapshot[chat.id] = cur_last
+                    self._snapshot_timestamps[chat.id] = now
+                    new_archived_snapshot.add(chat.id)
+                    continue
             msg = chat.last_message
             if msg is None:
                 continue
@@ -325,6 +357,7 @@ class WhatsAppChannel(Channel):
                 self._snapshot_timestamps[chat.id] = now
                 continue
             changed_chats.append(chat)
+        self._archived_snapshot = new_archived_snapshot
 
         all_fetched: list[tuple[Message, ChatOverview]] = []
         for chat in changed_chats:
@@ -379,7 +412,7 @@ class WhatsAppChannel(Channel):
 
         messages = self._client.get_chat_messages(
             chat_id=chat.id,
-            limit=20,
+            limit=self._message_fetch_limit,
             filter_from_me=False,
             filter_timestamp_gte=filter_ts,
         )
@@ -414,7 +447,6 @@ class WhatsAppChannel(Channel):
             self._seen_ids = {k: v for k, v in self._seen_ids.items() if v > cutoff}
         if msg.id in self._seen_ids:
             return None
-        self._seen_ids[msg.id] = now
 
         resolved_from = msg.from_number
         resolved_phone: str | None = None
@@ -438,8 +470,11 @@ class WhatsAppChannel(Channel):
             phonebook=self._phonebook,
         ):
             if self._filter_mode == "blacklist":
-                self._client.delete_message(chat.id, msg.id)
-                self._client.archive_chat(chat.id)
+                try:
+                    self._client.delete_message(chat.id, msg.id)
+                    self._client.archive_chat(chat.id)
+                except Exception as exc:
+                    log.warning("Blacklist action failed for chat %s: %s", chat.id, exc)
                 self._locally_archived.add(chat.id)
                 log.info("Blacklisted: deleted message and archived chat %s", chat.id)
             else:
@@ -453,6 +488,8 @@ class WhatsAppChannel(Channel):
 
         if not msg.body.strip():
             return None
+
+        self._seen_ids[msg.id] = now
 
         sender = msg.from_number
         for suffix in ("@c.us", "@s.whatsapp.net", "@lid"):

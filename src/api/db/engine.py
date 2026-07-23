@@ -25,7 +25,7 @@ _DB_URL: str = os.environ.get("COGTRIX_DB_URL", _DEFAULT_DB_URL)
 
 # Ensure the parent directory exists for the default SQLite path
 if _DB_URL == _DEFAULT_DB_URL:
-    Path("data/api").mkdir(parents=True, exist_ok=True)
+    Path("data/api").resolve().mkdir(parents=True, exist_ok=True)
 
 # ---------------------------------------------------------------------------
 # Engine
@@ -79,7 +79,6 @@ async def get_db() -> AsyncGenerator[AsyncSession]:
     async with AsyncSessionLocal() as session:
         try:
             yield session
-            await session.commit()
         except Exception:
             await session.rollback()
             raise

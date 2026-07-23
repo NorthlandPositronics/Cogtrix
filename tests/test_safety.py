@@ -6,7 +6,6 @@ from unittest.mock import MagicMock
 import pytest
 
 from src.agent.safety import (
-    LAST_KEYS,
     ConfirmationResult,
     ConfirmationUI,
     UserCancelledRun,
@@ -66,16 +65,6 @@ class TestUserCancelledRun:
     def test_raisable(self):
         with pytest.raises(UserCancelledRun):
             raise UserCancelledRun()
-
-
-class TestLastKeys:
-    def test_contains_expected(self):
-        assert "content" in LAST_KEYS
-        assert "code" in LAST_KEYS
-        assert "body" in LAST_KEYS
-
-    def test_is_frozenset(self):
-        assert isinstance(LAST_KEYS, frozenset)
 
 
 class TestCreateSafeToolWrapper:

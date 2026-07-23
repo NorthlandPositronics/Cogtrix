@@ -2,9 +2,7 @@
 
 from unittest.mock import MagicMock
 
-import pytest
-
-from src.tools.resolver import FUZZY_MATCH_THRESHOLD, _is_word_contained, resolve_tool_name
+from src.tools.resolver import _is_word_contained, resolve_tool_name
 
 # ---------------------------------------------------------------------------
 # _is_word_contained
@@ -156,12 +154,3 @@ class TestResolveToolNameFuzzy:
         name, source = resolve_tool_name("anything", {}, set())
         assert name is None
         assert source == "none"
-
-
-# ---------------------------------------------------------------------------
-# Threshold constant
-# ---------------------------------------------------------------------------
-
-
-def test_threshold_value():
-    assert FUZZY_MATCH_THRESHOLD == pytest.approx(0.40)

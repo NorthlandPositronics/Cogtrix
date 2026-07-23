@@ -91,7 +91,10 @@ class ReadinessOut(BaseModel):
 class DebugToggleRequest(BaseModel):
     """Request body for POST /api/v1/system/debug."""
 
-    debug: bool = Field(..., description="Target debug mode state.")
+    debug: bool | None = Field(
+        default=None,
+        description="Target debug mode state; null toggles current state.",
+    )
     verbose: bool | None = Field(
         default=None,
         description="Target verbose mode state; null leaves unchanged.",

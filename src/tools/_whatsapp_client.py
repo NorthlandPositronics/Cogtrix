@@ -11,8 +11,11 @@ Reference: https://waha.devlike.pro/docs/overview/introduction/
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from typing import Any
+
+log = logging.getLogger("cogtrix")
 
 try:
     import requests  # type: ignore[import-untyped]
@@ -343,7 +346,8 @@ class WahaClient:
             )
             resp.raise_for_status()
             raw_messages: list[dict[str, Any]] = resp.json()
-        except Exception:
+        except Exception as exc:
+            log.debug("Failed to fetch messages: %s", exc)
             return []
 
         messages: list[Message] = []
@@ -433,7 +437,8 @@ class WahaClient:
             )
             resp.raise_for_status()
             raw_chats: list[dict[str, Any]] = resp.json()
-        except Exception:
+        except Exception as exc:
+            log.debug("Failed to fetch chats overview: %s", exc)
             return []
 
         result: list[ChatOverview] = []

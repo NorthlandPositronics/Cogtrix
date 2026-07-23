@@ -30,10 +30,10 @@ import os
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+import bcrypt
 from fastapi import Depends, HTTPException, Query, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import ExpiredSignatureError, JWTError, jwt
-from passlib.context import CryptContext
 from sqlalchemy.ext.asyncio import AsyncSession
 
 log = logging.getLogger("cogtrix.api.auth")
@@ -45,10 +45,25 @@ log = logging.getLogger("cogtrix.api.auth")
 _bearer_scheme = HTTPBearer(auto_error=False)
 
 # ---------------------------------------------------------------------------
-# Passlib context for bcrypt password hashing
+# bcrypt password hashing helpers
 # ---------------------------------------------------------------------------
 
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+_BCRYPT_ROUNDS = 12
+
+
+def hash_password(password: str) -> str:
+    """Hash a password with bcrypt, returning the encoded hash string."""
+    pw_bytes = password.encode("utf-8")[:72]  # bcrypt truncates at 72 bytes
+    salt = bcrypt.gensalt(rounds=_BCRYPT_ROUNDS)
+    return bcrypt.hashpw(pw_bytes, salt).decode("utf-8")
+
+
+def verify_password(password: str, password_hash: str) -> bool:
+    """Verify a password against a bcrypt hash."""
+    pw_bytes = password.encode("utf-8")[:72]
+    hash_bytes = password_hash.encode("utf-8")
+    return bcrypt.checkpw(pw_bytes, hash_bytes)
+
 
 # ---------------------------------------------------------------------------
 # JWT constants
@@ -278,14 +293,8 @@ async def validate_api_key(api_key: str, db: AsyncSession) -> TokenData:
         if now > expires:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
-                detail={
-                    "code": "TOKEN_EXPIRED",
-                    "message": "The JWT has expired; refresh the token and retry.",
-                },
+                detail={"code": "UNAUTHORIZED", "message": "Missing or invalid bearer token."},
             )
-
-    # Update last_used_at
-    await repo.update_last_used(key_record.id, datetime.now(UTC))
 
     user_repo = UserRepository(db)
     user = await user_repo.get_by_id(key_record.user_id)
@@ -294,6 +303,12 @@ async def validate_api_key(api_key: str, db: AsyncSession) -> TokenData:
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail={"code": "UNAUTHORIZED", "message": "Missing or invalid bearer token."},
         )
+
+    # Update last_used_at only after confirming the user exists.
+    # Explicit commit ensures the timestamp persists even for read-only endpoints
+    # where the route handler never calls db.commit().
+    await repo.update_last_used(key_record.id, datetime.now(UTC))
+    await db.commit()
 
     return TokenData(
         user_id=user.id,

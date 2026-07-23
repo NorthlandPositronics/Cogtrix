@@ -53,7 +53,10 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from src.logging_config import get_logger
 from src.tools._whatsapp_client import REQUESTS_AVAILABLE, WahaClient
+
+log = get_logger()
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -114,8 +117,8 @@ def _load_config() -> WhatsAppConfig:
             cfg.phonebook = wa.get("phonebook", cfg.phonebook)
             cfg.rate_limit = wa.get("rate_limit", cfg.rate_limit)
             cfg.max_message_length = wa.get("max_message_length", cfg.max_message_length)
-    except Exception:
-        pass
+    except Exception as exc:
+        log.warning("Failed to parse WhatsApp config: %s", exc)
 
     # 2) Environment overrides (highest priority)
     if url := os.getenv("COGTRIX_WHATSAPP_URL"):

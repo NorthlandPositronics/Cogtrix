@@ -18,6 +18,7 @@ import asyncio
 import json
 import logging
 import time
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -69,6 +70,7 @@ class ApiSession:
     _lock: Any = None  # asyncio.Lock
     turn_lock: Any = None  # asyncio.Lock — serializes concurrent agent turns per session
     last_activity: float = field(default_factory=time.time)
+    active_confirmation_ui: Any = None  # ApiConfirmationUI | None — set for the duration of a turn
 
     def __post_init__(self) -> None:
         if self._lock is None:
@@ -78,7 +80,10 @@ class ApiSession:
         if self.cancel_event is None:
             self.cancel_event = asyncio.Event()
         if self.ws_queue is None:
-            self.ws_queue = asyncio.Queue()
+            # Bounded queue: prevents unbounded growth when no WebSocket drain
+            # task is active (e.g. REST-only clients that never open a WS
+            # connection) — BUG-FORGE-004.
+            self.ws_queue = asyncio.Queue(maxsize=10_000)
 
 
 # ---------------------------------------------------------------------------
@@ -113,6 +118,12 @@ async def warm_session(record: ApiSessionRecord, app_state: Any) -> ApiSession:
         asyncio.to_thread(_build_memory_manager, record.id, config, app_state),
         asyncio.to_thread(_build_llm, config, app_state),
     )
+
+    if llm is None:
+        log.error(
+            "LLM could not be created for session %s — check provider config and API keys",
+            record.id,
+        )
 
     # 5. Build AgentRunConfig
     run_config = _build_run_config(llm, session_state, config, app_state)
@@ -164,37 +175,31 @@ def _build_memory_manager(session_id: str, config: dict, app_state: Any) -> Any:
 
 
 def _build_llm(config: dict, app_state: Any) -> Any:
-    """Create an LLM from the session config or fall back to app defaults."""
+    """Create an LLM from the session config or fall back to app defaults.
+
+    Uses ``resolve_llm_config_for`` when a per-session model alias is set,
+    otherwise falls back to ``resolve_llm_config`` for the app default.
+    """
     try:
-        from src.config import ProviderConfig
-        from src.providers import create_chat_model_from_config
+        from src.providers import create_chat_model_from_configs
 
         app_cfg = getattr(app_state, "config", None)
+        if app_cfg is None:
+            log.warning("Could not build LLM for session: app config not loaded")
+            return None
 
-        provider_type = (
-            config.get("provider")
-            or (getattr(app_cfg, "provider", None) if app_cfg else None)
-            or "ollama"
-        )
-        model_name = config.get("model") or (getattr(app_cfg, "model", None) if app_cfg else None)
+        session_model = config.get("model")
 
-        # Resolve api_key from app config if available
-        api_key: str | None = None
-        if app_cfg is not None:
-            try:
-                provider_cfg = app_cfg.get_provider_config()
-                if provider_cfg is not None:
-                    api_key = provider_cfg.api_key
-            except Exception:
-                pass
+        try:
+            if session_model:
+                pc, mc = app_cfg.resolve_llm_config_for(session_model)
+            else:
+                pc, mc = app_cfg.resolve_llm_config()
+        except (ValueError, AttributeError) as exc:
+            log.warning("Could not resolve LLM config: %s", exc)
+            return None
 
-        pc = ProviderConfig(
-            name=provider_type,
-            type=provider_type,
-            model=model_name,
-            api_key=api_key,
-        )
-        return create_chat_model_from_config(pc)
+        return create_chat_model_from_configs(pc, mc, streaming=True)
     except Exception as exc:
         log.warning("Could not build LLM for session: %s", exc)
         return None
@@ -220,15 +225,31 @@ def _build_run_config(
         except Exception as exc:
             log.warning("Could not read tool registry: %s", exc)
 
+    # Populate all_tool_originals so unload/disable can restore the canonical
+    # (unwrapped) tool object — mirrors CLI behaviour (BUG-199).
+    if available_tools:
+        session_state.all_tool_originals = dict(available_tools)
+
     # Seed active_tools_list with request_tools so the agent can load on-demand tools.
+    # Auto-activate query_knowledge_base when a knowledge base exists.
     if available_tools:
         try:
-            from src.tools.configure import build_tool_catalog, create_request_tools_tool
+            from src.tools.configure import (
+                _update_rag_tool_description,
+                build_tool_catalog,
+                create_request_tools_tool,
+                rag_should_auto_activate,
+            )
+
+            if rag_should_auto_activate() and "query_knowledge_base" in available_tools:
+                rag_tool = available_tools.pop("query_knowledge_base")
+                _update_rag_tool_description(rag_tool)
+                active_tools_list.append(rag_tool)
 
             catalog = build_tool_catalog(available_tools)
             rt_tool = create_request_tools_tool(available_tools, catalog)
             if rt_tool is not None:
-                active_tools_list = [rt_tool]
+                active_tools_list.insert(0, rt_tool)
         except Exception as exc:
             log.warning("Could not create request_tools for session: %s", exc)
 
@@ -246,21 +267,63 @@ def _build_run_config(
     parallel = _cfg_get("parallel_tool_execution", True)
     context_compression = _cfg_get("context_compression", True)
 
-    # Determine context window size from app config
+    # Build system prompt: use session override if set, otherwise construct
+    # from DEFAULT_SYSTEM_PROMPT with model and tool context — matching CLI behavior.
+    custom_prompt = config.get("system_prompt")
+    if custom_prompt:
+        system_prompt = custom_prompt
+    else:
+        try:
+            from src.agent.core import build_system_prompt
+
+            tool_names: set[str] = set()
+            for t in active_tools_list:
+                name = getattr(t, "name", "")
+                if name:
+                    tool_names.add(name)
+            tool_names.update(available_tools.keys())
+
+            models_dict = getattr(app_cfg, "models", None) if app_cfg else None
+            delegation_models = (
+                getattr(app_cfg, "delegate_allowed_models", None) if app_cfg else None
+            )
+            system_prompt = build_system_prompt(
+                models=models_dict,
+                delegation_models=delegation_models,
+                active_tool_names=tool_names,
+            )
+        except Exception as exc:
+            log.warning("Could not build system prompt: %s", exc)
+            from src.agent.core import DEFAULT_SYSTEM_PROMPT
+
+            system_prompt = DEFAULT_SYSTEM_PROMPT
+
+    # Determine context window from the active model's context_window — matching CLI behavior.
     max_context_tokens: int | None = None
     if app_cfg is not None:
-        max_context_tokens = getattr(app_cfg, "max_context_tokens", None)
+        session_model = config.get("model")
+        try:
+            if session_model:
+                _, mc = app_cfg.resolve_llm_config_for(session_model)
+            else:
+                _, mc = app_cfg.resolve_llm_config()
+            max_context_tokens = mc.context_window
+        except Exception:
+            pass
     if max_context_tokens is None:
-        max_context_tokens = 131072  # safe default
+        max_context_tokens = 32_768  # matches _DEFAULT_CONTEXT_WINDOW in core.py
 
     return AgentRunConfig(
         llm=llm,
+        system_prompt=system_prompt or None,
         available_tools=available_tools,
         active_tools_list=active_tools_list,
         max_context_tokens=max_context_tokens,
         context_compression=bool(context_compression),
         parallel_tool_execution=bool(parallel),
         session_state=session_state,
+        bound_cache=OrderedDict(),
+        compression_cache=OrderedDict(),
     )
 
 
@@ -394,6 +457,10 @@ class ApiSessionRegistry:
     async def evict_idle(self, max_age_seconds: float = _DEFAULT_MAX_IDLE_AGE) -> int:
         """Save and evict sessions idle longer than ``max_age_seconds``.
 
+        Sessions with an active agent turn are skipped — evicting them would save
+        a stale memory snapshot that the running turn would overwrite moments later,
+        producing a divergence between on-disk state and what the turn commits.
+
         Returns the number of sessions evicted.
         """
         now = time.time()
@@ -402,6 +469,11 @@ class ApiSessionRegistry:
         async with self._lock:
             for sid, sess in list(self._sessions.items()):
                 if now - sess.last_activity > max_age_seconds:
+                    # Skip sessions with an agent turn actively running.
+                    turn_task = getattr(sess, "turn_task", None)
+                    if turn_task is not None and not turn_task.done():
+                        log.debug("Skipping eviction of session %s: agent turn in progress", sid)
+                        continue
                     to_evict.append(sid)
 
         evicted = 0

@@ -27,7 +27,7 @@ from src.providers.defaults import (
 )
 
 if TYPE_CHECKING:
-    from src.config import ProviderConfig
+    from src.config import ModelConfig, ProviderConfig
 
 # Re-export for convenience
 __all__ = [
@@ -36,7 +36,7 @@ __all__ = [
     "EMBEDDING_MODELS",
     "BASE_URLS",
     "create_chat_model",
-    "create_chat_model_from_config",
+    "create_chat_model_from_configs",
     "create_embeddings",
     "create_embeddings_from_config",
     "get_default_model",
@@ -75,12 +75,6 @@ def _load_provider(provider_type: str) -> Any:
         module = importlib.import_module(module_path)
         _provider_cache[provider_type] = module
         return module
-
-
-def _clear_provider_cache() -> None:
-    """Clear the provider module cache — call on provider/model switch."""
-    with _provider_cache_lock:
-        _provider_cache.clear()
 
 
 # ── Public helpers ───────────────────────────────────────────────────
@@ -136,8 +130,8 @@ def create_chat_model(
     """Create a chat model for *provider_type*.
 
     This is the **low-level** factory — pass explicit parameters.
-    For the higher-level variant that reads from a ``ProviderConfig``
-    dataclass, use :func:`create_chat_model_from_config`.
+    For the higher-level variant that takes separate provider and model
+    configs, use :func:`create_chat_model_from_configs`.
 
     Args:
         provider_type: One of ``PROVIDER_TYPES``.
@@ -175,26 +169,34 @@ def create_chat_model(
     return mod.create_chat_model(**kw)
 
 
-def create_chat_model_from_config(provider_config: ProviderConfig) -> Any:
-    """Create a chat model from a :class:`ProviderConfig` dataclass.
+def create_chat_model_from_configs(
+    provider_config: ProviderConfig,
+    model_config: ModelConfig,
+    *,
+    streaming: bool = False,
+) -> Any:
+    """Create a chat model from separate provider and model configs.
 
-    This is the **high-level** factory used by ``core.py`` and other
-    modules that already have a resolved ``ProviderConfig``.
+    This is the **new** factory that takes connection info from
+    ``provider_config`` and model settings from ``model_config``.
 
     Args:
-        provider_config: Resolved provider configuration.
+        provider_config: Connection info (type, base_url, api_key).
+        model_config: Model settings (model, temperature, context_window, max_tokens).
+        streaming: Enable token-level streaming callbacks (for API mode).
 
     Returns:
         A LangChain chat-model instance.
     """
     return create_chat_model(
         provider_config.type,
-        model=provider_config.get_model(),
+        model=model_config.model,
         api_key=provider_config.api_key,
         base_url=provider_config.get_base_url(),
-        temperature=provider_config.temperature if provider_config.temperature is not None else 0,
-        num_ctx=provider_config.num_ctx if provider_config.type == "ollama" else None,
-        max_tokens=provider_config.max_tokens,
+        temperature=model_config.temperature if model_config.temperature is not None else 0,
+        num_ctx=model_config.context_window if provider_config.type == "ollama" else None,
+        max_tokens=model_config.max_tokens,
+        streaming=streaming,
     )
 
 
@@ -244,7 +246,7 @@ def create_embeddings_from_config(
     """Create an embeddings instance from resolved embedding config.
 
     This is the **high-level** factory for embeddings, parallel to
-    :func:`create_chat_model_from_config` for chat models.  Accepts the
+    :func:`create_chat_model_from_configs` for chat models.  Accepts the
     fields returned by ``Config.resolve_embedding_config()``.
 
     Returns:

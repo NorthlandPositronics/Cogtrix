@@ -28,7 +28,7 @@ class TestResolveDataPath:
     def test_resolve_data_path_relative(self):
         config = Config()
         result = config.resolve_data_path("history")
-        assert result == Path("data/history")
+        assert result == Path("data/history").resolve()
 
     def test_resolve_data_path_absolute(self):
         config = Config()
@@ -39,12 +39,12 @@ class TestResolveDataPath:
         config = Config()
         assert config.data_dir == "data"
         result = config.resolve_data_path("data/vectordb")
-        assert result == Path("data/vectordb")
+        assert result == Path("data/vectordb").resolve()
 
     def test_resolve_data_path_legacy_prefix_not_double_nested(self):
         config = Config()
         result = config.resolve_data_path("data/vectordb")
-        assert result != Path("data/data/vectordb")
+        assert result != Path("data/data/vectordb").resolve()
 
     def test_resolve_data_path_custom_data_dir(self):
         config = Config()
@@ -74,18 +74,18 @@ class TestResolveDataPath:
     def test_resolve_data_path_non_legacy_relative(self):
         config = Config()
         result = config.resolve_data_path("sessions/foo")
-        assert result == Path("data/sessions/foo")
+        assert result == Path("data/sessions/foo").resolve()
 
     def test_resolve_data_path_bare_data(self):
         """subpath='data' resolves to data_dir itself (BUG-1703)."""
         config = Config()
-        assert config.resolve_data_path("data") == Path("data")
+        assert config.resolve_data_path("data") == Path("data").resolve()
 
     def test_resolve_data_path_trailing_slash(self):
         """subpath='data/' does not produce 'data/data/' (BUG-1703)."""
         config = Config()
         result = config.resolve_data_path("data/")
-        assert result == Path("data")
+        assert result == Path("data").resolve()
         assert "data/data" not in str(result)
 
     def test_resolve_data_path_traversal_raises(self):

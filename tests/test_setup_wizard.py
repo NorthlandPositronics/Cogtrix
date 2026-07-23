@@ -147,7 +147,7 @@ class TestExtractYaml:
 
 class TestInjectBootstrap:
     def test_injects_api_key(self):
-        data = {"provider": "openai"}
+        data = {}
         bootstrap = {
             "provider": "openai",
             "model": "gpt-4.1-mini",
@@ -157,7 +157,8 @@ class TestInjectBootstrap:
         }
         _inject_bootstrap(data, bootstrap)
         assert data["providers"]["openai"]["api_key"] == "sk-real-key"
-        assert data["providers"]["openai"]["model"] == "gpt-4.1-mini"
+        assert "model" not in data["providers"]["openai"]
+        assert data["models"]["default_model"]["model"] == "gpt-4.1-mini"
 
     def test_injects_ollama_base_url(self):
         data = {}
@@ -169,8 +170,9 @@ class TestInjectBootstrap:
             "type": "ollama",
         }
         _inject_bootstrap(data, bootstrap)
-        assert data["provider"] == "ollama"
+        assert "provider" not in data
         assert data["providers"]["ollama"]["base_url"] == "http://localhost:11434"
+        assert data["models"]["default"] == "default_model"
 
     def test_preserves_existing_providers(self):
         data = {"providers": {"other_provider": {"type": "openai", "model": "gpt-4.1"}}}
@@ -208,13 +210,17 @@ class TestInjectBootstrap:
         }
         _inject_bootstrap(data, bootstrap)
         assert "models" in data
-        assert "default" in data["models"]
-        assert data["models"]["default"]["provider"] == "openai"
-        assert data["models"]["default"]["model"] == "gpt-4.1-mini"
-        assert data["model"] == "default"
+        assert data["models"]["default"] == "default_model"
+        assert data["models"]["default_model"]["provider"] == "openai"
+        assert data["models"]["default_model"]["model"] == "gpt-4.1-mini"
+        assert "model" not in data
 
     def test_does_not_overwrite_existing_default_model(self):
-        data = {"models": {"default": {"provider": "ollama", "model": "existing-model"}}}
+        data = {
+            "models": {
+                "default_model": {"provider": "ollama", "model": "existing-model"},
+            }
+        }
         bootstrap = {
             "provider": "openai",
             "model": "gpt-4.1-mini",
@@ -223,9 +229,9 @@ class TestInjectBootstrap:
             "type": "openai",
         }
         _inject_bootstrap(data, bootstrap)
-        # Existing "default" model entry is preserved
-        assert data["models"]["default"]["provider"] == "ollama"
-        assert data["models"]["default"]["model"] == "existing-model"
+        assert data["models"]["default_model"]["provider"] == "ollama"
+        assert data["models"]["default_model"]["model"] == "existing-model"
+        assert data["models"]["default"] == "default_model"
 
 
 class TestMaskSecrets:
@@ -352,6 +358,109 @@ class TestExtractConfigInfo:
         info = _extract_config_info(yaml_content)
         assert info["type"] == "openai"
         assert info["base_url"] == "https://api.groq.com/openai/v1"
+
+
+class TestExtractConfigInfoNewFormat:
+    """Tests for _extract_config_info() with the new models.default format."""
+
+    def test_new_format_models_default_resolves_alias(self):
+        yaml_content = (
+            "providers:\n"
+            "  openai:\n"
+            "    type: openai\n"
+            "    api_key: sk-test\n"
+            "models:\n"
+            "  default: fast\n"
+            "  fast:\n"
+            "    provider: openai\n"
+            "    model: gpt-4o-mini\n"
+        )
+        info = _extract_config_info(yaml_content)
+        assert info["provider"] == "openai"
+        assert info["model"] == "gpt-4o-mini"
+        assert info["type"] == "openai"
+        assert info["api_key"] == "sk-test"
+
+    def test_new_format_with_base_url(self):
+        yaml_content = (
+            "providers:\n"
+            "  spark:\n"
+            "    type: openai\n"
+            "    base_url: http://spark:8080/v1\n"
+            "    api_key: sk-spark\n"
+            "models:\n"
+            "  default: oss\n"
+            "  oss:\n"
+            "    provider: spark\n"
+            "    model: gpt-oss\n"
+        )
+        info = _extract_config_info(yaml_content)
+        assert info["provider"] == "spark"
+        assert info["model"] == "gpt-oss"
+        assert info["base_url"] == "http://spark:8080/v1"
+
+    def test_new_format_default_alias_missing_from_models(self):
+        yaml_content = (
+            "providers:\n"
+            "  openai:\n"
+            "    type: openai\n"
+            "models:\n"
+            "  default: nonexistent\n"
+            "  fast:\n"
+            "    provider: openai\n"
+            "    model: gpt-4o\n"
+        )
+        info = _extract_config_info(yaml_content)
+        # Falls through to legacy — no top-level provider/model either
+        assert info.get("model") is None or "provider" not in info
+
+    def test_new_format_takes_precedence_over_legacy(self):
+        yaml_content = (
+            "provider: ollama\n"
+            "model: legacy-model\n"
+            "providers:\n"
+            "  openai:\n"
+            "    type: openai\n"
+            "    api_key: sk-new\n"
+            "models:\n"
+            "  default: smart\n"
+            "  smart:\n"
+            "    provider: openai\n"
+            "    model: gpt-4o\n"
+        )
+        info = _extract_config_info(yaml_content)
+        assert info["provider"] == "openai"
+        assert info["model"] == "gpt-4o"
+
+    def test_new_format_provider_not_in_providers_section(self):
+        yaml_content = (
+            "models:\n"
+            "  default: fast\n"
+            "  fast:\n"
+            "    provider: missing_provider\n"
+            "    model: some-model\n"
+        )
+        info = _extract_config_info(yaml_content)
+        assert info["provider"] == "missing_provider"
+        assert info["model"] == "some-model"
+        assert "type" not in info
+
+    def test_new_format_ollama_provider(self):
+        yaml_content = (
+            "providers:\n"
+            "  local:\n"
+            "    type: ollama\n"
+            "    base_url: http://localhost:11434\n"
+            "models:\n"
+            "  default: local_model\n"
+            "  local_model:\n"
+            "    provider: local\n"
+            "    model: qwen3:8b\n"
+        )
+        info = _extract_config_info(yaml_content)
+        assert info["type"] == "ollama"
+        assert info["base_url"] == "http://localhost:11434"
+        assert info["model"] == "qwen3:8b"
 
 
 class TestListOllamaModels:

@@ -1,5 +1,149 @@
 # Changelog
 
+## [0.1.20](https://github.com/NorthlandPositronics/Cogtrix/compare/v0.1.19...v0.1.20) (2026-03-20)
+
+
+### Features
+
+* **ci:** guard main source branch, fix CI dependencies and hanging tests ([2a96cb7](https://github.com/NorthlandPositronics/Cogtrix/commit/2a96cb7d8efa96cbcda15a755585914c25a1b68d))
+* **ci:** guard main source branch, fix CI dependencies and hanging tests ([06dba98](https://github.com/NorthlandPositronics/Cogtrix/commit/06dba98bfc5a91393f8a88fd4cfd33286ad18634))
+* **ci:** guard main source branch, fix CI dependencies and hanging tests ([#17](https://github.com/NorthlandPositronics/Cogtrix/issues/17)) ([2a96cb7](https://github.com/NorthlandPositronics/Cogtrix/commit/2a96cb7d8efa96cbcda15a755585914c25a1b68d))
+
+## [Unreleased]
+
+### Breaking Changes
+
+* **config:** Provider/model separation refactor — `ProviderConfig` now holds connection info only (`type`, `base_url`, `api_key`, `tool_instructions`); all inference parameters (`model`, `temperature`, `num_ctx`, `max_tokens`) belong exclusively in `ModelConfig`. `models.default` selects the active model alias. Legacy top-level `provider`/`model` keys and model fields inside `providers:` entries are auto-migrated but deprecated.
+* **cli:** `--provider` / `-p` CLI flag removed; use `--model` / `-m` with a model alias instead
+* **cli:** `/provider` command is now read-only (lists providers); use `/model` to switch models
+* **config:** `COGTRIX_PROVIDER` environment variable removed; use `COGTRIX_MODEL` instead
+* **api:** `POST /config/provider` endpoint removed (returns 410 Gone)
+
+### Features
+
+* **assistant:** Level 1 outbound messaging — `POST /api/v1/assistant/outbound` admin endpoint sends operator-initiated messages to phonebook contacts via the agent pipeline (bypasses input guardrails, applies output guardrails, updates memory)
+* **assistant:** Level 2 campaign system — multi-contact outbound campaigns with per-target progress tracking, automatic follow-ups when contacts don't reply, escalation after max attempts, and agent-classified goal completion via `report_campaign_outcome` tool; 6 API endpoints for CRUD + launch; persistence to `data/assistant/campaigns.json`; background follow-up thread with configurable check interval
+* **tools:** two-tier tool loading — agent-loaded tools auto-unload after each prompt cycle; manually loaded tools (via `/tools load`, `--activate-tools`, or API `PATCH`) are pinned and persist until explicitly unloaded
+* **cli:** `--activate-tools LIST` flag pins comma-separated tools as active at startup
+* **cli:** `/tools unload <name>` command to unpin and return a tool to the on-demand pool
+* **rag:** `query_knowledge_base` auto-activates (pinned) when a FAISS knowledge base exists; dynamic description shows index count and size
+* **rag:** multi-index search — queries both global CLI index and per-document API indexes, merges and deduplicates results
+* **api:** tool status now includes `"pinned"` for manually loaded tools in `ToolStatus` enum; API version bumped to 1.1.0
+* **api:** REST + WebSocket API layer with JWT authentication, session management, streaming agent turns, tool management, memory control, RAG document endpoints, config management, MCP server management, and assistant mode control (65 REST endpoints + 2 WebSocket streams)
+* **api:** API key authentication (`cgx_live_` prefix) for programmatic and CI access
+* **api:** setup wizard API for interactive configuration via HTTP
+* **api:** live log streaming via WebSocket at `ws://host/ws/v1/logs` (admin only)
+* **config:** `Config.resolve_llm_config()` and `resolve_llm_config_for(alias)` — new primary LLM resolution methods returning `(ProviderConfig, ModelConfig)` tuples
+* **providers:** `create_chat_model_from_configs(provider_config, model_config)` — new dual-config LLM factory replacing the old single-config path
+* **config:** `_parse_providers_section()` auto-migrates model fields from provider entries to the models registry for backward compatibility
+* **whatsapp:** track locally-archived chats in `_locally_archived` set to prevent re-processing after WhatsApp auto-unarchives (BUG-113)
+
+### Bug Fixes
+
+* **campaign:** `Campaign.from_dict` no longer mutates the caller's dict via `pop()` — uses `get()` instead (BUG-221)
+* **campaign:** `on_reply` releases the lock before calling `save()` to avoid blocking other threads during disk I/O (BUG-222)
+* **campaign:** `_process_follow_ups` re-checks `target.status` under lock at the escalation branch to prevent racing with concurrent `mark_target_outcome` (BUG-223)
+* **campaign:** `launch()` sets target to `"active"` before `handle_outbound` call so `on_reply()` can match replies arriving during the send window (BUG-224)
+* **campaign:** `start()` validates handler is wired via `set_handler()` and guards thread creation under the lock to prevent duplicate follow-up threads (BUG-225)
+* **api:** campaign CRUD routes (`create`, `update`, `delete`) now wrapped with `asyncio.to_thread` to prevent blocking the event loop during file I/O (BUG-226)
+* **api:** `_validate_campaign_id` enforces UUID regex on all campaign path parameters to prevent injection (BUG-227)
+* **api:** `status_filter` query param on `GET /campaigns` typed as `CampaignStatus` for Pydantic validation (rejects invalid values with 422)
+* **api:** `_resolve_contact` extracted as unified phonebook lookup — `send_outbound` now prefers active channels (matching campaign target resolution behavior)
+* **api:** `stop_assistant` route uses `executor.shutdown(wait=True)` to drain in-flight agent turns before `session_mgr.save_all()`, eliminating a race between executor threads and memory persistence (data-loss fix; mirrors `service.py` `_handle_shutdown` behaviour)
+* **api:** `WebSocketCallbackHandler` now tracks `tool_call_count` and `_extract_token_counts` in `turn_runner.py` returns it, so the `done` WebSocket message reports actual tool invocations instead of a hardcoded `0`
+* **api:** atomic `INSERT…SELECT` for admin role election in `create_with_role_election` eliminates registration race condition
+* **api:** per-session `asyncio.Event` in `ApiSessionRegistry._pending` prevents duplicate `warm_session` calls for concurrent requests targeting the same session (TOCTOU fix)
+* **api:** DB session threaded through route `Depends(get_db)` into auth helpers, eliminating redundant database connections
+* **api:** fix silent token degradation in `get_current_user_optional` — supplied tokens that are expired or invalid now re-raise instead of falling through to anonymous access (P0 security fix)
+* **api:** catch `IntegrityError` in registration endpoint for concurrent duplicate username/email submissions
+* **api:** bulk `DELETE` for `clear_history` with `keep_last` parameter (performance)
+* **api:** protect `_cancel_requested` flag with lock in `ApiConfirmationUI.cancel()` (thread safety)
+* **api:** fix `WSLogHandler` crash, `turn_runner` blocking save, and RAG flush/delete without commit
+* **api:** path traversal guard in RAG upload, WebSocket close ordering, event loop blocking in turn runner
+* **assistant:** resolve BUG-091 through BUG-112 across deferral system and assistant subsystem
+* **api:** reset `_cancel_requested = False` at the start of `render_prompt()` so cancellation from a previous turn does not silently deny all future tool confirmations (P0)
+* **api:** `_validate_doc_id()` UUID regex guard in RAG endpoints prevents path traversal via document ID parameters
+* **api:** `_snapshot_sessions()`, `_snapshot_scheduler_queue()`, `_snapshot_deferral_records()` helpers copy dicts under lock before iteration, eliminating five race conditions in assistant route handlers
+* **api:** `warm_session()` in `session_bridge.py` wraps `_build_memory_manager` and `_build_llm` with `asyncio.to_thread` to prevent blocking the event loop during session warm-up
+* **api:** `clear_memory` and `switch_memory_mode` in `memory.py` route blocking `mm.clear()`, `old_mm.save()`, and `new_mm.load()` calls through `asyncio.to_thread`
+* **api:** `ConnectionManager.connect()` in `ws.py` releases `_lock` before closing the displaced WebSocket connection to avoid holding the lock across I/O
+* **api:** `stop_assistant()` wraps blocking service shutdown calls with `asyncio.to_thread`
+* **api:** RAG document list endpoint uses compound `(created_at, id)` keyset cursor for stable pagination ordering; `_doc_to_out` disk I/O (file stat) runs via `asyncio.to_thread` when paginating
+* **api:** deleting a session now calls `manager.disconnect(session_id)` to close any orphaned WebSocket connection before archiving the record
+* **api:** `get_chat_messages` correctly derives message count by calling `get_messages()` when available (was always returning 0)
+* **api:** fix agent amnesia in `turn_runner._build_history()` — `prepare_context()` was called with no arguments (silently raising `TypeError`) and its return value was accessed via `.get()` on a dataclass (silently raising `AttributeError`), causing every turn to start with empty history; fixed by forwarding `user_input` and accessing `.messages` attribute directly (P0)
+* **api:** `asyncio.CancelledError` in `run_message_turn()` was swallowed without re-raising, breaking `asyncio.Task.cancel()` semantics; fixed by adding `raise` after cleanup (P0)
+* **api:** `get_or_warm()` in `session_bridge.py` now saves the discarded `ApiSession` when a concurrent warmer wins the race, preventing a memory manager resource leak (P1)
+* **api:** `memory_manager.update()` and `.save()` in `turn_runner` now run via `asyncio.to_thread` to prevent blocking the event loop on the threading lock and file I/O (P1)
+* **api:** `_http_exception_handler` now maps non-dict exception detail to a status-appropriate error code via `_STATUS_CODE_MAP` instead of always returning `code="INTERNAL_ERROR"` for 4xx responses (P1)
+* **api:** `check_provider_health` in `routes/config.py` now runs `create_chat_model_from_configs()` via `asyncio.to_thread` to prevent network I/O stalling the event loop (P1)
+* **api:** `reload_config` in `routes/config.py` now runs `Config()` file I/O via `asyncio.to_thread` (P1)
+* **api:** fix `MemoryUpdatePayload.tokens_used` schema example — was `"1200"` (string) for an `int` field, producing a malformed OpenAPI schema (P2)
+* **api:** fix fake-lock data races in `assistant.py` routes — `remove_from_blacklist`, `list_knowledge`, `search_knowledge`, and `delete_fact` created anonymous `threading.Lock()` as fallback instead of using the actual object lock, providing zero mutual exclusion against concurrent readers or writers; all four routes now acquire the real `violation_tracker._lock` or `knowledge_store._lock` (P0)
+* **api:** `delete_fact` in `assistant.py` contained dead unreachable code after `raise HTTPException` refactor — removed (P1)
+* **api:** `start_assistant` in `assistant.py` now creates the LLM via `asyncio.to_thread(create_chat_model_from_configs, ...)` instead of calling it synchronously in the async handler, preventing event loop blocking on provider initialization (P1)
+* **api:** `patch_session` in `sessions.py` now calls `_build_llm` via `asyncio.to_thread` when provider or model changes, preventing event loop blocking on LLM initialization (P1)
+* **api:** `_config_to_out` in `config.py` refactored — new `_read_raw_yaml()` async helper offloads config file I/O to a thread pool via `asyncio.to_thread`; `_config_to_out` signature changed from `is_admin: bool` to `raw_yaml: str | None` so the async I/O happens in the caller (P1)
+* **api:** `run_message_turn()` now updates `session.last_activity` at the end of each successful turn so the 30-minute idle eviction TTL resets correctly — previously a long-running agent turn would age out the session mid-execution, causing the next request to re-warm from DB (BUG-120)
+* **api:** `run_message_turn()` now fully implements `mode='think'` and `mode='delegate'` — think mode wires `classify_think_task` → optional research delegate → `force_deep_think`; delegate mode wires `force_delegation` with parallel sub-agent execution; all blocking LLM calls run via `asyncio.to_thread`; new `agent_state` values (`analyzing`, `deep_thinking`, `researching`, `delegating`) stream progress to the frontend (BUG-122)
+* **assistant:** removed dead conditional guard in `MessageHandler._run_agent()` — the `if defer_state/suppress_state` branch and its fallthrough were identical; the guard was a no-op that added confusion without preventing any unintended behaviour (BUG-121)
+* **security:** remove `copy` from `SAFE_MODULES` in `python_exec.py` — `copy.deepcopy` invokes `__reduce_ex__` via C code, bypassing sandbox attribute guards (SEC-01)
+* **security:** cap unbounded `.*` in 2 guardrails injection patterns to `.{0,200}` to prevent ReDoS on attacker-controlled assistant input (SEC-02)
+* **security:** cap unbounded `.*?` in 3 `DEEP_THINK_TRIGGERS` patterns and 2 `DELEGATION_TRIGGERS` patterns to bounded `.{0,80}?` / `.{3,80}?` to prevent ReDoS (SEC-03/04)
+* **security:** `resolve_data_path()` now returns the resolved absolute path, closing a TOCTOU window for symlink attacks between validation and file open (SEC-05)
+* **shell:** switch from `subprocess.run` to `Popen` with `start_new_session=True` + `os.killpg()` on timeout — kills the entire process group instead of just the direct `/bin/sh` child, preventing orphaned grandchild processes
+* **delegate:** fix `_validate_json_response` fence stripping — now finds the matching closing fence after the opening `` ```json `` instead of unconditionally stripping the last triple-backtick, which corrupted responses containing additional code blocks
+* **delegate:** change `circuit_breaker.check_availability()` to `circuit_breaker._check_availability_locked()` inside `with _circuit_breaker_lock:` block to fix redundant reentrant lock acquisition
+* **calculator:** tighten `_safe_pow` guard from `exp >= 10_000` to `abs(exp) >= 1_000` — prevents `9999**9999` (39K-digit computation) and catches negative exponents
+* **graph:** parallel tool `future.result()` now has a 10-minute timeout — on timeout an error `ToolMessage` is produced instead of hanging indefinitely (BUG-202)
+* **graph:** `_detect_tool_request` normalizes bare string args to single-element lists so `{"add": "web_search"}` works the same as `{"add": ["web_search"]}` (BUG-204)
+* **graph:** auto-expansion dedup cache key now uses the resolved (post-fuzzy-match) tool name for correct cross-name deduplication
+* **api:** `run_message_turn()` calls `reset_for_new_prompt()` at turn start to clear ephemeral tools and `deny_all`, matching CLI prompt boundaries (BUG-198)
+* **api:** `warm_session()` populates `session_state.all_tool_originals` from tool registry so unload/disable can restore canonical tool objects (BUG-199)
+* **api:** `patch_session_tools` acquires `turn_lock` around all `run_config` mutations to prevent races with in-flight agent turns (BUG-196)
+* **api:** `_classify_tool_status` only reports `"auto_approved"` when the tool is also in `loaded_tools` — an approval on an on-demand tool does not imply it is active
+* **cli:** `/tools disable` now removes from both `pinned_tools` and `loaded_tools` in addition to adding to `denials` (BUG-197)
+* **rag:** `_has_faiss_index()` validates actual FAISS index files exist before adding directories to the search list (BUG-200)
+* **rag:** `_collect_faiss_dirs()` applies containment check on resolved `idx` path to prevent symlink traversal via intermediate components (BUG-191)
+* **rag:** multi-index search uses `similarity_search_with_score` with score-based sorting for cross-index relevance ranking (BUG-193)
+* **delegate:** `future.cancel()` now called in the `remaining <= 0` timeout branch to prevent leaked LLM threads (BUG-195)
+* **compression:** warning log emitted on compression LLM timeout before truncation fallback
+* **compression:** `as_completed()` now receives a pool-level timeout so hung LLM calls trigger truncation fallback instead of blocking the agent turn indefinitely (BUG-207)
+* **api:** error messages in `run_message_turn()` use `put_nowait` (not blocking `await put()`) and the `done` message uses `asyncio.wait_for(put(), timeout=5.0)` to prevent deadlock on bounded queue in REST-only sessions (BUG-209)
+* **rag:** `knowledge_base_stats()` and `_build_description()` wrap `iterdir()`/`stat()` calls with `OSError` handling to survive permission errors and TOCTOU races on FAISS directories (BUG-211)
+* **tools:** `configure_rag_tool()` catches `(ImportError, OSError)` instead of just `ImportError` so a broken FAISS directory does not crash startup (BUG-211)
+* **cleanup:** remove dead `_has_phantom_tool_call` alias and unused import from `cogtrix.py` (BUG-206)
+* **api:** all workflow API `{workflow_id}` path parameters validated against `^[a-zA-Z0-9][a-zA-Z0-9_-]*$` regex at the route boundary before reaching filesystem operations (BUG-212)
+* **api:** `update_workflow` route uses `dataclasses.replace()` to build a copy instead of mutating the live registry object, preventing concurrent readers from seeing partially-updated state (BUG-213)
+* **assistant:** `_load_prompt_from_value` now resolves relative paths (e.g. `./`, `../`) against `data_dir` with `is_relative_to` containment, closing a path traversal bypass (BUG-214)
+* **api:** `upload_workflow_document` validates resolved file path stays inside `data_dir` via `is_relative_to` before writing (BUG-216)
+* **api:** `on_llm_new_token` sets `final=True` only when `tool_call_count > 0 AND len(_tool_starts) == 0`, preventing premature final-response marking during intermediate tool reasoning (BUG-218)
+* **compression:** inner `future.result()` now has `timeout=120` so the per-future `TimeoutError` handler is reachable (was dead code without a timeout) (BUG-219)
+* **assistant:** `_auto_detect` returns the highest-scoring workflow that meets `min_confidence`, not the first alphabetical match (BUG-220)
+* **api:** `update_workflow` route returns `_wf_to_out(updated)` instead of the stale pre-update object
+
+### Features
+
+* **assistant:** workflow system — `WorkflowRegistry` loads YAML workflow definitions from `data/workflows/<id>/workflow.yaml`; each workflow bundles a system prompt, per-workflow FAISS knowledge base, and tool policy; chat-to-workflow bindings persisted in `data/workflows/bindings.json`; resolution order: explicit binding → contact_prompts fallback → auto-detect (keyword/regex scoring) → global default; API CRUD at `/api/v1/assistant/workflows/` (11 endpoints)
+* **api:** user management — 4 admin-only endpoints: list all users, create user, update role, delete user; `UserRepository` extended with `list_all()`, `update_role()`, `delete()` methods
+* **api:** `TokenPayload.final` boolean field distinguishes preamble tokens (before tool calls) from the final response after all tools complete
+* **api:** `SessionCreateRequest.name` auto-generates `"Session YYYY-MM-DD HH:MM"` via `default_factory`
+* **api:** `ConfigOut` now includes `system_prompt` and `guardrails` fields for WebUI consumption
+* **api:** `_run_think_pipeline` checks `session.cancel_event.is_set()` between pipeline phases (classify → research → deep_think) to avoid proceeding to expensive phases after cancel
+* **config:** auto-migrated model aliases use `"{provider}/{model}"` format (e.g. `"openai/gpt-4.1-mini"`) instead of bare provider name
+
+### Performance
+
+* **compression:** convert eager `_COMPRESSION_POOL` (4 threads spawned at import) to lazy `_get_compression_pool()` with double-checked locking — threads only created when compression actually runs (PERF-01)
+* **runner:** fix `ToolCallLogger._evict_stale` calling `time.monotonic()` twice — reuses `now` parameter for cutoff calculation, eliminating a redundant syscall (PERF-02)
+* **intent:** hoist `_cat_by_name` dict comprehension to module-level `_THINK_CAT_BY_NAME` — avoids rebuilding a 23-entry dict on every `classify_think_task()` call (PERF-03)
+
+### Build
+
+* add `api` optional dependency group to `pyproject.toml` (FastAPI, uvicorn, SQLAlchemy async, aiosqlite, alembic, python-jose, passlib)
+* update `Dockerfile` for API mode support (uvicorn, alembic migrations at startup)
+* update `docker-entrypoint.sh` with `api` / `--api` mode that runs `alembic upgrade head` then starts uvicorn
+
 ## [0.1.19](https://github.com/NorthlandPositronics/Cogtrix/compare/v0.1.18...v0.1.19) (2026-03-05)
 
 
@@ -32,97 +176,6 @@
 ### Bug Fixes
 
 * add missing `api` optional-dependency group to pyproject.toml ([a1a3af1](https://github.com/NorthlandPositronics/Cogtrix/commit/a1a3af1f43591582bb73bba11d262b36539df047))
-
-## [0.1.16](https://github.com/NorthlandPositronics/Cogtrix/compare/v0.1.15...v0.1.16) (2026-03-05)
-
-
-### Features
-
-* **api:** REST + WebSocket API layer ([d711932](https://github.com/NorthlandPositronics/Cogtrix/commit/d711932280889996d198f3f26a40430cb06b7d39))
-* **api:** REST + WebSocket API layer with JWT auth, session management, and streaming agent turns ([7e6e4c2](https://github.com/NorthlandPositronics/Cogtrix/commit/7e6e4c2b083879739d7341d392bef930d229f29d))
-
-
-### Bug Fixes
-
-* exclude src/api from pyright — optional deps not in CI base install ([1927383](https://github.com/NorthlandPositronics/Cogtrix/commit/19273830863ef469b57adaf38e395dbd3c8a20d6))
-* resolve CI failures — ruff B008/UP046 ignores, bandit B108, test import guards ([f4d6a5c](https://github.com/NorthlandPositronics/Cogtrix/commit/f4d6a5cc6477dde99f02041da4a79ee793328b79))
-* skip API test files gracefully when fastapi is not installed ([05e8949](https://github.com/NorthlandPositronics/Cogtrix/commit/05e894912fdf52d9fa04f55dc2176ac16f9427c1))
-
-## [0.1.15](https://github.com/NorthlandPositronics/Cogtrix/compare/v0.1.14...v0.1.15) (2026-03-05)
-
-
-### Features
-
-* **api:** REST + WebSocket API layer ([d711932](https://github.com/NorthlandPositronics/Cogtrix/commit/d711932280889996d198f3f26a40430cb06b7d39))
-* **api:** REST + WebSocket API layer with JWT auth, session management, and streaming agent turns ([7e6e4c2](https://github.com/NorthlandPositronics/Cogtrix/commit/7e6e4c2b083879739d7341d392bef930d229f29d))
-
-
-### Bug Fixes
-
-* exclude src/api from pyright — optional deps not in CI base install ([1927383](https://github.com/NorthlandPositronics/Cogtrix/commit/19273830863ef469b57adaf38e395dbd3c8a20d6))
-* resolve BUG-091 through BUG-099 in deferral system and adjacent files ([2406222](https://github.com/NorthlandPositronics/Cogtrix/commit/2406222e769c54b86ac1ec125def172f6d1b7ef1))
-* resolve BUG-100 through BUG-104 in assistant subsystem ([efb9fd6](https://github.com/NorthlandPositronics/Cogtrix/commit/efb9fd6dbdb8d1c5c1a154fbec46a1f3d9ed2560))
-* resolve BUG-105 through BUG-108 and BUG-094 partial fix ([8b69c61](https://github.com/NorthlandPositronics/Cogtrix/commit/8b69c617dcfd880479156af17111c50b4b5c6aad))
-* resolve BUG-109 through BUG-112 and skip recovery on defer/suppress ([aca5f07](https://github.com/NorthlandPositronics/Cogtrix/commit/aca5f07049b78d59493245a02d9ca5aa48cc87c7))
-* resolve CI failures — ruff B008/UP046 ignores, bandit B108, test import guards ([f4d6a5c](https://github.com/NorthlandPositronics/Cogtrix/commit/f4d6a5cc6477dde99f02041da4a79ee793328b79))
-* skip API test files gracefully when fastapi is not installed ([05e8949](https://github.com/NorthlandPositronics/Cogtrix/commit/05e894912fdf52d9fa04f55dc2176ac16f9427c1))
-
-## [Unreleased]
-
-### Features
-
-* **api:** REST + WebSocket API layer with JWT authentication, session management, streaming agent turns, tool management, memory control, RAG document endpoints, config management, MCP server management, and assistant mode control (65 REST endpoints + 2 WebSocket streams)
-* **api:** API key authentication (`cgx_live_` prefix) for programmatic and CI access
-* **api:** setup wizard API for interactive configuration via HTTP
-* **api:** live log streaming via WebSocket at `ws://host/ws/v1/logs` (admin only)
-* **whatsapp:** track locally-archived chats in `_locally_archived` set to prevent re-processing after WhatsApp auto-unarchives (BUG-113)
-
-### Bug Fixes
-
-* **api:** `stop_assistant` route uses `executor.shutdown(wait=True)` to drain in-flight agent turns before `session_mgr.save_all()`, eliminating a race between executor threads and memory persistence (data-loss fix; mirrors `service.py` `_handle_shutdown` behaviour)
-* **api:** `WebSocketCallbackHandler` now tracks `tool_call_count` and `_extract_token_counts` in `turn_runner.py` returns it, so the `done` WebSocket message reports actual tool invocations instead of a hardcoded `0`
-* **api:** atomic `INSERT…SELECT` for admin role election in `create_with_role_election` eliminates registration race condition
-* **api:** per-session `asyncio.Event` in `ApiSessionRegistry._pending` prevents duplicate `warm_session` calls for concurrent requests targeting the same session (TOCTOU fix)
-* **api:** DB session threaded through route `Depends(get_db)` into auth helpers, eliminating redundant database connections
-* **api:** fix silent token degradation in `get_current_user_optional` — supplied tokens that are expired or invalid now re-raise instead of falling through to anonymous access (P0 security fix)
-* **api:** catch `IntegrityError` in registration endpoint for concurrent duplicate username/email submissions
-* **api:** bulk `DELETE` for `clear_history` with `keep_last` parameter (performance)
-* **api:** protect `_cancel_requested` flag with lock in `ApiConfirmationUI.cancel()` (thread safety)
-* **api:** fix `WSLogHandler` crash, `turn_runner` blocking save, and RAG flush/delete without commit
-* **api:** path traversal guard in RAG upload, WebSocket close ordering, event loop blocking in turn runner
-* **assistant:** resolve BUG-091 through BUG-112 across deferral system and assistant subsystem
-* **api:** reset `_cancel_requested = False` at the start of `render_prompt()` so cancellation from a previous turn does not silently deny all future tool confirmations (P0)
-* **api:** `_validate_doc_id()` UUID regex guard in RAG endpoints prevents path traversal via document ID parameters
-* **api:** `_snapshot_sessions()`, `_snapshot_scheduler_queue()`, `_snapshot_deferral_records()` helpers copy dicts under lock before iteration, eliminating five race conditions in assistant route handlers
-* **api:** `warm_session()` in `session_bridge.py` wraps `_build_memory_manager` and `_build_llm` with `asyncio.to_thread` to prevent blocking the event loop during session warm-up
-* **api:** `clear_memory` and `switch_memory_mode` in `memory.py` route blocking `mm.clear()`, `old_mm.save()`, and `new_mm.load()` calls through `asyncio.to_thread`
-* **api:** `ConnectionManager.connect()` in `ws.py` releases `_lock` before closing the displaced WebSocket connection to avoid holding the lock across I/O
-* **api:** `stop_assistant()` wraps blocking service shutdown calls with `asyncio.to_thread`
-* **api:** RAG document list endpoint uses compound `(created_at, id)` keyset cursor for stable pagination ordering; `_doc_to_out` disk I/O (file stat) runs via `asyncio.to_thread` when paginating
-* **api:** deleting a session now calls `manager.disconnect(session_id)` to close any orphaned WebSocket connection before archiving the record
-* **api:** `get_chat_messages` correctly derives message count by calling `get_messages()` when available (was always returning 0)
-* **api:** fix agent amnesia in `turn_runner._build_history()` — `prepare_context()` was called with no arguments (silently raising `TypeError`) and its return value was accessed via `.get()` on a dataclass (silently raising `AttributeError`), causing every turn to start with empty history; fixed by forwarding `user_input` and accessing `.messages` attribute directly (P0)
-* **api:** `asyncio.CancelledError` in `run_message_turn()` was swallowed without re-raising, breaking `asyncio.Task.cancel()` semantics; fixed by adding `raise` after cleanup (P0)
-* **api:** `get_or_warm()` in `session_bridge.py` now saves the discarded `ApiSession` when a concurrent warmer wins the race, preventing a memory manager resource leak (P1)
-* **api:** `memory_manager.add_messages()` and `.save()` in `turn_runner` now run via `asyncio.to_thread` to prevent blocking the event loop on the threading lock and file I/O (P1)
-* **api:** `_http_exception_handler` now maps non-dict exception detail to a status-appropriate error code via `_STATUS_CODE_MAP` instead of always returning `code="INTERNAL_ERROR"` for 4xx responses (P1)
-* **api:** `check_provider_health` in `routes/config.py` now runs `create_chat_model_from_config()` via `asyncio.to_thread` to prevent network I/O stalling the event loop (P1)
-* **api:** `reload_config` in `routes/config.py` now runs `Config()` file I/O via `asyncio.to_thread` (P1)
-* **api:** fix `MemoryUpdatePayload.tokens_used` schema example — was `"1200"` (string) for an `int` field, producing a malformed OpenAPI schema (P2)
-* **api:** fix fake-lock data races in `assistant.py` routes — `remove_from_blacklist`, `list_knowledge`, `search_knowledge`, and `delete_fact` created anonymous `threading.Lock()` as fallback instead of using the actual object lock, providing zero mutual exclusion against concurrent readers or writers; all four routes now acquire the real `violation_tracker._lock` or `knowledge_store._lock` (P0)
-* **api:** `delete_fact` in `assistant.py` contained dead unreachable code after `raise HTTPException` refactor — removed (P1)
-* **api:** `start_assistant` in `assistant.py` now creates the LLM via `asyncio.to_thread(create_chat_model_from_config, ...)` instead of calling it synchronously in the async handler, preventing event loop blocking on provider initialization (P1)
-* **api:** `patch_session` in `sessions.py` now calls `_build_llm` via `asyncio.to_thread` when provider or model changes, preventing event loop blocking on LLM initialization (P1)
-* **api:** `_config_to_out` in `config.py` refactored — new `_read_raw_yaml()` async helper offloads config file I/O to a thread pool via `asyncio.to_thread`; `_config_to_out` signature changed from `is_admin: bool` to `raw_yaml: str | None` so the async I/O happens in the caller (P1)
-* **api:** `run_message_turn()` now updates `session.last_activity` at the end of each successful turn so the 30-minute idle eviction TTL resets correctly — previously a long-running agent turn would age out the session mid-execution, causing the next request to re-warm from DB (BUG-120)
-* **api:** `run_message_turn()` now fully implements `mode='think'` and `mode='delegate'` — think mode wires `classify_think_task` → optional research delegate → `force_deep_think`; delegate mode wires `force_delegation` with parallel sub-agent execution; all blocking LLM calls run via `asyncio.to_thread`; new `agent_state` values (`analyzing`, `deep_thinking`, `researching`, `delegating`) stream progress to the frontend (BUG-122)
-* **assistant:** removed dead conditional guard in `MessageHandler._run_agent()` — the `if defer_state/suppress_state` branch and its fallthrough were identical; the guard was a no-op that added confusion without preventing any unintended behaviour (BUG-121)
-
-### Build
-
-* add `api` optional dependency group to `pyproject.toml` (FastAPI, uvicorn, SQLAlchemy async, aiosqlite, alembic, python-jose, passlib)
-* update `Dockerfile` for API mode support (uvicorn, alembic migrations at startup)
-* update `docker-entrypoint.sh` with `api` / `--api` mode that runs `alembic upgrade head` then starts uvicorn
 
 ## [0.1.16](https://github.com/NorthlandPositronics/Cogtrix/compare/v0.1.15...v0.1.16) (2026-03-05)
 

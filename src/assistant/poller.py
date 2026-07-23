@@ -70,14 +70,20 @@ class MessageBuffer:
 
     def flush_all(self) -> None:
         """Force-flush all pending buffers (called on shutdown)."""
+        captured: list[tuple[str, list]] = []
         with self._lock:
             keys = list(self._buffers.keys())
             for key in keys:
                 timer = self._timers.pop(key, None)
                 if timer:
                     timer.cancel()
-        for key in keys:
-            self._flush(key)
+                batch = self._buffers.pop(key, [])
+                if batch:
+                    captured.append((key, batch))
+        for _key, batch in captured:
+            messages = [m for m, _ in batch]
+            channel = batch[0][1]
+            self._executor.submit(self._handler.handle_batch, messages, channel)
 
 
 class ChannelPoller:
@@ -155,7 +161,7 @@ class ChannelPoller:
                 for msg in messages:
                     self._buffer.add(msg, channel)
             except Exception as exc:
-                log.error("Poll error on %s: %s", channel.name, exc)
+                log.error("Poll error on %s: %s", channel.name, exc, exc_info=True)
                 self._stop_event.wait(timeout=current_interval)
                 continue
 
@@ -171,7 +177,7 @@ class ChannelPoller:
             try:
                 self._session_mgr.evict_idle()
             except Exception as exc:
-                log.error("Session eviction failed: %s", exc)
+                log.error("Session eviction failed: %s", exc, exc_info=True)
             self._stop_event.wait(timeout=60)
 
     def _get_poll_interval(self, channel_name: str) -> float:

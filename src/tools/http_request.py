@@ -173,8 +173,9 @@ def _validate_url(url: str) -> tuple[bool, str, str | None]:
                     "Requests to localhost or private/reserved IP ranges are not allowed",
                     None,
                 )
-        except Exception:
-            pass
+        except Exception as exc:
+            log.warning("IP validation failed for %s: %s — blocking request", hostname, exc)
+            return (False, f"IP validation error: {exc}", None)
 
         # Resolve hostname via DNS and check every returned address
         resolved_ip: str | None = None
@@ -207,9 +208,13 @@ def _parse_headers(headers_str: str | None) -> tuple[dict, str | None]:
         headers = json.loads(headers_str)
         if not isinstance(headers, dict):
             return {}, "Headers must be a JSON object"
-        headers = {k: v.replace("\r", "").replace("\n", "") for k, v in headers.items()}
-        headers = {k: v for k, v in headers.items() if k.lower() not in _BLOCKED_HEADERS}
-        return headers, None
+        sanitized: dict[str, str] = {}
+        for k, v in headers.items():
+            safe_key = str(k).replace("\r", "").replace("\n", "")
+            safe_value = str(v).replace("\r", "").replace("\n", "")
+            if safe_key.lower() not in _BLOCKED_HEADERS:
+                sanitized[safe_key] = safe_value
+        return sanitized, None
     except json.JSONDecodeError as e:
         return {}, f"Invalid headers JSON: {e}"
 
@@ -231,8 +236,9 @@ def _check_recent_failure(url: str) -> str | None:
         last_fail = _recent_failures.get(url)
         if last_fail is None:
             return None
-        if (time.time() - last_fail) < _FAILURE_COOLDOWN:
-            ago = int(time.time() - last_fail)
+        now = time.monotonic()
+        if (now - last_fail) < _FAILURE_COOLDOWN:
+            ago = int(now - last_fail)
             return (
                 f"Error: This URL failed {ago}s ago (timeout/connection error). "
                 "Try a different source or a web reader proxy like r.jina.ai."
@@ -243,12 +249,11 @@ def _check_recent_failure(url: str) -> str | None:
 def _record_failure(url: str) -> None:
     """Record a failure timestamp for *url*."""
     global _last_failure_evict
-    now = time.time()
+    now = time.monotonic()
     with _recent_failures_lock:
         _recent_failures[url] = now
-        mono_now = time.monotonic()
-        if mono_now - _last_failure_evict >= _FAILURE_EVICT_INTERVAL:
-            _last_failure_evict = mono_now
+        if now - _last_failure_evict >= _FAILURE_EVICT_INTERVAL:
+            _last_failure_evict = now
             stale = [k for k, v in _recent_failures.items() if (now - v) >= _FAILURE_COOLDOWN]
             for k in stale:
                 del _recent_failures[k]
@@ -316,6 +321,17 @@ def _follow_redirects(
 
         with pin_ctx:
             response = session.request(method, url, allow_redirects=False, stream=True, **kwargs)
+
+        # Post-connection validation: re-check the URL that was actually connected to.
+        # The response may carry a different effective URL (e.g. due to DNS rebinding
+        # between validate and connect), so we re-validate it here before trusting the
+        # response.
+        actual_url = response.url if hasattr(response, "url") and response.url else url
+        if str(actual_url) != url:
+            post_valid, post_err, _ = _validate_url(str(actual_url))
+            if not post_valid:
+                response.close()
+                raise ValueError(f"Post-connection URL validation failed: {post_err}")
 
         if response.status_code not in (301, 302, 303, 307, 308):
             return response

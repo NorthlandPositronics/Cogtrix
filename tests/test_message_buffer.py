@@ -1530,3 +1530,99 @@ class TestRouteResponseEditAndSchedule:
 
         channel.send.assert_called_once()
         channel.edit_message.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# BUG-102: flush_all() must not cancel newly-created timers
+# ---------------------------------------------------------------------------
+
+
+class TestFlushAllTimerRace:
+    """Regression tests for BUG-102: flush_all() must not cancel newly-created timers.
+
+    Before the fix, flush_all() had an inner `with self._lock:` block after each _flush()
+    call that cancelled any timer for the same key. This destroyed timers created by
+    concurrent add() calls that arrived after the outer lock was released but before
+    _flush() completed, silently dropping messages.
+
+    After the fix, flush_all() only cancels timers in the initial locked phase, then calls
+    _flush() for each key. A concurrent add() during the flush window installs a new timer
+    that fires normally.
+    """
+
+    def _make_buf_msg(self, chat_id: str = "chat-1") -> IncomingMessage:
+        return IncomingMessage(
+            channel="telegram",
+            chat_id=chat_id,
+            message_id="m1",
+            sender_id="u1",
+            sender_name="Alice",
+            text="Hi",
+            timestamp=time.time(),
+        )
+
+    def _make_buf_channel(self) -> Channel:
+        ch = MagicMock(spec=Channel)
+        ch.name = "telegram"
+        return ch
+
+    def test_flush_all_does_not_cancel_new_timers_from_concurrent_add(self) -> None:
+        """A message added after flush_all must eventually be dispatched.
+
+        BUG-145 refactored flush_all to inline dispatch (no _flush calls).
+        This test verifies that flush_all dispatches existing messages AND
+        that a message added after flush_all still fires via its own timer.
+        """
+        handler = MagicMock()
+        executor = MagicMock()
+        buf = MessageBuffer(handler=handler, executor=executor, debounce_seconds=0.05)
+
+        channel = self._make_buf_channel()
+        msg1 = self._make_buf_msg("chat-A")
+        msg2 = self._make_buf_msg("chat-A")
+
+        buf.add(msg1, channel)
+        buf.flush_all()
+
+        # flush_all should have dispatched msg1
+        assert executor.submit.call_count == 1
+
+        # Add a new message after flush_all — its timer should fire independently
+        buf.add(msg2, channel)
+        time.sleep(0.2)
+
+        assert executor.submit.call_count >= 2, (
+            f"Expected at least 2 executor.submit calls, got {executor.submit.call_count}. "
+            "Message added after flush_all was not dispatched by its timer."
+        )
+
+    def test_flush_all_no_double_dispatch(self) -> None:
+        """flush_all() must not dispatch any batch twice.
+
+        _flush() pops the buffer under the lock, so a timer firing after flush_all()
+        calls _flush() for the same key finds an empty buffer and returns without
+        submitting work.
+        """
+        handler = MagicMock()
+        executor = MagicMock()
+        buf = MessageBuffer(handler=handler, executor=executor, debounce_seconds=0.05)
+        channel = self._make_buf_channel()
+
+        for _i in range(3):
+            buf.add(self._make_buf_msg("chat-B"), channel)
+
+        buf.flush_all()
+        time.sleep(0.3)
+
+        assert executor.submit.call_count == 1, (
+            f"Expected exactly 1 executor.submit call, got {executor.submit.call_count}. "
+            "flush_all() is double-dispatching."
+        )
+
+    def test_flush_all_empty_buffers_is_noop(self) -> None:
+        """flush_all() on an empty MessageBuffer must not raise and must not dispatch."""
+        handler = MagicMock()
+        executor = MagicMock()
+        buf = MessageBuffer(handler=handler, executor=executor, debounce_seconds=3.0)
+        buf.flush_all()
+        handler.handle_batch.assert_not_called()

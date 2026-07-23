@@ -67,6 +67,7 @@ class TelegramChannel(Channel):
         self._long_poll_timeout = long_poll_timeout
         self._ignore_older_than: float | None = parse_duration(config.get("ignore_older_than"))
         self._last_update_id: int = 0
+        self._seeded: bool = False
         if self._filter_mode != "none":
             log.info(
                 "Telegram filter_mode=%s with %d contacts",
@@ -89,6 +90,29 @@ class TelegramChannel(Channel):
     def poll(self) -> list[IncomingMessage]:
         if self._client is None:
             return []
+
+        if not self._seeded:
+            # On first boot, drain the full backlog silently so we don't
+            # replay messages that predate process start (cold-start storm).
+            _MAX_SEED_BATCHES = 200
+            try:
+                for _ in range(_MAX_SEED_BATCHES):
+                    seed = self._client.get_updates(
+                        timeout=0,
+                        limit=100,
+                        offset=self._last_update_id + 1 if self._last_update_id else None,
+                    )
+                    if not seed:
+                        break
+                    self._last_update_id = max(m.update_id for m in seed)
+                    log.debug(
+                        "Telegram cold-start: drained %d updates, offset now %d",
+                        len(seed),
+                        self._last_update_id,
+                    )
+            except Exception as exc:
+                log.debug("Telegram cold-start seed failed: %s", exc)
+            self._seeded = True
 
         offset = self._last_update_id + 1 if self._last_update_id else None
         raw_messages = self._client.get_updates(
@@ -120,8 +144,8 @@ class TelegramChannel(Channel):
                 if self._filter_mode == "blacklist" and self._client is not None:
                     try:
                         self._client.delete_message(msg.chat_id, msg.message_id)
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        log.debug("Failed to delete blacklisted message: %s", exc)
                 continue
             if not msg.text.strip():
                 continue

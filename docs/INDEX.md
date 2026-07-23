@@ -22,10 +22,11 @@
 
 | Guide | Description |
 |-------|-------------|
-| [OpenAPI Schema](api/openapi.yaml) | OpenAPI 3.1 specification for all 65 REST endpoints ([JSON](api/openapi.json)) |
+| [OpenAPI Schema](api/openapi.yaml) | OpenAPI 3.1 specification for all 80 REST endpoints ([JSON](api/openapi.json)) |
 | [Client Contract](api/client-contract.md) | TypeScript types, API client patterns, and WebSocket example code |
 | [WebSocket Protocol](api/websocket-protocol.md) | Streaming message types, authentication, connection lifecycle |
 | [WebUI Development Guide](api/webui-development-guide.md) | Page map, component hierarchy, integration patterns, and state management for React developers |
+| [Test Specification](api/test-specification.md) | Master test plan: schema validation, endpoint integration, DB repository, and WebSocket tests |
 
 ## Developer Guides
 
@@ -39,7 +40,7 @@
 
 | ADR | Status | Description |
 |-----|--------|-------------|
-| [ADR-007](adr/007-unify-tool-safety.md) | Proposed | Unify tool safety into `src/agent/safety.py` |
+| [ADR-0007](adr/0007-unify-tool-safety.md) | Proposed | Unify tool safety into `src/agent/safety.py` |
 | [ADR-0008](adr/0008-async-memory-update.md) | Accepted | Background memory update after agent response |
 | [ADR-0009](adr/0009-eliminate-live-list-reference-in-background-thread.md) | Proposed | Eliminate live list reference in background thread |
 | [ADR-0010](adr/0010-remove-cogtrix-module-import-from-orchestration.md) | Proposed | Remove reverse import from orchestration into cogtrix.py |
@@ -58,10 +59,10 @@
 | [ADR-0023](adr/0023-performance-optimization-plan.md) | Accepted | Performance optimization plan — TTFT and token budget |
 | [ADR-0024](adr/0024-parallel-tool-execution.md) | Accepted | Parallel tool execution via ThreadPoolExecutor |
 | [ADR-0025 Architecture](adr/0025-architecture-review-round-22.md) | Informational | Architecture review — round 22 |
-| [ADR-0025 Latency](adr/0025-latency-audit-round-22.md) | Informational | Latency audit — round 22 |
+| [ADR-0025b Latency](adr/0025b-latency-audit-round-22.md) | Informational | Latency audit — round 22 |
 | [ADR-0026](adr/0026-python-exec-session-lock-consistency.md) | Accepted | Python exec session lock consistency |
 | [ADR-0027 Architecture](adr/0027-architecture-review-round-23.md) | Informational | Architecture review — round 23 |
-| [ADR-0027 Performance](adr/0027-performance-audit-round-23.md) | Informational | Performance audit — round 23 |
+| [ADR-0027b Performance](adr/0027b-performance-audit-round-23.md) | Informational | Performance audit — round 23 |
 | [ADR-0028](adr/0028-architectural-review-march-2026.md) | Informational | Architectural review — March 2026 |
 | [ADR-0029](adr/0029-assistant-mode-architectural-review.md) | Informational | Assistant mode architectural review: datamarking and subsystem audit |
 | [ADR-0030](adr/0030-comprehensive-architectural-review-march-2026.md) | Informational | Comprehensive architectural review — March 2026 |
@@ -76,11 +77,19 @@
 | [ADR-0040](adr/0040-round6-audit-sprint.md) | Proposed | Round 6 audit sprint plan — BUG-083–090, ARCH-040, PERF-1001–1008 |
 | [ADR-0041](adr/0041-queue-append-tool-for-sequential-scheduling.md) | Accepted | Queue-append tool for sequential scheduled message delivery |
 | [ADR-0042 AI Designer](adr/0042-ai-designer-recommendations.md) | Accepted | AI designer recommendations for `defer_processing` tool |
-| [ADR-0042 Defer Reply](adr/0042-defer-reply-tool.md) | Proposed | Deferred message processing (`defer_processing` tool) |
+| [ADR-0042b Defer Reply](adr/0042b-defer-reply-tool.md) | Proposed | Deferred message processing (`defer_processing` tool) |
+| [ADR-0043](adr/0043-sprint3-architecture-audit.md) | Proposed | Sprint 3 architecture audit |
+| [ADR-0044](adr/0044-sprint4-architecture-audit.md) | Proposed | Sprint 4 architecture audit |
+| [ADR-0045](adr/0045-api-validation-error-translation-layer.md) | Accepted | API validation error translation layer |
+| [ADR-0046](adr/0046-bug-fix-batch-march-2026.md) | Proposed | Bug fix batch — March 2026 (security, correctness, cleanup) |
+| [ADR-0047 Architecture](adr/0047-architecture-review-round-5-march-2026.md) | Accepted | Architecture review — round 5, March 2026 |
+| [ADR-0047b Performance](adr/0047b-performance-audit-round5-ttft-and-total-latency.md) | Proposed | Performance audit — TTFT and total request latency |
+| [ADR-0048](adr/0048-workflow-system.md) | Accepted | Workflow system — per-chat knowledge bases, tool policies, auto-detection |
+| [ADR-0049](adr/0049-architecture-review-holistic-audit-march-2026.md) | Informational | Architecture review — holistic audit, March 2026 |
 
 ## Bug Reports
 
-The [`docs/bugs/`](bugs/) directory contains 33 bug report files produced during
+The [`docs/bugs/`](bugs/) directory contains 60 bug report files produced during
 automated and manual audit sweeps. Each file documents findings from a single
 audit session with BUG-IDs, root-cause analysis, and fix status.
 

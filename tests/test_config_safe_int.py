@@ -117,28 +117,40 @@ class TestApplyConfigFileNonNumeric:
         _apply_config_file(config, cfg_file)
 
     def test_provider_num_ctx_non_numeric(self, tmp_path):
+        """Non-numeric num_ctx in provider YAML auto-migrates to model; invalid value is dropped."""
         cfg_file = self._write_yaml(
             tmp_path,
             "providers:\n  my_ollama:\n    type: ollama\n    num_ctx: abc\n",
         )
         config = Config()
         _apply_config_file(config, cfg_file)
-        assert config.providers["my_ollama"].num_ctx is None
+        assert "my_ollama" in config.providers
+        migrated = [m for m in config.models.values() if m.provider == "my_ollama"]
+        for m in migrated:
+            assert m.context_window is None
 
     def test_provider_temperature_non_numeric(self, tmp_path):
+        """Non-numeric temperature in provider YAML auto-migrates to model; invalid value is dropped."""
         cfg_file = self._write_yaml(
             tmp_path,
             "providers:\n  my_openai:\n    type: openai\n    temperature: hot\n",
         )
         config = Config()
         _apply_config_file(config, cfg_file)
-        assert config.providers["my_openai"].temperature is None
+        assert "my_openai" in config.providers
+        migrated = [m for m in config.models.values() if m.provider == "my_openai"]
+        for m in migrated:
+            assert m.temperature is None
 
     def test_provider_max_tokens_non_numeric(self, tmp_path):
+        """Non-numeric max_tokens in provider YAML auto-migrates to model; invalid value is dropped."""
         cfg_file = self._write_yaml(
             tmp_path,
             "providers:\n  my_openai:\n    type: openai\n    max_tokens: many\n",
         )
         config = Config()
         _apply_config_file(config, cfg_file)
-        assert config.providers["my_openai"].max_tokens is None
+        assert "my_openai" in config.providers
+        migrated = [m for m in config.models.values() if m.provider == "my_openai"]
+        for m in migrated:
+            assert m.max_tokens is None

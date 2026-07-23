@@ -153,7 +153,7 @@ def create_safe_tool_wrapper(
     from src.orchestration.session_state import SessionState
 
     ss = session_state if session_state is not None else SessionState()
-    original_func = tool.func if hasattr(tool, "func") else tool._run
+    original_func = getattr(tool, "func", None) or getattr(tool, "invoke", None) or tool._run
 
     def safe_wrapper(*args, **kwargs):
         if registry.requires_confirmation(tool_name):

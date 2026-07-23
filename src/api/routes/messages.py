@@ -41,10 +41,11 @@ from fastapi import (
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.auth import TokenData, _decode_jwt, get_current_user, verify_session_owner
-from src.api.db.engine import get_db
+from src.api.db.engine import AsyncSessionLocal, get_db
 from src.api.db.repositories.messages import MessageRepository
 from src.api.schemas.common import APIResponse, CursorPage
 from src.api.schemas.message import ClearHistoryRequest, MessageOut, SendMessageRequest
+from src.api.turn_runner import run_message_turn
 from src.api.ws import ClientMessage, manager
 
 log = logging.getLogger("cogtrix.api.messages")
@@ -152,41 +153,39 @@ async def send_message(
     await verify_session_owner(session_id, current_user, db)
     sess = await _get_session_or_404(session_id, request, db)
 
-    # 409 if a turn is already running.
-    if sess.turn_task is not None and not sess.turn_task.done():
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={
-                "code": "TURN_IN_PROGRESS",
-                "message": "An agent turn is already in progress for this session.",
-            },
-        )
-
-    # Persist the user message.
-    msg_repo = MessageRepository(db)
-    user_msg = await msg_repo.create(
-        session_id=session_id,
-        role="user",
-        content_json=json.dumps({"text": body.content}),
-    )
-    await db.commit()
-
-    # Launch the agent turn as a background task.
-    from src.api.turn_runner import run_message_turn
-
-    async def _run() -> None:
-        from src.api.db.engine import AsyncSessionLocal
-
-        async with AsyncSessionLocal() as turn_db:
-            await run_message_turn(
-                session=sess,
-                text=body.content,
-                mode=body.mode,
-                db=turn_db,
-                app_state=request.app.state,
+    # Atomically check-and-set turn_task under turn_lock to prevent a race
+    # where two concurrent requests both see turn_task as None and both create tasks.
+    async with sess.turn_lock:
+        if sess.turn_task is not None and not sess.turn_task.done():
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "code": "TURN_IN_PROGRESS",
+                    "message": "An agent turn is already in progress for this session.",
+                },
             )
 
-    sess.turn_task = asyncio.create_task(_run(), name=f"turn-{session_id}")
+        # Persist the user message.
+        msg_repo = MessageRepository(db)
+        user_msg = await msg_repo.create(
+            session_id=session_id,
+            role="user",
+            content_json=json.dumps({"text": body.content}),
+        )
+        await db.commit()
+
+        # Launch the agent turn as a background task.
+        async def _run() -> None:
+            async with AsyncSessionLocal() as turn_db:
+                await run_message_turn(
+                    session=sess,
+                    text=body.content,
+                    mode=body.mode,
+                    db=turn_db,
+                    app_state=request.app.state,
+                )
+
+        sess.turn_task = asyncio.create_task(_run(), name=f"turn-{session_id}")
 
     return APIResponse(data=_message_to_out(user_msg))
 
@@ -416,8 +415,6 @@ async def session_websocket(
     current_user = TokenData(user_id=user_id, role=role, raw_claims=claims)
 
     # 3. Verify session ownership + warm session (single DB session).
-    from src.api.db.engine import AsyncSessionLocal
-
     registry = getattr(websocket.app.state, "session_registry", None)
     if registry is None:
         await websocket.close(code=4000, reason="Session registry unavailable")
@@ -500,52 +497,54 @@ async def session_websocket(
                 if not text:
                     continue
 
-                if sess.turn_task is not None and not sess.turn_task.done():
-                    await manager.send(
-                        session_id,
-                        "error",
-                        {
-                            "code": "TURN_IN_PROGRESS",
-                            "message": "An agent turn is already running.",
-                        },
-                    )
-                    continue
-
-                # Persist user message to DB.
-                try:
-                    async with AsyncSessionLocal() as db:
-                        msg_repo = MessageRepository(db)
-                        await msg_repo.create(
-                            session_id=session_id,
-                            role="user",
-                            content_json=json.dumps({"text": text}),
+                # Atomically check-and-set turn_task under turn_lock to prevent
+                # a race where two concurrent WS messages both see turn_task as None.
+                async with sess.turn_lock:
+                    if sess.turn_task is not None and not sess.turn_task.done():
+                        await manager.send(
+                            session_id,
+                            "error",
+                            {
+                                "code": "TURN_IN_PROGRESS",
+                                "message": "An agent turn is already running.",
+                            },
                         )
-                        await db.commit()
-                except Exception as exc:
-                    log.warning("Could not persist WS user message: %s", exc)
+                        continue
 
-                from src.api.turn_runner import run_message_turn
+                    # Persist user message to DB.
+                    try:
+                        async with AsyncSessionLocal() as db:
+                            msg_repo = MessageRepository(db)
+                            await msg_repo.create(
+                                session_id=session_id,
+                                role="user",
+                                content_json=json.dumps({"text": text}),
+                            )
+                            await db.commit()
+                    except Exception as exc:
+                        log.warning("Could not persist WS user message: %s", exc)
 
-                async def _run_turn(t: str = text, m: str = mode) -> None:
-                    async with AsyncSessionLocal() as turn_db:
-                        await run_message_turn(
-                            session=sess,
-                            text=t,
-                            mode=m,
-                            db=turn_db,
-                            app_state=websocket.app.state,
-                        )
+                    async def _run_turn(t: str = text, m: str = mode) -> None:
+                        async with AsyncSessionLocal() as turn_db:
+                            await run_message_turn(
+                                session=sess,
+                                text=t,
+                                mode=m,
+                                db=turn_db,
+                                app_state=websocket.app.state,
+                            )
 
-                sess.turn_task = asyncio.create_task(_run_turn(), name=f"turn-ws-{session_id}")
+                    sess.turn_task = asyncio.create_task(_run_turn(), name=f"turn-ws-{session_id}")
 
             elif client_msg.type == "tool_confirm":
                 confirmation_id = client_msg.payload.get("confirmation_id", "")
                 action = client_msg.payload.get("action", "deny")
 
-                # Resolve via run_config's confirmation_ui if it is an ApiConfirmationUI.
-                confirmation_ui = None
-                if sess.run_config is not None:
-                    confirmation_ui = getattr(sess.run_config, "confirmation_ui", None)
+                # Route to the per-turn ApiConfirmationUI published on the session by
+                # turn_runner at the start of each agent turn (BUG-FORGE-001).
+                # sess.run_config holds the session-level template (no confirmation_ui);
+                # the live UI is always on sess.active_confirmation_ui.
+                confirmation_ui = getattr(sess, "active_confirmation_ui", None)
                 if confirmation_ui is not None and hasattr(confirmation_ui, "resolve"):
                     confirmation_ui.resolve(confirmation_id, action)
 
@@ -554,10 +553,9 @@ async def session_websocket(
                     sess.cancel_event.set()
                     # Unblock any pending confirmation so the agent thread
                     # exits promptly instead of waiting up to 5 minutes.
-                    if sess.run_config is not None:
-                        _conf_ui = getattr(sess.run_config, "confirmation_ui", None)
-                        if _conf_ui is not None and hasattr(_conf_ui, "cancel"):
-                            _conf_ui.cancel()
+                    _conf_ui = getattr(sess, "active_confirmation_ui", None)
+                    if _conf_ui is not None and hasattr(_conf_ui, "cancel"):
+                        _conf_ui.cancel()
                     sess.turn_task.cancel()
                     try:
                         await sess.turn_task
@@ -578,3 +576,20 @@ async def session_websocket(
         if sess.drain_task is drain_task:
             sess.drain_task = None
         await manager.disconnect(session_id)
+
+        # Auto-delete empty sessions (0 messages) on disconnect.
+        try:
+            async with AsyncSessionLocal() as cleanup_db:
+                from src.api.db.repositories.sessions import SessionRepository
+
+                msg_repo = MessageRepository(cleanup_db)
+                rows = await msg_repo.list_by_session(session_id, limit=1)
+                if not rows:
+                    sess_repo = SessionRepository(cleanup_db)
+                    await sess_repo.archive(session_id)
+                    await cleanup_db.commit()
+                    if registry is not None:
+                        await registry.remove(session_id)
+                    log.info("Auto-archived empty session %s on disconnect", session_id)
+        except Exception as exc:
+            log.debug("Auto-delete check failed for session %s: %s", session_id, exc)
