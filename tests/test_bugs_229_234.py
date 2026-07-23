@@ -2,6 +2,7 @@
 
 BUG-229 — _detect_environment: OLLAMA_BASE_URL not validated before urlopen
 BUG-230 — _list_ollama_models: user-typed URL not validated before urlopen
+        — _is_safe_url: allow_local=True permits LAN/loopback for user-provided docs URLs
 BUG-231 — openai.py: "no-key" placeholder replaced with "not-required"
 BUG-232 — docker-entrypoint: wizard auto-start documented (no code change needed)
 BUG-233 — graph.py: _bound_cache accessed without lock in call_model closure
@@ -47,8 +48,8 @@ class TestBug229OllamaEnvSSRF:
             mock_gai.return_value = [(None, None, None, None, ("169.254.169.254", 80))]
             assert _is_safe_ollama_url("http://169.254.169.254/") is False
 
-    def test_safe_ollama_url_blocks_rfc1918(self):
-        """10.x.x.x / 192.168.x.x (RFC-1918 private, not loopback) must be blocked."""
+    def test_safe_ollama_url_blocks_rfc1918_in_strict_mode(self):
+        """In strict mode (env-var probe), RFC-1918 addresses must be blocked."""
         from src.setup_wizard import _is_safe_ollama_url
 
         with patch("socket.getaddrinfo") as mock_gai:
@@ -58,6 +59,26 @@ class TestBug229OllamaEnvSSRF:
         with patch("socket.getaddrinfo") as mock_gai:
             mock_gai.return_value = [(None, None, None, None, ("192.168.1.1", 80))]
             assert _is_safe_ollama_url("http://192.168.1.1/") is False
+
+    def test_safe_ollama_url_allows_rfc1918_in_user_mode(self):
+        """With allow_private=True (user-typed URL), LAN addresses must be allowed."""
+        from src.setup_wizard import _is_safe_ollama_url
+
+        with patch("socket.getaddrinfo") as mock_gai:
+            mock_gai.return_value = [(None, None, None, None, ("192.168.70.200", 11434))]
+            assert _is_safe_ollama_url("http://192.168.70.200:11434", allow_private=True) is True
+
+        with patch("socket.getaddrinfo") as mock_gai:
+            mock_gai.return_value = [(None, None, None, None, ("10.0.0.1", 11434))]
+            assert _is_safe_ollama_url("http://10.0.0.1:11434", allow_private=True) is True
+
+    def test_safe_ollama_url_still_blocks_link_local_in_user_mode(self):
+        """allow_private=True must still block link-local (AWS metadata) addresses."""
+        from src.setup_wizard import _is_safe_ollama_url
+
+        with patch("socket.getaddrinfo") as mock_gai:
+            mock_gai.return_value = [(None, None, None, None, ("169.254.169.254", 80))]
+            assert _is_safe_ollama_url("http://169.254.169.254/", allow_private=True) is False
 
     def test_safe_ollama_url_blocks_empty_hostname(self):
         from src.setup_wizard import _is_safe_ollama_url
@@ -137,6 +158,28 @@ class TestBug230OllamaUserURLSSRF:
         ):
             result = _list_ollama_models("http://127.0.0.1:11434")
 
+        assert "qwen3:8b" in result
+
+    def test_list_ollama_models_allows_lan_address(self):
+        """LAN Ollama servers (192.168.x.x) must NOT be blocked by user-typed URL guard."""
+        from src.setup_wizard import _list_ollama_models
+
+        payload = b'{"models": [{"name": "qwen3:8b", "size": 5000000000}]}'
+        mock_resp = MagicMock()
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_resp.read.return_value = payload
+
+        with (
+            patch(
+                "socket.getaddrinfo",
+                return_value=[(None, None, None, None, ("192.168.70.200", 11434))],
+            ),
+            patch("urllib.request.urlopen", return_value=mock_resp) as mock_urlopen,
+        ):
+            result = _list_ollama_models("http://192.168.70.200:11434")
+
+        mock_urlopen.assert_called_once()
         assert "qwen3:8b" in result
 
 
@@ -328,3 +371,71 @@ class TestBug232WizardAutoStartBehaviour:
         assert (
             "network host" in src or "--network host" in src
         ), "docker-entrypoint.sh must document --network host wizard behaviour (BUG-232)"
+
+
+# ---------------------------------------------------------------------------
+# BUG-230 (codebase audit): _is_safe_url allow_local flag for docs URLs
+# ---------------------------------------------------------------------------
+
+
+class TestBug230IsafeUrlAllowLocal:
+    """_is_safe_url must allow loopback and RFC-1918 when allow_local=True (BUG-230 audit)."""
+
+    def test_strict_mode_blocks_loopback(self):
+        """Default strict mode blocks loopback addresses."""
+        from src.setup_wizard import _is_safe_url
+
+        with patch("socket.getaddrinfo") as mock_gai:
+            mock_gai.return_value = [(None, None, None, None, ("127.0.0.1", 80))]
+            assert _is_safe_url("http://127.0.0.1/docs") is False
+
+    def test_strict_mode_blocks_rfc1918(self):
+        """Default strict mode blocks RFC-1918 private addresses."""
+        from src.setup_wizard import _is_safe_url
+
+        with patch("socket.getaddrinfo") as mock_gai:
+            mock_gai.return_value = [(None, None, None, None, ("192.168.1.1", 80))]
+            assert _is_safe_url("http://192.168.1.1/docs") is False
+
+    def test_strict_mode_always_blocks_link_local(self):
+        """Link-local (169.254.x.x) is always blocked even in strict mode."""
+        from src.setup_wizard import _is_safe_url
+
+        with patch("socket.getaddrinfo") as mock_gai:
+            mock_gai.return_value = [(None, None, None, None, ("169.254.169.254", 80))]
+            assert _is_safe_url("http://169.254.169.254/docs") is False
+
+    def test_allow_local_permits_loopback(self):
+        """allow_local=True must allow loopback (e.g. local vLLM doc server)."""
+        from src.setup_wizard import _is_safe_url
+
+        with patch("socket.getaddrinfo") as mock_gai:
+            mock_gai.return_value = [(None, None, None, None, ("127.0.0.1", 8080))]
+            assert _is_safe_url("http://127.0.0.1:8080/docs", allow_local=True) is True
+
+    def test_allow_local_permits_rfc1918(self):
+        """allow_local=True must allow RFC-1918 addresses (e.g. intranet doc server)."""
+        from src.setup_wizard import _is_safe_url
+
+        with patch("socket.getaddrinfo") as mock_gai:
+            mock_gai.return_value = [(None, None, None, None, ("10.0.0.5", 80))]
+            assert _is_safe_url("http://10.0.0.5/docs", allow_local=True) is True
+
+        with patch("socket.getaddrinfo") as mock_gai:
+            mock_gai.return_value = [(None, None, None, None, ("192.168.1.100", 80))]
+            assert _is_safe_url("http://192.168.1.100/docs", allow_local=True) is True
+
+    def test_allow_local_still_blocks_link_local(self):
+        """allow_local=True must still block link-local (169.254.x.x / AWS metadata)."""
+        from src.setup_wizard import _is_safe_url
+
+        with patch("socket.getaddrinfo") as mock_gai:
+            mock_gai.return_value = [(None, None, None, None, ("169.254.169.254", 80))]
+            assert _is_safe_url("http://169.254.169.254/", allow_local=True) is False
+
+    def test_load_docs_uses_allow_local_true(self):
+        """_load_docs must call _is_safe_url with allow_local=True so user docs URLs work."""
+        src = Path("src/setup_wizard.py").read_text()
+        assert (
+            "_is_safe_url(url, allow_local=True)" in src
+        ), "_load_docs must pass allow_local=True to _is_safe_url (BUG-230 audit)"

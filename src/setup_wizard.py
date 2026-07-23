@@ -208,12 +208,27 @@ $existing_config
 
 ## Bootstrap Provider
 
-The user already has a working LLM connection with these settings:
+The user completed Step 1 and already has a verified, working LLM connection:
 - Provider name: $bootstrap_provider
+- Provider type: $bootstrap_type
+- Base URL: $bootstrap_base_url
 - Model: $bootstrap_model
+- API key configured: $bootstrap_has_key
 
-Include this as a provider entry (connection info only) and create a model entry \
-referencing it in the generated config. Use ``models.default`` to set it as active.
+**Use these values directly in the YAML config. Do NOT ask the user about the \
+bootstrap provider — type, base URL, model name, and API key are already known.**
+
+## Active (Production) Model
+
+$production_context
+
+All API keys are managed outside the config and will be injected automatically. \
+Use the literal placeholder ``"your-api-key-here"`` for every api_key field. \
+Do NOT ask for any key value, do NOT include any real key or secret — not in \
+the YAML values, not in comments, not in "Next steps" or anywhere else.
+
+Include all configured providers as entries (connection info only) and create \
+model entries referencing them. Use ``models.default`` to set the active model.
 
 ## Instructions
 
@@ -228,8 +243,9 @@ Do not ask about features the user does not need.
 - When you have enough information, produce the COMPLETE configuration as a \
 YAML block enclosed in ```yaml``` and ``` markers.
 - Include comments in the YAML explaining each section.
-- Never include actual API keys in the output \u2014 use placeholder values like \
-"your-api-key-here" and tell the user to replace them.
+- Never include actual API keys or secrets anywhere in your output (not in values, \
+not in comments). Use ``"your-api-key-here"`` as the only placeholder — the real \
+key is injected automatically and the user never needs to copy-paste it.
 - If editing an existing config, preserve settings the user does not want to change.
 - Providers should contain only connection info (type, base_url, api_key). \
 Model settings (model name, temperature, context_window, max_tokens) go in the models section.
@@ -283,11 +299,16 @@ def run_setup_wizard(
     # Build system prompt — Template uses $placeholder syntax so curly braces in
     # docs/config content are passed through without escaping.
     existing_config_raw = existing_yaml or "No existing configuration."
+    production_info = _maybe_configure_production_model(bootstrap_info, env)
     system_prompt = _WIZARD_SYSTEM_PROMPT.substitute(
         docs=docs,
         existing_config=existing_config_raw,
         bootstrap_provider=bootstrap_info["provider"],
+        bootstrap_type=bootstrap_info.get("type", "openai"),
+        bootstrap_base_url=bootstrap_info.get("base_url") or "(default)",
         bootstrap_model=bootstrap_info["model"],
+        bootstrap_has_key="yes" if bootstrap_info.get("api_key") else "no",
+        production_context=_format_production_context(bootstrap_info, production_info),
     )
 
     # ── Step 2: LLM conversation ─────────────────────────────────
@@ -298,7 +319,7 @@ def run_setup_wizard(
     # ── Step 3: validate and write ───────────────────────────────
     _step(3, "Save")
     yaml_content = _extract_yaml(final_response)
-    _validate_and_write(yaml_content, bootstrap_info, output)
+    _validate_and_write(yaml_content, bootstrap_info, output, production_info=production_info)
 
     print(f"\n  {_BG(chr(0x2713))} Config written to {_B(str(output))}")
     print(f"  {_D('Run')} python cogtrix.py {_D('to start Cogtrix.')}\n")
@@ -425,12 +446,81 @@ def _extract_config_info(yaml_content: str) -> dict[str, Any]:
         return {}
 
 
+def _maybe_configure_production_model(
+    bootstrap_info: dict[str, Any],
+    env: dict[str, Any],
+) -> dict[str, Any]:
+    """Offer to configure a separate production model after Step 1.
+
+    The bootstrap model (used to run the wizard) may be small or cheap.
+    This scripted prompt lets the user configure a more capable model for
+    Cogtrix's day-to-day use without leaving the wizard.
+
+    Returns either *bootstrap_info* unchanged (same model for both roles)
+    or a fresh ``production_info`` dict from a second ``_bootstrap_llm`` run.
+    """
+    model = bootstrap_info["model"]
+    provider = bootstrap_info["provider"]
+    print(
+        f"\n  {_D('Wizard ran with:')} {_B(model)} "
+        f"{_D('on')} {_B(provider)}"
+        f"  {_D('(this will be your active Cogtrix model)')}"
+    )
+    choice = _ask_choice(
+        "Configure a different model for Cogtrix",
+        choices=["yes", "no"],
+        default="no",
+    )
+    if choice != "yes":
+        return bootstrap_info
+
+    print(
+        f"\n  {_D('Enter the connection details for your production model.')}\n"
+        f"  {_D('The wizard will test the connection before proceeding.')}\n"
+    )
+    _, production_info = _bootstrap_llm(env, {})
+    return production_info
+
+
+def _format_production_context(
+    bootstrap_info: dict[str, Any],
+    production_info: dict[str, Any],
+) -> str:
+    """Render the production-model block for the wizard system prompt.
+
+    When bootstrap == production the LLM is told to use the bootstrap as
+    the active model.  When they differ it receives the full production
+    connection context so it can write a two-provider config without asking.
+    """
+    if production_info is bootstrap_info or (
+        production_info.get("provider") == bootstrap_info.get("provider")
+        and production_info.get("model") == bootstrap_info.get("model")
+    ):
+        return (
+            f"Same as bootstrap: use {bootstrap_info['provider']} / "
+            f"{bootstrap_info['model']} as models.default."
+        )
+
+    return (
+        "The user configured a separate production model in Step 1:\n"
+        f"- Provider name: {production_info['provider']}\n"
+        f"- Provider type: {production_info.get('type', 'openai')}\n"
+        f"- Base URL: {production_info.get('base_url') or '(default)'}\n"
+        f"- Model: {production_info['model']}\n"
+        f"- API key configured: {'yes' if production_info.get('api_key') else 'no'}\n"
+        "\n"
+        "Add this as a second provider entry in the config and set it as "
+        "models.default. Keep the bootstrap provider in the providers section "
+        "too, but do NOT set it as the active model."
+    )
+
+
 def _list_ollama_models(base_url: str) -> list[str]:
     """Fetch and display installed Ollama models. Returns model names."""
-    if not _is_safe_ollama_url(base_url):
+    if not _is_safe_ollama_url(base_url, allow_private=True):
         log.warning(
             "_list_ollama_models: skipping model fetch — URL resolves to a "
-            "non-public address (BUG-230): %s",
+            "blocked address (link-local/reserved) (BUG-230): %s",
             _redact_url_creds(base_url),
         )
         return []
@@ -717,14 +807,22 @@ def _redact_url_creds(url: str) -> str:
         return "<unparseable URL>"
 
 
-def _is_safe_ollama_url(url: str) -> bool:
+def _is_safe_ollama_url(url: str, *, allow_private: bool = False) -> bool:
     """Return True if *url* is safe to probe as an Ollama endpoint.
 
     Like ``_is_safe_url`` but permits loopback addresses (127.x.x.x /
     ::1) so that a locally-running Ollama instance is always reachable.
-    All other non-public ranges — RFC-1918 private (except loopback),
-    link-local, reserved, and unspecified — are blocked to prevent SSRF
-    via ``OLLAMA_BASE_URL`` or user-supplied wizard input (BUG-229/230).
+
+    *allow_private* controls RFC-1918 handling:
+
+    - ``False`` (default) — used for untrusted sources such as the
+      ``OLLAMA_BASE_URL`` env-var probe (BUG-229): RFC-1918 private
+      addresses are blocked alongside link-local, reserved, and unspecified.
+    - ``True`` — used for user-typed wizard input (BUG-230): RFC-1918
+      addresses (192.168.x.x, 10.x.x.x, 172.16-31.x.x) are allowed so
+      that Ollama servers on a LAN are reachable.  Link-local (169.254.x.x /
+      AWS metadata), reserved, and unspecified are always blocked.
+
     Returns False on any parse or DNS resolution failure.
     """
     from urllib.parse import urlparse as _urlparse
@@ -740,18 +838,27 @@ def _is_safe_ollama_url(url: str) -> bool:
             ip = ipaddress.ip_address(sockaddr[0])
             if ip.is_loopback:
                 continue  # always allow localhost (canonical Ollama address)
-            if ip.is_private or ip.is_link_local or ip.is_reserved or ip.is_unspecified:
-                return False
+            if ip.is_link_local or ip.is_reserved or ip.is_unspecified:
+                return False  # always block — never legitimate Ollama targets
+            if not allow_private and ip.is_private:
+                return False  # block RFC-1918 in strict (env-var) mode only
     except Exception:
         return False
     return True
 
 
-def _is_safe_url(url: str) -> bool:
-    """Return True if all resolved IP addresses for *url* are publicly routable.
+def _is_safe_url(url: str, *, allow_local: bool = False) -> bool:
+    """Return True if all resolved IP addresses for *url* are safe to fetch.
 
-    Blocks loopback, RFC-1918 private, link-local, reserved, and unspecified
-    addresses to prevent SSRF attacks when the wizard fetches docs from a URL.
+    *allow_local* controls what is permitted:
+
+    - ``False`` (default) — strict mode for untrusted URL sources: blocks
+      loopback, RFC-1918 private, link-local, reserved, and unspecified.
+    - ``True`` — relaxed mode for explicitly user-provided URLs (e.g.
+      ``--setup-docs``, API admin wizard ``docs_url``): allows loopback and
+      RFC-1918 private so local/LAN doc servers work. Link-local (169.254.x.x
+      / AWS metadata), reserved, and unspecified are still blocked.
+
     Returns False on any DNS resolution failure.
     """
     from urllib.parse import urlparse as _urlparse
@@ -765,14 +872,10 @@ def _is_safe_url(url: str) -> bool:
         resolved = socket.getaddrinfo(hostname, port)
         for _, _, _, _, sockaddr in resolved:
             ip = ipaddress.ip_address(sockaddr[0])
-            if (
-                ip.is_private
-                or ip.is_loopback
-                or ip.is_link_local
-                or ip.is_reserved
-                or ip.is_unspecified
-            ):
-                return False
+            if ip.is_link_local or ip.is_reserved or ip.is_unspecified:
+                return False  # always block — never a legitimate doc server
+            if not allow_local and (ip.is_loopback or ip.is_private):
+                return False  # block private ranges in strict mode only
     except Exception:
         return False
     return True
@@ -793,7 +896,7 @@ def _load_docs(url: str | None = None) -> str:
                 raise ValueError(
                     f"Unsupported URL scheme: {parsed.scheme!r} (only http/https allowed)"
                 )
-            if not _is_safe_url(url):
+            if not _is_safe_url(url, allow_local=True):
                 log.warning("Blocked potentially unsafe docs URL: %s (using embedded docs)", url)
             else:
                 req = urllib.request.Request(url)
@@ -851,7 +954,13 @@ def _run_conversation(llm: Any, system_prompt: str) -> str:
     """
     from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
-    messages: list[Any] = [SystemMessage(content=system_prompt)]
+    # Strict OpenAI-compatible backends (vLLM, LiteLLM) reject a messages list
+    # that contains only a SystemMessage — they require at least one HumanMessage.
+    # Seed the conversation with a minimal trigger so the wizard LLM opens first.
+    messages: list[Any] = [
+        SystemMessage(content=system_prompt),
+        HumanMessage(content="Start."),
+    ]
 
     with _spinner("Thinking"):
         response = llm.invoke(messages)
@@ -941,28 +1050,30 @@ def _has_yaml_block(text: str) -> bool:
 def _extract_yaml(text: str) -> str:
     """Extract YAML content from the last ```yaml``` code fence in *text*.
 
+    Uses plain string search so code blocks that appear after the YAML (e.g.
+    shell commands in a "Next steps" section) never bleed into the result.
+
     Raises:
         ValueError: If no ```yaml``` block is found.
     """
-    # Non-greedy first: handles clean cases without nested backticks
-    pattern = re.compile(r"```yaml\s*\n(.*?)```", re.DOTALL)
-    iter_matches = list(pattern.finditer(text))
-    if not iter_matches:
-        # Greedy fallback: from first ```yaml to last ```
-        greedy = re.compile(r"```yaml\s*\n(.*)```", re.DOTALL)
-        greedy_matches = greedy.findall(text)
-        if not greedy_matches:
-            raise ValueError("No ```yaml``` block found in LLM response")
-        return greedy_matches[-1].strip()
-    last = iter_matches[-1]
-    if "```" in text[last.end() :]:
-        # Non-greedy terminated early at a nested ``` inside the block; use greedy
-        # to span from the first ```yaml opener to the last ``` in the text.
-        greedy = re.compile(r"```yaml\s*\n(.*)```", re.DOTALL)
-        greedy_matches = greedy.findall(text)
-        if greedy_matches:
-            return greedy_matches[-1].strip()
-    return last.group(1).strip()
+    start_marker = "```yaml"
+    last_start = text.rfind(start_marker)
+    if last_start == -1:
+        raise ValueError("No ```yaml``` block found in LLM response")
+
+    # Skip past the ```yaml header line to the content
+    newline_pos = text.find("\n", last_start)
+    if newline_pos == -1:
+        raise ValueError("No ```yaml``` block found in LLM response")
+    content_start = newline_pos + 1
+
+    # Stop at the very next ``` (the closing fence), not the last one in the file
+    end_pos = text.find("```", content_start)
+    if end_pos == -1:
+        # Unclosed block — take everything to end of string
+        return text[content_start:].strip()
+
+    return text[content_start:end_pos].strip()
 
 
 # ── Phase 3: validate & write ────────────────────────────────────────
@@ -972,6 +1083,7 @@ def _validate_and_write(
     yaml_content: str,
     bootstrap_info: dict[str, Any],
     output_path: Path,
+    production_info: dict[str, Any] | None = None,
 ) -> None:
     """Phase 3: parse, inject secrets, validate, and write config."""
     try:
@@ -985,7 +1097,7 @@ def _validate_and_write(
         print(f"  {_R('\u2717')} Generated config is not a valid mapping.")
         raise SystemExit(1)
 
-    _inject_bootstrap(data, bootstrap_info)
+    _inject_bootstrap(data, bootstrap_info, production_info=production_info)
 
     # Validate by round-tripping through load_config
     tmp_path: Path | None = None
@@ -1031,35 +1143,54 @@ def _validate_and_write(
         os.close(fd)
 
 
-def _inject_bootstrap(data: dict[str, Any], bootstrap_info: dict[str, Any]) -> None:
-    """Replace placeholder API keys with real values from bootstrap."""
-    provider = bootstrap_info["provider"]
-    api_key = bootstrap_info.get("api_key")
-    model = bootstrap_info["model"]
-    base_url = bootstrap_info.get("base_url")
+def _inject_bootstrap(
+    data: dict[str, Any],
+    bootstrap_info: dict[str, Any],
+    production_info: dict[str, Any] | None = None,
+) -> None:
+    """Inject real connection credentials from bootstrap (and optionally production).
 
-    # Ensure provider entry has connection info only (no model fields)
-    providers = data.setdefault("providers", {})
-    provider_cfg = providers.setdefault(provider, {})
-    provider_cfg["type"] = bootstrap_info["type"]
-    if api_key:
-        provider_cfg["api_key"] = api_key
-    if base_url:
-        provider_cfg["base_url"] = base_url
-    # Remove any legacy model field from provider entry
-    provider_cfg.pop("model", None)
-    provider_cfg.pop("temperature", None)
-    provider_cfg.pop("num_ctx", None)
-    provider_cfg.pop("context_window", None)
-    provider_cfg.pop("max_tokens", None)
+    *bootstrap_info* is always written into the providers section.
+    When *production_info* is provided and differs from *bootstrap_info*,
+    it is also written and used as models.default; otherwise the bootstrap
+    provider is the active model.
+    """
+
+    def _write_provider(info: dict[str, Any]) -> None:
+        providers = data.setdefault("providers", {})
+        cfg = providers.setdefault(info["provider"], {})
+        cfg["type"] = info["type"]
+        if info.get("api_key"):
+            cfg["api_key"] = info["api_key"]
+        if info.get("base_url"):
+            cfg["base_url"] = info["base_url"]
+        for legacy in ("model", "temperature", "num_ctx", "context_window", "max_tokens"):
+            cfg.pop(legacy, None)
+
+    _write_provider(bootstrap_info)
+
+    # Determine which provider/model is the active (production) one
+    is_separate = (
+        production_info is not None
+        and production_info is not bootstrap_info
+        and (
+            production_info.get("provider") != bootstrap_info.get("provider")
+            or production_info.get("model") != bootstrap_info.get("model")
+        )
+    )
+    active: dict[str, Any] = bootstrap_info
+    if is_separate:
+        assert production_info is not None  # narrowed by is_separate condition above
+        _write_provider(production_info)
+        active = production_info
 
     # Ensure a default model entry exists in the models registry
     models = data.setdefault("models", {})
     alias = "default_model"
     if alias not in models:
         models[alias] = {
-            "provider": provider,
-            "model": model,
+            "provider": active["provider"],
+            "model": active["model"],
         }
     models["default"] = alias
 

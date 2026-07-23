@@ -22,6 +22,7 @@ from src.setup_wizard import (
     _load_existing_config,
     _mask_secrets,
     _print_detections,
+    _run_conversation,
     _test_connection,
 )
 
@@ -128,22 +129,38 @@ class TestExtractYaml:
         result = _extract_yaml(text)
         assert result == "provider: ollama"
 
-    def test_nested_backticks_greedy_fallback(self):
-        # YAML content contains triple backticks; the non-greedy regex terminates
-        # early at the nested ```, so the greedy fallback must recover the full block.
+    def test_trailing_code_fences_not_included(self):
+        # BUG: when the LLM appends a "Next steps" section with shell code fences
+        # AFTER the YAML block, the old greedy fallback spanned all the way to the
+        # last ``` in the response, injecting shell commands into the YAML string
+        # which then failed yaml.safe_load with "character '`' cannot start token".
         text = (
+            "Here is your config:\n"
+            "\n"
             "```yaml\n"
             "provider: ollama\n"
-            "example: |\n"
-            "  ```\n"
-            "  some nested code\n"
-            "  ```\n"
             "model: qwen3:8b\n"
-            "```"
+            "```\n"
+            "\n"
+            "Next steps:\n"
+            "1. Create dirs:\n"
+            "\n"
+            "```\n"
+            "mkdir -p docs vectordb\n"
+            "```\n"
+            "\n"
+            "2. Start:\n"
+            "\n"
+            "```\n"
+            "python cogtrix.py\n"
+            "```\n"
         )
         result = _extract_yaml(text)
         assert "provider: ollama" in result
         assert "model: qwen3:8b" in result
+        assert "mkdir" not in result
+        assert "python cogtrix.py" not in result
+        assert "```" not in result
 
 
 class TestInjectBootstrap:
@@ -680,32 +697,300 @@ class TestPrintDetections:
 class TestWizardSystemPromptTemplate:
     """BUG-074 — _WIZARD_SYSTEM_PROMPT uses string.Template to handle curly braces."""
 
-    def test_curly_braces_in_docs_do_not_crash(self):
+    def _full_substitute(self, **overrides):
         from src.setup_wizard import _WIZARD_SYSTEM_PROMPT
 
-        result = _WIZARD_SYSTEM_PROMPT.substitute(
-            docs="example {curly} and {{double}} and }}}",
-            existing_config="x: 1",
-            bootstrap_provider="ollama",
-            bootstrap_model="qwen3:8b",
+        defaults = dict(
+            docs="doc content",
+            existing_config="cfg content",
+            bootstrap_provider="openai",
+            bootstrap_type="openai",
+            bootstrap_base_url="https://api.openai.com/v1",
+            bootstrap_model="gpt-4",
+            bootstrap_has_key="yes",
+            production_context="Same as bootstrap: use openai / gpt-4 as models.default.",
         )
+        defaults.update(overrides)
+        return _WIZARD_SYSTEM_PROMPT.substitute(**defaults)
+
+    def test_curly_braces_in_docs_do_not_crash(self):
+        result = self._full_substitute(docs="example {curly} and {{double}} and }}}")
         assert "{curly}" in result
         assert "{{double}}" in result
         assert "}}}" in result
 
     def test_substitution_inserts_all_fields(self):
-        from src.setup_wizard import _WIZARD_SYSTEM_PROMPT
-
-        result = _WIZARD_SYSTEM_PROMPT.substitute(
-            docs="doc content",
-            existing_config="cfg content",
-            bootstrap_provider="openai",
-            bootstrap_model="gpt-4",
-        )
+        result = self._full_substitute()
         assert "doc content" in result
         assert "cfg content" in result
         assert "openai" in result
         assert "gpt-4" in result
+
+    def test_bootstrap_context_included(self):
+        """New bootstrap fields must appear verbatim in the rendered prompt."""
+        result = self._full_substitute(
+            bootstrap_provider="spark",
+            bootstrap_type="openai",
+            bootstrap_base_url="http://192.168.70.254:8080",
+            bootstrap_model="qwen35",
+            bootstrap_has_key="yes",
+        )
+        assert "spark" in result
+        assert "http://192.168.70.254:8080" in result
+        assert "qwen35" in result
+        assert "yes" in result
+
+    def test_bootstrap_no_key_renders_no(self):
+        result = self._full_substitute(bootstrap_has_key="no")
+        assert "no" in result
+
+    def test_prompt_instructs_not_to_ask_about_bootstrap(self):
+        """System prompt must explicitly forbid re-asking bootstrap info."""
+        result = self._full_substitute()
+        assert "Do NOT ask" in result or "do NOT ask" in result
+
+    def test_prompt_forbids_key_in_comments(self):
+        """System prompt must forbid leaking secrets in comments."""
+        result = self._full_substitute()
+        assert "not in comments" in result or "not in\ncomments" in result
+
+    def test_production_context_rendered_in_prompt(self):
+        """$production_context must appear verbatim in the rendered prompt."""
+        result = self._full_substitute(
+            production_context="Use prod-provider / big-model as models.default."
+        )
+        assert "prod-provider" in result
+        assert "big-model" in result
+
+
+class TestFormatProductionContext:
+    """Unit tests for _format_production_context."""
+
+    def _info(
+        self,
+        provider="spark",
+        model="qwen35",
+        ptype="openai",
+        base_url="http://192.168.70.254:8080",
+        api_key="sk-test",
+    ):
+        return {
+            "provider": provider,
+            "model": model,
+            "type": ptype,
+            "base_url": base_url,
+            "api_key": api_key,
+        }
+
+    def test_same_object_returns_same_as_bootstrap(self):
+        from src.setup_wizard import _format_production_context
+
+        bootstrap = self._info()
+        result = _format_production_context(bootstrap, bootstrap)
+        assert "Same as bootstrap" in result
+
+    def test_same_values_returns_same_as_bootstrap(self):
+        from src.setup_wizard import _format_production_context
+
+        bootstrap = self._info()
+        production = self._info()  # equal dict but different object
+        result = _format_production_context(bootstrap, production)
+        assert "Same as bootstrap" in result
+
+    def test_different_model_returns_production_context(self):
+        from src.setup_wizard import _format_production_context
+
+        bootstrap = self._info(model="small-model")
+        production = self._info(model="big-model")
+        result = _format_production_context(bootstrap, production)
+        assert "big-model" in result
+        assert "separate production model" in result
+
+    def test_different_provider_returns_production_context(self):
+        from src.setup_wizard import _format_production_context
+
+        bootstrap = self._info(provider="local")
+        production = self._info(
+            provider="cloud", model="gpt-4o", base_url="https://api.openai.com/v1"
+        )
+        result = _format_production_context(bootstrap, production)
+        assert "cloud" in result
+        assert "gpt-4o" in result
+        assert "models.default" in result
+
+    def test_production_context_includes_all_fields(self):
+        from src.setup_wizard import _format_production_context
+
+        bootstrap = self._info(model="tiny")
+        production = self._info(
+            provider="big-provider",
+            model="gpt-4o",
+            ptype="openai",
+            base_url="https://api.openai.com/v1",
+            api_key="sk-real",
+        )
+        result = _format_production_context(bootstrap, production)
+        assert "big-provider" in result
+        assert "gpt-4o" in result
+        assert "openai" in result
+        assert "yes" in result  # api_key configured: yes
+
+    def test_no_key_shows_no(self):
+        from src.setup_wizard import _format_production_context
+
+        bootstrap = self._info(model="tiny")
+        production = self._info(model="big", api_key="")
+        result = _format_production_context(bootstrap, production)
+        assert "no" in result
+
+    def test_no_secret_in_context(self):
+        """Real API keys must never appear in the production context string."""
+        from src.setup_wizard import _format_production_context
+
+        bootstrap = self._info(model="tiny")
+        production = self._info(model="big", api_key="sk-supersecret")
+        result = _format_production_context(bootstrap, production)
+        assert "sk-supersecret" not in result
+
+
+class TestMaybeConfigureProductionModel:
+    """Unit tests for _maybe_configure_production_model."""
+
+    def _bootstrap(self):
+        return {
+            "provider": "spark",
+            "model": "qwen35",
+            "type": "openai",
+            "base_url": "http://192.168.70.254:8080",
+            "api_key": "sk-test",
+        }
+
+    def test_no_returns_bootstrap_unchanged(self):
+        from src.setup_wizard import _maybe_configure_production_model
+
+        bootstrap = self._bootstrap()
+        with patch("builtins.input", return_value="no"):
+            result = _maybe_configure_production_model(bootstrap, {})
+        assert result is bootstrap
+
+    def test_default_is_no(self):
+        """Pressing Enter (empty input) must default to 'no'."""
+        from src.setup_wizard import _maybe_configure_production_model
+
+        bootstrap = self._bootstrap()
+        with patch("builtins.input", return_value=""):
+            result = _maybe_configure_production_model(bootstrap, {})
+        assert result is bootstrap
+
+    def test_yes_runs_bootstrap_llm_and_returns_production(self):
+        from src.setup_wizard import _maybe_configure_production_model
+
+        bootstrap = self._bootstrap()
+        prod_info = {
+            "provider": "openai",
+            "model": "gpt-4o",
+            "type": "openai",
+            "base_url": None,
+            "api_key": "sk-prod",
+        }
+        prod_llm = MagicMock()
+        with (
+            patch("builtins.input", return_value="yes"),
+            patch("src.setup_wizard._bootstrap_llm", return_value=(prod_llm, prod_info)) as mock_bl,
+        ):
+            result = _maybe_configure_production_model(bootstrap, {"openai_key": "sk-prod"})
+        mock_bl.assert_called_once()
+        assert result is prod_info
+        assert result["model"] == "gpt-4o"
+
+    def test_output_shows_current_model(self, capsys):
+        from src.setup_wizard import _maybe_configure_production_model
+
+        bootstrap = self._bootstrap()
+        with patch("builtins.input", return_value="no"):
+            _maybe_configure_production_model(bootstrap, {})
+        out = capsys.readouterr().out
+        assert "qwen35" in out
+        assert "spark" in out
+
+
+class TestInjectBootstrapTwoProvider:
+    """Tests for _inject_bootstrap with a separate production provider."""
+
+    def _bootstrap(self):
+        return {
+            "provider": "wizard-llm",
+            "model": "small-model",
+            "type": "openai",
+            "base_url": "http://local:8080",
+            "api_key": "sk-wiz",
+        }
+
+    def _production(self):
+        return {
+            "provider": "cloud",
+            "model": "gpt-4o",
+            "type": "openai",
+            "base_url": None,
+            "api_key": "sk-cloud",
+        }
+
+    def test_single_provider_bootstrap_is_default(self):
+        from src.setup_wizard import _inject_bootstrap
+
+        data: dict = {}
+        _inject_bootstrap(data, self._bootstrap())
+        assert data["models"]["default_model"]["provider"] == "wizard-llm"
+        assert data["models"]["default_model"]["model"] == "small-model"
+
+    def test_production_provider_becomes_default(self):
+        from src.setup_wizard import _inject_bootstrap
+
+        data: dict = {}
+        _inject_bootstrap(data, self._bootstrap(), production_info=self._production())
+        assert data["models"]["default_model"]["provider"] == "cloud"
+        assert data["models"]["default_model"]["model"] == "gpt-4o"
+
+    def test_both_providers_in_providers_section(self):
+        from src.setup_wizard import _inject_bootstrap
+
+        data: dict = {}
+        _inject_bootstrap(data, self._bootstrap(), production_info=self._production())
+        assert "wizard-llm" in data["providers"]
+        assert "cloud" in data["providers"]
+
+    def test_bootstrap_key_injected(self):
+        from src.setup_wizard import _inject_bootstrap
+
+        data: dict = {}
+        _inject_bootstrap(data, self._bootstrap(), production_info=self._production())
+        assert data["providers"]["wizard-llm"]["api_key"] == "sk-wiz"
+
+    def test_production_key_injected(self):
+        from src.setup_wizard import _inject_bootstrap
+
+        data: dict = {}
+        _inject_bootstrap(data, self._bootstrap(), production_info=self._production())
+        assert data["providers"]["cloud"]["api_key"] == "sk-cloud"
+
+    def test_same_provider_not_duplicated(self):
+        """When production == bootstrap, only one provider entry is created."""
+        from src.setup_wizard import _inject_bootstrap
+
+        bootstrap = self._bootstrap()
+        data: dict = {}
+        _inject_bootstrap(data, bootstrap, production_info=bootstrap)
+        # Only one provider entry
+        assert list(data["providers"].keys()) == ["wizard-llm"]
+        assert data["models"]["default_model"]["provider"] == "wizard-llm"
+
+    def test_no_production_key_when_none(self):
+        from src.setup_wizard import _inject_bootstrap
+
+        prod = {**self._production(), "api_key": None}
+        data: dict = {}
+        _inject_bootstrap(data, self._bootstrap(), production_info=prod)
+        assert "api_key" not in data["providers"]["cloud"]
 
     def test_is_template_instance(self):
         from string import Template
@@ -765,3 +1050,183 @@ class TestIsUrlSafe:
         ):
             docs = _load_docs("http://169.254.169.254/latest/meta-data/")
         assert len(docs) > 10
+
+
+class TestRunConversation:
+    """Unit tests for _run_conversation — the Step 2 LLM dialogue loop."""
+
+    # ── helpers ──────────────────────────────────────────────────────
+
+    def _make_llm(self, responses: list[str]) -> MagicMock:
+        """Return a mock LLM that yields *responses* in sequence."""
+        llm = MagicMock()
+        side_effects = []
+        for text in responses:
+            resp = MagicMock()
+            resp.content = text
+            side_effects.append(resp)
+        llm.invoke.side_effect = side_effects
+        return llm
+
+    def _yaml_response(self, extra: str = "") -> str:
+        return f"Here is your config:\n```yaml\nprovider: ollama\n{extra}```\nDone."
+
+    # ── regression: vLLM / LiteLLM 400 "No user query" (bug report 2026-03-24) ──
+
+    def test_first_invoke_includes_human_message(self):
+        """The very first llm.invoke call must contain a HumanMessage.
+
+        Strict OpenAI-compatible backends (vLLM, LiteLLM, Qwen) reject a
+        messages list that contains only a SystemMessage with:
+          'No user query found in messages' (HTTP 400).
+        Seed HumanMessage("Start.") must be present before the first invoke.
+        """
+        from langchain_core.messages import (  # type: ignore[import-untyped]
+            HumanMessage,
+            SystemMessage,
+        )
+
+        llm = self._make_llm([self._yaml_response()])
+        with patch("builtins.input", return_value="yes"):
+            _run_conversation(llm, "You are the wizard.")
+
+        first_call_messages = llm.invoke.call_args_list[0][0][0]
+        types = [type(m) for m in first_call_messages]
+        assert SystemMessage in types, "SystemMessage must be present in first invoke"
+        assert HumanMessage in types, (
+            "HumanMessage must be present in the first invoke — "
+            "vLLM/LiteLLM reject system-only message lists with HTTP 400"
+        )
+
+    def test_first_human_message_is_start(self):
+        """The seed HumanMessage content must be 'Start.' (the documented trigger)."""
+        from langchain_core.messages import HumanMessage  # type: ignore[import-untyped]
+
+        llm = self._make_llm([self._yaml_response()])
+        with patch("builtins.input", return_value="yes"):
+            _run_conversation(llm, "You are the wizard.")
+
+        first_call_messages = llm.invoke.call_args_list[0][0][0]
+        human_msgs = [m for m in first_call_messages if isinstance(m, HumanMessage)]
+        assert human_msgs, "At least one HumanMessage must be in first invoke"
+        assert (
+            human_msgs[0].content == "Start."
+        ), f"Seed HumanMessage content must be 'Start.', got {human_msgs[0].content!r}"
+
+    def test_system_message_is_first(self):
+        """SystemMessage must be the first element (position 0) in the messages list."""
+        from langchain_core.messages import SystemMessage  # type: ignore[import-untyped]
+
+        llm = self._make_llm([self._yaml_response()])
+        with patch("builtins.input", return_value="yes"):
+            _run_conversation(llm, "wizard prompt text")
+
+        first_call_messages = llm.invoke.call_args_list[0][0][0]
+        assert isinstance(
+            first_call_messages[0], SystemMessage
+        ), "SystemMessage must be at position 0 in the messages list"
+        assert "wizard prompt text" in first_call_messages[0].content
+
+    # ── happy-path: YAML block accepted on first response ────────────
+
+    def test_returns_response_when_yaml_accepted(self):
+        yaml_resp = self._yaml_response()
+        llm = self._make_llm([yaml_resp])
+        with patch("builtins.input", return_value="yes"):
+            result = _run_conversation(llm, "system prompt")
+        assert result == yaml_resp
+
+    def test_invokes_llm_exactly_once_when_yaml_accepted_immediately(self):
+        llm = self._make_llm([self._yaml_response()])
+        with patch("builtins.input", return_value="yes"):
+            _run_conversation(llm, "system prompt")
+        assert llm.invoke.call_count == 1
+
+    # ── edit flow: user rejects config, then accepts revised version ─
+
+    def test_second_invoke_after_edit_request(self):
+        """User rejects config → types edit instruction → LLM invoked again."""
+        llm = self._make_llm(
+            [
+                self._yaml_response(),  # first response has YAML
+                self._yaml_response("model: qwen3:8b\n"),  # revised response
+            ]
+        )
+        inputs = iter(["no, continue editing", "add model setting", "yes"])
+        with patch("builtins.input", side_effect=inputs):
+            result = _run_conversation(llm, "system prompt")
+        assert llm.invoke.call_count == 2
+        assert "model: qwen3:8b" in result
+
+    # ── no-YAML flow: LLM asks a question, user answers, then YAML ──
+
+    def test_question_answer_before_yaml(self):
+        llm = self._make_llm(
+            [
+                "What do you want to use Cogtrix for?",  # no YAML yet
+                self._yaml_response(),
+            ]
+        )
+        inputs = iter(["I want a WhatsApp bot", "yes"])
+        with patch("builtins.input", side_effect=inputs):
+            result = _run_conversation(llm, "system prompt")
+        assert llm.invoke.call_count == 2
+        assert "provider: ollama" in result
+
+    # ── quit / cancel ────────────────────────────────────────────────
+
+    def test_quit_raises_system_exit(self):
+        llm = self._make_llm(["What do you need?"])
+        with patch("builtins.input", return_value="quit"):
+            with pytest.raises(SystemExit):
+                _run_conversation(llm, "system prompt")
+
+    def test_exit_keyword_raises_system_exit(self):
+        llm = self._make_llm(["What do you need?"])
+        with patch("builtins.input", return_value="exit"):
+            with pytest.raises(SystemExit):
+                _run_conversation(llm, "system prompt")
+
+    def test_cancel_after_rejecting_yaml_raises_system_exit(self):
+        """Typing 'quit' at the edit-instruction prompt cancels the wizard.
+
+        _ask_choice only accepts 'yes' / 'no, continue editing'; 'quit' is
+        handled in the free-text input() call that follows when the user
+        chooses to continue editing.
+        """
+        llm = self._make_llm([self._yaml_response()])
+        inputs = iter(["no, continue editing", "quit"])
+        with patch("builtins.input", side_effect=inputs):
+            with pytest.raises(SystemExit):
+                _run_conversation(llm, "system prompt")
+
+    # ── response without .content attribute ─────────────────────────
+
+    def test_response_without_content_attr_uses_str(self):
+        class _NoContent:
+            def __str__(self) -> str:
+                return self._yaml_response()
+
+            def _yaml_response(self) -> str:
+                return "```yaml\nprovider: ollama\n```"
+
+        llm = MagicMock()
+        llm.invoke.return_value = _NoContent()
+        with patch("builtins.input", return_value="yes"):
+            result = _run_conversation(llm, "system prompt")
+        assert "provider: ollama" in result
+
+    # ── empty user input is skipped (no extra LLM call) ─────────────
+
+    def test_empty_input_does_not_invoke_llm(self):
+        llm = self._make_llm(
+            [
+                "What do you need?",
+                self._yaml_response(),
+            ]
+        )
+        # First empty input is skipped; second real input triggers second invoke
+        inputs = iter(["", "I need a bot", "yes"])
+        with patch("builtins.input", side_effect=inputs):
+            _run_conversation(llm, "system prompt")
+        assert llm.invoke.call_count == 2

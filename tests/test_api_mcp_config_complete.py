@@ -840,3 +840,100 @@ class TestWizardEndpoints:
             )
         assert r.status_code == 422
         assert r.json()["error"]["code"] == "PROVIDER_UNREACHABLE"
+
+    def test_advance_wizard_step0_success_no_substitute_keyerror(self, client, tokens):
+        """Step 0 success must NOT raise KeyError from _WIZARD_SYSTEM_PROMPT.substitute().
+
+        Regression for a bug where the API wizard's substitute() call was missing
+        required template fields (bootstrap_type, bootstrap_base_url, bootstrap_has_key,
+        production_context) that were present in the CLI wizard but omitted here.
+        Template.substitute() raises KeyError for any missing $placeholder.
+        """
+        with (
+            patch("src.api.routes.config._wizard_detect_env") as mock_env,
+            patch("src.api.routes.config._wizard_load_existing") as mock_load,
+        ):
+            mock_env.return_value = {}
+            mock_load.return_value = ""
+            start_r = client.post(
+                "/api/v1/config/wizard",
+                headers=_ah(tokens),
+                json={"edit_existing": False},
+            )
+        assert start_r.status_code == 201
+        wid = start_r.json()["data"]["wizard_id"]
+
+        with (
+            patch("src.api.routes.config._wizard_test_connection", return_value=MagicMock()),
+            patch("src.api.routes.config._wizard_load_docs", return_value="docs content"),
+            patch("src.api.routes.config._wizard_invoke_llm", return_value="Hi, I can help!"),
+        ):
+            r = client.post(
+                f"/api/v1/config/wizard/{wid}/step",
+                headers=_ah(tokens),
+                json={"data": {"provider_type": "openai", "model": "gpt-4o", "api_key": "sk-test"}},
+            )
+
+        # If substitute() raised KeyError it would be a 500; a 200 with step==1 proves all
+        # template fields were supplied correctly.
+        assert r.status_code == 200, f"unexpected error: {r.text}"
+        data = r.json()["data"]
+        assert data["step"] == 1
+        assert data["complete"] is False
+
+    def test_advance_wizard_step0_success_seeds_human_message(self, client, tokens):
+        """Step 0 must seed messages with HumanMessage('Start.') at index 1.
+
+        Regression for a missing seed message that caused HTTP 400 errors on strict
+        OpenAI-compatible backends (vLLM, LiteLLM) that reject a messages list
+        containing only a SystemMessage.
+        """
+        with (
+            patch("src.api.routes.config._wizard_detect_env") as mock_env,
+            patch("src.api.routes.config._wizard_load_existing") as mock_load,
+        ):
+            mock_env.return_value = {}
+            mock_load.return_value = ""
+            start_r = client.post(
+                "/api/v1/config/wizard",
+                headers=_ah(tokens),
+                json={"edit_existing": False},
+            )
+        assert start_r.status_code == 201
+        wid = start_r.json()["data"]["wizard_id"]
+
+        captured_messages: list = []
+
+        def _capture_invoke(_, messages):
+            captured_messages.extend(messages)
+            return "Hi, I can help!"
+
+        with (
+            patch("src.api.routes.config._wizard_test_connection", return_value=MagicMock()),
+            patch("src.api.routes.config._wizard_load_docs", return_value="docs content"),
+            patch("src.api.routes.config._wizard_invoke_llm", side_effect=_capture_invoke),
+        ):
+            r = client.post(
+                f"/api/v1/config/wizard/{wid}/step",
+                headers=_ah(tokens),
+                json={"data": {"provider_type": "openai", "model": "gpt-4o", "api_key": "sk-test"}},
+            )
+
+        assert r.status_code == 200, f"unexpected error: {r.text}"
+        assert len(captured_messages) >= 2, "messages list must have at least 2 entries"
+
+        # Index 0 is SystemMessage (system prompt), index 1 must be HumanMessage("Start.")
+        from langchain_core.messages import (  # type: ignore[import-untyped]
+            HumanMessage,
+            SystemMessage,
+        )
+
+        assert isinstance(
+            captured_messages[0], SystemMessage
+        ), f"messages[0] must be SystemMessage, got {type(captured_messages[0])}"
+        assert isinstance(
+            captured_messages[1], HumanMessage
+        ), f"messages[1] must be HumanMessage, got {type(captured_messages[1])}"
+        assert (
+            captured_messages[1].content == "Start."
+        ), f"seed message content must be 'Start.', got {captured_messages[1].content!r}"

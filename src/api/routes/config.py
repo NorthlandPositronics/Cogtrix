@@ -675,17 +675,28 @@ async def advance_wizard(
         docs = await asyncio.to_thread(_wizard_load_docs, ws.get("docs_url"))
         from src.setup_wizard import _WIZARD_SYSTEM_PROMPT
 
+        # The API wizard does not offer a separate production model step; the
+        # bootstrap model is also the active (production) model.
+        production_context = f"Same as bootstrap: use {provider_name} / {model} as models.default."
         system_prompt = _WIZARD_SYSTEM_PROMPT.substitute(
             docs=docs,
             existing_config=ws["existing_yaml"] or "No existing configuration.",
             bootstrap_provider=provider_name,
+            bootstrap_type=provider_type,
+            bootstrap_base_url=base_url or "(default)",
             bootstrap_model=model,
+            bootstrap_has_key="yes" if api_key else "no",
+            production_context=production_context,
         )
 
-        # Get first LLM question
-        from langchain_core.messages import AIMessage, SystemMessage
+        # Strict OpenAI-compatible backends (vLLM, LiteLLM) reject a messages
+        # list that contains only a SystemMessage — seed with HumanMessage("Start.")
+        from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
-        messages = [SystemMessage(content=system_prompt)]
+        messages: list[Any] = [
+            SystemMessage(content=system_prompt),
+            HumanMessage(content="Start."),
+        ]
         try:
             ai_text = await asyncio.to_thread(_wizard_invoke_llm, llm, messages)
         except Exception as exc:

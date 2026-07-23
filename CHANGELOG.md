@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.1.35](https://github.com/NorthlandPositronics/Cogtrix/compare/v0.1.34...v0.1.35) (2026-03-24)
+
+
+### Features
+
+* **wizard:** production model configuration after Step 1 bootstrap ([d6bad74](https://github.com/NorthlandPositronics/Cogtrix/commit/d6bad7404d39d1939be414987b1c87782497bb8d))
+* **wizard:** production model configuration step after Step 1 bootstrap ([7a7b0e4](https://github.com/NorthlandPositronics/Cogtrix/commit/7a7b0e4750a479787587b40907e58272e1d8af9b))
+* **wizard:** production model configuration, SSRF fixes, and end-to-end scenario tests ([d6bad74](https://github.com/NorthlandPositronics/Cogtrix/commit/d6bad7404d39d1939be414987b1c87782497bb8d))
+
+
+### Bug Fixes
+
+* **wizard:** allow RFC-1918 LAN addresses in user-typed Ollama URL ([bbcfce9](https://github.com/NorthlandPositronics/Cogtrix/commit/bbcfce95fe6d033b855956dcb07309b8265a68da))
+* **wizard:** pass full bootstrap context to LLM — eliminate redundant questions and key leak ([aed59cd](https://github.com/NorthlandPositronics/Cogtrix/commit/aed59cd4b949007007525474fe18ad470d5d13c6))
+* **wizard:** seed conversation with HumanMessage to fix vLLM/LiteLLM 400 error ([044071c](https://github.com/NorthlandPositronics/Cogtrix/commit/044071ceff057aab142a60acbfb2b0810d8312ad))
+* **wizard:** stop _extract_yaml at first closing fence to prevent Next-steps bleed ([fa54e55](https://github.com/NorthlandPositronics/Cogtrix/commit/fa54e55e838c2bc7d04bbfa4f5faf96403537cdb))
+
 ## [0.1.34](https://github.com/NorthlandPositronics/Cogtrix/compare/v0.1.33...v0.1.34) (2026-03-24)
 
 
