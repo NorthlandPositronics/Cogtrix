@@ -261,7 +261,7 @@ class UserCancelledRun(Exception):
     """Raised when the user cancels the agent workflow from a tool prompt."""
 
 
-__version__ = "0.1.3"  # x-release-please-version
+__version__ = "0.1.4"  # x-release-please-version
 __copyright__ = "© 2025–2026 Northland Positronics (FZE)"
 __license__ = "Cogtrix Source-Available License 1.0"
 

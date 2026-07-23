@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.4](https://github.com/NorthlandPositronics/Cogtrix/compare/v0.1.3...v0.1.4) (2026-02-22)
+
+
+### Bug Fixes
+
+* **ci:** align release workflow with CI pipeline ([4a8e783](https://github.com/NorthlandPositronics/Cogtrix/commit/4a8e783861b1f602f2b578657e6bde17cf6dafa1))
+* **ci:** exclude integration tests and set bandit threshold in release workflow ([a5f7af3](https://github.com/NorthlandPositronics/Cogtrix/commit/a5f7af30a01c279c9d9d1f8644483e1258f6b434))
+
 ## [0.1.3](https://github.com/NorthlandPositronics/Cogtrix/compare/v0.1.2...v0.1.3) (2026-02-22)
 
 
