@@ -32,7 +32,7 @@ That's the whole install. No accounts, no keys, no SaaS. Cogtrix finds Ollama on
 
 Prefer cloud LLMs? `export OPENAI_API_KEY="sk-..." && uv run python cogtrix.py -m gpt-4.1`. Or any of Anthropic, Google, DeepSeek, Groq, Together, vLLM, xAI — anything that speaks the OpenAI API.
 
-> **Need:** Python 3.13.x and [uv](https://docs.astral.sh/uv/) (or `pip install -r requirements.txt`).
+> **Need:** Python 3.13.x and [uv](https://docs.astral.sh/uv/). (No `uv`? Export a pip file with `uv export --no-dev --no-hashes -o requirements.txt`, then `pip install -r requirements.txt`.)
 
 ---
 

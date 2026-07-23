@@ -575,3 +575,57 @@ def test_primary_deadline_default_fits_typical_provider_latency() -> None:
         "will frequently emit 'failed (timeout)' even when the LLM "
         "would have succeeded with a small extension."
     )
+
+
+class TestSynthesisPromptAffiliationDisclaimer:
+    """#1842 — the synthesiser's per-source block must also surface a
+    content-declared affiliation disclaimer, so the synthesis itself never
+    frames an unaffiliated source as official."""
+
+    def _extract(self, url: str, text: str):
+        from src.tools._http_fetch import FetchResult
+        from src.tools._web_search_aggregator import RankedResult
+        from src.tools._web_search_domain_class import DomainClass
+        from src.tools._web_search_extractor import ExtractedSource
+        from src.tools._web_search_fetcher import FetchOutcome
+
+        rank = RankedResult(
+            canonical_url=url,
+            title="Kimi models",
+            snippet="",
+            published_date=None,
+            domain_class=DomainClass.UNKNOWN,
+            score=0.0,
+            providers=("ddg",),
+        )
+        fr = FetchResult(
+            url=url,
+            status_code=200,
+            content=text.encode(),
+            encoding="utf-8",
+            content_type="text/html",
+            elapsed_ms=5,
+            truncated=False,
+            error=None,
+        )
+        outcome = FetchOutcome(ranked=rank, status="fetched", fetch_result=fr, error=None)
+        return ExtractedSource(fetch_outcome=outcome, extracted_text=text, status="extracted")
+
+    def test_disclaimer_surfaced_in_human_prompt(self) -> None:
+        from src.tools._web_search_synthesiser import _format_human_prompt
+
+        src = self._extract(
+            "https://platform.kimi.ai/docs",
+            "Kimi-AI.chat is an independent guide and is not affiliated with the "
+            "official Kimi API Platform.",
+        )
+        msg = _format_human_prompt("kimi pricing", [src])
+        assert "UNAFFILIATED" in msg.content
+        assert "not" in msg.content.lower()
+
+    def test_neutral_source_no_disclaimer_line(self) -> None:
+        from src.tools._web_search_synthesiser import _format_human_prompt
+
+        src = self._extract("https://example.com", "Neutral documentation content here.")
+        msg = _format_human_prompt("q", [src])
+        assert "UNAFFILIATED" not in msg.content

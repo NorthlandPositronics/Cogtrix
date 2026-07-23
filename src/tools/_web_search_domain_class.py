@@ -20,6 +20,7 @@ ADR-0056 explicitly chose this over LLM-based classification for v1.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from enum import StrEnum
 from urllib.parse import urlparse
@@ -361,8 +362,54 @@ def authority_bonus(cls: DomainClass) -> float:
     return _AUTHORITY_BONUS.get(cls, 0.0)
 
 
+# ── Content-declared affiliation disclaimers (#1842) ──────────────────
+#
+# ``classify_domain`` only inspects the URL. A page served from an
+# official-LOOKING domain (e.g. ``platform.kimi.ai``) can still
+# self-identify as third-party/unofficial in its body — and the next67
+# trial showed the model laundering exactly such a page into "the
+# official Kimi API Platform". These patterns capture a source's own
+# statement that it is NOT official/affiliated, so the pipeline can
+# surface it next to the citation (see _web_search_synthesiser and
+# _web_search_format). Detection is intentionally conservative —
+# self-referential disclaimer phrasings only — and is a soft *signal*
+# (a surfaced label), never a hard drop.
+_AFFILIATION_DISCLAIMER_RES: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\bnot\s+affiliated\s+with\b", re.IGNORECASE),
+    re.compile(r"\bno\s+affiliation\s+with\b", re.IGNORECASE),
+    re.compile(r"\bnot\s+(?:an\s+)?official\b", re.IGNORECASE),
+    re.compile(r"\bunofficial\b", re.IGNORECASE),
+    re.compile(r"\bnot\s+endorsed\s+by\b", re.IGNORECASE),
+    re.compile(r"\bnot\s+(?:operated|sponsored|owned|run)\s+by\b", re.IGNORECASE),
+    re.compile(
+        r"\bindependent\b.{0,40}?\b(?:guide|site|web\s*site|website|resource|"
+        r"fan[\s-]?site|blog|directory|tracker|wiki|portal|project|destination)\b",
+        re.IGNORECASE | re.DOTALL,
+    ),
+)
+
+
+def detect_affiliation_disclaimer(text: str) -> str | None:
+    """Return the first self-affiliation-disclaimer phrase found in *text*,
+    or ``None`` if the content makes no such statement.
+
+    A non-None result means the source's own text declares it is not the
+    official / affiliated source for its subject — a strong signal that it
+    must not be presented to the user as authoritative/official, even if
+    its domain looks official.
+    """
+    if not text:
+        return None
+    for rx in _AFFILIATION_DISCLAIMER_RES:
+        m = rx.search(text)
+        if m:
+            return m.group(0).strip()
+    return None
+
+
 __all__ = [
     "DomainClass",
     "authority_bonus",
     "classify_domain",
+    "detect_affiliation_disclaimer",
 ]

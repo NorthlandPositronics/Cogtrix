@@ -282,3 +282,42 @@ class TestCitationCap:
 def test_output_ends_with_newline() -> None:
     out = format_output(_state())
     assert out.endswith("\n")
+
+
+class TestAffiliationDisclaimerSurfacing:
+    """#1842 — a source whose own text disclaims affiliation must be
+    flagged in the agent-facing Sources index so the model can't present
+    an official-looking-but-unaffiliated page as authoritative."""
+
+    DISCLAIMER_TEXT = (
+        "Kimi-AI.chat is an independent English guide. It is not affiliated "
+        "with, endorsed by, or operated by Moonshot AI or the official Kimi "
+        "API Platform."
+    )
+
+    def test_disclaimer_source_is_flagged(self) -> None:
+        out = format_output(
+            _state(
+                extracted=[_extracted("https://platform.kimi.ai/docs", text=self.DISCLAIMER_TEXT)]
+            )
+        )
+        assert "UNAFFILIATED" in out
+        assert "not an official source" in out
+
+    def test_neutral_source_not_flagged(self) -> None:
+        out = format_output(
+            _state(extracted=[_extracted("https://example.com/a", text="Neutral factual content.")])
+        )
+        assert "UNAFFILIATED" not in out
+
+    def test_only_disclaimer_source_flagged_among_many(self) -> None:
+        out = format_output(
+            _state(
+                extracted=[
+                    _extracted("https://example.com/clean", text="Just normal documentation."),
+                    _extracted("https://platform.kimi.ai/docs", text=self.DISCLAIMER_TEXT),
+                ]
+            )
+        )
+        # Exactly one UNAFFILIATED marker, attached under the kimi source.
+        assert out.count("UNAFFILIATED") == 1

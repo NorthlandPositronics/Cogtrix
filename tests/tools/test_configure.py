@@ -364,3 +364,60 @@ class TestConfigureLoggingOnImportError:
             sys.modules.pop(key, None)
             if prior is not None:
                 sys.modules[key] = prior
+
+
+class TestRequestToolsQueryRecovery:
+    """Regression for bug #1839 (secondary root cause): a stray ``query``
+    must not silently no-op. Either it names a real tool (forgiving load)
+    or it produces a loud 'nothing loaded' signal — never a catalog dump
+    that the model mistakes for success."""
+
+    def test_query_naming_a_tool_loads_it(self):
+        from src.tools.configure import create_request_tools_tool
+
+        available = {"web_search": MagicMock(description="Search the web")}
+        catalog = {"web_search": "Search the web"}
+        tool = create_request_tools_tool(available, catalog)
+
+        result = tool.invoke({"query": "web_search"})
+
+        # The stray `query` was routed through the `add` path — "Tools loaded:"
+        # is only emitted when valid_add is non-empty, which here can only
+        # happen via the forgiving recovery (no `add` was passed).
+        assert "Tools loaded:" in result
+        assert "web_search" in result
+        # And the agent is nudged toward the correct call shape next time.
+        assert "add=" in result
+
+    def test_query_description_without_index_is_loud_noop(self):
+        from src.tools.configure import create_request_tools_tool
+
+        # The exact malformed call from the next66 trial run, no semantic index.
+        available = {"web_search": MagicMock(description="Search the web")}
+        catalog = {"web_search": "Search the web"}
+        tool = create_request_tools_tool(available, catalog, tool_index=None)
+
+        result = tool.invoke({"query": "current stock price financial data"})
+
+        # Must NOT load anything and must NOT masquerade as success.
+        assert "web_search" in available  # nothing was loaded
+        assert "Nothing was loaded" in result
+        assert "add=" in result
+        # Regression guard: the old behaviour dumped the catalog header as if OK.
+        assert "Tools you can ADD" not in result
+
+    def test_query_description_with_index_is_loud_noop(self):
+        from src.tools.configure import create_request_tools_tool
+
+        index = MagicMock()
+        index.search.return_value = ["web_search"]
+        available = {"web_search": MagicMock(description="Search the web")}
+        catalog = {"web_search": "Search the web"}
+        tool = create_request_tools_tool(available, catalog, tool_index=index)
+
+        result = tool.invoke({"query": "find me something to search the web"})
+
+        assert "Nothing was loaded" in result
+        assert "web_search" in result  # listed as a candidate
+        assert "web_search" in available  # but not actually loaded
+        assert "add=" in result

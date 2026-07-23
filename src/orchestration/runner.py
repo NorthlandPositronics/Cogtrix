@@ -7,6 +7,7 @@ and phantom-call detection.
 
 from __future__ import annotations
 
+import re
 import threading
 import time
 from collections import OrderedDict
@@ -74,6 +75,75 @@ _SIMPLE_PRELOAD_TOOLS: tuple[str, ...] = (
     "read_file",
     "get_current_datetime",
 )
+
+# Real-time / recency markers (bug #1839). The task-complexity classifier
+# scores *linguistic* complexity, so a short factual question like
+# "What's the current Apple stock price?" lands in SIMPLE and never gets
+# `web_search` auto-loaded — leaving the agent to deflect with "I don't
+# have real-time data". These markers add an orthogonal *information-
+# recency* signal: when a prompt is asking for fresh external data, the
+# retrieval tool set is force-loaded regardless of complexity score.
+# Kept high-precision (strong temporal markers + clear real-time domains)
+# so we don't pay web_search's subprocess cost on ordinary prompts.
+_REALTIME_QUERY_MARKERS = re.compile(
+    r"\b("
+    r"current(?:ly)?|latest|most[ -]recent|today'?s?|tonight|"
+    r"right[ -]now|as[ -]of[ -](?:now|today|this)|"
+    r"this[ -](?:week|month|year|morning|afternoon|evening)|"
+    r"up[ -]?to[ -]?date|real[ -]?time|"
+    r"stock|share[ -]price|\bquote\b|exchange[ -]rate|"
+    r"weather|forecast|\bnews\b|headlines|\bscores?\b"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def _query_needs_realtime_data(prompt: str) -> bool:
+    """Heuristic: does the prompt ask for information past the model's
+    training cutoff (current prices, today's weather, latest news, …)?
+
+    Orthogonal to task complexity — a recency-dependent prompt can be
+    linguistically trivial yet still require web retrieval. See bug #1839.
+    """
+    if not prompt:
+        return False
+    return _REALTIME_QUERY_MARKERS.search(prompt) is not None
+
+
+def _auto_load_web_search(config: AgentRunConfig) -> bool:
+    """Move ``web_search`` from the on-demand catalog into the active set.
+
+    Shared by the COMPLEX-task path and the real-time-query path so the
+    agent has web research from the first round without a ``request_tools``
+    round-trip. The modern ``web_search`` tool is subprocess-isolated for
+    the DDG provider (Bug D); the legacy in-process ``search_web`` name was
+    retired by PR-G and must never be auto-loaded — see the comment on
+    ``_SIMPLE_PRELOAD_TOOLS`` above.
+
+    Returns ``True`` only when the tool was actually moved into the active
+    set; ``False`` when it was already active, unavailable, or failed to
+    resolve (so callers can log accurately).
+    """
+    avail = config.available_tools
+    active = config.active_tools_list
+    if not avail or active is None or "web_search" not in avail:
+        return False
+    if any(getattr(t, "name", "") == "web_search" for t in active):
+        return False
+    search_tool = avail.pop("web_search")
+    # Resolve LazyToolProxy before adding to active tools — bind_tools()
+    # requires real StructuredTool objects.
+    if hasattr(search_tool, "_resolve"):
+        try:
+            search_tool = search_tool._resolve()
+        except Exception as exc:
+            get_logger().warning("Failed to resolve web_search tool: %s", exc)
+            avail["web_search"] = search_tool
+            return False
+    if search_tool is None:
+        return False
+    active.append(search_tool)
+    return True
 
 
 def advance_llm_generation() -> None:
@@ -926,34 +996,21 @@ def run_agent(
 
         if _complexity == TaskComplexity.SIMPLE:
             _auto_load_simple_tools(config)
+            # A SIMPLE-classified prompt can still need fresh external data
+            # (e.g. "What's the current Apple stock price?"). Force-load the
+            # retrieval set on a recency signal so the agent doesn't deflect
+            # for lack of a search tool (bug #1839).
+            if _query_needs_realtime_data(user_input) and _auto_load_web_search(config):
+                get_logger().info("Auto-loaded web_search for real-time query")
 
         # Auto-load `web_search` for complex tasks so the agent has web
         # research available from the first round without needing to call
         # `request_tools`. Addresses the RBA (Research-Before-Action) gap
         # where agents skip loading search when they're confident in
-        # training data. The modern `web_search` tool is subprocess-
-        # isolated for the DDG provider (Bug D); the legacy `search_web`
-        # tool name was retired by PR-G and must not be auto-loaded —
-        # see the comment on `_SIMPLE_PRELOAD_TOOLS` above.
+        # training data.
         elif _complexity in (TaskComplexity.COMPLEX_ACTION, TaskComplexity.COMPLEX_RESEARCH):
-            _avail = config.available_tools
-            _active = config.active_tools_list
-            if _avail and _active is not None and "web_search" in _avail:
-                _active_names_set = {getattr(t, "name", "") for t in _active}
-                if "web_search" not in _active_names_set:
-                    _search_tool = _avail.pop("web_search")
-                    # Resolve LazyToolProxy before adding to active tools —
-                    # bind_tools() requires real StructuredTool objects.
-                    if hasattr(_search_tool, "_resolve"):
-                        try:
-                            _search_tool = _search_tool._resolve()
-                        except Exception as exc:
-                            get_logger().warning("Failed to resolve web_search tool: %s", exc)
-                            _avail["web_search"] = _search_tool
-                            _search_tool = None
-                    if _search_tool is not None:
-                        _active.append(_search_tool)
-                        get_logger().info("Auto-loaded web_search for complex task")
+            if _auto_load_web_search(config):
+                get_logger().info("Auto-loaded web_search for complex task")
 
     # ── Task ownership classification ──────────────────────────────────────
     if getattr(config, "task_ownership_classifier_enabled", True):

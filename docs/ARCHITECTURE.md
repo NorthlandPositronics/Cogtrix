@@ -1615,7 +1615,7 @@ config block.
 
 ## Dependencies
 
-Dependencies are managed via `pyproject.toml` (with `uv`) and exported to `requirements.txt` for pip compatibility.
+Dependencies are managed via `pyproject.toml` + `uv.lock` (with `uv`). For pip compatibility, export a requirements file on demand with `uv export --no-dev --no-hashes -o requirements.txt` — it is not committed, since it is a generated artifact derived from `uv.lock`.
 
 ### Core
 

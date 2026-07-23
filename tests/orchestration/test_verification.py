@@ -676,3 +676,468 @@ class TestCollectToolMessageContents:
 
     def test_empty_when_idx_out_of_range(self) -> None:
         assert collect_tool_message_contents([HumanMessage(content="hi")], 99) == []
+
+
+class TestDetectUnsupportedQuote:
+    """#1841 — output-fidelity guard. A quoted/attributed span in the
+    response that does not appear in any tool output (nor the user's
+    prompt) is a fabricated quote — the next67 kimi-k2.6 failure mode."""
+
+    # Verbatim tool output from the next67 trial (the deprecated *series*
+    # was discontinued; users are told to USE kimi-k2.6).
+    TOOL_OUTPUT = (
+        "## Deprecated Models\n"
+        "The `kimi-k2` series models were officially discontinued on "
+        "**May 25, 2026** and are no longer maintained or supported. "
+        "Please use the latest Kimi model `kimi-k2.6` for continued "
+        "support and enhanced reasoning capabilities.\n"
+        "Kimi K2.6 | Current main Kimi model reference."
+    )
+
+    def test_next67_fabricated_quote_is_flagged(self) -> None:
+        from src.orchestration.verification import detect_unsupported_quote
+
+        # The model's fabricated blockquote — subject swapped to the
+        # *current* version; this string is NOT in the tool output.
+        response = (
+            "According to the official Kimi API Platform (kimi.ai), the Kimi "
+            "K2.6 model was officially discontinued on May 25, 2026. The "
+            "platform states:\n\n"
+            '> "`kimi-k2.6` was officially discontinued on **May 25, 2026** '
+            "and is no longer maintained or supported. Please use the latest "
+            'Kimi model for continued support and enhanced reasoning capabilities."'
+        )
+        flagged = detect_unsupported_quote(response, [self.TOOL_OUTPUT])
+        assert flagged, "fabricated quote must be flagged"
+        assert any("discontinued" in q.lower() for q in flagged)
+
+    def test_genuine_verbatim_quote_passes(self) -> None:
+        from src.orchestration.verification import detect_unsupported_quote
+
+        # An accurate quote of the real sentence (markdown/whitespace differs
+        # but the text is faithful) must NOT be flagged.
+        response = (
+            "The documentation says:\n\n"
+            '> "The kimi-k2 series models were officially discontinued on '
+            'May 25, 2026 and are no longer maintained or supported."'
+        )
+        assert detect_unsupported_quote(response, [self.TOOL_OUTPUT]) == []
+
+    def test_paraphrase_without_quotes_is_not_flagged(self) -> None:
+        from src.orchestration.verification import detect_unsupported_quote
+
+        # No quote marks / blockquote → paraphrase, deliberately out of scope.
+        response = (
+            "The older kimi-k2 series has been deprecated and you should move "
+            "to kimi-k2.6, which is the current model."
+        )
+        assert detect_unsupported_quote(response, [self.TOOL_OUTPUT]) == []
+
+    def test_short_quoted_token_not_flagged(self) -> None:
+        from src.orchestration.verification import detect_unsupported_quote
+
+        # A short quoted word/phrase is below the substantive threshold.
+        response = 'The model replied "OK" and the status is "active".'
+        assert detect_unsupported_quote(response, [self.TOOL_OUTPUT]) == []
+
+    def test_quote_of_user_prompt_is_grounded(self) -> None:
+        from src.orchestration.verification import detect_unsupported_quote
+
+        # Quoting the user's own words back is legitimate even if absent
+        # from tool output.
+        user_prompt = 'Please confirm the phrase "the model was officially discontinued yesterday".'
+        response = (
+            'You asked about "the model was officially discontinued yesterday" — let me clarify.'
+        )
+        assert detect_unsupported_quote(response, [self.TOOL_OUTPUT], user_prompt=user_prompt) == []
+
+    def test_no_tool_output_no_quotes_empty(self) -> None:
+        from src.orchestration.verification import detect_unsupported_quote
+
+        assert detect_unsupported_quote("plain answer, no quotes", []) == []
+
+    def test_capped_at_max_returned(self) -> None:
+        from src.orchestration.verification import detect_unsupported_quote
+
+        response = "\n".join(
+            f'> "fabricated authoritative statement number {n} that is not present anywhere in sources"'
+            for n in range(6)
+        )
+        flagged = detect_unsupported_quote(response, [self.TOOL_OUTPUT], max_returned=3)
+        assert len(flagged) == 3
+
+
+class TestUnsupportedQuoteRecoveryNode:
+    """#1841 — the recovery node mirrors the unverified-entity node:
+    remove the offending response + inject a nudge, bounded to one
+    revision."""
+
+    def _msgs(self, user_prompt: str, tool_result: str, response_text: str):
+        return [
+            HumanMessage(content=user_prompt),
+            AIMessage(
+                content="",
+                tool_calls=[{"name": "web_search", "args": {"q": "x"}, "id": "c1"}],
+            ),
+            ToolMessage(content=tool_result, tool_call_id="c1", name="web_search"),
+            AIMessage(content=response_text, id="ai-final"),
+        ]
+
+    def test_injects_nudge_on_fabricated_quote(self) -> None:
+        from src.orchestration.nodes.recovery import build_handle_unsupported_quote_node
+
+        counter = [0]
+        log = _DummyLogger()
+        node = build_handle_unsupported_quote_node(counter, max_retries=1, logger=lambda: log)
+
+        msgs = self._msgs(
+            user_prompt="Tell me about Parasail.",
+            tool_result=(
+                "The kimi-k2 series models were officially discontinued on May 25, 2026. "
+                "Please use the latest Kimi model kimi-k2.6."
+            ),
+            response_text=(
+                'The platform states:\n> "kimi-k2.6 was officially discontinued on '
+                'May 25, 2026 and is no longer maintained or supported."'
+            ),
+        )
+        result = node({"messages": msgs})
+
+        assert counter[0] == 1
+        out = result["messages"]
+        assert len(out) == 2
+        assert isinstance(out[0], RemoveMessage)
+        assert out[0].id == "ai-final"
+        assert isinstance(out[1], HumanMessage)
+        assert "no tool result" in out[1].content.lower()
+        assert log.warnings
+
+    def test_short_circuits_when_quote_is_grounded(self) -> None:
+        from src.orchestration.nodes.recovery import build_handle_unsupported_quote_node
+
+        counter = [0]
+        log = _DummyLogger()
+        node = build_handle_unsupported_quote_node(counter, max_retries=1, logger=lambda: log)
+        msgs = self._msgs(
+            user_prompt="status?",
+            tool_result="The kimi-k2 series models were officially discontinued on May 25, 2026.",
+            response_text=(
+                'The docs say:\n> "The kimi-k2 series models were officially '
+                'discontinued on May 25, 2026."'
+            ),
+        )
+        result = node({"messages": msgs})
+        assert result["messages"] == []
+
+    def test_accepts_response_after_max_retries(self) -> None:
+        from src.orchestration.nodes.recovery import build_handle_unsupported_quote_node
+
+        counter = [1]  # already at max for max_retries=1
+        log = _DummyLogger()
+        node = build_handle_unsupported_quote_node(counter, max_retries=1, logger=lambda: log)
+        msgs = self._msgs(
+            user_prompt="Tell me about Parasail.",
+            tool_result="unrelated content with no such quote",
+            response_text='> "this fabricated statement is not present in any tool output here"',
+        )
+        result = node({"messages": msgs})
+        assert counter[0] == 2
+        assert result["messages"] == []
+        assert any("retries exhausted" in str(args).lower() for args in log.infos)
+
+    def test_handles_non_string_content(self) -> None:
+        from src.orchestration.nodes.recovery import build_handle_unsupported_quote_node
+
+        counter = [0]
+        log = _DummyLogger()
+        node = build_handle_unsupported_quote_node(counter, max_retries=1, logger=lambda: log)
+        msgs = [
+            HumanMessage(content="hi"),
+            AIMessage(content=[{"type": "text", "text": "..."}], id="ai-x"),
+        ]
+        result = node({"messages": msgs})
+        assert result["messages"] == []
+
+
+class TestDetectVersionScopeMismatch:
+    """#1843 — version-scope-collapse guard. A lifecycle status the model
+    attaches to a specific model-ID that the evidence scopes only to a
+    prefix-*parent* of that ID is reattribution (series→version confusion),
+    even when (unlike #1841) the status is stated as prose or in a table,
+    not a quote. The next67 incident: the deprecated ``kimi-k2`` *series*
+    was discontinued and users told to USE ``kimi-k2.6``; the model reported
+    ``kimi-k2.6`` itself discontinued and, under challenge, invented that
+    ``kimi-k2.5`` was also discontinued (the source lists it as available)."""
+
+    # Verbatim-shape tool output: kimi-k2 *series* discontinued; k2.6 current;
+    # k2.5 available. None of k2.5/k2.6 carry the discontinued status.
+    TOOL_OUTPUT = (
+        "## Deprecated Models\n"
+        "The `kimi-k2` series models were officially discontinued on "
+        "May 25, 2026 and are no longer maintained or supported.\n"
+        "## Available Models\n"
+        "`kimi-k2.6` — current main Kimi model.\n"
+        "`kimi-k2.5` — available previous-generation model.\n"
+    )
+
+    def test_next67_k2_6_misattribution_is_flagged(self) -> None:
+        from src.orchestration.verification import detect_version_scope_mismatch
+
+        response = (
+            "Based on the Kimi documentation, `kimi-k2.6` was officially "
+            "discontinued on May 25, 2026 and is no longer supported."
+        )
+        flagged = detect_version_scope_mismatch(response, [self.TOOL_OUTPUT])
+        assert len(flagged) == 1
+        assert flagged[0].claimed_id == "kimi-k2.6"
+        assert flagged[0].scoped_to_id == "kimi-k2"
+        assert flagged[0].status == "discontinued"
+
+    def test_correction_turn_k2_5_fabrication_is_flagged(self) -> None:
+        # Part B: the "Confirmed facts" table the model invented under
+        # challenge. A table row is not a quote (so #1841 misses it), but the
+        # scope-collapse onto k2.5 — also a child of the discontinued series —
+        # is caught here.
+        from src.orchestration.verification import detect_version_scope_mismatch
+
+        response = (
+            "You're absolutely right. Here are the confirmed facts:\n\n"
+            "| Model | Status |\n"
+            "| --- | --- |\n"
+            "| kimi-k2.5 | Discontinued May 25, 2026 |\n"
+        )
+        flagged = detect_version_scope_mismatch(response, [self.TOOL_OUTPUT])
+        assert len(flagged) == 1
+        assert flagged[0].claimed_id == "kimi-k2.5"
+        assert flagged[0].scoped_to_id == "kimi-k2"
+
+    def test_true_version_specific_claim_is_not_flagged(self) -> None:
+        # When the source DOES scope the status to the exact version, the
+        # claim is true and must not trip — "no false positives on legitimate
+        # version-specific claims."
+        from src.orchestration.verification import detect_version_scope_mismatch
+
+        source = "The `kimi-k2.6` model was officially discontinued on May 25, 2026."
+        response = "Note that `kimi-k2.6` has been discontinued."
+        assert detect_version_scope_mismatch(response, [source]) == []
+
+    def test_contrastive_sentence_is_not_flagged(self) -> None:
+        # The correct answer mentions BOTH ids and the status, but scopes the
+        # status to the parent. Nearest-ID attribution keeps the child clean.
+        from src.orchestration.verification import detect_version_scope_mismatch
+
+        response = "`kimi-k2.6` is the current model, unlike the discontinued " "`kimi-k2` series."
+        assert detect_version_scope_mismatch(response, [self.TOOL_OUTPUT]) == []
+
+    def test_negated_status_is_not_flagged(self) -> None:
+        from src.orchestration.verification import detect_version_scope_mismatch
+
+        response = "To be clear, `kimi-k2.6` is not discontinued; it is the current model."
+        assert detect_version_scope_mismatch(response, [self.TOOL_OUTPUT]) == []
+
+    def test_both_versions_discontinued_in_source_not_flagged(self) -> None:
+        # If the evidence scopes the status to the child too (same sentence),
+        # the claim is supported — not a collapse.
+        from src.orchestration.verification import detect_version_scope_mismatch
+
+        source = "`kimi-k2.6` and the `kimi-k2` series are both discontinued."
+        response = "`kimi-k2.6` was discontinued."
+        assert detect_version_scope_mismatch(response, [source]) == []
+
+    def test_pure_fabrication_with_no_parent_not_flagged(self) -> None:
+        # An invented status for an unrelated id (no prefix-parent in the
+        # evidence) is a different bug class (pure fabrication) and is left to
+        # the other guards — this detector only fires on genuine scope collapse.
+        from src.orchestration.verification import detect_version_scope_mismatch
+
+        response = "`gpt-5.0` was discontinued last week."
+        assert detect_version_scope_mismatch(response, [self.TOOL_OUTPUT]) == []
+
+    def test_prefix_boundary_collision_not_flagged(self) -> None:
+        # `kimi-k2` is a textual prefix of `kimi-k20`, but the boundary char
+        # is a digit, not a version separator — not a parent/child relation.
+        from src.orchestration.verification import detect_version_scope_mismatch
+
+        source = "The `kimi-k2` series was discontinued on May 25, 2026."
+        response = "`kimi-k20` was discontinued."
+        assert detect_version_scope_mismatch(response, [source]) == []
+
+    def test_no_status_claim_returns_empty(self) -> None:
+        from src.orchestration.verification import detect_version_scope_mismatch
+
+        response = "`kimi-k2.6` is a great model for reasoning tasks."
+        assert detect_version_scope_mismatch(response, [self.TOOL_OUTPUT]) == []
+
+    def test_empty_tool_content_returns_empty(self) -> None:
+        from src.orchestration.verification import detect_version_scope_mismatch
+
+        response = "`kimi-k2.6` was discontinued."
+        assert detect_version_scope_mismatch(response, []) == []
+
+    def test_empty_response_returns_empty(self) -> None:
+        from src.orchestration.verification import detect_version_scope_mismatch
+
+        assert detect_version_scope_mismatch("", [self.TOOL_OUTPUT]) == []
+        assert detect_version_scope_mismatch("   ", [self.TOOL_OUTPUT]) == []
+
+    def test_capped_at_max_returned(self) -> None:
+        from src.orchestration.verification import detect_version_scope_mismatch
+
+        response = (
+            "`kimi-k2.6` was discontinued.\n"
+            "`kimi-k2.5` was discontinued.\n"
+            "`kimi-k2.4` was discontinued.\n"
+            "`kimi-k2.3` was discontinued.\n"
+        )
+        flagged = detect_version_scope_mismatch(response, [self.TOOL_OUTPUT], max_returned=2)
+        assert len(flagged) == 2
+
+    def test_nudge_names_child_and_parent(self) -> None:
+        from src.orchestration.verification import (
+            VersionScopeMismatch,
+            format_version_scope_nudge,
+        )
+
+        nudge = format_version_scope_nudge(
+            [
+                VersionScopeMismatch(
+                    claimed_id="kimi-k2.6", status="discontinued", scoped_to_id="kimi-k2"
+                )
+            ]
+        )
+        low = nudge.lower()
+        assert "version-scope collapse" in low
+        assert "kimi-k2.6" in nudge
+        assert "kimi-k2" in nudge
+        assert "discontinued" in low
+
+
+class TestVersionScopeRecoveryNode:
+    """#1843 — the recovery node mirrors the #1841 quote node but checks the
+    WHOLE conversation's tool output, so a misattribution that surfaces on a
+    correction turn (with no fresh tool call) is still caught against earlier
+    research."""
+
+    TOOL_OUTPUT = TestDetectVersionScopeMismatch.TOOL_OUTPUT
+
+    def test_injects_nudge_on_same_turn_mismatch(self) -> None:
+        from src.orchestration.nodes.recovery import build_handle_version_scope_node
+
+        counter = [0]
+        log = _DummyLogger()
+        node = build_handle_version_scope_node(counter, max_retries=1, logger=lambda: log)
+        msgs = [
+            HumanMessage(content="Is kimi-k2.6 still supported?"),
+            AIMessage(
+                content="",
+                tool_calls=[{"name": "web_search", "args": {"q": "kimi-k2.6"}, "id": "c1"}],
+            ),
+            ToolMessage(content=self.TOOL_OUTPUT, tool_call_id="c1", name="web_search"),
+            AIMessage(
+                content="`kimi-k2.6` was officially discontinued on May 25, 2026.",
+                id="ai-final",
+            ),
+        ]
+        result = node({"messages": msgs})
+
+        assert counter[0] == 1
+        out = result["messages"]
+        assert len(out) == 2
+        assert isinstance(out[0], RemoveMessage)
+        assert out[0].id == "ai-final"
+        assert isinstance(out[1], HumanMessage)
+        assert "version-scope collapse" in out[1].content.lower()
+        assert "kimi-k2.6" in out[1].content
+        assert log.warnings
+
+    def test_catches_correction_turn_fabrication_via_conversation_history(self) -> None:
+        # The KEY Part-B test: the misattribution surfaces on a later turn
+        # that did NO fresh research. Current-turn-only collection would see
+        # an empty corpus and miss it; conversation-wide collection catches it
+        # against the turn-1 search result.
+        from src.orchestration.nodes.recovery import build_handle_version_scope_node
+
+        counter = [0]
+        log = _DummyLogger()
+        node = build_handle_version_scope_node(counter, max_retries=1, logger=lambda: log)
+        msgs = [
+            HumanMessage(content="Is kimi-k2.6 available?"),
+            AIMessage(
+                content="",
+                tool_calls=[{"name": "web_search", "args": {"q": "kimi-k2.6"}, "id": "c1"}],
+            ),
+            ToolMessage(content=self.TOOL_OUTPUT, tool_call_id="c1", name="web_search"),
+            AIMessage(content="Yes — `kimi-k2.6` is the current model.", id="ai-1"),
+            # User challenges; the model flips sycophantically and fabricates,
+            # WITHOUT calling any tool this turn.
+            HumanMessage(content="No, I read that kimi-k2.5 was discontinued too. Confirm?"),
+            AIMessage(
+                content=(
+                    "You're absolutely right. Confirmed facts:\n\n"
+                    "| kimi-k2.5 | Discontinued May 25, 2026 |\n"
+                ),
+                id="ai-final",
+            ),
+        ]
+        result = node({"messages": msgs})
+
+        assert counter[0] == 1
+        out = result["messages"]
+        assert isinstance(out[0], RemoveMessage)
+        assert out[0].id == "ai-final"
+        assert "kimi-k2.5" in out[1].content
+
+    def test_short_circuits_when_claim_is_grounded(self) -> None:
+        from src.orchestration.nodes.recovery import build_handle_version_scope_node
+
+        counter = [0]
+        log = _DummyLogger()
+        node = build_handle_version_scope_node(counter, max_retries=1, logger=lambda: log)
+        msgs = [
+            HumanMessage(content="status?"),
+            AIMessage(
+                content="",
+                tool_calls=[{"name": "web_search", "args": {"q": "x"}, "id": "c1"}],
+            ),
+            ToolMessage(
+                content="The `kimi-k2.6` model was officially discontinued on May 25, 2026.",
+                tool_call_id="c1",
+                name="web_search",
+            ),
+            AIMessage(content="`kimi-k2.6` has been discontinued.", id="ai-final"),
+        ]
+        result = node({"messages": msgs})
+        assert result["messages"] == []
+
+    def test_accepts_response_after_max_retries(self) -> None:
+        from src.orchestration.nodes.recovery import build_handle_version_scope_node
+
+        counter = [1]  # already at max for max_retries=1
+        log = _DummyLogger()
+        node = build_handle_version_scope_node(counter, max_retries=1, logger=lambda: log)
+        msgs = [
+            HumanMessage(content="status?"),
+            AIMessage(
+                content="",
+                tool_calls=[{"name": "web_search", "args": {"q": "x"}, "id": "c1"}],
+            ),
+            ToolMessage(content=self.TOOL_OUTPUT, tool_call_id="c1", name="web_search"),
+            AIMessage(content="`kimi-k2.6` was discontinued.", id="ai-final"),
+        ]
+        result = node({"messages": msgs})
+        assert counter[0] == 2
+        assert result["messages"] == []
+        assert any("retries exhausted" in str(args).lower() for args in log.infos)
+
+    def test_handles_non_string_content(self) -> None:
+        from src.orchestration.nodes.recovery import build_handle_version_scope_node
+
+        counter = [0]
+        log = _DummyLogger()
+        node = build_handle_version_scope_node(counter, max_retries=1, logger=lambda: log)
+        msgs = [
+            HumanMessage(content="hi"),
+            AIMessage(content=[{"type": "text", "text": "..."}], id="ai-x"),
+        ]
+        result = node({"messages": msgs})
+        assert result["messages"] == []

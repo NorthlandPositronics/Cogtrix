@@ -331,23 +331,31 @@ class TestRequestToolsQuery:
             tool_index=tool_index,
         )
 
-    def test_query_with_tool_index_returns_semantic_results(self):
+    def test_query_with_tool_index_lists_results_as_loud_noop(self):
+        # A `query` (semantic description) still surfaces relevant tools, but
+        # the response now makes clear nothing was loaded and points at the
+        # `add=[...]` call shape — so the model can't mistake a search for a
+        # successful load (bug #1839).
         idx_mock = MagicMock()
         idx_mock.search.return_value = ["send_email", "web_search"]
 
         tool = self._make_tool(tool_index=idx_mock)
         result = tool.func(query="send an email")
 
-        assert "send_email" in result
-        assert "Semantic search results" in result
+        assert "send_email" in result  # candidates still listed
+        assert "Nothing was loaded" in result
+        assert "add=" in result
         idx_mock.search.assert_called_once_with("send an email", k=8)
 
-    def test_query_with_no_tool_index_falls_back_to_full_catalog(self):
+    def test_query_with_no_tool_index_is_loud_noop(self):
+        # No semantic index: a bare `query` can't search and loads nothing.
+        # The response must say so explicitly instead of dumping the catalog
+        # as if the call succeeded (bug #1839).
         tool = self._make_tool(tool_index=None)
         result = tool.func(query="send an email")
 
-        # Should fall through to full catalog listing
-        assert "Tools you can ADD" in result
+        assert "Nothing was loaded" in result
+        assert "add=" in result
 
     def test_add_wins_over_query(self):
         idx_mock = MagicMock()

@@ -82,10 +82,21 @@ mypy_report/
 settings/
 
 # ── Retired directories — deliberately excluded ──────────────────
-# scripts/ was removed in 583450f (the cogtrix-task.sh Docker
-# wrapper).  Listed here so the directory cannot reappear via
-# accidental ``git add``.
-scripts/
+# /scripts/ was removed in 583450f (the cogtrix-task.sh Docker
+# wrapper).  Listed here so the top-level directory cannot
+# reappear via accidental ``git add``.  Anchored to the repo root
+# with a leading slash so it does NOT block ``.github/scripts/``
+# (the CI helper scripts that back the GitHub Actions workflows).
+/scripts/
+
+# ── Generated artifacts — never commit ───────────────────────────
+# requirements.txt is a generated pip-compatibility export of
+# uv.lock (``uv export --no-dev --no-hashes -o requirements.txt``),
+# NOT a source of truth.  It was decommitted in #1823 because
+# Dependabot's uv ecosystem kept editing this generated file
+# instead of uv.lock, producing untested no-op PRs.  Generate it
+# locally on demand if you need a pip file; do not commit it.
+/requirements.txt
 
 # ── Local scratch dir ────────────────────────────────────────────
 # .tmp/ accumulates stale logs and ad-hoc test data during local

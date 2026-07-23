@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from src.memory.summarizer import generate_summary
+from src.tools._web_search_domain_class import detect_affiliation_disclaimer
 from src.tools._web_search_extractor import ExtractedSource
 
 log = logging.getLogger("cogtrix")
@@ -218,6 +219,17 @@ def _format_human_prompt(query: str, extracts: list[ExtractedSource]) -> Any:
         recency = ranked.published_date or "undated"
         header = f"【{citation}】 {domain} [{ranked.domain_class} · {recency}]"
         lines.append(header)
+        # #1842: surface a content-declared affiliation disclaimer so the
+        # synthesis does not present an unaffiliated/unofficial source as
+        # authoritative. classify_domain only sees the URL — this catches
+        # an official-LOOKING domain whose own text disclaims affiliation.
+        disclaimer = detect_affiliation_disclaimer(source.extracted_text or "")
+        if disclaimer:
+            lines.append(
+                f"⚠ AUTHORITY: this source self-identifies as UNAFFILIATED/UNOFFICIAL "
+                f'("{disclaimer}") — do NOT describe it as an official source or '
+                f"attribute statements to an official platform based on it."
+            )
         lines.append(f"Title: {ranked.title or '(no title)'}")
         lines.append("")
         body = source.extracted_text or "(no content available — snippet only)"

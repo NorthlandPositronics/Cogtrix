@@ -387,9 +387,7 @@ class ToolRegistry:
             StructuredTool object or None if creation fails
         """
         if StructuredTool is None:
-            raise ImportError(
-                "LangChain is not installed. Please run: pip install -r requirements.txt"
-            )
+            raise ImportError("LangChain is not installed. Please run: uv sync")
 
         try:
             name = config.get("name", func.__name__)

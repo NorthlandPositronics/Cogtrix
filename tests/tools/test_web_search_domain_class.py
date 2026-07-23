@@ -232,3 +232,53 @@ class TestAuthorityBonus:
 
     def test_unknown_neutral(self) -> None:
         assert authority_bonus(DomainClass.UNKNOWN) == 0.0
+
+
+class TestDetectAffiliationDisclaimer:
+    """#1842 — content-declared (un)affiliation. classify_domain only sees
+    the URL; a page on an official-LOOKING domain can self-identify as
+    third-party in its body. This detector captures that so the pipeline
+    can surface it."""
+
+    def test_next67_kimi_guide_disclaimer(self) -> None:
+        from src.tools._web_search_domain_class import detect_affiliation_disclaimer
+
+        # The exact disclaimer from the next67 trial's fetched page.
+        text = (
+            "Independent site notice: Kimi-AI.chat is an independent English guide "
+            "and lightweight chat destination. It is not affiliated with, endorsed "
+            "by, sponsored by, or operated by Moonshot AI, Kimi.com, or the official "
+            "Kimi API Platform."
+        )
+        assert detect_affiliation_disclaimer(text) is not None
+
+    def test_common_disclaimer_phrasings(self) -> None:
+        from src.tools._web_search_domain_class import detect_affiliation_disclaimer
+
+        for text in (
+            "This is an unofficial fan site.",
+            "We are not affiliated with Acme Corp.",
+            "This page has no affiliation with the vendor.",
+            "Not endorsed by the manufacturer.",
+            "This site is not operated by the company.",
+            "An independent community guide to the product.",
+        ):
+            assert detect_affiliation_disclaimer(text) is not None, text
+
+    def test_neutral_content_not_flagged(self) -> None:
+        from src.tools._web_search_domain_class import detect_affiliation_disclaimer
+
+        for text in (
+            "The official documentation describes the API endpoints.",
+            "Python 3.13 was released with new features.",
+            "Our company provides enterprise support and SLAs.",
+            "",
+        ):
+            assert detect_affiliation_disclaimer(text) is None, text
+
+    def test_returns_the_matched_phrase(self) -> None:
+        from src.tools._web_search_domain_class import detect_affiliation_disclaimer
+
+        got = detect_affiliation_disclaimer("Note: not affiliated with Moonshot AI.")
+        assert got is not None
+        assert "not affiliated with" in got.lower()

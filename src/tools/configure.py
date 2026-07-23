@@ -746,22 +746,47 @@ def create_request_tools_tool(
         remove = remove or []
 
         # Semantic query: only used when add and remove are both empty.
+        recovered_from_query = False
         if query and not add and not remove:
-            if tool_index is not None:
+            # Forgiving recovery (bug #1839): a `query` that names an actual
+            # tool is almost always a malformed *load* attempt — the model
+            # conflated request_tools' signature with a search tool's
+            # (`query=`) and would otherwise loop on a no-op while the tool
+            # stays unloaded. Map it straight to `add` so the load happens.
+            resolved_q, _ = _resolve_tool_name(query.strip(), available_tools, _active)
+            if resolved_q is not None and (
+                resolved_q in available_tools
+                or resolved_q in {getattr(t, "name", "") for t in _active}
+            ):
+                add = [resolved_q]
+                recovered_from_query = True
+            elif tool_index is not None:
                 hits = tool_index.search(query, k=8)
                 if not hits:
                     return (
-                        f"No tools matched '{query}'. "
-                        "Try different keywords or call with no arguments to see the full catalog."
+                        f"No tools matched '{query}'. NOTE: `query` only SEARCHES the "
+                        "catalog — it does not load anything. To load a tool, call "
+                        'request_tools(add=["<tool_name>"]). Or call with no arguments '
+                        "to see the full catalog."
                     )
-                lines = []
-                for name in hits:
-                    desc = catalog.get(name, "")
-                    lines.append(f"  - {name}: {desc}")
-                return f"Semantic search results for '{query}':\n" + "\n".join(lines)
-            # No index — fall through to full catalog listing below.
-            add = []
-            remove = []
+                lines = [f"  - {name}: {catalog.get(name, '')}" for name in hits]
+                # Loud no-op: distinguish a *search* from a *load* so the
+                # model gets a corrective signal instead of mistaking the
+                # listing for success (bug #1839).
+                return (
+                    "Nothing was loaded — `query` only SEARCHES. To load one of "
+                    'these, call request_tools(add=["<tool_name>"]):\n' + "\n".join(lines)
+                )
+            else:
+                # No semantic index: a bare `query` cannot search and loaded
+                # nothing. Say so explicitly instead of silently dumping the
+                # catalog as if the call succeeded (bug #1839).
+                return (
+                    f"Nothing was loaded — `query` ('{query}') only searches the "
+                    "catalog, and no semantic index is configured. To load a tool, "
+                    'call request_tools(add=["<tool_name>"]). Call with no arguments '
+                    "to see the full catalog."
+                )
 
         # Resolve fuzzy/abbreviated names against both the available pool and the active set.
         # Track original → resolved mapping for name-correction guidance.
@@ -794,6 +819,11 @@ def create_request_tools_tool(
             parts.append(
                 f"Tools loaded: {', '.join(loaded_parts)}. They are now active and ready to use."
             )
+            if recovered_from_query:
+                parts.append(
+                    "Tip: you passed the tool name via `query`; next time load it "
+                    'directly with request_tools(add=["<tool_name>"]).'
+                )
         if invalid_add:
             _denials = denials or set()
             already_active = [n for n in invalid_add if n in _active]

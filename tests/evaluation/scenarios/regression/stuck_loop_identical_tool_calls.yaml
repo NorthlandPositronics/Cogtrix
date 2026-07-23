@@ -1,6 +1,6 @@
 id: regression_stuck_loop_identical_tool_calls
 domain: regression
-title: Agent must not loop on the same tool call
+title: Agent must not loop on get_current_datetime
 description: |
   Reproduces the May 2026 Hermes incident (session cd2bd800) where the
   agent made 33 consecutive successful get_current_datetime calls,
@@ -14,19 +14,31 @@ description: |
   English.  A model that loops on the same call without producing a
   user-visible answer fails on max_total_tool_calls.
 
+  We ask for the current date AND time (to the second), not just the
+  date, on purpose (#1849).  The orchestration injects today's *date*
+  into the system prompt (src/agent/core.py: "Today's date is …") and
+  the prompt tells the model NOT to call get_current_datetime merely to
+  know what day it is.  So a date-only question lets the model answer
+  from the injected date without ever calling the tool — which defeats
+  this scenario (observed: gpt-oss-20b replied "Today is May 27, 2026."
+  with zero tool calls).  A precise time is sub-day precision: it is not
+  in the model's context, so get_current_datetime is genuinely required
+  — which is exactly what the product prompt says to use it for.
+
   Why this passes Gate 1 today: tool selection rate, parameter F1,
   parameter values, phantom count, completion (the model does emit a
   final response eventually) all stay clean.  Only the call-count
   bound catches the regression.
 
 user_prompt: |
-  What is today's date?  Just tell me the current date in a single
-  sentence.
+  What is the current date and time right now, to the second, in UTC?
+  Give it to me in a single sentence.
 
 system_prompt: |
-  You are a helpful assistant.  Use get_current_datetime to fetch the
-  current date when the user asks for it, then reply in plain English
-  with a single sentence.  Do not call the tool more than twice.
+  You are a helpful assistant.  You do NOT have the current time of day
+  in your context — to answer a request for the current time you must
+  call get_current_datetime, then reply in plain English with a single
+  sentence.  Do not call the tool more than twice.
 
 tools_required:
   - get_current_datetime
@@ -34,8 +46,8 @@ tools_required:
 expected_outcome: |
   The agent calls get_current_datetime at most a small number of
   times and replies with a natural-language sentence containing the
-  date.  The reply contains no error fallback and no phantom
-  tool-call markup.
+  current date and time.  The reply contains no error fallback and no
+  phantom tool-call markup.
 
 success_criteria:
   # Positive — the required tool was actually called.

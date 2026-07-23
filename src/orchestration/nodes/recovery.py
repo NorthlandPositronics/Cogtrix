@@ -374,6 +374,171 @@ def build_handle_unverified_entity_node(
     return handle_unverified_entity
 
 
+def build_handle_unsupported_quote_node(
+    unsupported_quote_count: list[int],
+    max_retries: int,
+    logger: Callable[[], Any] = get_logger,
+) -> Callable[[CogtrixState], dict]:
+    """Build the unsupported-quote recovery node bound to a run-local counter.
+
+    #1841 (output-fidelity guard): when the model's final response contains
+    a verbatim quote or explicit attribution that appears in NO tool result
+    this turn — a fabricated quote / fabricated citation — this node deletes
+    the response and injects a nudge listing the offending quote(s) with
+    three revision options (quote verbatim from a real result, drop the
+    attribution, or say the tools didn't establish it).
+
+    Args:
+        unsupported_quote_count: Mutable counter of how many times the node
+            fired this run.
+        max_retries: Maximum revision attempts before accepting the
+            response. Default 1 — one revision attempt; a model still
+            fabricating quotes after the nudge is actively ignoring the
+            guard, not unlucky.
+        logger: Logger factory.
+    """
+    from src.orchestration.verification import (
+        collect_tool_message_contents,
+        detect_unsupported_quote,
+        format_unsupported_quote_nudge,
+    )
+
+    def handle_unsupported_quote(state: CogtrixState) -> dict:
+        from langchain_core.messages import HumanMessage as _HM
+
+        unsupported_quote_count[0] += 1
+        log = logger()
+        msgs = state.get("messages") or []
+        last = msgs[-1] if msgs else None
+        last_content = getattr(last, "content", "") if last is not None else ""
+
+        if not isinstance(last_content, str):
+            return {"messages": []}
+
+        turn_start = _find_current_turn_start(msgs)
+        user_prompt = ""
+        if turn_start < len(msgs) and isinstance(msgs[turn_start], _HM):
+            up = msgs[turn_start].content
+            if isinstance(up, str):
+                user_prompt = up
+        tool_contents = collect_tool_message_contents(msgs, turn_start)
+
+        quotes = detect_unsupported_quote(last_content, tool_contents, user_prompt)
+
+        if not quotes:
+            # Re-detection failed — possibly revised by a concurrent path.
+            return {"messages": []}
+
+        log.warning(
+            "Unsupported-quote detected (quotes=%s, attempt %d/%d). Injecting nudge.",
+            quotes,
+            unsupported_quote_count[0],
+            max_retries,
+        )
+
+        if unsupported_quote_count[0] > max_retries:
+            log.info(
+                "Unsupported-quote retries exhausted (quotes=%s) — accepting the "
+                "agent's response as-is rather than spinning further.",
+                quotes,
+            )
+            return {"messages": []}
+
+        removal: list[Any] = []
+        if last is not None and getattr(last, "id", None):
+            removal.append(RemoveMessage(id=last.id))
+        return {
+            "messages": [
+                *removal,
+                HumanMessage(content=format_unsupported_quote_nudge(quotes)),
+            ]
+        }
+
+    return handle_unsupported_quote
+
+
+def build_handle_version_scope_node(
+    version_scope_count: list[int],
+    max_retries: int,
+    logger: Callable[[], Any] = get_logger,
+) -> Callable[[CogtrixState], dict]:
+    """Build the version-scope recovery node bound to a run-local counter.
+
+    #1843 (version-scope-collapse guard): when the model attaches a
+    lifecycle status (discontinued / deprecated / …) to a specific
+    model-ID while the fetched evidence scopes that status only to a
+    prefix-*parent* of that ID, this node deletes the response and injects
+    a nudge naming the offending ``child → parent`` pairs.
+
+    Unlike the other verification nodes, the evidence corpus is the WHOLE
+    conversation's tool output (``turn_start=0``), not just the current
+    turn. The next67 incident's worst fabrication surfaced on a *correction*
+    turn where the model re-asserted a (wrong) status WITHOUT re-calling any
+    tool — so the only ground truth is the research done on an earlier turn.
+    Scoping to the current turn would leave that corpus empty and the guard
+    blind. See ``src/orchestration/verification.py`` for the detector.
+
+    Args:
+        version_scope_count: Mutable counter of how many times the node
+            fired this run.
+        max_retries: Maximum revision attempts before accepting the
+            response. Default 1 — one revision attempt; a model still
+            collapsing the scope after the nudge is ignoring the guard.
+        logger: Logger factory.
+    """
+    from src.orchestration.verification import (
+        collect_tool_message_contents,
+        detect_version_scope_mismatch,
+        format_version_scope_nudge,
+    )
+
+    def handle_version_scope(state: CogtrixState) -> dict:
+        version_scope_count[0] += 1
+        log = logger()
+        msgs = state.get("messages") or []
+        last = msgs[-1] if msgs else None
+        last_content = getattr(last, "content", "") if last is not None else ""
+
+        if not isinstance(last_content, str):
+            return {"messages": []}
+
+        # Conversation-wide tool content — the misattribution may surface on
+        # a correction turn that did no fresh research (see docstring).
+        tool_contents = collect_tool_message_contents(msgs, 0)
+        mismatches = detect_version_scope_mismatch(last_content, tool_contents)
+
+        if not mismatches:
+            # Re-detection failed — possibly revised by a concurrent path.
+            return {"messages": []}
+
+        log.warning(
+            "Version-scope mismatch detected (pairs=%s, attempt %d/%d). Injecting nudge.",
+            [(m.claimed_id, m.scoped_to_id) for m in mismatches],
+            version_scope_count[0],
+            max_retries,
+        )
+
+        if version_scope_count[0] > max_retries:
+            log.info(
+                "Version-scope retries exhausted (pairs=%s) — accepting the agent's "
+                "response as-is rather than spinning further.",
+                [(m.claimed_id, m.scoped_to_id) for m in mismatches],
+            )
+            return {"messages": []}
+
+        removal: list[Any] = []
+        if last is not None and getattr(last, "id", None):
+            removal.append(RemoveMessage(id=last.id))
+        return {
+            "messages": [
+                *removal,
+                HumanMessage(content=format_version_scope_nudge(mismatches)),
+            ]
+        }
+
+    return handle_version_scope
+
+
 def _find_current_turn_start(messages: list[Any]) -> int:
     """Return the index of the most recent HumanMessage in *messages*.
 

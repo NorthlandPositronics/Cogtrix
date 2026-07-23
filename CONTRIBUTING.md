@@ -15,7 +15,7 @@ See the [LICENSE](LICENSE) file for full terms.
 ## Getting Started
 
 1. **Fork** the repository and clone your fork.
-2. **Install dependencies:** `uv sync` (or `pip install -r requirements.txt`).
+2. **Install dependencies:** `uv sync`. (No `uv`? Generate a pip file with `uv export --no-dev --no-hashes -o requirements.txt`, then `pip install -r requirements.txt`.)
 3. **Run the test suite** to make sure everything works: `uv run pytest tests/ -v`.
 4. **Read the docs** — [Architecture](docs/ARCHITECTURE.md) for system design, [Development](docs/DEVELOPMENT.md) for practical extension guides.
 
@@ -47,9 +47,9 @@ See the [LICENSE](LICENSE) file for full terms.
 
 ### Submitting Code
 
-1. Create a feature branch from `next` (the integration branch — not `main`):
+1. Create a feature branch from `release/next` (the integration branch — not `production`):
    ```bash
-   git checkout next
+   git checkout release/next
    git checkout -b feat/my-feature
    ```
    Use the naming convention `feat/<short-description>` or `fix/<short-description>`.
@@ -64,11 +64,11 @@ uv run pyright cogtrix.py src/
 uv run pytest tests/ -v
 ```
 
-5. Submit a pull request targeting `next` with:
+5. Submit a pull request targeting `release/next` with:
    - A clear description of what the change does and why
    - Reference to any related issues
 
-> **Branch policy:** `main` is release-only. All pull requests must target `next`. The CI enforces this — PRs directly to `main` from non-release branches are blocked.
+> **Branch policy:** `production` is release-only. All pull requests must target `release/next`. The CI enforces this — PRs directly to `production` from non-release branches are blocked.
 
 ### Your First Contribution
 

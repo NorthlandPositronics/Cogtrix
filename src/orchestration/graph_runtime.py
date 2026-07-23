@@ -99,6 +99,11 @@ class PerRunState:
     unverified_claim_count: list[int] = field(default_factory=lambda: [0])
     # cogtrix47 Issues 5+6: unverified-entity guard.
     unverified_entity_count: list[int] = field(default_factory=lambda: [0])
+    # #1841: output-fidelity guard (fabricated/misattributed quotes).
+    unsupported_quote_count: list[int] = field(default_factory=lambda: [0])
+    # #1843: version-scope-collapse guard (parent/series status mis-scoped
+    # onto a specific child/newer version ID).
+    version_scope_count: list[int] = field(default_factory=lambda: [0])
     incompleteness_nudge_given: list[int] = field(default_factory=lambda: [0])
     expansion_count: list[int] = field(default_factory=lambda: [0])
     auto_expansion_count: list[int] = field(default_factory=lambda: [0])

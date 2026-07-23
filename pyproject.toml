@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cogtrix"
-version = "0.2.11"
+version = "0.2.12"
 description = "Modular AI assistant with 67 built-in tools, multi-provider LLM support, and hybrid memory"
 readme = "README.md"
 requires-python = "~=3.13.0"
@@ -24,12 +24,12 @@ dependencies = [
     # LangChain Ecosystem
     "langchain-core>=1.3.3",
     "langchain-ollama~=1.1.0",
-    "langchain-openai~=1.2.1",
+    "langchain-openai~=1.2.2",
     "langchain-text-splitters~=1.1.0",
     "langchain-community~=0.4.1",
-    "langgraph~=1.2.0",
+    "langgraph~=1.2.1",
     # LLM Providers
-    "openai~=2.32.0",
+    "openai~=2.38.0",
     # Data Validation
     "pydantic~=2.12.0",
     # CLI & Display
@@ -45,7 +45,7 @@ dependencies = [
     "pytz~=2026.2",             # datetime_tool.py (calendar-versioned)
     "curl_cffi~=0.15.0",        # _ddg.py — browser-fingerprint-impersonating libcurl binding (Bug D phase 2; replaced ddgs/primp)
     "trafilatura~=2.0",          # web_search.py — HTML→Markdown extraction (ADR-0056)
-    "tldextract~=5.1.0",         # web_search.py — registered-domain extraction (ADR-0056)
+    "tldextract~=5.3.1",         # web_search.py — registered-domain extraction (ADR-0056)
     "cachetools~=5.5.0",         # web_search.py — TTL cache for query results (ADR-0056)
     "croniter~=6.0",             # cron_tools.py
     "pluggy~=1.6",               # src/plugins/ — tool plugin system
@@ -59,7 +59,7 @@ dependencies = [
 [project.optional-dependencies]
 rag = [
     "faiss-cpu~=1.13.0",
-    "pypdf>=6.10.2",
+    "pypdf>=6.12.2",
 ]
 search = [
     "tavily-python~=0.7.24",
@@ -83,7 +83,7 @@ dev = [
     "pytest-cov~=7.1.0",
     "pytest-timeout~=2.4.0",
     "pytest-xdist~=3.8.0",
-    "coverage~=7.13.5",
+    "coverage~=7.14.0",
     "black~=26.3.0",
     "ruff~=0.15.12",
     "bandit~=1.9.4",
@@ -97,13 +97,13 @@ dev = [
     "argparse-manpage>=4",
 ]
 science = [
-    "numpy~=2.4.4",
+    "numpy~=2.4.6",
 ]
 discord = [
     "discord.py>=2.3",
 ]
 slack = [
-    "slack-sdk>=3.19",
+    "slack-sdk>=3.42.0",
 ]
 mcp = [
     "mcp~=1.27.0",
@@ -119,7 +119,7 @@ google = [
 ]
 api = [
     "fastapi~=0.135.2",
-    "uvicorn[standard]~=0.46.0",
+    "uvicorn[standard]~=0.48.0",
     "sqlalchemy[asyncio]~=2.0.0",
     "aiosqlite~=0.22.0",
     "alembic~=1.18.0",
@@ -219,7 +219,7 @@ dev = [
     "pytest-cov~=7.1.0",
     "pytest-timeout~=2.4.0",
     "pytest-xdist~=3.8.0",
-    "coverage~=7.13.5",
+    "coverage~=7.14.0",
     "black~=26.3.0",
     "ruff~=0.15.12",
     "bandit~=1.9.4",

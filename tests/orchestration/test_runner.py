@@ -92,3 +92,87 @@ class TestLogToolCallsMetrics:
         )
 
         mock_counter.labels.assert_called_once_with(tool_name="search_web", status="success")
+
+
+class _FakeTool:
+    """Minimal tool stub with a ``name`` and no ``_resolve`` (so the
+    auto-loader appends it directly without LazyToolProxy resolution)."""
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+
+class TestRealtimeQueryDetection:
+    """Regression for bug #1839 (primary root cause): recency-dependent
+    prompts must be detected so the retrieval tool set is force-loaded
+    regardless of task-complexity classification."""
+
+    def test_current_stock_price_is_realtime(self):
+        from src.orchestration.runner import _query_needs_realtime_data
+
+        # The exact prompt that failed in the next66 trial run.
+        assert _query_needs_realtime_data("What's the current Apple stock price?") is True
+
+    def test_recency_markers_detected(self):
+        from src.orchestration.runner import _query_needs_realtime_data
+
+        for prompt in (
+            "today's weather in Tokyo",
+            "latest news on the election",
+            "what is the most recent SpaceX launch",
+            "give me the AAPL stock quote",
+            "current USD to EUR exchange rate",
+            "the score of the game right now",
+        ):
+            assert _query_needs_realtime_data(prompt) is True, prompt
+
+    def test_non_realtime_prompts_not_flagged(self):
+        from src.orchestration.runner import _query_needs_realtime_data
+
+        for prompt in (
+            "Write a function to reverse a string",
+            "Explain how recursion works",
+            "What is 2 + 2?",
+            "Summarize this paragraph for me",
+            "",
+        ):
+            assert _query_needs_realtime_data(prompt) is False, prompt
+
+
+class TestAutoLoadWebSearch:
+    """Regression for bug #1839: the shared web_search auto-loader moves
+    the tool from the catalog into the active set and reports accurately."""
+
+    def _config(self, available, active):
+        from src.common.types import AgentRunConfig
+
+        return AgentRunConfig(available_tools=available, active_tools_list=active)
+
+    def test_loads_from_catalog(self):
+        from src.orchestration.runner import _auto_load_web_search
+
+        tool = _FakeTool("web_search")
+        active: list = []
+        config = self._config({"web_search": tool}, active)
+
+        assert _auto_load_web_search(config) is True
+        assert any(getattr(t, "name", "") == "web_search" for t in active)
+        assert "web_search" not in config.available_tools
+
+    def test_noop_when_already_active(self):
+        from src.orchestration.runner import _auto_load_web_search
+
+        active = [_FakeTool("web_search")]
+        config = self._config({}, active)
+
+        assert _auto_load_web_search(config) is False
+        assert len(active) == 1
+
+    def test_noop_when_unavailable(self):
+        from src.orchestration.runner import _auto_load_web_search
+
+        active: list = []
+        config = self._config({}, active)
+
+        assert _auto_load_web_search(config) is False
+        assert active == []

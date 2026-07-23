@@ -150,8 +150,8 @@ The v0.x → v0.2.0 migration is fully documented in [docs/MIGRATION.md](MIGRATI
 
 ### In CI (automatic)
 
-Every pull request targeting `main` runs the **API Breaking Change Check** workflow
-(`.github/workflows/api-breaking-change.yml`). The workflow:
+Every pull request targeting `production` or `release/next` runs the **API Breaking Change Check** workflow
+(`.github/workflows/openapi-diff.yml`). The workflow:
 
 1. Generates the OpenAPI spec from the current branch.
 2. Retrieves the OpenAPI spec from the last stable git tag.

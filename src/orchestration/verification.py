@@ -588,12 +588,452 @@ def format_unverified_entity_nudge(entities: list[str]) -> str:
     return _UNVERIFIED_ENTITY_NUDGE.format(n_word=n_word, plural=plural, entities=quoted)
 
 
+# ── Output-fidelity guard (#1841) ─────────────────────────────────────
+#
+# The rule registry and the entity detector both check *research effort*
+# (was a tool called? is a user-named identifier present in a tool
+# result?). Neither checks *research fidelity*: that a verbatim quote or
+# explicitly-attributed statement the model puts in its answer actually
+# appears in a tool result this turn. The next67 trial surfaced the gap —
+# the model fabricated a blockquote ("`kimi-k2.6` was officially
+# discontinued …") that inverted the fetched source (which said the
+# deprecated `kimi-k2` *series* was discontinued and to USE `kimi-k2.6`).
+#
+# This detector targets QUOTED spans (double-quoted text and `>`
+# blockquotes) only — explicit verbatim claims of "the source says
+# exactly this." Free paraphrase is deliberately out of scope
+# (paraphrase-fidelity is a separate, false-positive-prone problem).
+
+# Markdown emphasis / inline-code marks to drop before comparison so the
+# model's reformatting (``**bold**``, `` `code` ``) doesn't cause a
+# spurious mismatch against the raw tool text.
+_FIDELITY_MD_STRIP_RE = re.compile(r"[`*_]+")
+_FIDELITY_WS_RE = re.compile(r"\s+")
+_QUOTE_GLYPHS = str.maketrans({"“": '"', "”": '"', "‘": "'", "’": "'"})
+
+# Quoted-span extractors.
+_BLOCKQUOTE_RE = re.compile(r"^\s*>\s?(.*)$", re.MULTILINE)
+_DOUBLE_QUOTE_RE = re.compile(r'"([^"\n]+)"')
+_ELLIPSIS_SPLIT_RE = re.compile(r"\.{3,}|…")
+
+# A quoted span shorter than this (in significant words) is not treated
+# as a substantive claim — quoting "OK" or a single product token must
+# not trip the guard.
+_MIN_QUOTE_WORDS = 6
+
+
+def _normalize_for_fidelity(text: str) -> str:
+    """Casefold + strip markdown marks + collapse whitespace so a faithful
+    quote matches the raw tool text despite cosmetic reformatting."""
+    t = text.translate(_QUOTE_GLYPHS).lower()
+    t = _FIDELITY_MD_STRIP_RE.sub("", t)
+    return _FIDELITY_WS_RE.sub(" ", t).strip()
+
+
+def _strip_quote_wrapping(span: str) -> str:
+    """Remove surrounding whitespace and a single layer of wrapping quote
+    characters from an extracted span."""
+    s = span.strip()
+    if len(s) >= 2 and s[0] in "\"'“‘" and s[-1] in "\"'”’":
+        s = s[1:-1].strip()
+    return s
+
+
+def _extract_quoted_spans(text: str) -> list[str]:
+    """Return the substantive quoted spans in *text* — `>` blockquote
+    lines and double-quoted substrings, de-wrapped of quote characters."""
+    spans: list[str] = []
+    for m in _BLOCKQUOTE_RE.finditer(text):
+        spans.append(_strip_quote_wrapping(m.group(1)))
+    for m in _DOUBLE_QUOTE_RE.finditer(text):
+        spans.append(_strip_quote_wrapping(m.group(1)))
+    return [s for s in spans if s]
+
+
+def _quote_is_grounded(norm_span: str, grounded_blob: str) -> bool:
+    """A normalized quote is grounded if it (or, for elided quotes, each
+    of its non-trivial segments) is a substring of the grounded blob."""
+    if not norm_span:
+        return True
+    if norm_span in grounded_blob:
+        return True
+    segments = [seg.strip() for seg in _ELLIPSIS_SPLIT_RE.split(norm_span)]
+    segments = [seg for seg in segments if len(seg.split()) >= 3]
+    if len(segments) >= 2:
+        return all(seg in grounded_blob for seg in segments)
+    return False
+
+
+def detect_unsupported_quote(
+    response_content: str,
+    tool_message_contents: Iterable[str],
+    user_prompt: str = "",
+    *,
+    min_quote_words: int = _MIN_QUOTE_WORDS,
+    max_returned: int = 3,
+) -> list[str]:
+    """Return substantive quoted spans in the response that appear in no
+    tool result this turn (and aren't quotes of the user's own prompt).
+
+    Targets fabricated verbatim quotes / fabricated source citations —
+    the output-fidelity gap (#1841). Quoted spans only; paraphrase is out
+    of scope by design.
+
+    Parameters
+    ----------
+    response_content: the final AIMessage content text.
+    tool_message_contents: ToolMessage content strings from this turn —
+        the ground-truth corpus a quote must be traceable to.
+    user_prompt: the user's most recent message; quoting the user's own
+        words back is legitimate, so it counts as grounding.
+    """
+    if not response_content or not response_content.strip():
+        return []
+
+    spans = _extract_quoted_spans(response_content)
+    if not spans:
+        return []
+
+    grounded_sources = [c for c in tool_message_contents if isinstance(c, str)]
+    if user_prompt:
+        grounded_sources.append(user_prompt)
+    grounded_blob = _normalize_for_fidelity("\n".join(grounded_sources))
+
+    unsupported: list[str] = []
+    seen: set[str] = set()
+    for span in spans:
+        norm = _normalize_for_fidelity(span)
+        if len(norm.split()) < min_quote_words:
+            continue  # too short to be a substantive claim
+        if norm in seen:
+            continue
+        seen.add(norm)
+        if not grounded_blob or not _quote_is_grounded(norm, grounded_blob):
+            unsupported.append(span)
+            if len(unsupported) >= max_returned:
+                break
+    return unsupported
+
+
+_UNSUPPORTED_QUOTE_NUDGE = (
+    "Your response presents {n_word} quoted/attributed statement{plural} "
+    "that appear in NO tool result from this turn: {quotes}. Presenting a "
+    "verbatim quote or a source attribution that you cannot trace to "
+    "fetched content is fabrication — even when the surrounding topic was "
+    "researched. This is the exact failure mode where a model invents an "
+    'authoritative-sounding quote (e.g. "the official platform states …") '
+    "that the source never said, or inverts what it did say.\n\n"
+    "Revise your response to either:\n"
+    "  (a) quote VERBATIM from an actual tool result (copy the exact text, "
+    "and only attribute it to the source that actually contains it); or\n"
+    "  (b) drop the quotation marks / attribution and state the point as "
+    "your own summary, clearly grounded in what the tools returned; or\n"
+    "  (c) if the tools did not establish the point, say so plainly rather "
+    "than manufacturing a citation.\n\n"
+    "Do NOT fabricate a quote. Do NOT attribute a statement to a source "
+    "that does not contain it. Do NOT change the subject of a real quote "
+    "(e.g. attributing a statement about one model/version to a different "
+    "one)."
+)
+
+
+def format_unsupported_quote_nudge(quotes: list[str]) -> str:
+    """Render the recovery nudge for one or more unsupported quotes."""
+    n = len(quotes)
+    plural = "s" if n != 1 else ""
+    n_word = {1: "one", 2: "two", 3: "three"}.get(n, str(n))
+
+    def _clip(q: str) -> str:
+        q = q.strip()
+        return q if len(q) <= 120 else q[:117] + "..."
+
+    quoted = "; ".join(f'"{_clip(q)}"' for q in quotes)
+    return _UNSUPPORTED_QUOTE_NUDGE.format(n_word=n_word, plural=plural, quotes=quoted)
+
+
+# ── Version-scope-collapse guard (#1843) ──────────────────────────────
+#
+# The fidelity guard (#1841) catches a *fabricated quote* — text the model
+# attributes to a source that the source never said. The version-scope
+# guard catches a subtler, adjacent failure: the model takes a status that
+# the evidence genuinely scopes to one identifier and *re-scopes* it onto a
+# more specific (child / newer) identifier. In the next67 trial the fetched
+# docs said the deprecated ``kimi-k2`` *series* was discontinued and to USE
+# ``kimi-k2.6``; the model reported that ``kimi-k2.6`` itself was
+# discontinued, and under challenge invented that ``kimi-k2.5`` was *also*
+# discontinued. Both are children of the ``kimi-k2`` parent the source
+# actually scoped the status to. Textually ``kimi-k2`` ⊂ ``kimi-k2.6`` /
+# ``kimi-k2.5``; semantically they are opposite — the classic
+# series→version substring confusion.
+#
+# Why effort/fidelity guards miss it: ``detect_unverified_claim`` only
+# checks the verifier was called (it was); ``detect_unsupported_quote``
+# only fires on *quoted* spans (a status stated as prose or in a table cell
+# is not a quote); and every presence-based check is satisfied because
+# ``kimi-k2`` *is* present in the tool blob and is a substring of the
+# child ID. Scope requires modelling *which* identifier a status attaches
+# to — not merely whether a token appears.
+#
+# Detection is deliberately conservative to satisfy the "no false positives
+# on legitimate version-specific claims" requirement:
+#
+#   * **Sentence-scoped, nearest-ID attribution.** A status attaches to the
+#     nearest model-ID *within its own sentence / table row*. This handles
+#     the contrastive form ("``kimi-k2.6`` is current, unlike the
+#     discontinued ``kimi-k2`` series") — there the status's nearest ID is
+#     the parent, so the child is never marked claimed.
+#   * **Negation aware.** "is not discontinued" / "isn't deprecated" do not
+#     count as a status assertion.
+#   * **Canonical IDs only.** We match canonical hyphen/dotted identifiers
+#     (``kimi-k2.6``, ``gpt-4``) — the form tool outputs and the model's
+#     own citations use. Display variants ("Kimi K2.6") are out of scope.
+#   * **Flag only true scope-collapse.** A child claim is flagged only when
+#     (a) the source does NOT support that status for the child's exact ID,
+#     AND (b) the source scopes that status to a prefix-*parent* of the
+#     child. A genuinely version-specific claim the source supports, or a
+#     pure fabrication with no parent in the evidence, is left to the other
+#     guards.
+#
+# Lifecycle-status only (discontinued / deprecated / retired / sunset /
+# EOL): these are the high-harm misattributions (telling a user a current
+# model is dead). Release/launch status is intentionally excluded — version
+# release dates legitimately differ and the false-positive cost is higher.
+
+_NEG_STATUS_RE = re.compile(
+    r"\b(?:discontinued|deprecated|sunset(?:ted|ting)?|retired|"
+    r"decommissioned|end[\s-]of[\s-]life|eol|"
+    r"no\s+longer\s+(?:available|supported|maintained|offered))\b",
+    re.IGNORECASE,
+)
+
+# Negation tokens that, when they immediately precede a status word, mean
+# the model is NOT asserting that status ("kimi-k2.6 is not discontinued").
+_PRE_NEGATION_RE = re.compile(
+    r"\b(?:not|never|no|isn[’']t|wasn[’']t|aren[’']t|weren[’']t|n[’']t)\b",
+    re.IGNORECASE,
+)
+
+# Canonical model/version identifier: an alpha stem of ≥2 letters, at least
+# one digit somewhere, and at least one ``-``/``.`` separator group. Matches
+# ``kimi-k2``, ``kimi-k2.6``, ``gpt-4``, ``claude-opus-4-7``. The greedy
+# separator group means ``kimi-k2.6`` is captured whole (not just
+# ``kimi-k2``), so the child and parent are distinct tokens. The leading
+# ``[a-z]{2,}`` and the digit lookahead exclude bare versions (``1.2.3``),
+# abbreviations (``e.g``), Slack/object IDs (``u0b115kt39d``), and
+# dotted-but-digitless names (``node.js``).
+_MODEL_ID_RE = re.compile(r"\b(?=[a-z0-9.\-]*\d)[a-z]{2,}[a-z0-9]*(?:[-.][a-z0-9]+)+\b")
+
+# Split into sentences / table rows WITHOUT breaking version tokens: a
+# sentence ends on .!? followed by whitespace (so the ``.`` inside
+# ``kimi-k2.6`` — followed by a digit — never splits), or on a newline.
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+|[\n\r]+")
+
+# A status attached to an ID more than this many characters away (within a
+# single long sentence) is too distant to be a reliable attribution.
+_SCOPE_WINDOW = 100
+
+
+@dataclass(frozen=True)
+class VersionScopeMismatch:
+    """One version-scope-collapse finding.
+
+    ``claimed_id`` is the specific identifier the response attaches the
+    status to; ``scoped_to_id`` is the prefix-parent the *evidence*
+    actually scopes that status to; ``status`` is the matched lifecycle
+    word (``discontinued`` etc.).
+    """
+
+    claimed_id: str
+    status: str
+    scoped_to_id: str
+
+
+def _nearest_id(
+    ids: list[tuple[str, int, int]], s_start: int, s_end: int, *, window: int = _SCOPE_WINDOW
+) -> str | None:
+    """Return the model-ID token nearest to a status span, or ``None`` if
+    the closest ID is farther than *window* characters."""
+    best: str | None = None
+    best_gap: int | None = None
+    for tok, i_start, i_end in ids:
+        if i_end <= s_start:
+            gap = s_start - i_end
+        elif i_start >= s_end:
+            gap = i_start - s_end
+        else:
+            gap = 0
+        if gap <= window and (best_gap is None or gap < best_gap):
+            best, best_gap = tok, gap
+    return best
+
+
+def _nonnegated_status_spans(lowered_segment: str) -> list[tuple[int, int, str]]:
+    """Return ``(start, end, word)`` for each non-negated lifecycle-status
+    mention in a (lowercased) sentence/row."""
+    out: list[tuple[int, int, str]] = []
+    for sm in _NEG_STATUS_RE.finditer(lowered_segment):
+        pre = lowered_segment[max(0, sm.start() - 24) : sm.start()]
+        if _PRE_NEGATION_RE.search(pre):
+            continue
+        out.append((sm.start(), sm.end(), sm.group(0)))
+    return out
+
+
+def _response_status_claims(text: str) -> list[tuple[str, str]]:
+    """Return ``(model_id, status_word)`` pairs the response asserts —
+    status attached to its nearest model-ID within each sentence/row."""
+    claims: list[tuple[str, str]] = []
+    for seg in _SENTENCE_SPLIT_RE.split(text):
+        lowered = seg.lower()
+        ids = [(m.group(0), m.start(), m.end()) for m in _MODEL_ID_RE.finditer(lowered)]
+        if not ids:
+            continue
+        for s_start, s_end, word in _nonnegated_status_spans(lowered):
+            nearest = _nearest_id(ids, s_start, s_end)
+            if nearest is not None:
+                claims.append((nearest, word))
+    return claims
+
+
+def _source_status_scope(tool_blob: str) -> tuple[set[str], set[str]]:
+    """Return ``(supported_ids, primary_ids)`` from the evidence.
+
+    ``supported_ids`` is every ID that shares a sentence/row with a
+    non-negated lifecycle status — the generous set used to decide whether
+    a claimed ID's status is genuinely backed (avoids false positives when
+    the source really does scope the status to that exact ID).
+    ``primary_ids`` is the nearest ID to each status — the precise set used
+    to find the parent a status is actually scoped to.
+    """
+    supported: set[str] = set()
+    primary: set[str] = set()
+    for seg in _SENTENCE_SPLIT_RE.split(tool_blob):
+        lowered = seg.lower()
+        ids = [(m.group(0), m.start(), m.end()) for m in _MODEL_ID_RE.finditer(lowered)]
+        if not ids:
+            continue
+        spans = _nonnegated_status_spans(lowered)
+        if not spans:
+            continue
+        supported.update(item[0] for item in ids)
+        for span in spans:
+            nearest = _nearest_id(ids, span[0], span[1])
+            if nearest is not None:
+                primary.add(nearest)
+    return supported, primary
+
+
+def _best_parent(child_id: str, parent_candidates: set[str]) -> str | None:
+    """Return the longest ID in *parent_candidates* that is a prefix-parent
+    of *child_id* (proper prefix ending on a ``.``/``-`` version boundary),
+    or ``None``. ``kimi-k2`` is a parent of ``kimi-k2.6``; ``kimi-k2`` is
+    NOT a parent of ``kimi-k20`` (boundary char ``0`` is not a separator)."""
+    parents = [
+        y
+        for y in parent_candidates
+        if y != child_id and child_id.startswith(y) and child_id[len(y)] in ".-"
+    ]
+    return max(parents, key=len) if parents else None
+
+
+def detect_version_scope_mismatch(
+    response_content: str,
+    tool_message_contents: Iterable[str],
+    *,
+    max_returned: int = 3,
+) -> list[VersionScopeMismatch]:
+    """Return version-scope-collapse findings (#1843).
+
+    Flags each case where the response attaches a lifecycle status to a
+    specific model-ID while the evidence scopes that status only to a
+    prefix-*parent* of that ID (and does not back it for the exact ID).
+    Returns ``[]`` when nothing is found — including when the response makes
+    no status claim, when no tool content is available to check against, or
+    when every claim is either source-supported or a pure fabrication with
+    no parent in the evidence (the latter is the other guards' concern).
+    """
+    if not response_content or not response_content.strip():
+        return []
+    claims = _response_status_claims(response_content)
+    if not claims:
+        return []
+    blob = "\n".join(c for c in tool_message_contents if isinstance(c, str))
+    if not blob.strip():
+        return []
+    supported, primary = _source_status_scope(blob)
+    if not primary:
+        return []
+
+    results: list[VersionScopeMismatch] = []
+    seen: set[tuple[str, str]] = set()
+    for claimed_id, status in claims:
+        if claimed_id in supported:
+            continue  # evidence backs this exact ID — a true claim
+        parent = _best_parent(claimed_id, primary)
+        if parent is None:
+            continue  # no parent scope in evidence — not a scope collapse
+        key = (claimed_id, parent)
+        if key in seen:
+            continue
+        seen.add(key)
+        results.append(
+            VersionScopeMismatch(claimed_id=claimed_id, status=status, scoped_to_id=parent)
+        )
+        if len(results) >= max_returned:
+            break
+    return results
+
+
+_VERSION_SCOPE_NUDGE = (
+    "Your response attaches a lifecycle status to {n_word} specific "
+    "model/version identifier{plural} that the fetched sources scope to a "
+    "DIFFERENT (broader / parent) identifier: {pairs}. This is version-scope "
+    "collapse — a statement about a deprecated *series* or a different "
+    "version is being reattributed to a more specific version. Textually "
+    "`{parent}` is a substring of `{child}`, but they are not the same "
+    "thing, and the sources may actually list `{child}` as current or "
+    "available.\n\n"
+    "Re-read the tool results and revise your answer to:\n"
+    '  (a) attach the "{status}" status to the EXACT identifier the '
+    "source scopes it to (`{parent}`), not to `{child}`; and\n"
+    "  (b) state the actual status of `{child}` using ONLY what the sources "
+    "say about that exact identifier — do not assume it inherits the "
+    "parent's status.\n\n"
+    "Do NOT carry a parent/series status down onto a specific version. Do "
+    "NOT invent a status for a version the sources do not mention."
+)
+
+
+def format_version_scope_nudge(mismatches: list[VersionScopeMismatch]) -> str:
+    """Render the recovery nudge for one or more version-scope mismatches."""
+    n = len(mismatches)
+    plural = "s" if n != 1 else ""
+    n_word = {1: "one", 2: "two", 3: "three"}.get(n, str(n))
+    pairs = "; ".join(
+        f'`{m.claimed_id}` (sources scope "{m.status}" to `{m.scoped_to_id}`)' for m in mismatches
+    )
+    example = mismatches[0]
+    return _VERSION_SCOPE_NUDGE.format(
+        n_word=n_word,
+        plural=plural,
+        pairs=pairs,
+        child=example.claimed_id,
+        parent=example.scoped_to_id,
+        status=example.status,
+    )
+
+
 __all__ = [
     "VERIFICATION_RULES",
     "VerificationRule",
+    "VersionScopeMismatch",
     "collect_tool_message_contents",
     "collect_tool_names_this_turn",
+    "detect_unsupported_quote",
     "detect_unverified_claim",
     "detect_unverified_entities",
+    "detect_version_scope_mismatch",
+    "format_unsupported_quote_nudge",
     "format_unverified_entity_nudge",
+    "format_version_scope_nudge",
 ]

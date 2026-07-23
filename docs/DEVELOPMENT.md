@@ -607,8 +607,7 @@ def process_data(
 cogtrix/
 ├── cogtrix.py                # CLI entry point
 ├── pyproject.toml            # Project metadata & dependencies
-├── uv.lock                   # Locked dependency versions
-├── requirements.txt          # Pip-compatible deps (auto-generated)
+├── uv.lock                   # Locked dependency versions (source of truth)
 │
 ├── src/
 │   ├── config.py             # Configuration management

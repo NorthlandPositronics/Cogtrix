@@ -23,7 +23,7 @@ from src.tools._web_search_aggregator import (
     ProviderResult,
     RankedResult,
 )
-from src.tools._web_search_domain_class import DomainClass
+from src.tools._web_search_domain_class import DomainClass, detect_affiliation_disclaimer
 from src.tools._web_search_extractor import ExtractedSource
 from src.tools._web_search_fetcher import FetchOutcome
 from src.tools._web_search_synthesiser import SynthesisResult
@@ -141,6 +141,15 @@ def _emit_sources(out: list[str], state: FormatInput) -> tuple[int, int]:
         out.append(f"{idx} {domain} [{ranked.domain_class} · {recency}]")
         out.append(f"   {title}")
         out.append(f"   {ranked.canonical_url}")
+        # #1842: surface a content-declared affiliation disclaimer right
+        # under the citation so the agent cannot present an
+        # official-looking-but-unaffiliated source as authoritative.
+        if isinstance(source, ExtractedSource):
+            disclaimer = detect_affiliation_disclaimer(source.extracted_text or "")
+            if disclaimer:
+                out.append(
+                    "   ⚠ self-identifies as UNAFFILIATED/UNOFFICIAL — not an official source"
+                )
         sources_emitted += 1
 
     return sources_emitted, overflow

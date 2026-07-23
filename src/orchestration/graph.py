@@ -28,8 +28,10 @@ from src.orchestration.nodes.process_tools import build_process_tools_node
 from src.orchestration.nodes.recovery import (
     build_handle_action_intent_node,
     build_handle_phantom_node,
+    build_handle_unsupported_quote_node,
     build_handle_unverified_claim_node,
     build_handle_unverified_entity_node,
+    build_handle_version_scope_node,
 )
 from src.orchestration.run_config import AgentRunConfig
 from src.orchestration.session_state import SessionState
@@ -650,6 +652,12 @@ def build_agent_graph(
     # repeating unverified identifiers after the nudge it is
     # actively ignoring the guard, not unlucky.
     _MAX_UNVERIFIED_ENTITY_RETRIES = 1
+    # #1841: output-fidelity guard. One revision attempt — a model still
+    # fabricating quotes after the nudge is ignoring the guard, not unlucky.
+    _MAX_UNSUPPORTED_QUOTE_RETRIES = 1
+    # #1843: version-scope-collapse guard. One revision attempt — same
+    # rationale as the fidelity guard it composes with.
+    _MAX_VERSION_SCOPE_RETRIES = 1
     # After the 3 standard action-intent nudges are exhausted, the model
     # gets exactly one more chance if the response contains incompleteness
     # language ("first", "to start", "step 1") — a stronger nudge that
@@ -1104,6 +1112,14 @@ def build_agent_graph(
         unverified_entity_count=_per_run_state[0].unverified_entity_count,
         max_retries=_MAX_UNVERIFIED_ENTITY_RETRIES,
     )
+    handle_unsupported_quote = build_handle_unsupported_quote_node(
+        unsupported_quote_count=_per_run_state[0].unsupported_quote_count,
+        max_retries=_MAX_UNSUPPORTED_QUOTE_RETRIES,
+    )
+    handle_version_scope = build_handle_version_scope_node(
+        version_scope_count=_per_run_state[0].version_scope_count,
+        max_retries=_MAX_VERSION_SCOPE_RETRIES,
+    )
 
     def handle_fabrication(state: CogtrixState) -> dict:
         _per_run_state[0].fabrication_count[0] += 1
@@ -1453,8 +1469,10 @@ def build_agent_graph(
                 from src.orchestration.verification import (
                     collect_tool_message_contents,
                     collect_tool_names_this_turn,
+                    detect_unsupported_quote,
                     detect_unverified_claim,
                     detect_unverified_entities,
+                    detect_version_scope_mismatch,
                 )
 
                 _turn_start = 0
@@ -1485,6 +1503,28 @@ def build_agent_graph(
                         <= _MAX_UNVERIFIED_ENTITY_RETRIES
                     ):
                         return "handle_unverified_entity"
+
+                # #1841: output-fidelity guard. A verbatim quote or explicit
+                # attribution in the response that appears in no tool result
+                # this turn is a fabricated quote / fabricated citation.
+                if detect_unsupported_quote(content, _tool_contents, _user_prompt):
+                    if (
+                        _per_run_state[0].unsupported_quote_count[0]
+                        <= _MAX_UNSUPPORTED_QUOTE_RETRIES
+                    ):
+                        return "handle_unsupported_quote"
+
+                # #1843: version-scope-collapse guard. A lifecycle status the
+                # model attaches to a specific model-ID that the evidence
+                # scopes only to a prefix-parent (series→version confusion).
+                # Checked against the WHOLE conversation's tool output, not
+                # just this turn: the misattribution often surfaces on a
+                # correction turn that did no fresh research, so the only
+                # ground truth is research from an earlier turn.
+                _all_tool_contents = collect_tool_message_contents(msgs, 0)
+                if detect_version_scope_mismatch(content, _all_tool_contents):
+                    if _per_run_state[0].version_scope_count[0] <= _MAX_VERSION_SCOPE_RETRIES:
+                        return "handle_version_scope"
 
         return END
 
@@ -1529,6 +1569,22 @@ def build_agent_graph(
         # attempt, then accept-and-ship so the model can't loop on
         # a stubborn refusal to drop the unverified identifier.
         if _per_run_state[0].unverified_entity_count[0] > _MAX_UNVERIFIED_ENTITY_RETRIES:
+            return END
+        return "call_model"
+
+    def route_after_unsupported_quote(state: CogtrixState) -> str:  # noqa: ARG001
+        # Same shape as the other verification guards: one revision
+        # attempt, then accept-and-ship rather than loop on a model
+        # that keeps re-emitting the unsupported quote.
+        if _per_run_state[0].unsupported_quote_count[0] > _MAX_UNSUPPORTED_QUOTE_RETRIES:
+            return END
+        return "call_model"
+
+    def route_after_version_scope(state: CogtrixState) -> str:  # noqa: ARG001
+        # Same shape as the other verification guards: one revision
+        # attempt, then accept-and-ship rather than loop on a model
+        # that keeps collapsing the version scope.
+        if _per_run_state[0].version_scope_count[0] > _MAX_VERSION_SCOPE_RETRIES:
             return END
         return "call_model"
 
@@ -1594,6 +1650,8 @@ def build_agent_graph(
     graph.add_node("handle_incompleteness", handle_incompleteness)
     graph.add_node("handle_unverified_claim", handle_unverified_claim)
     graph.add_node("handle_unverified_entity", handle_unverified_entity)
+    graph.add_node("handle_unsupported_quote", handle_unsupported_quote)
+    graph.add_node("handle_version_scope", handle_version_scope)
     graph.add_node("process_tools", process_tools)
     graph.set_entry_point("call_model")
     graph.add_conditional_edges(
@@ -1607,6 +1665,8 @@ def build_agent_graph(
             "handle_incompleteness": "handle_incompleteness",
             "handle_unverified_claim": "handle_unverified_claim",
             "handle_unverified_entity": "handle_unverified_entity",
+            "handle_unsupported_quote": "handle_unsupported_quote",
+            "handle_version_scope": "handle_version_scope",
             END: END,
         },
     )
@@ -1637,6 +1697,16 @@ def build_agent_graph(
     graph.add_conditional_edges(
         "handle_unverified_entity",
         route_after_unverified_entity,
+        {"call_model": "call_model", END: END},
+    )
+    graph.add_conditional_edges(
+        "handle_unsupported_quote",
+        route_after_unsupported_quote,
+        {"call_model": "call_model", END: END},
+    )
+    graph.add_conditional_edges(
+        "handle_version_scope",
+        route_after_version_scope,
         {"call_model": "call_model", END: END},
     )
     compiled = graph.compile()
