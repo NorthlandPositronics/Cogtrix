@@ -1,5 +1,20 @@
 # Cogtrix Documentation
 
+## Repositories & Packages
+
+| Project | GitHub Repository | Container Registry |
+|---------|------------------|--------------------|
+| Cogtrix (backend / CLI / API) | [NorthlandPositronics/Cogtrix](https://github.com/NorthlandPositronics/Cogtrix) | [`ghcr.io/northlandpositronics/cogtrix`](https://github.com/NorthlandPositronics/Cogtrix/pkgs/container/cogtrix) |
+| Cogtrix WebUI (React frontend) | [NorthlandPositronics/Cogtrix-WebUI](https://github.com/NorthlandPositronics/Cogtrix-WebUI) | [`ghcr.io/northlandpositronics/cogtrix-webui`](https://github.com/NorthlandPositronics/Cogtrix-WebUI/pkgs/container/cogtrix-webui) |
+
+**Pull examples:**
+```bash
+docker pull ghcr.io/northlandpositronics/cogtrix:v0.1.23
+docker pull ghcr.io/northlandpositronics/cogtrix-webui:latest
+```
+
+---
+
 ## User Guides
 
 | Guide | Description |

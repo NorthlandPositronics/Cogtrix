@@ -90,6 +90,17 @@ def _BG(t: str) -> str:
     return f"\033[1;32m{t}\033[0m" if color_enabled() else t
 
 
+def _mask_api_key(key: str) -> str:
+    """Return a display-safe masked version of an API key.
+
+    Shows the first 3 and last 4 characters when the key is at least 10
+    characters long; otherwise returns ``***`` to avoid revealing short keys.
+    """
+    if len(key) < 10:
+        return "***"
+    return key[:3] + "***" + key[-4:]
+
+
 # ── Spinner ──────────────────────────────────────────────────────────
 
 
@@ -479,9 +490,10 @@ def _bootstrap_llm(
     """Phase 1: scripted prompts to get a working LLM instance.
 
     Wraps the provider/model/key questions in a retry loop so that
-    connection failures don't kill the wizard.
+    connection failures don't kill the wizard.  All entered values are
+    carried forward as defaults on each retry attempt.
     """
-    # Determine default provider type from existing config or environment
+    # Determine initial default provider type from existing config or environment
     if existing_info.get("type"):
         default_type = existing_info["type"]
     elif env.get("ollama_running"):
@@ -497,120 +509,135 @@ def _bootstrap_llm(
     else:
         default_type = "openai"
 
+    last: dict[str, Any] = {}  # carries entered values across retry iterations
+
     while True:
-        provider_type = _ask_choice(
+        selected_type = _ask_choice(
             "Provider type",
             choices=["ollama", "openai", "anthropic", "google", "xai"],
-            default=default_type,
+            default=last.get("selected_type") or default_type,
         )
 
         api_key: str | None = None
         base_url: str | None = None
-        provider_name: str = provider_type
-        default_model: str
+        provider_name: str = selected_type
+        provider_type: str = selected_type  # may be remapped (xai → openai)
 
-        if provider_type == "ollama":
-            default_url = env.get("ollama_url", "http://127.0.0.1:11434")
-            if existing_info.get("type") == "ollama" and existing_info.get("base_url"):
-                default_url = existing_info["base_url"]
+        if selected_type == "ollama":
+            default_url = (
+                last.get("base_url")
+                or (
+                    existing_info.get("base_url") if existing_info.get("type") == "ollama" else None
+                )
+                or env.get("ollama_url", "http://127.0.0.1:11434")
+            )
             base_url = _ask_input("Ollama URL", default=default_url)
-
             available = _list_ollama_models(base_url)
-
-            default_model = existing_info.get("model") or "qwen3:8b"
+            default_model = last.get("model") or existing_info.get("model") or "qwen3:8b"
             if available and default_model not in available:
                 default_model = available[0]
             model = _ask_input("Model", default=default_model)
 
-        elif provider_type == "openai":
+        elif selected_type == "openai":
+            prior_key = last.get("api_key") or (
+                existing_info.get("api_key") if existing_info.get("type") == "openai" else None
+            )
             if env.get("openai_key"):
                 print(f"  {_G(chr(0x2713))} Using OPENAI_API_KEY from environment")
                 api_key = env["openai_key"]
-            elif existing_info.get("api_key"):
-                existing_key = existing_info["api_key"]
-                masked = (
-                    existing_key[:4] + "***" + existing_key[-4:] if len(existing_key) > 8 else "***"
-                )
+            elif prior_key:
+                masked = _mask_api_key(prior_key)
                 entered = _ask_input("API key", default=masked, secret=True)
-                api_key = existing_key if entered == masked else entered
+                api_key = prior_key if entered == masked else (entered or None)
             else:
-                api_key = _ask_input("API key", secret=True)
+                entered = _ask_input("API key", secret=True)
+                api_key = entered or None
 
-            default_base = "https://api.openai.com/v1"
-            if existing_info.get("type") == "openai" and existing_info.get("base_url"):
-                default_base = existing_info["base_url"]
+            default_base = (
+                last.get("base_url")
+                or (
+                    existing_info.get("base_url") if existing_info.get("type") == "openai" else None
+                )
+                or "https://api.openai.com/v1"
+            )
             base_url = _ask_input("Base URL", default=default_base)
-
             if base_url != "https://api.openai.com/v1":
                 provider_name = _ask_input(
                     "Provider name",
-                    default=existing_info.get("provider", "openai"),
+                    default=last.get("provider_name") or existing_info.get("provider") or "openai",
                 )
             else:
                 provider_name = "openai"
-
-            default_model = existing_info.get("model") or "gpt-4.1-mini"
+            default_model = last.get("model") or existing_info.get("model") or "gpt-4.1-mini"
             model = _ask_input("Model", default=default_model)
 
-        elif provider_type == "anthropic":
+        elif selected_type == "anthropic":
+            prior_key = last.get("api_key") or (
+                existing_info.get("api_key") if existing_info.get("type") == "anthropic" else None
+            )
             if env.get("anthropic_key"):
                 print(f"  {_G(chr(0x2713))} Using ANTHROPIC_API_KEY from environment")
                 api_key = env["anthropic_key"]
-            elif existing_info.get("api_key") and existing_info.get("type") == "anthropic":
-                existing_key = existing_info["api_key"]
-                masked = (
-                    existing_key[:4] + "***" + existing_key[-4:] if len(existing_key) > 8 else "***"
-                )
+            elif prior_key:
+                masked = _mask_api_key(prior_key)
                 entered = _ask_input("API key", default=masked, secret=True)
-                api_key = existing_key if entered == masked else entered
+                api_key = prior_key if entered == masked else (entered or None)
             else:
-                api_key = _ask_input("API key", secret=True)
-
+                entered = _ask_input("API key", secret=True)
+                api_key = entered or None
             provider_name = "anthropic"
-            default_model = existing_info.get("model") or "claude-sonnet-4-5"
+            default_model = last.get("model") or existing_info.get("model") or "claude-sonnet-4-5"
             model = _ask_input("Model", default=default_model)
 
-        elif provider_type == "google":
+        elif selected_type == "google":
+            prior_key = last.get("api_key") or (
+                existing_info.get("api_key") if existing_info.get("type") == "google" else None
+            )
             if env.get("gemini_key"):
                 print(f"  {_G(chr(0x2713))} Using GEMINI_API_KEY from environment")
                 api_key = env["gemini_key"]
-            elif existing_info.get("api_key") and existing_info.get("type") == "google":
-                existing_key = existing_info["api_key"]
-                masked = (
-                    existing_key[:4] + "***" + existing_key[-4:] if len(existing_key) > 8 else "***"
-                )
+            elif prior_key:
+                masked = _mask_api_key(prior_key)
                 entered = _ask_input("API key", default=masked, secret=True)
-                api_key = existing_key if entered == masked else entered
+                api_key = prior_key if entered == masked else (entered or None)
             else:
-                api_key = _ask_input("API key", secret=True)
-
+                entered = _ask_input("API key", secret=True)
+                api_key = entered or None
             provider_name = "google"
-            default_model = existing_info.get("model") or "gemini-2.5-flash"
+            default_model = last.get("model") or existing_info.get("model") or "gemini-2.5-flash"
             model = _ask_input("Model", default=default_model)
 
         else:  # xai
+            prior_key = last.get("api_key") or (
+                existing_info.get("api_key")
+                if existing_info.get("type") == "openai" and existing_info.get("provider") == "xai"
+                else None
+            )
             if env.get("xai_key"):
                 print(f"  {_G(chr(0x2713))} Using XAI_API_KEY from environment")
                 api_key = env["xai_key"]
-            elif (
-                existing_info.get("api_key")
-                and existing_info.get("type") == "openai"
-                and existing_info.get("provider") == "xai"
-            ):
-                existing_key = existing_info["api_key"]
-                masked = (
-                    existing_key[:4] + "***" + existing_key[-4:] if len(existing_key) > 8 else "***"
-                )
+            elif prior_key:
+                masked = _mask_api_key(prior_key)
                 entered = _ask_input("API key", default=masked, secret=True)
-                api_key = existing_key if entered == masked else entered
+                api_key = prior_key if entered == masked else (entered or None)
             else:
-                api_key = _ask_input("API key", secret=True)
-
+                entered = _ask_input("API key", secret=True)
+                api_key = entered or None
             provider_name = "xai"
             base_url = "https://api.x.ai/v1"
             provider_type = "openai"
-            default_model = existing_info.get("model") or "grok-4.1-fast"
+            default_model = last.get("model") or existing_info.get("model") or "grok-4.1-fast"
             model = _ask_input("Model", default=default_model)
+
+        # Persist all entered values so the next retry uses them as defaults
+        last = {
+            "selected_type": selected_type,
+            "type": provider_type,
+            "model": model,
+            "api_key": api_key,
+            "base_url": base_url,
+            "provider_name": provider_name,
+        }
 
         # Test connection
         llm = _test_connection(provider_type, model, api_key, base_url)
@@ -978,6 +1005,57 @@ def _mask_secrets(yaml_text: str) -> str:
 # ── Input helpers ────────────────────────────────────────────────────
 
 
+def _read_masked_input(prompt: str) -> str:
+    """Read a line of input displaying '*' for each character typed.
+
+    Uses character-by-character raw terminal reads so the user sees ``*``
+    feedback without the actual characters being echoed.  Falls back to
+    ``getpass`` when stdin is not a TTY or ``termios`` is unavailable
+    (e.g. Windows or piped input).
+    """
+    if not sys.stdin.isatty():
+        return getpass.getpass(prompt)
+    try:
+        import termios
+        import tty
+    except ImportError:
+        return getpass.getpass(prompt)
+
+    sys.stdout.write(prompt)
+    sys.stdout.flush()
+    chars: list[str] = []
+    fd = sys.stdin.fileno()
+    old = termios.tcgetattr(fd)
+    try:
+        tty.setcbreak(fd)
+        while True:
+            ch = os.read(fd, 1).decode("utf-8", errors="replace")
+            if ch in ("\r", "\n"):
+                sys.stdout.write("\n")
+                sys.stdout.flush()
+                break
+            if ch in ("\x7f", "\x08"):  # backspace / delete
+                if chars:
+                    chars.pop()
+                    sys.stdout.write("\b \b")
+                    sys.stdout.flush()
+            elif ch == "\x1b":  # escape sequence (arrow keys etc.) — consume and ignore
+                nxt = os.read(fd, 1)
+                if nxt == b"[":
+                    os.read(fd, 1)
+            elif ch.isprintable():
+                chars.append(ch)
+                sys.stdout.write("*")
+                sys.stdout.flush()
+    except KeyboardInterrupt:
+        sys.stdout.write("\n")
+        sys.stdout.flush()
+        raise
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+    return "".join(chars)
+
+
 def _ask_choice(prompt: str, choices: list[str], default: str | None = None) -> str:
     """Ask the user to pick from inline choices.
 
@@ -1014,13 +1092,18 @@ def _ask_choice(prompt: str, choices: list[str], default: str | None = None) -> 
 
 
 def _ask_input(prompt: str, default: str | None = None, secret: bool = False) -> str:
-    """Ask the user for free-text input."""
+    """Ask the user for free-text input.
+
+    When *secret* is ``True`` each typed character is echoed as ``*``.
+    An empty response accepts *default* when provided, or returns an empty
+    string — callers treat an empty API key as "no authentication required".
+    """
     suffix = f" {_D(f'[{default}]')}" if default else ""
     full_prompt = f"  {_B(prompt)}{suffix}: "
 
     try:
         if secret:
-            raw = getpass.getpass(full_prompt)
+            raw = _read_masked_input(full_prompt)
         else:
             raw = input(full_prompt)
     except (EOFError, KeyboardInterrupt):
@@ -1030,7 +1113,4 @@ def _ask_input(prompt: str, default: str | None = None, secret: bool = False) ->
     raw = raw.strip()
     if not raw and default:
         return default
-    if not raw and secret:
-        print(f"  {_R('API key cannot be empty. Please try again.')}")
-        return _ask_input(prompt, default=default, secret=secret)
     return raw

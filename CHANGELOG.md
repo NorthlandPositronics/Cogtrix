@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.1.24](https://github.com/NorthlandPositronics/Cogtrix/compare/v0.1.23...v0.1.24) (2026-03-22)
+
+
+### Features
+
+* wizard UX improvements, vLLM no-auth fix, entrypoint fix ([758d703](https://github.com/NorthlandPositronics/Cogtrix/commit/758d70319d2a536c75b30e9e77a46ba7073e2191))
+* **wizard:** masked API key input, retry defaults, empty key support ([#14](https://github.com/NorthlandPositronics/Cogtrix/issues/14)) ([2a229de](https://github.com/NorthlandPositronics/Cogtrix/commit/2a229de272d55196d8628396d505f464b4fa9b95))
+
+
+### Bug Fixes
+
+* **docker:** always start wizard when no config/key regardless of args ([2a229de](https://github.com/NorthlandPositronics/Cogtrix/commit/2a229de272d55196d8628396d505f464b4fa9b95))
+* **providers/openai:** pass 'no-key' placeholder for unauthenticated endpoints ([2a229de](https://github.com/NorthlandPositronics/Cogtrix/commit/2a229de272d55196d8628396d505f464b4fa9b95))
+
+
+### Documentation
+
+* **index:** add Repositories & Packages section with GHCR links ([2a229de](https://github.com/NorthlandPositronics/Cogtrix/commit/2a229de272d55196d8628396d505f464b4fa9b95))
+
 ## [0.1.23](https://github.com/NorthlandPositronics/Cogtrix/compare/v0.1.22...v0.1.23) (2026-03-20)
 
 
