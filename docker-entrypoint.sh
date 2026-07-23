@@ -31,6 +31,11 @@ if [ "${1}" = "api" ] || [ "${1}" = "--api" ]; then
         echo "Warning: Alembic migration step returned non-zero (tables may already exist)" >&2
     fi
 
+    # Mark API mode so the HEALTHCHECK can skip the HTTP probe in CLI mode
+    # (BUG-236). The sentinel is created before exec so it persists across the
+    # process replacement and is visible to subsequent `docker exec` probes.
+    touch /tmp/.cogtrix-api-mode
+
     exec python -m src.api "$@"
 fi
 
@@ -42,6 +47,12 @@ fi
 #
 # The COGTRIX_CONFIG_FILE env var is intentionally NOT checked here — if the
 # user has set that, python cogtrix.py will find it and the wizard is skipped.
+#
+# Note (BUG-232): when Ollama is available on the Docker host via --network host
+# but neither COGTRIX_OLLAMA nor OLLAMA_BASE_URL is set, the wizard runs because
+# no configured provider is detected. This is intentional — the wizard auto-
+# detects a running Ollama instance and pre-fills its connection details, so the
+# user ends up with a valid config after a single wizard session.
 if [ ! -f /app/.cogtrix.yaml ] && [ ! -f /app/.cogtrix.json ] && [ -t 0 ]; then
     if [ -z "$OPENAI_API_KEY" ] && \
        [ -z "$ANTHROPIC_API_KEY" ] && \

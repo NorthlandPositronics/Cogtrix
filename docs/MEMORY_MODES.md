@@ -99,7 +99,8 @@ What the LLM actually sees on each turn:
 Summarization is triggered **after each response**, not during the user's wait for a reply. Specifically:
 
 1. After the agent replies, the memory manager checks how many messages have fallen outside the sliding window since the last summary was generated.
-2. If unsummarized messages have accumulated, a meaningful-content gate runs before sending anything to the LLM:
+2. Summarization is skipped unless **at least 10 messages** have fallen out of the window since the last summary (`_SUMMARY_BATCH_SIZE = 10`). This prevents premature summarization after every single turn.
+3. Once the 10-message threshold is crossed, a **meaningful-content gate** runs before sending anything to the LLM:
    - At least **4 meaningful messages** (2 full human+assistant turns) must be present (`_MIN_MEANINGFUL_MSGS_FOR_SUMMARY = 4`)
    - At least **5,000 characters** of meaningful content must exist (`_MIN_MEANINGFUL_CHARS_FOR_SUMMARY = 5000`)
    - Both thresholds must be missed simultaneously to skip summarization — if either is met, the batch proceeds. This prevents summarization from firing on short or tool-heavy exchanges that contain no real conversational substance.

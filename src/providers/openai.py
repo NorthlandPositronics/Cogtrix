@@ -60,8 +60,10 @@ def create_chat_model(
         # OpenAI-compatible endpoints (vLLM, LM Studio, etc.) often require no
         # authentication, but the SDK unconditionally rejects a missing api_key.
         # Use the caller-supplied key when present; fall back to a placeholder so
-        # the SDK's client-option check passes without forcing users to invent a key.
-        llm_kwargs["api_key"] = api_key or "no-key"
+        # the SDK's client-option check passes without forcing users to invent a
+        # key.  "not-required" is deliberately descriptive so it never appears as
+        # a confusing literal in SDK error messages (BUG-231).
+        llm_kwargs["api_key"] = api_key or "not-required"
     elif api_key:
         llm_kwargs["api_key"] = api_key
     llm_kwargs.update(kwargs)

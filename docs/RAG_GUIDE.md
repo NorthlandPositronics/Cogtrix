@@ -101,7 +101,7 @@ You: What does the policy say about remote work?
 
 ### Directory Structure
 
-Place files in the docs directory — **subdirectories are traversed recursively**.
+Place files in the docs directory — **subdirectories are traversed recursively**, so any folder layout is supported.
 
 ```
 docs/
@@ -112,7 +112,7 @@ docs/
 └── employees.csv
 ```
 
-If you currently organize files in folders, either flatten them into `docs/` before ingestion, or point `--docs-dir` at the specific folder containing the files you want to ingest.
+You can organize files into subdirectories; they will all be ingested. Use `--docs-dir` to point at a specific subdirectory if you only want to ingest part of your document tree.
 
 ---
 

@@ -39,6 +39,8 @@ _ACTION_MAP: dict[str, str] = {
 
 # Default to deny on timeout (5 minutes).
 _TIMEOUT_SECONDS = 300
+# Poll interval for blocking read_choice() loop.
+_POLL_INTERVAL = 0.5
 
 
 class ApiConfirmationUI:
@@ -128,7 +130,6 @@ class ApiConfirmationUI:
 
         if event is not None:
             deadline = time.monotonic() + _TIMEOUT_SECONDS
-            _POLL_INTERVAL = 0.5  # seconds per poll cycle
             while time.monotonic() < deadline:
                 if event.wait(timeout=_POLL_INTERVAL):
                     with self._lock:

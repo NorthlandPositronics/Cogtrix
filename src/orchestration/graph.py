@@ -435,6 +435,9 @@ def build_agent_graph(
     _bound_cache: OrderedDict[tuple[str, ...], Any] = (
         bound_cache if bound_cache is not None else OrderedDict()
     )
+    # Lock protecting the per-graph _bound_cache; mirrors the module-level
+    # _persistent_bound_cache pattern in runner.py (BUG-233).
+    _bound_cache_lock = threading.Lock()
     _tool_version = [0]
     _last_tool_version = [-1]
     _cached_fingerprint: list[tuple[str, ...]] = [()]
@@ -470,14 +473,15 @@ def build_agent_graph(
             )
             _last_tool_version[0] = _tool_version[0]
         fingerprint = _cached_fingerprint[0]
-        if fingerprint in _bound_cache:
-            _bound_cache.move_to_end(fingerprint)
-        else:
-            tool_list = list(active_tools_list) if active_tools_list else []
-            if len(_bound_cache) >= 8:
-                _bound_cache.popitem(last=False)
-            _bound_cache[fingerprint] = llm.bind_tools(tool_list) if tool_list else llm
-        model = _bound_cache[fingerprint]
+        with _bound_cache_lock:
+            if fingerprint in _bound_cache:
+                _bound_cache.move_to_end(fingerprint)
+            else:
+                tool_list = list(active_tools_list) if active_tools_list else []
+                if len(_bound_cache) >= 8:
+                    _bound_cache.popitem(last=False)
+                _bound_cache[fingerprint] = llm.bind_tools(tool_list) if tool_list else llm
+            model = _bound_cache[fingerprint]
         _graph_log.debug("⏱ call_model bind_tools: %.0fms", (time.monotonic() - _cm_t0) * 1000)
         msgs = list(state["messages"])
         _comp_llm = compression_llm or llm
@@ -535,10 +539,20 @@ def build_agent_graph(
         }
 
     def _tool_call_key(call: dict) -> str | None:
-        """Compute the deduplication key for a tool call, or None if not serializable."""
+        """Compute the deduplication key for a tool call, or None if not serializable.
+
+        Normalizes to the canonical tool name via ``_tool_lookup`` so that an
+        alias and its resolved canonical name share the same cache key.  When the
+        alias is not in ``_tool_lookup`` (e.g. during the auto-expansion serial
+        path) the raw call name is used instead (BUG-234).
+        """
         tool_name = call["name"]
         if tool_name in _DUPLICATE_EXEMPT:
             return None
+        # Prefer the canonical name stored on the live tool object.
+        tool_obj = _tool_lookup.get(tool_name)
+        if tool_obj is not None:
+            tool_name = getattr(tool_obj, "name", tool_name) or tool_name
         try:
             return tool_name + ":" + _json.dumps(call.get("args", {}))
         except (TypeError, ValueError):

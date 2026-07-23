@@ -23,6 +23,7 @@ import socket
 import sys
 import tempfile
 import threading
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from string import Template
@@ -334,14 +335,21 @@ def _detect_environment() -> dict[str, Any]:
         ollama_url = _parse_ollama_address(cogtrix_ollama.strip())
     else:
         ollama_url = os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
-    try:
-        req = urllib.request.Request(f"{ollama_url}/api/tags", method="GET")
-        with urllib.request.urlopen(req, timeout=2) as resp:  # nosec B310
-            if resp.status == 200:
-                env["ollama_running"] = True
-                env["ollama_url"] = ollama_url
-    except Exception:
-        pass
+    if _is_safe_ollama_url(ollama_url):
+        try:
+            req = urllib.request.Request(f"{ollama_url}/api/tags", method="GET")
+            with urllib.request.urlopen(req, timeout=2) as resp:  # nosec B310
+                if resp.status == 200:
+                    env["ollama_running"] = True
+                    env["ollama_url"] = ollama_url
+        except Exception:
+            pass
+    else:
+        log.warning(
+            "_detect_environment: skipping Ollama probe — URL resolves to a "
+            "non-public address (BUG-229): %s",
+            _redact_url_creds(ollama_url),
+        )
 
     return env
 
@@ -419,6 +427,13 @@ def _extract_config_info(yaml_content: str) -> dict[str, Any]:
 
 def _list_ollama_models(base_url: str) -> list[str]:
     """Fetch and display installed Ollama models. Returns model names."""
+    if not _is_safe_ollama_url(base_url):
+        log.warning(
+            "_list_ollama_models: skipping model fetch — URL resolves to a "
+            "non-public address (BUG-230): %s",
+            _redact_url_creds(base_url),
+        )
+        return []
     try:
         req = urllib.request.Request(f"{base_url}/api/tags")
         with urllib.request.urlopen(req, timeout=5) as resp:  # nosec B310
@@ -688,6 +703,48 @@ def _bootstrap_llm(
 
 
 # ── Documentation & config loading ───────────────────────────────────
+
+
+def _redact_url_creds(url: str) -> str:
+    """Return *url* with any embedded username/password stripped for safe logging."""
+    try:
+        p = urllib.parse.urlparse(url)
+        netloc = p.hostname or ""
+        if p.port:
+            netloc += f":{p.port}"
+        return urllib.parse.urlunparse(p._replace(netloc=netloc))
+    except Exception:
+        return "<unparseable URL>"
+
+
+def _is_safe_ollama_url(url: str) -> bool:
+    """Return True if *url* is safe to probe as an Ollama endpoint.
+
+    Like ``_is_safe_url`` but permits loopback addresses (127.x.x.x /
+    ::1) so that a locally-running Ollama instance is always reachable.
+    All other non-public ranges — RFC-1918 private (except loopback),
+    link-local, reserved, and unspecified — are blocked to prevent SSRF
+    via ``OLLAMA_BASE_URL`` or user-supplied wizard input (BUG-229/230).
+    Returns False on any parse or DNS resolution failure.
+    """
+    from urllib.parse import urlparse as _urlparse
+
+    try:
+        parsed = _urlparse(url)
+        hostname = parsed.hostname
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        if not hostname:
+            return False
+        resolved = socket.getaddrinfo(hostname, port)
+        for _, _, _, _, sockaddr in resolved:
+            ip = ipaddress.ip_address(sockaddr[0])
+            if ip.is_loopback:
+                continue  # always allow localhost (canonical Ollama address)
+            if ip.is_private or ip.is_link_local or ip.is_reserved or ip.is_unspecified:
+                return False
+    except Exception:
+        return False
+    return True
 
 
 def _is_safe_url(url: str) -> bool:

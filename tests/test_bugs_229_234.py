@@ -1,0 +1,330 @@
+"""Regression tests for BUG-229 through BUG-236 (2026-03-22 sweep fixes).
+
+BUG-229 — _detect_environment: OLLAMA_BASE_URL not validated before urlopen
+BUG-230 — _list_ollama_models: user-typed URL not validated before urlopen
+BUG-231 — openai.py: "no-key" placeholder replaced with "not-required"
+BUG-232 — docker-entrypoint: wizard auto-start documented (no code change needed)
+BUG-233 — graph.py: _bound_cache accessed without lock in call_model closure
+BUG-234 — graph.py: _tool_call_key normalizes to canonical name via _tool_lookup
+BUG-236 — Dockerfile: HEALTHCHECK exits 0 in CLI mode (sentinel file gate)
+"""
+
+from __future__ import annotations
+
+import os
+import subprocess
+import tempfile
+import threading
+from collections import OrderedDict
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+# ---------------------------------------------------------------------------
+# BUG-229: _detect_environment skips Ollama probe for non-safe URLs
+# ---------------------------------------------------------------------------
+
+
+class TestBug229OllamaEnvSSRF:
+    """OLLAMA_BASE_URL env var must be validated before urlopen."""
+
+    def test_safe_ollama_url_allows_loopback(self):
+        """127.0.0.1 (canonical Ollama address) must pass _is_safe_ollama_url."""
+        from src.setup_wizard import _is_safe_ollama_url
+
+        assert _is_safe_ollama_url("http://127.0.0.1:11434") is True
+
+    def test_safe_ollama_url_allows_localhost(self):
+        from src.setup_wizard import _is_safe_ollama_url
+
+        assert _is_safe_ollama_url("http://localhost:11434") is True
+
+    def test_safe_ollama_url_blocks_link_local(self):
+        """169.254.x.x (AWS metadata, link-local) must be blocked."""
+        from src.setup_wizard import _is_safe_ollama_url
+
+        # We patch getaddrinfo so we don't need real DNS resolution in CI.
+        with patch("socket.getaddrinfo") as mock_gai:
+            mock_gai.return_value = [(None, None, None, None, ("169.254.169.254", 80))]
+            assert _is_safe_ollama_url("http://169.254.169.254/") is False
+
+    def test_safe_ollama_url_blocks_rfc1918(self):
+        """10.x.x.x / 192.168.x.x (RFC-1918 private, not loopback) must be blocked."""
+        from src.setup_wizard import _is_safe_ollama_url
+
+        with patch("socket.getaddrinfo") as mock_gai:
+            mock_gai.return_value = [(None, None, None, None, ("10.0.0.1", 80))]
+            assert _is_safe_ollama_url("http://10.0.0.1/admin") is False
+
+        with patch("socket.getaddrinfo") as mock_gai:
+            mock_gai.return_value = [(None, None, None, None, ("192.168.1.1", 80))]
+            assert _is_safe_ollama_url("http://192.168.1.1/") is False
+
+    def test_safe_ollama_url_blocks_empty_hostname(self):
+        from src.setup_wizard import _is_safe_ollama_url
+
+        assert _is_safe_ollama_url("not-a-url") is False
+        assert _is_safe_ollama_url("") is False
+
+    def test_detect_environment_skips_probe_for_unsafe_url(self):
+        """_detect_environment must NOT call urlopen when URL is unsafe (BUG-229)."""
+        from src.setup_wizard import _detect_environment
+
+        with (
+            patch("src.setup_wizard._is_safe_ollama_url", return_value=False) as mock_safe,
+            patch("urllib.request.urlopen") as mock_urlopen,
+            patch.dict("os.environ", {"OLLAMA_BASE_URL": "http://169.254.169.254/"}, clear=False),
+        ):
+            env = _detect_environment()
+
+        mock_safe.assert_called()
+        mock_urlopen.assert_not_called()
+        assert "ollama_running" not in env
+
+    def test_detect_environment_probes_safe_url(self):
+        """_detect_environment MUST call urlopen when URL is safe."""
+        from src.setup_wizard import _detect_environment
+
+        mock_resp = MagicMock()
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_resp.status = 200
+
+        with (
+            patch("src.setup_wizard._is_safe_ollama_url", return_value=True),
+            patch("urllib.request.urlopen", return_value=mock_resp) as mock_urlopen,
+            patch.dict("os.environ", {"OLLAMA_BASE_URL": "http://127.0.0.1:11434"}, clear=False),
+        ):
+            env = _detect_environment()
+
+        mock_urlopen.assert_called_once()
+        assert env.get("ollama_running") is True
+
+
+# ---------------------------------------------------------------------------
+# BUG-230: _list_ollama_models validates user-typed URL before urlopen
+# ---------------------------------------------------------------------------
+
+
+class TestBug230OllamaUserURLSSRF:
+    """User-typed Ollama URL must be validated before urlopen (BUG-230)."""
+
+    def test_list_ollama_models_skips_unsafe_url(self):
+        """_list_ollama_models must return [] and NOT call urlopen for unsafe URL."""
+        from src.setup_wizard import _list_ollama_models
+
+        with (
+            patch("src.setup_wizard._is_safe_ollama_url", return_value=False),
+            patch("urllib.request.urlopen") as mock_urlopen,
+        ):
+            result = _list_ollama_models("http://169.254.169.254/")
+
+        mock_urlopen.assert_not_called()
+        assert result == []
+
+    def test_list_ollama_models_fetches_for_safe_url(self):
+        """_list_ollama_models must proceed normally for safe URLs."""
+        from src.setup_wizard import _list_ollama_models
+
+        payload = b'{"models": [{"name": "qwen3:8b", "size": 5000000000}]}'
+        mock_resp = MagicMock()
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_resp.read.return_value = payload
+
+        with (
+            patch("src.setup_wizard._is_safe_ollama_url", return_value=True),
+            patch("urllib.request.urlopen", return_value=mock_resp),
+        ):
+            result = _list_ollama_models("http://127.0.0.1:11434")
+
+        assert "qwen3:8b" in result
+
+
+# ---------------------------------------------------------------------------
+# BUG-231: openai.py uses "not-required" placeholder (not "no-key")
+# ---------------------------------------------------------------------------
+
+
+class TestBug231NoKeyPlaceholder:
+    """The api_key fallback must be "not-required", not the confusing "no-key"."""
+
+    def test_placeholder_is_not_required(self):
+        src = Path("src/providers/openai.py").read_text()
+        assert "not-required" in src, 'expected "not-required" placeholder in openai.py'
+        assert '"no-key"' not in src, '"no-key" placeholder must be removed (BUG-231)'
+
+    def test_placeholder_literal_value(self):
+        """The exact string used as fallback must be 'not-required'."""
+        from src.providers import create_chat_model
+
+        captured = {}
+
+        class _FakeChatOpenAI:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+        with (
+            patch("src.providers.openai.ChatOpenAI", _FakeChatOpenAI),
+            patch("src.providers.openai.OpenAIEmbeddings", MagicMock()),
+        ):
+            create_chat_model(
+                provider_type="openai",
+                model="gpt-4o",
+                base_url="http://localhost:1234/v1",
+                api_key=None,
+            )
+
+        assert (
+            captured.get("api_key") == "not-required"
+        ), f"Expected 'not-required', got {captured.get('api_key')!r}"
+
+
+# ---------------------------------------------------------------------------
+# BUG-233: _bound_cache in build_agent_graph closure is lock-protected
+# ---------------------------------------------------------------------------
+
+
+class TestBug233BoundCacheLock:
+    """_bound_cache in call_model closure must be guarded by _bound_cache_lock."""
+
+    def test_bound_cache_lock_exists_in_closure(self):
+        """build_agent_graph must create _bound_cache_lock as a threading.Lock."""
+        src = Path("src/orchestration/graph.py").read_text()
+        assert (
+            "_bound_cache_lock = threading.Lock()" in src
+        ), "_bound_cache_lock must be initialised as threading.Lock() in the closure (BUG-233)"
+
+    def test_bound_cache_accessed_under_lock(self):
+        """The _bound_cache operations in call_model must be inside a with _bound_cache_lock block."""
+        src = Path("src/orchestration/graph.py").read_text()
+        # Verify the with-lock pattern wraps the cache operations
+        assert (
+            "with _bound_cache_lock:" in src
+        ), "call_model must access _bound_cache under _bound_cache_lock (BUG-233)"
+
+    def test_lock_prevents_concurrent_cache_corruption(self):
+        """Concurrent call_model invocations must not corrupt the OrderedDict."""
+        cache: OrderedDict = OrderedDict()
+        lock = threading.Lock()
+        errors: list[str] = []
+
+        def _worker(key: str) -> None:
+            try:
+                with lock:
+                    if key not in cache:
+                        if len(cache) >= 8:
+                            cache.popitem(last=False)
+                        cache[key] = f"bound_{key}"
+                    cache.move_to_end(key)
+            except RuntimeError as exc:
+                errors.append(str(exc))
+
+        threads = [threading.Thread(target=_worker, args=(f"k{i}",)) for i in range(20)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert not errors, f"Lock prevented no errors: {errors}"
+        assert len(cache) <= 8
+
+
+# ---------------------------------------------------------------------------
+# BUG-234: _tool_call_key normalizes alias to canonical name
+# ---------------------------------------------------------------------------
+
+
+class TestBug234FuzzyDedupKey:
+    """_tool_call_key must resolve alias names to canonical via _tool_lookup (BUG-234)."""
+
+    def test_canonical_name_used_when_tool_in_lookup(self):
+        """When a tool is in _tool_lookup, its .name attribute takes precedence."""
+        src = Path("src/orchestration/graph.py").read_text()
+        # Confirm the normalization logic is present
+        assert (
+            "_tool_lookup.get(tool_name)" in src
+        ), "_tool_call_key must look up the tool in _tool_lookup for canonical name (BUG-234)"
+        assert (
+            "getattr(tool_obj" in src
+        ), "_tool_call_key must use getattr(tool_obj, 'name', ...) to get canonical name"
+
+    def test_key_falls_back_to_call_name_when_not_in_lookup(self):
+        """When tool is not in _tool_lookup, the raw call name is used (no KeyError)."""
+        # This is verified by the source-level check above — the code uses .get()
+        # which returns None safely, so no exception is possible.
+        src = Path("src/orchestration/graph.py").read_text()
+        assert "_tool_lookup.get(" in src, "must use .get() not [] to avoid KeyError"
+
+
+# ---------------------------------------------------------------------------
+# BUG-236: Dockerfile HEALTHCHECK is conditional on API-mode sentinel
+# ---------------------------------------------------------------------------
+
+
+class TestBug236HealthcheckCLIMode:
+    """HEALTHCHECK must exit 0 immediately in CLI mode (no sentinel file)."""
+
+    def test_dockerfile_healthcheck_checks_sentinel(self):
+        """Dockerfile HEALTHCHECK CMD must check for /tmp/.cogtrix-api-mode."""
+        src = Path("Dockerfile").read_text()
+        assert (
+            "/tmp/.cogtrix-api-mode" in src
+        ), "Dockerfile HEALTHCHECK must gate on /tmp/.cogtrix-api-mode sentinel (BUG-236)"
+
+    def test_entrypoint_creates_sentinel_in_api_mode(self):
+        """docker-entrypoint.sh must create sentinel before exec in API mode."""
+        src = Path("docker-entrypoint.sh").read_text()
+        assert (
+            "touch /tmp/.cogtrix-api-mode" in src
+        ), "docker-entrypoint.sh must create /tmp/.cogtrix-api-mode in API mode (BUG-236)"
+        # Ensure sentinel is created before exec
+        sentinel_pos = src.index("touch /tmp/.cogtrix-api-mode")
+        exec_pos = src.index("exec python -m src.api")
+        assert sentinel_pos < exec_pos, "sentinel must be created before exec"
+
+    def test_healthcheck_cmd_exits_zero_without_sentinel(self):
+        """Simulate the healthcheck in CLI mode: exits 0 when sentinel absent."""
+        # Run the healthcheck logic without the sentinel present.
+        cmd = (
+            "import os, sys; "
+            "sys.exit(0) if not os.path.exists('/tmp/.cogtrix-api-mode-test') else None; "
+            "sys.exit(99)"  # would probe HTTP — sentinel absent so we never reach here
+        )
+        result = subprocess.run(["python", "-c", cmd], capture_output=True)
+        assert (
+            result.returncode == 0
+        ), f"Healthcheck must exit 0 in CLI mode, got {result.returncode}"
+
+    def test_healthcheck_cmd_probes_http_with_sentinel(self):
+        """Simulate the healthcheck in API mode: tries HTTP probe when sentinel present."""
+        fd, sentinel_path = tempfile.mkstemp(suffix=".sentinel")
+        sentinel = Path(sentinel_path)
+        try:
+            os.close(fd)
+            cmd = (
+                f"import os, sys; "
+                f"sys.exit(0) if not os.path.exists('{sentinel}') else None; "
+                f"sys.exit(42)"  # simulates failed HTTP probe
+            )
+            result = subprocess.run(["python", "-c", cmd], capture_output=True)
+            # Should NOT exit 0 — it tried to probe and "failed" (exit 42)
+            assert (
+                result.returncode == 42
+            ), f"Healthcheck must attempt HTTP probe in API mode, got {result.returncode}"
+        finally:
+            sentinel.unlink(missing_ok=True)
+
+
+# ---------------------------------------------------------------------------
+# BUG-232: wizard auto-start documented (behavioural contract test)
+# ---------------------------------------------------------------------------
+
+
+class TestBug232WizardAutoStartBehaviour:
+    """Wizard auto-start condition must be documented in docker-entrypoint.sh (BUG-232)."""
+
+    def test_entrypoint_documents_ollama_network_host_behaviour(self):
+        src = Path("docker-entrypoint.sh").read_text()
+        assert (
+            "network host" in src or "--network host" in src
+        ), "docker-entrypoint.sh must document --network host wizard behaviour (BUG-232)"

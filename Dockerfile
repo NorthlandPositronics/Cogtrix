@@ -78,13 +78,16 @@ EXPOSE 8000
 # Uvicorn handles SIGTERM for graceful shutdown
 STOPSIGNAL SIGTERM
 
-# Healthcheck for container orchestrators (API mode only).
+# Healthcheck for container orchestrators.
+# In CLI mode the HTTP server is not running, so the probe exits 0 immediately
+# (healthy by convention — the process is simply not a server). In API mode the
+# entrypoint creates /tmp/.cogtrix-api-mode before exec, which signals that the
+# HTTP endpoint must be reachable (BUG-236).
 # Uses Python's built-in urllib — no curl/wget required in the slim image.
 # The 4-second socket timeout keeps the probe within Docker's 5-second deadline.
-# Exits 0 on HTTP 200, non-zero on any error.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
     CMD ["python", "-c", \
-         "import urllib.request, sys; r = urllib.request.urlopen('http://localhost:8000/api/v1/health', timeout=4); sys.exit(0 if r.status == 200 else 1)"]
+         "import os, sys; sys.exit(0) if not os.path.exists('/tmp/.cogtrix-api-mode') else None; import urllib.request; r = urllib.request.urlopen('http://localhost:8000/api/v1/health', timeout=4); sys.exit(0 if r.status == 200 else 1)"]
 
 USER cogtrix
 

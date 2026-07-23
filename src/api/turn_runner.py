@@ -463,8 +463,8 @@ async def _run_message_turn_inner(
         }
         try:
             await asyncio.wait_for(session.ws_queue.put(done_msg), timeout=5.0)
-        except (TimeoutError, asyncio.QueueFull):
-            log.warning("Queue full/timeout, dropping done message for session %s", session.id)
+        except TimeoutError:
+            log.warning("Queue put timeout, dropping done message for session %s", session.id)
     finally:
         # Clear the active confirmation UI so stale references never linger
         # after the turn completes or is cancelled (BUG-FORGE-001).

@@ -1,5 +1,37 @@
 # Changelog
 
+## [0.1.34](https://github.com/NorthlandPositronics/Cogtrix/compare/v0.1.33...v0.1.34) (2026-03-24)
+
+
+### Bug Fixes
+
+* **api:** dead QueueFull catch and loop-local constant in confirmation/turn_runner ([57c2d95](https://github.com/NorthlandPositronics/Cogtrix/commit/57c2d952047e407565c69d8ed29b3b7536bdaca5))
+* BUG-229/230/231/232/233/234/236 — Ollama SSRF guards, healthcheck sentinel, bound_cache lock, dedup key normalization ([5f7e2fe](https://github.com/NorthlandPositronics/Cogtrix/commit/5f7e2fe370391242f7c831ff3baf37230028a5fb))
+* BUG-229/230/231/232/233/234/236 — Ollama SSRF guards, healthcheck sentinel, bound_cache lock, dedup key normalization ([e8fee43](https://github.com/NorthlandPositronics/Cogtrix/commit/e8fee4335dac4493e5466053aa1daf3fd58a9351))
+* **wizard:** redact URL credentials in SSRF warning logs (CodeQL CWE-312) ([0afb74f](https://github.com/NorthlandPositronics/Cogtrix/commit/0afb74f8fc6d3b904a3e8b617d5630934de14abe))
+
+
+### Documentation
+
+* holistic accuracy audit — secondary guides and API spec verification ([89fcffa](https://github.com/NorthlandPositronics/Cogtrix/commit/89fcffaea228c9bb22b03fd817f3e948d56a53fb))
+* holistic documentation audit — BUG-AUDIT-001/002 coverage + accuracy fixes ([ff7a6ec](https://github.com/NorthlandPositronics/Cogtrix/commit/ff7a6ec6b16fd26c83bd61debbd691007fc58539))
+
+## [Unreleased]
+
+### Bug Fixes
+
+* **api:** remove dead `QueueFull` except clause from `done`-message handler in `turn_runner.py` — `asyncio.Queue.put()` never raises `QueueFull` (BUG-AUDIT-001) ([57c2d95](https://github.com/NorthlandPositronics/Cogtrix/commit/57c2d95))
+* **api:** hoist `_POLL_INTERVAL` from loop body to module-level constant in `confirmation.py` — eliminates ~600 redundant assignments per confirmation cycle (BUG-AUDIT-002) ([57c2d95](https://github.com/NorthlandPositronics/Cogtrix/commit/57c2d95))
+
+### Tests
+
+* **api:** add regression suite for forge audit fixes — 23 tests covering BUG-AUDIT-001 and BUG-AUDIT-002 ([1531ff8](https://github.com/NorthlandPositronics/Cogtrix/commit/1531ff8))
+* **api:** holistic coverage for all 13 API route modules — +466 tests (#83) ([27b1188](https://github.com/NorthlandPositronics/Cogtrix/commit/27b1188))
+
+### Documentation
+
+* **api:** exhaustive accuracy audit of API documentation (#81) ([d5d6bfd](https://github.com/NorthlandPositronics/Cogtrix/commit/d5d6bfd))
+
 ## [0.1.33](https://github.com/NorthlandPositronics/Cogtrix/compare/v0.1.32...v0.1.33) (2026-03-24)
 
 
