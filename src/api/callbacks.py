@@ -169,7 +169,7 @@ class WebSocketCallbackHandler(BaseCallbackHandler):
         self._enqueue(
             "tool_start",
             {
-                "tool": tool_name,
+                "tool_name": tool_name,
                 "tool_call_id": key,
                 "input": tool_input,
             },
@@ -188,7 +188,7 @@ class WebSocketCallbackHandler(BaseCallbackHandler):
         self._enqueue(
             "tool_end",
             {
-                "tool": tool_name,
+                "tool_name": tool_name,
                 "tool_call_id": key,
                 "duration_ms": duration_ms,
                 "error": None,
@@ -209,7 +209,7 @@ class WebSocketCallbackHandler(BaseCallbackHandler):
         self._enqueue(
             "tool_end",
             {
-                "tool": tool_name,
+                "tool_name": tool_name,
                 "tool_call_id": key,
                 "duration_ms": duration_ms,
                 "error": str(error),

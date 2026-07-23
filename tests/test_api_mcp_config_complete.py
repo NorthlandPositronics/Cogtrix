@@ -937,3 +937,198 @@ class TestWizardEndpoints:
         assert (
             captured_messages[1].content == "Start."
         ), f"seed message content must be 'Start.', got {captured_messages[1].content!r}"
+
+    def test_advance_wizard_step0_invoke_failure_soft_fails_to_default_question(
+        self, client, tokens
+    ):
+        """If the first LLM invocation (seeding the conversation) raises, the wizard
+        must NOT return 422.  Instead it soft-fails and returns the default first
+        question so the user can proceed despite a misbehaving provider.
+
+        Regression: strict providers (e.g. reasoning models) may return HTTP 400 for
+        a cold first-call even though subsequent calls work fine.
+        """
+        with (
+            patch("src.api.routes.config._wizard_detect_env") as mock_env,
+            patch("src.api.routes.config._wizard_load_existing") as mock_load,
+        ):
+            mock_env.return_value = {}
+            mock_load.return_value = ""
+            start_r = client.post(
+                "/api/v1/config/wizard",
+                headers=_ah(tokens),
+                json={"edit_existing": False},
+            )
+        assert start_r.status_code == 201
+        wid = start_r.json()["data"]["wizard_id"]
+
+        with (
+            patch("src.api.routes.config._wizard_test_connection", return_value=MagicMock()),
+            patch("src.api.routes.config._wizard_load_docs", return_value="docs"),
+            patch(
+                "src.api.routes.config._wizard_invoke_llm",
+                side_effect=Exception(
+                    "Error code: 400 - {'error': {'message': 'No connected db.'}}"
+                ),
+            ),
+        ):
+            r = client.post(
+                f"/api/v1/config/wizard/{wid}/step",
+                headers=_ah(tokens),
+                json={
+                    "data": {
+                        "provider_type": "openai",
+                        "model": "qwen35",
+                        "base_url": "http://192.168.1.1/v1",
+                    }
+                },
+            )
+
+        assert r.status_code == 200, f"wizard must soft-fail provider errors, got: {r.text}"
+        data = r.json()["data"]
+        assert data["step"] == 1
+        assert data["complete"] is False
+        from src.api.routes.config import _WIZARD_DEFAULT_FIRST_QUESTION
+
+        assert data["question"] == _WIZARD_DEFAULT_FIRST_QUESTION
+
+    def test_advance_wizard_step0_null_content_falls_back_to_default_question(self, client, tokens):
+        """If the LLM returns None/empty content (reasoning models), the wizard must
+        return the default first question rather than an empty or None question field.
+        """
+        with (
+            patch("src.api.routes.config._wizard_detect_env") as mock_env,
+            patch("src.api.routes.config._wizard_load_existing") as mock_load,
+        ):
+            mock_env.return_value = {}
+            mock_load.return_value = ""
+            start_r = client.post(
+                "/api/v1/config/wizard",
+                headers=_ah(tokens),
+                json={"edit_existing": False},
+            )
+        assert start_r.status_code == 201
+        wid = start_r.json()["data"]["wizard_id"]
+
+        with (
+            patch("src.api.routes.config._wizard_test_connection", return_value=MagicMock()),
+            patch("src.api.routes.config._wizard_load_docs", return_value="docs"),
+            patch("src.api.routes.config._wizard_invoke_llm", return_value=""),
+        ):
+            r = client.post(
+                f"/api/v1/config/wizard/{wid}/step",
+                headers=_ah(tokens),
+                json={
+                    "data": {
+                        "provider_type": "openai",
+                        "model": "qwen35",
+                        "base_url": "http://192.168.1.1/v1",
+                    }
+                },
+            )
+
+        assert r.status_code == 200, f"empty content must not fail the wizard: {r.text}"
+        data = r.json()["data"]
+        assert data["step"] == 1
+        from src.api.routes.config import _WIZARD_DEFAULT_FIRST_QUESTION
+
+        assert data["question"] == _WIZARD_DEFAULT_FIRST_QUESTION
+
+
+class TestResolveApiKeyFromExisting:
+    """_resolve_api_key_from_existing — key lookup from existing YAML."""
+
+    def _fn(
+        self, yaml_text: str, *, provider_name: str | None = None, base_url: str | None = None
+    ) -> str | None:
+        from src.api.routes.config import _resolve_api_key_from_existing
+
+        return _resolve_api_key_from_existing(
+            yaml_text, provider_name=provider_name, base_url=base_url
+        )
+
+    _YAML = """
+providers:
+  spark:
+    type: openai
+    base_url: "http://192.168.70.254:8080/v1"
+    api_key: "sk-correct-key"
+  openai:
+    type: openai
+    api_key: "sk-openai-key"
+"""
+
+    def test_resolves_by_provider_name(self) -> None:
+        assert self._fn(self._YAML, provider_name="spark") == "sk-correct-key"
+
+    def test_resolves_by_base_url_when_name_missing(self) -> None:
+        assert self._fn(self._YAML, base_url="http://192.168.70.254:8080/v1") == "sk-correct-key"
+
+    def test_name_takes_priority_over_base_url(self) -> None:
+        # provider_name "openai" matches openai entry, not spark — even though base_url matches spark
+        assert (
+            self._fn(self._YAML, provider_name="openai", base_url="http://192.168.70.254:8080/v1")
+            == "sk-openai-key"
+        )
+
+    def test_returns_none_when_no_match(self) -> None:
+        assert self._fn(self._YAML, provider_name="unknown", base_url="http://other/v1") is None
+
+    def test_returns_none_on_empty_yaml(self) -> None:
+        assert self._fn("", provider_name="spark") is None
+
+    def test_returns_none_on_invalid_yaml(self) -> None:
+        assert self._fn(":: bad yaml ::", provider_name="spark") is None
+
+    def test_step0_uses_existing_api_key_when_none_submitted(self, client, tokens) -> None:
+        """Step 0 must resolve the api_key from existing config when the WebUI omits it."""
+        existing_yaml = """
+providers:
+  spark:
+    type: openai
+    base_url: "http://192.168.70.254:8080/v1"
+    api_key: "sk-resolved-from-config"
+"""
+        with (
+            patch("src.api.routes.config._wizard_detect_env") as mock_env,
+            patch("src.api.routes.config._wizard_load_existing") as mock_load,
+        ):
+            mock_env.return_value = {}
+            mock_load.return_value = existing_yaml
+            start_r = client.post(
+                "/api/v1/config/wizard",
+                headers=_ah(tokens),
+                json={"edit_existing": False},
+            )
+        assert start_r.status_code == 201
+        wid = start_r.json()["data"]["wizard_id"]
+
+        captured_key: list[str | None] = []
+
+        def _capture_test(provider_type, model, api_key, base_url):
+            captured_key.append(api_key)
+            return MagicMock()
+
+        with (
+            patch("src.api.routes.config._wizard_test_connection", side_effect=_capture_test),
+            patch("src.api.routes.config._wizard_load_docs", return_value="docs"),
+            patch("src.api.routes.config._wizard_invoke_llm", return_value="First question?"),
+        ):
+            r = client.post(
+                f"/api/v1/config/wizard/{wid}/step",
+                headers=_ah(tokens),
+                # No api_key in payload — must be resolved from existing config
+                json={
+                    "data": {
+                        "provider_type": "openai",
+                        "provider_name": "spark",
+                        "model": "qwen35",
+                        "base_url": "http://192.168.70.254:8080/v1",
+                    }
+                },
+            )
+
+        assert r.status_code == 200, r.text
+        assert captured_key == [
+            "sk-resolved-from-config"
+        ], f"api_key must be resolved from existing config, got {captured_key!r}"

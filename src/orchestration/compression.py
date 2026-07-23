@@ -255,6 +255,8 @@ def apply_message_compression(
             )
             for _future, idx in futures.items():
                 if idx not in compressed_results:
+                    # Cancel the future to prevent zombie threads
+                    _future.cancel()
                     content = eligible[idx][0]
                     compressed_results[idx] = truncate_tool_output(
                         content, min(len(content) * 3 // 4, _FALLBACK_MAX_CHARS)

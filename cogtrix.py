@@ -727,26 +727,45 @@ class SlashCommandRegistry:
         if args.startswith("enable") and (len(args) == 6 or args[6] == " "):
             term = args[6:].strip()
             if not term:
-                print("Usage: /tools enable <tool-name>")
+                if console is not None:
+                    console.print("[dim]Usage: /tools enable <tool-name>[/dim]")
+                else:
+                    print("Usage: /tools enable <tool-name>")
                 return "continue"
             if term in _session.denials:
                 _session.denials.discard(term)
-                print(f"Tool '{term}' re-enabled.")
+                if console is not None:
+                    console.print(f"[green]✓ Tool '{term}' re-enabled.[/green]")
+                else:
+                    print(f"Tool '{term}' re-enabled.")
             else:
                 matches = [n for n in _session.denials if term in n]
                 if len(matches) == 1:
                     _session.denials.discard(matches[0])
-                    print(f"Tool '{matches[0]}' re-enabled.")
+                    if console is not None:
+                        console.print(f"[green]✓ Tool '{matches[0]}' re-enabled.[/green]")
+                    else:
+                        print(f"Tool '{matches[0]}' re-enabled.")
                 elif len(matches) > 1:
-                    print(f"Ambiguous: matches {matches}. Be more specific.")
+                    msg = f"Ambiguous: '{term}' matches {', '.join(matches)}. Be more specific."
+                    if console is not None:
+                        console.print(f"[yellow]{msg}[/yellow]")
+                    else:
+                        print(msg)
                 else:
-                    print(f"Tool '{term}' is not disabled.")
+                    if console is not None:
+                        console.print(f"[dim]Tool '{term}' is not disabled.[/dim]")
+                    else:
+                        print(f"Tool '{term}' is not disabled.")
             return "continue"
 
         if args.startswith("disable") and (len(args) == 7 or args[7] == " "):
             term = args[7:].strip()
             if not term:
-                print("Usage: /tools disable <tool-name>")
+                if console is not None:
+                    console.print("[dim]Usage: /tools disable <tool-name>[/dim]")
+                else:
+                    print("Usage: /tools disable <tool-name>")
                 return "continue"
             all_known = (
                 set(reg.tools.keys())
@@ -757,36 +776,67 @@ class SlashCommandRegistry:
                 _session.denials.add(term)
                 _session.pinned_tools.discard(term)
                 _session.loaded_tools.discard(term)
-                print(f"Tool '{term}' disabled for this session.")
+                if console is not None:
+                    console.print(f"[yellow]Tool '{term}' disabled for this session.[/yellow]")
+                else:
+                    print(f"Tool '{term}' disabled for this session.")
             else:
                 matches = [n for n in all_known if term in n]
                 if len(matches) == 1:
                     _session.denials.add(matches[0])
                     _session.pinned_tools.discard(matches[0])
                     _session.loaded_tools.discard(matches[0])
-                    print(f"Tool '{matches[0]}' disabled for this session.")
+                    if console is not None:
+                        console.print(
+                            f"[yellow]Tool '{matches[0]}' disabled for this session.[/yellow]"
+                        )
+                    else:
+                        print(f"Tool '{matches[0]}' disabled for this session.")
                 elif len(matches) > 1:
-                    print(f"Ambiguous: matches {matches}. Be more specific.")
+                    msg = f"Ambiguous: '{term}' matches {', '.join(matches)}. Be more specific."
+                    if console is not None:
+                        console.print(f"[yellow]{msg}[/yellow]")
+                    else:
+                        print(msg)
                 else:
-                    print(f"Unknown tool '{term}'.")
+                    if console is not None:
+                        console.print(f"[red]Unknown tool '{term}'.[/red]")
+                    else:
+                        print(f"Unknown tool '{term}'.")
             return "continue"
 
         if args.startswith("load") and (len(args) == 4 or args[4] == " "):
             term = args[4:].strip()
             if not term:
-                print("Usage: /tools load <tool-name>")
+                if console is not None:
+                    console.print("[dim]Usage: /tools load <tool-name>[/dim]")
+                else:
+                    print("Usage: /tools load <tool-name>")
                 return "continue"
             if term in reg.tools:
                 if term not in _session.pinned_tools:
                     # Promote agent-loaded tool to pinned
                     _session.pinned_tools.add(term)
                     _session.loaded_tools.add(term)
-                    print(f"Tool '{term}' pinned (was agent-loaded, now persists).")
+                    if console is not None:
+                        console.print(
+                            f"[green]✓ Tool '{term}' pinned"
+                            " (was agent-loaded, now persists).[/green]"
+                        )
+                    else:
+                        print(f"Tool '{term}' pinned (was agent-loaded, now persists).")
                 else:
-                    print(f"Tool '{term}' is already loaded and pinned.")
+                    if console is not None:
+                        console.print(f"[dim]Tool '{term}' is already loaded and pinned.[/dim]")
+                    else:
+                        print(f"Tool '{term}' is already loaded and pinned.")
                 return "continue"
             if term in _session.denials:
-                print(f"Tool '{term}' is disabled. Use '/tools enable {term}' first.")
+                msg = f"Tool '{term}' is disabled. Use '/tools enable {term}' first."
+                if console is not None:
+                    console.print(f"[yellow]{msg}[/yellow]")
+                else:
+                    print(msg)
                 return "continue"
             if term in available:
                 return f"load_tool:{term}"
@@ -794,20 +844,33 @@ class SlashCommandRegistry:
             if len(matches) == 1:
                 return f"load_tool:{matches[0]}"
             if len(matches) > 1:
-                print(f"Ambiguous: matches {matches}. Be more specific.")
+                msg = f"Ambiguous: '{term}' matches {', '.join(matches)}. Be more specific."
+                if console is not None:
+                    console.print(f"[yellow]{msg}[/yellow]")
+                else:
+                    print(msg)
             else:
                 # Check if already active via substring
                 active_matches = [n for n in reg.tools if term in n]
                 if len(active_matches) == 1:
-                    print(f"Tool '{active_matches[0]}' is already loaded.")
+                    if console is not None:
+                        console.print(f"[dim]Tool '{active_matches[0]}' is already loaded.[/dim]")
+                    else:
+                        print(f"Tool '{active_matches[0]}' is already loaded.")
                 else:
-                    print(f"Unknown or unavailable tool '{term}'.")
+                    if console is not None:
+                        console.print(f"[red]Unknown or unavailable tool '{term}'.[/red]")
+                    else:
+                        print(f"Unknown or unavailable tool '{term}'.")
             return "continue"
 
         if args.startswith("unload") and (len(args) == 6 or args[6] == " "):
             term = args[6:].strip()
             if not term:
-                print("Usage: /tools unload <tool-name>")
+                if console is not None:
+                    console.print("[dim]Usage: /tools unload <tool-name>[/dim]")
+                else:
+                    print("Usage: /tools unload <tool-name>")
                 return "continue"
             if term in _session.pinned_tools:
                 return f"unload_tool:{term}"
@@ -816,13 +879,22 @@ class SlashCommandRegistry:
             if len(matches) == 1:
                 return f"unload_tool:{matches[0]}"
             if len(matches) > 1:
-                print(f"Ambiguous: matches {matches}. Be more specific.")
+                msg = f"Ambiguous: '{term}' matches {', '.join(matches)}. Be more specific."
+                if console is not None:
+                    console.print(f"[yellow]{msg}[/yellow]")
+                else:
+                    print(msg)
             elif term in _session.loaded_tools:
-                print(
-                    f"Tool '{term}' was loaded by the agent and will be " "auto-unloaded next turn."
-                )
+                msg = f"Tool '{term}' was loaded by the agent and will be auto-unloaded next turn."
+                if console is not None:
+                    console.print(f"[dim]{msg}[/dim]")
+                else:
+                    print(msg)
             else:
-                print(f"Tool '{term}' is not currently loaded.")
+                if console is not None:
+                    console.print(f"[dim]Tool '{term}' is not currently loaded.[/dim]")
+                else:
+                    print(f"Tool '{term}' is not currently loaded.")
             return "continue"
 
         active_names: set[str] = set(reg.tools.keys())
@@ -1014,7 +1086,7 @@ class SlashCommandRegistry:
 
         if console is not None:
             lines_out: list[str] = []
-            lines_out.append(f"  [bold green]{current}[/bold green] [green]● active[/green]")
+            lines_out.append(f"  [bold green]{current}[/bold green]  [green]● active[/green]")
             if models:
                 lines_out.append("")
                 for mname, mcfg in models.items():
@@ -1022,7 +1094,7 @@ class SlashCommandRegistry:
                     is_current = mname == alias
                     if is_current:
                         name_fmt = f"[bold green]{mname:<16s}[/bold green]"
-                        marker = " [green]● active[/green]"
+                        marker = "  [green]● active[/green]"
                     else:
                         name_fmt = f"[bold]{mname:<16s}[/bold]"
                         marker = ""
@@ -1459,8 +1531,9 @@ def _help_rich(self_reg: SlashCommandRegistry) -> None:
                 continue
             aliases = ""
             if cmd.aliases:
-                aliases = f" [dim]({', '.join('/' + a for a in cmd.aliases)})[/dim]"
-            lines.append(f"  [bold]/{cmd.name:<10s}[/bold] {cmd.short_help}{aliases}")
+                aliases = f"  [dim]({', '.join('/' + a for a in cmd.aliases)})[/dim]"
+            desc = cmd.short_help.ljust(30)
+            lines.append(f"  [bold]/{cmd.name:<14s}[/bold] {desc}{aliases}")
         lines.append("")
 
     lines.append("[dim]Type [bold]/help <command>[/bold] for detailed information.[/dim]")
@@ -1474,13 +1547,39 @@ def _help_rich(self_reg: SlashCommandRegistry) -> None:
 
 def _help_plain(self_reg: SlashCommandRegistry) -> None:
     """Render the /help listing as plain text (no Rich)."""
+    categories = [
+        (
+            "Session & Config",
+            ["info", "session", "mode", "model", "provider", "setup"],
+        ),
+        (
+            "Tools & Reasoning",
+            ["tools", "think", "delegate", "approve", "optimizer"],
+        ),
+        (
+            "Logging",
+            ["debug", "verbose"],
+        ),
+        (
+            "Input & Other",
+            ["paste", "clear", "help", "quit"],
+        ),
+    ]
+
     print("\nAvailable commands:\n")
-    for cmd in self_reg._commands.values():
-        alias_str = ""
-        if cmd.aliases:
-            alias_str = f" ({', '.join('/' + a for a in cmd.aliases)})"
-        print(f"  /{cmd.name:<12s} {cmd.short_help}{alias_str}")
-    print("\n  Type /help <command> for detailed information.")
+    for cat_name, cmd_names in categories:
+        print(f"  {cat_name}")
+        for name in cmd_names:
+            cmd = self_reg._commands.get(name)
+            if cmd is None:
+                continue
+            alias_str = ""
+            if cmd.aliases:
+                alias_str = f"  ({', '.join('/' + a for a in cmd.aliases)})"
+            desc = cmd.short_help.ljust(34)
+            print(f"  /{cmd.name:<14s} {desc}{alias_str}")
+        print()
+    print("  Type /help <command> for detailed information.")
     print('  Use """ or /paste to enter multi-line input mode.\n')
 
 
@@ -1776,36 +1875,39 @@ def _info_rich(
     lines: list[str] = []
     lines.append("[bold cyan]Connection[/bold cyan]")
     lines.append(
-        f"  [bold]Model[/bold]         {alias} "
+        f"  [bold]{'Model':<13s}[/bold]  {alias} "
         f"[dim]({model_cfg.provider}/{model_cfg.model})[/dim]"
     )
     lines.append(
-        f"  [bold]Provider[/bold]      {model_cfg.provider} [dim]({provider_cfg.type})[/dim]"
+        f"  [bold]{'Provider':<13s}[/bold]  {model_cfg.provider} [dim]({provider_cfg.type})[/dim]"
     )
     if model_cfg.context_window:
-        lines.append(f"  [bold]Context size[/bold]  {model_cfg.context_window:,} tokens")
+        lines.append(f"  [bold]{'Context size':<13s}[/bold]  {model_cfg.context_window:,} tokens")
     if system_prompt:
         sp_chars = len(system_prompt)
         sp_tokens = sp_chars // 4  # rough estimate
         lines.append(
-            f"  [bold]System prompt[/bold] ~{sp_tokens:,} tokens [dim]({sp_chars:,} chars)[/dim]"
+            f"  [bold]{'System prompt':<13s}[/bold]  ~{sp_tokens:,} tokens"
+            f" [dim]({sp_chars:,} chars)[/dim]"
         )
     if mcp_manager is not None:
         server_info = mcp_manager.get_server_info()
         connected = sum(1 for s in server_info if s["connected"])
         total_tools = sum(s["tool_count"] for s in server_info)
-        lines.append(f"  [bold]MCP servers[/bold]   {connected} connected ({total_tools} tools)")
+        lines.append(
+            f"  [bold]{'MCP servers':<13s}[/bold]  {connected} connected ({total_tools} tools)"
+        )
 
     # ── Memory section ────────────────────────────────────────
     lines.append("")
     lines.append("[bold cyan]Memory[/bold cyan]")
-    lines.append(f"  [bold]Mode[/bold]          {cfg.memory_mode}")
-    lines.append(f"  [bold]Session[/bold]       {cfg.session}")
-    lines.append(f"  [bold]Messages[/bold]      {msg_count}")
+    lines.append(f"  [bold]{'Mode':<13s}[/bold]  {cfg.memory_mode}")
+    lines.append(f"  [bold]{'Session':<13s}[/bold]  {cfg.session}")
+    lines.append(f"  [bold]{'Messages':<13s}[/bold]  {msg_count}")
 
     wm_size = stats.get("working_memory_size")
     if wm_size is not None:
-        lines.append(f"  [bold]Working mem[/bold]   {wm_size} messages")
+        lines.append(f"  [bold]{'Working mem':<13s}[/bold]  {wm_size} messages")
 
     # Mode-specific extras
     extras: list[str] = []
@@ -2002,7 +2104,7 @@ def _build_slash_commands() -> SlashCommandRegistry:
         SlashCommand(
             name="mcp",
             handler=SlashCommandRegistry._cmd_mcp,
-            short_help="List or restart MCP server connections",
+            short_help="List / restart MCP servers",
             long_help=(
                 "Usage: /mcp [restart [server-name]]\n\n"
                 "Without arguments, lists all configured MCP servers with\n"
@@ -2039,7 +2141,7 @@ def _build_slash_commands() -> SlashCommandRegistry:
         SlashCommand(
             name="think",
             handler=SlashCommandRegistry._cmd_think,
-            short_help="Deep reasoning on a complex problem",
+            short_help="Force deep-reasoning pipeline",
             long_help=(
                 "Usage: /think <task description>\n\n"
                 "Runs the Tree-of-Thought reasoning engine directly,\n"
@@ -2065,7 +2167,7 @@ def _build_slash_commands() -> SlashCommandRegistry:
         SlashCommand(
             name="delegate",
             handler=SlashCommandRegistry._cmd_delegate,
-            short_help="Force task delegation to other models",
+            short_help="Force task delegation",
             long_help=(
                 "Usage: /delegate <task description>\n\n"
                 "Forces the task to be broken into subtasks and delegated\n"
@@ -2213,7 +2315,7 @@ def _build_slash_commands() -> SlashCommandRegistry:
         SlashCommand(
             name="approve",
             handler=SlashCommandRegistry._cmd_approve,
-            short_help="Auto-approve all tool confirmations",
+            short_help="Toggle tool auto-approval",
             long_help=(
                 "Usage: /approve\n\n"
                 "Toggles automatic approval for tools that normally\n"
@@ -2231,7 +2333,7 @@ def _build_slash_commands() -> SlashCommandRegistry:
         SlashCommand(
             name="optimizer",
             handler=SlashCommandRegistry._cmd_optimizer,
-            short_help="Toggle optimizer or force-optimize a prompt",
+            short_help="Toggle prompt optimizer",
             long_help=(
                 "Usage: /optimizer [prompt]\n\n"
                 "Without arguments: toggles the prompt optimizer on/off.\n"
@@ -4003,8 +4105,16 @@ def main():
 
                             _today = _date.today().strftime("%B %d, %Y")
 
-                            # Classify the task to pick specialised prompts
-                            think_cat = classify_think_task(think_task, llm=llm)
+                            # Classify the task to pick specialised prompts.
+                            # Start the spinner immediately so the user sees
+                            # activity — the LLM call inside classify_think_task
+                            # can take several seconds with no other feedback.
+                            _spinner.start()
+                            _spinner.set_context("Classifying")
+                            try:
+                                think_cat = classify_think_task(think_task, llm=llm)
+                            finally:
+                                _spinner.stop()
 
                             # Stage 1: Gather data via the agent
                             if console is not None:
@@ -4014,7 +4124,7 @@ def main():
                                 )
                             else:
                                 print(
-                                    f"Stage 1/2: Gathering data " f"(strategy: {think_cat.name})…"
+                                    f"Stage 1/2: Gathering data (strategy: {think_cat.name})…"
                                 )
 
                             gather_prompt = think_cat.gather_template.replace(

@@ -880,7 +880,7 @@ class TestCallbacksToolEvents:
         items = _flush_loop_and_drain(loop, q)
         assert any(i["type"] == "tool_start" for i in items)
         tool_start = next(i for i in items if i["type"] == "tool_start")
-        assert tool_start["payload"]["tool"] == "web_search"
+        assert tool_start["payload"]["tool_name"] == "web_search"
         assert tool_start["payload"]["tool_call_id"] == "run-1"
         loop.close()
 
@@ -953,7 +953,7 @@ class TestCallbacksToolEvents:
         handler.on_tool_start(None, "", run_id="r1")
         items = _flush_loop_and_drain(loop, q)
         tool_start = next(i for i in items if i["type"] == "tool_start")
-        assert tool_start["payload"]["tool"] == "unknown"
+        assert tool_start["payload"]["tool_name"] == "unknown"
         loop.close()
 
 

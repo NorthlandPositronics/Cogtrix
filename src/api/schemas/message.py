@@ -138,6 +138,28 @@ class SendMessageRequest(BaseModel):
     )
 
 
+class SyncTurnOut(BaseModel):
+    """Response body for POST /api/v1/sessions/{id}/messages?sync=true.
+
+    Returned with HTTP 200 once the agent turn has completed.  The caller
+    receives the full response text without needing a WebSocket connection.
+    """
+
+    message_id: str = Field(..., description="UUID of the AI message created for this turn.")
+    text: str = Field(..., description="Assembled agent response text.")
+    total_tokens: int = Field(
+        ..., description="Total tokens consumed (input + output).", examples=[1800]
+    )
+    input_tokens: int = Field(..., description="Input tokens for this turn.", examples=[1420])
+    output_tokens: int = Field(..., description="Output tokens for this turn.", examples=[380])
+    duration_ms: int = Field(
+        ..., description="Wall-clock agent turn duration in milliseconds.", examples=[4200]
+    )
+    tool_calls: int = Field(
+        ..., description="Number of tool calls made during this turn.", examples=[3]
+    )
+
+
 class ClearHistoryRequest(BaseModel):
     """Request body for DELETE /api/v1/sessions/{id}/messages.
 

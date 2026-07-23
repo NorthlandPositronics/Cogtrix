@@ -35,6 +35,46 @@ class ProviderOut(BaseModel):
     )
 
 
+class ProviderCreateRequest(BaseModel):
+    """Request body for adding a new provider at runtime."""
+
+    name: str = Field(
+        ...,
+        description="Provider alias (must be unique). Used in model configs as 'provider'.",
+        examples=["my-openai"],
+        min_length=1,
+        max_length=64,
+        pattern=r"^[a-zA-Z0-9][a-zA-Z0-9_-]*$",
+    )
+    type: str = Field(
+        ...,
+        description="Provider type: 'openai', 'ollama', 'anthropic', or 'google'.",
+        examples=["openai"],
+    )
+    base_url: str | None = Field(
+        default=None,
+        description="API base URL. Null uses the provider-type default.",
+        examples=["https://api.openai.com/v1"],
+    )
+    api_key: str | None = Field(
+        default=None,
+        description="API key. Leave null for unauthenticated endpoints (e.g. local Ollama).",
+    )
+
+
+class ProviderPatchRequest(BaseModel):
+    """Request body for updating an existing provider at runtime (all fields optional)."""
+
+    base_url: str | None = Field(
+        default=None,
+        description="New API base URL. Null clears the override and uses the provider default.",
+    )
+    api_key: str | None = Field(
+        default=None,
+        description="New API key. Send an empty string to remove the key.",
+    )
+
+
 class ProviderHealthOut(BaseModel):
     """Provider connectivity health check result."""
 

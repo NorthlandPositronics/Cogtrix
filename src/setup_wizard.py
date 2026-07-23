@@ -38,12 +38,14 @@ try:
     from rich.console import Console as _RichConsole
     from rich.markdown import Markdown as _RichMarkdown
     from rich.panel import Panel as _RichPanel
+    from rich.syntax import Syntax as _RichSyntax
 
     _rich_console: Any = _RichConsole()
 except ImportError:
     _RichConsole = None  # type: ignore[assignment, misc]
     _RichMarkdown = None  # type: ignore[assignment, misc]
     _RichPanel = None  # type: ignore[assignment, misc]
+    _RichSyntax = None  # type: ignore[assignment, misc]
     _rich_console = None
 
 log = logging.getLogger("cogtrix")
@@ -164,10 +166,26 @@ def _print_banner() -> None:
 
 
 def _print_config_box(yaml_text: str) -> None:
-    """Print YAML content inside a box-drawn frame."""
-    lines = yaml_text.rstrip().split("\n")
-    inner_w = max((len(line) for line in lines), default=0) + 2
-    inner_w = max(inner_w, 30)  # minimum width
+    """Print YAML content with syntax highlighting at full terminal width."""
+    if _rich_console is not None and _RichPanel is not None and _RichSyntax is not None:
+        _rich_console.print()
+        _rich_console.print(
+            _RichPanel(
+                _RichSyntax(
+                    yaml_text.rstrip(), "yaml", theme="monokai", background_color="default"
+                ),
+                title="Generated Configuration",
+                border_style="cyan",
+                padding=(1, 2),
+            )
+        )
+        return
+
+    # Plain-text fallback: use terminal width
+    import shutil
+
+    term_w = shutil.get_terminal_size((80, 24)).columns
+    inner_w = max(term_w - 4, 30)  # 2 chars indent + 2 border chars
 
     header = " Generated Configuration "
     bar_len = inner_w - len(header)
@@ -177,7 +195,7 @@ def _print_config_box(yaml_text: str) -> None:
     print(
         f"  {_C('\u256d')}{_C('\u2500' * bar_l)}{_BC(header)}{_C('\u2500' * bar_r)}{_C('\u256e')}"
     )
-    for line in lines:
+    for line in yaml_text.rstrip().split("\n"):
         padded = line.ljust(inner_w)
         print(f"  {_C('\u2502')}{padded}{_C('\u2502')}")
     print(f"  {_C('\u2570')}{_C('\u2500' * inner_w)}{_C('\u256f')}")
@@ -367,8 +385,8 @@ def _detect_environment() -> dict[str, Any]:
             pass
     else:
         log.warning(
-            "_detect_environment: skipping Ollama probe — URL resolves to a "
-            "non-public address (BUG-229): %s",
+            "Skipping Ollama auto-detection — OLLAMA_BASE_URL %r resolves to a "
+            "restricted address and will not be probed automatically.",
             _redact_url_creds(ollama_url),
         )
 
@@ -517,10 +535,24 @@ def _format_production_context(
 
 def _list_ollama_models(base_url: str) -> list[str]:
     """Fetch and display installed Ollama models. Returns model names."""
+    from urllib.parse import urlparse as _urlparse
+
+    _parsed = _urlparse(base_url)
+    _hostname = _parsed.hostname or ""
+    _port = _parsed.port or 80
+    try:
+        socket.getaddrinfo(_hostname, _port)
+    except OSError:
+        log.warning(
+            "Cannot reach Ollama at %r — hostname did not resolve. "
+            "If running inside Docker, try --network host.",
+            _redact_url_creds(base_url),
+        )
+        return []
     if not _is_safe_ollama_url(base_url, allow_private=True):
         log.warning(
-            "_list_ollama_models: skipping model fetch — URL resolves to a "
-            "blocked address (link-local/reserved) (BUG-230): %s",
+            "Skipping model list — %r resolved to a restricted address "
+            "(link-local or reserved range). Use a loopback or LAN address.",
             _redact_url_creds(base_url),
         )
         return []
@@ -897,7 +929,10 @@ def _load_docs(url: str | None = None) -> str:
                     f"Unsupported URL scheme: {parsed.scheme!r} (only http/https allowed)"
                 )
             if not _is_safe_url(url, allow_local=True):
-                log.warning("Blocked potentially unsafe docs URL: %s (using embedded docs)", url)
+                log.warning(
+                    "Docs URL %s could not be fetched (address not permitted) — using built-in documentation.",
+                    url,
+                )
             else:
                 req = urllib.request.Request(url)
                 with urllib.request.urlopen(req, timeout=15) as resp:  # nosec B310
@@ -1047,6 +1082,25 @@ def _has_yaml_block(text: str) -> bool:
     return "```" in after
 
 
+def _strip_nulls(obj: Any) -> Any:
+    """Recursively remove None values and empty dicts from a config structure.
+
+    Prevents ``services: null`` and similar LLM-generated placeholders from
+    appearing in the written config file.
+    """
+    if not isinstance(obj, dict):
+        return obj
+    result: dict[str, Any] = {}
+    for k, v in obj.items():
+        if v is None:
+            continue
+        stripped = _strip_nulls(v)
+        if isinstance(stripped, dict) and not stripped:
+            continue
+        result[k] = stripped
+    return result
+
+
 def _extract_yaml(text: str) -> str:
     """Extract YAML content from the last ```yaml``` code fence in *text*.
 
@@ -1098,6 +1152,7 @@ def _validate_and_write(
         raise SystemExit(1)
 
     _inject_bootstrap(data, bootstrap_info, production_info=production_info)
+    data = _strip_nulls(data)
 
     # Validate by round-tripping through load_config
     tmp_path: Path | None = None

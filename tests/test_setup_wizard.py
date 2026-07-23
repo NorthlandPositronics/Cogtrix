@@ -23,6 +23,7 @@ from src.setup_wizard import (
     _mask_secrets,
     _print_detections,
     _run_conversation,
+    _strip_nulls,
     _test_connection,
 )
 
@@ -1230,3 +1231,31 @@ class TestRunConversation:
         with patch("builtins.input", side_effect=inputs):
             _run_conversation(llm, "system prompt")
         assert llm.invoke.call_count == 2
+
+
+class TestStripNulls:
+    """_strip_nulls removes None values and empty dicts from config structures."""
+
+    def test_top_level_none_removed(self):
+        assert _strip_nulls({"services": None, "session": "default"}) == {"session": "default"}
+
+    def test_nested_none_removed(self):
+        data = {"memory": {"mode": "conversation", "extra": None}}
+        assert _strip_nulls(data) == {"memory": {"mode": "conversation"}}
+
+    def test_all_none_values_in_dict_removes_parent(self):
+        data = {"services": {"whatsapp": None, "telegram": None}, "session": "x"}
+        assert _strip_nulls(data) == {"session": "x"}
+
+    def test_non_dict_passthrough(self):
+        assert _strip_nulls("hello") == "hello"
+        assert _strip_nulls(42) == 42
+        assert _strip_nulls([1, 2]) == [1, 2]
+
+    def test_false_and_zero_are_kept(self):
+        data = {"delegate": {"enabled": False}, "temperature": 0.0}
+        assert _strip_nulls(data) == {"delegate": {"enabled": False}, "temperature": 0.0}
+
+    def test_empty_dict_literal_is_removed(self):
+        data = {"services": {}, "session": "default"}
+        assert _strip_nulls(data) == {"session": "default"}

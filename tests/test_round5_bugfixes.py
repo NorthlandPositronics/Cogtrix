@@ -176,12 +176,12 @@ class TestPerf5010EnqueueAgentStateNonBlocking:
 
 
 # ---------------------------------------------------------------------------
-# BUG-159 (P1): _llm_generation read happens inside _bound_cache_lock
+# BUG-159 (P1): _llm_generation read happens inside _cache_lock
 # ---------------------------------------------------------------------------
 
 
 class TestBug159LlmGenerationReadInsideLock:
-    """_llm_generation must be read atomically under _bound_cache_lock."""
+    """_llm_generation must be read atomically under _cache_lock."""
 
     def test_invalidate_from_another_thread_is_reflected(self):
         """After invalidate_llm_caches() from another thread, next run_agent sees
@@ -190,7 +190,7 @@ class TestBug159LlmGenerationReadInsideLock:
         from src.orchestration import runner as runner_mod
 
         # Record initial generation.
-        with runner_mod._bound_cache_lock:
+        with runner_mod._cache_lock:
             gen_before = runner_mod._llm_generation
 
         # Fire invalidation from a background thread.
@@ -205,7 +205,7 @@ class TestBug159LlmGenerationReadInsideLock:
         barrier.wait()
         t.join(timeout=2.0)
 
-        with runner_mod._bound_cache_lock:
+        with runner_mod._cache_lock:
             gen_after = runner_mod._llm_generation
 
         assert gen_after > gen_before, "Generation counter must have been incremented"
@@ -214,12 +214,12 @@ class TestBug159LlmGenerationReadInsideLock:
         """advance_llm_generation must increment _llm_generation atomically."""
         from src.orchestration import runner as runner_mod
 
-        with runner_mod._bound_cache_lock:
+        with runner_mod._cache_lock:
             before = runner_mod._llm_generation
 
         runner_mod.advance_llm_generation()
 
-        with runner_mod._bound_cache_lock:
+        with runner_mod._cache_lock:
             after = runner_mod._llm_generation
 
         assert after == before + 1
@@ -229,12 +229,12 @@ class TestBug159LlmGenerationReadInsideLock:
         from src.orchestration import runner as runner_mod
 
         # Populate the bound cache.
-        with runner_mod._bound_cache_lock:
+        with runner_mod._cache_lock:
             runner_mod._persistent_bound_cache["fake_key"] = MagicMock()
 
         runner_mod.invalidate_llm_caches()
 
-        with runner_mod._bound_cache_lock:
+        with runner_mod._cache_lock:
             assert len(runner_mod._persistent_bound_cache) == 0
 
 

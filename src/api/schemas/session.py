@@ -175,6 +175,24 @@ class SessionCreateRequest(BaseModel):
         default_factory=SessionConfig,
         description="Initial session configuration; all fields are optional.",
     )
+    initial_tools: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Tool names to pin into the active set immediately after session creation. "
+            "Equivalent to calling PATCH /sessions/{id}/tools with load=[...] right after "
+            "creation. Unknown tool names are silently skipped."
+        ),
+        examples=[["read_file", "write_file", "git_status"]],
+    )
+    auto_approve_tools: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Tool names to auto-approve for the session (no confirmation prompt). "
+            "Equivalent to calling PATCH /sessions/{id}/tools with auto_approve=[...]. "
+            "Does not require the tool to be in initial_tools."
+        ),
+        examples=[["git_add", "git_commit"]],
+    )
 
 
 class SessionPatchRequest(BaseModel):

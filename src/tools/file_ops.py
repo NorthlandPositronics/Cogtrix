@@ -412,6 +412,80 @@ def list_directory(path: str = ".", pattern: str = "*", show_hidden: bool = Fals
         return f"Error listing directory: {e}"
 
 
+class PatchFileInput(BaseModel):
+    path: str = Field(..., description="Path to the file to patch.")
+    old_str: str = Field(..., description="Exact string to find in the file (must be unique).")
+    new_str: str = Field(..., description="Replacement string.")
+
+
+def patch_file(path: str, old_str: str, new_str: str) -> str:
+    """
+    Surgically replace an exact string in a file.
+
+    Reads the file, finds ``old_str``, replaces it with ``new_str``, and
+    writes the result back atomically.  Fails clearly when ``old_str`` is
+    not found or appears more than once — add more surrounding context to
+    resolve ambiguity.
+
+    Args:
+        path:    Path to the file to edit (must be inside an allowed write root).
+        old_str: Exact string to search for.  Must occur exactly once.
+        new_str: Replacement string (may be empty to delete the match).
+
+    Returns:
+        Success message or a descriptive error string.
+    """
+    is_valid, error, resolved = _validate_path(path, is_write=True)
+    if not is_valid:
+        return f"Error: {error}"
+
+    if resolved is None:
+        return "Error: Could not resolve path"
+
+    if not resolved.exists():
+        return f"Error: File not found: {path}"
+
+    if not resolved.is_file():
+        return f"Error: Not a file: {path}"
+
+    try:
+        content = resolved.read_text(encoding="utf-8")
+    except PermissionError:
+        return f"Error: Permission denied reading: {path}"
+    except Exception as e:
+        return f"Error reading file: {e}"
+
+    count = content.count(old_str)
+    if count == 0:
+        return f"Error: old_str not found in {path}. " "Check for exact whitespace and indentation."
+    if count > 1:
+        return (
+            f"Error: old_str found {count} times in {path} — ambiguous. "
+            "Add more surrounding context to make the match unique."
+        )
+
+    new_content = content.replace(old_str, new_str, 1)
+
+    try:
+        from src.utils.atomic_write import atomic_write_json
+
+        with atomic_write_json(resolved, encoding="utf-8") as f:
+            f.write(new_content)
+    except PermissionError:
+        return f"Error: Permission denied writing: {path}"
+    except Exception as e:
+        return f"Error writing file: {e}"
+
+    old_lines = content.count("\n") + 1
+    new_lines = new_content.count("\n") + 1
+    delta = new_lines - old_lines
+    sign = "+" if delta >= 0 else ""
+    return (
+        f"Patched {path}: {old_lines} → {new_lines} lines ({sign}{delta}), "
+        f"{len(content)} → {len(new_content)} chars."
+    )
+
+
 def file_info(path: str) -> str:
     """
     Get detailed information about a file or directory.
@@ -498,6 +572,18 @@ TOOL_CONFIGS = [
         "function": write_file,
     },
     {
+        "name": "patch_file",
+        "description": (
+            "Surgically replace an exact string in a file. "
+            "Finds old_str in the file (must appear exactly once) and replaces it with new_str. "
+            "Fails if old_str is not found or is ambiguous — add more surrounding context. "
+            "Prefer this over write_file for targeted edits to existing files."
+        ),
+        "input_schema": PatchFileInput,
+        "requires_confirmation": True,
+        "function": patch_file,
+    },
+    {
         "name": "append_file",
         "description": (
             "Append content to the end of a file. Creates the file if it doesn't exist."
@@ -533,12 +619,14 @@ TOOL_CONFIG = TOOL_CONFIGS[0]
 __all__ = [
     "read_file",
     "write_file",
+    "patch_file",
     "append_file",
     "list_directory",
     "file_info",
     "set_allowed_write_dirs",
     "ReadFileInput",
     "WriteFileInput",
+    "PatchFileInput",
     "AppendFileInput",
     "ListDirectoryInput",
     "FileInfoInput",

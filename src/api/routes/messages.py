@@ -18,7 +18,7 @@ The WebSocket handler:
 4. Starts the ping/pong keepalive loop (client sends ping every 30 s).
 5. Dispatches incoming client messages (user_message, tool_confirm, cancel).
 6. Forwards server messages from the agent runner to the client.
-7. Closes the connection on 'done' or on idle timeout (90 s of silence).
+7. Closes the connection on 'done' or on idle timeout (COGTRIX_WS_IDLE_TIMEOUT s, default 300).
 """
 
 from __future__ import annotations
@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from typing import Any
 
 from fastapi import (
@@ -34,6 +35,7 @@ from fastapi import (
     HTTPException,
     Query,
     Request,
+    Response,
     WebSocket,
     WebSocketDisconnect,
     status,
@@ -44,11 +46,13 @@ from src.api.auth import TokenData, _decode_jwt, get_current_user, verify_sessio
 from src.api.db.engine import AsyncSessionLocal, get_db
 from src.api.db.repositories.messages import MessageRepository
 from src.api.schemas.common import APIResponse, CursorPage
-from src.api.schemas.message import ClearHistoryRequest, MessageOut, SendMessageRequest
+from src.api.schemas.message import ClearHistoryRequest, MessageOut, SendMessageRequest, SyncTurnOut
 from src.api.turn_runner import run_message_turn
 from src.api.ws import ClientMessage, manager
 
 log = logging.getLogger("cogtrix.api.messages")
+
+_WS_IDLE_TIMEOUT: float = float(os.environ.get("COGTRIX_WS_IDLE_TIMEOUT", "300"))
 
 router = APIRouter(tags=["Messages"])
 
@@ -117,15 +121,17 @@ async def _get_session_or_404(session_id: str, request: Request, db: AsyncSessio
     summary="Send a user message and initiate an agent turn",
     description=(
         "Submit a user message to the session. "
-        "The message is persisted immediately and an agent turn is queued. "
-        "Connect to the session WebSocket (WS /ws/v1/sessions/{id}) to receive "
-        "streaming token output while the agent processes the request. "
-        "The REST response returns the persisted user message — not the agent reply."
+        "By default (sync=false) the message is persisted immediately and an agent turn is queued; "
+        "connect to the session WebSocket to receive streaming output (HTTP 202). "
+        "Pass ?sync=true to block until the agent turn completes and receive the full response "
+        "text in the HTTP body (HTTP 200) — no WebSocket needed."
     ),
-    response_model=APIResponse[MessageOut],
-    status_code=202,
+    response_model=None,
     responses={
-        202: {"description": "Message accepted; agent turn queued. Stream output via WebSocket."},
+        200: {"description": "Sync turn complete; response text in body (sync=true)."},
+        202: {
+            "description": "Message accepted; agent turn queued. Stream output via WebSocket (sync=false)."
+        },
         401: {"description": "Not authenticated."},
         403: {"description": "Forbidden (FORBIDDEN)."},
         404: {"description": "Session not found (SESSION_NOT_FOUND)."},
@@ -137,13 +143,27 @@ async def send_message(
     session_id: str,
     body: SendMessageRequest,
     request: Request,
+    response: Response,
     db: AsyncSession = Depends(get_db),
     current_user: TokenData = Depends(get_current_user),
-) -> APIResponse[MessageOut]:
-    """Persist a user message and queue an agent turn.
+    sync: bool = Query(
+        default=False,
+        description=(
+            "When true, block until the agent turn completes and return the full response. "
+            "When false (default), queue the turn and return immediately (HTTP 202)."
+        ),
+    ),
+) -> Any:
+    """Persist a user message and queue (or run synchronously) an agent turn.
 
-    The agent runs asynchronously.  The caller must connect to the session
-    WebSocket to receive the streaming response.
+    async mode (sync=false, default):
+        Returns HTTP 202 with the persisted user message.
+        The agent runs in the background; connect to the WebSocket to stream output.
+
+    sync mode (sync=true):
+        Blocks until the agent turn completes (may take 30–120 s for reasoning models).
+        Returns HTTP 200 with the assembled response text in ``data.text``.
+        No WebSocket connection required — suitable for scripting and CI workflows.
 
     Auth: bearer token required.
     Error codes:
@@ -174,20 +194,81 @@ async def send_message(
         )
         await db.commit()
 
-        # Launch the agent turn as a background task.
-        async def _run() -> None:
-            async with AsyncSessionLocal() as turn_db:
-                await run_message_turn(
-                    session=sess,
-                    text=body.content,
-                    mode=body.mode,
-                    db=turn_db,
-                    app_state=request.app.state,
-                )
+        if not sync:
+            # Async path: launch background task, return 202 immediately.
+            async def _run() -> None:
+                async with AsyncSessionLocal() as turn_db:
+                    await run_message_turn(
+                        session=sess,
+                        text=body.content,
+                        mode=body.mode,
+                        db=turn_db,
+                        app_state=request.app.state,
+                    )
 
-        sess.turn_task = asyncio.create_task(_run(), name=f"turn-{session_id}")
+            sess.turn_task = asyncio.create_task(_run(), name=f"turn-{session_id}")
+        else:
+            # Sync path: set a sentinel future so any concurrent ?sync=true request
+            # that arrives before run_message_turn completes sees the turn as in-progress
+            # and receives 409 TURN_IN_PROGRESS rather than silently serialising.
+            sentinel: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+            sess.turn_task = sentinel
 
-    return APIResponse(data=_message_to_out(user_msg))
+    if not sync:
+        response.status_code = status.HTTP_202_ACCEPTED
+        return APIResponse(data=_message_to_out(user_msg))
+
+    # Sync path: run the turn inline and return the assembled response.
+    # run_message_turn acquires turn_lock internally; releasing it above is correct.
+    try:
+        async with AsyncSessionLocal() as turn_db:
+            await run_message_turn(
+                session=sess,
+                text=body.content,
+                mode=body.mode,
+                db=turn_db,
+                app_state=request.app.state,
+            )
+    finally:
+        sentinel.set_result(None)
+
+    # Drain ws_queue to find the done message (which carries the response text).
+    # Items accumulate in the queue when no WebSocket drain task is active.
+    response_text = ""
+    ai_message_id = str(user_msg.id)
+    total_tokens = 0
+    input_tokens = 0
+    output_tokens = 0
+    duration_ms = 0
+    tool_calls = 0
+
+    while True:
+        try:
+            item = sess.ws_queue.get_nowait()
+            if item.get("type") == "done":
+                p = item.get("payload", {})
+                response_text = p.get("text", "")
+                ai_message_id = p.get("message_id", ai_message_id)
+                total_tokens = p.get("total_tokens", 0)
+                input_tokens = p.get("input_tokens", 0)
+                output_tokens = p.get("output_tokens", 0)
+                duration_ms = p.get("duration_ms", 0)
+                tool_calls = p.get("tool_calls", 0)
+                break
+        except asyncio.QueueEmpty:
+            break
+
+    return APIResponse(
+        data=SyncTurnOut(
+            message_id=ai_message_id,
+            text=response_text,
+            total_tokens=total_tokens,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            duration_ms=duration_ms,
+            tool_calls=tool_calls,
+        )
+    )
 
 
 @router.get(
@@ -470,7 +551,7 @@ async def session_websocket(
     sess.drain_task = drain_task
 
     # 7. Receive loop.
-    idle_timeout = 90.0  # seconds
+    idle_timeout = _WS_IDLE_TIMEOUT
     try:
         while True:
             try:

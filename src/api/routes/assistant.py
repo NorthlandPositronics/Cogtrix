@@ -527,7 +527,7 @@ async def list_chats(
                     break
         except Exception:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail={"code": "INVALID_CURSOR", "message": "The pagination cursor is malformed."},
             ) from None
 
@@ -648,7 +648,7 @@ async def get_chat_messages(
             start = decoded_idx
         except Exception:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail={"code": "INVALID_CURSOR", "message": "The pagination cursor is malformed."},
             ) from None
 
@@ -762,7 +762,7 @@ async def list_scheduled(
                     break
         except Exception:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail={"code": "INVALID_CURSOR", "message": "The pagination cursor is malformed."},
             ) from None
 
@@ -1343,7 +1343,7 @@ async def list_knowledge(
                     break
         except Exception:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail={"code": "INVALID_CURSOR", "message": "The pagination cursor is malformed."},
             ) from None
 

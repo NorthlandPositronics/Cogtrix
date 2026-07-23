@@ -8,7 +8,8 @@ Endpoints:
     GET    /api/v1/sessions              — list sessions (paginated, cursor-based)
     GET    /api/v1/sessions/{id}         — get session details and current state
     PATCH  /api/v1/sessions/{id}         — update session name or config
-    DELETE /api/v1/sessions/{id}         — terminate and archive a session
+    DELETE /api/v1/sessions/{id}         — archive (or permanently delete) a session
+    POST   /api/v1/sessions/{id}/restore — unarchive a session
 """
 
 from __future__ import annotations
@@ -20,7 +21,7 @@ import logging
 from datetime import UTC, datetime
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.auth import TokenData, get_current_user
@@ -223,6 +224,7 @@ async def create_session(
     await db.refresh(record)
 
     # Warm the session into the registry (best-effort — non-blocking)
+    tool_registry = getattr(request.app.state, "tool_registry", None)
     registry = _get_registry(request)
     live_session = None
     if registry is not None:
@@ -231,6 +233,32 @@ async def create_session(
             await registry.put(live_session)
         except Exception as exc:
             log.warning("Could not warm new session %s: %s", record.id, exc)
+
+    # Apply initial_tools and auto_approve_tools from the request.
+    # Uses the same mutation pattern as PATCH /sessions/{id}/tools (BUG-196 pattern).
+    if live_session is not None and (body.initial_tools or body.auto_approve_tools):
+        if tool_registry is not None:
+            ss = live_session.session_state
+            rc = getattr(live_session, "run_config", None)
+            all_tool_names = set((getattr(tool_registry, "tools", None) or {}).keys())
+            async with live_session.turn_lock:
+                for name in body.initial_tools:
+                    if name not in all_tool_names:
+                        log.warning(
+                            "create_session: initial_tools tool '%s' not found, skipping", name
+                        )
+                        continue
+                    ss.loaded_tools.add(name)
+                    ss.pinned_tools.add(name)
+                    if rc is not None:
+                        avail = getattr(rc, "available_tools", None) or {}
+                        if name in avail:
+                            tool_obj = avail.pop(name)
+                            atl = getattr(rc, "active_tools_list", None)
+                            if atl is not None:
+                                atl.append(tool_obj)
+                for name in body.auto_approve_tools:
+                    ss.approvals.add(name)
 
     return APIResponse(data=_record_to_out(record, live_session))
 
@@ -427,7 +455,7 @@ async def patch_session(
                     app_cfg.resolve_llm_config_for(body.config.model)
                 except Exception as exc:
                     raise HTTPException(
-                        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                        status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                         detail={
                             "code": "MODEL_NOT_FOUND",
                             "message": f"Model alias '{body.config.model}' is not configured: {exc}",
@@ -503,16 +531,17 @@ async def patch_session(
 
 @router.delete(
     "/{session_id}",
-    summary="Terminate and archive a session",
+    summary="Terminate and archive (or permanently delete) a session",
     description=(
         "Stop any in-progress agent turn, persist memory to disk, "
         "and archive the session. Archived sessions are excluded from list results "
         "by default but can be retrieved with include_archived=true. "
-        "Memory data is retained for 30 days after archival."
+        "Memory data is retained for 30 days after archival. "
+        "Pass permanent=true to irreversibly delete the session and all its messages."
     ),
     response_model=APIResponse[None],
     responses={
-        200: {"description": "Session archived."},
+        200: {"description": "Session archived or permanently deleted."},
         401: {"description": "Not authenticated."},
         403: {"description": "Forbidden (FORBIDDEN)."},
         404: {"description": "Session not found (SESSION_NOT_FOUND)."},
@@ -523,10 +552,17 @@ async def delete_session(
     request: Request,
     current_user: TokenData = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    permanent: bool = Query(
+        default=False,
+        description=(
+            "When true, permanently delete the session and all its messages. "
+            "Non-recoverable. When false (default), archive the session."
+        ),
+    ),
 ) -> APIResponse[None]:
-    """Terminate any active agent turn, save memory, and archive the session.
+    """Terminate any active agent turn, save memory, and archive (or hard-delete) the session.
 
-    Auth: bearer token required. Admins may archive any session.
+    Auth: bearer token required. Admins may delete any session.
     Error codes: UNAUTHORIZED, TOKEN_EXPIRED, FORBIDDEN, SESSION_NOT_FOUND.
     """
     await _check_session_access(session_id, current_user, db)
@@ -558,6 +594,20 @@ async def delete_session(
         # Save memory and evict from registry
         await registry.remove(session_id)
 
+    # Archive or hard-delete in DB first — do the reversible DB write before
+    # the irreversible side effects (registry eviction, WS close) so that a
+    # failed commit leaves the session still active in memory (BUG-247).
+    if permanent:
+        deleted = await repo.hard_delete(session_id)
+        if not deleted:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={"code": "SESSION_NOT_FOUND", "message": "Session not found."},
+            )
+    else:
+        await repo.archive(session_id)
+    await db.commit()
+
     # Close any active WebSocket connection for this session.
     try:
         from src.api.ws import manager as _ws_manager
@@ -566,8 +616,42 @@ async def delete_session(
     except Exception:
         pass
 
-    # Archive in DB
-    await repo.archive(session_id)
-    await db.commit()
-
     return APIResponse(data=None)
+
+
+@router.post(
+    "/{session_id}/restore",
+    summary="Restore (unarchive) a session",
+    description=(
+        "Clear the archived_at timestamp on an archived session, making it visible "
+        "in the default session listing again. Has no effect on active (non-archived) sessions."
+    ),
+    response_model=APIResponse[SessionOut],
+    responses={
+        200: {"description": "Session restored."},
+        401: {"description": "Not authenticated."},
+        403: {"description": "Forbidden (FORBIDDEN)."},
+        404: {"description": "Session not found (SESSION_NOT_FOUND)."},
+    },
+)
+async def restore_session(
+    session_id: str,
+    current_user: TokenData = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> APIResponse[SessionOut]:
+    """Unarchive a session by clearing its archived_at timestamp.
+
+    Auth: bearer token required. Admins may restore any session.
+    Error codes: UNAUTHORIZED, TOKEN_EXPIRED, FORBIDDEN, SESSION_NOT_FOUND.
+    """
+    await _check_session_access(session_id, current_user, db)
+    repo = SessionRepository(db)
+    await repo.restore(session_id)
+    record = await repo.get_by_id(session_id)
+    if record is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "SESSION_NOT_FOUND", "message": "Session not found."},
+        )
+    await db.commit()
+    return APIResponse(data=_record_to_out(record))

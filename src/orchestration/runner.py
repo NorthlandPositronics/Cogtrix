@@ -34,15 +34,14 @@ _MAX_BOUND_CACHE_SIZE = 16
 _persistent_bound_cache: OrderedDict = OrderedDict()
 _persistent_compression_cache: OrderedDict = OrderedDict()
 _cached_llm_id: tuple[int, int] | None = None
-_bound_cache_lock = threading.Lock()
-_compression_cache_lock = threading.Lock()
+_cache_lock = threading.Lock()
 _llm_generation: int = 0
 
 
 def advance_llm_generation() -> None:
     """Increment the LLM generation counter when the LLM is switched."""
     global _llm_generation
-    with _bound_cache_lock:
+    with _cache_lock:
         _llm_generation += 1
 
 
@@ -54,10 +53,9 @@ def invalidate_llm_caches() -> None:
     those sessions manage their own cache lifecycle independently.
     """
     global _llm_generation
-    with _bound_cache_lock:
+    with _cache_lock:
         _llm_generation += 1
         _persistent_bound_cache.clear()
-    with _compression_cache_lock:
         _persistent_compression_cache.clear()
 
 
@@ -641,16 +639,14 @@ def run_agent(
             global _persistent_bound_cache, _persistent_compression_cache, _cached_llm_id
 
             llm_changed: bool
-            with _bound_cache_lock:
+            with _cache_lock:
                 current_llm_id = (id(config.llm), _llm_generation)
                 llm_changed = _cached_llm_id is not None and _cached_llm_id != current_llm_id
                 if llm_changed:
                     _persistent_bound_cache.clear()
+                    _persistent_compression_cache.clear()
                 _cached_llm_id = current_llm_id
                 local_bound_cache = OrderedDict(_persistent_bound_cache)
-            with _compression_cache_lock:
-                if llm_changed:
-                    _persistent_compression_cache.clear()
                 local_compression_cache = OrderedDict(_persistent_compression_cache)
 
         _mark("cache_setup")
@@ -734,19 +730,13 @@ def run_agent(
                 while len(config.compression_cache) > _MAX_COMPRESSION_CACHE_SIZE:
                     config.compression_cache.popitem(last=False)
             else:
-                with _bound_cache_lock:
+                with _cache_lock:
                     if _cached_llm_id == current_llm_id:
                         for key, value in local_bound_cache.items():
                             _persistent_bound_cache[key] = value
                             _persistent_bound_cache.move_to_end(key)
                         while len(_persistent_bound_cache) > _MAX_BOUND_CACHE_SIZE:
                             _persistent_bound_cache.popitem(last=False)
-                with _compression_cache_lock:
-                    # Re-check _cached_llm_id inside this lock — another thread may
-                    # have called invalidate_llm_caches() between releasing
-                    # _bound_cache_lock above and acquiring _compression_cache_lock here,
-                    # which would make our local_compression_cache stale for the new LLM.
-                    if _cached_llm_id == current_llm_id:
                         for key, value in local_compression_cache.items():
                             _persistent_compression_cache[key] = value
                             _persistent_compression_cache.move_to_end(key)

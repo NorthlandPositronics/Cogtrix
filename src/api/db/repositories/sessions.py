@@ -5,10 +5,10 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 
-from sqlalchemy import func, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.api.db.models import ApiSessionRecord
+from src.api.db.models import ApiSessionRecord, Message
 
 
 class SessionRepository:
@@ -144,6 +144,28 @@ class SessionRepository:
             .values(archived_at=now, updated_at=now)
         )
         await self._db.flush()
+
+    async def restore(self, session_id: str) -> None:
+        """Clear archived_at, making the session visible in default listings again."""
+        now = datetime.now(UTC)
+        await self._db.execute(
+            update(ApiSessionRecord)
+            .where(ApiSessionRecord.id == session_id)
+            .values(archived_at=None, updated_at=now)
+        )
+        await self._db.flush()
+
+    async def hard_delete(self, session_id: str) -> bool:
+        """Permanently delete a session and all its messages (non-recoverable).
+
+        Returns True if the session existed and was deleted, False otherwise.
+        """
+        await self._db.execute(delete(Message).where(Message.session_id == session_id))
+        result = await self._db.execute(
+            delete(ApiSessionRecord).where(ApiSessionRecord.id == session_id)
+        )
+        await self._db.flush()
+        return result.rowcount > 0
 
     async def count_by_user(self, user_id: str) -> int:
         """Return the total number of active (non-archived) sessions for a user."""

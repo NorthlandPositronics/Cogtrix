@@ -182,6 +182,43 @@ class TestBug230OllamaUserURLSSRF:
         mock_urlopen.assert_called_once()
         assert "qwen3:8b" in result
 
+    def test_list_ollama_models_dns_failure_logs_network_hint(self):
+        """DNS resolution failure (e.g. inside Docker) must log a clear message,
+        not the misleading 'blocked address (link-local/reserved)' text."""
+        from src.setup_wizard import _list_ollama_models
+
+        with (
+            patch("socket.getaddrinfo", side_effect=OSError("Name or service not known")),
+            patch("urllib.request.urlopen") as mock_urlopen,
+        ):
+            result = _list_ollama_models("http://spark:11434")
+
+        mock_urlopen.assert_not_called()
+        assert result == []
+
+    def test_list_ollama_models_allows_hostname_resolving_to_lan(self):
+        """A hostname that resolves to an RFC-1918 address (e.g. 'spark' → 192.168.x.x)
+        must succeed — the user-typed URL guard allows private addresses."""
+        from src.setup_wizard import _list_ollama_models
+
+        payload = b'{"models": [{"name": "llama3:8b", "size": 4000000000}]}'
+        mock_resp = MagicMock()
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_resp.read.return_value = payload
+
+        with (
+            patch(
+                "socket.getaddrinfo",
+                return_value=[(None, None, None, None, ("192.168.1.50", 11434))],
+            ),
+            patch("urllib.request.urlopen", return_value=mock_resp) as mock_urlopen,
+        ):
+            result = _list_ollama_models("http://spark:11434")
+
+        mock_urlopen.assert_called_once()
+        assert "llama3:8b" in result
+
 
 # ---------------------------------------------------------------------------
 # BUG-231: openai.py uses "not-required" placeholder (not "no-key")

@@ -21,6 +21,7 @@ import asyncio
 import dataclasses
 import json
 import logging
+import re
 import time
 import uuid
 from typing import TYPE_CHECKING, Any
@@ -74,6 +75,31 @@ async def _enqueue_agent_state(session: ApiSession, state: str) -> None:
         log.debug("Queue full, dropping agent_state for session %s", session.id)
     except Exception as exc:  # pragma: no cover
         log.debug("Could not enqueue agent_state for session %s: %s", session.id, exc)
+
+
+def _extract_final_solution(report: str) -> str:
+    """Extract the Final Solution section from a Tree-of-Thought report.
+
+    ``force_deep_think`` returns a full formatted report that includes branch
+    scores, iteration summaries, and a ``## Final Solution`` section.  Only the
+    final solution text should be stored as the AI response; the full report is
+    only useful for debug inspection.
+
+    Falls back to the full report if the section is absent or empty so content
+    is never silently lost.
+    """
+    match = re.search(
+        # Match any confidence value (int, float, or locale-specific decimal).
+        # Lookahead stops at a horizontal rule (---) on its own line or end-of-string.
+        r"^##\s+Final Solution\b[^\n]*\n+(.*?)(?=\n---|\Z)",
+        report,
+        re.DOTALL | re.MULTILINE,
+    )
+    if match:
+        sol = match.group(1).strip()
+        if sol:
+            return sol
+    return report
 
 
 async def _run_think_pipeline(
@@ -171,7 +197,7 @@ async def _run_think_pipeline(
         )
         if session.cancel_event.is_set():
             raise asyncio.CancelledError("Cancel requested between pipeline phases")
-        return result
+        return _extract_final_solution(result)
     except asyncio.CancelledError:
         raise
     except Exception as exc:
@@ -459,6 +485,7 @@ async def _run_message_turn_inner(
                 "output_tokens": token_counts.get("output_tokens", 0),
                 "duration_ms": duration_ms,
                 "tool_calls": token_counts.get("tool_call_count", 0),
+                "text": response_text,
             },
         }
         try:

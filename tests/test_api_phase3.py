@@ -128,7 +128,7 @@ class TestWebSocketCallbackHandler:
         await asyncio.sleep(0.05)
         item = await queue.get()
         assert item["type"] == "tool_start"
-        assert item["payload"]["tool"] == "web_search"
+        assert item["payload"]["tool_name"] == "web_search"
         assert item["payload"]["tool_call_id"] == str(run_id)
 
     @pytest.mark.asyncio
@@ -149,7 +149,7 @@ class TestWebSocketCallbackHandler:
         item = await queue.get()
         assert item["type"] == "tool_end"
         assert item["payload"]["error"] is None
-        assert item["payload"]["tool"] == "web_search"
+        assert item["payload"]["tool_name"] == "web_search"
 
     @pytest.mark.asyncio
     async def test_on_tool_error_enqueues_tool_end_with_error(self) -> None:

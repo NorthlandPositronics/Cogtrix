@@ -732,3 +732,278 @@ class TestSessionToolsExtra:
             json={"disable": ["search"]},
         )
         assert r.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# Issue #94 — permanent delete (?permanent=true) and restore (POST .../restore)
+# ---------------------------------------------------------------------------
+
+
+class TestSessionPermanentDelete:
+    def test_permanent_delete_removes_session(self, client, tokens):
+        """DELETE ?permanent=true must hard-delete the session row."""
+        token = tokens["owner"]
+        sid = _create_session(client, token).json()["data"]["id"]
+
+        r = client.delete(f"/api/v1/sessions/{sid}?permanent=true", headers=_h(token))
+        assert r.status_code == 200
+
+        # Session must no longer appear even with include_archived=true
+        r2 = client.get("/api/v1/sessions?include_archived=true", headers=_h(token))
+        ids = [s["id"] for s in r2.json()["data"]["items"]]
+        assert sid not in ids
+
+    def test_permanent_delete_nonexistent_returns_404(self, client, tokens):
+        r = client.delete(
+            f"/api/v1/sessions/{uuid.uuid4()}?permanent=true",
+            headers=_h(tokens["owner"]),
+        )
+        assert r.status_code == 404
+
+    def test_permanent_delete_non_owner_returns_403(self, client, tokens):
+        sid = _create_session(client, tokens["owner"]).json()["data"]["id"]
+        r = client.delete(f"/api/v1/sessions/{sid}?permanent=true", headers=_h(tokens["other"]))
+        assert r.status_code == 403
+
+    def test_archive_still_works_without_permanent(self, client, tokens):
+        """Default DELETE (no permanent) must still archive (not hard-delete)."""
+        token = tokens["owner"]
+        sid = _create_session(client, token).json()["data"]["id"]
+
+        r = client.delete(f"/api/v1/sessions/{sid}", headers=_h(token))
+        assert r.status_code == 200
+
+        # Session appears with include_archived=true
+        r2 = client.get("/api/v1/sessions?include_archived=true", headers=_h(token))
+        ids = [s["id"] for s in r2.json()["data"]["items"]]
+        assert sid in ids
+
+
+class TestSessionRestore:
+    def test_restore_unarchives_session(self, client, tokens):
+        """POST .../restore must clear archived_at."""
+        token = tokens["owner"]
+        sid = _create_session(client, token).json()["data"]["id"]
+
+        # Archive it first
+        client.delete(f"/api/v1/sessions/{sid}", headers=_h(token))
+
+        # Verify it's hidden from default listing
+        r = client.get("/api/v1/sessions", headers=_h(token))
+        ids = [s["id"] for s in r.json()["data"]["items"]]
+        assert sid not in ids
+
+        # Restore
+        r2 = client.post(f"/api/v1/sessions/{sid}/restore", headers=_h(token))
+        assert r2.status_code == 200
+        assert r2.json()["data"]["id"] == sid
+        assert r2.json()["data"]["archived_at"] is None
+
+        # Now visible in default listing
+        r3 = client.get("/api/v1/sessions", headers=_h(token))
+        ids3 = [s["id"] for s in r3.json()["data"]["items"]]
+        assert sid in ids3
+
+    def test_restore_nonexistent_returns_404(self, client, tokens):
+        r = client.post(
+            f"/api/v1/sessions/{uuid.uuid4()}/restore",
+            headers=_h(tokens["owner"]),
+        )
+        assert r.status_code == 404
+
+    def test_restore_non_owner_returns_403(self, client, tokens):
+        token = tokens["owner"]
+        sid = _create_session(client, token).json()["data"]["id"]
+        client.delete(f"/api/v1/sessions/{sid}", headers=_h(token))
+        r = client.post(f"/api/v1/sessions/{sid}/restore", headers=_h(tokens["other"]))
+        assert r.status_code == 403
+
+    def test_restore_no_auth_returns_401(self, client, tokens):
+        sid = _create_session(client, tokens["owner"]).json()["data"]["id"]
+        r = client.post(f"/api/v1/sessions/{sid}/restore")
+        assert r.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# BUG-246 — hard_delete returns False for non-existent sessions (rowcount check)
+# ---------------------------------------------------------------------------
+
+
+class TestHardDeleteRowcount:
+    def test_hard_delete_nonexistent_session_returns_false(self) -> None:
+        """SessionRepository.hard_delete must return False when no row is deleted (BUG-246)."""
+        import asyncio
+
+        from src.api.db.repositories.sessions import SessionRepository
+
+        async def _run():
+            from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+            from sqlalchemy.orm import sessionmaker
+
+            from src.api.db.models import Base
+
+            engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+            async with engine.begin() as conn:
+                await conn.run_sync(Base.metadata.create_all)
+            async_session = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+            async with async_session() as session:
+                repo = SessionRepository(session)
+                deleted = await repo.hard_delete(str(uuid.uuid4()))
+                return deleted
+
+        result = asyncio.run(_run())
+        assert result is False, "hard_delete must return False for non-existent session (BUG-246)"
+
+    def test_hard_delete_existing_session_returns_true(self) -> None:
+        """SessionRepository.hard_delete must return True when a row was actually deleted."""
+        import asyncio
+
+        from src.api.db.repositories.sessions import SessionRepository
+
+        async def _run():
+            from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+            from sqlalchemy.orm import sessionmaker
+
+            from src.api.db.models import Base
+
+            engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+            async with engine.begin() as conn:
+                await conn.run_sync(Base.metadata.create_all)
+            async_session = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+            async with async_session() as session:
+                repo = SessionRepository(session)
+                record = await repo.create(user_id="u1", name="test")
+                await session.commit()
+                deleted = await repo.hard_delete(record.id)
+                await session.commit()
+                return deleted
+
+        result = asyncio.run(_run())
+        assert result is True, "hard_delete must return True when a row was deleted"
+
+
+# ---------------------------------------------------------------------------
+# BUG-247 — delete_session commits DB before evicting from memory (source check)
+# ---------------------------------------------------------------------------
+
+
+class TestDeleteSessionOrderOfOperations:
+    def test_db_write_before_ws_disconnect(self) -> None:
+        """delete_session must commit to DB before disconnecting WebSocket (BUG-247)."""
+        import inspect
+
+        from src.api.routes import sessions as _mod
+
+        src = inspect.getsource(_mod.delete_session)
+        commit_pos = src.find("await db.commit()")
+        disconnect_pos = src.find("await _ws_manager.disconnect")
+        assert commit_pos != -1, "db.commit() not found in delete_session"
+        assert disconnect_pos != -1, "ws_manager.disconnect not found in delete_session"
+        assert (
+            commit_pos < disconnect_pos
+        ), "delete_session must commit DB before disconnecting WebSocket (BUG-247)"
+
+
+# ---------------------------------------------------------------------------
+# Issue #94 — permanent delete: additional coverage
+# ---------------------------------------------------------------------------
+
+
+class TestSessionPermanentDeleteExtra:
+    def test_permanent_delete_no_auth_returns_401(self, client, tokens):
+        """DELETE ?permanent=true without a token must return 401."""
+        sid = _create_session(client, tokens["owner"]).json()["data"]["id"]
+        r = client.delete(f"/api/v1/sessions/{sid}?permanent=true")
+        assert r.status_code == 401
+
+    def test_permanent_delete_admin_can_delete_other_user_session(self, client, tokens):
+        """Admin (first registered user) may permanently delete any session."""
+        # tokens["owner"] is first-registered → admin via role-election
+        other_sid = _create_session(client, tokens["other"]).json()["data"]["id"]
+        r = client.delete(
+            f"/api/v1/sessions/{other_sid}?permanent=true",
+            headers=_h(tokens["owner"]),
+        )
+        assert r.status_code == 200
+
+        # Session must be gone even with include_archived
+        r2 = client.get(
+            "/api/v1/sessions?include_archived=true",
+            headers=_h(tokens["other"]),
+        )
+        ids = [s["id"] for s in r2.json()["data"]["items"]]
+        assert other_sid not in ids
+
+    def test_permanent_delete_response_body_null_data(self, client, tokens):
+        """DELETE ?permanent=true must return {data: null, error: null}."""
+        sid = _create_session(client, tokens["owner"]).json()["data"]["id"]
+        r = client.delete(
+            f"/api/v1/sessions/{sid}?permanent=true",
+            headers=_h(tokens["owner"]),
+        )
+        assert r.status_code == 200
+        body = r.json()
+        assert body["data"] is None
+        assert body["error"] is None
+
+    def test_permanent_delete_404_error_code(self, client, tokens):
+        """404 response on permanent delete must use SESSION_NOT_FOUND code."""
+        r = client.delete(
+            f"/api/v1/sessions/{uuid.uuid4()}?permanent=true",
+            headers=_h(tokens["owner"]),
+        )
+        assert r.status_code == 404
+        assert r.json()["error"]["code"] == "SESSION_NOT_FOUND"
+
+    def test_permanent_delete_session_not_visible_by_id(self, client, tokens):
+        """After hard delete, GET /sessions/{id} must return 404."""
+        token = tokens["owner"]
+        sid = _create_session(client, token).json()["data"]["id"]
+        client.delete(f"/api/v1/sessions/{sid}?permanent=true", headers=_h(token))
+        r = client.get(f"/api/v1/sessions/{sid}", headers=_h(token))
+        assert r.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Issue #94 — restore: additional coverage
+# ---------------------------------------------------------------------------
+
+
+class TestSessionRestoreExtra:
+    def test_restore_admin_can_restore_other_user_session(self, client, tokens):
+        """Admin may restore any session regardless of ownership."""
+        other_sid = _create_session(client, tokens["other"]).json()["data"]["id"]
+        client.delete(f"/api/v1/sessions/{other_sid}", headers=_h(tokens["other"]))
+
+        r = client.post(
+            f"/api/v1/sessions/{other_sid}/restore",
+            headers=_h(tokens["owner"]),  # admin
+        )
+        assert r.status_code == 200
+        assert r.json()["data"]["archived_at"] is None
+
+    def test_restore_active_session_succeeds(self, client, tokens):
+        """Restoring a session that is not archived must succeed (no-op, still 200)."""
+        token = tokens["owner"]
+        sid = _create_session(client, token).json()["data"]["id"]
+        r = client.post(f"/api/v1/sessions/{sid}/restore", headers=_h(token))
+        assert r.status_code == 200
+        data = r.json()["data"]
+        assert data["id"] == sid
+        assert data["archived_at"] is None
+
+    def test_restore_response_contains_full_session_out(self, client, tokens):
+        """Restore must return a full SessionOut with all required fields."""
+        token = tokens["owner"]
+        sid = _create_session(client, token).json()["data"]["id"]
+        client.delete(f"/api/v1/sessions/{sid}", headers=_h(token))
+
+        r = client.post(f"/api/v1/sessions/{sid}/restore", headers=_h(token))
+        assert r.status_code == 200
+        data = r.json()["data"]
+        assert data["id"] == sid
+        assert "archived_at" in data
+        assert data["archived_at"] is None
+        assert "name" in data
+        assert "state" in data
+        assert r.json()["error"] is None

@@ -1158,3 +1158,608 @@ class TestHealth:
         assert resp.status_code == 503, resp.text
         data = resp.json()["data"]
         assert data["ready"] is False
+
+
+# ===========================================================================
+# Issue #95 — Runtime provider CRUD (POST / PATCH / DELETE /config/providers)
+# ===========================================================================
+
+
+def _make_provider_config(
+    name: str, type_: str = "openai", api_key: str | None = None
+) -> MagicMock:
+    """Return a MagicMock that quacks like a ProviderConfig."""
+    pc = MagicMock()
+    pc.name = name
+    pc.type = type_
+    pc.base_url = None
+    pc.api_key = api_key
+    pc.tool_instructions = None
+    return pc
+
+
+class TestProviderCreate:
+    def test_create_provider_returns_201(self) -> None:
+        """POST /config/providers creates a new provider entry."""
+        cfg = _make_config()
+        cfg.providers = {}
+        cfg.config_file_path = None  # triggers home/.cogtrix.yaml path (mocked away)
+
+        with (
+            _api_client(extra_state={"config": cfg}) as (client, admin_token, _),
+            patch("src.api.routes.config._write_providers_to_config"),
+        ):
+            resp = client.post(
+                "/api/v1/config/providers",
+                headers={"Authorization": f"Bearer {admin_token}"},
+                json={"name": "my-ollama", "type": "ollama"},
+            )
+        assert resp.status_code == 201, resp.text
+        data = resp.json()["data"]
+        assert data["name"] == "my-ollama"
+        assert data["type"] == "ollama"
+
+    def test_create_provider_conflict_returns_409(self) -> None:
+        """Creating a provider whose name already exists → 409 PROVIDER_EXISTS."""
+        existing = _make_provider_config("ollama", "ollama")
+        cfg = _make_config()
+        cfg.providers = {"ollama": existing}
+
+        with (
+            _api_client(extra_state={"config": cfg}) as (client, admin_token, _),
+            patch("src.api.routes.config._write_providers_to_config"),
+        ):
+            resp = client.post(
+                "/api/v1/config/providers",
+                headers={"Authorization": f"Bearer {admin_token}"},
+                json={"name": "ollama", "type": "ollama"},
+            )
+        assert resp.status_code == 409, resp.text
+        assert resp.json()["error"]["code"] == "PROVIDER_EXISTS"
+
+    def test_create_provider_invalid_type_returns_422(self) -> None:
+        """Unknown provider type must fail validation."""
+        cfg = _make_config()
+        cfg.providers = {}
+
+        with (
+            _api_client(extra_state={"config": cfg}) as (client, admin_token, _),
+            patch("src.api.routes.config._write_providers_to_config"),
+        ):
+            resp = client.post(
+                "/api/v1/config/providers",
+                headers={"Authorization": f"Bearer {admin_token}"},
+                json={"name": "bad", "type": "nonexistent_type"},
+            )
+        assert resp.status_code == 422, resp.text
+
+    def test_create_provider_non_admin_returns_403(self) -> None:
+        with _api_client() as (client, _, user_token):
+            resp = client.post(
+                "/api/v1/config/providers",
+                headers={"Authorization": f"Bearer {user_token}"},
+                json={"name": "x", "type": "openai"},
+            )
+        assert resp.status_code == 403, resp.text
+
+    def test_create_provider_no_auth_returns_401(self) -> None:
+        with _api_client() as (client, _, __):
+            resp = client.post(
+                "/api/v1/config/providers",
+                json={"name": "x", "type": "openai"},
+            )
+        assert resp.status_code == 401, resp.text
+
+
+class TestProviderUpdate:
+    def test_patch_provider_updates_api_key(self) -> None:
+        """PATCH /config/providers/{name} replaces the api_key field."""
+        existing = _make_provider_config("openai", "openai", api_key="old-key")
+        cfg = _make_config()
+        cfg.providers = {"openai": existing}
+
+        with (
+            _api_client(extra_state={"config": cfg}) as (client, admin_token, _),
+            patch("src.api.routes.config._write_providers_to_config"),
+        ):
+            resp = client.patch(
+                "/api/v1/config/providers/openai",
+                headers={"Authorization": f"Bearer {admin_token}"},
+                json={"api_key": "new-key"},
+            )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["data"]["name"] == "openai"
+
+    def test_patch_unknown_provider_returns_404(self) -> None:
+        with _api_client() as (client, admin_token, _):
+            resp = client.patch(
+                "/api/v1/config/providers/does_not_exist",
+                headers={"Authorization": f"Bearer {admin_token}"},
+                json={"api_key": "key"},
+            )
+        assert resp.status_code == 404, resp.text
+        assert resp.json()["error"]["code"] == "NOT_FOUND"
+
+    def test_patch_provider_non_admin_returns_403(self) -> None:
+        with _api_client() as (client, _, user_token):
+            resp = client.patch(
+                "/api/v1/config/providers/openai",
+                headers={"Authorization": f"Bearer {user_token}"},
+                json={"api_key": "k"},
+            )
+        assert resp.status_code == 403, resp.text
+
+    def test_patch_provider_no_auth_returns_401(self) -> None:
+        with _api_client() as (client, _, __):
+            resp = client.patch("/api/v1/config/providers/openai", json={"api_key": "k"})
+        assert resp.status_code == 401, resp.text
+
+
+class TestProviderDelete:
+    def test_delete_provider_returns_200(self) -> None:
+        """DELETE /config/providers/{name} removes the provider."""
+        pc = _make_provider_config("my-provider", "openai")
+        cfg = _make_config()
+        cfg.providers = {"my-provider": pc}
+        cfg.models = {}  # no models reference this provider
+
+        with (
+            _api_client(extra_state={"config": cfg}) as (client, admin_token, _),
+            patch("src.api.routes.config._write_providers_to_config"),
+        ):
+            resp = client.delete(
+                "/api/v1/config/providers/my-provider",
+                headers={"Authorization": f"Bearer {admin_token}"},
+            )
+        assert resp.status_code == 200, resp.text
+
+    def test_delete_provider_in_use_returns_409(self) -> None:
+        """Cannot delete a provider that has a model referencing it."""
+        pc = _make_provider_config("openai", "openai")
+        mc = MagicMock()
+        mc.provider = "openai"
+        cfg = _make_config()
+        cfg.providers = {"openai": pc}
+        cfg.models = {"gpt4": mc}
+
+        with _api_client(extra_state={"config": cfg}) as (client, admin_token, _):
+            resp = client.delete(
+                "/api/v1/config/providers/openai",
+                headers={"Authorization": f"Bearer {admin_token}"},
+            )
+        assert resp.status_code == 409, resp.text
+        assert resp.json()["error"]["code"] == "PROVIDER_IN_USE"
+
+    def test_delete_unknown_provider_returns_404(self) -> None:
+        with _api_client() as (client, admin_token, _):
+            resp = client.delete(
+                "/api/v1/config/providers/ghost",
+                headers={"Authorization": f"Bearer {admin_token}"},
+            )
+        assert resp.status_code == 404, resp.text
+        assert resp.json()["error"]["code"] == "NOT_FOUND"
+
+    def test_delete_provider_non_admin_returns_403(self) -> None:
+        with _api_client() as (client, _, user_token):
+            resp = client.delete(
+                "/api/v1/config/providers/openai",
+                headers={"Authorization": f"Bearer {user_token}"},
+            )
+        assert resp.status_code == 403, resp.text
+
+    def test_delete_provider_no_auth_returns_401(self) -> None:
+        with _api_client() as (client, _, __):
+            resp = client.delete("/api/v1/config/providers/openai")
+        assert resp.status_code == 401, resp.text
+
+
+# ---------------------------------------------------------------------------
+# BUG-237 — provider write lock serialises concurrent CRUD (source check)
+# ---------------------------------------------------------------------------
+
+
+class TestProviderWriteLock:
+    def test_provider_write_lock_helper_exists(self) -> None:
+        """_get_provider_write_lock() must be defined and return an asyncio.Lock."""
+        import asyncio
+        import importlib
+
+        mod = importlib.import_module("src.api.routes.config")
+        assert hasattr(
+            mod, "_get_provider_write_lock"
+        ), "_get_provider_write_lock missing — BUG-237 fix not applied"
+        lock = mod._get_provider_write_lock()
+        assert isinstance(lock, asyncio.Lock), "Must return asyncio.Lock"
+
+    def test_create_provider_acquires_lock(self) -> None:
+        import inspect
+
+        import src.api.routes.config as _mod
+
+        src = inspect.getsource(_mod.create_provider)
+        assert (
+            "_get_provider_write_lock()" in src
+        ), "create_provider must acquire _get_provider_write_lock() (BUG-237)"
+
+    def test_update_provider_acquires_lock(self) -> None:
+        import inspect
+
+        import src.api.routes.config as _mod
+
+        src = inspect.getsource(_mod.update_provider)
+        assert (
+            "_get_provider_write_lock()" in src
+        ), "update_provider must acquire _get_provider_write_lock() (BUG-237)"
+
+    def test_delete_provider_acquires_lock(self) -> None:
+        import inspect
+
+        import src.api.routes.config as _mod
+
+        src = inspect.getsource(_mod.delete_provider)
+        assert (
+            "_get_provider_write_lock()" in src
+        ), "delete_provider must acquire _get_provider_write_lock() (BUG-237)"
+
+
+# ---------------------------------------------------------------------------
+# BUG-238 — SSRF guard on base_url in create/update provider
+# ---------------------------------------------------------------------------
+
+
+class TestProviderBaseUrlSSRFGuard:
+    def test_create_provider_blocks_link_local_base_url(self) -> None:
+        """POST /config/providers must reject link-local base_url values (BUG-238)."""
+        with _api_client() as (client, admin_token, _):
+            resp = client.post(
+                "/api/v1/config/providers",
+                json={
+                    "name": "ssrf-test",
+                    "type": "openai",
+                    "base_url": "http://169.254.169.254/latest/meta-data/",
+                },
+                headers={"Authorization": f"Bearer {admin_token}"},
+            )
+        assert resp.status_code == 422, resp.text
+        assert "VALIDATION_ERROR" in resp.text
+
+    def test_update_provider_blocks_link_local_base_url(self) -> None:
+        """PATCH /config/providers/{name} must reject link-local base_url (BUG-238)."""
+        with _api_client() as (client, admin_token, _):
+            resp = client.patch(
+                "/api/v1/config/providers/openai",
+                json={"base_url": "http://169.254.1.1/"},
+                headers={"Authorization": f"Bearer {admin_token}"},
+            )
+        assert resp.status_code == 422, resp.text
+        assert "VALIDATION_ERROR" in resp.text
+
+    def test_create_provider_allows_private_lan_base_url(self) -> None:
+        """Private RFC-1918 addresses must be allowed for local LAN providers (BUG-238)."""
+        import inspect
+
+        import src.api.routes.config as _mod
+
+        src = inspect.getsource(_mod.create_provider)
+        # Confirm allow_private=True is passed to the SSRF guard
+        assert (
+            "allow_private=True" in src
+        ), "create_provider SSRF guard must pass allow_private=True to permit LAN providers"
+
+
+# ---------------------------------------------------------------------------
+# BUG-243 — no config file path raises 503 instead of silently writing wrong file
+# ---------------------------------------------------------------------------
+
+
+class TestProviderCrudNoConfigFile:
+    def test_write_providers_raises_when_no_config_path(self) -> None:
+        """_write_providers_to_config raises RuntimeError when cfg has no file path (BUG-243)."""
+        import pytest
+
+        import src.api.routes.config as _mod
+
+        mock_cfg = type("Cfg", (), {"config_file_path": None})()
+        with pytest.raises(RuntimeError, match="No config file is loaded"):
+            _mod._write_providers_to_config(mock_cfg, {})
+
+
+# ---------------------------------------------------------------------------
+# BUG-245 — health check uses .base_url attribute, not get_base_url() method
+# ---------------------------------------------------------------------------
+
+
+class TestProviderHealthBaseUrlAccess:
+    def test_health_check_uses_base_url_attribute(self) -> None:
+        """check_provider_health must read pc.base_url, not pc.get_base_url() (BUG-245)."""
+        import inspect
+
+        import src.api.routes.config as _mod
+
+        src = inspect.getsource(_mod.check_provider_health)
+        assert (
+            "get_base_url" not in src
+        ), "check_provider_health must not call get_base_url() — use .base_url attribute (BUG-245)"
+        assert (
+            'base_url=getattr(pc, "base_url"' in src or "pc.base_url" in src
+        ), "check_provider_health must read base_url attribute from ProviderConfig (BUG-245)"
+
+
+# ---------------------------------------------------------------------------
+# BUG-239 — wizard sessions per-session lock (source check)
+# ---------------------------------------------------------------------------
+
+
+class TestWizardSessionLock:
+    def test_wizard_session_includes_lock_field(self) -> None:
+        """start_wizard must store asyncio.Lock in the wizard session dict (BUG-239)."""
+        import inspect
+
+        import src.api.routes.config as _mod
+
+        src = inspect.getsource(_mod.start_wizard)
+        assert (
+            '"lock": asyncio.Lock()' in src
+        ), "start_wizard must add asyncio.Lock() to wizard session dict (BUG-239)"
+
+    def test_advance_wizard_acquires_per_session_lock(self) -> None:
+        """advance_wizard must acquire ws['lock'] before reading/modifying session (BUG-239)."""
+        import inspect
+
+        import src.api.routes.config as _mod
+
+        src = inspect.getsource(_mod.advance_wizard)
+        assert (
+            'ws["lock"]' in src
+        ), "advance_wizard must acquire ws['lock'] to prevent concurrent corruption (BUG-239)"
+
+
+# ===========================================================================
+# Issue #95 — Provider CRUD: additional coverage
+# ===========================================================================
+
+
+class TestProviderCreateExtra:
+    def test_create_provider_with_base_url_reflects_in_response(self) -> None:
+        """POST /config/providers with base_url must return it in ProviderOut."""
+        cfg = _make_config()
+        cfg.providers = {}
+
+        with (
+            _api_client(extra_state={"config": cfg}) as (client, admin_token, _),
+            patch("src.api.routes.config._write_providers_to_config"),
+        ):
+            resp = client.post(
+                "/api/v1/config/providers",
+                headers={"Authorization": f"Bearer {admin_token}"},
+                json={
+                    "name": "my-vllm",
+                    "type": "openai",
+                    "base_url": "http://10.0.0.5:8000/v1",
+                },
+            )
+        assert resp.status_code == 201, resp.text
+        data = resp.json()["data"]
+        assert data["base_url"] == "http://10.0.0.5:8000/v1"
+
+    def test_create_provider_with_api_key_sets_has_api_key_true(self) -> None:
+        """POST with api_key must return has_api_key=true (key is never echoed)."""
+        cfg = _make_config()
+        cfg.providers = {}
+
+        with (
+            _api_client(extra_state={"config": cfg}) as (client, admin_token, _),
+            patch("src.api.routes.config._write_providers_to_config"),
+        ):
+            resp = client.post(
+                "/api/v1/config/providers",
+                headers={"Authorization": f"Bearer {admin_token}"},
+                json={"name": "keyed", "type": "openai", "api_key": "sk-secret"},
+            )
+        assert resp.status_code == 201, resp.text
+        data = resp.json()["data"]
+        assert data["has_api_key"] is True
+        # Key itself must never appear in the response
+        assert "sk-secret" not in resp.text
+
+    def test_create_provider_without_api_key_has_api_key_false(self) -> None:
+        """POST without api_key must return has_api_key=false."""
+        cfg = _make_config()
+        cfg.providers = {}
+
+        with (
+            _api_client(extra_state={"config": cfg}) as (client, admin_token, _),
+            patch("src.api.routes.config._write_providers_to_config"),
+        ):
+            resp = client.post(
+                "/api/v1/config/providers",
+                headers={"Authorization": f"Bearer {admin_token}"},
+                json={"name": "local-ollama", "type": "ollama"},
+            )
+        assert resp.status_code == 201, resp.text
+        assert resp.json()["data"]["has_api_key"] is False
+
+    def test_create_provider_no_config_file_returns_503(self) -> None:
+        """POST /config/providers when no config file is loaded must return 503."""
+        cfg = _make_config()
+        cfg.providers = {}
+        cfg.config_file_path = None  # triggers RuntimeError in _write_providers_to_config
+
+        with _api_client(extra_state={"config": cfg}) as (client, admin_token, _):
+            resp = client.post(
+                "/api/v1/config/providers",
+                headers={"Authorization": f"Bearer {admin_token}"},
+                json={"name": "new-p", "type": "ollama"},
+            )
+        assert resp.status_code == 503, resp.text
+        assert resp.json()["error"]["code"] == "SERVICE_UNAVAILABLE"
+
+    def test_create_provider_invalid_name_pattern_returns_422(self) -> None:
+        """Provider name must match ^[a-zA-Z0-9][a-zA-Z0-9_-]*$ — invalid chars → 422."""
+        with _api_client() as (client, admin_token, _):
+            resp = client.post(
+                "/api/v1/config/providers",
+                headers={"Authorization": f"Bearer {admin_token}"},
+                json={"name": "-invalid-start", "type": "openai"},
+            )
+        assert resp.status_code == 422, resp.text
+
+    def test_create_provider_empty_name_returns_422(self) -> None:
+        """Empty provider name must be rejected by schema validation."""
+        with _api_client() as (client, admin_token, _):
+            resp = client.post(
+                "/api/v1/config/providers",
+                headers={"Authorization": f"Bearer {admin_token}"},
+                json={"name": "", "type": "openai"},
+            )
+        assert resp.status_code == 422, resp.text
+
+
+class TestProviderUpdateExtra:
+    def test_patch_provider_updates_base_url(self) -> None:
+        """PATCH with base_url must update the URL and reflect in response."""
+        pc = _make_provider_config("myp", "openai")
+        pc.base_url = "http://10.0.0.5:8000/v1"
+        cfg = _make_config()
+        cfg.providers = {"myp": pc}
+
+        with (
+            _api_client(extra_state={"config": cfg}) as (client, admin_token, _),
+            patch("src.api.routes.config._write_providers_to_config"),
+        ):
+            resp = client.patch(
+                "/api/v1/config/providers/myp",
+                headers={"Authorization": f"Bearer {admin_token}"},
+                json={"base_url": "http://10.0.0.6:8000/v1"},
+            )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["data"]["base_url"] == "http://10.0.0.6:8000/v1"
+
+    def test_patch_provider_updates_both_fields(self) -> None:
+        """PATCH with both base_url and api_key must update both fields."""
+        pc = _make_provider_config("combo", "openai", api_key="old-key")
+        pc.base_url = "http://10.0.0.5:8000/v1"
+        cfg = _make_config()
+        cfg.providers = {"combo": pc}
+
+        with (
+            _api_client(extra_state={"config": cfg}) as (client, admin_token, _),
+            patch("src.api.routes.config._write_providers_to_config"),
+        ):
+            resp = client.patch(
+                "/api/v1/config/providers/combo",
+                headers={"Authorization": f"Bearer {admin_token}"},
+                json={"base_url": "http://10.0.0.6:8000/v1", "api_key": "new-key"},
+            )
+        assert resp.status_code == 200, resp.text
+        data = resp.json()["data"]
+        assert data["base_url"] == "http://10.0.0.6:8000/v1"
+        assert data["has_api_key"] is True
+
+    def test_patch_provider_empty_body_returns_200_unchanged(self) -> None:
+        """PATCH with neither field set must succeed and leave data unchanged."""
+        pc = _make_provider_config("stable", "ollama")
+        pc.base_url = "http://10.0.0.1:11434"
+        cfg = _make_config()
+        cfg.providers = {"stable": pc}
+
+        with (
+            _api_client(extra_state={"config": cfg}) as (client, admin_token, _),
+            patch("src.api.routes.config._write_providers_to_config"),
+        ):
+            resp = client.patch(
+                "/api/v1/config/providers/stable",
+                headers={"Authorization": f"Bearer {admin_token}"},
+                json={},
+            )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["data"]["name"] == "stable"
+
+    def test_patch_provider_no_config_file_returns_503(self) -> None:
+        """PATCH /config/providers/{name} when no config file is loaded must return 503."""
+        pc = _make_provider_config("p", "openai", api_key="k")
+        cfg = _make_config()
+        cfg.providers = {"p": pc}
+        cfg.config_file_path = None
+
+        with _api_client(extra_state={"config": cfg}) as (client, admin_token, _):
+            resp = client.patch(
+                "/api/v1/config/providers/p",
+                headers={"Authorization": f"Bearer {admin_token}"},
+                json={"api_key": "new-k"},
+            )
+        assert resp.status_code == 503, resp.text
+        assert resp.json()["error"]["code"] == "SERVICE_UNAVAILABLE"
+
+    def test_patch_provider_allows_private_lan_base_url(self) -> None:
+        """RFC-1918 private addresses must be accepted (local Ollama/vLLM installs)."""
+        pc = _make_provider_config("lan-llm", "openai")
+        cfg = _make_config()
+        cfg.providers = {"lan-llm": pc}
+
+        with (
+            _api_client(extra_state={"config": cfg}) as (client, admin_token, _),
+            patch("src.api.routes.config._write_providers_to_config"),
+        ):
+            resp = client.patch(
+                "/api/v1/config/providers/lan-llm",
+                headers={"Authorization": f"Bearer {admin_token}"},
+                json={"base_url": "http://192.168.1.100:8080/v1"},
+            )
+        assert resp.status_code == 200, resp.text
+
+
+class TestProviderDeleteExtra:
+    def test_delete_provider_no_config_file_returns_503(self) -> None:
+        """DELETE /config/providers/{name} when no config file is loaded must return 503."""
+        pc = _make_provider_config("to-delete", "openai")
+        cfg = _make_config()
+        cfg.providers = {"to-delete": pc}
+        cfg.models = {}
+        cfg.config_file_path = None
+
+        with _api_client(extra_state={"config": cfg}) as (client, admin_token, _):
+            resp = client.delete(
+                "/api/v1/config/providers/to-delete",
+                headers={"Authorization": f"Bearer {admin_token}"},
+            )
+        assert resp.status_code == 503, resp.text
+        assert resp.json()["error"]["code"] == "SERVICE_UNAVAILABLE"
+
+    def test_delete_provider_in_use_message_names_the_model(self) -> None:
+        """PROVIDER_IN_USE error message must list the referencing model alias."""
+        pc = _make_provider_config("openai", "openai")
+        mc = MagicMock()
+        mc.provider = "openai"
+        cfg = _make_config()
+        cfg.providers = {"openai": pc}
+        cfg.models = {"gpt-4o": mc}
+
+        with _api_client(extra_state={"config": cfg}) as (client, admin_token, _):
+            resp = client.delete(
+                "/api/v1/config/providers/openai",
+                headers={"Authorization": f"Bearer {admin_token}"},
+            )
+        assert resp.status_code == 409, resp.text
+        msg = resp.json()["error"]["message"]
+        assert "gpt-4o" in msg
+
+    def test_delete_provider_response_body_null_data(self) -> None:
+        """DELETE /config/providers/{name} success response must have data=null."""
+        pc = _make_provider_config("removable", "ollama")
+        cfg = _make_config()
+        cfg.providers = {"removable": pc}
+        cfg.models = {}
+
+        with (
+            _api_client(extra_state={"config": cfg}) as (client, admin_token, _),
+            patch("src.api.routes.config._write_providers_to_config"),
+        ):
+            resp = client.delete(
+                "/api/v1/config/providers/removable",
+                headers={"Authorization": f"Bearer {admin_token}"},
+            )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["data"] is None
+        assert body["error"] is None

@@ -191,11 +191,23 @@ class TestEntrypointLogic:
             "exec python -m src.api" in text
         ), "API mode must use 'exec python -m src.api' as the server command"
 
+    def test_wizard_skipped_when_args_present(self) -> None:
+        text = _entrypoint_text()
+        assert (
+            "$# -eq 0" in text
+        ), "Wizard guard must check $# -eq 0 so explicit CLI args pass straight through"
+
     def test_wizard_checks_no_yaml_config(self) -> None:
         text = _entrypoint_text()
         assert (
             "! -f /app/.cogtrix.yaml" in text
         ), "Wizard guard must check for absence of /app/.cogtrix.yaml"
+
+    def test_wizard_checks_no_yml_config(self) -> None:
+        text = _entrypoint_text()
+        assert (
+            "! -f /app/.cogtrix.yml" in text
+        ), "Wizard guard must check for absence of /app/.cogtrix.yml"
 
     def test_wizard_checks_no_json_config(self) -> None:
         text = _entrypoint_text()

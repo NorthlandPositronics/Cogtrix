@@ -1,5 +1,48 @@
 # Changelog
 
+## [0.1.36](https://github.com/NorthlandPositronics/Cogtrix/compare/v0.1.35...v0.1.36) (2026-03-25)
+
+
+### Features
+
+* **api:** permanent delete + restore sessions; runtime provider CRUD ([4630c77](https://github.com/NorthlandPositronics/Cogtrix/commit/4630c77e12391c68fe12daba651c78ec660cfaf9))
+* **api:** permanent session delete/restore + runtime provider CRUD ([17b419c](https://github.com/NorthlandPositronics/Cogtrix/commit/17b419c62e085fa5c724e8686001c6b08e083881))
+* **cli:** implement CLI output style guide across all slash commands ([e7f3dd2](https://github.com/NorthlandPositronics/Cogtrix/commit/e7f3dd2f932ad804d72e488ba4940d9f1e53b128))
+* **scripts:** add ProjectForge prompt suite and cogtrix-task Docker runner ([b61c709](https://github.com/NorthlandPositronics/Cogtrix/commit/b61c709b0898f5e8d052ade4310a0f5a526c8c3d))
+* self-improving loop foundation — 7 targeted improvements ([e16b9dd](https://github.com/NorthlandPositronics/Cogtrix/commit/e16b9dd7fee276dcdffc0e2ba9488a96fafcd1e6))
+* self-improving loop, API improvements, and bug fixes ([23e593b](https://github.com/NorthlandPositronics/Cogtrix/commit/23e593bd5d7a93e6968e02b500ad0568a3993b65))
+* **wizard:** full-width YAML preview with syntax highlighting in Step 3 ([5245f12](https://github.com/NorthlandPositronics/Cogtrix/commit/5245f12abfdb971cb6ad48ef2582099b1ebe3ff4))
+* **wizard:** full-width YAML preview with syntax highlighting in Step 3 ([aa88245](https://github.com/NorthlandPositronics/Cogtrix/commit/aa8824520f85f99ce1dd7b430accab1cf7f9e234))
+
+
+### Bug Fixes
+
+* **api/wizard:** resolve api_key from existing config when not submitted ([f781366](https://github.com/NorthlandPositronics/Cogtrix/commit/f7813663fed66d5268f73558ee8c512a1b6027e1))
+* **api/wizard:** soft-fail first LLM invocation on provider errors ([ba1df0c](https://github.com/NorthlandPositronics/Cogtrix/commit/ba1df0cd40a663d9929a999bdd45fb61c5c4dd09))
+* **api/wizard:** soft-fail probe errors so valid providers aren't blocked ([d2258b1](https://github.com/NorthlandPositronics/Cogtrix/commit/d2258b1a229832154462b758d3679078b06f4381))
+* **api:** BUG-237/238/239/243/244/245/246/247 — provider CRUD, wizard, session safety ([7e0f0bb](https://github.com/NorthlandPositronics/Cogtrix/commit/7e0f0bbf88fc3647a957e1992b847784a651994c))
+* **api:** replace deprecated HTTP_422_UNPROCESSABLE_ENTITY with HTTP_422_UNPROCESSABLE_CONTENT ([84317af](https://github.com/NorthlandPositronics/Cogtrix/commit/84317af88f53682f99831f811eb6cdf0c68005be))
+* **api:** sentinel turn_task for sync=true 409 consistency; extract ToT final solution ([6ba904b](https://github.com/NorthlandPositronics/Cogtrix/commit/6ba904bcb885d35c39d7ff22f64f85f2c10fb245))
+* **ci:** black format test_api_mcp_config_complete; remove unused variable in test_self_improving_loop_features ([a13e9f7](https://github.com/NorthlandPositronics/Cogtrix/commit/a13e9f7c063aaea54bde4175bdcec8d3d2fe6eb6))
+* **cli:** shorten /help descriptions to fit 30-char column; soft-fail wizard probe ([c9ddc86](https://github.com/NorthlandPositronics/Cogtrix/commit/c9ddc861f9e1ffc3195b54460039669a710e6681))
+* **cli:** start spinner before classify_think_task to eliminate silent pause ([5464266](https://github.com/NorthlandPositronics/Cogtrix/commit/5464266c759c81370c8fd6f0f70de3729811a83b))
+* **docker:** restore --network host hint comment in entrypoint ([497f2c2](https://github.com/NorthlandPositronics/Cogtrix/commit/497f2c25a72fc676b750a339510e4242d8ddfe86))
+* **docker:** skip wizard auto-start when CLI arguments are passed ([7c48b41](https://github.com/NorthlandPositronics/Cogtrix/commit/7c48b41f0197a6fe0e20855388abba75dbb2cbfb))
+* **docker:** wizard auto-start must also check for .cogtrix.yml ([e234ba2](https://github.com/NorthlandPositronics/Cogtrix/commit/e234ba2be9679184c6c40159043a8abbebacee34))
+* **orchestration:** atomic cache ops with single _cache_lock ([158a33c](https://github.com/NorthlandPositronics/Cogtrix/commit/158a33c878b98f4196c03de2123d2557f559a5f1))
+* **orchestration:** cancel timed-out futures to prevent zombie threads ([b143c62](https://github.com/NorthlandPositronics/Cogtrix/commit/b143c62e4cfa9f81a1884d76c9359f0a165dd6e1))
+* **wizard:** clean up remaining user-facing log messages in setup_wizard ([0a65628](https://github.com/NorthlandPositronics/Cogtrix/commit/0a656282c3874bc9a7d677df9004f9c0c570c0b2))
+* **wizard:** distinguish DNS failure from blocked address in _list_ollama_models ([609251a](https://github.com/NorthlandPositronics/Cogtrix/commit/609251a8374e9091893f6017b2f15329b2d2b7c5))
+* **wizard:** distinguish DNS failure from blocked address in _list_ollama_models ([d83965c](https://github.com/NorthlandPositronics/Cogtrix/commit/d83965c4803bbc26b3ed4bd89580424932ea9391))
+* **wizard:** remove internal bug IDs and jargon from Ollama error messages ([4abb907](https://github.com/NorthlandPositronics/Cogtrix/commit/4abb907cb87c8a9e143cb305df5854dfbeff9031))
+* **wizard:** strip null/empty values from generated config before preview and write ([5ff6448](https://github.com/NorthlandPositronics/Cogtrix/commit/5ff64483c4969f865474c068850dc0c851a4fc74))
+
+
+### Documentation
+
+* **api:** update client contract and OpenAPI schema for [#94](https://github.com/NorthlandPositronics/Cogtrix/issues/94)/[#95](https://github.com/NorthlandPositronics/Cogtrix/issues/95) ([b13e7e7](https://github.com/NorthlandPositronics/Cogtrix/commit/b13e7e742dcb2e7f63b24fb13c6cd5cf00ea3819))
+* **changelog:** add unreleased entries for [#94](https://github.com/NorthlandPositronics/Cogtrix/issues/94), [#95](https://github.com/NorthlandPositronics/Cogtrix/issues/95), BUG-215, BUG-002 ([48dc1d8](https://github.com/NorthlandPositronics/Cogtrix/commit/48dc1d8a43ad036bea7a806e95a849707755a21b))
+
 ## [0.1.35](https://github.com/NorthlandPositronics/Cogtrix/compare/v0.1.34...v0.1.35) (2026-03-24)
 
 
@@ -35,18 +78,28 @@
 
 ## [Unreleased]
 
+### Features
+
+* **api:** permanent session delete — `DELETE /sessions/{id}?permanent=true` removes the session row and all messages (non-recoverable) (#94) ([4630c77](https://github.com/NorthlandPositronics/Cogtrix/commit/4630c77))
+* **api:** session restore — `POST /sessions/{id}/restore` unarchives a soft-deleted session (#94) ([4630c77](https://github.com/NorthlandPositronics/Cogtrix/commit/4630c77))
+* **api:** runtime provider CRUD — `POST/PATCH/DELETE /config/providers` (admin only); changes are persisted atomically to the YAML config file (#95) ([4630c77](https://github.com/NorthlandPositronics/Cogtrix/commit/4630c77))
+
 ### Bug Fixes
 
+* **api:** sync `send_message` path sets sentinel `Future` as `turn_task` before releasing `turn_lock` — concurrent `?sync=true` requests now correctly receive 409 `TURN_IN_PROGRESS` (BUG-215) ([6ba904b](https://github.com/NorthlandPositronics/Cogtrix/commit/6ba904b))
+* **api:** think pipeline stores only the `## Final Solution` section in memory/DB — full Tree-of-Thought report is no longer persisted verbatim (BUG-002) ([6ba904b](https://github.com/NorthlandPositronics/Cogtrix/commit/6ba904b))
 * **api:** remove dead `QueueFull` except clause from `done`-message handler in `turn_runner.py` — `asyncio.Queue.put()` never raises `QueueFull` (BUG-AUDIT-001) ([57c2d95](https://github.com/NorthlandPositronics/Cogtrix/commit/57c2d95))
 * **api:** hoist `_POLL_INTERVAL` from loop body to module-level constant in `confirmation.py` — eliminates ~600 redundant assignments per confirmation cycle (BUG-AUDIT-002) ([57c2d95](https://github.com/NorthlandPositronics/Cogtrix/commit/57c2d95))
 
 ### Tests
 
+* **api:** 22 regression tests for permanent delete, session restore, and runtime provider CRUD (#94 #95) ([4630c77](https://github.com/NorthlandPositronics/Cogtrix/commit/4630c77))
 * **api:** add regression suite for forge audit fixes — 23 tests covering BUG-AUDIT-001 and BUG-AUDIT-002 ([1531ff8](https://github.com/NorthlandPositronics/Cogtrix/commit/1531ff8))
 * **api:** holistic coverage for all 13 API route modules — +466 tests (#83) ([27b1188](https://github.com/NorthlandPositronics/Cogtrix/commit/27b1188))
 
 ### Documentation
 
+* **api:** update client contract and OpenAPI schema for permanent delete, restore, and runtime provider CRUD ([b13e7e7](https://github.com/NorthlandPositronics/Cogtrix/commit/b13e7e7))
 * **api:** exhaustive accuracy audit of API documentation (#81) ([d5d6bfd](https://github.com/NorthlandPositronics/Cogtrix/commit/d5d6bfd))
 
 ## [0.1.33](https://github.com/NorthlandPositronics/Cogtrix/compare/v0.1.32...v0.1.33) (2026-03-24)

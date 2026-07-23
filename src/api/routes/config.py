@@ -6,6 +6,9 @@ Endpoints:
     POST   /api/v1/config/reload            — reload config from disk (admin)
     GET    /api/v1/config/providers         — list configured providers
     GET    /api/v1/config/providers/{name}  — get provider details
+    POST   /api/v1/config/providers         — add a new provider (admin)
+    PATCH  /api/v1/config/providers/{name}  — update provider api_key / base_url (admin)
+    DELETE /api/v1/config/providers/{name}  — remove a provider (admin)
     POST   /api/v1/config/provider          — switch active provider
     POST   /api/v1/config/providers/{name}/health — provider connectivity check
     GET    /api/v1/config/models            — list available models
@@ -19,6 +22,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import pathlib
+import tempfile
 import time
 import uuid
 from typing import Any
@@ -33,8 +38,10 @@ from src.api.schemas.config import (
     ConfigReloadResponse,
     ModelOut,
     ModelSwitchRequest,
+    ProviderCreateRequest,
     ProviderHealthOut,
     ProviderOut,
+    ProviderPatchRequest,
     WizardStartRequest,
     WizardStepOut,
     WizardStepRequest,
@@ -271,7 +278,7 @@ async def reload_config(
         )
     except Exception as exc:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail={"code": "CONFIG_INVALID", "message": f"Config reload failed: {exc}"},
         ) from exc
 
@@ -334,6 +341,338 @@ async def get_provider(
             detail={"code": "NOT_FOUND", "message": f"Provider '{provider_name}' not found."},
         )
     return APIResponse(data=_provider_to_out(provider_name, providers[provider_name]))
+
+
+def _write_providers_to_config(cfg: Any, providers_dict: dict[str, Any]) -> None:
+    """Persist an updated providers dict to the config YAML file.
+
+    Reads the current file, replaces the ``providers`` section, and writes back.
+    Uses a temporary file for atomicity.  Raises on any I/O or parse error.
+    """
+    import yaml
+
+    cfg_path = getattr(cfg, "config_file_path", None)
+    if cfg_path is None:
+        # No config file was loaded — the application is running from defaults or
+        # environment variables only.  Silently writing to ~/.cogtrix.yaml would
+        # create a file at the wrong location and diverge from the active config on
+        # the next restart (BUG-243).  Callers must surface this as 503.
+        raise RuntimeError(
+            "No config file is loaded; provider changes cannot be persisted. "
+            "Run the setup wizard to create a config file first."
+        )
+
+    cfg_path = pathlib.Path(cfg_path)
+
+    try:
+        data: dict = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+    except FileNotFoundError:
+        data = {}
+
+    # Rebuild providers section preserving other config keys
+    serialised: dict[str, Any] = {}
+    for name, pc in providers_dict.items():
+        entry: dict[str, Any] = {"type": getattr(pc, "type", name)}
+        base_url = getattr(pc, "base_url", None)
+        if base_url:
+            entry["base_url"] = base_url
+        api_key = getattr(pc, "api_key", None)
+        if api_key:
+            entry["api_key"] = api_key
+        tool_instructions = getattr(pc, "tool_instructions", None)
+        if tool_instructions:
+            entry["tool_instructions"] = tool_instructions
+        serialised[name] = entry
+
+    data["providers"] = serialised
+
+    tmp_path: pathlib.Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            suffix=".yaml",
+            dir=cfg_path.parent,
+            delete=False,
+            encoding="utf-8",
+        ) as tmp:
+            tmp_path = pathlib.Path(tmp.name)
+            yaml.dump(data, tmp, default_flow_style=False, sort_keys=False)
+        tmp_path.replace(cfg_path)
+        tmp_path = None
+    finally:
+        if tmp_path is not None:
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
+@router.post(
+    "/providers",
+    summary="Add a new provider",
+    description=(
+        "Add a new LLM provider entry to the config file at runtime. "
+        "The change is persisted to disk and the in-memory config is reloaded immediately. "
+        "Admin only."
+    ),
+    response_model=APIResponse[ProviderOut],
+    status_code=201,
+    responses={
+        201: {"description": "Provider created."},
+        401: {"description": "Not authenticated."},
+        403: {"description": "Admin required (FORBIDDEN)."},
+        409: {"description": "Provider name already exists (PROVIDER_EXISTS)."},
+        422: {"description": "Validation error (VALIDATION_ERROR)."},
+    },
+)
+async def create_provider(
+    body: ProviderCreateRequest,
+    request: Request,
+    current_user: TokenData = Depends(require_admin),
+) -> APIResponse[ProviderOut]:
+    """Add a new provider to the config (admin only).
+
+    Auth: admin bearer token required.
+    Error codes: UNAUTHORIZED, TOKEN_EXPIRED, FORBIDDEN, PROVIDER_EXISTS, VALIDATION_ERROR.
+    """
+    from src.config import ProviderConfig
+    from src.setup_wizard import _is_safe_ollama_url
+
+    # SSRF guard: reject link-local / reserved base_url values (BUG-238).
+    # Private RFC-1918 addresses are allowed (local Ollama, vLLM, LiteLLM).
+    base_url = body.base_url or None
+    if base_url is not None and not _is_safe_ollama_url(base_url, allow_private=True):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={
+                "code": "VALIDATION_ERROR",
+                "message": "base_url resolves to a blocked address (link-local, reserved, or unspecified).",
+            },
+        )
+
+    cfg = _get_config(request)
+
+    # Serialise concurrent provider mutations to prevent TOCTOU on the config
+    # file (read → modify → write race — BUG-237).
+    async with _get_provider_write_lock():
+        providers = dict((getattr(cfg, "providers", {}) or {}) if cfg else {})
+
+        if body.name in providers:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "code": "PROVIDER_EXISTS",
+                    "message": f"Provider '{body.name}' already exists.",
+                },
+            )
+
+        try:
+            new_pc = ProviderConfig(
+                name=body.name,
+                type=body.type,
+                base_url=base_url,
+                api_key=body.api_key or None,
+            )
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail={"code": "VALIDATION_ERROR", "message": str(exc)},
+            ) from exc
+
+        providers[body.name] = new_pc
+
+        try:
+            await asyncio.to_thread(_write_providers_to_config, cfg, providers)
+        except RuntimeError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail={"code": "SERVICE_UNAVAILABLE", "message": str(exc)},
+            ) from exc
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail={"code": "INTERNAL_ERROR", "message": f"Failed to write config: {exc}"},
+            ) from exc
+
+        # Apply to in-memory config
+        if cfg is not None and hasattr(cfg, "providers"):
+            cfg.providers[body.name] = new_pc
+
+    return APIResponse(data=_provider_to_out(body.name, new_pc))
+
+
+@router.patch(
+    "/providers/{provider_name}",
+    summary="Update a provider",
+    description=(
+        "Update the base_url and/or api_key of an existing provider. "
+        "Changes are persisted to disk and the in-memory config is updated immediately. "
+        "Useful for rotating API keys without re-running the wizard. Admin only."
+    ),
+    response_model=APIResponse[ProviderOut],
+    responses={
+        200: {"description": "Provider updated."},
+        401: {"description": "Not authenticated."},
+        403: {"description": "Admin required (FORBIDDEN)."},
+        404: {"description": "Provider not found (NOT_FOUND)."},
+    },
+)
+async def update_provider(
+    provider_name: str,
+    body: ProviderPatchRequest,
+    request: Request,
+    current_user: TokenData = Depends(require_admin),
+) -> APIResponse[ProviderOut]:
+    """Update an existing provider's connection details (admin only).
+
+    Auth: admin bearer token required.
+    Error codes: UNAUTHORIZED, TOKEN_EXPIRED, FORBIDDEN, NOT_FOUND.
+    """
+    from src.config import ProviderConfig
+    from src.setup_wizard import _is_safe_ollama_url
+
+    # SSRF guard on the incoming base_url (BUG-238).
+    if body.base_url is not None:
+        new_base_url_candidate = body.base_url or None
+        if new_base_url_candidate is not None and not _is_safe_ollama_url(
+            new_base_url_candidate, allow_private=True
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail={
+                    "code": "VALIDATION_ERROR",
+                    "message": "base_url resolves to a blocked address (link-local, reserved, or unspecified).",
+                },
+            )
+
+    cfg = _get_config(request)
+
+    async with _get_provider_write_lock():  # BUG-237
+        providers = dict((getattr(cfg, "providers", {}) or {}) if cfg else {})
+
+        if provider_name not in providers:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={"code": "NOT_FOUND", "message": f"Provider '{provider_name}' not found."},
+            )
+
+        pc = providers[provider_name]
+        changed = False
+        new_base_url = getattr(pc, "base_url", None)
+        new_api_key = getattr(pc, "api_key", None)
+        new_tool_instructions = getattr(pc, "tool_instructions", None)
+
+        if body.base_url is not None:
+            new_base_url = body.base_url or None
+            changed = True
+        if body.api_key is not None:
+            new_api_key = body.api_key or None
+            changed = True
+
+        if changed:
+            pc = ProviderConfig(
+                name=provider_name,
+                type=getattr(pc, "type", provider_name),
+                base_url=new_base_url,
+                api_key=new_api_key,
+                tool_instructions=new_tool_instructions,
+            )
+            providers[provider_name] = pc
+
+            try:
+                await asyncio.to_thread(_write_providers_to_config, cfg, providers)
+            except RuntimeError as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail={"code": "SERVICE_UNAVAILABLE", "message": str(exc)},
+                ) from exc
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail={"code": "INTERNAL_ERROR", "message": f"Failed to write config: {exc}"},
+                ) from exc
+
+            if cfg is not None and hasattr(cfg, "providers"):
+                cfg.providers[provider_name] = pc
+
+    return APIResponse(data=_provider_to_out(provider_name, pc))
+
+
+@router.delete(
+    "/providers/{provider_name}",
+    summary="Remove a provider",
+    description=(
+        "Remove a provider from the config file. "
+        "Fails with 409 if any active model references this provider. "
+        "Admin only."
+    ),
+    response_model=APIResponse[None],
+    responses={
+        200: {"description": "Provider removed."},
+        401: {"description": "Not authenticated."},
+        403: {"description": "Admin required (FORBIDDEN)."},
+        404: {"description": "Provider not found (NOT_FOUND)."},
+        409: {"description": "Provider has an active model (PROVIDER_IN_USE)."},
+    },
+)
+async def delete_provider(
+    provider_name: str,
+    request: Request,
+    current_user: TokenData = Depends(require_admin),
+) -> APIResponse[None]:
+    """Remove a provider from the config (admin only).
+
+    Auth: admin bearer token required.
+    Error codes: UNAUTHORIZED, TOKEN_EXPIRED, FORBIDDEN, NOT_FOUND, PROVIDER_IN_USE.
+    """
+    cfg = _get_config(request)
+
+    async with _get_provider_write_lock():  # BUG-237
+        providers = dict((getattr(cfg, "providers", {}) or {}) if cfg else {})
+
+        if provider_name not in providers:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={"code": "NOT_FOUND", "message": f"Provider '{provider_name}' not found."},
+            )
+
+        # Guard: refuse if any registered model references this provider
+        models = (getattr(cfg, "models", {}) or {}) if cfg else {}
+        referencing = [
+            alias for alias, mc in models.items() if getattr(mc, "provider", None) == provider_name
+        ]
+        if referencing:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "code": "PROVIDER_IN_USE",
+                    "message": (
+                        f"Provider '{provider_name}' is referenced by model(s): "
+                        + ", ".join(referencing)
+                        + ". Remove or reassign those models first."
+                    ),
+                },
+            )
+
+        del providers[provider_name]
+
+        try:
+            await asyncio.to_thread(_write_providers_to_config, cfg, providers)
+        except RuntimeError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail={"code": "SERVICE_UNAVAILABLE", "message": str(exc)},
+            ) from exc
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail={"code": "INTERNAL_ERROR", "message": f"Failed to write config: {exc}"},
+            ) from exc
+
+        if cfg is not None and hasattr(cfg, "providers"):
+            cfg.providers.pop(provider_name, None)
+
+    return APIResponse(data=None)
 
 
 @router.post(
@@ -412,7 +751,7 @@ async def check_provider_health(
             prov_type,
             model=default_model,
             api_key=getattr(pc, "api_key", None),
-            base_url=getattr(pc, "get_base_url", lambda: None)(),
+            base_url=getattr(pc, "base_url", None),
         )
         latency_ms = int((time.monotonic() - t0) * 1000)
         return APIResponse(
@@ -512,17 +851,50 @@ async def switch_model(
     return APIResponse(data=_config_to_out(cfg, raw_yaml=raw_yaml))
 
 
+# Serialises concurrent provider CRUD operations to prevent TOCTOU races on
+# the config file (read-modify-write) between concurrent admin requests (BUG-237).
+_provider_write_lock: asyncio.Lock | None = None
+
+
+def _get_provider_write_lock() -> asyncio.Lock:
+    """Return (lazily initialising) the module-level provider write lock."""
+    global _provider_write_lock
+    if _provider_write_lock is None:
+        _provider_write_lock = asyncio.Lock()
+    return _provider_write_lock
+
+
 # ---------------------------------------------------------------------------
 # Setup wizard — in-memory session store with 3-step flow
 # ---------------------------------------------------------------------------
 
 
 _wizard_sessions: dict[str, dict[str, Any]] = {}
+_wizard_sessions_lock: asyncio.Lock | None = None
 _WIZARD_TTL = 1800  # 30 minutes
+# Shown when the first LLM call fails or returns no content (provider soft-fail).
+_WIZARD_DEFAULT_FIRST_QUESTION = (
+    "Welcome! I'll help you configure Cogtrix. "
+    "What would you like to set up? For example: tools, memory settings, "
+    "assistant mode, or any other option from the documentation."
+)
+
+
+def _get_wizard_sessions_lock() -> asyncio.Lock:
+    """Return (lazily initialising) the module-level wizard sessions lock."""
+    global _wizard_sessions_lock
+    if _wizard_sessions_lock is None:
+        _wizard_sessions_lock = asyncio.Lock()
+    return _wizard_sessions_lock
 
 
 def _get_wizard(wizard_id: str) -> dict[str, Any] | None:
-    """Return wizard session or None if expired/missing."""
+    """Return wizard session or None if expired/missing.
+
+    Caller must hold ``_get_wizard_sessions_lock()`` when reading and mutating
+    wizard state to prevent concurrent advance_wizard calls from corrupting
+    the conversation history (BUG-239).
+    """
     session = _wizard_sessions.get(wizard_id)
     if session is None:
         return None
@@ -564,10 +936,9 @@ async def start_wizard(
     # Detect environment (non-blocking)
     env = await asyncio.to_thread(_wizard_detect_env)
 
-    # Load existing config if editing
-    existing_yaml = ""
-    if body.edit_existing:
-        existing_yaml = await asyncio.to_thread(_wizard_load_existing)
+    # Always load existing config — used both to pre-populate answers when editing
+    # and to resolve stored API keys when reconnecting to an already-configured provider.
+    existing_yaml = await asyncio.to_thread(_wizard_load_existing)
 
     _wizard_sessions[wid] = {
         "created_mono": time.monotonic(),
@@ -578,6 +949,9 @@ async def start_wizard(
         "llm": None,
         "messages": [],
         "docs_url": body.docs_url,
+        # Per-session lock: serialises concurrent advance_wizard calls to prevent
+        # duplicate LLM invocations and message history corruption (BUG-239).
+        "lock": asyncio.Lock(),
     }
 
     return APIResponse(
@@ -631,6 +1005,28 @@ async def advance_wizard(
             detail={"code": "NOT_FOUND", "message": "Wizard session not found or expired."},
         )
 
+    # Serialise concurrent advance_wizard calls for the same session to prevent
+    # duplicate LLM calls and message history corruption (BUG-239).
+    async with ws["lock"]:
+        # Re-check after acquiring the lock — a concurrent call may have
+        # expired or completed the session while we were waiting.
+        ws = _get_wizard(wizard_id)
+        if ws is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={"code": "NOT_FOUND", "message": "Wizard session not found or expired."},
+            )
+
+        return await _advance_wizard_locked(wizard_id, ws, body, request)
+
+
+async def _advance_wizard_locked(
+    wizard_id: str,
+    ws: dict[str, Any],
+    body: WizardStepRequest,
+    request: Request,
+) -> APIResponse[WizardStepOut]:
+    """Inner wizard step handler; called while holding ``ws['lock']``."""
     step = ws["step"]
 
     # ── Step 0: Connect to LLM ──
@@ -640,6 +1036,14 @@ async def advance_wizard(
         api_key = data.get("api_key")
         base_url = data.get("base_url")
         model = data.get("model")
+        provider_name = data.get("provider_name", provider_type)
+
+        # If no api_key was submitted, try to resolve one from the existing config
+        # (user is re-configuring and the key is already stored — no need to re-enter).
+        if not api_key and ws.get("existing_yaml"):
+            api_key = _resolve_api_key_from_existing(
+                ws["existing_yaml"], provider_name=provider_name, base_url=base_url
+            )
 
         if not model:
             from src.providers import get_default_model
@@ -653,15 +1057,13 @@ async def advance_wizard(
             )
         except Exception as exc:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail={
                     "code": "PROVIDER_UNREACHABLE",
                     "message": str(exc),
                 },
             ) from exc
 
-        # Determine provider name
-        provider_name = data.get("provider_name", provider_type)
         ws["bootstrap_info"] = {
             "provider": provider_name,
             "model": model,
@@ -700,13 +1102,10 @@ async def advance_wizard(
         try:
             ai_text = await asyncio.to_thread(_wizard_invoke_llm, llm, messages)
         except Exception as exc:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail={
-                    "code": "PROVIDER_UNREACHABLE",
-                    "message": str(exc),
-                },
-            ) from exc
+            log.warning("Wizard initial LLM call failed, using default question: %s", exc)
+            ai_text = None
+        if not ai_text:
+            ai_text = _WIZARD_DEFAULT_FIRST_QUESTION
         messages.append(AIMessage(content=ai_text))
         ws["messages"] = messages
         ws["step"] = 1
@@ -731,7 +1130,7 @@ async def advance_wizard(
         user_answer = body.answer or ""
         if not user_answer.strip():
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail={
                     "code": "WIZARD_STEP_ERROR",
                     "message": "An answer is required for this step.",
@@ -757,7 +1156,7 @@ async def advance_wizard(
             ai_text = await asyncio.to_thread(_wizard_invoke_llm, llm, messages)
         except Exception as exc:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail={"code": "PROVIDER_UNREACHABLE", "message": str(exc)},
             ) from exc
         messages.append(AIMessage(content=ai_text))
@@ -801,7 +1200,7 @@ async def advance_wizard(
         return await _wizard_save(wizard_id, ws, request)
 
     raise HTTPException(
-        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
         detail={"code": "WIZARD_STEP_ERROR", "message": "Invalid wizard step."},
     )
 
@@ -863,30 +1262,79 @@ def _wizard_load_docs(url: str | None) -> str:
     return _load_docs(url)
 
 
+def _resolve_api_key_from_existing(
+    existing_yaml: str, *, provider_name: str | None, base_url: str | None
+) -> str | None:
+    """Return the api_key from the existing config for a matching provider.
+
+    Matches by provider name first, then by base_url.  Returns None if nothing
+    is found so the caller can fall back gracefully.
+    """
+    try:
+        import yaml as _yaml
+
+        cfg = _yaml.safe_load(existing_yaml) or {}
+        providers: dict[str, Any] = cfg.get("providers", {}) or {}
+        # Match by name
+        if provider_name and provider_name in providers:
+            key = providers[provider_name].get("api_key")
+            if key:
+                return str(key)
+        # Match by base_url
+        if base_url:
+            for entry in providers.values():
+                if isinstance(entry, dict) and entry.get("base_url") == base_url:
+                    key = entry.get("api_key")
+                    if key:
+                        return str(key)
+    except Exception:
+        pass
+    return None
+
+
 def _wizard_test_connection(
     provider_type: str, model: str, api_key: str | None, base_url: str | None
 ) -> Any:
     """Test LLM connection for API wizard. Returns LLM on success, raises on failure.
 
-    Unlike the CLI _test_connection which swallows errors, this version propagates
-    the original provider exception so callers can surface the real failure reason.
+    Two-phase test:
+    - Phase 1 (hard fail): LLM object creation. A failure here means the config
+      itself is invalid (bad provider type, malformed base_url, SDK init error).
+      The exception propagates so the caller returns 422 PROVIDER_UNREACHABLE.
+    - Phase 2 (soft fail): a live "Say ok" probe. Some valid providers return
+      transient or setup-related errors (e.g. 'No connected db.') for cold pings
+      while working fine for real conversations. A probe failure is logged as a
+      warning but does NOT block the wizard — the LLM is returned so the user
+      can proceed. The first real wizard message will surface any actual problem.
     """
+    import logging as _logging
+
     from langchain_core.messages import HumanMessage as _HumanMessage
 
     from src.agent.core import create_llm_from_provider_config
     from src.config import ModelConfig, ProviderConfig
 
+    # Phase 1: config/SDK validation — hard fail
     pc = ProviderConfig(name=provider_type, type=provider_type, api_key=api_key, base_url=base_url)
     mc = ModelConfig(provider=provider_type, model=model)
     llm = create_llm_from_provider_config(pc, mc)
-    llm.invoke([_HumanMessage(content="Say 'ok' in one word.")])
+
+    # Phase 2: live probe — soft fail
+    try:
+        llm.invoke([_HumanMessage(content="Say 'ok' in one word.")])
+    except Exception as exc:
+        _logging.getLogger("cogtrix.api").warning(
+            "Wizard connection probe returned an error (proceeding anyway): %s", exc
+        )
+
     return llm
 
 
 def _wizard_invoke_llm(llm: Any, messages: list[Any]) -> str:
-    """Invoke the LLM with messages. Returns the AI response text."""
+    """Invoke the LLM with messages. Returns the AI response text (never None)."""
     response = llm.invoke(messages)
-    return response.content if hasattr(response, "content") else str(response)
+    content = response.content if hasattr(response, "content") else str(response)
+    return content or ""
 
 
 async def _wizard_save(
@@ -905,7 +1353,7 @@ async def _wizard_save(
 
     if not last_yaml_text:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail={
                 "code": "WIZARD_STEP_ERROR",
                 "message": "No YAML configuration found in conversation.",
@@ -917,7 +1365,7 @@ async def _wizard_save(
         raw_yaml = _extract_yaml(last_yaml_text)
     except ValueError as exc:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail={"code": "WIZARD_STEP_ERROR", "message": str(exc)},
         ) from exc
 
@@ -926,7 +1374,7 @@ async def _wizard_save(
         await asyncio.to_thread(_wizard_validate_and_write, raw_yaml, ws["bootstrap_info"])
     except Exception as exc:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail={"code": "CONFIG_INVALID", "message": f"Config validation failed: {exc}"},
         ) from exc
 

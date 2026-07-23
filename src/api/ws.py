@@ -131,7 +131,7 @@ class TokenPayload(BaseModel):
 class ToolStartPayload(BaseModel):
     """Payload for type='tool_start' — agent began executing a tool."""
 
-    tool: str = Field(
+    tool_name: str = Field(
         ...,
         description="Tool name being invoked.",
         examples=["web_search"],
@@ -150,7 +150,7 @@ class ToolStartPayload(BaseModel):
 class ToolEndPayload(BaseModel):
     """Payload for type='tool_end' — tool execution completed."""
 
-    tool: str = Field(..., description="Tool name.")
+    tool_name: str = Field(..., description="Tool name.")
     tool_call_id: str = Field(..., description="Unique invocation ID (matches tool_start).")
     duration_ms: int = Field(
         ...,
@@ -265,6 +265,10 @@ class DonePayload(BaseModel):
         ...,
         description="Number of tool calls made during this turn.",
         examples=[3],
+    )
+    text: str = Field(
+        default="",
+        description="Full assembled agent response text for this turn.",
     )
 
 

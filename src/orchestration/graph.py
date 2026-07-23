@@ -884,6 +884,8 @@ def build_agent_graph(
                     result_msgs.append(future.result(timeout=600))
                 except (TimeoutError, concurrent.futures.TimeoutError):
                     log.warning("Tool '%s' timed out after 600s", call["name"])
+                    # Cancel the future to prevent zombie threads
+                    future.cancel()
                     result_msgs.append(
                         ToolMessage(
                             content=f"Error: tool '{call['name']}' timed out after 10 minutes",

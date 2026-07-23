@@ -83,7 +83,8 @@ settings/
 # ── AI coding agents ──────────────────────────────────────────────
 # Anthropic Claude Code
 CLAUDE.md
-.claude/
+.claude/*
+!.claude/print/
 # OpenAI Codex
 AGENTS.md
 .codex/

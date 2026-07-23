@@ -41,19 +41,19 @@ fi
 
 # ── Interactive CLI mode ─────────────────────────────────────
 # Auto-start the setup wizard when all of the following are true:
-#   1. No config file is present at /app/.cogtrix.yaml or /app/.cogtrix.json
+#   1. No config file is present at /app/.cogtrix.yaml, /app/.cogtrix.yml,
+#      or /app/.cogtrix.json
 #   2. No provider API key env var is set
 #   3. stdin is a TTY (i.e. the container is running interactively)
+#   4. No arguments were passed — explicit args mean the user knows what they
+#      want; pass them straight through to cogtrix.py instead of the wizard
 #
 # The COGTRIX_CONFIG_FILE env var is intentionally NOT checked here — if the
 # user has set that, python cogtrix.py will find it and the wizard is skipped.
 #
-# Note (BUG-232): when Ollama is available on the Docker host via --network host
-# but neither COGTRIX_OLLAMA nor OLLAMA_BASE_URL is set, the wizard runs because
-# no configured provider is detected. This is intentional — the wizard auto-
-# detects a running Ollama instance and pre-fills its connection details, so the
-# user ends up with a valid config after a single wizard session.
-if [ ! -f /app/.cogtrix.yaml ] && [ ! -f /app/.cogtrix.json ] && [ -t 0 ]; then
+# Tip: to reach an Ollama instance running on the Docker host, add
+# --network host so the wizard can auto-detect it at 127.0.0.1:11434.
+if [ $# -eq 0 ] && [ ! -f /app/.cogtrix.yaml ] && [ ! -f /app/.cogtrix.yml ] && [ ! -f /app/.cogtrix.json ] && [ -t 0 ]; then
     if [ -z "$OPENAI_API_KEY" ] && \
        [ -z "$ANTHROPIC_API_KEY" ] && \
        [ -z "$GEMINI_API_KEY" ] && \

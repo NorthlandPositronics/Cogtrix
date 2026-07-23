@@ -218,7 +218,7 @@ async def switch_memory_mode(
 
         if not MemoryFactory.is_registered(target_mode):
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail={
                     "code": "VALIDATION_ERROR",
                     "message": f"Unknown memory mode: {target_mode!r}.",
@@ -248,7 +248,7 @@ async def switch_memory_mode(
     except Exception as exc:
         log.warning("Memory mode switch failed for session %s: %s", session_id, exc)
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail={
                 "code": "VALIDATION_ERROR",
                 "message": f"Could not switch memory mode: {exc}",
