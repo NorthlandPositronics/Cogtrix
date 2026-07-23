@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cogtrix"
-version = "0.1.15"
-description = "Modular AI assistant with 52 built-in tools, multi-provider LLM support, and hybrid memory"
+version = "0.1.16"
+description = "Modular AI assistant with 53 built-in tools, multi-provider LLM support, and hybrid memory"
 readme = "README.md"
 requires-python = "~=3.13.0"
 
@@ -111,11 +111,13 @@ ignore = [
     "E501",   # line too long — handled by black
     "E203",   # whitespace before ':' — conflicts with black
     "C901",   # function complexity — too noisy for now
+    "UP046",  # Generic[T] subclass — required by Pydantic BaseModel
 ]
 
 [tool.ruff.lint.per-file-ignores]
 "src/agent/core.py" = ["E501"]
 "src/tools/delegate.py" = ["E501"]
+"src/api/**" = ["B008"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["src"]
@@ -138,6 +140,7 @@ reportOptionalMemberAccess = "warning"
 reportOptionalCall = "warning"
 reportAttributeAccessIssue = "warning"
 reportArgumentType = "warning"
+exclude = ["src/api"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

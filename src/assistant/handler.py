@@ -318,13 +318,6 @@ class MessageHandler:
             response = "I encountered an error processing your message. Please try again."
             return response, set()
 
-        # If the agent intentionally produced no content via defer or suppress,
-        # skip any empty-content recovery to avoid a wasted second LLM call (BUG-NEW).
-        if (defer_state is not None and defer_state.was_called) or (
-            suppress_state is not None and suppress_state.was_called
-        ):
-            return response, call_session_state.loaded_tools
-
         return response, call_session_state.loaded_tools
 
     def _route_response(

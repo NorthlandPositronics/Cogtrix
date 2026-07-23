@@ -538,6 +538,10 @@ class DeferralManager:
                     continue
                 fire_at_snapshot = current.fire_at
 
+            # If fire_at was extended by a concurrent defer() call, skip this cycle.
+            if fire_at_snapshot > now:
+                continue
+
             overdue = now - fire_at_snapshot
             if overdue > self._stale_threshold:
                 with self._lock:

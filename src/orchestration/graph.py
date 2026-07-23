@@ -533,6 +533,7 @@ def build_agent_graph(
             return
         with _history_lock:
             _tool_call_history[key] = result_text[:500]
+            _tool_call_history.move_to_end(key)
             if len(_tool_call_history) > _MAX_TOOL_CALL_HISTORY:
                 _tool_call_history.popitem(last=False)
 
@@ -675,7 +676,7 @@ def build_agent_graph(
                     tool_obj = available_tools.pop(match)
                     tool_catalog.pop(match, None)
                     apply_output_cap(tool_obj, output_cap)
-                    if registry.requires_confirmation(match):
+                    if registry is not None and registry.requires_confirmation(match):
                         if session_state.no_confirm:
                             approvals.add(match)
                         tool_obj = _safe_wrap(
@@ -809,8 +810,6 @@ def build_agent_graph(
                         name=parallel_calls[0]["name"],
                     )
                 )
-            if parallel_calls[0]["name"] == "request_tools":
-                saw_request_tools = True
         elif parallel_calls:
             pool = _get_tool_executor()
             futures = [(call, pool.submit(_invoke_one, call, config)) for call in parallel_calls]
@@ -836,8 +835,6 @@ def build_agent_graph(
                             name=call["name"],
                         )
                     )
-                if call["name"] == "request_tools":
-                    saw_request_tools = True
 
             if cancel_requested:
                 # Note: future.cancel() only prevents not-yet-started futures.
@@ -879,7 +876,7 @@ def build_agent_graph(
                         tool_obj = available_tools.pop(rname)
                         tool_catalog.pop(rname, None)
                         apply_output_cap(tool_obj, output_cap)
-                        if registry.requires_confirmation(rname):
+                        if registry is not None and registry.requires_confirmation(rname):
                             if session_state.no_confirm:
                                 approvals.add(rname)
                             tool_obj = _safe_wrap(

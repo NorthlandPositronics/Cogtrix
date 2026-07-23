@@ -1,6 +1,6 @@
 # Cogtrix Agent
 
-A modular AI assistant with 52 built-in tools, multi-provider LLM support, and intelligent memory management.
+A modular AI assistant with 53 built-in tools, multi-provider LLM support, and intelligent memory management.
 
 ---
 
@@ -12,7 +12,7 @@ Cogtrix is an **interactive command-line AI assistant** that connects to large l
 
 **Highlights:**
 
-- 52 built-in tools across 6 search providers, file I/O, shell, Python, HTTP, NLP, WhatsApp and Telegram messaging, and more
+- 53 built-in tools across 6 search providers, file I/O, shell, Python, HTTP, NLP, WhatsApp and Telegram messaging, and more
 - Three memory modes optimized for conversation, coding, or strategic reasoning — with hybrid memory (rolling summary + semantic recall)
 - Deep reasoning engine (Tree-of-Thought with iterative reflection) via `/think`
 - Task delegation across multiple LLM models via `/delegate`
@@ -30,6 +30,16 @@ Cogtrix is an **interactive command-line AI assistant** that connects to large l
 git clone https://github.com/NorthlandPositronics/Cogtrix.git
 cd Cogtrix
 uv sync            # or: pip install -r requirements.txt
+```
+
+Install optional provider and feature extras:
+
+```bash
+uv pip install "cogtrix[anthropic]"    # Anthropic Claude
+uv pip install "cogtrix[google]"       # Google Gemini
+uv pip install "cogtrix[api]"          # REST API server
+uv pip install "cogtrix[mcp]"          # MCP server support
+uv pip install "cogtrix[search]"       # Tavily, Exa, Brave, SerpAPI search
 ```
 
 > **Prerequisite:** Python 3.13.x and [uv](https://docs.astral.sh/uv/) (recommended) or pip.
@@ -214,7 +224,7 @@ Arrow keys, Home/End, and input history work out of the box (via `readline`).
 
 ---
 
-## Built-in Tools (52)
+## Built-in Tools (53)
 
 | Category | Tools |
 |----------|-------|
@@ -287,6 +297,78 @@ docker run -it --network host \
   ghcr.io/northlandpositronics/cogtrix:latest
 ```
 
+**Running the API server in Docker:**
+
+```bash
+docker run -p 8000:8000 \
+  -e COGTRIX_JWT_SECRET="$(python -c 'import secrets; print(secrets.token_hex(32))')" \
+  ghcr.io/northlandpositronics/cogtrix:latest api
+```
+
+Pass `api` as the final argument to start the FastAPI server instead of the interactive CLI.
+
+---
+
+## API Server
+
+Cogtrix includes a REST + WebSocket API server built with FastAPI. It exposes 65 REST endpoints and 2 WebSocket streams, powering the React web frontend and enabling programmatic access from any HTTP client.
+
+### Starting the API server
+
+**Directly with uvicorn:**
+
+```bash
+# Generate a strong secret (required)
+export COGTRIX_JWT_SECRET="$(python -c 'import secrets; print(secrets.token_hex(32))')"
+
+uvicorn src.api.app:app --host 0.0.0.0 --port 8000
+```
+
+**With dev auto-reload:**
+
+```bash
+uvicorn src.api.app:app --reload --port 8000
+```
+
+Once running, interactive API docs are available at `http://localhost:8000/api/v1/docs` (Swagger UI) and `http://localhost:8000/api/v1/redoc` (ReDoc).
+
+### Environment variables
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `COGTRIX_JWT_SECRET` | Yes | — | JWT signing secret, minimum 32 characters. Generate with: `python -c "import secrets; print(secrets.token_hex(32))"` |
+| `COGTRIX_API_HOST` | No | `0.0.0.0` | Bind host for uvicorn (Docker entrypoint) |
+| `COGTRIX_API_PORT` | No | `8000` | Bind port for uvicorn (Docker entrypoint) |
+| `COGTRIX_API_WORKERS` | No | `1` | Number of uvicorn worker processes (Docker entrypoint) |
+| `COGTRIX_DB_URL` | No | `sqlite+aiosqlite:///./data/api/cogtrix.db` | SQLAlchemy async database URL. Use `postgresql+asyncpg://` in production |
+| `COGTRIX_CORS_ORIGINS` | No | Localhost + `app.cogtrix.ai` | Comma-separated list of allowed CORS origins |
+
+### Authentication
+
+The API uses JWT bearer tokens (`Authorization: Bearer <token>`). The first registered user is automatically granted the `admin` role. API keys (prefix `cgx_live_`) are available for programmatic/CI access and are accepted on the same `Authorization` header.
+
+WebSocket connections that cannot set custom headers may pass the token as a `?token=<jwt>` query parameter.
+
+### What the API covers
+
+| Route group | Endpoints | Description |
+|-------------|-----------|-------------|
+| `POST /api/v1/auth/*` | 8 | Registration, login, token refresh, logout, profile, API key management |
+| `/api/v1/sessions/*` | 5 | Create, list, get, update, delete sessions |
+| `/api/v1/sessions/{id}/messages/*` | 3 | Send messages, list history, clear history |
+| `/api/v1/sessions/{id}/memory/*` | 3 | Get memory state, switch mode, clear memory |
+| `/api/v1/sessions/{id}/tools/*` | 4 | List, load, enable, disable tools |
+| `/api/v1/config/*` | 12 | Read/write config, provider management, model aliases |
+| `/api/v1/assistant/*` | 16 | Start/stop assistant mode, channel management, phonebook |
+| `/api/v1/rag/*` | 5 | Upload documents, list, delete, query knowledge base |
+| `/api/v1/mcp/*` | 5 | List servers, connect, disconnect, restart, list tools |
+| `/api/v1/system/*` | 2 | Server info, shutdown |
+| `/api/v1/health` | 2 | Liveness and readiness probes |
+| `ws://host/ws/v1/sessions/{id}` | WS | Streaming agent turns, tool confirmation, token events |
+| `ws://host/ws/v1/logs` | WS | Live log stream (admin only) |
+
+Full reference: **[API Reference](docs/api/openapi.yaml)** | **[Client Contract](docs/api/client-contract.md)** | **[WebSocket Protocol](docs/api/websocket-protocol.md)**
+
 ---
 
 ## Quick Troubleshooting
@@ -313,12 +395,15 @@ For detailed debugging, run with `--debug` (logs every LLM call, tool input/outp
 | **[Configuration](docs/CONFIGURATION.md)** | Every config option, environment variables, search providers |
 | **[Providers](docs/PROVIDERS.md)** | Step-by-step: Ollama, OpenAI, Groq, Together, vLLM |
 | **[Memory Modes](docs/MEMORY_MODES.md)** | Conversation, code, and reasoning modes + hybrid memory (summary + recall) |
-| **[Tools Reference](docs/TOOLS_REFERENCE.md)** | All 52 tools with parameters and examples |
+| **[Tools Reference](docs/TOOLS_REFERENCE.md)** | All 53 tools with parameters and examples |
 | **[WhatsApp Guide](docs/WHATSAPP_GUIDE.md)** | Use Cogtrix as a WhatsApp assistant (with Docker Compose) |
 | **[Telegram Guide](docs/TELEGRAM_GUIDE.md)** | Use Cogtrix as a Telegram assistant via a bot |
 | **[Assistant Mode](docs/CONFIGURATION.md#assistant-mode)** | Run Cogtrix as a headless WhatsApp/Telegram messaging daemon |
 | **[Deep Think](docs/DEEPTHINK.md)** | Tree-of-Thought reasoning engine internals |
 | **[RAG Guide](docs/RAG_GUIDE.md)** | Build a knowledge base from your documents |
+| **[API Reference](docs/api/openapi.yaml)** | OpenAPI 3.1 schema for the REST + WebSocket API |
+| **[Client Contract](docs/api/client-contract.md)** | TypeScript API client contract with full type definitions |
+| **[WebSocket Protocol](docs/api/websocket-protocol.md)** | Streaming session protocol and message types |
 | **[Architecture](docs/ARCHITECTURE.md)** | System design, data flow, components |
 | **[Development](docs/DEVELOPMENT.md)** | Add tools, memory modes, slash commands; testing |
 
@@ -326,7 +411,7 @@ For detailed debugging, run with `--debug` (logs every LLM call, tool input/outp
 
 - Want to connect OpenAI, Groq, or another LLM? See [Providers](docs/PROVIDERS.md).
 - Want to customize settings, add search API keys, or set up messaging? See [Configuration](docs/CONFIGURATION.md).
-- Want to know what all 52 tools do? See [Tools Reference](docs/TOOLS_REFERENCE.md).
+- Want to know what all 53 tools do? See [Tools Reference](docs/TOOLS_REFERENCE.md).
 
 ---
 

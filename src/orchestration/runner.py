@@ -656,6 +656,10 @@ def run_agent(
                     while len(_persistent_bound_cache) > _MAX_BOUND_CACHE_SIZE:
                         _persistent_bound_cache.popitem(last=False)
             with _compression_cache_lock:
+                # Re-check _cached_llm_id inside this lock — another thread may
+                # have called invalidate_llm_caches() between releasing
+                # _bound_cache_lock above and acquiring _compression_cache_lock here,
+                # which would make our local_compression_cache stale for the new LLM.
                 if _cached_llm_id == current_llm_id:
                     for key, value in local_compression_cache.items():
                         _persistent_compression_cache[key] = value

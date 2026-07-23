@@ -361,8 +361,11 @@ class MCPManager:
             Exception: Propagates any exception raised inside the coroutine.
         """
         self._ensure_loop()
-        assert self._loop is not None
-        future = asyncio.run_coroutine_threadsafe(coro, self._loop)
+        with self._loop_lock:
+            loop = self._loop
+        if loop is None:
+            raise RuntimeError("MCP event loop is not running")
+        future = asyncio.run_coroutine_threadsafe(coro, loop)
         try:
             return future.result(timeout=timeout)
         except TimeoutError:

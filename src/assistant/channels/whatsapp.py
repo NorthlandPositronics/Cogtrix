@@ -158,6 +158,7 @@ class WhatsAppChannel(Channel):
         self._overview_limit: int = int(config.get("overview_limit", 50))
         self._ignore_archived: bool = bool(config.get("ignore_archived", True))
         self._ignore_older_than: float | None = parse_duration(config.get("ignore_older_than"))
+        self._locally_archived: set[str] = set()
         self._chat_errors: dict[str, tuple[int, float]] = {}
         self._FETCH_ERROR_BASE: float = 30.0
         self._FETCH_ERROR_MAX: float = 300.0
@@ -305,6 +306,13 @@ class WhatsAppChannel(Channel):
 
         changed_chats: list[ChatOverview] = []
         for chat in chats:
+            if chat.id in self._locally_archived:
+                if not chat.archived:
+                    try:
+                        self._client.archive_chat(chat.id)
+                    except Exception:
+                        pass
+                continue
             if self._ignore_archived and chat.archived:
                 continue
             msg = chat.last_message
@@ -432,6 +440,7 @@ class WhatsAppChannel(Channel):
             if self._filter_mode == "blacklist":
                 self._client.delete_message(chat.id, msg.id)
                 self._client.archive_chat(chat.id)
+                self._locally_archived.add(chat.id)
                 log.info("Blacklisted: deleted message and archived chat %s", chat.id)
             else:
                 log.debug(
@@ -501,6 +510,16 @@ class WhatsAppChannel(Channel):
 
     def archive_chat(self, chat_id: str) -> bool:
         return self._client.archive_chat(chat_id)
+
+    def unarchive_locally(self, chat_id: str) -> bool:
+        """Remove *chat_id* from the local archive suppression set.
+
+        Called when a chat is un-blacklisted so it can be processed again.
+        Returns True if the chat was in the set.
+        """
+        was_present = chat_id in self._locally_archived
+        self._locally_archived.discard(chat_id)
+        return was_present
 
     def is_ready(self) -> bool:
         if not REQUESTS_AVAILABLE:

@@ -153,12 +153,12 @@ python cogtrix.py --ingest \
 📚 RAG Document Ingestion
 
   Documents directory: docs
-  Vector DB output:    data/vectordb
+  Vector DB output:    vectordb
   Embedding provider:  ollama
 
 ✓ Loaded 15 document(s)
 ✓ Created 234 chunk(s)
-✓ Saved to data/vectordb/faiss_index
+✓ Saved to vectordb/faiss_index
 ```
 
 ### Re-ingestion
@@ -300,7 +300,7 @@ Switch between embedding providers by changing the `rag.model` value — no need
 ```yaml
 rag:
   docs_dir: docs
-  vectordb_dir: data/vectordb
+  vectordb_dir: vectordb
   chunk_size: 2000
   chunk_overlap: 200
   model: embed-local
@@ -311,7 +311,7 @@ rag:
 | Option | Default | Description |
 |--------|---------|-------------|
 | `docs_dir` | `"docs"` | Source documents directory |
-| `vectordb_dir` | `"data/vectordb"` | Vector database output |
+| `vectordb_dir` | `"vectordb"` | Vector database output |
 | `chunk_size` | `2000` | Characters per chunk |
 | `chunk_overlap` | `200` | Overlap between chunks |
 | `model` | `null` | Model name from the `models` registry for embeddings. Falls back to the active provider when not set. |

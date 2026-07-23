@@ -1,0 +1,158 @@
+"""WebSocket callback handler for LangChain agent streaming.
+
+Bridges synchronous LangChain callbacks to an async WebSocket queue using
+``asyncio.run_coroutine_threadsafe``.  The handler runs on the agent thread
+(inside ``asyncio.to_thread``) and safely enqueues typed messages onto the
+event loop's queue so the WebSocket drain task can forward them to the client.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import time
+from typing import Any
+
+log = logging.getLogger("cogtrix.api.callbacks")
+
+try:
+    from langchain_core.callbacks import BaseCallbackHandler
+except ImportError:  # pragma: no cover
+    BaseCallbackHandler = object  # type: ignore[misc, assignment]
+
+
+class WebSocketCallbackHandler(BaseCallbackHandler):
+    """LangChain callback handler that forwards events to a WebSocket queue.
+
+    Instantiated per agent turn.  The owning coroutine captures the running
+    event loop at connect time and passes it here so ``run_coroutine_threadsafe``
+    can safely cross the thread boundary.
+
+    Also accumulates token usage so the ``done`` payload and session
+    token_counts are populated correctly.
+    """
+
+    def __init__(self, ws_queue: asyncio.Queue, loop: asyncio.AbstractEventLoop) -> None:
+        super().__init__()
+        self._queue = ws_queue
+        self._loop = loop
+        self._tool_starts: dict[str, float] = {}  # str(run_id) -> start_time
+        self.input_tokens: int = 0
+        self.output_tokens: int = 0
+        self.tool_call_count: int = 0
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _enqueue(self, msg_type: str, payload: dict[str, Any]) -> None:
+        """Thread-safe enqueue via run_coroutine_threadsafe."""
+        try:
+            asyncio.run_coroutine_threadsafe(
+                self._queue.put({"type": msg_type, "payload": payload}),
+                self._loop,
+            )
+        except Exception as exc:  # pragma: no cover
+            log.debug("WebSocketCallbackHandler._enqueue failed: %s", exc)
+
+    # ------------------------------------------------------------------
+    # LLM events
+    # ------------------------------------------------------------------
+
+    def on_llm_new_token(self, token: str, **kwargs: Any) -> None:
+        """Forward a streaming token to the WebSocket."""
+        self._enqueue("token", {"text": token})
+
+    def on_llm_end(self, response: Any, **kwargs: Any) -> None:
+        """Accumulate token usage from each LLM call."""
+        llm_output = getattr(response, "llm_output", None)
+        if llm_output:
+            usage = llm_output.get("token_usage") or llm_output.get("usage")
+            if usage:
+                self.input_tokens += usage.get("prompt_tokens", 0)
+                self.output_tokens += usage.get("completion_tokens", 0)
+                return
+        gens = getattr(response, "generations", None)
+        if gens:
+            for gen_list in gens:
+                for gen in gen_list:
+                    msg = getattr(gen, "message", None)
+                    if msg:
+                        um = getattr(msg, "usage_metadata", None)
+                        if um:
+                            self.input_tokens += getattr(um, "input_tokens", 0)
+                            self.output_tokens += getattr(um, "output_tokens", 0)
+
+    def on_llm_error(self, error: BaseException | str, **kwargs: Any) -> None:
+        """Forward an LLM-level error to the WebSocket."""
+        self._enqueue("error", {"code": "AGENT_ERROR", "message": str(error)})
+
+    # ------------------------------------------------------------------
+    # Tool events
+    # ------------------------------------------------------------------
+
+    def on_tool_start(
+        self,
+        serialized: dict[str, Any],
+        input_str: str | dict,
+        *,
+        run_id: Any = None,
+        **kwargs: Any,
+    ) -> None:
+        """Notify the WebSocket that a tool invocation has started."""
+        key = str(run_id) if run_id is not None else ""
+        self._tool_starts[key] = time.time()
+        self.tool_call_count += 1
+        tool_name: str = serialized.get("name", "unknown") if serialized else "unknown"
+        if isinstance(input_str, dict):
+            tool_input: dict = input_str
+        else:
+            try:
+                import json as _json
+
+                parsed = _json.loads(input_str)
+                tool_input = parsed if isinstance(parsed, dict) else {}
+            except Exception:
+                tool_input = {}
+        self._enqueue(
+            "tool_start",
+            {
+                "tool": tool_name,
+                "tool_call_id": key,
+                "input": tool_input,
+            },
+        )
+
+    def on_tool_end(self, output: Any, *, run_id: Any = None, **kwargs: Any) -> None:
+        """Notify the WebSocket that a tool invocation completed successfully."""
+        key = str(run_id) if run_id is not None else ""
+        start = self._tool_starts.pop(key, time.time())
+        duration_ms = int((time.time() - start) * 1000)
+        tool_name: str = kwargs.get("name", "unknown")
+        self._enqueue(
+            "tool_end",
+            {
+                "tool": tool_name,
+                "tool_call_id": key,
+                "duration_ms": duration_ms,
+                "error": None,
+            },
+        )
+
+    def on_tool_error(
+        self, error: BaseException | str, *, run_id: Any = None, **kwargs: Any
+    ) -> None:
+        """Notify the WebSocket that a tool invocation failed."""
+        key = str(run_id) if run_id is not None else ""
+        start = self._tool_starts.pop(key, time.time())
+        duration_ms = int((time.time() - start) * 1000)
+        tool_name: str = kwargs.get("name", "unknown")
+        self._enqueue(
+            "tool_end",
+            {
+                "tool": tool_name,
+                "tool_call_id": key,
+                "duration_ms": duration_ms,
+                "error": str(error),
+            },
+        )

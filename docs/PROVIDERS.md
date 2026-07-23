@@ -310,7 +310,7 @@ providers:
 |-------|---------|----------|
 | `claude-sonnet-4-5` | 200K | Complex reasoning (default) |
 | `claude-opus-4-5` | 200K | Highest capability |
-| `claude-haiku-3-5` | 200K | Fast, cost-effective |
+| `claude-haiku-4-5` | 200K | Fast, cost-effective |
 
 > **Note:** Anthropic does not provide an embedding API. Use a different provider (OpenAI or Ollama) for RAG embeddings.
 

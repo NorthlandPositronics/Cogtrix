@@ -14,7 +14,8 @@ RUN uv sync --frozen --no-dev --no-install-project \
     --extra anthropic \
     --extra google \
     --extra mcp \
-    --extra science && \
+    --extra science \
+    --extra api && \
     find /app/.venv -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null; \
     rm -rf /root/.cache/uv
 
@@ -22,7 +23,7 @@ RUN uv sync --frozen --no-dev --no-install-project \
 FROM python:3.13-slim AS runtime
 
 LABEL org.opencontainers.image.title="Cogtrix" \
-      org.opencontainers.image.description="Modular AI assistant with 51 built-in tools" \
+      org.opencontainers.image.description="Modular AI assistant with 53 built-in tools and REST/WebSocket API" \
       org.opencontainers.image.source="https://github.com/NorthlandPositronics/Cogtrix"
 
 # Non-root user for security
@@ -42,14 +43,20 @@ COPY --from=builder --chown=cogtrix:cogtrix /app/.venv /app/.venv
 COPY --chown=cogtrix:cogtrix cogtrix.py ./
 COPY --chown=cogtrix:cogtrix src/ ./src/
 COPY --chown=cogtrix:cogtrix docs/ ./docs/
+COPY --chown=cogtrix:cogtrix alembic/ ./alembic/
+COPY --chown=cogtrix:cogtrix alembic.ini ./
 COPY --chown=cogtrix:cogtrix docker-entrypoint.sh ./
 
 # Data directories + entrypoint permissions
-RUN mkdir -p /app/data/history /app/data/knowledge /app/data/vectordb && \
+RUN mkdir -p /app/data/history /app/data/knowledge /app/data/vectordb \
+             /app/data/api /app/data/api/uploads /app/data/assistant && \
     chown -R cogtrix:cogtrix /app/data && \
     chmod +x /app/docker-entrypoint.sh
 
 VOLUME /app/data
+
+# API server port
+EXPOSE 8000
 
 USER cogtrix
 

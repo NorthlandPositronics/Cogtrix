@@ -18,6 +18,15 @@
 | [WhatsApp](WHATSAPP_GUIDE.md) | WhatsApp assistant mode via Waha |
 | [Telegram](TELEGRAM_GUIDE.md) | Telegram bot assistant mode |
 
+## API Documentation
+
+| Guide | Description |
+|-------|-------------|
+| [OpenAPI Schema](api/openapi.yaml) | OpenAPI 3.1 specification for all 65 REST endpoints ([JSON](api/openapi.json)) |
+| [Client Contract](api/client-contract.md) | TypeScript types, API client patterns, and WebSocket example code |
+| [WebSocket Protocol](api/websocket-protocol.md) | Streaming message types, authentication, connection lifecycle |
+| [WebUI Development Guide](api/webui-development-guide.md) | Page map, component hierarchy, integration patterns, and state management for React developers |
+
 ## Developer Guides
 
 | Guide | Description |
@@ -53,6 +62,27 @@
 | [ADR-0026](adr/0026-python-exec-session-lock-consistency.md) | Accepted | Python exec session lock consistency |
 | [ADR-0027 Architecture](adr/0027-architecture-review-round-23.md) | Informational | Architecture review — round 23 |
 | [ADR-0027 Performance](adr/0027-performance-audit-round-23.md) | Informational | Performance audit — round 23 |
+| [ADR-0028](adr/0028-architectural-review-march-2026.md) | Informational | Architectural review — March 2026 |
+| [ADR-0029](adr/0029-assistant-mode-architectural-review.md) | Informational | Assistant mode architectural review: datamarking and subsystem audit |
+| [ADR-0030](adr/0030-comprehensive-architectural-review-march-2026.md) | Informational | Comprehensive architectural review — March 2026 |
+| [ADR-0031](adr/0031-list-scheduled-messages-filter-parameters.md) | Accepted | Extended filter parameters for `list_scheduled_messages` |
+| [ADR-0032](adr/0032-whatsapp-polling-performance-optimizations.md) | Accepted | WhatsApp polling performance optimizations |
+| [ADR-0033](adr/0033-architecture-and-performance-review-march-2026-round2.md) | Informational | Architecture and performance review — March 2026 (round 2) |
+| [ADR-0034](adr/0034-sprint-audit-fixes-march-2026.md) | Accepted | Sprint audit fixes — March 2026 (performance, concurrency, correctness) |
+| [ADR-0035](adr/0035-architecture-performance-review-round3.md) | Proposed | Architecture and performance review — round 3 |
+| [ADR-0036](adr/0036-deferred-audit-fixes-march-2026.md) | Proposed | Deferred audit fixes — March 2026 (concurrency, security, correctness) |
+| [ADR-0037](adr/0037-deferred-audit-fixes-round4-march-2026.md) | Proposed | Deferred audit fixes — round 4, March 2026 (performance, architecture, tests) |
+| [ADR-0038](adr/0038-deferred-round4-final-batch-march-2026.md) | Proposed | Deferred round 4 final batch — March 2026 (PERF-801/803/809, ARCH-037-06/08) |
+| [ADR-0040](adr/0040-round6-audit-sprint.md) | Proposed | Round 6 audit sprint plan — BUG-083–090, ARCH-040, PERF-1001–1008 |
+| [ADR-0041](adr/0041-queue-append-tool-for-sequential-scheduling.md) | Accepted | Queue-append tool for sequential scheduled message delivery |
+| [ADR-0042 AI Designer](adr/0042-ai-designer-recommendations.md) | Accepted | AI designer recommendations for `defer_processing` tool |
+| [ADR-0042 Defer Reply](adr/0042-defer-reply-tool.md) | Proposed | Deferred message processing (`defer_processing` tool) |
+
+## Bug Reports
+
+The [`docs/bugs/`](bugs/) directory contains 33 bug report files produced during
+automated and manual audit sweeps. Each file documents findings from a single
+audit session with BUG-IDs, root-cause analysis, and fix status.
 
 ## Internal Documentation
 
