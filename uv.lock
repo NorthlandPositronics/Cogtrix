@@ -359,6 +359,11 @@ science = [
     { name = "numpy" },
     { name = "scipy" },
 ]
+search = [
+    { name = "exa-py" },
+    { name = "google-search-results" },
+    { name = "tavily-python" },
+]
 
 [package.dev-dependencies]
 dev = [
@@ -383,8 +388,10 @@ requires-dist = [
     { name = "coverage", marker = "extra == 'dev'", specifier = "~=7.13.4" },
     { name = "ddgs", specifier = "~=9.10.0" },
     { name = "exa-py", marker = "extra == 'dev'", specifier = "~=2.4.0" },
+    { name = "exa-py", marker = "extra == 'search'", specifier = "~=2.4.0" },
     { name = "faiss-cpu", specifier = "~=1.13.0" },
     { name = "google-search-results", marker = "extra == 'dev'", specifier = "~=2.4.2" },
+    { name = "google-search-results", marker = "extra == 'search'", specifier = "~=2.4.2" },
     { name = "langchain-community", specifier = "~=0.4.1" },
     { name = "langchain-core", specifier = "~=1.2.5" },
     { name = "langchain-ollama", specifier = "~=1.0.1" },
@@ -410,9 +417,10 @@ requires-dist = [
     { name = "ruff", marker = "extra == 'dev'", specifier = "~=0.15.1" },
     { name = "scipy", marker = "extra == 'science'", specifier = "~=1.17.0" },
     { name = "tavily-python", marker = "extra == 'dev'", specifier = "~=0.7.21" },
+    { name = "tavily-python", marker = "extra == 'search'", specifier = "~=0.7.21" },
     { name = "textblob", specifier = "~=0.19.0" },
 ]
-provides-extras = ["dev", "science"]
+provides-extras = ["search", "dev", "science"]
 
 [package.metadata.requires-dev]
 dev = [

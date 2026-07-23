@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.1.2](https://github.com/NorthlandPositronics/Cogtrix/compare/v0.1.1...v0.1.2) (2026-02-16)
+
+
+### Bug Fixes
+
+* include search packages in Docker image ([6b6eb02](https://github.com/NorthlandPositronics/Cogtrix/commit/6b6eb02aa0bbbe74adf4e5bbb940ece4859e6501))
+
+
+### Documentation
+
+* improve getting-started guide and document search provider setup ([bbf113d](https://github.com/NorthlandPositronics/Cogtrix/commit/bbf113d00238074218b8be83176045c28a3ba3a7))
+* improve getting-started guide and document search provider setup ([16f6a92](https://github.com/NorthlandPositronics/Cogtrix/commit/16f6a9256aadd889b1ee92e25f9ec14c9ab47c42)), closes [#22](https://github.com/NorthlandPositronics/Cogtrix/issues/22)
+
 ## [0.1.1](https://github.com/NorthlandPositronics/Cogtrix/compare/v0.1.0...v0.1.1) (2026-02-16)
 
 

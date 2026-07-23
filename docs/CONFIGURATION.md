@@ -239,17 +239,64 @@ python cogtrix.py -m fast     # Resolves alias to ollama/llama3:8b
 python cogtrix.py -m deep     # Resolves to ollama/llama3:70b with num_ctx=32768
 ```
 
-### OpenWeather Section
+### Services Section
 
-Configure weather tool:
+Configure API keys for external services (search providers, weather, etc.) in a single place:
 
 ```json
 {
-  "openweather": {
-    "api_key": "your-api-key"
+  "services": {
+    "tavily":      { "api_key": "tvly-..." },
+    "exa":         { "api_key": "exa-..." },
+    "brave":       { "api_key": "BSA..." },
+    "serpapi":     { "api_key": "..." },
+    "google":      { "api_key": "AIza...", "cse_id": "abc123..." },
+    "openweather": { "api_key": "..." }
   }
 }
 ```
+
+Tools that require an API key are **automatically hidden** from the agent when the key is not configured — no errors, they simply don't appear in the tool list.
+
+#### Search Providers
+
+Cogtrix includes six search providers. DuckDuckGo is always available with no setup. The other five require an API key and some require an additional Python package.
+
+| Provider | Tools | Package | API Key | Free Tier |
+|----------|-------|---------|---------|-----------|
+| DuckDuckGo | `search_web`, `search_news` | Included (`ddgs`) | None | Unlimited |
+| Tavily | `tavily_search`, `tavily_extract` | `tavily-python` | `TAVILY_API_KEY` | 1 000/month |
+| Exa | `exa_search`, `exa_find_similar`, `exa_get_contents` | `exa-py` | `EXA_API_KEY` | 1 000/month |
+| Brave | `brave_search` | Included (`requests`) | `BRAVE_API_KEY` | 2 000/month |
+| Google | `google_search` | Included (`requests`) | `GOOGLE_API_KEY` + `GOOGLE_CSE_ID` | 100/day |
+| SerpAPI | `serpapi_search` | `google-search-results` | `SERPAPI_API_KEY` | 100/month |
+
+**Installing optional search packages:**
+
+Tavily, Exa, and SerpAPI need extra Python packages not included by default:
+
+```bash
+# All at once (recommended)
+uv sync --extra search
+
+# Or individually with pip
+pip install tavily-python exa-py google-search-results
+```
+
+Brave and Google use only `requests`, which is already a core dependency.
+
+#### Legacy service format
+
+For backward compatibility, top-level service keys still work:
+
+```json
+{
+  "openweather": { "api_key": "..." },
+  "tavily":      { "api_key": "..." }
+}
+```
+
+The `"services"` section takes priority when both are present.
 
 ---
 
@@ -346,7 +393,7 @@ python cogtrix.py --ingest [OPTIONS]
   "provider": "my-server",
   "session": "default",
 
-  "providers": {
+  "inference": {
     "my-server": {
       "type": "ollama",
       "base_url": "http://192.168.1.100:11434",
@@ -369,6 +416,13 @@ python cogtrix.py --ingest [OPTIONS]
       "base_url": "http://192.168.1.101:11434",
       "model": "codellama:34b"
     }
+  },
+
+  "services": {
+    "tavily":      { "api_key": "tvly-..." },
+    "exa":         { "api_key": "exa-..." },
+    "brave":       { "api_key": "BSA..." },
+    "openweather": { "api_key": "..." }
   },
 
   "memory": {
@@ -395,13 +449,11 @@ python cogtrix.py --ingest [OPTIONS]
       "smart": "openai/gpt-4o",
       "code": "local-gpu/codellama:34b"
     }
-  },
-
-  "openweather": {
-    "api_key": "your-openweather-api-key"
   }
 }
 ```
+
+> **Note:** This example uses `"inference"` (preferred). The legacy key `"providers"` still works.
 
 ---
 

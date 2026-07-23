@@ -2,48 +2,106 @@
 
 A modular LangChain-based AI agent with extensible tools, multi-provider support, and intelligent memory management.
 
-## Features
+---
 
-- **Multi-Provider Support** — OpenAI, Ollama, and any OpenAI-compatible API
-- **43 Built-in Tools** — File operations, web search (DuckDuckGo, Tavily, Exa, Brave, Google, SerpAPI), code execution, deep reasoning, and more
-- **Interactive CLI** — Slash commands, line editing with history (arrow keys, Home/End)
-- **Live Configuration Switching** — Change model, provider, memory mode, and session at runtime via slash commands
-- **Memory Modes** — Optimized for conversation, coding, or strategic reasoning
-- **Deep Reasoning** — Tree-of-Thought with Chain-of-Thought Reflection via `/think`
-- **Task Delegation** — Distribute subtasks across multiple LLM models
-- **Non-interactive Mode** — Single prompt with file I/O for scripting and automation
-- **Safety Layer** — Human confirmation for sensitive operations (toggleable with `/noconfirm`)
-- **Debug & Logging** — Comprehensive logging with verbose LLM observability
+## What Is Cogtrix?
+
+Cogtrix is an **interactive command-line AI assistant** that connects to large language models (LLMs) and extends them with tools — web search, file operations, code execution, deep reasoning, and more. You type a question or task; the agent reasons about it, calls tools as needed, and returns the result.
+
+It works with **OpenAI**, **Ollama** (local models), and any **OpenAI-compatible API** (Groq, Together, vLLM, LocalAI, etc.).
+
+### Key capabilities
+
+- **43 built-in tools** — web search, file I/O, shell commands, Python execution, HTTP requests, JSON processing, NLP, and more
+- **6 search providers** — DuckDuckGo (free, no key), Tavily, Exa, Brave, Google, SerpAPI
+- **Memory modes** — optimized for conversation, coding, or strategic reasoning
+- **Deep reasoning** — Tree-of-Thought with Chain-of-Thought Reflection via `/think`
+- **Task delegation** — distribute subtasks across multiple LLM models
+- **Non-interactive mode** — single prompt with file I/O for scripting and automation
+- **Safety layer** — human confirmation for sensitive operations (shell, code execution)
+- **Live configuration** — change model, provider, memory mode at runtime via slash commands
+
+---
+
+## Prerequisites
+
+| Requirement | Notes |
+|-------------|-------|
+| **Python 3.13+** | Check with `python3 --version` |
+| **[uv](https://docs.astral.sh/uv/)** (recommended) or pip | `uv` handles dependencies and virtual environments |
+| **An LLM backend** | One of: OpenAI API key, running Ollama server, or any OpenAI-compatible API |
+
+---
 
 ## Quick Start
 
-### Installation
+Follow these steps to go from zero to a working agent.
+
+### 1. Clone and install
 
 ```bash
-# Clone and navigate to project
+git clone <repository-url> cogtrix
 cd cogtrix
 
-# Install dependencies and run (using uv — recommended)
+# Using uv (recommended)
 uv sync
+
+# Or using pip
+python -m venv .venv
+source .venv/bin/activate   # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+```
+
+### 2. Configure an LLM provider
+
+You need at least one LLM backend. Pick one:
+
+**Option A — OpenAI (cloud)**
+
+```bash
+export OPENAI_API_KEY="sk-..."
+```
+
+**Option B — Ollama (local, free)**
+
+Install [Ollama](https://ollama.com/), then pull a model:
+
+```bash
+ollama pull llama3:8b
+```
+
+**Option C — Any OpenAI-compatible API** (Groq, Together, vLLM, etc.)
+
+Create a config file — see [Configuration](#configuration) below.
+
+### 3. Run
+
+```bash
+# With uv
 uv run python cogtrix.py
 
-# Or using pip (traditional)
-python -m venv .venv
-source .venv/bin/activate  # Windows: .venv\Scripts\activate
-pip install -r requirements.txt
+# With pip/venv
 python cogtrix.py
 ```
 
-### Basic Usage
+You should see an interactive prompt. Type a question and press Enter.
+
+### 4. Try it out
+
+```
+You: What is the capital of New Zealand?
+You: /think search for top 10 news affecting the stock market
+You: /help
+You: /quit
+```
+
+### Common launch examples
 
 ```bash
-# Default (uses config file or built-in defaults)
-python cogtrix.py
-
 # Specify provider and model
 python cogtrix.py -p ollama -m llama3:70b
 
-# Use code development memory mode
+# Code development memory mode
 python cogtrix.py -M code
 
 # Non-interactive mode (single prompt, then exit)
@@ -56,15 +114,29 @@ python cogtrix.py --prompt "Summarize this code" -o summary.md
 python cogtrix.py --debug
 ```
 
+---
+
 ## Configuration
 
-Create `.cogtrix.json` (or `.cogtrix.yml` / `.cogtrix.yaml`) in your current directory, home directory, or `~/.config/cogtrix/`:
+Create `.cogtrix.json` (or `.cogtrix.yml` / `.cogtrix.yaml`) in your current directory, home directory, or `~/.config/cogtrix/`.
+
+### Minimal example (Ollama)
+
+```json
+{
+  "provider": "ollama"
+}
+```
+
+That's it — Cogtrix will connect to `http://localhost:11434` with the default model.
+
+### Full example
 
 ```json
 {
   "provider": "my-server",
 
-  "providers": {
+  "inference": {
     "my-server": {
       "type": "ollama",
       "base_url": "http://192.168.1.100:11434",
@@ -82,33 +154,125 @@ Create `.cogtrix.json` (or `.cogtrix.yml` / `.cogtrix.yaml`) in your current dir
     }
   },
 
-  "memory": {
-    "mode": "conversation"
+  "services": {
+    "tavily":      { "api_key": "tvly-..." },
+    "exa":         { "api_key": "exa-..." },
+    "brave":       { "api_key": "BSA..." },
+    "serpapi":     { "api_key": "..." },
+    "google":      { "api_key": "AIza...", "cse_id": "..." },
+    "openweather": { "api_key": "..." }
   },
 
-  "delegate": {
-    "enabled": true,
-    "model_aliases": {
-      "fast": "my-server/llama3:8b",
-      "smart": "openai/gpt-4o"
-    }
+  "model_aliases": {
+    "fast": "my-server/llama3:8b",
+    "smart": "openai/gpt-4o"
+  },
+
+  "memory": {
+    "mode": "conversation"
   }
 }
 ```
 
-### Configuration Priority
+> **Note:** The key `"inference"` is preferred. The legacy key `"providers"` still works for backward compatibility.
+
+### Configuration priority
 
 1. **Command line arguments** — highest priority
-2. **Environment variables** — `COGTRIX_PROVIDER`, `COGTRIX_MODEL`, `OPENAI_API_KEY`
+2. **Environment variables** — `COGTRIX_PROVIDER`, `COGTRIX_MODEL`, `OPENAI_API_KEY`, etc.
 3. **Config file** — `.cogtrix.json` / `.cogtrix.yml` / `.cogtrix.yaml`
 4. **Built-in defaults** — fallback values
+
+---
+
+## Search Providers
+
+Cogtrix ships with **six search providers**. DuckDuckGo works immediately with no setup. The other five are premium providers that require an API key and, in some cases, an additional Python package.
+
+### Overview
+
+| Provider | Package required | API key | Free tier | Best for |
+|----------|-----------------|---------|-----------|----------|
+| **DuckDuckGo** | Included (`ddgs`) | None | Unlimited | Quick, no-setup search |
+| **Tavily** | `tavily-python` | `TAVILY_API_KEY` | 1 000/month | AI-optimized search with full-page extraction |
+| **Exa** | `exa-py` | `EXA_API_KEY` | 1 000/month | Semantic/neural search |
+| **Brave** | Included (`requests`) | `BRAVE_API_KEY` | 2 000/month | Privacy-focused, independent index |
+| **Google** | Included (`requests`) | `GOOGLE_API_KEY` + `GOOGLE_CSE_ID` | 100/day | Official Google results |
+| **SerpAPI** | `google-search-results` | `SERPAPI_API_KEY` | 100/month | Structured Google/Bing with knowledge graph |
+
+**DuckDuckGo is always available.** Premium providers are automatically hidden from the agent when their API key is missing — no errors, they simply don't appear.
+
+### Step 1: Install optional search packages
+
+Tavily, Exa, and SerpAPI require extra Python packages that are **not** installed by default. Install them all at once:
+
+```bash
+# With uv (recommended)
+uv sync --extra search
+
+# With pip
+pip install tavily-python exa-py google-search-results
+```
+
+Brave and Google use only `requests`, which is already included — no extra install needed.
+
+### Step 2: Configure API keys
+
+You can set API keys via **environment variables** or the **config file**. Both methods work; use whichever you prefer.
+
+**Environment variables:**
+
+```bash
+export TAVILY_API_KEY="tvly-..."
+export EXA_API_KEY="exa-..."
+export BRAVE_API_KEY="BSA..."
+export SERPAPI_API_KEY="..."
+export GOOGLE_API_KEY="AIza..."
+export GOOGLE_CSE_ID="abc123..."
+```
+
+**Config file** (`.cogtrix.json`):
+
+```json
+{
+  "services": {
+    "tavily":  { "api_key": "tvly-..." },
+    "exa":     { "api_key": "exa-..." },
+    "brave":   { "api_key": "BSA..." },
+    "serpapi":  { "api_key": "..." },
+    "google":  { "api_key": "AIza...", "cse_id": "abc123..." }
+  }
+}
+```
+
+### Step 3: Verify
+
+Start Cogtrix and run `/tools search` to see which search tools are loaded:
+
+```
+You: /tools search
+```
+
+You should see entries like `search_web`, `search_news`, `tavily_search`, `exa_search`, etc., depending on which packages and keys you configured.
+
+### Where to get API keys
+
+| Provider | Sign-up URL |
+|----------|-------------|
+| Tavily | <https://tavily.com/> |
+| Exa | <https://exa.ai/> |
+| Brave | <https://brave.com/search/api/> |
+| Google | <https://console.cloud.google.com/> (enable Custom Search API, then create a search engine at <https://programmablesearchengine.google.com/>) |
+| SerpAPI | <https://serpapi.com/> |
+
+---
 
 ## Command Line Options
 
 | Option | Description |
 |--------|-------------|
 | `-p, --provider` | LLM provider name |
-| `-m, --model` | Model name (or model alias from delegate config) |
+| `-m, --model` | Model name (or model alias from config) |
 | `-s, --session` | Session ID for memory persistence |
 | `-M, --memory-mode` | Memory mode: `conversation`, `code`, `reasoning` |
 | `--debug` | Enable debug mode (auto-enables `--log` and `--verbose`) |
@@ -123,6 +287,8 @@ Create `.cogtrix.json` (or `.cogtrix.yml` / `.cogtrix.yaml`) in your current dir
 | `--ingest` | Build vector database from documents and exit |
 | `--docs-dir PATH` | Documents directory for ingestion |
 | `--embedding-provider` | Embedding provider: `openai` or `ollama` |
+
+---
 
 ## Interactive Commands
 
@@ -149,6 +315,8 @@ The CLI also supports full line editing: arrow keys, Home/End, and input history
 
 **Note:** Short aliases match the corresponding CLI flags (e.g., `-M` for mode maps to `/M`, `-m` for model maps to `/m`).
 
+---
+
 ## Memory Modes
 
 | Mode | Best For | Working Memory |
@@ -162,23 +330,23 @@ python cogtrix.py -M code        # Code development
 python cogtrix.py -M reasoning   # Strategic planning
 ```
 
+---
+
 ## Task Delegation
 
 Delegate subtasks to specialized models:
 
 ```json
 {
-  "delegate": {
-    "model_aliases": {
-      "code": "ollama/codellama:34b",
-      "fast": "groq/llama-3.3-70b-versatile",
-      "smart": "openai/gpt-4o",
-      "deep": {
-        "provider": "ollama",
-        "model": "llama3:70b",
-        "num_ctx": 32768,
-        "temperature": 0.3
-      }
+  "model_aliases": {
+    "code": "ollama/codellama:34b",
+    "fast": "groq/llama-3.3-70b-versatile",
+    "smart": "openai/gpt-4o",
+    "deep": {
+      "provider": "ollama",
+      "model": "llama3:70b",
+      "num_ctx": 32768,
+      "temperature": 0.3
     }
   }
 }
@@ -187,6 +355,8 @@ Delegate subtasks to specialized models:
 The agent can then delegate: *"Analyze this code using the 'code' model"*
 
 Aliases also work with `-m`: `python cogtrix.py -m fast`
+
+---
 
 ## Built-in Tools
 
@@ -224,7 +394,7 @@ Aliases also work with `-m`: `python cogtrix.py -m fast`
 ### Deep Reasoning
 - `deep_think` — Tree-of-Thought with iterative Chain-of-Thought reflection (also available as `/think` command)
 
-**Note:** Search tools that require API keys (Tavily, Exa, Brave, Google, SerpAPI) are automatically disabled when the key is not configured. DuckDuckGo search is always available.
+---
 
 ## Debugging & Logging
 
@@ -242,6 +412,8 @@ python cogtrix.py --debug
 ```
 
 Debug mode logs: user messages, tool calls (with inputs/outputs), agent responses, memory context. See [Configuration](docs/CONFIGURATION.md#debugging--logging) for details.
+
+---
 
 ## Adding Custom Tools
 
@@ -266,6 +438,8 @@ TOOL_CONFIG = {
 ```
 
 The tool is automatically discovered on next startup.
+
+---
 
 ## RAG (Knowledge Base)
 
@@ -301,13 +475,15 @@ python cogtrix.py --ingest --docs-dir ./my-docs --vectordb-dir ./my-vectordb
 }
 ```
 
-**Note:** `embedding_provider` can be `openai`, `ollama`, or any named provider from your `providers` config.
+**Note:** `embedding_provider` can be `openai`, `ollama`, or any named provider from your `inference` config.
 
 After ingestion, query in conversation:
 
 ```
 You: What does the policy say about remote work?
 ```
+
+---
 
 ## Project Structure
 
@@ -335,6 +511,8 @@ cogtrix/
 └── data/                 # Session history & vector DB
 ```
 
+---
+
 ## Documentation
 
 | Document | Description |
@@ -347,6 +525,8 @@ cogtrix/
 | **[Deep Think](docs/DEEPTHINK.md)** | Tree-of-Thought reasoning engine |
 | **[RAG Guide](docs/RAG_GUIDE.md)** | Knowledge base setup |
 | **[Development](docs/DEVELOPMENT.md)** | Adding tools, extending the system |
+
+---
 
 ## Testing
 
@@ -361,11 +541,15 @@ python -m pytest tests/ -v
 uv run pytest tests/test_provider_config.py -v
 ```
 
+---
+
 ## Requirements
 
 - Python 3.13+
 - [uv](https://docs.astral.sh/uv/) (recommended) or pip
 - One of: OpenAI API key, Ollama server, or OpenAI-compatible API
+
+---
 
 ## License
 

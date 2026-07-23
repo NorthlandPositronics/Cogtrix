@@ -10,7 +10,7 @@ WORKDIR /app
 COPY pyproject.toml uv.lock ./
 
 # Install production dependencies into a virtual environment
-RUN uv sync --frozen --no-dev --no-install-project
+RUN uv sync --frozen --no-dev --no-install-project --extra search
 
 # ── Stage 2: Runtime ─────────────────────────────────────────
 FROM python:3.13-slim AS runtime

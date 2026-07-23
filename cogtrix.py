@@ -195,7 +195,7 @@ _tool_logger = ToolCallLogger()
 # Lock to serialize tool confirmation prompts
 confirmation_lock = threading.Lock()
 
-__version__ = "0.1.1"  # x-release-please-version
+__version__ = "0.1.2"  # x-release-please-version
 __copyright__ = "© 2025–2026 Northland Positronics (FZE)"
 __license__ = "Cogtrix Source-Available License 1.0"
 
