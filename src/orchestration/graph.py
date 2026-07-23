@@ -819,11 +819,15 @@ def build_agent_graph(
         # Progress tracking — must always be callable.
         "checkpoint",
     }
-    _TOOL_BUDGET_HARD_EXEMPT = _TOOL_BUDGET_SOFT_EXEMPT | {
-        # Search tools should not hard-stop at the fixed cutoff because
-        # legitimate research often requires many progressive searches.
-        # ADR-0056 PR-G renamed search_web → web_search; both kept so
-        # any future re-introduction of search_web still exempts.
+    # Retrieval/search tools: must not hard-stop at the *fixed* cutoff of 8 —
+    # legitimate research often needs many progressive searches. But "many" is
+    # not "unbounded": with no ceiling at all, a non-converging model runs these
+    # to the LangGraph recursion limit (#2014/#2213). DedupedToolInvoker gives
+    # them a RECURSION-AWARE ceiling (recursion_limit // divisor) instead — high
+    # enough for real research, low enough to force convergence before a crash.
+    # ADR-0056 PR-G renamed search_web → web_search; both kept so any future
+    # re-introduction of search_web still classifies as retrieval.
+    _TOOL_BUDGET_RETRIEVAL = {
         "search_web",
         "web_search",
         "search_news",
@@ -836,6 +840,19 @@ def build_agent_graph(
         "search_email",
         "calendar_search_events",
     }
+    # Ceiling = recursion_limit // divisor. Calibrated in #2014: divisor 3
+    # (ceiling 20 in the eval) let deepseek-v4-flash over-search (~22 queries)
+    # into a non-compliant ramble on the persist-before-refusing scenario and
+    # FAIL; divisor 4 (ceiling 15) forced an honest refusal in time and PASSED,
+    # while the synthesis control was unaffected at every divisor (1 search). 4
+    # also leaves ample headroom for genuine deep research (chat ~22,
+    # COMPLEX_ACTION ~75 searches).
+    _TOOL_BUDGET_RETRIEVAL_CEILING_DIVISOR = 4
+    # Control + action tools stay uncapped here (their ceilings are #2213 Layer
+    # 2). Retrieval tools are folded in for back-compat with any reader of the
+    # hard-exempt set, but DedupedToolInvoker checks retrieval FIRST so they get
+    # the recursion-aware ceiling, not full exemption.
+    _TOOL_BUDGET_HARD_EXEMPT = _TOOL_BUDGET_SOFT_EXEMPT | _TOOL_BUDGET_RETRIEVAL
     _DUPLICATE_EXEMPT = {
         "request_tools",
         "report_progress",
@@ -1534,6 +1551,8 @@ def build_agent_graph(
         tool_budget_soft=_TOOL_BUDGET_SOFT,
         tool_budget_hard_exempt=_TOOL_BUDGET_HARD_EXEMPT,
         tool_budget_soft_exempt=_TOOL_BUDGET_SOFT_EXEMPT,
+        tool_budget_retrieval_tools=_TOOL_BUDGET_RETRIEVAL,
+        tool_budget_retrieval_ceiling_divisor=_TOOL_BUDGET_RETRIEVAL_CEILING_DIVISOR,
     )
     _invoke_one = _invoker.invoke_one
 

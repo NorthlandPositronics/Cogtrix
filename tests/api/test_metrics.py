@@ -16,6 +16,11 @@ import pytest
 
 pytest.importorskip("fastapi")
 
+# Snapshot the JWT secret at import (before any load_config() unsets it, #2102).
+_JWT_SECRET_FOR_SIGNING = (
+    os.environ.get("COGTRIX_JWT_SECRET") or "testsecret_mustbe32chars_minimum00"
+)
+
 
 # ---------------------------------------------------------------------------
 # Pure function tests (no FastAPI required)
@@ -72,7 +77,7 @@ class TestMetricsEndpoint:
         """Return a valid JWT for test requests."""
         return jwt.encode(
             {"sub": "test-user-uuid", "role": "admin", "iat": 0},
-            os.environ["COGTRIX_JWT_SECRET"],
+            _JWT_SECRET_FOR_SIGNING,
             algorithm="HS256",
         )
 

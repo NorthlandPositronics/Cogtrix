@@ -9,7 +9,7 @@ import threading
 from datetime import UTC, datetime
 from pathlib import Path
 
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 from src.tools._path_policy import (
     format_read_outside_error,
@@ -34,6 +34,16 @@ if _env_write_paths:
     _extra_write_dirs = [
         Path(d.strip()).resolve() for d in _env_write_paths.split(",") if d.strip()
     ]
+
+# Wire COGTRIX_ALLOWED_READ_PATHS env var at import time, symmetric with the
+# write paths above (#2231). Without this the read allowlist was populated ONLY
+# by configure_file_read_dirs(), which the CLI calls but the API session path
+# (src/api/session_bridge.py) does not — so COGTRIX_ALLOWED_READ_PATHS was
+# silently a no-op for API-served (TUI / WebUI) sessions, while the write var
+# worked everywhere. Wiring at import makes it effective on the API path too.
+_env_read_paths = os.environ.get("COGTRIX_ALLOWED_READ_PATHS", "")
+if _env_read_paths:
+    _extra_read_dirs = [Path(d.strip()).resolve() for d in _env_read_paths.split(",") if d.strip()]
 
 
 class _RefLock:
@@ -103,17 +113,43 @@ def set_allowed_write_dirs(dirs: list[str] | None) -> None:
 
 
 def set_allowed_read_dirs(dirs: list[str] | None) -> None:
-    """Configure additional directories where file read operations are allowed."""
+    """Configure additional directories where file read operations are allowed.
+
+    An empty/None list clears the extra dirs. As with the write counterpart
+    (#2060), callers must NOT pass an empty/None value when they only mean
+    "config didn't specify paths" — that would wipe the dirs wired from
+    ``COGTRIX_ALLOWED_READ_PATHS`` at import (#2231). The guard lives at the call
+    site (``configure_file_read_dirs``), which only calls this with a non-empty
+    list.
+    """
     global _extra_read_dirs
     _extra_read_dirs = [Path(d).resolve() for d in (dirs or [])]
+
+
+# Models routinely reach for a synonym of ``path`` (``file``, ``filename``,
+# ``file_path``) when calling the file tools. Accept them all and normalize to
+# ``path`` so the call doesn't die on a Pydantic "Field required" error and lose
+# the write (#2257) — same defect class as the shell ``command``/``cmd`` alias.
+# ``populate_by_name`` keeps the canonical ``path`` working and keeps the JSON
+# schema the model sees advertising ``path`` (AliasChoices has no single alias to
+# surface), while the synonyms are still accepted on input.
+_PATH_ALIASES = AliasChoices("path", "file", "filename", "file_path")
 
 
 class ReadFileInput(BaseModel):
     """Input schema for reading files."""
 
-    path: str | dict = Field(description="Path to the file to read", alias="file_path")
+    model_config = ConfigDict(populate_by_name=True)
 
-    model_config = {"populate_by_name": True}  # accept both "path" and "file_path"
+    # ``default`` is required for the alias to survive LangChain's StructuredTool
+    # arg-extraction: it forwards a field only if its canonical name is in the raw
+    # input OR the field has a default (then it forwards the validated, alias-
+    # resolved value). Without a default, a model that sent ``file=`` would have
+    # ``path`` silently dropped — re-creating #2257 end-to-end. An empty path is
+    # caught downstream by ``_validate_path`` and returns a graceful error.
+    path: str | dict = Field(
+        default="", validation_alias=_PATH_ALIASES, description="Path to the file to read"
+    )
     encoding: str = Field(default="utf-8", description="File encoding (default: utf-8)")
     start_line: int = Field(
         default=0,
@@ -129,7 +165,13 @@ class ReadFileInput(BaseModel):
 class WriteFileInput(BaseModel):
     """Input schema for writing files."""
 
-    path: str | dict = Field(description="Path to the file to write")
+    model_config = ConfigDict(populate_by_name=True)
+
+    # See ReadFileInput: ``default`` lets the alias-resolved value survive
+    # LangChain arg-extraction (#2257).
+    path: str | dict = Field(
+        default="", validation_alias=_PATH_ALIASES, description="Path to the file to write"
+    )
     content: str = Field(description="Content to write to the file")
     encoding: str = Field(default="utf-8", description="File encoding (default: utf-8)")
 
@@ -137,7 +179,13 @@ class WriteFileInput(BaseModel):
 class AppendFileInput(BaseModel):
     """Input schema for appending to files."""
 
-    path: str | dict = Field(description="Path to the file to append to")
+    model_config = ConfigDict(populate_by_name=True)
+
+    # See ReadFileInput: ``default`` lets the alias-resolved value survive
+    # LangChain arg-extraction (#2257).
+    path: str | dict = Field(
+        default="", validation_alias=_PATH_ALIASES, description="Path to the file to append to"
+    )
     content: str = Field(description="Content to append to the file")
     encoding: str = Field(default="utf-8", description="File encoding (default: utf-8)")
 
@@ -145,7 +193,13 @@ class AppendFileInput(BaseModel):
 class ListDirectoryInput(BaseModel):
     """Input schema for listing directory contents."""
 
-    path: str | dict = Field(default=".", description="Path to the directory to list")
+    model_config = ConfigDict(populate_by_name=True)
+
+    path: str | dict = Field(
+        default=".",
+        validation_alias=_PATH_ALIASES,
+        description="Path to the directory to list",
+    )
     pattern: str = Field(default="*", description="Glob pattern to filter files (e.g., '*.py')")
     show_hidden: bool = Field(default=False, description="Whether to show hidden files")
 
@@ -153,7 +207,13 @@ class ListDirectoryInput(BaseModel):
 class FileInfoInput(BaseModel):
     """Input schema for getting file information."""
 
-    path: str | dict = Field(description="Path to the file or directory")
+    model_config = ConfigDict(populate_by_name=True)
+
+    # See ReadFileInput: ``default`` lets the alias-resolved value survive
+    # LangChain arg-extraction (#2257).
+    path: str | dict = Field(
+        default="", validation_alias=_PATH_ALIASES, description="Path to the file or directory"
+    )
 
 
 def _validate_path(path: str, is_write: bool = False) -> tuple[bool, str, Path | None]:

@@ -696,7 +696,11 @@ def format_agent_error(e: Exception) -> str:
                 "- Use a shorter prompt\n"
                 "- Increase `context_window` in the model config (Ollama only)"
             )
-        return f"**Invalid request:** {_sanitize_sdk_error(error_str)}"
+        # Prefer the provider's own message field; _sanitize_sdk_error alone
+        # truncates at the leading "Error code:" marker (idx 0) and yields an
+        # empty detail for OpenAI-compatible 400s like "No connected db" (#2220).
+        actual = _extract_api_message(error_str) or _sanitize_sdk_error(error_str)
+        return f"**Invalid request:** {actual}"
 
     if "InternalServerError" in error_type or "500" in error_str:
         return (
@@ -1145,6 +1149,7 @@ def run_agent(
     *,
     config: AgentRunConfig,
     task_complexity: TaskComplexity | None = None,
+    user_images: list[str] | None = None,
 ) -> str:
     """Run agent using a custom LangGraph StateGraph.
 
@@ -1164,6 +1169,8 @@ def run_agent(
         config: Session-constant parameters bundle (required)
         task_complexity: Optional precomputed complexity; when omitted the
             function classifies the task automatically.
+        user_images: Optional list of data-URI image strings to include in the
+            user turn as multimodal content (vision-capable models only).
 
     Returns:
         Agent response as string
@@ -1305,6 +1312,7 @@ def run_agent(
             user_input=user_input,
             context_prefix=context_prefix,
             max_context_tokens=config.max_context_tokens,
+            user_images=user_images,
         )
         _mark("prepare_messages")
 
@@ -1502,6 +1510,32 @@ def run_agent(
                         log,
                     )
                 return recover_from_step_limit(graph, result, input_messages, invoke_config, log)
+
+            # ── Pending extension on NORMAL completion (#2258 / #2267) ───
+            # The extend_run tool registers a continue/delegate extension; the
+            # agent may then wrap up and end the turn WITHOUT hitting the step
+            # limit. Honour the pending extension here too — run the delegated
+            # subtasks (delegate) or re-invoke with more budget (continue) so the
+            # deferred work actually happens, instead of returning a bare "results
+            # coming later" announcement that never materialises (the #2258
+            # symptom, which #2261 only closed for the delegate-with-subtasks
+            # path — leaving continue / delegate-without-subtasks still broken).
+            #
+            # ``_extend_state.requested`` is only True for a valid ``continue`` or
+            # a ``delegate`` WITH subtasks (the empty-subtasks delegate returns an
+            # error and never registers), so this mirrors the hit_recursion_limit
+            # branch above and ``_handle_extend_run`` dispatches by mode.
+            if _extend_state.requested:
+                return _handle_extend_run(
+                    _extend_state,
+                    graph,
+                    result,
+                    input_messages,
+                    invoke_config,
+                    config,
+                    callbacks,
+                    log,
+                )
 
             response = extract_response(result, log, prior_count=prior_msg_count)
             if response and not is_step_limit_apology(response):

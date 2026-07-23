@@ -90,19 +90,27 @@ _dns_pin_installed: bool = False
 _dns_pin_lock = threading.Lock()
 
 
-def _install_dns_pin_hook() -> None:
-    """Monkey-patch urllib3's create_connection once to honour thread-local pins."""
+def _install_dns_pin_hook() -> bool:
+    """Monkey-patch urllib3's create_connection once to honour thread-local pins.
+
+    Returns ``True`` if the pin hook is installed (DNS-rebinding protection
+    active), ``False`` if urllib3's connection module could not be imported
+    (version skew). Callers MUST treat a ``False`` return as "pinning is
+    unavailable" and fall back to post-connection peer-IP verification or fail
+    closed (#2136 F1) — silently issuing an un-pinned request restores the
+    validate-then-connect TOCTOU this hook exists to close (BUG-074).
+    """
     global _dns_pin_installed
     if _dns_pin_installed:
-        return
+        return True
     with _dns_pin_lock:
         if _dns_pin_installed:
-            return
+            return True
         try:
             import urllib3.util.connection as _uc  # type: ignore[import-not-found]
         except ImportError:
             log.warning("DNS pin hook unavailable — SSRF rebinding protection degraded")
-            return
+            return False
         _orig = _uc.create_connection
 
         def _pinned_create_connection(address, *args, **kwargs):  # type: ignore[no-untyped-def]
@@ -114,6 +122,34 @@ def _install_dns_pin_hook() -> None:
 
         _uc.create_connection = _pinned_create_connection  # type: ignore[assignment]
         _dns_pin_installed = True
+        return True
+
+
+def _peer_ip_from_response(response: "Any") -> str | None:
+    """Best-effort extraction of the remote IP the response actually connected to.
+
+    The post-connection SSRF backstop (#2136 F1/F2): the IP we *validated* must
+    equal the IP we *connected to*. Reads the live socket's peer address off the
+    underlying urllib3 connection (only reliably available while the response is
+    still streaming, i.e. before the body is consumed). Returns the IP string, or
+    ``None`` if it can't be determined — urllib3 internals vary across versions
+    and the connection may already be released — in which case the caller decides
+    whether DNS pinning alone is sufficient or it must fail closed.
+    """
+    raw = getattr(response, "raw", None)
+    if raw is None:
+        return None
+    conn = getattr(raw, "_connection", None) or getattr(raw, "connection", None)
+    sock = getattr(conn, "sock", None)
+    if sock is None:
+        return None
+    try:
+        peer = sock.getpeername()
+    except (OSError, AttributeError):
+        return None
+    if isinstance(peer, (tuple, list)) and peer:
+        return str(peer[0])
+    return None
 
 
 @contextmanager
@@ -229,29 +265,41 @@ def _follow_redirects(
     Raises ValueError if a redirect target fails SSRF validation or the redirect
     limit is exceeded.
     """
-    _install_dns_pin_hook()
+    pinning_active = _install_dns_pin_hook()
     for _ in range(MAX_REDIRECTS + 1):
         parsed = urlparse(url)
         hostname = parsed.hostname or ""
 
-        if pinned_ip and hostname:
-            pin_ctx = _pin_dns(hostname, pinned_ip)
+        hop_pinned = bool(pinning_active and pinned_ip and hostname)
+        if hop_pinned:
+            pin_ctx = _pin_dns(hostname, pinned_ip)  # type: ignore[arg-type]
         else:
             pin_ctx = nullcontext()
 
         with pin_ctx:
             response = session.request(method, url, allow_redirects=False, stream=True, **kwargs)
 
-        # Post-connection validation: re-check the URL that was actually connected to.
-        # The response may carry a different effective URL (e.g. due to DNS rebinding
-        # between validate and connect), so we re-validate it here before trusting the
-        # response.
-        actual_url = response.url if hasattr(response, "url") and response.url else url
-        if str(actual_url) != url:
-            post_valid, post_err, _ = _validate_url(str(actual_url))
-            if not post_valid:
+        # Post-connection SSRF re-validation (#2136 F1/F2). The old check compared
+        # response.url to the request URL, but with allow_redirects=False requests
+        # sets response.url == url, so it was dead code AND a rebind changes the
+        # connected IP, not the URL string. Instead verify the IP we actually
+        # connected to: it must not be a private/reserved address. If we can't
+        # read the peer IP, only proceed when this hop was DNS-pinned to a
+        # pre-validated IP; otherwise fail closed rather than trust an un-pinned,
+        # unverifiable connection (DNS-rebinding TOCTOU).
+        peer_ip = _peer_ip_from_response(response)
+        if peer_ip is not None:
+            if _is_blocked_ip(peer_ip):
                 response.close()
-                raise ValueError(f"Post-connection URL validation failed: {post_err}")
+                raise ValueError(
+                    "Connection resolved to a private/reserved IP (DNS rebinding blocked)"
+                )
+        elif not hop_pinned:
+            response.close()
+            raise ValueError(
+                "Unable to verify the connection target IP and DNS pinning is "
+                "unavailable — refusing request (SSRF protection)"
+            )
 
         if response.status_code not in (301, 302, 303, 307, 308):
             return response

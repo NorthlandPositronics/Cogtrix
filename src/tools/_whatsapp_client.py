@@ -17,6 +17,11 @@ from typing import Any
 
 log = logging.getLogger("cogtrix")
 
+# After this many consecutive failures of the same poll operation, escalate from
+# DEBUG to a single WARNING so a silently-dead WhatsApp poll is visible at normal
+# operator verbosity (#2229).
+_POLL_FAILURE_ESCALATION_THRESHOLD = 3
+
 try:
     import requests  # type: ignore[import-untyped]
 
@@ -99,6 +104,11 @@ class WahaClient:
         self.api_key = api_key
         self.session = session
         self.timeout = timeout
+        # Per-operation count of consecutive poll failures, so a persistently
+        # failing poll (#2229) gets escalated from DEBUG to a single WARNING with
+        # the actionable HTTP body — instead of looping forever at DEBUG while the
+        # assistant silently receives nothing.
+        self._consecutive_poll_failures: dict[str, int] = {}
 
     # -- helpers -----------------------------------------------------------
 
@@ -110,6 +120,61 @@ class WahaClient:
 
     def _url(self, path: str) -> str:
         return f"{self.base_url}{path}"
+
+    def _describe_poll_error(self, exc: Exception) -> str:
+        """Build an actionable description of a poll failure.
+
+        Surfaces the HTTP response body (the *reason*, e.g. WAHA's "Enable NOWEB
+        store …" 400) which ``str(exc)`` alone drops, plus a hint for the common
+        NOWEB-store misconfiguration (#2229)."""
+        parts: list[str] = [str(exc)]
+        resp = getattr(exc, "response", None)
+        body = ""
+        if resp is not None:
+            try:
+                body = (resp.text or "").strip()
+            except Exception:
+                body = ""
+        if body:
+            parts.append(f"response body: {body[:500]}")
+            low = body.lower()
+            if "noweb" in low or ("store" in low and "enable" in low):
+                parts.append(
+                    "hint: enable the NOWEB store on this WAHA session "
+                    "(start the session with the NOWEB engine store enabled)."
+                )
+        return " | ".join(parts)
+
+    def _record_poll_failure(self, operation: str, exc: Exception) -> None:
+        """Track a consecutive poll failure and escalate once it is persistent.
+
+        Logs at DEBUG normally; emits a single WARNING when the failure count
+        reaches ``_POLL_FAILURE_ESCALATION_THRESHOLD`` (not every cycle), so a
+        dead poll is visible at normal verbosity without spamming the log.
+        """
+        n = self._consecutive_poll_failures.get(operation, 0) + 1
+        self._consecutive_poll_failures[operation] = n
+        detail = self._describe_poll_error(exc)
+        if n == _POLL_FAILURE_ESCALATION_THRESHOLD:
+            log.warning(
+                "WhatsApp poll '%s' has failed %d times in a row — the assistant "
+                "is receiving no messages on this channel. %s",
+                operation,
+                n,
+                detail,
+            )
+        else:
+            log.debug("Failed to %s (consecutive failure #%d): %s", operation, n, detail)
+
+    def _record_poll_success(self, operation: str) -> None:
+        """Reset the failure counter; log recovery if it had escalated."""
+        if self._consecutive_poll_failures.get(operation, 0) >= _POLL_FAILURE_ESCALATION_THRESHOLD:
+            log.info(
+                "WhatsApp poll '%s' recovered after %d consecutive failures",
+                operation,
+                self._consecutive_poll_failures[operation],
+            )
+        self._consecutive_poll_failures[operation] = 0
 
     # -- session -----------------------------------------------------------
 
@@ -347,8 +412,9 @@ class WahaClient:
             resp.raise_for_status()
             raw_messages: list[dict[str, Any]] = resp.json()
         except Exception as exc:
-            log.debug("Failed to fetch messages: %s", exc)
+            self._record_poll_failure("fetch messages", exc)
             return []
+        self._record_poll_success("fetch messages")
 
         messages: list[Message] = []
         for raw in raw_messages:
@@ -438,8 +504,9 @@ class WahaClient:
             resp.raise_for_status()
             raw_chats: list[dict[str, Any]] = resp.json()
         except Exception as exc:
-            log.debug("Failed to fetch chats overview: %s", exc)
+            self._record_poll_failure("fetch chats overview", exc)
             return []
+        self._record_poll_success("fetch chats overview")
 
         result: list[ChatOverview] = []
         for chat in raw_chats:
@@ -469,6 +536,67 @@ class WahaClient:
                 )
             )
         return result
+
+    def download_media(
+        self, media_url: str, *, max_bytes: int = 8 * 1024 * 1024
+    ) -> tuple[bytes, str] | None:
+        """GET media bytes + mimetype from a Waha media URL (X-Api-Key auth).
+
+        Returns ``(data, mimetype)`` for ``image/*`` only; ``None`` on error,
+        non-image content type, or oversize payload.
+
+        The media URL is already absolute (from the Waha payload) so it is used
+        directly without ``self._url()``.  A JSON Content-Type header would be
+        wrong for a binary GET, so only the auth header is sent.
+        """
+        auth_headers: dict[str, str] = {}
+        if self.api_key:
+            auth_headers["X-Api-Key"] = self.api_key
+        try:
+            resp = requests.get(
+                media_url,
+                headers=auth_headers,
+                timeout=self.timeout,
+                stream=True,
+            )
+            if resp.status_code >= 400:
+                log.debug("download_media HTTP %d for %s", resp.status_code, media_url)
+                return None
+            content_type: str = resp.headers.get("Content-Type", "")
+            mimetype = content_type.split(";")[0].strip()
+            if not mimetype.startswith("image/"):
+                log.debug("download_media skipped non-image content-type %r", mimetype)
+                return None
+            content_length_hdr = resp.headers.get("Content-Length")
+            if content_length_hdr is not None:
+                try:
+                    if int(content_length_hdr) > max_bytes:
+                        log.warning(
+                            "download_media skipped oversize image: Content-Length %s > %d",
+                            content_length_hdr,
+                            max_bytes,
+                        )
+                        return None
+                except ValueError:
+                    pass
+            data = resp.raw.read(max_bytes + 1)
+            if len(data) > max_bytes:
+                log.warning(
+                    "download_media skipped oversize image: read %d bytes > %d",
+                    len(data),
+                    max_bytes,
+                )
+                return None
+            return data, mimetype
+        except requests.exceptions.ConnectionError:
+            log.debug("download_media connection error for %s", media_url)
+            return None
+        except requests.exceptions.Timeout:
+            log.debug("download_media timed out for %s", media_url)
+            return None
+        except Exception as exc:
+            log.warning("download_media unexpected error for %s: %s", media_url, exc)
+            return None
 
     # -- health check ------------------------------------------------------
 

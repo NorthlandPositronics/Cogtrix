@@ -43,6 +43,10 @@ class WebSocketCallbackHandler(BaseCallbackHandler):
         self.input_tokens: int = 0
         self.output_tokens: int = 0
         self.tool_call_count: int = 0
+        # #2251: True once any post-tool *final-answer* token has been buffered
+        # (suppressed from the live stream). The turn runner consults this to emit
+        # the surviving answer once at turn end — see on_llm_new_token.
+        self.final_answer_buffered: bool = False
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -86,13 +90,28 @@ class WebSocketCallbackHandler(BaseCallbackHandler):
             log.debug("LLM call started: model=%s prompt_chars=%d", model_name, prompt_chars)
 
     def on_llm_new_token(self, token: str, **kwargs: Any) -> None:
-        """Forward a streaming token to the WebSocket."""
+        """Forward a streaming token to the WebSocket.
+
+        #2251: post-tool *final-answer* tokens (``is_final``) are NOT streamed
+        live. The verification-recovery loop can discard a fully-generated final
+        answer (``RemoveMessage``) and regenerate, so streaming each generation
+        live would render TWO answers on the client while only the surviving one
+        is persisted. Instead, these tokens are buffered (suppressed); the turn
+        runner emits the single surviving answer once at turn end (the text from
+        ``extract_response``). Non-final tokens — including no-tool answers and
+        inter-tool reasoning — still stream live as before.
+        """
         # BUG-218: final is True only when tool calls have been seen AND none
         # are currently in-flight — avoids marking intermediate reasoning tokens
         # between tool calls as final.
         with self._tool_starts_lock:
             is_final = self.tool_call_count > 0 and len(self._tool_starts) == 0
-        self._enqueue("token", {"text": token, "final": is_final})
+        if is_final:
+            # Suppress from the live stream; the surviving final answer is emitted
+            # once at turn end (#2251). Flag it so the turn runner knows to do so.
+            self.final_answer_buffered = True
+            return
+        self._enqueue("token", {"text": token, "final": False})
 
     def on_llm_end(self, response: Any, **kwargs: Any) -> None:
         """Accumulate token usage from each LLM call.

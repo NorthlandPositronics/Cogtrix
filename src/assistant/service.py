@@ -139,6 +139,20 @@ class AssistantService:
             )
         guardrails = GuardrailPipeline(config=asst_cfg, llm=judge_llm)
 
+        vision_model: str | None = asst_cfg.get("vision_model")
+        vision_llm = None
+        if vision_model:
+            vision_llm = create_extraction_llm(vision_model, config)
+            log.info("Assistant vision model configured: %s", vision_model)
+
+        conversation_supports_vision: bool | None = None
+        try:
+            active_mc = config.get_model_config(getattr(config, "active_model_alias", None))
+            if active_mc is not None:
+                conversation_supports_vision = active_mc.supports_vision
+        except Exception as _exc:
+            log.debug("Could not resolve conversation model vision capability: %s", _exc)
+
         self._session_mgr = ChatSessionManager(
             config=config,
             llm=llm,
@@ -261,6 +275,8 @@ class AssistantService:
                 deferral_mgr=self._deferral_mgr,
                 workflow_registry=self._workflow_registry,
                 campaign_mgr=self._campaign_mgr,
+                vision_llm=vision_llm,
+                conversation_supports_vision=conversation_supports_vision,
             )
 
             # Wire campaign manager dependencies after handler construction
@@ -452,6 +468,13 @@ class AssistantService:
             from src.assistant.channels.whatsapp import WhatsAppChannel
 
             wa_cfg = {**config.services.get("whatsapp", {}), **ch_cfgs.get("whatsapp", {})}
+            # Persist processed-message ids so a restart doesn't re-answer recent
+            # messages (#2053). An explicit config override wins.
+            top_data_dir = getattr(config, "data_dir", "data")
+            wa_cfg.setdefault(
+                "seen_ids_path",
+                str(Path(top_data_dir) / "assistant" / "whatsapp_seen_ids.json"),
+            )
             wa = WhatsAppChannel(wa_cfg)
             if not wa.is_ready():
                 log.info("Waha session not ready — attempting to start it")

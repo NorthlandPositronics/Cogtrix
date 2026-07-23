@@ -1,0 +1,87 @@
+# ============================================================================
+# Dedicated Cogtrix configuration for COMPREHENSIVE TEST CYCLES
+# ============================================================================
+# Used by the heavy, non-deterministic harnesses (agent-complexity fleet, PM
+# role test, Gate-2 eval) — see docs/optional/testing/.
+#
+# This file is SECRET-FREE and committable: every API key / token is injected
+# from the environment, not stored here.
+#   * custom `spark` provider  -> COGTRIX_PROVIDER_SPARK_API_KEY   (#2222)
+#   * deepseek                 -> DEEPSEEK_API_KEY
+#   * tavily / openweather     -> TAVILY_API_KEY / OPENWEATHER_API_KEY
+#
+# Keys live in tests/comprehensive/.env (gitignored). They are loaded at test
+# start by tests/comprehensive/env_loader.py, which also points
+# COGTRIX_CONFIG_FILE at this file so Cogtrix resolves it deterministically
+# (no dependence on ~/.config/cogtrix vs ~/.cogtrix/config — see #F-01 in the
+# 2026-06-24 cycle log). Copy cogtrix.comprehensive.env.example -> .env to set up.
+# ============================================================================
+
+model: coder            # active model for the agent-complexity + PM harnesses
+session: comprehensive-tests
+data_dir: /data         # fleet-container convention; in-process harnesses may
+                        # override via COGTRIX_DATA_DIR
+
+providers:
+  # Local self-hosted vLLM endpoint (OpenAI-compatible). Free + offline-capable;
+  # deliberately a mid-tier model so the harnesses stress orchestration, not the
+  # ceiling. Key from env: COGTRIX_PROVIDER_SPARK_API_KEY
+  spark:
+    type: openai
+    base_url: http://192.168.70.254:8080/v1
+  # Cloud model used by the Gate-2 eval. Key from env: DEEPSEEK_API_KEY
+  deepseek:
+    type: openai
+    base_url: https://api.deepseek.com/v1
+
+models:
+  default: coder
+  coder:
+    provider: spark
+    model: qwen3-coder
+    temperature: 0.65
+    context_window: 262144
+  reasoning:
+    provider: spark
+    model: qwen3-coder
+    temperature: 0.5
+    context_window: 262144
+  witty:
+    provider: spark
+    model: qwen3-coder
+    temperature: 0.75
+    context_window: 262144
+  embedding:
+    provider: spark
+    model: qwen3-embedding
+    temperature: 0.0
+  deepseek-v4-pro:
+    provider: deepseek
+    model: deepseek-v4-pro
+    temperature: 0.3
+    context_window: 1000000
+  deepseek-v4-flash:
+    provider: deepseek
+    model: deepseek-v4-flash
+    temperature: 0.3
+    context_window: 1000000
+
+rag:
+  docs_dir: /data/documents
+  vectordb_dir: /data/vectordb
+  chunk_size: 800
+  chunk_overlap: 100
+  model: embedding
+
+# Web-search / weather tools — keys injected from env.
+services:
+  tavily: {}        # api_key <- TAVILY_API_KEY
+  openweather: {}   # api_key <- OPENWEATHER_API_KEY
+
+# Comprehensive tests exercise the agent + tools + RAG, not external
+# integrations — no MCP servers / assistant / messaging here (also avoids the
+# unresolved-host MCP warnings seen in containers). Prompt optimizer off so a
+# test run isn't gated on an extra LLM round-trip.
+auto_route: false
+quick_mode: false
+prompt_optimizer: false

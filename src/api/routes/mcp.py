@@ -122,6 +122,11 @@ def _request_to_config_entry(body: MCPServerAddRequest) -> dict[str, Any]:
         entry["headers"] = dict(body.headers)
     if body.timeout != 30:
         entry["timeout"] = body.timeout
+    # Persist only non-default semantics so existing configs stay terse.
+    if not body.pin:
+        entry["pin"] = False
+    if body.allow_insecure:
+        entry["allow_insecure"] = True
     return entry
 
 
@@ -169,6 +174,87 @@ def _persist_mcp_servers(cfg: Any) -> None:
         except OSError:
             pass
         raise RuntimeError(f"Failed to write config file: {exc}") from exc
+
+
+# ---------------------------------------------------------------------------
+# Runtime wiring (#2151 / #2153)
+#
+# The add / delete / restart routes must drive the live ``MCPManager`` and
+# mirror the result into ``app.state.tool_registry`` so a change takes effect
+# without a process restart — then evict warm sessions so it reaches in-flight
+# users (a session snapshots the registry at warm time). All registry mutation
+# goes through ``src/api/mcp_runtime.py`` so it stays identical to startup.
+# ---------------------------------------------------------------------------
+
+
+def _get_tool_registry(request: Request) -> Any:
+    return getattr(request.app.state, "tool_registry", None)
+
+
+def _get_pinned_set(request: Request) -> set[str]:
+    pinned = getattr(request.app.state, "pinned_mcp_tool_names", None)
+    if pinned is None:
+        pinned = set()
+        request.app.state.pinned_mcp_tool_names = pinned
+    return pinned
+
+
+def _entry_to_server_config(name: str, entry: dict[str, Any]) -> Any:
+    """Build an MCPServerConfig from a persisted config entry (KNOWN fields only)."""
+    from src.mcp_client import KNOWN_MCP_FIELDS, MCPServerConfig
+
+    filtered = {k: v for k, v in entry.items() if k in KNOWN_MCP_FIELDS}
+    return MCPServerConfig(name=name, **filtered)
+
+
+async def _reconcile_sessions(request: Request) -> None:
+    """Evict warm sessions so the tool-registry change reaches active users."""
+    session_registry = getattr(request.app.state, "session_registry", None)
+    reconcile = getattr(session_registry, "reconcile_tools", None)
+    if reconcile is None:
+        return
+    try:
+        await reconcile()
+    except Exception as exc:  # never let reconciliation failure break the route
+        log.warning("MCP: session reconcile after server change failed: %s", exc)
+
+
+async def _connect_and_register(request: Request, mcp_client: Any, name: str, entry: dict) -> None:
+    """Connect a single newly-added server and register its tools at runtime."""
+    from src.mcp_client import MCP_AVAILABLE
+
+    if not MCP_AVAILABLE:
+        return
+    from src.api.mcp_runtime import register_mcp_tools
+
+    tool_registry = _get_tool_registry(request)
+    cfg = _entry_to_server_config(name, entry)
+    # Collision base: every tool currently in the registry (builtins + already
+    # connected MCP servers) so the new server's tools are prefixed on clash.
+    builtin = set((tool_registry.tools if tool_registry is not None else {}).keys())
+    try:
+        mcp_tools = await asyncio.to_thread(
+            mcp_client.connect_all, [cfg], builtin_tool_names=builtin
+        )
+    except Exception as exc:
+        log.warning("MCP: runtime connect of server '%s' failed: %s", name, exc)
+        return
+    register_mcp_tools(tool_registry, _get_pinned_set(request), mcp_tools, {name: cfg.pin})
+
+
+async def _disconnect_and_unregister(request: Request, mcp_client: Any, name: str) -> None:
+    """Tear down a server's live connection and revoke its tools at runtime."""
+    from src.api.mcp_runtime import unregister_mcp_server_tools
+
+    disconnect_fn = getattr(mcp_client, "disconnect", None)
+    if disconnect_fn is not None:
+        try:
+            await asyncio.to_thread(disconnect_fn, name)
+        except Exception as exc:
+            log.warning("MCP: runtime disconnect of server '%s' failed: %s", name, exc)
+    # Revoke the tools even if the close errored — a delete must not leave a
+    # (possibly compromised) server's tools bound and callable (#2153).
+    unregister_mcp_server_tools(_get_tool_registry(request), _get_pinned_set(request), name)
 
 
 # ---------------------------------------------------------------------------
@@ -268,7 +354,13 @@ async def add_mcp_server(
             },
         ) from exc
 
+    # Connect the new server at runtime and register its tools so it is usable
+    # immediately, then refresh active sessions (#2153).
     mcp_client = _get_mcp_client(request)
+    if mcp_client is not None:
+        await _connect_and_register(request, mcp_client, body.name, entry)
+        await _reconcile_sessions(request)
+
     runtime = _runtime_info_map(mcp_client)
     return APIResponse(data=_config_entry_to_out(body.name, entry, runtime.get(body.name)))
 
@@ -370,6 +462,13 @@ async def remove_mcp_server(
             },
         ) from exc
 
+    # Tear down the live connection and revoke its tools immediately, then
+    # refresh active sessions so the model can no longer call them (#2153).
+    mcp_client = _get_mcp_client(request)
+    if mcp_client is not None:
+        await _disconnect_and_unregister(request, mcp_client, server_name)
+        await _reconcile_sessions(request)
+
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -413,10 +512,28 @@ async def restart_mcp_server(
         )
 
     mcp_client = _get_mcp_client(request)
-    restart_fn = getattr(mcp_client, "restart_server", None)
+    # MCPManager exposes ``restart(...)`` (not ``restart_server``) — the old
+    # getattr looked up a method that never existed, so restart was a silent
+    # no-op (#2151). Reconnect, swap the rebuilt tools into the live registry,
+    # then refresh active sessions.
+    restart_fn = getattr(mcp_client, "restart", None)
     if restart_fn is not None:
+        from src.api.mcp_runtime import register_mcp_tools, unregister_mcp_server_tools
+
+        tool_registry = _get_tool_registry(request)
+        pinned = _get_pinned_set(request)
+        # Collision base: every tool NOT owned by the server being restarted
+        # (its own tools are about to be rebuilt and re-registered).
+        builtin: set[str] = set()
+        if tool_registry is not None:
+            meta = getattr(tool_registry, "tool_metadata", {}) or {}
+            builtin = {
+                n
+                for n in getattr(tool_registry, "tools", {})
+                if meta.get(n, {}).get("server", "") != server_name
+            }
         try:
-            await asyncio.to_thread(restart_fn, server_name)
+            new_tools = await asyncio.to_thread(restart_fn, server_name, builtin_tool_names=builtin)
         except Exception as exc:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -425,6 +542,13 @@ async def restart_mcp_server(
                     "message": f"MCP server restart failed: {exc}",
                 },
             ) from exc
+
+        # Replace this server's tools: purge the stale set, register the rebuilt
+        # one. Honour the persisted pin flag for the server.
+        unregister_mcp_server_tools(tool_registry, pinned, server_name)
+        pin = bool(servers_dict[server_name].get("pin", True))
+        register_mcp_tools(tool_registry, pinned, new_tools or {}, {server_name: pin})
+        await _reconcile_sessions(request)
 
     runtime = _runtime_info_map(mcp_client)
     return APIResponse(

@@ -679,13 +679,22 @@ os.environ.setdefault("COGTRIX_JWT_SECRET", "testsecret_mustbe32chars_minimum00"
 os.environ.setdefault("COGTRIX_DB_URL", "sqlite+aiosqlite:///:memory:")
 
 
+# Snapshot the JWT secret at import (before any load_config() unsets it, #2102):
+# the API validates tokens with the secret captured at startup, so signing must
+# use the same value — reading os.environ at call time would KeyError once the
+# var is unset mid-test.
+_JWT_SECRET_FOR_SIGNING = (
+    os.environ.get("COGTRIX_JWT_SECRET") or "testsecret_mustbe32chars_minimum00"
+)
+
+
 def _make_expired_local_jwt(user_id: str = "uid", role: str = "user") -> str:
     import jwt as _jwt
 
     now = datetime.now(UTC)
     return _jwt.encode(
         {"sub": user_id, "role": role, "iat": now, "exp": now - timedelta(hours=1)},
-        os.environ["COGTRIX_JWT_SECRET"],
+        _JWT_SECRET_FOR_SIGNING,
         algorithm="HS256",
     )
 

@@ -42,14 +42,32 @@ class TestGetApiKey:
             with patch("src.config.load_config", return_value=mock_config):
                 assert _get_api_key() == "config-key-456"
 
-    def test_env_var_overrides_config(self):
-        """Environment variable wins over config file."""
-        mock_config = MagicMock()
-        mock_config.openweather_api_key = "config-key"
+    def test_injected_config_takes_priority(self):
+        """The TOOL_SETUP-injected key wins over the resolved config (#2101: the
+        env-over-config-file precedence now lives in config resolution, not in a
+        separate os.getenv step inside the tool)."""
+        from src.tools.weather import _weather_config
 
-        with patch.dict("os.environ", {"OPENWEATHER_API_KEY": "env-key"}, clear=False):
-            with patch("src.config.load_config", return_value=mock_config):
-                assert _get_api_key() == "env-key"
+        mock_config = MagicMock()
+        mock_config.openweather_api_key = "cached-key"
+
+        _weather_config["api_key"] = "injected-key"
+        try:
+            with patch("src.config.get_cached_config", return_value=mock_config):
+                assert _get_api_key() == "injected-key"
+        finally:
+            _weather_config.pop("api_key", None)
+
+    def test_falls_back_to_cached_config(self):
+        """With no injected key, the tool returns the cached config's value."""
+        from src.tools.weather import _weather_config
+
+        mock_config = MagicMock()
+        mock_config.openweather_api_key = "cached-key"
+
+        _weather_config.pop("api_key", None)
+        with patch("src.config.get_cached_config", return_value=mock_config):
+            assert _get_api_key() == "cached-key"
 
 
 class TestGetWeatherNoKey:

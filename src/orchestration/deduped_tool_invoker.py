@@ -46,6 +46,12 @@ from src.orchestration.compression import truncate_tool_output
 # to override them per-graph.
 _HISTORY_TOOL_MESSAGE_CAP_CHARS = 30_000
 
+# Fallback recursion budget used to scale the retrieval-tool ceiling when the
+# run config doesn't carry ``recursion_limit``. Mirrors
+# ``graph.DEFAULT_RECURSION_LIMIT`` (kept as a literal to avoid a circular
+# import: graph.py imports this module).
+_RECURSION_LIMIT_FALLBACK = 90
+
 
 class DedupedToolInvoker:
     """Execute a single tool call with cross-thread dedup + TOCTOU safety.
@@ -87,6 +93,8 @@ class DedupedToolInvoker:
         tool_budget_soft: int,
         tool_budget_hard_exempt: frozenset[str] | set[str],
         tool_budget_soft_exempt: frozenset[str] | set[str],
+        tool_budget_retrieval_tools: frozenset[str] | set[str] = frozenset(),
+        tool_budget_retrieval_ceiling_divisor: int = 3,
     ) -> None:
         self._per_run_state = per_run_state
         self._history_lock = history_lock
@@ -105,12 +113,47 @@ class DedupedToolInvoker:
         self._tool_budget_soft = tool_budget_soft
         self._tool_budget_hard_exempt = tool_budget_hard_exempt
         self._tool_budget_soft_exempt = tool_budget_soft_exempt
+        self._tool_budget_retrieval_tools = tool_budget_retrieval_tools
+        self._tool_budget_retrieval_ceiling_divisor = max(1, tool_budget_retrieval_ceiling_divisor)
 
     def _cap_history_tool_content(self, content: str) -> str:
         """Cap tool output before it is stored in message history."""
         if len(content) <= _HISTORY_TOOL_MESSAGE_CAP_CHARS:
             return content
         return truncate_tool_output(content, _HISTORY_TOOL_MESSAGE_CAP_CHARS)
+
+    def _effective_recursion_limit(self, run_config: Any) -> int:
+        """Best-effort read of the live LangGraph recursion budget from the run
+        config, used to scale the retrieval-tool hard ceiling (#2014).
+
+        LangGraph puts ``recursion_limit`` at the top level of the RunnableConfig
+        it threads into nodes. Falls back to ``_RECURSION_LIMIT_FALLBACK`` when
+        the config is absent or doesn't carry a positive int (e.g. unit tests
+        that invoke ``invoke_one`` with ``run_config=None``).
+        """
+        if isinstance(run_config, dict):
+            rl = run_config.get("recursion_limit")
+            if isinstance(rl, int) and not isinstance(rl, bool) and rl > 0:
+                return rl
+        return _RECURSION_LIMIT_FALLBACK
+
+    def _release_sentinel(self, call_key: str | None) -> None:
+        """Pop and signal the pending-event sentinel reserved for ``call_key``.
+
+        Must run on EVERY return path taken after the sentinel is reserved in
+        ``invoke_one`` — including the early-return arms (denial, hard-budget
+        cap, tool-call-guard block), not just the success and exception arms.
+        Skipping it strands a duplicate caller blocked on the Event: it waits
+        the full 30s timeout and then re-executes the tool, defeating the
+        BUG-1293 dedup guarantee. See the module docstring's "Sentinel
+        cleanup" invariant. Idempotent — a no-op if the slot is already gone.
+        """
+        if call_key is None:
+            return
+        with self._history_lock:
+            _event = self._pending_events.pop(call_key, None)
+        if _event is not None:
+            _event.set()
 
     def invoke_one(self, call: dict, run_config: Any) -> Any:
         """Execute a single tool call already in tool_lookup. Returns ToolMessage."""
@@ -176,6 +219,7 @@ class DedupedToolInvoker:
         # wrapper's is_denied check is skipped (no_confirm=True), so this is the
         # only guaranteed enforcement point.
         if self._session_state is not None and self._session_state.is_denied(tool_name):
+            self._release_sentinel(call_key)
             return ToolMessage(
                 content=f"Tool '{self._safe_tool_name(tool_name)}' is disabled and cannot be used.",
                 tool_call_id=call["id"],
@@ -183,16 +227,41 @@ class DedupedToolInvoker:
             )
 
         # ── Per-tool call budget ──────────────────────────────────────────
-        # Prevents runaway search loops where the model calls the same tool
-        # 10+ times with diminishing returns.  Exempt tools (request_tools,
-        # report_progress, etc.) are not counted.
-        if tool_name not in self._tool_budget_hard_exempt:
+        # Prevents runaway tool loops. Three tiers (#2014):
+        #   * retrieval/search tools — historically *fully* exempt from the
+        #     fixed cap ("research needs many progressive searches"), which let
+        #     a non-converging model call e.g. search_web unbounded until the
+        #     LangGraph recursion limit (GraphRecursionError / wasted budget).
+        #     They now get a RECURSION-AWARE ceiling: a fraction of the live
+        #     recursion budget, so it scales with the task (eval ~20,
+        #     COMPLEX_ACTION ~100) and always fires before the recursion limit,
+        #     forcing an honest synthesis/refusal instead of a crash.
+        #   * other exempt tools (control + action: request_tools, shell, …) —
+        #     still not counted (their ceilings are tracked in #2213 Layer 2).
+        #   * everything else — the fixed hard cap.
+        _is_retrieval = tool_name in self._tool_budget_retrieval_tools
+        if _is_retrieval:
+            _effective_hard = max(
+                self._tool_budget_hard,
+                self._effective_recursion_limit(run_config)
+                // self._tool_budget_retrieval_ceiling_divisor,
+            )
+            _budgeted = True
+        elif tool_name in self._tool_budget_hard_exempt:
+            _budgeted = False
+            _effective_hard = 0  # unused
+        else:
+            _effective_hard = self._tool_budget_hard
+            _budgeted = True
+
+        if _budgeted:
+            _hard_capped = False
             # Critical section: protect compound read-increment-write on
             # _per_run_state[0].tool_call_counts and concurrent removal from active_tools_list
             with self._tool_budget_lock:
                 count = self._per_run_state[0].tool_call_counts.get(tool_name, 0) + 1
                 self._per_run_state[0].tool_call_counts[tool_name] = count
-                if count > self._tool_budget_hard:
+                if count > _effective_hard:
                     # Remove from active set AND add to denials so the model
                     # can't re-load it via request_tools(add=[...]).
                     # Also remove from active_tools_list so bind_tools stops
@@ -202,7 +271,8 @@ class DedupedToolInvoker:
                     # of the "Tool names must be unique" 400 on re-add).
                     self._per_run_state[0].tool_lookup.pop(tool_name, None)
                     self._per_run_state[0].active_names.discard(tool_name)
-                    self._session_state.deny_tool(tool_name)
+                    if self._session_state is not None:
+                        self._session_state.deny_tool(tool_name)
                     _disabled_obj = next(
                         (t for t in self._active_tools_list if getattr(t, "name", "") == tool_name),
                         None,
@@ -214,15 +284,21 @@ class DedupedToolInvoker:
                             except ValueError:
                                 pass  # already removed by a concurrent invocation
                     self._per_run_state[0].tool_version[0] += 1  # force bind_tools refresh
-                    return ToolMessage(
-                        content=(
-                            f"Tool '{self._safe_tool_name(tool_name)}' has been disabled after {self._tool_budget_hard} calls "
-                            f"and is no longer available. Please synthesize your findings into a "
-                            f"final response now using the data you already have."
-                        ),
-                        tool_call_id=call["id"],
-                        name=tool_name,
-                    )
+                    _hard_capped = True
+            if _hard_capped:
+                # Release the TOCTOU sentinel OUTSIDE the budget lock — calling
+                # _release_sentinel (which takes _history_lock) here avoids
+                # introducing a tool_budget_lock → history_lock ordering.
+                self._release_sentinel(call_key)
+                return ToolMessage(
+                    content=(
+                        f"Tool '{self._safe_tool_name(tool_name)}' has been disabled after {_effective_hard} calls "
+                        f"and is no longer available. Please synthesize your findings into a "
+                        f"final response now using the data you already have."
+                    ),
+                    tool_call_id=call["id"],
+                    name=tool_name,
+                )
 
         tool_input = {**call, "type": "tool_call"}
 
@@ -236,6 +312,7 @@ class DedupedToolInvoker:
                     tool_name,
                     getattr(_guard_result, "reason", ""),
                 )
+                self._release_sentinel(call_key)
                 return ToolMessage(
                     content=(
                         f"Tool call blocked by security policy: "

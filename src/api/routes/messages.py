@@ -66,6 +66,29 @@ log = logging.getLogger("cogtrix.api.messages")
 
 _WS_IDLE_TIMEOUT: float = float(os.environ.get("COGTRIX_WS_IDLE_TIMEOUT", "300"))
 
+# Cadence at which the receive loop re-evaluates connection idleness while
+# waiting for an inbound frame. The idle timeout must measure *connection*
+# idleness (an active turn or any inbound frame), not merely *inbound* idleness:
+# a long, actively-streaming agent turn sends no client text frame, so without
+# this re-evaluation a turn longer than the idle timeout is torn down mid-stream
+# (#2256). Bounded by the idle timeout so a small configured timeout still fires
+# promptly.
+_WS_IDLE_POLL_INTERVAL: float = 30.0
+
+
+def _ws_idle_should_reap(turn_active: bool, idle_elapsed: float, idle_timeout: float) -> bool:
+    """Decide whether an idle WebSocket connection should be reaped on a poll tick.
+
+    A connection is reaped only when it is *genuinely* idle: an actively-streaming
+    agent turn keeps the connection alive no matter how long it runs (#2256 — a
+    long turn sends no inbound frame but is not idle), otherwise the connection is
+    reaped once it has gone ``idle_timeout`` seconds without inbound activity.
+    """
+    if turn_active:
+        return False
+    return idle_elapsed >= idle_timeout
+
+
 router = APIRouter(tags=["Messages"])
 
 
@@ -283,6 +306,8 @@ async def send_message(
     duration_ms = 0
     tool_calls = 0
     agent_error: str | None = None
+    blocked_by_guardrails = False
+    guardrail_reason: str | None = None
 
     while True:
         try:
@@ -298,6 +323,10 @@ async def send_message(
                 output_tokens = p.get("output_tokens", 0)
                 duration_ms = p.get("duration_ms", 0)
                 tool_calls = p.get("tool_calls", 0)
+                # Guardrail block (#2056): an expected refusal, surfaced as a 200
+                # with blocked_by_guardrails=true — NOT an error frame / 500.
+                blocked_by_guardrails = bool(p.get("blocked_by_guardrails", False))
+                guardrail_reason = p.get("guardrail_reason")
                 # done payload carries an error key when the turn failed
                 if not agent_error and p.get("error"):
                     agent_error = p["error"]
@@ -320,6 +349,8 @@ async def send_message(
             output_tokens=output_tokens,
             duration_ms=duration_ms,
             tool_calls=tool_calls,
+            blocked_by_guardrails=blocked_by_guardrails,
+            guardrail_reason=guardrail_reason,
         )
     )
 
@@ -729,16 +760,50 @@ async def session_websocket(
     sess.drain_task = drain_task
 
     # 7. Receive loop.
+    #
+    # The idle timeout reaps abandoned connections, but it must measure
+    # *connection* idleness, not *inbound* idleness. During a long agent turn the
+    # client legitimately sends no text frame (it only receives streamed tokens),
+    # so a turn longer than the timeout must NOT be treated as idle and torn down
+    # mid-stream (#2256). We wait for an inbound frame OR a poll tick — whichever
+    # comes first — and only give up once the connection has been genuinely idle
+    # (no active turn AND no inbound frame) for the full idle timeout. The
+    # ``receive_text()`` task is held across ticks rather than cancelled, so a
+    # tool_confirm/cancel that arrives on a poll boundary is never dropped.
     idle_timeout = _WS_IDLE_TIMEOUT
+    poll_interval = min(idle_timeout, _WS_IDLE_POLL_INTERVAL) if idle_timeout > 0 else 0
+    loop = asyncio.get_running_loop()
+    last_activity = loop.time()
+    recv_task: asyncio.Task[str] | None = None
     try:
         while True:
+            if recv_task is None:
+                recv_task = asyncio.ensure_future(websocket.receive_text())
+            current_recv = recv_task
+
+            await asyncio.wait({current_recv}, timeout=poll_interval)
+
+            if not current_recv.done():
+                # Poll tick, no inbound frame: re-evaluate idleness. An active
+                # turn keeps the connection non-idle; otherwise reap only after
+                # the connection has been idle for the full timeout (#2256).
+                turn_active = sess.turn_task is not None and not sess.turn_task.done()
+                if turn_active:
+                    last_activity = loop.time()
+                if _ws_idle_should_reap(turn_active, loop.time() - last_activity, idle_timeout):
+                    log.info("WebSocket idle timeout for session %s", session_id)
+                    current_recv.cancel()
+                    break
+                continue
+
+            # An inbound frame resolved the receive task.
             try:
-                raw = await asyncio.wait_for(websocket.receive_text(), timeout=idle_timeout)
-            except TimeoutError:
-                log.info("WebSocket idle timeout for session %s", session_id)
-                break
+                raw = current_recv.result()
             except WebSocketDisconnect:
                 break
+            finally:
+                recv_task = None
+            last_activity = loop.time()
 
             try:
                 data = json.loads(raw)
@@ -846,6 +911,13 @@ async def session_websocket(
     except Exception as exc:
         log.debug("WebSocket receive loop error for session %s: %s", session_id, exc)
     finally:
+        # Cancel/await any in-flight receive so it doesn't outlive the loop.
+        if recv_task is not None:
+            recv_task.cancel()
+            try:
+                await recv_task
+            except (asyncio.CancelledError, Exception):
+                pass
         drain_task.cancel()
         try:
             await drain_task

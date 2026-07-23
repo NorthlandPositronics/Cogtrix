@@ -48,6 +48,8 @@ def _make_invoker(
     tool_budget_soft: int = 5,
     tool_budget_hard_exempt: set[str] | None = None,
     tool_budget_soft_exempt: set[str] | None = None,
+    tool_budget_retrieval_tools: set[str] | None = None,
+    tool_budget_retrieval_ceiling_divisor: int = 3,
     tool_call_guard: Any = None,
 ) -> tuple[DedupedToolInvoker, PerRunState, dict[str, threading.Event], list[Any]]:
     """Construct a DedupedToolInvoker with sensible defaults."""
@@ -105,6 +107,10 @@ def _make_invoker(
         tool_budget_soft=tool_budget_soft,
         tool_budget_hard_exempt=tool_budget_hard_exempt,
         tool_budget_soft_exempt=tool_budget_soft_exempt,
+        tool_budget_retrieval_tools=(
+            tool_budget_retrieval_tools if tool_budget_retrieval_tools is not None else set()
+        ),
+        tool_budget_retrieval_ceiling_divisor=tool_budget_retrieval_ceiling_divisor,
     )
     return invoker, per_run_state, pending_events, active_tools_list
 
@@ -348,6 +354,127 @@ class TestExceptionCleansSentinel:
             f"thread B blocked {results['b_wait_s']:.2f}s — exception arm "
             "did not signal the pending event"
         )
+
+
+class TestEarlyReturnReleasesSentinel:
+    """Regression #2207: the denial / hard-budget-cap / guard-block early
+    returns must release the TOCTOU sentinel reserved by the guard — exactly
+    like the success and both exception arms. Leaking it strands a duplicate
+    caller on the 30s Event wait, which then re-executes the tool.
+    """
+
+    def test_denied_tool_releases_sentinel(self):
+        tool = MagicMock()
+        tool.name = "echo_tool"
+        ss = SessionState()
+        ss.deny_tool("echo_tool")
+
+        invoker, _, pending_events, _ = _make_invoker(tool=tool, session_state=ss)
+
+        call = {"name": "echo_tool", "args": {"text": "hi"}, "id": "c1"}
+        result = invoker.invoke_one(call, None)
+
+        assert "disabled and cannot be used" in result.content
+        assert tool.invoke.call_count == 0
+        # The sentinel reserved by the TOCTOU guard must not be leaked.
+        assert pending_events == {}
+
+    def test_hard_budget_cap_releases_sentinel(self):
+        tool = MagicMock()
+        tool.name = "noisy_tool"
+        tool.invoke.side_effect = lambda inp, *a, **k: ToolMessage(
+            content=f"resp-{inp['id']}", tool_call_id=inp["id"], name="noisy_tool"
+        )
+
+        invoker, _, pending_events, _ = _make_invoker(
+            tool=tool, tool_name="noisy_tool", tool_budget_hard=2, tool_budget_soft=1
+        )
+
+        # Exhaust the hard cap (distinct args → each call_key is unique).
+        for i in range(2):
+            invoker.invoke_one({"name": "noisy_tool", "args": {"i": i}, "id": f"c{i}"}, None)
+
+        # The (N+1)-th call trips the hard cap and takes the early-return arm.
+        over = {"name": "noisy_tool", "args": {"i": 99}, "id": "c_over"}
+        result = invoker.invoke_one(over, None)
+
+        assert "disabled after 2 calls" in result.content
+        # Every key (the successful ones AND the capped one) must be released.
+        assert pending_events == {}
+
+    def test_guard_block_releases_sentinel(self):
+        tool = MagicMock()
+        tool.name = "echo_tool"
+        blocked = MagicMock(is_safe=False, guard_name="test_guard", reason="nope")
+        guard = MagicMock(return_value=blocked)
+
+        invoker, _, pending_events, _ = _make_invoker(tool=tool, tool_call_guard=guard)
+
+        call = {"name": "echo_tool", "args": {"text": "hi"}, "id": "c1"}
+        result = invoker.invoke_one(call, None)
+
+        assert "blocked by security policy" in result.content
+        assert tool.invoke.call_count == 0
+        assert pending_events == {}
+
+
+class TestRetrievalRecursionCeiling:
+    """#2014: retrieval/search tools were fully exempt from the hard cap, so a
+    non-converging model could call them unbounded until the LangGraph recursion
+    limit. They now get a recursion-aware ceiling (recursion_limit // divisor)."""
+
+    @staticmethod
+    def _search_tool() -> Any:
+        tool = MagicMock()
+        tool.name = "search_web"
+        tool.invoke.side_effect = lambda inp, *a, **k: ToolMessage(
+            content=f"results-{inp['id']}", tool_call_id=inp["id"], name="search_web"
+        )
+        return tool
+
+    def test_retrieval_tool_capped_at_recursion_fraction(self):
+        tool = self._search_tool()
+        invoker, state, _, active = _make_invoker(
+            tool=tool,
+            tool_name="search_web",
+            tool_budget_hard=8,
+            # Mirror production: retrieval is also in the hard-exempt set, but
+            # the retrieval ceiling must take precedence over full exemption.
+            tool_budget_hard_exempt={"search_web"},
+            tool_budget_retrieval_tools={"search_web"},
+            tool_budget_retrieval_ceiling_divisor=3,
+        )
+        cfg = {"recursion_limit": 30}  # ceiling = max(8, 30 // 3) = 10
+
+        for i in range(10):
+            r = invoker.invoke_one({"name": "search_web", "args": {"q": i}, "id": f"c{i}"}, cfg)
+            assert "disabled" not in r.content, f"capped too early at call {i + 1}"
+
+        # The 11th call exceeds the ceiling of 10 → hard stop (was: never capped).
+        r = invoker.invoke_one({"name": "search_web", "args": {"q": 99}, "id": "c99"}, cfg)
+        assert "disabled after 10 calls" in r.content
+        assert "search_web" not in state.tool_lookup
+        assert tool not in active
+        assert tool.invoke.call_count == 10  # the capped call did NOT execute the tool
+
+    def test_retrieval_ceiling_scales_with_recursion_budget(self):
+        # Same 11 calls, but a larger recursion budget → higher ceiling (20),
+        # so the tool is still active where the tight budget (10) disabled it.
+        tool = self._search_tool()
+        invoker, state, _, _ = _make_invoker(
+            tool=tool,
+            tool_name="search_web",
+            tool_budget_hard=8,
+            tool_budget_hard_exempt={"search_web"},
+            tool_budget_retrieval_tools={"search_web"},
+            tool_budget_retrieval_ceiling_divisor=3,
+        )
+        cfg = {"recursion_limit": 60}  # ceiling = 60 // 3 = 20
+        r = None
+        for i in range(11):
+            r = invoker.invoke_one({"name": "search_web", "args": {"q": i}, "id": f"c{i}"}, cfg)
+        assert r is not None and "disabled" not in r.content
+        assert "search_web" in state.tool_lookup
 
 
 @pytest.fixture(autouse=True)

@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Any
 
 import sqlalchemy as sa
+from sqlalchemy import event
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -37,6 +38,8 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 from sqlalchemy.orm import DeclarativeBase
+
+from src.config import secret_from_env_or_file
 
 log = logging.getLogger(__name__)
 
@@ -52,7 +55,10 @@ log = logging.getLogger(__name__)
 # it's the only branch that actually performs filesystem I/O.
 # ---------------------------------------------------------------------------
 
-_db_url: str | None = os.environ.get("COGTRIX_DB_URL") or None
+# Env value wins (tests set it before import); else the #2103 _FILE convention
+# (COGTRIX_DB_URL_FILE). The file is only consulted when the env var is unset, so
+# the cheap-early-capture contract above holds for the env-set path.
+_db_url: str | None = secret_from_env_or_file("COGTRIX_DB_URL") or None
 _engine: AsyncEngine | None = None
 _session_factory: async_sessionmaker[AsyncSession] | None = None
 
@@ -66,9 +72,10 @@ def _resolve_default_db_url() -> str:
 
     # Priority 2: data_dir from config file
     try:
-        from src.config import load_config
+        from src.config import get_cached_config
 
-        cfg = load_config()
+        # #2101: reuse the process-wide resolved config (env read once).
+        cfg = get_cached_config()
         return f"sqlite+aiosqlite:///{cfg.data_dir}/api/cogtrix.db"
     except Exception as exc:  # noqa: BLE001
         log.debug("Could not read data_dir from config, using built-in default: %s", exc)
@@ -105,7 +112,24 @@ def _build_engine() -> AsyncEngine:
     if url.startswith("sqlite"):
         Path(url.split("///", 1)[-1]).parent.mkdir(parents=True, exist_ok=True)
 
-    return create_async_engine(url, echo=False, connect_args=_connect_args_for(url))
+    engine = create_async_engine(url, echo=False, connect_args=_connect_args_for(url))
+
+    # SQLite enforces ON DELETE CASCADE / SET NULL only when
+    # ``PRAGMA foreign_keys=ON`` is set per connection (it is OFF by default).
+    # Without this, the 21 ``ondelete`` clauses in models.py are silently inert
+    # on every SQLite-backed deployment (#2165). Register a connect listener so
+    # every pooled connection enables it. No-op for Postgres (FKs always on).
+    if url.startswith("sqlite"):
+
+        @event.listens_for(engine.sync_engine, "connect")
+        def _enable_sqlite_foreign_keys(dbapi_connection: Any, _record: Any) -> None:
+            cursor = dbapi_connection.cursor()
+            try:
+                cursor.execute("PRAGMA foreign_keys=ON")
+            finally:
+                cursor.close()
+
+    return engine
 
 
 def _get_engine() -> AsyncEngine:

@@ -1584,6 +1584,68 @@ class MCPManager:
             log.error("MCP: restart operation timed out after %.1f seconds", overall_timeout)
             return {}
 
+    def disconnect(self, server_name: str, timeout: float = 15.0) -> bool:
+        """Disconnect and fully remove a single MCP server at runtime.
+
+        Closes the live connection (stdio subprocess / SSE socket) and purges
+        the server from ``_connections``, ``_configs`` and ``_tool_server_map``
+        so its tools can no longer be resolved or called. Returns True if the
+        server had a live connection that was closed, False if it was unknown
+        or already disconnected.
+
+        Deadlock-safe like ``restart()`` (#2152): the inner coroutine runs ON
+        the MCP event loop and ``await``s ``conn.close()`` directly rather than
+        routing through ``self._run()`` (which blocks on ``future.result()`` and
+        would wedge the loop thread).
+        """
+        log = get_logger()
+
+        # Nothing known about this server — purge any stray mapping and bail
+        # without forcing a background loop into existence.
+        if server_name not in self._connections and server_name not in self._configs:
+            for key in [k for k, v in self._tool_server_map.items() if v == server_name]:
+                del self._tool_server_map[key]
+            return False
+
+        try:
+            self._ensure_loop()
+        except RuntimeError as exc:
+            # Shutting down / no loop: still purge in-memory state so the
+            # manager reflects the caller's intent.
+            log.warning(
+                "MCP: cannot cleanly disconnect '%s' — event loop unavailable: %s",
+                server_name,
+                exc,
+            )
+            was_connected = self._connections.pop(server_name, None) is not None
+            self._configs.pop(server_name, None)
+            for key in [k for k, v in self._tool_server_map.items() if v == server_name]:
+                del self._tool_server_map[key]
+            return was_connected
+
+        async def _do_disconnect() -> bool:
+            """Runs ON the MCP event loop — awaits close() directly (#2152)."""
+            for key in [k for k, v in self._tool_server_map.items() if v == server_name]:
+                del self._tool_server_map[key]
+            conn = self._connections.pop(server_name, None)
+            self._configs.pop(server_name, None)
+            if conn is None:
+                return False
+            try:
+                await asyncio.wait_for(conn.close(), timeout=10)
+            except Exception as exc:
+                log.warning("MCP: error closing '%s' during disconnect: %s", server_name, exc)
+            return True
+
+        try:
+            future = asyncio.run_coroutine_threadsafe(
+                asyncio.wait_for(_do_disconnect(), timeout=timeout), self._loop
+            )
+            return future.result(timeout=timeout + 1.0)
+        except (TimeoutError, concurrent.futures.TimeoutError):
+            log.error("MCP: disconnect of '%s' timed out after %.1f seconds", server_name, timeout)
+            return False
+
     def get_langchain_tools(
         self,
         server_name: str | None = None,

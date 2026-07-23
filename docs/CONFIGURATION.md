@@ -170,7 +170,9 @@ All modes support hybrid memory — a combination of a sliding window, increment
 | `summarization` | bool | `true` | Enable LLM-based rolling summary of older messages. Set to `false` to save LLM calls on metered APIs. |
 | `vector_recall_k` | int | `3` | Number of semantically similar past exchanges to retrieve per turn. Set to `0` to disable vector recall. |
 
-Hybrid memory is automatically enabled when an LLM is available. The vector recall component additionally requires an embedding provider — Cogtrix attempts to auto-detect one at startup (tries Ollama's `nomic-embed-text` first, then falls back to OpenAI if `OPENAI_API_KEY` is set). If no embedding provider is available, vector recall is silently skipped while summarization still functions normally.
+Hybrid memory is automatically enabled when an LLM is available. The vector recall component additionally requires an embedding provider — Cogtrix attempts to auto-detect one at startup (tries Ollama's `nomic-embed-text` first, then falls back to OpenAI if `OPENAI_API_KEY` is set).
+
+If no embedding provider is available, vector recall is silently skipped while summarization still functions normally.
 
 See [MEMORY_MODES.md](MEMORY_MODES.md) for detailed mode options and a full explanation of the hybrid memory system.
 
@@ -274,6 +276,7 @@ models:
 | `temperature` | float | No | Sampling temperature, 0.0–2.0 |
 | `context_window` | int | No | Context window size in tokens (>= 256). Forwarded to Ollama as `num_ctx`; silently ignored for OpenAI, Anthropic, and Google. Accepted aliases: `context_length`, `num_ctx`. |
 | `max_tokens` | int | No | Maximum output tokens per LLM call (>= 1) |
+| `supports_vision` | bool | No | Declare whether this model accepts image content. `true` = vision-capable; `false` = text-only; omitted (default) = unknown. Used by the assistant vision delegation path — see below. |
 
 #### Using Models
 
@@ -1038,6 +1041,74 @@ services:
 | `guardrails.pii_detection` | bool | `true` | Redact email, credit card, SSN, and private IP addresses from responses |
 | `guardrails.llm_judge.enabled` | bool | `false` | Enable LLM-as-judge classifier (opt-in; adds ~500ms–2s latency) |
 | `guardrails.llm_judge.model` | string | `null` | Model alias or `provider/model` for the judge LLM (null = main LLM) |
+| `vision_model` | string | `null` | Model alias for image description (delegate-and-describe). See below. |
+
+#### Vision Model (`vision_model`)
+
+When an inbound message carries images, Cogtrix supports a dedicated vision
+model that runs before the main conversation turn — the "delegate and describe"
+pattern.
+
+```yaml
+services:
+  assistant:
+    vision_model: gpt4o-vision  # model alias from the models registry
+
+models:
+  gpt4o-vision:
+    provider: openai
+    model: gpt-4o
+    supports_vision: true
+
+  deepseek-chat:
+    provider: openrouter
+    model: deepseek/deepseek-chat-v3-0324
+    supports_vision: false
+```
+
+**How it works:**
+
+1. An image arrives (WhatsApp or Telegram photo message).
+2. `vision_model` is called with the image(s) and a short factual-description
+   prompt that includes the user's text for context.
+3. The description is folded into the user turn as
+   `[Image description: <text>]`, and the images are stripped from the message.
+4. The main conversation model receives the augmented text only — no image
+   data, so a text-only model such as `deepseek-chat` is never asked to handle
+   `image_url` content.
+
+**Fallback behaviour when `vision_model` is not set:**
+
+| `supports_vision` on conversation model | Result |
+|---|---|
+| `true` or omitted (unknown) | Images forwarded as-is (existing behaviour) |
+| `false` | Images dropped; turn annotated with a notice |
+
+**Error handling:** If the vision model call fails for any reason, the image is
+dropped and the turn is annotated with
+`[An image was received but could not be analyzed.]` — the conversation
+continues rather than raising.
+
+#### Guardrails on the API chat path (`api.guardrails`)
+
+The same guardrail pipeline can run on the **HTTP/WebSocket API chat path** (#2056), which otherwise has no content screening. It is **off by default** — set `api.guardrails.enabled: true` to turn it on. The schema is identical to the assistant `guardrails` table above (banned strings, PII redaction, URL blocking, encoding/injection detection, optional `llm_judge`, rate-limit / auto-blacklist).
+
+```yaml
+api:
+  guardrails:
+    enabled: true
+    pii_detection: true
+    block_urls_in_output: true
+    rate_limit: { per_minute: 30, per_hour: 300 }
+    llm_judge: { enabled: false }
+```
+
+Behaviour notes:
+
+- Rate-limit and auto-blacklist are keyed by **`user_id`** (not chat/session), so a caller can't reset their violation window by opening a new session.
+- A blocked input is refused **before** the model runs: the REST sync call returns HTTP 200 with `blocked_by_guardrails: true` and a `guardrail_reason`, and the WebSocket `done` frame carries the same fields. The agent is never invoked.
+- The final response is passed through `sanitize_output` before it is stored and returned. In normal mode the tokens streamed incrementally over the WebSocket during the turn are not retroactively sanitized — the `done`-frame text is authoritative for the stored message and the REST response.
+- If `api.guardrails.enabled` is true but the pipeline cannot be constructed, the API **fails to start** (fail-closed) rather than serving unprotected.
 
 **How it works:**
 
@@ -1335,6 +1406,69 @@ to avoid adding 500ms–2s to every request.
 | `COGTRIX_API_HOST` | API server bind host (default `0.0.0.0`) | `127.0.0.1` |
 | `COGTRIX_API_PORT` | API server bind port (default `8000`) | `3001` |
 | `COGTRIX_API_WORKERS` | Number of uvicorn workers (default `1`) | `4` |
+
+### Secrets from files (`_FILE` convention)
+
+Environment variables are the least-safe delivery channel for a secret — the value is visible via `docker inspect`, `/proc/<pid>/environ`, and is inherited by child processes.
+
+The standard container/orchestrator way to deliver a secret is a **file** (Docker/Swarm secrets at `/run/secrets/`, a Kubernetes secret volume, a Vault-agent sidecar).
+
+Every secret-bearing variable accepts a `_FILE` counterpart: set `<VAR>_FILE` to a file path and Cogtrix reads the secret from that file (a single trailing newline is trimmed).
+
+This works for **all** provider keys (`OPENAI_API_KEY_FILE`, `DEEPSEEK_API_KEY_FILE`, the generic `COGTRIX_PROVIDER_<NAME>_API_KEY_FILE`, …), service keys (`TAVILY_API_KEY_FILE`, `OPENWEATHER_API_KEY_FILE`, …), messaging tokens (`COGTRIX_WHATSAPP_API_KEY_FILE`, `COGTRIX_TELEGRAM_TOKEN_FILE`, `COGTRIX_SLACK_BOT_TOKEN_FILE`), and the API secrets `COGTRIX_JWT_SECRET_FILE` and `COGTRIX_DB_URL_FILE`.
+
+**Precedence** (highest → lowest): explicit `<VAR>` env value → `<VAR>_FILE` → config-file value (`providers.<name>.api_key` / `services.<name>.api_key`) → default.
+
+A `<VAR>_FILE` that points to a **missing, unreadable, or empty** file is a hard error at startup (named after the variable and path) — a misconfigured secret mount fails loudly rather than silently yielding an empty key.
+
+```yaml
+# docker-compose.yml — JWT secret + provider key delivered as files
+services:
+  cogtrix:
+    image: ghcr.io/northlandpositronics/cogtrix:latest
+    command: ["api"]
+    environment:
+      COGTRIX_JWT_SECRET_FILE: /run/secrets/jwt_secret
+      OPENAI_API_KEY_FILE: /run/secrets/openai_api_key
+    secrets:
+      - jwt_secret
+      - openai_api_key
+    ports:
+      - "8000:8000"
+
+secrets:
+  jwt_secret:
+    file: ./secrets/jwt_secret.txt
+  openai_api_key:
+    file: ./secrets/openai_api_key.txt
+```
+
+On Kubernetes, mount a `Secret` as a volume (e.g. at `/run/secrets`) and point each `_FILE` variable at the mounted key.
+
+> **Honest caveat:** a mounted secret file is still readable by the process uid, so this is *surface reduction* (out of the environment / `inspect` / `/proc/environ`), not leak-proofing. It pairs with read-once + unset-after-read (the secret is read once into `Config`, then the source env var is dropped).
+
+### Secret lifecycle: read once, then unset
+
+Cogtrix treats the environment as a one-time source for configuration, then hardens it:
+
+**Read once.** Every environment variable is read **exactly once per process**. Configuration is resolved a single time into a cached `Config`, and every later consumer — the RAG ingest task, the database-URL resolver, the API CORS resolver, the weather / WhatsApp / Telegram tool loaders — reuses that resolved instance instead of re-reading `os.environ`.
+
+The admin **`POST /api/v1/config/reload`** endpoint is the only sanctioned path that re-reads the environment and config file (an explicit, audited operation).
+
+**Unset after read.** Once secrets are copied into `Config`, the secret-bearing variables are removed from `os.environ` so a shell / code-exec tool subprocess can't inherit them and they don't linger in a child's `/proc/<pid>/environ`.
+
+This covers every provider key (`OPENAI_API_KEY`, `DEEPSEEK_API_KEY`, the generic `COGTRIX_PROVIDER_<NAME>_API_KEY`, …), the search-service keys, the messaging tokens (`COGTRIX_WHATSAPP_API_KEY`, `COGTRIX_TELEGRAM_TOKEN`, `COGTRIX_SLACK_BOT_TOKEN`), and `COGTRIX_JWT_SECRET`.
+
+Set `COGTRIX_KEEP_ENV_SECRETS=1` to opt out of the unset (for debugging) — the secrets then remain in the environment.
+
+> **`COGTRIX_DB_URL`** is intentionally *not* unset: it is resolved by the database engine layer through its own `data_dir`-aware path. The default SQLite URL carries no secret; if your DB URL embeds a password, deliver it via `COGTRIX_DB_URL_FILE` instead.
+
+**What this does NOT scrub (do not over-trust it):**
+
+- The **main process's `/proc/<pid>/environ`** still shows the *original* values — the kernel exposes the initial-env region, and rewriting it needs `CAP_SYS_RESOURCE`, which a hardened container drops. A same-uid read of the main PID can still see them.
+- **`docker inspect`** shows the static `-e` / `environment:` config, unaffected by a runtime unset.
+
+This is **defense-in-depth only** — surface reduction, not a substitute for removing in-process code execution or off-box secret custody (a broker / short-lived credentials).
 
 ### Docker Healthcheck
 

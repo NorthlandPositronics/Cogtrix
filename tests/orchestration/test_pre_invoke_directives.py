@@ -1042,3 +1042,24 @@ class TestStuckConclusionLengthGuard:
         msgs = [AIMessage(content=long_answer), AIMessage(content=long_answer)]
         out = apply_pre_invoke_directives(self._ctx(), list(msgs), list(msgs), msgs, _DummyLogger())
         assert _has_stuck_nudge(out), "substantial repeated answers must still trigger the nudge"
+
+    def test_short_replies_skip_sequencematcher(self, monkeypatch) -> None:
+        # #2199: the cheap length guard must run BEFORE the O(n·m) SequenceMatcher,
+        # so short prior responses short-circuit without paying the diff cost.
+        import difflib
+
+        calls = {"n": 0}
+        real = difflib.SequenceMatcher
+
+        def _spy(*args: Any, **kwargs: Any):
+            calls["n"] += 1
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(difflib, "SequenceMatcher", _spy)
+        short = "No rush, take your time."
+        msgs = [AIMessage(content=short), AIMessage(content=short)]
+        apply_pre_invoke_directives(self._ctx(), list(msgs), list(msgs), msgs, _DummyLogger())
+        assert calls["n"] == 0, (
+            "SequenceMatcher must be skipped for short prior responses — the length "
+            "guard should short-circuit before the O(n·m) diff (#2199)"
+        )

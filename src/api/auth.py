@@ -178,7 +178,10 @@ def _get_jwt_secret() -> str:
     """Return the cached JWT signing secret, lazily initializing it once."""
     global _JWT_SECRET
     if _JWT_SECRET is None:
-        configure_jwt_secret(os.environ.get("COGTRIX_JWT_SECRET", ""))
+        # Resolve via the #2103 _FILE convention (COGTRIX_JWT_SECRET_FILE).
+        from src.config import secret_from_env_or_file
+
+        configure_jwt_secret(secret_from_env_or_file("COGTRIX_JWT_SECRET") or "")
     if _JWT_SECRET is None:
         raise RuntimeError("JWT secret not configured")
     return _JWT_SECRET

@@ -69,13 +69,19 @@ def _user_token() -> str:
     return create_access_token(user_id=str(uuid.uuid4()), role="user")
 
 
+# Snapshot the JWT secret at import (before any load_config() unsets it, #2102).
+_JWT_SECRET_FOR_SIGNING = (
+    os.environ.get("COGTRIX_JWT_SECRET") or "testsecret_mustbe32chars_minimum00"
+)
+
+
 def _expired_token() -> str:
     """Mint a token that is already expired (negative expire_minutes)."""
     import datetime as _dt
 
     import jwt as _jwt
 
-    secret = os.environ["COGTRIX_JWT_SECRET"]
+    secret = _JWT_SECRET_FOR_SIGNING
     now = _dt.datetime.now(_dt.UTC)
     payload = {
         "sub": str(uuid.uuid4()),

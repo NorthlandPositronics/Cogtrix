@@ -622,6 +622,7 @@ def prepare_messages_with_context(
     user_input: str,
     context_prefix: str | None = None,
     max_context_tokens: int | None = None,
+    user_images: list[str] | None = None,
 ) -> list[Any]:
     """
     Prepare messages for the agent with optional context prefix.
@@ -641,6 +642,11 @@ def prepare_messages_with_context(
         max_context_tokens: Token budget for the full prompt (from
             ``ModelConfig.context_window`` or a sensible default).  When set,
             the function trims history to leave room for the LLM response.
+        user_images: Optional list of data-URI strings to attach as image_url
+            blocks in the final user message (vision-capable models only).
+            When non-empty the message uses multimodal list content instead of
+            a plain string, keeping ``user_input`` a ``str`` throughout the
+            pipeline.
 
     Returns:
         List of messages ready for agent invocation
@@ -648,7 +654,10 @@ def prepare_messages_with_context(
     if HumanMessage is None:
         # LangChain not available, return basic structure
         fallback_msgs = list(history_messages)
-        fallback_msgs.append({"type": "human", "content": user_input})
+        if user_images:
+            fallback_msgs.append({"type": "human", "content": user_input, "images": user_images})
+        else:
+            fallback_msgs.append({"type": "human", "content": user_input})
         return fallback_msgs
 
     result: list[Any] = []
@@ -664,8 +673,13 @@ def prepare_messages_with_context(
     # Add conversation history
     result.extend(history_messages)
 
-    # Add current user input
-    result.append(HumanMessage(content=user_input))
+    # Add current user input — multimodal when images are present
+    if user_images:
+        mm_content: list[Any] = [{"type": "text", "text": user_input}]
+        mm_content += [{"type": "image_url", "image_url": {"url": uri}} for uri in user_images]
+        result.append(HumanMessage(content=mm_content))
+    else:
+        result.append(HumanMessage(content=user_input))
 
     # Trim to budget if a limit is set
     if max_context_tokens and max_context_tokens > 0:
@@ -804,4 +818,5 @@ class AgentRunner(Protocol):
         *,
         config: AgentRunConfig,
         task_complexity: Any | None = None,
+        user_images: list[str] | None = None,
     ) -> str: ...

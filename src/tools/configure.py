@@ -412,10 +412,19 @@ def configure_file_ops_tool(config: Config) -> None:
 
 
 def configure_file_read_dirs(config: Config) -> None:
-    """Configure file operations tool with allowed read directories."""
+    """Configure file operations tool with allowed read directories.
+
+    #2060/#2231: only apply the config value when it is non-empty. A config file
+    without an ``allowed_read_paths`` key resolves to an empty list, and calling
+    ``set_allowed_read_dirs([])`` would clear the directories already wired from
+    ``COGTRIX_ALLOWED_READ_PATHS`` at import time — silently revoking the agent's
+    env-configured read dirs. When the config specifies paths, they take over as
+    the explicit source of truth (mirrors ``configure_file_ops_tool``).
+    """
     from src.tools.file_ops import set_allowed_read_dirs
 
-    set_allowed_read_dirs(config.allowed_read_paths)
+    if config.allowed_read_paths:
+        set_allowed_read_dirs(config.allowed_read_paths)
 
 
 def configure_cron_tool(
@@ -503,7 +512,9 @@ def configure_rag_tool(config: Config) -> None:
             "embedding_model": emb_model,
             "base_url": emb_base_url,
             "api_key": emb_api_key,
-            "vectordb_dir": str(config.resolve_data_path(config.rag.vectordb_dir) / "faiss_index"),
+            # #2216: shared with run_ingest via resolve_rag_index_dir so the
+            # query path can't drift from where the CLI ingest writes.
+            "vectordb_dir": str(config.resolve_rag_index_dir()),
         }
 
         # Resolve the API uploads directory so the RAG tool can also search

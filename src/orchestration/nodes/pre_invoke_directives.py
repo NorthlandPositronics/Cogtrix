@@ -412,39 +412,43 @@ def _phase_p1_post_bind_prep(
                     if len(_prior_finals) == 2:
                         break
         if len(_prior_finals) == 2:
-            from difflib import SequenceMatcher as _SeqMatch
-
-            _sim = _SeqMatch(None, _prior_finals[0], _prior_finals[1]).ratio()
             # #2054: only fire for substantial answers — skip short
             # conversational acknowledgments that are near-identical by nature.
+            # #2199: evaluate this cheap length guard BEFORE the O(n·m)
+            # SequenceMatcher, so short prior responses (the common case on every
+            # fresh user turn) short-circuit without paying the diff cost.
             _both_substantial = (
                 min(len(_prior_finals[0]), len(_prior_finals[1])) > _STUCK_CONCLUSION_MIN_CHARS
             )
-            if _sim >= 0.90 and _both_substantial:
-                msgs.append(
-                    HumanMessage(
-                        content=(
-                            "[Stuck-conclusion check] Your prior two assistant "
-                            "responses are near-identical "
-                            f"(similarity {_sim:.2f}). Either acknowledge "
-                            "honestly that you are unable to gather new "
-                            "evidence (state what evidence would change your "
-                            "answer), or pursue a categorically different "
-                            "line of investigation — do NOT repeat the same "
-                            "conclusion with a 'You're absolutely right' or "
-                            "'I apologize' prefix. If you've considered the "
-                            "user's input and your conclusion is unchanged, "
-                            "say so plainly with the words "
-                            "'my conclusion is unchanged' and explain what "
-                            "would change it."
+            if _both_substantial:
+                from difflib import SequenceMatcher as _SeqMatch
+
+                _sim = _SeqMatch(None, _prior_finals[0], _prior_finals[1]).ratio()
+                if _sim >= 0.90:
+                    msgs.append(
+                        HumanMessage(
+                            content=(
+                                "[Stuck-conclusion check] Your prior two assistant "
+                                "responses are near-identical "
+                                f"(similarity {_sim:.2f}). Either acknowledge "
+                                "honestly that you are unable to gather new "
+                                "evidence (state what evidence would change your "
+                                "answer), or pursue a categorically different "
+                                "line of investigation — do NOT repeat the same "
+                                "conclusion with a 'You're absolutely right' or "
+                                "'I apologize' prefix. If you've considered the "
+                                "user's input and your conclusion is unchanged, "
+                                "say so plainly with the words "
+                                "'my conclusion is unchanged' and explain what "
+                                "would change it."
+                            )
                         )
                     )
-                )
-                log.info(
-                    "Stuck-conclusion nudge injected (similarity=%.2f) — "
-                    "prior 2 final responses near-identical (Bug G #1713)",
-                    _sim,
-                )
+                    log.info(
+                        "Stuck-conclusion nudge injected (similarity=%.2f) — "
+                        "prior 2 final responses near-identical (Bug G #1713)",
+                        _sim,
+                    )
 
     return msgs
 

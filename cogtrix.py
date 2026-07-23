@@ -2433,10 +2433,12 @@ def run_ingest(args, config: Config) -> int:
 
     # Build ingest configuration from args and config
     docs_dir = Path(args.docs_dir if args.docs_dir else config.rag.docs_dir)
-    raw_vdb = args.vectordb_dir if args.vectordb_dir else config.rag.vectordb_dir
-    vectordb_dir = (
-        Path(raw_vdb) if Path(raw_vdb).is_absolute() else config.resolve_data_path(raw_vdb)
-    )
+    # #2216: write the index to the SAME directory the query side reads
+    # (configure_rag_tool) — i.e. ``<vectordb_dir>/faiss_index`` — via the
+    # shared helper. Previously this wrote straight to ``vectordb_dir`` (no
+    # ``faiss_index`` segment), so query_knowledge_base never found a
+    # CLI-ingested index.
+    vectordb_dir = config.resolve_rag_index_dir(args.vectordb_dir)
 
     # Resolve embedding config from models registry
     # Priority: CLI args > env vars > rag.model > active provider fallback

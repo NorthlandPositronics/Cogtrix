@@ -268,11 +268,13 @@ async def reload_config(
 
     warnings_list: list[str] = []
     try:
-        from src.config import load_config
+        from src.config import reload_cached_config
 
-        # load_config() reads the config file, applies env vars, and resolves
-        # model aliases — Config() alone would create an empty default config.
-        new_cfg = await asyncio.to_thread(load_config)
+        # The ONLY sanctioned env re-read path (#2101): force a fresh resolution
+        # and replace the process-wide cache so every consumer that reuses
+        # get_cached_config() picks up the new values. reload_cached_config()
+        # reads the config file, applies env vars, and resolves model aliases.
+        new_cfg = await asyncio.to_thread(reload_cached_config)
         request.app.state.config = new_cfg
         cfg_path = getattr(new_cfg, "config_file_path", None)
         return APIResponse(

@@ -1,0 +1,5 @@
+# Real comprehensive-test secrets — NEVER commit. Only the *.example template
+# and the secret-free cogtrix.comprehensive.yaml are tracked.
+.env
+*.env
+!*.env.example

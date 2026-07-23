@@ -23,11 +23,65 @@ import pytest
 
 from tests.agent_complexity.runner import (
     ScenarioResult,
+    _build_run_cmd,
     _format_summary,
     _parse_log,
+    _resolve_env_file,
     _select_scenarios,
     resolve_config_path,
 )
+
+# ── secrets env-file (#2219) ──────────────────────────────────────────
+
+
+class TestBuildRunCmd:
+    def _kw(self, tmp_path, **extra):
+        return {
+            "name": "fleet-1-gas",
+            "image": "cogtrix:test",
+            "config_path": tmp_path / "cfg.yaml",
+            "log_path": tmp_path / "t.log",
+            "prompt": "do a thing",
+            "verbosity": 3,
+            **extra,
+        }
+
+    def test_no_env_file_by_default(self, tmp_path):
+        cmd = _build_run_cmd(**self._kw(tmp_path))
+        assert "--env-file" not in cmd
+
+    def test_env_file_injected_before_image(self, tmp_path):
+        envf = tmp_path / ".env"
+        cmd = _build_run_cmd(**self._kw(tmp_path, env_file=envf))
+        assert "--env-file" in cmd
+        i = cmd.index("--env-file")
+        assert cmd[i + 1] == str(envf)
+        # must precede the image (a docker run flag, not a container arg)
+        assert i < cmd.index("cogtrix:test")
+
+    def test_prompt_and_config_still_present(self, tmp_path):
+        envf = tmp_path / ".env"
+        cmd = _build_run_cmd(**self._kw(tmp_path, env_file=envf))
+        assert cmd[cmd.index("--prompt") + 1] == "do a thing"
+        assert any(str(tmp_path / "cfg.yaml") in part for part in cmd)
+
+
+class TestResolveEnvFile:
+    def test_explicit_override_used_when_present(self, tmp_path):
+        envf = tmp_path / "secrets.env"
+        envf.write_text("X=1\n")
+        assert _resolve_env_file(envf, tmp_path / "cfg.yaml") == envf
+
+    def test_explicit_missing_override_is_skip(self, tmp_path):
+        assert _resolve_env_file(tmp_path / "nope.env", tmp_path / "cfg.yaml") is None
+
+    def test_autodetect_sibling_dotenv(self, tmp_path):
+        (tmp_path / ".env").write_text("X=1\n")
+        assert _resolve_env_file(None, tmp_path / "cfg.yaml") == tmp_path / ".env"
+
+    def test_no_sibling_returns_none(self, tmp_path):
+        assert _resolve_env_file(None, tmp_path / "cfg.yaml") is None
+
 
 # ── resolve_config_path ───────────────────────────────────────────────
 

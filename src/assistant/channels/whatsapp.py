@@ -7,16 +7,20 @@ Contact filtering mirrors the logic in src/tools/whatsapp.py.
 
 from __future__ import annotations
 
+import base64
 import collections
+import json
 import logging
 import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from typing import Any
 
 from src.assistant.channel import Channel, IncomingMessage, SendResult, parse_duration
 from src.tools._whatsapp_client import REQUESTS_AVAILABLE, ChatOverview, Message, WahaClient
+from src.utils.atomic_write import atomic_write_json
 
 log = logging.getLogger("cogtrix")
 
@@ -132,6 +136,20 @@ def _check_receive_contact(
 class WhatsAppChannel(Channel):
     """WhatsApp channel backed by a Waha instance."""
 
+    # Class-level default so instances built without ``__init__`` (e.g. test
+    # fixtures via ``__new__``) still resolve the flag; ``__init__`` overrides it
+    # from ``config["analyze_media"]`` (#2237).
+    _analyze_media: bool = True
+
+    # Class-level defaults for the persisted-dedup attributes (#2053) so that
+    # ``__new__``-built test doubles that exercise ``_process_message``/``poll``
+    # resolve them without an ``AttributeError``. ``__init__`` sets the real
+    # per-instance values; when ``_seen_ids_path`` is ``None`` persistence is
+    # disabled (the default — no disk I/O in unit tests).
+    _seen_ids_path: Path | None = None
+    _SEEN_PERSIST_TTL: float = 604800.0  # 7 days; matches _WATERMARK_TTL
+    _seen_dirty: bool = False
+
     def __init__(self, config: dict[str, Any]) -> None:
         self._config = config
         self._client = WahaClient(
@@ -156,6 +174,20 @@ class WhatsAppChannel(Channel):
         self._WATERMARK_TTL: float = 604800.0
         self._seen_ids: dict[str, float] = {}
         self._SEEN_TTL: float = 600.0
+        # Cross-restart dedup (#2053): _seen_ids is in-memory (monotonic-keyed,
+        # for the in-process TTL prune) and is wiped on restart, which let a
+        # recently-answered message inside the reactivation lookback be
+        # re-fetched and answered again. _seen_wall persists processed message
+        # ids keyed by WALL-CLOCK time (time.time()) so they survive a restart;
+        # monotonic values would be meaningless after a reboot.
+        self._seen_wall: dict[str, float] = {}
+        self._SEEN_PERSIST_TTL: float = 604800.0  # 7 days; matches _WATERMARK_TTL
+        self._seen_dirty: bool = False
+        seen_path = config.get("seen_ids_path")
+        self._seen_ids_path: Path | None = Path(seen_path) if seen_path else None
+        if self._seen_ids_path is not None:
+            self._load_seen_ids()
+        self._analyze_media: bool = bool(config.get("analyze_media", True))
         self._overview_limit: int = int(config.get("overview_limit", 50))
         self._ignore_archived: bool = bool(config.get("ignore_archived", True))
         self._ignore_older_than: float | None = parse_duration(config.get("ignore_older_than"))
@@ -414,6 +446,13 @@ class WhatsAppChannel(Channel):
             if incoming is not None:
                 result.append(incoming)
 
+        # Persist newly-seen ids once per cycle (#2053) so a restart doesn't
+        # re-answer messages already handled. Cheap no-op when persistence is
+        # disabled or nothing new was processed.
+        if self._seen_dirty and self._seen_ids_path is not None:
+            self._save_seen_ids()
+            self._seen_dirty = False
+
         return result
 
     def _fetch_new_messages(self, chat: ChatOverview) -> list[Message]:
@@ -429,6 +468,7 @@ class WhatsAppChannel(Channel):
         messages = self._client.get_chat_messages(
             chat_id=chat.id,
             limit=self._message_fetch_limit,
+            download_media=self._analyze_media,
             filter_from_me=False,
             filter_timestamp_gte=filter_ts,
         )
@@ -461,7 +501,9 @@ class WhatsAppChannel(Channel):
         if len(self._seen_ids) > 500:
             cutoff = now - self._SEEN_TTL
             self._seen_ids = {k: v for k, v in self._seen_ids.items() if v > cutoff}
-        if msg.id in self._seen_ids:
+        # ``getattr`` guard: ``__new__``-built doubles may not set ``_seen_wall``.
+        seen_wall = getattr(self, "_seen_wall", None)
+        if msg.id in self._seen_ids or (seen_wall is not None and msg.id in seen_wall):
             return None
 
         resolved_from = msg.from_number
@@ -502,10 +544,21 @@ class WhatsAppChannel(Channel):
                 )
             return None
 
-        if not msg.body.strip():
+        images: list[str] = []
+        if self._analyze_media and msg.has_media and msg.media_url:
+            result = self._client.download_media(msg.media_url)
+            if result is not None:
+                data, mimetype = result
+                uri = f"data:{mimetype};base64,{base64.b64encode(data).decode()}"
+                images.append(uri)
+
+        if not msg.body.strip() and not images:
             return None
 
         self._seen_ids[msg.id] = now
+        if seen_wall is not None:
+            seen_wall[msg.id] = time.time()
+            self._seen_dirty = True
 
         sender = msg.from_number
         for suffix in ("@c.us", "@s.whatsapp.net", "@lid"):
@@ -520,6 +573,7 @@ class WhatsAppChannel(Channel):
             text=msg.body,
             timestamp=float(msg.timestamp),
             resolved_phone=resolved_phone,
+            images=images,
         )
 
     def _evict_stale_snapshots(self, now: float) -> None:
@@ -541,6 +595,55 @@ class WhatsAppChannel(Channel):
             for cid in stale_watermarks:
                 self._chat_watermarks.pop(cid, None)
                 self._watermark_timestamps.pop(cid, None)
+
+    def _load_seen_ids(self) -> None:
+        """Load wall-clock-keyed seen message ids from disk, pruning stale ones.
+
+        Persisted timestamps are wall-clock (``time.time()``), NOT monotonic: a
+        monotonic value written before a reboot is meaningless afterwards, and a
+        load-time prune comparing against ``time.time()`` would discard
+        everything. Only the in-memory ``_seen_ids`` map uses monotonic for its
+        in-process TTL prune. Best-effort: a missing/corrupt file is ignored.
+        """
+        path = self._seen_ids_path
+        if path is None or not path.exists():
+            return
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            log.warning("Failed to load WhatsApp seen-ids from %s: %s", path, exc)
+            return
+        if not isinstance(raw, dict):
+            return
+        cutoff = time.time() - self._SEEN_PERSIST_TTL
+        loaded = 0
+        for msg_id, ts in raw.items():
+            try:
+                ts_f = float(ts)
+            except (TypeError, ValueError):
+                continue
+            if ts_f > cutoff:
+                self._seen_wall[str(msg_id)] = ts_f
+                loaded += 1
+        if loaded:
+            log.info("WhatsApp: loaded %d persisted seen-id(s) from disk", loaded)
+
+    def _save_seen_ids(self) -> None:
+        """Persist the wall-clock seen-id map atomically (best-effort).
+
+        Prunes entries older than ``_SEEN_PERSIST_TTL`` before writing so the
+        file stays bounded.
+        """
+        path = self._seen_ids_path
+        if path is None:
+            return
+        cutoff = time.time() - self._SEEN_PERSIST_TTL
+        self._seen_wall = {k: v for k, v in self._seen_wall.items() if v > cutoff}
+        try:
+            with atomic_write_json(path) as f:
+                json.dump(self._seen_wall, f, ensure_ascii=False)
+        except OSError as exc:
+            log.warning("Failed to persist WhatsApp seen-ids to %s: %s", path, exc)
 
     def send(self, chat_id: str, text: str) -> SendResult:
         result = self._client.send_text(chat_id, text)

@@ -12,9 +12,10 @@ Functions:
   tool" errors and return de-duplicated tool names the LLM attempted.
 * :func:`_strip_failed_tool_messages` — remove those ToolMessage errors
   and the matching AIMessage tool_call entries.
-* :func:`_repair_tool_message_pairs` — drop orphaned / misordered
-  ToolMessages whose ``tool_call_id`` does not pair with a preceding
-  AIMessage (OpenAI rejects this shape).
+* :func:`_repair_tool_message_pairs` — reconcile AIMessage(tool_calls)
+  ⇄ ToolMessage pairing both directions: drop orphaned / misordered
+  ToolMessages, and inject synthetic answers for declared-but-unanswered
+  tool_calls (OpenAI rejects either shape).
 * :func:`_apply_context_message_cap` — chunk-aware history trim that
   respects AIMessage + ToolMessage pairing under both message-count
   and token caps.
@@ -120,23 +121,29 @@ def _strip_failed_tool_messages(messages: list, tool_names: set[str]) -> list:
 
 
 def _repair_tool_message_pairs(messages: list) -> list:
-    """Remove ToolMessages whose tool_call_id has no valid preceding AIMessage.
+    """Repair the AIMessage(tool_calls) ⇄ ToolMessage pairing both directions.
 
-    OpenAI (and compatible providers) reject requests where a ToolMessage is not
-    preceded by an AIMessage that contains a tool_call with a matching id.  This
-    situation arises when:
-    - An MCP/tool call raises an exception (e.g. ClosedResourceError) and the
-      ToolMessage error is stored in state, but the triggering AIMessage was empty
-      or had a malformed / truncated tool_calls list.
-    - Message compression strips tool_calls from an AIMessage while retaining the
-      paired ToolMessages.
+    OpenAI (and compatible providers) reject a request unless **every** tool_call
+    an AIMessage declares is answered by a following ToolMessage, and no
+    ToolMessage is orphaned/misordered. This guard reconciles both sides:
 
-    The repair pass collects every tool_call id that appears in an AIMessage
-    (checking .tool_calls, additional_kwargs["tool_calls"], and Anthropic/Bedrock
-    content blocks), then drops any ToolMessage whose tool_call_id is absent from
-    that set or appears before the declaring AIMessage.  Truly empty AIMessages
-    (no content, no tool_calls of any kind) that no longer serve as a pair anchor
-    are also dropped.
+    - **Orphaned / misordered ToolMessages** — a ``tool`` result whose
+      ``tool_call_id`` has no declaring AIMessage, or appears *before* it — are
+      dropped (e.g. an MCP call raising ``ClosedResourceError`` left a result in
+      state with no triggering AIMessage, or compression stripped the AIMessage's
+      tool_calls while keeping the results). Truly empty AIMessages (no content,
+      no tool_calls of any kind) are dropped too.
+    - **Unanswered tool_calls** (#2238) — a ``tool_call_id`` an AIMessage
+      *declares* that has no following ToolMessage — get a synthetic placeholder
+      ``ToolMessage("[tool call not completed]", tool_call_id=...)`` injected right
+      after the declaring AIMessage. Without this, a partially-fulfilled parallel
+      batch (cut mid-flight by the recursion limit or per-tool budget, deduped, or
+      half-trimmed by compression) reaches the provider unanswered → a hard 400
+      that kills the turn and can wedge the session.
+
+    Declared ids are harvested across all encodings (``.tool_calls``,
+    ``additional_kwargs["tool_calls"]``, and Anthropic/Bedrock ``tool_use``
+    content blocks).
     """
     from langchain_core.messages import AIMessage, ToolMessage
 
@@ -174,9 +181,33 @@ def _repair_tool_message_pairs(messages: list) -> list:
             return bool(content)  # any content blocks (including tool_use) count
         return bool(content)
 
-    # Pass 1 — collect declared tool_call ids and their first declaring position.
+    def _collect_tool_call_names(msg: AIMessage) -> dict[str, str]:
+        """Map declared tool_call id -> tool name (best-effort) for synthetic answers."""
+        names: dict[str, str] = {}
+        for tc in getattr(msg, "tool_calls", None) or []:
+            tcid = tc.get("id") if isinstance(tc, dict) else getattr(tc, "id", None)
+            nm = tc.get("name") if isinstance(tc, dict) else getattr(tc, "name", None)
+            if tcid and nm:
+                names[tcid] = nm
+        for tc in (getattr(msg, "additional_kwargs", None) or {}).get("tool_calls") or []:
+            if isinstance(tc, dict):
+                tcid = tc.get("id")
+                nm = (tc.get("function") or {}).get("name") or tc.get("name")
+                if tcid and nm:
+                    names.setdefault(tcid, nm)
+        content = getattr(msg, "content", None)
+        if isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "tool_use":
+                    tcid, nm = block.get("id"), block.get("name")
+                    if tcid and nm:
+                        names.setdefault(tcid, nm)
+        return names
+
+    # Pass 1 — collect declared tool_call ids, first declaring position, and names.
     declared_ids: set[str] = set()
     declared_positions: dict[str, int] = {}
+    declared_names: dict[str, str] = {}
     for idx, msg in enumerate(messages):
         if not isinstance(msg, AIMessage):
             continue
@@ -184,46 +215,165 @@ def _repair_tool_message_pairs(messages: list) -> list:
         declared_ids |= tool_call_ids
         for tcid in tool_call_ids:
             declared_positions.setdefault(tcid, idx)
+        for tcid, nm in _collect_tool_call_names(msg).items():
+            declared_names.setdefault(tcid, nm)
 
-    # Pass 2 — identify orphaned and misordered ToolMessage tool_call_ids.
+    # Pass 2 — identify orphaned and misordered ToolMessage tool_call_ids, and the
+    # set of declared ids that ARE answered by a ToolMessage following their
+    # declaration.
     orphaned_ids: set[str] = set()
     misordered_ids: set[str] = set()
+    answered_ids: set[str] = set()
     for msg_idx, msg in enumerate(messages):
         if isinstance(msg, ToolMessage):
             tcid = getattr(msg, "tool_call_id", None)
-            if tcid and tcid not in declared_ids:
+            if not tcid:
+                continue
+            if tcid not in declared_ids:
                 orphaned_ids.add(tcid)
                 continue
-            if tcid and declared_positions.get(tcid) is not None:
-                if msg_idx < declared_positions[tcid]:
-                    misordered_ids.add(tcid)
+            decl_pos = declared_positions.get(tcid)
+            if decl_pos is not None and msg_idx < decl_pos:
+                misordered_ids.add(tcid)
+            elif decl_pos is not None and msg_idx > decl_pos:
+                answered_ids.add(tcid)
 
-    if not orphaned_ids and not misordered_ids:
+    # Pass 3 (#2238) — declared tool_call ids with NO answering ToolMessage after
+    # their declaration. Left as-is, the AIMessage's tool_calls reach the provider
+    # unanswered → 400 "insufficient tool messages following tool_calls" (kills the
+    # turn and can wedge the session). This arises when a parallel tool batch is
+    # cut mid-flight (recursion / per-tool budget), a dedup/skip emits no
+    # ToolMessage, or compression drops a ToolMessage while keeping its AIMessage.
+    # We inject a synthetic placeholder ToolMessage for each so the pairing holds.
+    unanswered_ids: set[str] = declared_ids - answered_ids
+
+    # Pass 4 — contiguity. OpenAI/Azure reject a request unless every ToolMessage
+    # *immediately* follows its declaring AIMessage(tool_calls) (or a sibling
+    # ToolMessage in the same block). A directive/nudge/compression step can wedge
+    # a non-tool message between an AIMessage's tool_calls and its answering
+    # ToolMessage(s); declaration and order are both still valid, so Passes 1-3
+    # leave it untouched, but the provider 400s ("messages with role 'tool' must
+    # be a response to a preceeding message with 'tool_calls'"). Group each
+    # answered ToolMessage under its declaring AIMessage; a foreign message inside
+    # that span means the answers must be relocated to restore contiguity.
+    answers_by_decl: dict[int, list[int]] = {}
+    for ti, msg in enumerate(messages):
+        if not isinstance(msg, ToolMessage):
+            continue
+        tcid = getattr(msg, "tool_call_id", None)
+        if not tcid or tcid in orphaned_ids or tcid in misordered_ids:
+            continue
+        decl = declared_positions.get(tcid)
+        if decl is not None and ti > decl:
+            answers_by_decl.setdefault(decl, []).append(ti)
+    displaced = False
+    for decl, tis in answers_by_decl.items():
+        run = set(tis)
+        # A gap between the declaration and the last answer that is not itself an
+        # answer for this declaration = a wedged foreign message → not contiguous.
+        if any(k not in run for k in range(decl + 1, max(tis))):
+            displaced = True
+            break
+
+    # Pass 5 — duplicate answers (#2276). More than one ToolMessage answering the
+    # SAME tool_call_id: OpenAI/Azure require exactly one tool response per declared
+    # tool_call, so the extra is unmatched → a hard 400 that kills the turn
+    # (observed on gpt-4o via OpenRouter, role_pm_06: a tool node emitted two
+    # results for one parallel call). Keep the first answer and drop the rest. This
+    # is removal-only, so it composes with call_model's RemoveMessage write-back.
+    seen_answer_tcids: set[str] = set()
+    duplicate = False
+    for msg in messages:
+        if not isinstance(msg, ToolMessage):
+            continue
+        tc = getattr(msg, "tool_call_id", None)
+        if not tc or tc in orphaned_ids or tc in misordered_ids:
+            continue
+        if tc in seen_answer_tcids:
+            duplicate = True
+            break
+        seen_answer_tcids.add(tc)
+
+    if (
+        not orphaned_ids
+        and not misordered_ids
+        and not unanswered_ids
+        and not displaced
+        and not duplicate
+    ):
         return messages
 
     # Logging via the original ``cogtrix.orchestration.graph`` logger so the
     # repair warnings keep landing in the same operator-facing stream that
     # existed before the extraction.
     logging.getLogger("cogtrix.orchestration.graph").warning(
-        "Repairing %d orphaned and %d misordered ToolMessage(s) (orphans: %s; misordered: %s) — "
-        "likely caused by ClosedResourceError, malformed tool_calls, or compressed history",
+        "Repairing %d orphaned, %d misordered, %d unanswered, %s displaced, and "
+        "%s duplicate ToolMessage block(s) (orphans: %s; misordered: %s; "
+        "unanswered: %s) — likely caused by ClosedResourceError, malformed "
+        "tool_calls, a budget/recursion-cut tool batch, a duplicated tool result, "
+        "an injected directive splitting a tool pair, or compressed history",
         len(orphaned_ids),
         len(misordered_ids),
+        len(unanswered_ids),
+        "some" if displaced else "no",
+        "some" if duplicate else "no",
         ", ".join(sorted(orphaned_ids)) if orphaned_ids else "none",
         ", ".join(sorted(misordered_ids)) if misordered_ids else "none",
+        ", ".join(sorted(unanswered_ids)) if unanswered_ids else "none",
     )
 
+    consumed: set[int] = set()
+    emitted_tcids: set[str] = set()
     repaired: list = []
-    for msg in messages:
+    for idx, msg in enumerate(messages):
         if isinstance(msg, ToolMessage):
+            if idx in consumed:
+                continue  # already emitted contiguously under its declaring AIMessage
             tcid = getattr(msg, "tool_call_id", None)
             if tcid in orphaned_ids or tcid in misordered_ids:
                 continue  # drop orphaned or misordered ToolMessage
+            if tcid in emitted_tcids:
+                continue  # drop a duplicate answer for an already-answered tool_call
+            if tcid:
+                emitted_tcids.add(tcid)
+            repaired.append(msg)  # defensive: answered tool whose declarer was dropped
         elif isinstance(msg, AIMessage):
             # Drop truly empty AIMessages: no text, no tool_calls, no content blocks
             if not _msg_has_content(msg):
                 continue
-        repaired.append(msg)
+            repaired.append(msg)
+            # Pull this AIMessage's answered ToolMessages into place (original
+            # order) so the tool block sits immediately after it — restoring
+            # contiguity when a foreign message had split the pair. Keep one answer
+            # per tool_call_id (drop duplicates) so the block stays OpenAI-compliant.
+            for ti in answers_by_decl.get(idx, []):
+                consumed.add(ti)
+                tc = getattr(messages[ti], "tool_call_id", None)
+                if tc in emitted_tcids:
+                    continue  # duplicate — one answer already emitted for this id
+                if tc:
+                    emitted_tcids.add(tc)
+                repaired.append(messages[ti])
+            # Inject a synthetic answer for each unanswered tool_call FIRST declared
+            # by this AIMessage (so duplicate declarations don't double-inject),
+            # keeping the ToolMessage block contiguous.
+            to_fill = [
+                tcid
+                for tcid in _collect_tool_call_ids(msg)
+                if tcid in unanswered_ids and declared_positions.get(tcid) == idx
+            ]
+            for tcid in to_fill:
+                emitted_tcids.add(tcid)
+                repaired.append(
+                    ToolMessage(
+                        content="[tool call not completed]",
+                        tool_call_id=tcid,
+                        name=declared_names.get(tcid),
+                        additional_kwargs={"cogtrix.kind": "synthetic_tool_repair"},
+                    )
+                )
+        else:
+            repaired.append(msg)
     return repaired
 
 

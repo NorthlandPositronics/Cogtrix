@@ -40,6 +40,11 @@ Config file (``services.whatsapp`` section)::
           bob:   "+442071234567"
         rate_limit: 30                # messages per hour (0 = unlimited)
         max_message_length: 4096
+
+TOOL_SETUP(config) is called automatically by ToolRegistry after this module
+is imported.  It rebuilds the module singleton ``_cfg`` from the passed app
+``Config`` (which ``_apply_env_vars`` populates before env vars are unset) so
+the API key survives the ``COGTRIX_WHATSAPP_API_KEY`` unset (#2223 phase 2).
 """
 
 from __future__ import annotations
@@ -49,13 +54,16 @@ import re
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, Field
 
 from src.logging_config import get_logger
 from src.tools._whatsapp_client import REQUESTS_AVAILABLE, WahaClient
 from src.tools.delegate import register_tool_categories
+
+if TYPE_CHECKING:
+    from src.config import Config
 
 log = get_logger()
 
@@ -100,11 +108,13 @@ def _load_config() -> WhatsAppConfig:
     """Build config by merging config file values with environment overrides."""
     cfg = WhatsAppConfig()
 
-    # 1) Load from config file (best-effort)
+    # 1) Load from config file (best-effort). #2101: reuse the process-wide
+    #    resolved config so the environment is read once; the api_key survives the
+    #    #2223/#2102 unset via the secret cache.
     try:
-        from src.config import load_config
+        from src.config import get_cached_config
 
-        app_cfg = load_config()
+        app_cfg = get_cached_config()
         wa = app_cfg.services.get("whatsapp", {})
         if wa:
             cfg.waha_url = wa.get("waha_url", cfg.waha_url)
@@ -140,6 +150,48 @@ def _load_config() -> WhatsAppConfig:
         cfg.contacts = [c.strip() for c in contacts_str.split(",") if c.strip()]
 
     return cfg
+
+
+def TOOL_SETUP(config: Config) -> None:
+    """Called automatically by ToolRegistry after loading this module.
+
+    Rebuilds the module singleton from the passed app ``Config`` so the API
+    key survives the ``COGTRIX_WHATSAPP_API_KEY`` env unset (#2223 phase 2).
+    Re-running is idempotent — it simply replaces ``_cfg`` in-place.
+    """
+    global _cfg
+    wa = (getattr(config, "services", None) or {}).get("whatsapp", {})
+    cfg = WhatsAppConfig()
+    if wa:
+        cfg.waha_url = wa.get("waha_url", cfg.waha_url)
+        cfg.api_key = wa.get("api_key", cfg.api_key)
+        cfg.session = wa.get("session", cfg.session)
+        cfg.allow_send = wa.get("allow_send", cfg.allow_send)
+        cfg.allow_receive = wa.get("allow_receive", cfg.allow_receive)
+        cfg.require_confirmation = wa.get("require_confirmation", cfg.require_confirmation)
+        cfg.filter_mode = wa.get("filter_mode", cfg.filter_mode)
+        cfg.contacts = wa.get("contacts", cfg.contacts)
+        cfg.phonebook = wa.get("phonebook", cfg.phonebook)
+        cfg.rate_limit = wa.get("rate_limit", cfg.rate_limit)
+        cfg.max_message_length = wa.get("max_message_length", cfg.max_message_length)
+    # Env overrides remain as fallback; after phase-2 unset they no-op
+    if url := os.getenv("COGTRIX_WHATSAPP_URL"):
+        cfg.waha_url = url.strip()
+    if key := os.getenv("COGTRIX_WHATSAPP_API_KEY"):
+        cfg.api_key = key.strip()
+    if session := os.getenv("COGTRIX_WHATSAPP_SESSION"):
+        cfg.session = session.strip()
+    cfg.allow_send = _env_bool("COGTRIX_WHATSAPP_SEND", cfg.allow_send)
+    cfg.allow_receive = _env_bool("COGTRIX_WHATSAPP_RECEIVE", cfg.allow_receive)
+    fm = os.environ.get("COGTRIX_WHATSAPP_FILTER", "").lower().strip()
+    if fm:
+        _LEGACY_MODES = {"whitelist": "allow"}
+        fm = _LEGACY_MODES.get(fm, fm)
+        if fm in ("none", "allow", "ignore", "blacklist"):
+            cfg.filter_mode = fm
+    if contacts_str := os.getenv("COGTRIX_WHATSAPP_CONTACTS"):
+        cfg.contacts = [c.strip() for c in contacts_str.split(",") if c.strip()]
+    _cfg = cfg
 
 
 # Singleton — loaded once at import time
@@ -614,6 +666,7 @@ __all__ = [
     "is_configured",
     "TOOL_CONFIG",
     "TOOL_CONFIGS",
+    "TOOL_SETUP",
     "WhatsAppSendInput",
     "WhatsAppSendImageInput",
     "WhatsAppCheckInput",

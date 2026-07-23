@@ -179,9 +179,10 @@ def _get_cors_origins() -> list[str]:
     localhost-only default if Config cannot be loaded.
     """
     try:
-        from src.config import load_config
+        from src.config import get_cached_config
 
-        origins = load_config().api.cors_origins
+        # #2101: reuse the process-wide resolved config (env read once).
+        origins = get_cached_config().api.cors_origins
         if origins:
             return list(origins)
     except Exception:  # noqa: BLE001 — never let config failure break CORS setup
@@ -243,8 +244,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
 
     log.info("Cogtrix API starting up")
 
-    # Validate and snapshot JWT secret for auth helpers.
-    jwt_secret = os.environ.get("COGTRIX_JWT_SECRET", "")
+    # Validate and snapshot JWT secret for auth helpers. Resolve via the #2103
+    # _FILE convention so COGTRIX_JWT_SECRET_FILE=/run/secrets/jwt_secret works.
+    from src.config import secret_from_env_or_file
+
+    jwt_secret = secret_from_env_or_file("COGTRIX_JWT_SECRET") or ""
     from src.api.auth import configure_dummy_password_hash, configure_jwt_secret
 
     configure_jwt_secret(jwt_secret)
@@ -264,10 +268,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     # first request.
     try:
         from src.config import APIConfig as _APIConfig
-        from src.config import load_config as _load_config
+        from src.config import get_cached_config as _get_cached_config
 
         try:
-            _app_cfg_api = _load_config().api
+            # #2101: reuse the process-wide resolved config (env read once).
+            _app_cfg_api = _get_cached_config().api
         except Exception as _cfg_exc:  # noqa: BLE001
             log.info(
                 "API rate-limit / trusted-proxy config falling back to "
@@ -394,9 +399,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     # Load Cogtrix config
     cfg = None
     try:
-        from src.config import load_config
+        from src.config import get_cached_config
 
-        cfg = load_config()
+        # #2101: resolve once and reuse process-wide. This seeds the cache at
+        # startup so every later runtime path (CORS, RAG ingest, DB-URL resolver,
+        # tools) reuses the same instance instead of re-reading os.environ.
+        cfg = get_cached_config()
         app.state.config = cfg
         log.info(
             "Config loaded (provider=%s, file=%s)",
@@ -486,20 +494,17 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
                     mcp_configs,
                     builtin_tool_names=set((tool_registry.tools if tool_registry else {}).keys()),
                 )
-                if tool_registry is not None:
-                    for tool_name, tool_obj in mcp_tools.items():
-                        tool_registry.tools[tool_name] = tool_obj
-                        srv_name = (tool_obj.metadata or {}).get("server", "")
-                        tool_registry.tool_metadata[tool_name] = {
-                            "requires_confirmation": (tool_obj.metadata or {}).get(
-                                "requires_confirmation", True
-                            ),
-                            "source": "mcp",
-                            "server": srv_name,
-                            "pin": _mcp_pin_map.get(srv_name, True),
-                        }
-                        if _mcp_pin_map.get(srv_name, True):
-                            app.state.pinned_mcp_tool_names.add(tool_name)
+                # Mirror the discovered tools into the live registry via the
+                # shared helper so startup and the runtime /mcp routes register
+                # tools identically (#2151/#2153).
+                from src.api.mcp_runtime import register_mcp_tools
+
+                register_mcp_tools(
+                    tool_registry,
+                    app.state.pinned_mcp_tool_names,
+                    mcp_tools,
+                    _mcp_pin_map,
+                )
 
                 app.state.mcp_manager = mcp_manager
                 log.info(
@@ -585,6 +590,46 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     app.state.deferral_manager = None
     app.state.guardrail_pipeline = None
     app.state.knowledge_store = None
+
+    # API content guardrails (#2056). The assistant/messaging path runs a
+    # GuardrailPipeline; the API chat path historically had none. Build it here
+    # so the turn runner can screen input and sanitize output. Default OFF: the
+    # pipeline is only constructed when ``api.guardrails.enabled`` is truthy, so
+    # existing deployments are unchanged. If the operator DID enable guardrails
+    # but construction fails, we re-raise (fail closed) rather than silently
+    # serve unprotected — a security control must not degrade silently.
+    api_guardrails: dict[str, Any] = (
+        dict(getattr(getattr(cfg, "api", None), "guardrails", {}) or {}) if cfg is not None else {}
+    )
+    if api_guardrails.get("enabled"):
+        from pathlib import Path as _Path
+
+        from src.assistant.guardrails import GuardrailPipeline
+
+        if "violations_persist_path" not in api_guardrails:
+            _data_dir = getattr(cfg, "data_dir", "data")
+            api_guardrails["violations_persist_path"] = str(
+                _Path(_data_dir) / "api" / "violations.json"
+            )
+        # Optional LLM judge — only when enabled AND a model is named (the API has
+        # no guaranteed default chat LLM at startup to fall back on).
+        judge_llm = None
+        judge_cfg = api_guardrails.get("llm_judge", {}) or {}
+        if judge_cfg.get("enabled", False):
+            judge_model = judge_cfg.get("model")
+            if judge_model:
+                from src.assistant.knowledge import create_extraction_llm
+
+                judge_llm = create_extraction_llm(judge_model, cfg)
+            else:
+                log.warning(
+                    "api.guardrails.llm_judge.enabled is true but no model is set; "
+                    "the LLM judge will be disabled on the API path."
+                )
+        app.state.guardrail_pipeline = GuardrailPipeline(
+            config={"guardrails": api_guardrails}, llm=judge_llm
+        )
+        log.info("API content guardrails enabled")
 
     # Auto-start assistant if configured
     if cfg is not None and app.state.tool_registry is not None:

@@ -510,3 +510,91 @@ class TestPatchFileLocking:
         content = (tmp_cwd / "target.txt").read_text()
         assert "old" not in content
         assert ("NEW_A" in content) != ("NEW_B" in content)
+
+
+# ---------------------------------------------------------------------------
+# #2257 — file/filename/file_path aliases for `path`
+#
+# Models frequently call write_file with `file=`/`filename=` instead of `path=`.
+# The input schemas must accept those synonyms (and normalize to `path`) instead
+# of failing Pydantic validation and silently dropping the write.
+# ---------------------------------------------------------------------------
+
+from langchain_core.tools import StructuredTool  # noqa: E402
+
+from src.tools.file_ops import (  # noqa: E402
+    AppendFileInput,
+    FileInfoInput,
+    ListDirectoryInput,
+    ReadFileInput,
+    WriteFileInput,
+)
+
+
+class TestPathAliasSchemas:
+    """Each file-tool schema must accept `path`, `file`, `filename`, `file_path`."""
+
+    @pytest.mark.parametrize("alias", ["path", "file", "filename", "file_path"])
+    def test_write_file_input_accepts_alias(self, alias: str) -> None:
+        model = WriteFileInput.model_validate({alias: "/tmp/x", "content": "y"})
+        assert model.path == "/tmp/x"
+        assert model.content == "y"
+
+    @pytest.mark.parametrize("alias", ["path", "file", "filename", "file_path"])
+    def test_append_file_input_accepts_alias(self, alias: str) -> None:
+        model = AppendFileInput.model_validate({alias: "/tmp/x", "content": "y"})
+        assert model.path == "/tmp/x"
+
+    @pytest.mark.parametrize("alias", ["path", "file", "filename", "file_path"])
+    def test_read_file_input_accepts_alias(self, alias: str) -> None:
+        assert ReadFileInput.model_validate({alias: "/tmp/x"}).path == "/tmp/x"
+
+    @pytest.mark.parametrize("alias", ["path", "file", "filename", "file_path"])
+    def test_list_directory_input_accepts_alias(self, alias: str) -> None:
+        assert ListDirectoryInput.model_validate({alias: "/tmp/d"}).path == "/tmp/d"
+
+    @pytest.mark.parametrize("alias", ["path", "file", "filename", "file_path"])
+    def test_file_info_input_accepts_alias(self, alias: str) -> None:
+        assert FileInfoInput.model_validate({alias: "/tmp/x"}).path == "/tmp/x"
+
+    def test_list_directory_default_path_preserved(self) -> None:
+        # The "." default must survive adding validation_alias.
+        assert ListDirectoryInput.model_validate({}).path == "."
+
+    def test_missing_path_defaults_to_empty(self) -> None:
+        # `path` carries a default ("") so the alias-resolved value survives
+        # LangChain arg-extraction (#2257). A wholly missing path therefore
+        # defaults rather than raising — the empty path is rejected downstream
+        # by the tool, not at schema validation.
+        assert WriteFileInput.model_validate({"content": "y"}).path == ""
+
+    def test_missing_path_is_rejected_by_the_tool(self, tmp_cwd: Path) -> None:
+        # The graceful-error contract: an empty path writes nothing and returns
+        # an error string (no crash).
+        result = write_file("", "data")
+        assert result.startswith("Error")
+
+
+class TestPathAliasEndToEnd:
+    """The bug surfaced through the LangChain StructuredTool: validate the full
+    path the model actually hits, not just the bare schema (#2257)."""
+
+    def _tool(self, func, schema):
+        return StructuredTool.from_function(func=func, args_schema=schema, name=func.__name__)
+
+    def test_write_file_via_tool_with_file_alias(self, tmp_cwd: Path) -> None:
+        tool = self._tool(write_file, WriteFileInput)
+        out = tool.invoke({"file": "aliased.txt", "content": "hello"})
+        assert "Error" not in out
+        assert (tmp_cwd / "aliased.txt").read_text() == "hello"
+
+    def test_write_file_via_tool_with_path_still_works(self, tmp_cwd: Path) -> None:
+        tool = self._tool(write_file, WriteFileInput)
+        tool.invoke({"path": "canonical.txt", "content": "hi"})
+        assert (tmp_cwd / "canonical.txt").read_text() == "hi"
+
+    def test_append_file_via_tool_with_filename_alias(self, tmp_cwd: Path) -> None:
+        tool = self._tool(append_file, AppendFileInput)
+        tool.invoke({"filename": "log.txt", "content": "a"})
+        tool.invoke({"filename": "log.txt", "content": "b"})
+        assert (tmp_cwd / "log.txt").read_text() == "ab"

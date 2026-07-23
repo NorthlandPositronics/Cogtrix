@@ -52,9 +52,11 @@ def _run_ingest(doc_id: str, file_path: Path) -> tuple[bool, int, str | None]:
     # same provider as the CLI (instead of defaulting to Ollama).
     emb_kwargs: dict[str, Any] = {}
     try:
-        from src.config import load_config
+        from src.config import get_cached_config
 
-        cfg = load_config()
+        # #2101: reuse the process-wide resolved config instead of re-reading
+        # os.environ on every ingest task.
+        cfg = get_cached_config()
         emb_type, emb_model, emb_base_url, emb_api_key = cfg.resolve_embedding_config()
         emb_kwargs = {
             "embedding_provider": emb_type,

@@ -1661,7 +1661,9 @@ class TestTokenFinalNotPremature:
         _, payload = handler._enqueue.call_args.args
         assert payload["final"] is False
 
-    def test_final_true_after_tools_complete(self):
+    def test_final_answer_buffered_after_tools_complete(self):
+        # #2251: a post-tool final-answer token is buffered (suppressed), not
+        # streamed live, so a verification-recovery regeneration can't double-render.
         from unittest.mock import Mock
 
         from src.api.callbacks import WebSocketCallbackHandler
@@ -1674,9 +1676,8 @@ class TestTokenFinalNotPremature:
             assert len(handler._tool_starts) == 0
         handler._enqueue = Mock()
         handler.on_llm_new_token("token-2")
-        handler._enqueue.assert_called_once()
-        _, payload = handler._enqueue.call_args.args
-        assert payload["final"] is True
+        handler._enqueue.assert_not_called()  # final-answer token suppressed (#2251)
+        assert handler.final_answer_buffered is True
 
 
 # ── BUG-219 — compression per-future timeout not dead code ───────────────

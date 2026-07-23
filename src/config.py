@@ -64,6 +64,7 @@ import json
 import logging
 import os
 import re
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -191,6 +192,11 @@ class ModelConfig:
     #: (model, temperature, max_tokens, api_key, base_url, streaming, …) are
     #: dropped to avoid duplicate-keyword errors.
     model_kwargs: dict[str, Any] = field(default_factory=dict)
+    #: Declare whether this model accepts image content (vision). ``True`` =
+    #: vision-capable; ``False`` = text-only; ``None`` (default) = unknown.
+    #: Used by the assistant vision delegation path (#2262): when ``None`` and
+    #: no ``vision_model`` is configured, images are forwarded as-is.
+    supports_vision: bool | None = None
 
     DEFAULT_TEMPERATURE: float = 0.5
     DEFAULT_CONTEXT_WINDOW: int = 32_768
@@ -334,6 +340,16 @@ class APIConfig:
         ]
     )
 
+    # Content guardrails for the API chat path (#2056). The assistant/messaging
+    # mode runs a GuardrailPipeline (banned strings, PII redaction, URL blocking,
+    # encoding/injection detection, optional LLM-judge, rate-limit/blacklist
+    # reactions); the API chat path historically had none. This dict mirrors the
+    # assistant ``services.assistant.guardrails`` schema and is wired into the API
+    # turn runner. Empty (the default) = OFF: the pipeline is only constructed
+    # when ``api.guardrails.enabled`` is true, so existing deployments are
+    # unchanged. See docs/CONFIGURATION.md.
+    guardrails: dict[str, Any] = field(default_factory=dict)
+
     def __post_init__(self) -> None:
         for name, spec in self.rate_limits.items():
             if not _RATE_LIMIT_SPEC_RE.match(spec):
@@ -362,6 +378,18 @@ class APIConfig:
                 "api.cors_origins must be a list of non-empty origin strings "
                 "(e.g. ['https://cogtrix.ai'])"
             )
+
+        if not isinstance(self.guardrails, dict):
+            raise ConfigError(
+                f"api.guardrails must be a mapping (got {type(self.guardrails).__name__}); "
+                "see docs/CONFIGURATION.md for the schema"
+            )
+        # The GuardrailPipeline raises on `enabled: false` (it would bypass every
+        # check). On the API path we instead treat falsey/absent as "off" — only a
+        # truthy `enabled` constructs the pipeline — so a config that explicitly
+        # sets `api.guardrails.enabled: false` means "disabled", not "construct a
+        # bypassed pipeline". No further validation here; the pipeline validates
+        # its own sub-keys at construction.
 
 
 @dataclass
@@ -794,6 +822,22 @@ class Config:
             raise ConfigError(f"Path traversal detected in data path: {subpath!r}")
         return result_resolved
 
+    def resolve_rag_index_dir(self, override: str | None = None) -> Path:
+        """Canonical FAISS index directory for RAG: ``<vectordb_dir>/faiss_index``.
+
+        Single source of truth so the CLI ingest path (``cogtrix.run_ingest``)
+        and the query-tool config (``src.tools.configure.configure_rag_tool``)
+        cannot drift apart. They DID drift in #2216: post-#1951 ``run_ingest``
+        wrote the index straight to ``vectordb_dir`` while ``configure_rag_tool``
+        configured the query side to read ``vectordb_dir/faiss_index`` — so
+        ``query_knowledge_base`` never found a CLI-ingested index. Both callers
+        now derive the directory from here.
+
+        ``override`` is the optional CLI ``--vectordb-dir`` value; when absent
+        the configured ``rag.vectordb_dir`` is used.
+        """
+        return self.resolve_data_path(override or self.rag.vectordb_dir) / "faiss_index"
+
     def get_provider_config(self, name: str | None = None) -> ProviderConfig:
         """Get configuration for a provider by name.
 
@@ -1028,7 +1072,7 @@ def find_config_file() -> Path | None:
     return None
 
 
-def load_config(cli_args=None) -> Config:
+def load_config(cli_args=None, *, unset_secrets: bool = True) -> Config:
     """
     Load configuration with priority:
     CLI args > Environment variables > Config file > Defaults
@@ -1038,6 +1082,10 @@ def load_config(cli_args=None) -> Config:
 
     Args:
         cli_args: Parsed command line arguments (argparse namespace)
+        unset_secrets: When True (default), config-authoritative secret env
+            vars are removed from ``os.environ`` after being copied into the
+            returned ``Config`` (#2223). Pass False in tests that must assert
+            environment contents after a load.
 
     Returns:
         Config object with resolved settings
@@ -1065,7 +1113,7 @@ def load_config(cli_args=None) -> Config:
         config.config_file_path = config_file
 
     # 3. Override with environment variables (medium priority)
-    _apply_env_vars(config)
+    _apply_env_vars(config, unset_secrets=unset_secrets)
 
     # 4. Override with CLI arguments (highest priority)
     if cli_args:
@@ -1086,6 +1134,60 @@ def load_config(cli_args=None) -> Config:
         config.active_model_alias = _synth
 
     return config
+
+
+# ── Process-wide cached configuration (#2101) ────────────────────────────────
+# Environment variables must be read EXACTLY ONCE per process. ``load_config()``
+# re-applies ``os.environ`` on every call, so runtime paths that re-invoke it
+# (RAG ingest, the DB-engine default-URL resolver, the API CORS resolver, the
+# weather / WhatsApp / Telegram tool loaders) would re-read the environment — and,
+# after the #2102/#2223 unset, observe missing secrets. ``get_cached_config()``
+# resolves config ONCE and returns that instance to every later caller, so the
+# environment is read a single time and resolution no longer depends on the env
+# still being present. The admin ``reload_config`` endpoint is the ONLY sanctioned
+# re-read path, via ``reload_cached_config()``.
+_CACHED_CONFIG: "Config | None" = None
+_CACHED_CONFIG_LOCK = threading.Lock()
+
+
+def get_cached_config() -> "Config":
+    """Return the process-wide resolved :class:`Config`, reading os.environ once.
+
+    Runtime/post-startup callers MUST use this instead of :func:`load_config` so
+    environment variables are read exactly once (#2101). The first call resolves
+    config (no CLI args — this is the post-startup accessor); every later call
+    returns the same instance. Thread-safe (double-checked lock) because the API
+    resolves config from worker threads.
+    """
+    global _CACHED_CONFIG
+    if _CACHED_CONFIG is None:
+        with _CACHED_CONFIG_LOCK:
+            if _CACHED_CONFIG is None:
+                _CACHED_CONFIG = load_config()
+    return _CACHED_CONFIG
+
+
+def reload_cached_config() -> "Config":
+    """Force a fresh resolution and replace the process cache (#2101).
+
+    The ONLY sanctioned re-read path — the admin ``reload_config`` endpoint. Every
+    other consumer reuses :func:`get_cached_config`.
+    """
+    global _CACHED_CONFIG
+    with _CACHED_CONFIG_LOCK:
+        _CACHED_CONFIG = load_config()
+    return _CACHED_CONFIG
+
+
+def reset_cached_config() -> None:
+    """Drop the cached Config so the next :func:`get_cached_config` re-resolves.
+
+    For test isolation only — never call in app code (the cache is meant to hold
+    the single process-lifetime resolution).
+    """
+    global _CACHED_CONFIG
+    with _CACHED_CONFIG_LOCK:
+        _CACHED_CONFIG = None
 
 
 def _resolve_model(config: Config) -> None:
@@ -1739,6 +1841,18 @@ def _apply_config_file(config: Config, path: Path) -> None:
                     "(got %s); ignoring",
                     type(raw_origins).__name__,
                 )
+        # API content guardrails (#2056) — a mapping mirroring the assistant
+        # ``services.assistant.guardrails`` schema. Copied verbatim; the
+        # GuardrailPipeline validates its own sub-keys at construction time.
+        if "guardrails" in api_cfg:
+            raw_guardrails = api_cfg["guardrails"]
+            if isinstance(raw_guardrails, dict):
+                config.api.guardrails = dict(raw_guardrails)
+            else:
+                _log.warning(
+                    "api.guardrails must be a mapping (got %s); ignoring",
+                    type(raw_guardrails).__name__,
+                )
         # Re-validate the merged APIConfig so invalid specs / CIDRs raise
         # ``ConfigError`` with the same diagnostic as a freshly-constructed
         # instance.
@@ -1857,15 +1971,20 @@ def _apply_config_file(config: Config, path: Path) -> None:
     # ── Per-user quotas ───────────────────────────────────────────
     quota_data = data.get("quotas", {}) or {}
     if quota_data:
-        v = quota_data.get("token_budget_per_day")
-        if v is not None and int(v) > 0:
-            config.quota_token_budget_per_day = int(v)
-        v = quota_data.get("requests_per_hour")
-        if v is not None and int(v) > 0:
-            config.quota_requests_per_hour = int(v)
-        v = quota_data.get("max_concurrent_sessions")
-        if v is not None and int(v) > 0:
-            config.quota_max_concurrent_sessions = int(v)
+        # Tolerant numeric coercion (mirrors every other numeric config key):
+        # a non-integer value warns-and-skips instead of crashing load_config.
+        if "token_budget_per_day" in quota_data:
+            val = _safe_int(quota_data["token_budget_per_day"], "quotas.token_budget_per_day")
+            if val is not None and val > 0:
+                config.quota_token_budget_per_day = val
+        if "requests_per_hour" in quota_data:
+            val = _safe_int(quota_data["requests_per_hour"], "quotas.requests_per_hour")
+            if val is not None and val > 0:
+                config.quota_requests_per_hour = val
+        if "max_concurrent_sessions" in quota_data:
+            val = _safe_int(quota_data["max_concurrent_sessions"], "quotas.max_concurrent_sessions")
+            if val is not None and val > 0:
+                config.quota_max_concurrent_sessions = val
 
     # ── Self-improvement loop ─────────────────────────────────────
     if "self_improve_auto_commit" in data:
@@ -1999,6 +2118,10 @@ def _parse_models_section(config: Config, models_data: dict[str, Any]) -> None:
                     type(raw_model_kwargs).__name__,
                 )
                 raw_model_kwargs = None
+            raw_supports_vision = model_data.get("supports_vision")
+            supports_vision: bool | None = None
+            if raw_supports_vision is not None:
+                supports_vision = bool(raw_supports_vision)
             try:
                 config.models[name] = ModelConfig(
                     provider=provider,
@@ -2024,6 +2147,7 @@ def _parse_models_section(config: Config, models_data: dict[str, Any]) -> None:
                         else 180
                     ),
                     model_kwargs=dict(raw_model_kwargs) if raw_model_kwargs else {},
+                    supports_vision=supports_vision,
                 )
             except (ConfigError, ValueError, TypeError) as exc:
                 _log.warning("Invalid model config '%s': %s", name, exc)
@@ -2152,8 +2276,202 @@ def _parse_ollama_address(value: str) -> str:
     return f"http://{value}:{_OLLAMA_DEFAULT_PORT}"
 
 
-def _apply_env_vars(config: Config) -> None:
-    """Apply settings from environment variables."""
+#: Matches ``COGTRIX_PROVIDER_<NAME>_API_KEY`` for the generic per-provider key
+#: override (#2222). The captured ``name`` is lowercased to the provider name.
+_PROVIDER_KEY_ENV_RE = re.compile(r"^COGTRIX_PROVIDER_(?P<name>.+)_API_KEY$")
+
+#: Sensitive env vars dropped from ``os.environ`` immediately after they've been
+#: copied into ``Config`` (#2223), so a shell/code-exec tool subprocess can't
+#: inherit them and they don't linger in ``/proc/<pid>/environ``. ONLY secrets
+#: that are consumed via ``Config`` are listed: every LLM provider key (read
+#: through ``config.providers[].api_key``) and the search-tool service keys
+#: (injected into each tool's config by ``configure_*_tool``). The generic
+#: ``COGTRIX_PROVIDER_<NAME>_API_KEY`` names are matched dynamically via
+#: :data:`_PROVIDER_KEY_ENV_RE` in addition to this set.
+#:
+#: Phase 2 (#2223): ``OPENWEATHER_API_KEY``, ``COGTRIX_WHATSAPP_API_KEY``,
+#: ``COGTRIX_TELEGRAM_TOKEN``, and ``COGTRIX_SLACK_BOT_TOKEN`` are now also
+#: included because their tools are config-authoritative (each declares
+#: ``TOOL_SETUP`` which rebuilds the tool singleton from the injected ``Config``
+#: before the env var is unset).
+#:
+#: Phase 3 (#2102): ``COGTRIX_JWT_SECRET``. It is consumed OUTSIDE the config
+#: loader (``app.py`` / ``auth.py``) via :func:`secret_from_env_or_file`, which
+#: reads the survives-unset process cache (#2103). :func:`_apply_env_vars` seeds
+#: that cache *before* the unset so those consumers still resolve it once the env
+#: var is gone — without #2103's cache routing this unset would be unsafe (the
+#: documented read-once dependency of #2101/#2102).
+#:
+#: ``COGTRIX_DB_URL`` is deliberately NOT unset here: the engine layer
+#: (``src/api/db/engine.py``) resolves it through its own ``data_dir``-aware,
+#: lazily-reimported path that reads ``os.environ`` directly, so unsetting it from
+#: the config loader rebinds the engine and breaks ``data_dir`` resolution. The
+#: default SQLite URL carries no secret; unsetting a password-bearing DB URL is
+#: left to dedicated engine-layer work.
+_SECRETS_UNSET_AFTER_READ = frozenset(
+    {
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "GEMINI_API_KEY",
+        "GROQ_API_KEY",
+        "XAI_API_KEY",
+        "DEEPSEEK_API_KEY",
+        "TAVILY_API_KEY",
+        "EXA_API_KEY",
+        "BRAVE_API_KEY",
+        "SERPAPI_API_KEY",
+        "GOOGLE_API_KEY",
+        "OPENWEATHER_API_KEY",
+        "COGTRIX_WHATSAPP_API_KEY",
+        "COGTRIX_TELEGRAM_TOKEN",
+        "COGTRIX_SLACK_BOT_TOKEN",
+        "COGTRIX_JWT_SECRET",
+    }
+)
+
+#: Secret names consumed outside :func:`_apply_env_vars` (at API startup) via
+#: :func:`secret_from_env_or_file`. They are seeded into the process cache before
+#: the post-read unset so those consumers survive it (#2101/#2102).
+_SECRETS_SEED_BEFORE_UNSET = ("COGTRIX_JWT_SECRET",)
+
+
+def _keep_env_secrets() -> bool:
+    """True when ``COGTRIX_KEEP_ENV_SECRETS`` opts out of the post-read env unset.
+
+    Escape hatch (#2102) for debugging: leaves the sensitive env vars in
+    ``os.environ`` (and therefore in child-process environments) so an operator
+    can inspect them. Off by default — the hardening (unset-after-read) is the
+    default posture.
+    """
+    return os.environ.get("COGTRIX_KEEP_ENV_SECRETS", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+
+
+def _unset_sensitive_env() -> None:
+    """Drop config-authoritative secrets from ``os.environ`` (#2223).
+
+    Called once, after :func:`_apply_env_vars` has copied the values into the
+    ``Config``. Removes the static :data:`_SECRETS_UNSET_AFTER_READ` names plus
+    any generic ``COGTRIX_PROVIDER_<NAME>_API_KEY`` keys.
+    """
+    for name in list(os.environ):
+        if name in _SECRETS_UNSET_AFTER_READ or _PROVIDER_KEY_ENV_RE.match(name):
+            os.environ.pop(name, None)
+
+
+#: Process-level cache of secret env values, keyed by env-var name (#2233).
+#: Populated the first time a secret is read from ``os.environ``; reused by later
+#: ``load_config()`` calls after :func:`_unset_sensitive_env` has popped the var.
+#: This is a plain in-process dict — NOT inherited by subprocesses — so the
+#: #2223 goal (secrets out of the *inheritable* environment) still holds, while
+#: the invariant "once a key is read from the env it stays available to Config
+#: for the process lifetime, regardless of how many times config is re-resolved"
+#: is preserved. The API re-resolves config (per session / turn / reload), which
+#: is exactly when an env-only provider key would otherwise come back empty.
+_SECRET_ENV_CACHE: dict[str, str] = {}
+
+
+def _read_secret_from_file(name: str) -> str | None:
+    """Resolve the ``<name>_FILE`` secret-file convention (#2103).
+
+    Container/orchestrator secret delivery (Docker/Swarm secrets at
+    ``/run/secrets/``, Kubernetes secret volumes, Vault-agent) mounts a secret
+    as a *file*, which keeps it out of the process environment entirely
+    (``docker inspect`` / ``/proc/<pid>/environ`` / child inheritance). If
+    ``<name>_FILE`` is set, read the secret from that path, trimming a single
+    trailing newline (secret files commonly end with one).
+
+    Returns ``None`` when ``<name>_FILE`` is not set. Raises :class:`ConfigError`
+    when it IS set but the target is missing, unreadable, or empty — a
+    misconfigured secret mount must fail loudly, never silently yield an empty
+    key (acceptance criterion of #2103).
+    """
+    file_var = f"{name}_FILE"
+    path_str = os.environ.get(file_var)
+    if not path_str:
+        return None
+    try:
+        raw = Path(path_str).read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ConfigError(
+            f"{file_var}={path_str!r} could not be read: {exc}. Ensure the secret "
+            f"file exists and is readable by the process uid."
+        ) from exc
+    # Trim exactly one trailing newline (``\n`` or ``\r\n``); preserve any other
+    # content verbatim so secrets that legitimately contain whitespace survive.
+    if raw.endswith("\r\n"):
+        secret = raw[:-2]
+    elif raw.endswith("\n"):
+        secret = raw[:-1]
+    else:
+        secret = raw
+    if not secret:
+        raise ConfigError(
+            f"{file_var}={path_str!r} is empty. A secret file must contain the "
+            f"secret value (a single trailing newline is trimmed)."
+        )
+    return secret
+
+
+def _secret_env(name: str) -> str | None:
+    """Read a secret from the environment, the ``_FILE`` convention, or the cache.
+
+    Resolution order (honours the #2103 precedence explicit-env > ``_FILE`` >
+    config-file > default — the config file is applied before this runs, so a
+    ``None`` return leaves the config-file value in place):
+
+      1. Live ``<name>`` env value (cached for the process lifetime).
+      2. Process cache from an earlier load — the env var may since have been
+         unset by #2223, and a value already resolved from ``_FILE`` lives here
+         too, so the cache wins over re-reading the file (keeps explicit-env's
+         precedence stable across re-resolutions when both ``<name>`` and
+         ``<name>_FILE`` are set).
+      3. ``<name>_FILE`` secret-file convention (#2103), then cache it.
+
+    See :data:`_SECRET_ENV_CACHE`.
+    """
+    val = os.environ.get(name)
+    if val:
+        _SECRET_ENV_CACHE[name] = val
+        return val
+    cached = _SECRET_ENV_CACHE.get(name)
+    if cached:
+        return cached
+    file_val = _read_secret_from_file(name)
+    if file_val:
+        _SECRET_ENV_CACHE[name] = file_val
+        return file_val
+    return None
+
+
+def secret_from_env_or_file(name: str) -> str | None:
+    """Public entry point for secret consumers OUTSIDE the config loader.
+
+    The JWT signing secret (``src/api/app.py`` / ``src/api/auth.py``) and the
+    database URL (``src/api/db/engine.py``) are read directly from the
+    environment rather than through :func:`_apply_env_vars`. This wrapper gives
+    them the same ``<name>`` → ``<name>_FILE`` → process-cache resolution (#2103)
+    so e.g. ``COGTRIX_JWT_SECRET_FILE`` / ``COGTRIX_DB_URL_FILE`` work.
+    """
+    return _secret_env(name)
+
+
+def _reset_secret_env_cache() -> None:
+    """Clear the secret-env cache. For test isolation only — never call in app
+    code (secrets are meant to persist for the process lifetime)."""
+    _SECRET_ENV_CACHE.clear()
+
+
+def _apply_env_vars(config: Config, *, unset_secrets: bool = True) -> None:
+    """Apply settings from environment variables.
+
+    When ``unset_secrets`` (the default), config-authoritative secret env vars
+    are removed from ``os.environ`` after being read (#2223). Pass ``False`` in
+    tests that need to assert environment contents.
+    """
     # General settings
     if env_val := os.getenv("COGTRIX_MODEL"):
         config.active_model_alias = env_val
@@ -2162,19 +2480,47 @@ def _apply_env_vars(config: Config) -> None:
     if env_val := os.getenv("COGTRIX_DATA_DIR"):
         config.data_dir = env_val
 
-    # LLM provider API keys — via named providers
-    if env_val := os.getenv("OPENAI_API_KEY"):
+    # LLM provider API keys — via named providers. Read through _secret_env so an
+    # env-only key survives later re-resolutions after #2223 unset it (#2233).
+    if env_val := _secret_env("OPENAI_API_KEY"):
         _set_provider_key(config, "openai", env_val)
-    if env_val := os.getenv("ANTHROPIC_API_KEY"):
+    if env_val := _secret_env("ANTHROPIC_API_KEY"):
         _set_provider_key(config, "anthropic", env_val)
-    if env_val := os.getenv("GEMINI_API_KEY"):
+    if env_val := _secret_env("GEMINI_API_KEY"):
         _set_provider_key(config, "google", env_val)
-    if env_val := os.getenv("GROQ_API_KEY"):
+    if env_val := _secret_env("GROQ_API_KEY"):
         _set_provider_key(config, "groq", env_val)
-    if env_val := os.getenv("XAI_API_KEY"):
+    if env_val := _secret_env("XAI_API_KEY"):
         _set_provider_key(config, "xai", env_val)
-    if env_val := os.getenv("DEEPSEEK_API_KEY"):
+    if env_val := _secret_env("DEEPSEEK_API_KEY"):
         _set_provider_key(config, "deepseek", env_val)
+
+    # Generic per-provider key override (#2222). Custom / self-hosted providers
+    # (e.g. a local vLLM "spark" endpoint) have no well-known *_API_KEY name, so
+    # their key could only live inline in the config file. This lets ANY
+    # provider's key come from the environment instead:
+    #     COGTRIX_PROVIDER_<NAME>_API_KEY=<key>  ->  providers.<name>.api_key
+    # <NAME> maps to a lowercased provider name (hyphenated names aren't
+    # addressable this way — use a simple/underscore-free provider name). As
+    # with the well-known keys above, the env value overrides the config file.
+    # Consider both live env names and cached names (#2233): on a re-resolution
+    # the generic key has been popped from os.environ, so discover it from the
+    # cache too, then read the value through _secret_env.
+    generic_names = {n for n in os.environ if _PROVIDER_KEY_ENV_RE.match(n)}
+    generic_names |= {n for n in _SECRET_ENV_CACHE if _PROVIDER_KEY_ENV_RE.match(n)}
+    # _FILE convention (#2103): a custom provider key may be delivered only as
+    # COGTRIX_PROVIDER_<NAME>_API_KEY_FILE (no plain env var). Discover the base
+    # name from the *_FILE entry so _secret_env() can resolve it from the file.
+    for n in os.environ:
+        if n.endswith("_FILE"):
+            base = n[: -len("_FILE")]
+            if _PROVIDER_KEY_ENV_RE.match(base):
+                generic_names.add(base)
+    for env_name in generic_names:
+        m = _PROVIDER_KEY_ENV_RE.match(env_name)
+        env_val = _secret_env(env_name)
+        if m and env_val:
+            _set_provider_key(config, m.group("name").lower(), env_val)
 
     # Ollama settings — update or create ollama provider entry
     ollama_url: str | None = None
@@ -2193,18 +2539,20 @@ def _apply_env_vars(config: Config) -> None:
                 base_url=ollama_url,
             )
 
-    # Service API keys → services dict
-    if env_val := os.getenv("OPENWEATHER_API_KEY"):
+    # Service API keys → services dict. Secret keys go through _secret_env so they
+    # survive re-resolution after the #2223 unset (#2233); GOOGLE_CSE_ID is not a
+    # secret (not unset), so it stays a plain env read.
+    if env_val := _secret_env("OPENWEATHER_API_KEY"):
         _set_service(config, "openweather", "api_key", env_val)
-    if env_val := os.getenv("TAVILY_API_KEY"):
+    if env_val := _secret_env("TAVILY_API_KEY"):
         _set_service(config, "tavily", "api_key", env_val)
-    if env_val := os.getenv("EXA_API_KEY"):
+    if env_val := _secret_env("EXA_API_KEY"):
         _set_service(config, "exa", "api_key", env_val)
-    if env_val := os.getenv("BRAVE_API_KEY"):
+    if env_val := _secret_env("BRAVE_API_KEY"):
         _set_service(config, "brave", "api_key", env_val)
-    if env_val := os.getenv("SERPAPI_API_KEY"):
+    if env_val := _secret_env("SERPAPI_API_KEY"):
         _set_service(config, "serpapi", "api_key", env_val)
-    if env_val := os.getenv("GOOGLE_API_KEY"):
+    if env_val := _secret_env("GOOGLE_API_KEY"):
         _set_service(config, "google", "api_key", env_val)
     if env_val := os.getenv("GOOGLE_CSE_ID"):
         _set_service(config, "google", "cse_id", env_val)
@@ -2219,9 +2567,10 @@ def _apply_env_vars(config: Config) -> None:
     if env_val := os.getenv("OLLAMA_EMBEDDING_MODEL"):
         config.embedding_model_override = env_val
 
-    # WhatsApp env vars
+    # WhatsApp env vars. The api_key is a secret (unset by #2223) → read via
+    # _secret_env so it survives re-resolution (#2233); URL/session are not.
     wa_url = os.environ.get("COGTRIX_WHATSAPP_URL")
-    wa_key = os.environ.get("COGTRIX_WHATSAPP_API_KEY")
+    wa_key = _secret_env("COGTRIX_WHATSAPP_API_KEY")
     wa_session = os.environ.get("COGTRIX_WHATSAPP_SESSION")
     if wa_url or wa_key or wa_session:
         wa = config.services.setdefault("whatsapp", {})
@@ -2232,11 +2581,15 @@ def _apply_env_vars(config: Config) -> None:
         if wa_session:
             wa["session"] = wa_session
 
-    # Telegram env vars
-    tg_token = os.environ.get("COGTRIX_TELEGRAM_TOKEN")
+    # Telegram env vars (bot_token is a secret → _secret_env, #2233)
+    tg_token = _secret_env("COGTRIX_TELEGRAM_TOKEN")
     if tg_token:
         tg = config.services.setdefault("telegram", {})
         tg["bot_token"] = tg_token
+
+    # Slack env vars (#2223 phase 2; secret → _secret_env, #2233)
+    if env_val := _secret_env("COGTRIX_SLACK_BOT_TOKEN"):
+        _set_service(config, "slack", "bot_token", env_val)
 
     # Allowed CORS origins — comma-separated; overrides api.cors_origins (#2059).
     if env_val := os.getenv("COGTRIX_CORS_ORIGINS"):
@@ -2263,6 +2616,18 @@ def _apply_env_vars(config: Config) -> None:
     # Organization scoping for admin endpoints
     if env_val := os.getenv("COGTRIX_ENABLE_ORG_SCOPING"):
         config.enable_org_scoping = env_val.lower() in ("true", "1", "yes")
+
+    # Read-once hardening: now that every secret above has been copied into
+    # `config`, drop the config-authoritative ones from the environment (#2223).
+    # COGTRIX_KEEP_ENV_SECRETS opts out for debugging (#2102).
+    if unset_secrets and not _keep_env_secrets():
+        # Seed the JWT secret and DB URL into the process cache before the unset
+        # so the consumers that read them outside this loader (app.py / auth.py /
+        # db engine, via secret_from_env_or_file → _secret_env) still resolve them
+        # once the env var is gone (#2101/#2102).
+        for _name in _SECRETS_SEED_BEFORE_UNSET:
+            _secret_env(_name)
+        _unset_sensitive_env()
 
 
 def _apply_cli_args(config: Config, args) -> None:

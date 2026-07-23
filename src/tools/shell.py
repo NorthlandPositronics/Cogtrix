@@ -126,6 +126,36 @@ def _check_curl_wget_url_allowed(command: str) -> str | None:
                 "that are exfiltrated to the allowed domain. Use file_ops for authenticated "
                 "API requests instead."
             )
+        # Long-form and upload variants of the above. The short forms (-H/-d)
+        # and --data-* are handled above, but their long forms (--header, plain
+        # --data) and the file-upload flags (-F/--form multipart, -T/--upload-file
+        # PUT) were missing — leaving an exfiltration bypass that sends headers,
+        # body data, or arbitrary local files to the allowed domain. Issue #2209.
+        if re.search(r"--header\b", command):
+            return (
+                "Error: curl with --header is not allowed when shell.curl_wget_allowed_domains "
+                "is configured. Header arguments can contain secrets that are exfiltrated "
+                "to the allowed domain. Use file_ops for authenticated API requests instead."
+            )
+        if re.search(r"--data\b", command):
+            return (
+                "Error: curl with --data is not allowed when shell.curl_wget_allowed_domains "
+                "is configured. Body data arguments can contain secrets or file contents "
+                "that are exfiltrated to the allowed domain. Use file_ops for authenticated "
+                "API requests instead."
+            )
+        if re.search(r"(?:^|\s)-F(?!\s*$)", command) or re.search(r"--form\b", command):
+            return (
+                "Error: curl with -F/--form is not allowed when shell.curl_wget_allowed_domains "
+                "is configured. Multipart form uploads can send arbitrary local file contents "
+                "(e.g. -F file=@/etc/passwd) to the allowed domain. Use file_ops instead."
+            )
+        if re.search(r"(?:^|\s)-T(?!\s*$)", command) or re.search(r"--upload-file\b", command):
+            return (
+                "Error: curl with -T/--upload-file is not allowed when "
+                "shell.curl_wget_allowed_domains is configured. File uploads can send "
+                "arbitrary local file contents to the allowed domain. Use file_ops instead."
+            )
 
         # Block -L/--location (redirect following) when domain allowlisting is active.
         # With -L, curl follows HTTP redirects. An allowed domain returning a 302 to an
@@ -896,6 +926,32 @@ class ShellCommandInput(BaseModel):
     )
 
 
+# Heredoc or a `>`/`>>` redirect to a path token. Excludes stderr (`2>`) and
+# process substitution (`>(`), which are not file-content writes. Used ONLY to
+# tailor the substitution-block error toward write_file — never a security
+# decision (#2235).
+_FILE_WRITE_HINT_RE = re.compile(r"<<|(?<!\d)>>?\s*[\w./~$'\"-]")
+
+
+def _looks_like_file_write(command: str) -> bool:
+    """True if *command* appears to write file content (heredoc / redirect)."""
+    return bool(_FILE_WRITE_HINT_RE.search(command))
+
+
+def _substitution_blocked_msg(kind: str, command: str) -> str:
+    """Build the command-substitution block message (#1104), redirecting
+    file-content writes to ``write_file`` so models don't spiral on workarounds
+    (#2235). Always contains 'blocked'/'substitution' for callers/tests."""
+    base = f"Error: Command substitution via {kind} is blocked for security. "
+    if _looks_like_file_write(command):
+        return base + (
+            "To write file CONTENT, use the write_file tool (or patch_file / append_file) "
+            "instead of a shell heredoc/redirect — those tools handle backticks and $() in "
+            "content with no restriction. Otherwise split the command into separate steps."
+        )
+    return base + "Use a safe alternative or split the command into separate steps."
+
+
 def execute_shell_command(
     command: str,
     working_directory: str | None = None,
@@ -906,6 +962,12 @@ def execute_shell_command(
 
     WARNING: This tool can execute arbitrary shell commands. It requires
     user confirmation before execution (handled by the safety layer).
+
+    For writing or editing file CONTENT, prefer the dedicated ``write_file`` /
+    ``patch_file`` / ``append_file`` tools — this tool blocks shell command
+    substitution (backticks and ``$()``) for security, even when those
+    characters are literal data inside a quoted heredoc, so authoring files
+    (e.g. Markdown with ``` fences) via ``cat > file <<EOF`` will be rejected.
 
     Args:
         command: The shell command to execute
@@ -919,22 +981,16 @@ def execute_shell_command(
         return "Error: No command provided."
 
     # Block command-substitution syntax that can embed arbitrary code execution
-    # (issue #1104). Variable expansion ($VAR) is still allowed.
+    # (issue #1104). Variable expansion ($VAR) is still allowed. The block is a
+    # naive substring check (no quote/heredoc awareness) — quote-aware relaxation
+    # is tracked as #2235 phase 2; for now redirect file-content writes to
+    # write_file via the error message.
     if "$(" in command:
-        return (
-            "Error: Command substitution via $() is blocked for security. "
-            "Use a safe alternative or split the command into separate steps."
-        )
+        return _substitution_blocked_msg("$()", command)
     if "`" in command:
-        return (
-            "Error: Command substitution via backticks is blocked for security. "
-            "Use a safe alternative or split the command into separate steps."
-        )
+        return _substitution_blocked_msg("backticks", command)
     if "<(" in command or ">(" in command:
-        return (
-            "Error: Command substitution via <() or >() process substitution is blocked for security. "
-            "Use a safe alternative or split the command into separate steps."
-        )
+        return _substitution_blocked_msg("<() or >() process substitution", command)
 
     # Validate and clamp timeout
     timeout = min(max(1, timeout), 300)

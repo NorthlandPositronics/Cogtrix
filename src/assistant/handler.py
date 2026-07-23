@@ -186,6 +186,8 @@ class MessageHandler:
         datamarking_enabled: Any = _UNSET,
         workflow_registry: Any = None,
         campaign_mgr: Any = None,
+        vision_llm: Any = None,
+        conversation_supports_vision: bool | None = None,
     ) -> None:
         self._session_mgr = session_mgr
         self._llm = llm
@@ -212,6 +214,8 @@ class MessageHandler:
         self._deferral_mgr: DeferralManager | None = deferral_mgr
         self._workflow_registry: Any = workflow_registry
         self._campaign_mgr: Any = campaign_mgr
+        self._vision_llm: Any = vision_llm
+        self._conversation_supports_vision: bool | None = conversation_supports_vision
 
         if datamarking_enabled is _UNSET:
             guardrail_cfg = config.get("guardrails", {})
@@ -365,8 +369,14 @@ class MessageHandler:
                 recall_k = 5
                 # Get threshold from config, fall back to store default (0.25)
                 recall_threshold = self._config.get("vector_recall_threshold", 0.25)
+                # #2142: scope recall to THIS chat so a fact learned from one
+                # contact never surfaces in another contact's context. The store
+                # tags each fact with session.session_key (see extract_and_store).
                 knowledge = self._knowledge_store.recall(
-                    msg.text, k=recall_k, score_threshold=recall_threshold
+                    msg.text,
+                    k=recall_k,
+                    score_threshold=recall_threshold,
+                    source_session=session.session_key,
                 )
                 if knowledge:
                     section = f"Known facts (learned over time):\n{knowledge}"
@@ -382,11 +392,13 @@ class MessageHandler:
         msg: IncomingMessage,
         context: Any,
         session: Any = None,
-    ) -> tuple[str, str, list, set[str], set[str]]:
+    ) -> tuple[str, str, list, set[str], set[str], list[str]]:
         """Resolve effective prompt and apply datamarking to input and history.
 
         Returns ``(effective_prompt, user_input_for_agent, history_for_agent,
-        workflow_excluded, workflow_approved)``.
+        workflow_excluded, workflow_approved, images)``.
+        Images are data-URI strings from ``msg.images``; datamarking does NOT
+        apply to image content.
         """
         workflow_excluded: set[str] = set()
         workflow_approved: set[str] = set()
@@ -417,13 +429,46 @@ class MessageHandler:
         history_for_agent = (
             _datamark_history(context.messages, dm_marker) if dm_marker else context.messages
         )
+        images: list[str] = list(msg.images) if msg.images else []
         return (
             effective_prompt,
             user_input_for_agent,
             history_for_agent,
             workflow_excluded,
             workflow_approved,
+            images,
         )
+
+    def _describe_images(self, images: list[str], user_text: str) -> str | None:
+        """Call the vision LLM to describe *images* and return a text summary.
+
+        Returns None when the description is empty or when the call fails.
+        Failures are logged as warnings and never propagate — a failed vision
+        call must not abort the conversation turn (#2262).
+        """
+        try:
+            from langchain_core.messages import HumanMessage as _HumanMessage
+
+            prompt_text = (
+                "Describe the following image(s) factually and concisely for a text-only "
+                "assistant. Focus on details relevant to the user's message: "
+                f"'{user_text}'."
+            )
+            content: list[Any] = [{"type": "text", "text": prompt_text}]
+            for uri in images:
+                content.append({"type": "image_url", "image_url": {"url": uri}})
+            response = self._vision_llm.invoke([_HumanMessage(content=content)])
+            # Coerce response.content: may be None, str, or list (#2250 pattern)
+            raw = response.content if hasattr(response, "content") else str(response)
+            if raw is None:
+                return None
+            if not isinstance(raw, str):
+                raw = str(raw)
+            result = raw.strip()
+            return result if result else None
+        except Exception as exc:
+            log.warning("Vision model description failed: %s", exc)
+            return None
 
     def _run_agent(
         self,
@@ -436,9 +481,35 @@ class MessageHandler:
         session: Any,
         extra_excluded: set[str] | None = None,
         extra_approvals: set[str] | None = None,
+        user_images: list[str] | None = None,
     ) -> tuple[str, set[str]]:
         """Invoke the agent runner and return (response, loaded_tools)."""
         from src.orchestration.run_config import AgentRunConfig
+
+        # Vision delegation (#2262): when images are present, resolve them to
+        # text before running the conversation model. Read the vision attrs
+        # defensively — some test doubles build the handler via
+        # ``__new__`` without running ``__init__``, and a partially-constructed
+        # handler must still degrade to the existing passthrough behaviour.
+        if user_images:
+            vision_llm = getattr(self, "_vision_llm", None)
+            if vision_llm is not None:
+                desc = self._describe_images(user_images, user_input)
+                if desc:
+                    annotation = f"[Image description: {desc}]"
+                    user_input = (
+                        f"{user_input}\n\n{annotation}".strip() if user_input else annotation
+                    )
+                else:
+                    note = "[An image was received but could not be analyzed.]"
+                    user_input = f"{user_input}\n\n{note}".strip() if user_input else note
+                user_images = None
+            elif getattr(self, "_conversation_supports_vision", None) is False:
+                note = "[An image was received but the assistant's model cannot analyze images.]"
+                user_input = f"{user_input}\n\n{note}".strip() if user_input else note
+                user_images = None
+            # else: vision capability unknown and no vision_model — pass images
+            # through unchanged (existing #2237 behaviour).
 
         try:
             call_session_state = SessionState(
@@ -470,6 +541,7 @@ class MessageHandler:
                 approvals=call_approvals,
                 context_prefix=context_prefix,
                 config=run_config,
+                user_images=user_images,
             )
         except UserCancelledRun:
             log.info("Agent run cancelled for %s", session.session_key)
@@ -770,7 +842,7 @@ class MessageHandler:
                     # Notify campaign manager that the contact replied
                     self._campaign_mgr.on_reply(msg.channel, msg.chat_id)
 
-            effective_prompt, user_input, history, wf_excluded, wf_approved = (
+            effective_prompt, user_input, history, wf_excluded, wf_approved, images = (
                 self._prepare_agent_call(msg, context, session=session)
             )
             response, turn_loaded_tools = self._run_agent(
@@ -782,6 +854,7 @@ class MessageHandler:
                 session=session,
                 extra_excluded=wf_excluded or None,
                 extra_approvals=wf_approved or None,
+                user_images=images or None,
             )
             if turn_loaded_tools:
                 log.debug(
@@ -935,7 +1008,7 @@ class MessageHandler:
                 return "[Operator instruction blocked — injection or encoding detected]", None
             context, combined_prefix = self._prepare_context(synthetic_msg, session)
 
-            effective_prompt, user_input, history, wf_excluded, wf_approved = (
+            effective_prompt, user_input, history, wf_excluded, wf_approved, _outbound_images = (
                 self._prepare_agent_call(synthetic_msg, context, session=session)
             )
 
@@ -955,6 +1028,7 @@ class MessageHandler:
                 session=session,
                 extra_excluded=wf_excluded or None,
                 extra_approvals=wf_approved or None,
+                user_images=None,
             )
 
             if turn_loaded_tools:
@@ -1157,7 +1231,7 @@ class MessageHandler:
                     _tool_guard_reason[0] = result.reason
                 return result
 
-            effective_prompt, user_input, history, wf_excluded, wf_approved = (
+            effective_prompt, user_input, history, wf_excluded, wf_approved, _sim_images = (
                 self._prepare_agent_call(synthetic_msg, context, session=session)
             )
 

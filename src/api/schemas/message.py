@@ -158,6 +158,18 @@ class SyncTurnOut(BaseModel):
     tool_calls: int = Field(
         ..., description="Number of tool calls made during this turn.", examples=[3]
     )
+    blocked_by_guardrails: bool = Field(
+        default=False,
+        description=(
+            "True when the input was refused by the API content guardrail (#2056) "
+            "before the model ran. When true, `text` is a generic refusal and "
+            "token/tool counts are zero. Always false unless api.guardrails is enabled."
+        ),
+    )
+    guardrail_reason: str | None = Field(
+        default=None,
+        description="Guard reason when blocked_by_guardrails is true, else null.",
+    )
 
 
 class ClearHistoryRequest(BaseModel):

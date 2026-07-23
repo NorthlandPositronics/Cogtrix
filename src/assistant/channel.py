@@ -56,6 +56,7 @@ class IncomingMessage:
     timestamp: float
     metadata: dict[str, Any] = field(default_factory=dict)
     resolved_phone: str | None = None
+    images: list[str] = field(default_factory=list)
 
     @property
     def session_key(self) -> str:

@@ -418,6 +418,31 @@ class TestConfigQuotasParsing:
         cfg = self._load("quotas:\n  requests_per_hour: -5\n", tmp_path)
         assert cfg.quota_requests_per_hour is None
 
+    def test_non_numeric_value_ignored_not_crash(self, tmp_path):
+        # Regression #2203: a non-numeric quota value must not raise an
+        # unhandled ValueError out of load_config (which aborted startup for
+        # every entrypoint). It is tolerated like every other numeric config
+        # key — warn-and-skip, leaving the default.
+        cfg = self._load(
+            "quotas:\n"
+            "  token_budget_per_day: abc\n"
+            "  requests_per_hour: not-a-number\n"
+            "  max_concurrent_sessions: []\n",
+            tmp_path,
+        )
+        assert cfg.quota_token_budget_per_day is None
+        assert cfg.quota_requests_per_hour is None
+        assert cfg.quota_max_concurrent_sessions is None
+
+    def test_valid_value_with_one_invalid_sibling(self, tmp_path):
+        # A bad value in one field must not discard a valid sibling.
+        cfg = self._load(
+            "quotas:\n  token_budget_per_day: abc\n  requests_per_hour: 100\n",
+            tmp_path,
+        )
+        assert cfg.quota_token_budget_per_day is None
+        assert cfg.quota_requests_per_hour == 100
+
     def test_absent_quotas_section_leaves_none(self, tmp_path):
         cfg = self._load("verbosity: 0\n", tmp_path)
         assert cfg.quota_token_budget_per_day is None

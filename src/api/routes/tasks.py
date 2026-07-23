@@ -43,9 +43,19 @@ def _task_to_out(task: object) -> TaskOut:
 
 
 def _assert_task_ownership(record: object, current_user: TokenData, ctx: OrgContext) -> None:
-    """Raise 403 FORBIDDEN if the task does not belong to the current user or org."""
+    """Raise 403 FORBIDDEN if the task does not belong to the current user or org.
+
+    Deny-by-default (#2197): previously an empty/legacy task ``user_id`` (agent-
+    and CLI-spawned background tasks default ``user_id=''``) made the per-user
+    check ``if task_user_id and ...`` short-circuit, so any *other* authenticated
+    user could read / cancel / inspect those tasks — an IDOR (cross-user
+    disclosure via ``GET``/``DELETE /tasks/{id}`` and the log endpoint). A task
+    is now accessible only to its owner or an admin; unowned/legacy tasks (empty
+    ``user_id``) are admin-only. (Propagating ``user_id`` onto agent/CLI-spawned
+    tasks so their owner can retrieve them is tracked as the #2197 follow-up.)
+    """
     task_user_id = getattr(record, "user_id", "")
-    if task_user_id and task_user_id != current_user.user_id:
+    if task_user_id != current_user.user_id and not current_user.is_admin:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail={

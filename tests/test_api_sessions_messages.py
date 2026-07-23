@@ -107,6 +107,13 @@ async def test_app(http_db_engine):
         patch("src.api.routes.sessions.warm_session", new_callable=AsyncMock) as mock_warm,
         patch("src.config.load_config", side_effect=Exception("no config in tests")),
     ):
+        # #2101: create_app() above seeded the process config cache (via the CORS
+        # resolver) before the load_config patch took effect. Drop it so the
+        # lifespan's get_cached_config() re-resolves under the patch and leaves
+        # app.state.config = None (this fixture's "no config in tests" contract).
+        from src.config import reset_cached_config
+
+        reset_cached_config()
 
         async def _fake_warm(record, app_state):
             from src.api.session_bridge import ApiSession

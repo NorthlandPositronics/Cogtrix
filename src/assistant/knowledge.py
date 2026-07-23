@@ -210,13 +210,38 @@ class SharedKnowledgeStore:
             self._index_facts(added)
             self.save()
 
-    def recall(self, query: str, k: int = 5, score_threshold: float | None = None) -> str | None:
+    def recall(
+        self,
+        query: str,
+        k: int = 5,
+        score_threshold: float | None = None,
+        source_session: str | None = None,
+    ) -> str | None:
         """Retrieve relevant facts as a formatted string for context injection.
+
+        When ``source_session`` is given, only facts learned in THAT chat are
+        eligible — strict per-chat isolation so one contact's facts never surface
+        in another contact's conversation (#2142). Pass ``None`` for the
+        historical unscoped global recall (non-assistant callers, e.g. CLI/tests).
 
         Returns None if no relevant facts found.
         """
         with self._lock:
-            facts_snapshot = list(self._facts)
+            all_facts = list(self._facts)
+
+        if not all_facts:
+            return None
+
+        if source_session is not None:
+            facts_snapshot = [f for f in all_facts if f.source_session == source_session]
+            # The FAISS index spans every chat, so a plain top-k global search can
+            # be dominated by other chats' (now-filtered-out) facts and starve this
+            # chat's recall. Over-fetch candidates and intersect with this chat's
+            # facts, then keep the top-k by similarity.
+            search_k = min(len(all_facts), max(k * 8, 40))
+        else:
+            facts_snapshot = all_facts
+            search_k = k
 
         if not facts_snapshot:
             return None
@@ -224,7 +249,9 @@ class SharedKnowledgeStore:
         _threshold = score_threshold if score_threshold is not None else self._recall_threshold
 
         if self._vectorstore is not None and self._embeddings_ready.is_set():
-            results = self._recall_semantic(query, k, facts_snapshot, score_threshold=_threshold)
+            results = self._recall_semantic(
+                query, k, facts_snapshot, score_threshold=_threshold, search_k=search_k
+            )
         else:
             results = self._recall_keyword(query, k, facts_snapshot)
 
@@ -345,9 +372,16 @@ class SharedKnowledgeStore:
         finally:
             pool.shutdown(wait=False)
 
-        raw_text: str = (
-            response.content if hasattr(response, "content") else str(response)
-        ).strip()
+        # #2250: an AIMessage's .content can be None (e.g. a tool-call-only or
+        # empty-content message) or a list (multimodal). Coerce both before
+        # .strip() so extraction degrades to "no facts" instead of raising
+        # AttributeError: 'NoneType' object has no attribute 'strip'.
+        content = response.content if hasattr(response, "content") else str(response)
+        if content is None:
+            content = ""
+        elif not isinstance(content, str):
+            content = str(content)
+        raw_text: str = content.strip()
 
         # Extract JSON array from response (may have surrounding text, code blocks, etc.)
         start = raw_text.find("[")
@@ -431,27 +465,42 @@ class SharedKnowledgeStore:
     # ------------------------------------------------------------------
 
     def _recall_semantic(
-        self, query: str, k: int, facts_snapshot: list[Fact], score_threshold: float | None = None
+        self,
+        query: str,
+        k: int,
+        facts_snapshot: list[Fact],
+        score_threshold: float | None = None,
+        search_k: int | None = None,
     ) -> list[Fact]:
-        """Semantic recall via FAISS."""
+        """Semantic recall via FAISS.
+
+        ``search_k`` is the number of candidates pulled from the (global) index
+        before intersecting with ``facts_snapshot``; it over-fetches so per-chat
+        scoping (#2142) doesn't starve recall. Defaults to ``k`` (unscoped path).
+        """
+        _search_k = search_k if (search_k is not None and search_k > 0) else k
         with self._index_lock:
             try:
                 if score_threshold is not None and score_threshold > 0.0:
                     # Use L2 distance and convert: similarity = 1 / (1 + dist)
-                    scored = self._vectorstore.similarity_search_with_score(query, k=k)
+                    scored = self._vectorstore.similarity_search_with_score(query, k=_search_k)
                     results = [doc for doc, dist in scored if 1.0 / (1.0 + dist) >= score_threshold]
                 else:
-                    results = self._vectorstore.similarity_search(query, k=k)
+                    results = self._vectorstore.similarity_search(query, k=_search_k)
             except Exception as exc:
                 log.debug("FAISS recall failed: %s", exc)
                 return self._recall_keyword(query, k, facts_snapshot)
 
+        # ``results`` are similarity-ordered; keep the first k that belong to this
+        # chat's (already source-scoped) snapshot.
         hash_to_fact = {f.fact_hash: f for f in facts_snapshot}
         matched: list[Fact] = []
         for doc in results:
             fhash = doc.metadata.get("fact_hash")
             if fhash and fhash in hash_to_fact:
                 matched.append(hash_to_fact[fhash])
+                if len(matched) >= k:
+                    break
 
         return matched
 
@@ -487,43 +536,48 @@ class SharedKnowledgeStore:
             self._embeddings_ready.set()
 
     def _setup_embeddings(self) -> None:
-        """Initialise the embedding function and load or create a FAISS index."""
-        if not hasattr(self._config, "embedding"):
-            return
+        """Initialise the embedding function and load or create a FAISS index.
 
-        emb_provider = getattr(self._config.embedding, "provider", "ollama")
-        emb_model = getattr(self._config.embedding, "model", None)
-
+        #2249: resolve the embedding provider + credentials through the canonical
+        config path (``Config.resolve_embedding_config`` → the
+        ``create_embeddings`` factory) so the ``api_key`` / ``base_url`` come from
+        ``Config`` — which survives the #2223/#2102 secret unset via the #2233
+        cache — instead of relying on the ``OPENAI_API_KEY`` env var, which is no
+        longer present after startup. Previously this built ``OpenAIEmbeddings()``
+        with no key (env-reliant → 401 post-unset) and gated on a non-existent
+        ``config.embedding`` attribute, so knowledge embeddings never initialised
+        on a real ``Config``. Falls back to a local Ollama endpoint, then keyword
+        recall, when the configured provider cannot embed (e.g. an OpenRouter-only
+        deployment with no embedding model)."""
         fn: Any = None
         tag: str | None = None
 
-        try:
-            if emb_provider == "ollama":
-                from langchain_ollama import OllamaEmbeddings
+        if callable(getattr(self._config, "resolve_embedding_config", None)):
+            try:
+                from src.providers import create_embeddings_from_config
 
-                model_name = emb_model or "nomic-embed-text"
-                prov_cfg = None
-                try:
-                    prov_cfg = self._config.get_provider_config("ollama")
-                except (ValueError, AttributeError):
-                    pass
-                base = (prov_cfg.get_base_url() if prov_cfg else None) or "http://localhost:11434"
-                fn = OllamaEmbeddings(model=model_name, base_url=base)
+                emb_type, emb_model, emb_base_url, emb_api_key = (
+                    self._config.resolve_embedding_config()
+                )
+                fn, tag = create_embeddings_from_config(
+                    emb_type,
+                    model=emb_model,
+                    base_url=emb_base_url,
+                    api_key=emb_api_key,
+                )
                 fn.embed_query("ping")
-                tag = f"ollama/{model_name}"
+            except Exception as exc:
+                log.debug(
+                    "Knowledge store: configured embedding provider unavailable "
+                    "(falling back to Ollama/keyword): %s",
+                    exc,
+                )
+                fn = None
+                tag = None
 
-            elif emb_provider == "openai":
-                from langchain_openai import OpenAIEmbeddings
-
-                model_name = emb_model or "text-embedding-3-small"
-                fn = OpenAIEmbeddings(model=model_name)
-                fn.embed_query("ping")
-                tag = f"openai/{model_name}"
-
-        except Exception as exc:
-            log.debug("Knowledge store: embedding provider '%s' unavailable: %s", emb_provider, exc)
-
-        if fn is None and emb_provider != "ollama":
+        # Local Ollama fallback (no credentials required) when the configured
+        # provider is unavailable, absent, or cannot produce embeddings.
+        if fn is None:
             try:
                 from langchain_ollama import OllamaEmbeddings
 
@@ -532,6 +586,7 @@ class SharedKnowledgeStore:
                 tag = "ollama/nomic-embed-text"
             except Exception as exc:
                 log.debug("Knowledge store: Ollama fallback unavailable: %s", exc)
+                fn = None
 
         if fn is None:
             log.debug("Knowledge store: no embedding provider — using keyword recall")

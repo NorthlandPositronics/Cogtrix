@@ -469,7 +469,18 @@ def ingest_many(
         save_faiss_store(vector_store, persist_path)
         if config.build_bm25_sidecar:
             _maybe_build_bm25_sidecar(prepared_chunks, config.vectordb_dir)
-    except Exception:
+    except Exception as exc:
+        # The build/persist stage is where the most common real failures
+        # occur (embedding endpoint down/401, wrong embedding model, FAISS
+        # write/permission error). Log it — otherwise the caller sees every
+        # prepared file marked failed with no diagnostic, indistinguishable
+        # from "all files unparseable".
+        _log.warning(
+            "ingest_many: vector-store build failed for %d prepared file(s): %s",
+            len(successful_paths),
+            exc,
+            exc_info=True,
+        )
         for path_str in successful_paths:
             results[path_str] = False
         return results

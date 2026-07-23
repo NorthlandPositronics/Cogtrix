@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio as _asyncio
 import os
 import uuid
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -406,10 +407,12 @@ class TestMCPRestartServer:
         app.state.config = cfg
         mcp = MagicMock()
         mcp.get_server_info.return_value = []
+        # #2151: the route now calls restart(...) (not the never-existed
+        # restart_server) and re-registers the rebuilt tool dict it returns.
         if succeed:
-            mcp.restart_server = MagicMock(return_value=None)
+            mcp.restart = MagicMock(return_value={})
         else:
-            mcp.restart_server = MagicMock(side_effect=RuntimeError("fail"))
+            mcp.restart = MagicMock(side_effect=RuntimeError("fail"))
         app.state.mcp_manager = mcp
 
     def test_restart_success(self, client, tokens, app_engine):
@@ -446,7 +449,11 @@ class TestMCPRestartServer:
         assert r.status_code == 401
 
     def test_restart_uses_asyncio_to_thread(self, client, tokens, app_engine):
-        """Regression for #1198: restart_fn must be offloaded via asyncio.to_thread."""
+        """Regression for #1198: the restart call must be offloaded via asyncio.to_thread.
+
+        #2151: the route now calls ``restart(name, builtin_tool_names=...)`` —
+        the blocking manager call still runs off the event loop.
+        """
         app, _ = app_engine
         cfg = _make_mock_config()
         cfg.mcp_servers = {
@@ -455,16 +462,140 @@ class TestMCPRestartServer:
         app.state.config = cfg
         mcp = MagicMock()
         mcp.get_server_info.return_value = []
-        restart_mock = MagicMock(return_value=None)
-        mcp.restart_server = restart_mock
+        restart_mock = MagicMock(return_value={})
+        mcp.restart = restart_mock
         app.state.mcp_manager = mcp
 
         with patch(
-            "src.api.routes.mcp.asyncio.to_thread", new_callable=AsyncMock
+            "src.api.routes.mcp.asyncio.to_thread", new_callable=AsyncMock, return_value={}
         ) as mock_to_thread:
             r = client.post("/api/v1/mcp/servers/restart_srv/restart", headers=_ah(tokens))
             assert r.status_code == 200
-            mock_to_thread.assert_awaited_once_with(restart_mock, "restart_srv")
+            mock_to_thread.assert_awaited_once()
+            call = mock_to_thread.await_args
+            assert call.args[0] is restart_mock
+            assert call.args[1] == "restart_srv"
+            assert "builtin_tool_names" in call.kwargs
+
+
+class TestMCPRuntimeWiring:
+    """#2151 / #2153 — add/delete/restart must drive the live MCPManager AND
+    mirror the change into the live tool registry, then reconcile warm sessions
+    — not merely persist YAML.
+    """
+
+    def _wire(self, app):
+        app.state.tool_registry = SimpleNamespace(tools={}, tool_metadata={})
+        app.state.pinned_mcp_tool_names = set()
+        sr = MagicMock()
+        sr.reconcile_tools = AsyncMock(return_value=0)
+        app.state.session_registry = sr
+        return sr
+
+    @staticmethod
+    def _mcp_tool(server):
+        t = MagicMock()
+        t.metadata = {"source": "mcp", "server": server, "requires_confirmation": True}
+        return t
+
+    def test_add_connects_registers_and_reconciles(self, client, tokens, app_engine):
+        app, _ = app_engine
+        cfg = _make_mock_config()
+        cfg.mcp_servers = {}
+        app.state.config = cfg
+        sr = self._wire(app)
+
+        mcp = MagicMock()
+        mcp.connect_all.return_value = {"do_thing": self._mcp_tool("new_srv")}
+        mcp.get_server_info.return_value = [
+            {
+                "name": "new_srv",
+                "connected": True,
+                "tool_count": 1,
+                "tools": ["do_thing"],
+                "transport": "stdio",
+                "endpoint": "python",
+            }
+        ]
+        app.state.mcp_manager = mcp
+
+        with patch("src.api.routes.mcp._persist_mcp_servers"):
+            r = client.post(
+                "/api/v1/mcp/servers",
+                headers=_ah(tokens),
+                json={
+                    "name": "new_srv",
+                    "transport": "stdio",
+                    "command": "python",
+                    "args": ["-m", "srv"],
+                },
+            )
+        assert r.status_code == 201, r.text
+        mcp.connect_all.assert_called_once()
+        # Tools mirrored into the live registry + pinned set.
+        assert "do_thing" in app.state.tool_registry.tools
+        assert "do_thing" in app.state.pinned_mcp_tool_names
+        # Active sessions refreshed and real runtime status reported.
+        sr.reconcile_tools.assert_awaited_once()
+        assert r.json()["data"]["status"] == "connected"
+
+    def test_delete_disconnects_unregisters_and_reconciles(self, client, tokens, app_engine):
+        app, _ = app_engine
+        cfg = _make_mock_config()
+        cfg.mcp_servers = {"gone": {"command": "py", "args": [], "requires_confirmation": True}}
+        app.state.config = cfg
+        sr = self._wire(app)
+        # A tool from this server is currently registered + pinned.
+        app.state.tool_registry.tools["do_thing"] = self._mcp_tool("gone")
+        app.state.tool_registry.tool_metadata["do_thing"] = {
+            "source": "mcp",
+            "server": "gone",
+            "pin": True,
+        }
+        app.state.pinned_mcp_tool_names.add("do_thing")
+
+        mcp = MagicMock()
+        mcp.disconnect.return_value = True
+        mcp.get_server_info.return_value = []
+        app.state.mcp_manager = mcp
+
+        with patch("src.api.routes.mcp._persist_mcp_servers"):
+            r = client.delete("/api/v1/mcp/servers/gone", headers=_ah(tokens))
+        assert r.status_code == 204
+        mcp.disconnect.assert_called_once_with("gone")
+        # Tool revoked from the live registry + pinned set.
+        assert "do_thing" not in app.state.tool_registry.tools
+        assert "do_thing" not in app.state.pinned_mcp_tool_names
+        sr.reconcile_tools.assert_awaited_once()
+
+    def test_restart_reregisters_tools_and_reconciles(self, client, tokens, app_engine):
+        app, _ = app_engine
+        cfg = _make_mock_config()
+        cfg.mcp_servers = {"r": {"command": "py", "args": [], "requires_confirmation": True}}
+        app.state.config = cfg
+        sr = self._wire(app)
+        # Stale tool present before restart.
+        app.state.tool_registry.tools["old_tool"] = self._mcp_tool("r")
+        app.state.tool_registry.tool_metadata["old_tool"] = {
+            "source": "mcp",
+            "server": "r",
+            "pin": True,
+        }
+        app.state.pinned_mcp_tool_names.add("old_tool")
+
+        mcp = MagicMock()
+        mcp.restart.return_value = {"new_tool": self._mcp_tool("r")}
+        mcp.get_server_info.return_value = []
+        app.state.mcp_manager = mcp
+
+        r = client.post("/api/v1/mcp/servers/r/restart", headers=_ah(tokens))
+        assert r.status_code == 200
+        mcp.restart.assert_called_once()
+        # Old tool purged, rebuilt tool registered.
+        assert "old_tool" not in app.state.tool_registry.tools
+        assert "old_tool" not in app.state.pinned_mcp_tool_names
+        assert "new_tool" in app.state.tool_registry.tools
+        sr.reconcile_tools.assert_awaited_once()
 
 
 # ---------------------------------------------------------------------------

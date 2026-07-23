@@ -31,6 +31,11 @@ Config file (``services.telegram`` section)::
           team:  "-1001234567890"
         rate_limit: 30
         max_message_length: 4096
+
+TOOL_SETUP(config) is called automatically by ToolRegistry after this module
+is imported.  It rebuilds the module singleton ``_cfg`` from the passed app
+``Config`` (which ``_apply_env_vars`` populates before env vars are unset) so
+the bot token survives the ``COGTRIX_TELEGRAM_TOKEN`` unset (#2223 phase 2).
 """
 
 from __future__ import annotations
@@ -39,13 +44,16 @@ import os
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, Field
 
 from src.logging_config import get_logger
 from src.tools._telegram_client import REQUESTS_AVAILABLE, TelegramBotClient
 from src.tools.delegate import register_tool_categories
+
+if TYPE_CHECKING:
+    from src.config import Config
 
 log = get_logger()
 
@@ -88,11 +96,13 @@ def _load_config() -> TelegramConfig:
     """Build config by merging config file values with environment overrides."""
     cfg = TelegramConfig()
 
-    # 1) Load from config file (best-effort)
+    # 1) Load from config file (best-effort). #2101: reuse the process-wide
+    #    resolved config so the environment is read once; the bot_token survives
+    #    the #2223/#2102 unset via the secret cache.
     try:
-        from src.config import load_config
+        from src.config import get_cached_config
 
-        app_cfg = load_config()
+        app_cfg = get_cached_config()
         tg = app_cfg.services.get("telegram", {})
         if tg:
             cfg.bot_token = tg.get("bot_token", cfg.bot_token)
@@ -122,6 +132,42 @@ def _load_config() -> TelegramConfig:
         cfg.contacts = [c.strip() for c in contacts_str.split(",") if c.strip()]
 
     return cfg
+
+
+def TOOL_SETUP(config: Config) -> None:
+    """Called automatically by ToolRegistry after loading this module.
+
+    Rebuilds the module singleton from the passed app ``Config`` so the bot
+    token survives the ``COGTRIX_TELEGRAM_TOKEN`` env unset (#2223 phase 2).
+    Re-running is idempotent — it simply replaces ``_cfg`` in-place.
+    """
+    global _cfg
+    tg = (getattr(config, "services", None) or {}).get("telegram", {})
+    cfg = TelegramConfig()
+    if tg:
+        cfg.bot_token = tg.get("bot_token", cfg.bot_token)
+        cfg.allow_send = tg.get("allow_send", cfg.allow_send)
+        cfg.allow_receive = tg.get("allow_receive", cfg.allow_receive)
+        cfg.require_confirmation = tg.get("require_confirmation", cfg.require_confirmation)
+        cfg.filter_mode = tg.get("filter_mode", cfg.filter_mode)
+        cfg.contacts = tg.get("contacts", cfg.contacts)
+        cfg.phonebook = tg.get("phonebook", cfg.phonebook)
+        cfg.rate_limit = tg.get("rate_limit", cfg.rate_limit)
+        cfg.max_message_length = tg.get("max_message_length", cfg.max_message_length)
+    # Env overrides remain as fallback; after phase-2 unset they no-op
+    if token := os.getenv("COGTRIX_TELEGRAM_TOKEN"):
+        cfg.bot_token = token.strip()
+    cfg.allow_send = _env_bool("COGTRIX_TELEGRAM_SEND", cfg.allow_send)
+    cfg.allow_receive = _env_bool("COGTRIX_TELEGRAM_RECEIVE", cfg.allow_receive)
+    fm = os.environ.get("COGTRIX_TELEGRAM_FILTER", "").lower().strip()
+    if fm:
+        _LEGACY_MODES = {"whitelist": "allow"}
+        fm = _LEGACY_MODES.get(fm, fm)
+        if fm in ("none", "allow", "ignore", "blacklist"):
+            cfg.filter_mode = fm
+    if contacts_str := os.getenv("COGTRIX_TELEGRAM_CONTACTS"):
+        cfg.contacts = [c.strip() for c in contacts_str.split(",") if c.strip()]
+    _cfg = cfg
 
 
 # Singleton — loaded once at import time
@@ -555,6 +601,7 @@ __all__ = [
     "is_configured",
     "TOOL_CONFIG",
     "TOOL_CONFIGS",
+    "TOOL_SETUP",
     "TelegramSendInput",
     "TelegramSendPhotoInput",
     "TelegramCheckInput",

@@ -121,6 +121,24 @@ def resolve_config_path(override: Path | None = None) -> Path:
     )
 
 
+def _resolve_env_file(override: Path | None, config_path: Path) -> Path | None:
+    """Resolve the secrets ``--env-file`` to inject into each container (#2219).
+
+    Priority:
+      1. explicit ``override`` (``--env-file``) — returned if it exists.
+      2. a ``.env`` sibling of *config_path* (e.g. ``tests/comprehensive/.env``
+         beside ``cogtrix.comprehensive.yaml``), if present.
+      3. ``None`` — no secrets file; the caller warns.
+
+    An explicit-but-missing override resolves to ``None`` (skip), so passing a
+    non-existent path or ``-`` is a clean opt-out rather than an error.
+    """
+    if override is not None:
+        return override if override.is_file() else None
+    sibling = config_path.parent / ".env"
+    return sibling if sibling.is_file() else None
+
+
 # ── Docker helpers ────────────────────────────────────────────────────
 
 
@@ -159,7 +177,7 @@ def _build_image(tag: str, *, repo_root: Path) -> None:
     log.info("Built cogtrix:%s", tag)
 
 
-def _launch_container(
+def _build_run_cmd(
     *,
     name: str,
     image: str,
@@ -167,15 +185,19 @@ def _launch_container(
     log_path: Path,
     prompt: str,
     verbosity: int,
-) -> str:
-    """Start a detached container for one scenario, return its ID."""
-    cmd = [
-        "docker",
-        "run",
-        "-d",
-        "--rm",
-        "--name",
-        name,
+    env_file: Path | None = None,
+) -> list[str]:
+    """Build the ``docker run`` argv for one scenario (pure; unit-testable).
+
+    When *env_file* is given, its ``KEY=VALUE`` lines are injected into the
+    container via ``--env-file`` so Cogtrix's ``_apply_env_vars`` resolves keyed
+    providers/tools (e.g. ``COGTRIX_PROVIDER_SPARK_API_KEY``, ``TAVILY_API_KEY``)
+    from secrets that live outside the (secret-free) mounted config (#2219).
+    """
+    cmd = ["docker", "run", "-d", "--rm", "--name", name]
+    if env_file is not None:
+        cmd += ["--env-file", str(env_file)]
+    cmd += [
         "-v",
         f"{config_path}:/app/.cogtrix.yaml:ro",
         "-v",
@@ -190,6 +212,29 @@ def _launch_container(
         "--prompt",
         prompt,
     ]
+    return cmd
+
+
+def _launch_container(
+    *,
+    name: str,
+    image: str,
+    config_path: Path,
+    log_path: Path,
+    prompt: str,
+    verbosity: int,
+    env_file: Path | None = None,
+) -> str:
+    """Start a detached container for one scenario, return its ID."""
+    cmd = _build_run_cmd(
+        name=name,
+        image=image,
+        config_path=config_path,
+        log_path=log_path,
+        prompt=prompt,
+        verbosity=verbosity,
+        env_file=env_file,
+    )
     result = subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=30)
     if result.returncode != 0:
         raise RuntimeError(
@@ -325,6 +370,7 @@ def run_fleet(
     task_timeout_s: int,
     verbosity: int,
     container_prefix: str,
+    env_file: Path | None = None,
 ) -> list[ScenarioResult]:
     """Run all *scenarios* in parallel; return parsed results.
 
@@ -365,6 +411,7 @@ def run_fleet(
             log_path=log_path,
             prompt=scenario.prompt,
             verbosity=verbosity,
+            env_file=env_file,
         )
         launched.append(
             ScenarioResult(
@@ -460,6 +507,17 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--env-file",
+        type=Path,
+        default=None,
+        help=(
+            "Path to a KEY=VALUE secrets file injected into each container via "
+            "docker --env-file, so keyed providers/tools resolve from a "
+            "secret-free config (#2219). Default: auto-detect a '.env' sibling "
+            "of the resolved config; pass '-' (or a missing path) to skip."
+        ),
+    )
+    parser.add_argument(
         "--output-dir",
         type=Path,
         default=Path(".agent-fleet-logs"),
@@ -538,6 +596,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
     log.info("Using config: %s", config_path)
 
+    # Resolve the secrets file: explicit --env-file, else a '.env' sibling of
+    # the config (e.g. tests/comprehensive/.env next to the comprehensive
+    # config). Inject it into each container so keyed providers/tools work from
+    # a secret-free config (#2219).
+    env_file = _resolve_env_file(args.env_file, config_path)
+    if env_file is not None:
+        log.info("Injecting secrets via --env-file: %s", env_file)
+    else:
+        log.warning(
+            "No secrets --env-file found (looked for a '.env' beside %s). "
+            "Keyed providers/tools (spark, tavily, ...) will be unauthenticated "
+            "in-container unless the mounted config carries inline keys.",
+            config_path,
+        )
+
     if args.build:
         try:
             _build_image(args.build_tag, repo_root=repo_root)
@@ -561,6 +634,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             task_timeout_s=args.task_timeout,
             verbosity=args.verbosity,
             container_prefix=args.container_prefix,
+            env_file=env_file,
         )
     except RuntimeError as exc:
         print(f"Fleet failed: {exc}", file=sys.stderr)

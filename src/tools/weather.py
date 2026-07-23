@@ -9,11 +9,22 @@ Configuration:
     Config file:          ``services.openweather.api_key``
                           (legacy: ``openweather.api_key`` at top level)
     Free tier:            60 calls / minute, 1 000 000 calls / month
+
+TOOL_SETUP(config) is called automatically by ToolRegistry after this module
+is imported.  It captures the OpenWeather API key from the app ``Config``
+(which ``_apply_env_vars`` populates before the env var is unset) into
+module-level state so the key is available after ``OPENWEATHER_API_KEY`` has
+been removed from ``os.environ`` (#2223 phase 2).
 """
 
-import os
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, Field
+
+if TYPE_CHECKING:
+    from src.config import Config
 
 # Try to import requests
 try:
@@ -28,25 +39,33 @@ from src.tools.error_sanitizer import sanitize_error as _sanitize_error
 
 OPENWEATHER_BASE_URL = "https://api.openweathermap.org/data/2.5/weather"
 
+# ── Module-level state (set by TOOL_SETUP) ────────────────────────────────────
+_weather_config: dict[str, str] = {}
+
+
+def TOOL_SETUP(config: Config) -> None:
+    """Called automatically by ToolRegistry after loading this module."""
+    key = getattr(config, "openweather_api_key", None)
+    if key:
+        _weather_config["api_key"] = key
+
 
 def _get_api_key() -> str | None:
-    """Get OpenWeather API key from environment or config."""
-    # First check environment variable
-    api_key = os.getenv("OPENWEATHER_API_KEY")
-    if api_key:
-        return api_key
+    """Get OpenWeather API key: injected config first, then the cached config."""
+    # Config injection (populated by TOOL_SETUP before env var is unset)
+    key = _weather_config.get("api_key")
+    if key:
+        return key
 
-    # Try to load from config
+    # #2101: fall back to the process-wide resolved config — the env is read
+    # once and the key survives the #2223/#2102 unset via the secret cache, so no
+    # per-call os.environ re-read is needed.
     try:
-        from src.config import load_config
+        from src.config import get_cached_config
 
-        config = load_config()
-        if config.openweather_api_key:
-            return config.openweather_api_key
-    except ImportError:
-        pass
-
-    return None
+        return get_cached_config().openweather_api_key
+    except Exception:  # noqa: BLE001 — never let config failure break the tool
+        return None
 
 
 class WeatherQueryInput(BaseModel):
@@ -190,4 +209,4 @@ def is_configured() -> bool:
     return REQUESTS_AVAILABLE and bool(_get_api_key())
 
 
-__all__ = ["get_weather", "WeatherQueryInput", "TOOL_CONFIG", "is_configured"]
+__all__ = ["get_weather", "WeatherQueryInput", "TOOL_CONFIG", "TOOL_SETUP", "is_configured"]

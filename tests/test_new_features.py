@@ -269,8 +269,10 @@ class TestTokenFinalField:
         payload_final = TokenPayload(text="done", final=True)
         assert payload_final.final is True
 
-    def test_callback_emits_final_field(self):
-        """WebSocketCallbackHandler.on_llm_new_token emits final=True after tool calls."""
+    def test_callback_buffers_post_tool_final_answer(self):
+        """#2251: non-final tokens stream live; post-tool final-answer tokens are
+        buffered (suppressed) and flagged, not streamed — so a verification-recovery
+        regeneration can't double-render."""
         from src.api.callbacks import WebSocketCallbackHandler
 
         loop = asyncio.new_event_loop()
@@ -281,16 +283,19 @@ class TestTokenFinalField:
         payloads: list[dict] = []
         handler._enqueue = lambda msg_type, payload: payloads.append(payload)
 
-        # Before any tool calls, final should be False
+        # Before any tool calls, a non-final token streams live.
         handler.tool_call_count = 0
         handler.on_llm_new_token("hello")
         assert payloads[-1]["final"] is False
 
-        # After tool calls with no in-flight starts, final=True
+        # After tool calls with no in-flight starts, the final-answer token is
+        # buffered (suppressed) and flagged — NOT enqueued.
         handler.tool_call_count = 2
         handler._tool_starts.clear()
+        before = len(payloads)
         handler.on_llm_new_token("world")
-        assert payloads[-1]["final"] is True
+        assert len(payloads) == before, "post-tool final-answer token must not be streamed"
+        assert handler.final_answer_buffered is True
 
         loop.close()
 

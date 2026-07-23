@@ -87,18 +87,23 @@ def create_extend_run_tool(state: ExtendRunState) -> Any:
     ) -> str:
         if mode == "delegate" and not subtasks:
             return (
-                "Error: mode='delegate' requires a non-empty 'subtasks' list. "
-                "Provide 2-5 independent subtask descriptions."
+                "Error: mode='delegate' requires a non-empty 'subtasks' list — NO "
+                "extension was registered. Call extend_run again with 2-5 concrete "
+                "subtask descriptions, or just keep answering without delegation."
             )
         state.request_extension(mode=mode, subtasks=subtasks or [], reason=reason)
         if mode == "delegate":
             return (
-                f"Extension registered: {len(subtasks or [])} subtasks queued for parallel delegation. "
-                "Continue with any remaining sequential work; delegation will execute after this run."
+                f"Extension registered: {len(subtasks or [])} subtasks will run in parallel "
+                "and their results will be folded into your final answer in THIS turn. "
+                "Finish any remaining sequential work, then write your final answer here. "
+                "Do NOT end the turn promising results 'later' — there is no separate later run."
             )
         return (
-            "Extension registered: the step budget will be increased when the current limit "
-            "is reached. Continue working on the task."
+            "Extension registered: your step budget will be raised when you reach the current "
+            "limit, so keep working in THIS turn until the task is done and give your final "
+            "answer here. Do NOT end the turn promising results 'later' — there is no separate "
+            "later run."
         )
 
     return StructuredTool.from_function(
@@ -113,7 +118,10 @@ def create_extend_run_tool(state: ExtendRunState) -> Any:
             "- 'continue': Request more sequential steps (for builds, multi-step installs)\n"
             "- 'delegate': Split work into parallel sub-agents (for research from multiple "
             "angles, independent analysis tasks). Requires a 'subtasks' list.\n\n"
-            "Call this EARLY — don't wait until you're almost out of steps."
+            "Call this EARLY — don't wait until you're almost out of steps. Both modes "
+            "complete within the CURRENT turn: keep working and deliver your final answer "
+            "here. NEVER end a turn announcing that results will arrive 'later' or 'next "
+            "turn' — there is no separate later run."
         ),
         args_schema=ExtendRunInput,
     )

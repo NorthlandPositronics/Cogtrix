@@ -527,17 +527,19 @@ class TestCallbacksTokenFinalFlag:
         assert token_msgs[-1]["payload"]["final"] is False
         loop.close()
 
-    def test_final_true_after_tool_call_ends(self):
+    def test_final_answer_token_buffered_after_tool_call(self):
+        # #2251: a post-tool final-answer token (tool_call_count>0, none in-flight)
+        # is buffered (suppressed), NOT streamed live — so a verification-recovery
+        # regeneration can't double-render. The surviving answer is emitted once by
+        # the turn runner at turn end.
         handler, q, loop = self._make_handler()
-        # Simulate one tool call cycle
         handler.on_tool_start({"name": "search"}, "", run_id="run-1")
         handler.on_tool_end("result", run_id="run-1")
-        # No in-flight tools + tool_call_count > 0 → final=True
         handler.on_llm_new_token("response text")
         msgs = self._drain_queue(q, loop)
         token_msgs = [m for m in msgs if m.get("type") == "token"]
-        assert token_msgs, "expected at least one token message"
-        assert token_msgs[-1]["payload"]["final"] is True
+        assert token_msgs == [], "post-tool final-answer tokens must not stream live (#2251)"
+        assert handler.final_answer_buffered is True
         loop.close()
 
     def test_final_false_while_tool_in_flight(self):

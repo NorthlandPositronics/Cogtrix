@@ -114,3 +114,18 @@ class MCPServerAddRequest(BaseModel):
         le=300,
         description="Connection timeout in seconds.",
     )
+    pin: bool = Field(
+        default=True,
+        description=(
+            "Pin this server's tools into every turn's context. "
+            "Set false for large servers to avoid per-turn token overhead "
+            "(tools are then loaded on demand via request_tools)."
+        ),
+    )
+    allow_insecure: bool = Field(
+        default=False,
+        description=(
+            "Permit http:// (non-TLS) and private/loopback SSE endpoints. "
+            "Off by default — only enable for trusted internal servers."
+        ),
+    )

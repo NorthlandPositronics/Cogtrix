@@ -83,6 +83,39 @@ class TestIngestMany:
         # no implicit ``/faiss_index`` suffix is appended.
         mock_save_store.assert_called_once_with(mock_store, config.vectordb_dir)
 
+    def test_build_failure_is_logged(self, tmp_path: Path):
+        """Regression #2204: when the vector-store build/persist stage fails
+        (embedding endpoint down, FAISS write error, ...), the failure is
+        logged at WARNING — not silently swallowed — and every prepared file
+        is still reported as failed."""
+        from src.rag.ingest import ingest_many
+
+        config = _make_ingest_config(tmp_path)
+        paths: list[str | Path] = [tmp_path / f"file{i}.txt" for i in range(3)]
+        prepared = {str(path): (str(path), [_fake_document(source=path.name)]) for path in paths}
+
+        def fake_prepare(path, cfg):
+            return prepared.get(str(path))
+
+        mock_log = MagicMock()
+        with (
+            patch("src.rag.ingest._prepare_ingest_file", side_effect=fake_prepare),
+            patch(
+                "src.rag.ingest._create_embeddings",
+                side_effect=RuntimeError("embedding endpoint 401"),
+            ),
+            patch("src.rag.ingest._log", mock_log),
+        ):
+            result = ingest_many(paths, config)
+
+        # Behavior preserved: every prepared file marked failed.
+        assert len(result) == 3
+        assert not any(result.values())
+        # The #2204 fix: the build failure is logged (was silently swallowed).
+        assert mock_log.warning.called
+        logged = " ".join(str(call.args) for call in mock_log.warning.call_args_list)
+        assert "vector-store build failed" in logged
+
     def test_partial_failure(self, tmp_path: Path):
         """When some files fail, successes and failures are reported correctly."""
         from src.rag.ingest import ingest_many

@@ -34,6 +34,11 @@ from src.tools.error_sanitizer import sanitize_error
 
 log = logging.getLogger("cogtrix.api.turn_runner")
 
+# Refusal returned to the client when the API content guardrail blocks an input
+# (#2056). Mirrors the assistant-mode ``_BLOCKED_RESPONSE`` — deliberately generic
+# so it doesn't disclose which guard fired or how to evade it.
+_API_BLOCKED_RESPONSE = "I'm unable to process this message. Please try rephrasing your request."
+
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -323,6 +328,12 @@ async def run_message_turn(
         app_state: FastAPI app.state (unused currently; reserved for future hooks).
     """
     set_session_id(session.id)
+    # #2240: tag agent-spawned background tasks with the requesting user so the
+    # creator can retrieve them under the deny-by-default #2197 ownership gate.
+    # (org_id is not yet carried on ApiSession — tracked as the #2240 follow-up.)
+    from src.tasks.queue import reset_task_owner, set_task_owner
+
+    _owner_token = set_task_owner(getattr(session, "user_id", "") or "")
     try:
         if mode not in ("normal", "think", "delegate"):
             log.warning("run_message_turn: unknown mode %r — treating as 'normal'", mode)
@@ -344,6 +355,7 @@ async def run_message_turn(
             await _run_message_turn_inner(session, text, mode, db, app_state)
     finally:
         clear_session_id()
+        reset_task_owner(_owner_token)
 
 
 async def _run_message_turn_inner(
@@ -409,7 +421,63 @@ async def _run_message_turn_inner(
         approvals = set(getattr(session.session_state, "approvals", set()))
 
     agent_msgs: list = []
+    # API content guardrails (#2056). The pipeline lives on app.state and is built
+    # at startup ONLY when api.guardrails.enabled is true, so this is a no-op for
+    # deployments that haven't opted in. None when app_state is absent (e.g. tests
+    # calling this helper directly).
+    guardrails = getattr(app_state, "guardrail_pipeline", None) if app_state is not None else None
     try:
+        # ── Input screening (before the model runs) ───────────────────
+        if guardrails is not None:
+            # Key abuse tracking (rate-limit + auto-blacklist) by user_id so a
+            # caller can't reset their violation window by opening a new session;
+            # fall back to session id if user_id is somehow unset.
+            guard_key = getattr(session, "user_id", None) or session.id
+            try:
+                gres = await asyncio.to_thread(guardrails.check_input, text, guard_key)
+                gres_safe = bool(gres.is_safe)
+                gres_reason = gres.reason
+            except Exception as exc:
+                # A guardrail-internal failure must fail CLOSED — never let an
+                # error in the safety layer wave the input through to the model.
+                log.error("Guardrail check_input failed for session %s: %s", session.id, exc)
+                gres_safe = False
+                gres_reason = None
+            if not gres_safe:
+                reason = gres_reason or "blocked"
+                log.warning(
+                    "API guardrail blocked input: session=%s user=%s reason=%s",
+                    session.id,
+                    guard_key,
+                    reason,
+                )
+                # Persist violation / blacklist state so repeat offenders stick.
+                try:
+                    await asyncio.to_thread(guardrails.save)
+                except Exception as exc:  # noqa: BLE001 — persistence is best-effort
+                    log.debug("Guardrail save failed for session %s: %s", session.id, exc)
+                session.agent_state = "idle"
+                await _enqueue_agent_state(session, "idle")
+                # Emit a normal `done` frame (NOT an `error` frame): a guardrail
+                # block is an expected refusal, so the REST sync path returns 200
+                # with blocked_by_guardrails=true rather than 500.
+                await session.ws_queue.put(
+                    {
+                        "type": "done",
+                        "payload": {
+                            "message_id": str(uuid.uuid4()),
+                            "total_tokens": 0,
+                            "input_tokens": 0,
+                            "output_tokens": 0,
+                            "duration_ms": int((time.monotonic() - turn_start) * 1000),
+                            "tool_calls": 0,
+                            "text": _API_BLOCKED_RESPONSE,
+                            "blocked_by_guardrails": True,
+                            "guardrail_reason": reason,
+                        },
+                    }
+                )
+                return
         try:
             response_text: str = await asyncio.to_thread(
                 run_agent,
@@ -503,18 +571,36 @@ async def _run_message_turn_inner(
                 log.warning("Queue full, dropping CANCELLED error for session %s", session.id)
             raise
 
-        # BUG-253: deep_think / delegation run inside asyncio.to_thread without the
-        # ws_callback, so no incremental tokens are streamed during these phases.
-        # Emit the final result as a single token message now so the frontend has
-        # content to display regardless of whether it clears the earlier run_agent
-        # tokens on the "analyzing" state transition.
-        if mode in ("think", "delegate") and response_text:
+        # ── Output sanitization (#2056) ───────────────────────────────
+        # Sanitize the final response (banned strings / PII / URL policy) before
+        # it is streamed in the done frame, persisted to memory/DB, or returned on
+        # the REST path. NOTE: in normal mode the incremental tokens streamed by
+        # ws_callback during run_agent are NOT retroactively sanitized — only the
+        # final (and think/delegate) text is. The done-frame text is authoritative
+        # for the stored message and the REST sync response.
+        if guardrails is not None and response_text:
+            try:
+                response_text = await asyncio.to_thread(guardrails.sanitize_output, response_text)
+            except Exception as exc:  # noqa: BLE001 — never let sanitization crash the turn
+                log.error("Guardrail sanitize_output failed for session %s: %s", session.id, exc)
+
+        # Emit the final answer as a single token frame at turn end when it was
+        # not streamed live:
+        #   - BUG-253: deep_think / delegation run inside asyncio.to_thread without
+        #     the ws_callback, so no incremental tokens stream during those phases.
+        #   - #2251: post-tool final-answer tokens are buffered (suppressed) live so
+        #     a verification-recovery regeneration can't double-render; the single
+        #     surviving answer (from extract_response) is delivered here.
+        # No-tool answers stream live and never set final_answer_buffered, so they
+        # are NOT re-emitted here (no duplication).
+        final_was_suppressed = getattr(ws_callback, "final_answer_buffered", False)
+        if response_text and (mode in ("think", "delegate") or final_was_suppressed):
             try:
                 session.ws_queue.put_nowait(
                     {"type": "token", "payload": {"text": response_text, "final": True}}
                 )
             except asyncio.QueueFull:
-                log.debug("Queue full, dropping think-result token for session %s", session.id)
+                log.debug("Queue full, dropping final-answer token for session %s", session.id)
 
         # Update memory with the new exchange.
         if session.memory_manager is not None:
@@ -592,6 +678,8 @@ async def _run_message_turn_inner(
                 "duration_ms": duration_ms,
                 "tool_calls": token_counts.get("tool_call_count", 0),
                 "text": response_text,
+                "blocked_by_guardrails": False,
+                "guardrail_reason": None,
             },
         }
         await session.ws_queue.put(done_msg)

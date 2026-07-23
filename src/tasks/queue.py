@@ -24,8 +24,32 @@ import time
 import uuid
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
+from contextvars import ContextVar
 from dataclasses import dataclass
 from enum import StrEnum
+
+# Per-turn task owner (#2240). Background tasks spawned by the agent's
+# ``run_agent(..., background=True)`` tool reach ``submit_task`` with no owner;
+# the API turn path sets this ContextVar to the requesting user so those tasks
+# inherit ownership and their creator can retrieve them under the deny-by-default
+# #2197 gate. ``asyncio.to_thread`` copies the context into the agent thread, so
+# the value set in ``run_message_turn`` is visible where ``submit_task`` runs.
+# Unset (CLI / non-API spawns) → empty owner, which stays admin-only.
+_task_owner: ContextVar[tuple[str, str | None]] = ContextVar("task_owner", default=("", None))
+
+
+def set_task_owner(user_id: str, org_id: str | None = None) -> object:
+    """Set the per-turn task owner; returns a token for ``reset_task_owner``."""
+    return _task_owner.set((user_id or "", org_id))
+
+
+def reset_task_owner(token: object) -> None:
+    """Restore the previous task-owner value (best-effort)."""
+    try:
+        _task_owner.reset(token)  # type: ignore[arg-type]
+    except (ValueError, LookupError):
+        pass
+
 
 # ---------------------------------------------------------------------------
 # Enums and dataclasses
@@ -383,6 +407,11 @@ def submit_task(
     user_id: str = "",
     org_id: str | None = None,
 ) -> str:
+    # #2240: when the caller passes no explicit owner (the agent's background
+    # tool / CLI), inherit the current turn's owner from the ContextVar so the
+    # creator can retrieve their own task under the #2197 per-user gate.
+    if not user_id and org_id is None:
+        user_id, org_id = _task_owner.get()
     return get_task_queue().submit(
         agent_name, prompt, session_id=session_id, user_id=user_id, org_id=org_id
     )

@@ -1125,17 +1125,18 @@ def build_process_tools_node(
                 _consecutive_identical_error_count[0] = 1
             _identical_count = _consecutive_identical_error_count[0]
             if _identical_count == 2:
-                result_msgs.append(
-                    ToolMessage(
-                        content=(
-                            f"You've tried this exact action {_identical_count} times and "
-                            "received the same error. Stop retrying. Instead: "
-                            f"{_tool_error_guidance(_tool_error, getattr(_tool_msg, 'name', '') or _tool_call.get('name', ''))}"
-                        ),
-                        tool_call_id=getattr(_tool_msg, "tool_call_id", ""),
-                        name=getattr(_tool_msg, "name", "") or _tool_call.get("name", ""),
-                    )
+                _hint = (
+                    f"You've tried this exact action {_identical_count} times and "
+                    "received the same error. Stop retrying. Instead: "
+                    f"{_tool_error_guidance(_tool_error, getattr(_tool_msg, 'name', '') or _tool_call.get('name', ''))}"
                 )
+                # Append the hint INTO the error ToolMessage rather than emitting a
+                # SECOND ToolMessage that reuses the same tool_call_id. Two tool
+                # messages for one tool_call are rejected by OpenAI/Azure (400) and
+                # collapsed by the downstream pairing repair — emitting a separate
+                # message would re-introduce the #2276 crash and lose the hint.
+                _existing = _tool_msg.content if isinstance(_tool_msg.content, str) else ""
+                _tool_msg.content = f"{_existing}\n\n{_hint}" if _existing else _hint
             if _identical_count >= 3:
                 _force_thinking_break[0] = True
                 _graph_log.info(

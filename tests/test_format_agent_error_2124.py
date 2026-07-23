@@ -53,6 +53,40 @@ class TestFormatInvalidModelId:
         assert "Invalid request" in msg
 
 
+_NO_DB_400 = (
+    "Error code: 400 - {'error': {'message': 'No connected db.', "
+    "'type': 'no_db_connection', 'param': None, 'code': '400'}}"
+)
+
+
+class TestGenericBadRequestMessage:
+    """#2220: the generic BadRequest branch must surface the provider's message.
+
+    ``_sanitize_sdk_error`` alone truncates at the leading ``Error code:`` marker
+    (index 0) and returns an empty string, so the operator previously saw a bare
+    ``**Invalid request:** `` with no reason. The fix extracts the API ``message``
+    field first (as the model-id / rate-limit branches already do).
+    """
+
+    def test_provider_message_is_surfaced(self) -> None:
+        msg = format_agent_error(BadRequestError(_NO_DB_400))
+        assert "Invalid request" in msg
+        # The actual reason must be present — not an empty detail.
+        assert "No connected db" in msg
+
+    def test_detail_is_not_empty(self) -> None:
+        # Pin the regression precisely: the text after the bold prefix is non-blank.
+        msg = format_agent_error(BadRequestError(_NO_DB_400))
+        detail = msg.split("**Invalid request:**", 1)[1].strip()
+        assert detail, "generic BadRequest rendered an empty detail (regression #2220)"
+
+    def test_no_message_field_falls_back_without_crashing(self) -> None:
+        # A 400 with no extractable message keeps the prefix (empty detail is OK
+        # when there genuinely is nothing to show) and never raises.
+        msg = format_agent_error(BadRequestError("Error code: 400 - opaque"))
+        assert "Invalid request" in msg
+
+
 class TestIsUserConfigError:
     def test_bad_request_is_user_config_error(self) -> None:
         assert _is_user_config_error(BadRequestError(_INVALID_MODEL_400)) is True

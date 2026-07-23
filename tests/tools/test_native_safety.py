@@ -12,6 +12,7 @@ a silent ``"double free or corruption (!prev)"`` abort.
 
 from __future__ import annotations
 
+import contextlib
 import importlib
 import logging
 import sys
@@ -75,6 +76,40 @@ def clean_native_modules(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def _inject(monkeypatch: pytest.MonkeyPatch, name: str) -> None:
     monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
+
+
+@contextlib.contextmanager
+def _isolated_reimport(module_name: str):
+    """Re-import *module_name* from scratch for a side-effect check, then fully
+    restore the ORIGINAL module object.
+
+    A plain ``del sys.modules[...] + importlib.import_module(...)`` (even via
+    ``monkeypatch.delitem``) leaves the *parent package attribute* (e.g.
+    ``src.tools.web_search``) pointing at the throwaway re-imported module —
+    ``monkeypatch`` only restores the ``sys.modules`` dict entry, not the
+    attribute. Any other test that bound ``from <module> import name`` at import
+    time then reads a module whose globals ``monkeypatch.setattr`` can no longer
+    reach. That decoupling broke ``test_web_search``'s outer-deadline test under
+    ``--dist=loadfile`` once both files shared an xdist worker. Restore both the
+    ``sys.modules`` entry and the package attribute so the re-import is fully
+    isolated regardless of file ordering.
+    """
+    parent_name, _, attr = module_name.rpartition(".")
+    parent = sys.modules.get(parent_name)
+    original = sys.modules.get(module_name)
+    sys.modules.pop(module_name, None)
+    try:
+        importlib.import_module(module_name)
+        yield
+    finally:
+        if original is not None:
+            sys.modules[module_name] = original
+            if parent is not None:
+                setattr(parent, attr, original)
+        else:
+            sys.modules.pop(module_name, None)
+            if parent is not None and hasattr(parent, attr):
+                delattr(parent, attr)
 
 
 class TestDetect:
@@ -204,15 +239,14 @@ class TestModuleHygiene:
         _strip_native_modules(monkeypatch)
 
         # Re-import the web_search module from scratch so module-level
-        # side effects re-execute.
-        monkeypatch.delitem(sys.modules, "src.tools.web_search", raising=False)
-        importlib.import_module("src.tools.web_search")
-
-        assert "curl_cffi" not in sys.modules, (
-            "Importing src.tools.web_search must NOT pull curl_cffi into the "
-            "parent process — Bug D / cogtrix46 heap corruption regression. "
-            "curl_cffi belongs ONLY in the DDG subprocess worker."
-        )
+        # side effects re-execute — fully isolated so we don't decouple
+        # other tests' bound references (see _isolated_reimport).
+        with _isolated_reimport("src.tools.web_search"):
+            assert "curl_cffi" not in sys.modules, (
+                "Importing src.tools.web_search must NOT pull curl_cffi into the "
+                "parent process — Bug D / cogtrix46 heap corruption regression. "
+                "curl_cffi belongs ONLY in the DDG subprocess worker."
+            )
 
     def test_importing_ddg_module_does_not_load_curl_cffi(
         self, monkeypatch: pytest.MonkeyPatch
@@ -223,10 +257,8 @@ class TestModuleHygiene:
         # before re-importing so a stale entry from another test in
         # the same xdist worker doesn't poison the assertion.
         _strip_native_modules(monkeypatch)
-        monkeypatch.delitem(sys.modules, "src.tools._ddg", raising=False)
-        importlib.import_module("src.tools._ddg")
-
-        assert "curl_cffi" not in sys.modules, (
-            "Importing src.tools._ddg must NOT pull curl_cffi into the parent "
-            "process — the import belongs strictly inside fetch_ddg_html."
-        )
+        with _isolated_reimport("src.tools._ddg"):
+            assert "curl_cffi" not in sys.modules, (
+                "Importing src.tools._ddg must NOT pull curl_cffi into the parent "
+                "process — the import belongs strictly inside fetch_ddg_html."
+            )

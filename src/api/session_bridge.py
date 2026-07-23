@@ -699,6 +699,40 @@ class ApiSessionRegistry:
         async with self._lock:
             return self._sessions.get(session_id)
 
+    async def reconcile_tools(self) -> int:
+        """Evict warm sessions so they re-warm against the current tool registry.
+
+        Called after an MCP server is added, removed, or restarted at runtime.
+        A warm session snapshots ``tool_registry.tools`` at warm time (see
+        ``_build_run_config``), so the only safe way to make a registry change
+        take effect for an already-warm session is to evict it and let the next
+        request re-warm it with the fresh registry.
+
+        Sessions with an agent turn in flight are skipped — their bound tools
+        cannot be swapped out from under a running LLM turn; they pick up the
+        change on their next turn. Returns the number of sessions evicted.
+        """
+        to_evict: list[str] = []
+        async with self._lock:
+            for sid, sess in list(self._sessions.items()):
+                turn_task = getattr(sess, "turn_task", None)
+                if turn_task is not None and not turn_task.done():
+                    log.debug("Skipping reconcile-evict of session %s: agent turn in progress", sid)
+                    continue
+                to_evict.append(sid)
+
+        evicted = 0
+        for sid in to_evict:
+            async with self._lock:
+                sess = self._sessions.pop(sid, None)
+            if sess is not None:
+                await _save_memory(sess)
+                evicted += 1
+
+        if evicted:
+            log.info("MCP reconcile: evicted %d warm session(s) to refresh tools", evicted)
+        return evicted
+
 
 # ---------------------------------------------------------------------------
 # Internal helpers
