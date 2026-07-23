@@ -708,8 +708,13 @@ class TestHandlerDeferralIntegration:
         handler.handle(msg, ch, is_reprocessing=True)
         assert "suppress_reply" in injected_tools
 
-    def test_suppress_tool_not_injected_on_normal_turn(self, tmp_path):
-        """suppress_reply should NOT appear on normal (non-reprocessing) turns."""
+    def test_suppress_tool_injected_on_normal_turn(self, tmp_path):
+        """suppress_reply should appear in active_tools on ALL turns, not just reprocessing.
+
+        Previously it was only injected on is_reprocessing=True, which caused agents
+        to emit "(No reply...)" or the literal string "suppress_reply" as plain text
+        when following a system-prompt gatekeeper policy.
+        """
         injected_tools: list[str] = []
 
         def fake_runner(**kwargs):
@@ -737,7 +742,7 @@ class TestHandlerDeferralIntegration:
         msg = _make_msg()
         ch = _make_channel()
         handler.handle(msg, ch, is_reprocessing=False)
-        assert "suppress_reply" not in injected_tools
+        assert "suppress_reply" in injected_tools
 
     def test_defer_skips_delivery_and_memory(self, tmp_path):
         """When defer_processing is called, channel.send and memory.update should NOT be called."""
@@ -811,6 +816,51 @@ class TestHandlerDeferralIntegration:
 
         ch.send.assert_not_called()
         session.memory_manager.update.assert_not_called()
+
+    def test_outbound_suppress_skips_send_and_updates_memory(self):
+        """handle_outbound: when agent calls suppress_reply, channel.send is skipped
+        and memory records '[Outbound suppressed by agent]'."""
+        from src.assistant.handler import MessageHandler
+
+        session_mgr = MagicMock()
+        session = _make_session()
+        session_mgr.get_or_create.return_value = session
+
+        def fake_runner(**kwargs):
+            for tool in (kwargs.get("config") or MagicMock()).active_tools_list or []:
+                if getattr(tool, "name", "") == "suppress_reply":
+                    tool.invoke({})
+                    break
+            return ""
+
+        handler = MessageHandler(
+            session_mgr=session_mgr,
+            config={},
+            llm=MagicMock(),
+            system_prompt="sys",
+            registry=MagicMock(),
+            approvals=set(),
+            available_tools={},
+            active_tools=[],
+            agent_runner=fake_runner,
+        )
+        ch = _make_channel()
+        response_text, message_id = handler.handle_outbound(
+            contact_name="Alice",
+            instructions="Say hello",
+            channel=ch,
+            chat_id="+1@c.us",
+        )
+
+        ch.send.assert_not_called()
+        assert message_id is None
+        assert (
+            "suppressed" in response_text.lower()
+            or response_text == "[Outbound suppressed by agent]"
+        )
+        session.memory_manager.update.assert_called_once()
+        call_args = session.memory_manager.update.call_args[0]
+        assert "[Outbound suppressed by agent]" in call_args[1]
 
     def test_handle_batch_coalesces_into_deferred_record(self, tmp_path):
         """Messages arriving during a pending deferral should be absorbed, not processed."""

@@ -294,6 +294,118 @@ class KnowledgeSearchRequest(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Simulation
+# ---------------------------------------------------------------------------
+
+SimulateDirection = Literal["inbound", "outbound"]
+
+
+class SimulateRequest(BaseModel):
+    """Request body for POST /api/v1/assistant/simulate."""
+
+    channel: str = Field(
+        ...,
+        description="Logical channel name (e.g. 'whatsapp' or 'telegram').",
+        examples=["whatsapp"],
+    )
+    chat_id: str = Field(
+        ...,
+        min_length=1,
+        max_length=512,
+        description="Chat identifier on the channel (e.g. '+1234567890@c.us').",
+        examples=["+1234567890@c.us"],
+    )
+    message: str = Field(
+        ...,
+        min_length=1,
+        max_length=8192,
+        description=(
+            "User message text for inbound simulation, or context text for outbound. "
+            "For outbound, prefer setting 'instructions' explicitly."
+        ),
+        examples=["Hey, can you help me with my order?"],
+    )
+    direction: SimulateDirection = Field(
+        default="inbound",
+        description=(
+            "'inbound' simulates an end-user message arriving from the channel. "
+            "'outbound' simulates an operator-initiated message (uses 'instructions')."
+        ),
+    )
+    instructions: str | None = Field(
+        default=None,
+        max_length=8192,
+        description=(
+            "Operator instructions for outbound simulation. " "Falls back to 'message' when absent."
+        ),
+        examples=["Greet the user and ask about their order status."],
+    )
+    sender_name: str = Field(
+        default="Simulator",
+        max_length=256,
+        description="Human-readable sender name inserted into the synthetic message.",
+        examples=["Alice"],
+    )
+    sender_id: str = Field(
+        default="simulator",
+        max_length=256,
+        description="Sender identifier (chat_id-like string) inserted into the synthetic message.",
+        examples=["simulator"],
+    )
+    persist: bool = Field(
+        default=False,
+        description=(
+            "When true, the simulated turn is recorded in session memory. "
+            "Use with care — this modifies the live conversation context."
+        ),
+    )
+
+
+class SimulateOut(BaseModel):
+    """Response body for POST /api/v1/assistant/simulate."""
+
+    channel: str = Field(..., description="Channel name from the request.", examples=["whatsapp"])
+    chat_id: str = Field(
+        ..., description="Chat ID from the request.", examples=["+1234567890@c.us"]
+    )
+    session_key: str = Field(
+        ...,
+        description="Session key used for this simulation turn.",
+        examples=["whatsapp::+1234567890@c.us"],
+    )
+    direction: SimulateDirection = Field(..., description="Direction from the request.")
+    response: str = Field(
+        ...,
+        description="Agent-generated response (empty string when suppressed).",
+    )
+    suppressed: bool = Field(
+        ...,
+        description="True when the agent called suppress_reply — no message would have been sent.",
+    )
+    deferred: bool = Field(
+        ...,
+        description="True when the agent called defer_processing — turn would have been re-queued.",
+    )
+    blocked_by_guardrails: bool = Field(
+        ...,
+        description="True when the input was blocked by the guardrail pipeline.",
+    )
+    guardrail_reason: str | None = Field(
+        default=None,
+        description="Guard reason when blocked_by_guardrails is True, else null.",
+    )
+    duration_ms: float = Field(
+        ...,
+        description="Wall-clock milliseconds for the full pipeline (LLM call included).",
+        examples=[1234.5],
+    )
+    memory_persisted: bool = Field(
+        ...,
+        description="True when persist=True was requested and memory was successfully saved.",
+    )
+
+
+# ---------------------------------------------------------------------------
 # Outbound messaging
 # ---------------------------------------------------------------------------
 

@@ -412,6 +412,14 @@ async def _run_message_turn_inner(
                 )
             except asyncio.QueueFull:
                 log.warning("Queue full, dropping AGENT_ERROR for session %s", session.id)
+            # Emit done so the sync drain loop in send_message terminates correctly
+            # and can surface the error rather than returning HTTP 200 with empty text.
+            try:
+                session.ws_queue.put_nowait(
+                    {"type": "done", "payload": {"text": "", "error": str(exc)}}
+                )
+            except asyncio.QueueFull:
+                log.warning("Queue full, dropping done-on-error for session %s", session.id)
             session.agent_state = "idle"
             await _enqueue_agent_state(session, "idle")
             return

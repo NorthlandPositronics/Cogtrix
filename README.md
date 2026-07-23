@@ -1,6 +1,6 @@
 # Cogtrix Agent
 
-A modular AI assistant with 51 built-in tools, multi-provider LLM support, and intelligent memory management.
+A modular AI assistant with 60 built-in tools, multi-provider LLM support, and intelligent memory management.
 
 ---
 
@@ -12,7 +12,7 @@ Cogtrix is an **interactive command-line AI assistant** that connects to large l
 
 **Highlights:**
 
-- 51 built-in tools across 6 search providers, file I/O, shell, Python, HTTP, NLP, WhatsApp and Telegram messaging, and more
+- 60 built-in tools across 6 search providers, file I/O, Git operations, shell, Python, HTTP, NLP, WhatsApp and Telegram messaging, and more
 - Three memory modes optimized for conversation, coding, or strategic reasoning — with hybrid memory (rolling summary + semantic recall)
 - Deep reasoning engine (Tree-of-Thought with iterative reflection) via `/think`
 - Task delegation across multiple LLM models via `/delegate`
@@ -230,14 +230,15 @@ Arrow keys, Home/End, and input history work out of the box (via `readline`).
 
 ---
 
-## Built-in Tools (51)
+## Built-in Tools (60)
 
 | Category | Tools |
 |----------|-------|
-| **Search** (10) | DuckDuckGo (free), Tavily, Exa, Brave, Google, SerpAPI |
-| **Files** (5) | `read_file`, `write_file`, `append_file`, `list_directory`, `file_info` |
+| **Search** (11) | DuckDuckGo web + news (free), Tavily, Exa, Brave, Google, SerpAPI |
+| **Files** (6) | `read_file`, `write_file`, `patch_file`, `append_file`, `list_directory`, `file_info` |
+| **Git** (7) | `git_status`, `git_diff`, `git_log`, `git_add`, `git_commit`, `git_create_branch`, `git_checkout` |
 | **System** (2) | `execute_shell_command`, `execute_python` |
-| **Text & NLP** (10) | word count, find/replace, URLs, emails, compare, sentiment, summarize, keywords |
+| **Text & NLP** (10) | word count, find/replace, URLs, emails, compare, split, trim, sentiment, summarize, keywords |
 | **JSON & Math** (6) | parse, format, query, extract, convert, calculate |
 | **Web** (2) | `http_get`, `http_post` |
 | **Date & Weather** (4) | datetime, timezone, parse date, weather |
@@ -405,7 +406,7 @@ For detailed debugging, run with `--debug` (logs every LLM call, tool input/outp
 | **[Configuration](docs/CONFIGURATION.md)** | Every config option, environment variables, search providers |
 | **[Providers](docs/PROVIDERS.md)** | Step-by-step: Ollama, OpenAI, Anthropic, Google, Groq, Together, vLLM |
 | **[Memory Modes](docs/MEMORY_MODES.md)** | Conversation, code, and reasoning modes + hybrid memory (summary + recall) |
-| **[Tools Reference](docs/TOOLS_REFERENCE.md)** | All 51 tools with parameters and examples |
+| **[Tools Reference](docs/TOOLS_REFERENCE.md)** | All 60 tools with parameters and examples |
 | **[WhatsApp Guide](docs/WHATSAPP_GUIDE.md)** | Use Cogtrix as a WhatsApp assistant (with Docker Compose) |
 | **[Telegram Guide](docs/TELEGRAM_GUIDE.md)** | Use Cogtrix as a Telegram assistant via a bot |
 | **[Assistant Mode](docs/CONFIGURATION.md#assistant-mode)** | Run Cogtrix as a headless WhatsApp/Telegram messaging daemon |
@@ -421,7 +422,7 @@ For detailed debugging, run with `--debug` (logs every LLM call, tool input/outp
 
 - Want to connect OpenAI, Groq, or another LLM? See [Providers](docs/PROVIDERS.md).
 - Want to customize settings, add search API keys, or set up messaging? See [Configuration](docs/CONFIGURATION.md).
-- Want to know what all 51 tools do? See [Tools Reference](docs/TOOLS_REFERENCE.md).
+- Want to know what all 60 tools do? See [Tools Reference](docs/TOOLS_REFERENCE.md).
 
 ---
 
@@ -429,7 +430,8 @@ For detailed debugging, run with `--debug` (logs every LLM call, tool input/outp
 
 ```bash
 uv run pytest tests/ -v
-uv run pytest tests/ -q -k "not test_agent_workflow"  # unit tests only (fast)
+uv run pytest tests/ -q -m "not agent_workflow and not live_llm"  # unit tests only (fast)
+uv run pytest tests/ -m live_llm -v --timeout=300                 # live LLM tests (requires Gemma container at localhost:18080)
 ```
 
 ---

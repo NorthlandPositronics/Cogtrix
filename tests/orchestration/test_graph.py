@@ -2,7 +2,7 @@
 
 from types import SimpleNamespace
 
-from src.orchestration.graph import _detect_tool_request
+from src.orchestration.graph import _detect_tool_request, _is_action_intent
 
 
 class TestDetectToolRequest:
@@ -282,3 +282,177 @@ class TestDetectToolRequestEdgeCases:
         assert result.add == ["shell"]
         # calculator from names should NOT appear
         assert "calculator" not in result.add
+
+
+class TestIsActionIntent:
+    """Unit tests for _is_action_intent — action-intent-without-tool-call detection."""
+
+    def _ai(self, content: str, tool_calls=None):
+        return SimpleNamespace(content=content, tool_calls=tool_calls or [])
+
+    # ── Positive cases (should return True) ──────────────────────────────────
+
+    def test_ill_create(self):
+        assert _is_action_intent(self._ai("I'll create an OpenAI-compatible API server."))
+
+    def test_i_will_write(self):
+        assert _is_action_intent(self._ai("I will write the configuration file now."))
+
+    def test_let_me_run(self):
+        assert _is_action_intent(self._ai("Let me run the tests to verify the changes."))
+
+    def test_lets_build(self):
+        assert _is_action_intent(self._ai("Let's build the Docker image first."))
+
+    def test_let_us_execute(self):
+        assert _is_action_intent(self._ai("Let us execute the migration script."))
+
+    def test_im_going_to_generate(self):
+        assert _is_action_intent(self._ai("I'm going to generate the report."))
+
+    def test_i_am_going_to_fetch(self):
+        assert _is_action_intent(self._ai("I am going to fetch the data from the API."))
+
+    def test_im_about_to_deploy(self):
+        assert _is_action_intent(self._ai("I'm about to deploy the service."))
+
+    def test_i_need_to_install(self):
+        assert _is_action_intent(self._ai("I need to install the dependencies first."))
+
+    def test_i_have_to_update(self):
+        assert _is_action_intent(self._ai("I have to update the config file."))
+
+    def test_i_should_search(self):
+        assert _is_action_intent(self._ai("I should search for recent documentation."))
+
+    def test_i_must_implement(self):
+        assert _is_action_intent(self._ai("I must implement the retry logic."))
+
+    def test_i_will_now_set_up(self):
+        assert _is_action_intent(self._ai("I will now set up the server."))
+
+    def test_ill_now_configure(self):
+        assert _is_action_intent(self._ai("I'll now configure the environment variables."))
+
+    def test_im_now_loading(self):
+        assert _is_action_intent(self._ai("I'm now loading the dataset."))
+
+    def test_ill_proceed_start(self):
+        assert _is_action_intent(self._ai("I'll proceed to start the application."))
+
+    def test_ill_go_ahead_save(self):
+        assert _is_action_intent(self._ai("I'll go ahead and save the output to a file."))
+
+    def test_now_ill_fetch(self):
+        assert _is_action_intent(self._ai("Now I'll fetch the latest changes from GitHub."))
+
+    def test_now_let_me_check(self):
+        assert _is_action_intent(self._ai("Now let me check the current directory structure."))
+
+    def test_first_ill_read(self):
+        assert _is_action_intent(self._ai("First, I'll read the existing file."))
+
+    def test_next_let_me_build(self):
+        assert _is_action_intent(self._ai("Next, let me build the project."))
+
+    def test_then_i_will_commit(self):
+        assert _is_action_intent(self._ai("Then I will commit the changes."))
+
+    def test_finally_ill_deploy(self):
+        assert _is_action_intent(self._ai("Finally, I'll deploy to production."))
+
+    def test_additionally_ill_export(self):
+        assert _is_action_intent(self._ai("Additionally, I'll export the results."))
+
+    def test_going_to_download(self):
+        assert _is_action_intent(self._ai("Going to download the model weights."))
+
+    def test_about_to_launch(self):
+        assert _is_action_intent(self._ai("About to launch the service container."))
+
+    def test_time_to_refactor(self):
+        assert _is_action_intent(self._ai("Time to refactor this module."))
+
+    def test_i_can_now_upload(self):
+        assert _is_action_intent(self._ai("I can now upload the package."))
+
+    def test_ill_send_request(self):
+        assert _is_action_intent(self._ai("I'll send a request to the endpoint."))
+
+    def test_let_me_parse(self):
+        assert _is_action_intent(self._ai("Let me parse the JSON response."))
+
+    def test_ill_scaffold_project(self):
+        assert _is_action_intent(self._ai("I'll scaffold the project structure."))
+
+    def test_let_me_clone(self):
+        assert _is_action_intent(self._ai("Let me clone the repository."))
+
+    def test_ill_push_changes(self):
+        assert _is_action_intent(self._ai("I'll push the changes to the remote branch."))
+
+    def test_let_me_extract(self):
+        assert _is_action_intent(self._ai("Let me extract the archive first."))
+
+    def test_ill_spin_up_server(self):
+        assert _is_action_intent(self._ai("I'll spin up a local server on port 8080."))
+
+    def test_multiline_with_intent_later(self):
+        """Intent phrase near the end of a multi-sentence response."""
+        text = (
+            "Looking at the requirements, the approach is clear. "
+            "Let me implement the solution now."
+        )
+        assert _is_action_intent(self._ai(text))
+
+    # ── Negative cases (should return False) ─────────────────────────────────
+
+    def test_returns_false_with_tool_calls(self):
+        """Tool calls present — not an action-intent-without-action case."""
+        msg = SimpleNamespace(
+            content="I'll create the file.",
+            tool_calls=[{"name": "write_file", "args": {}, "id": "tc1"}],
+        )
+        assert not _is_action_intent(msg)
+
+    def test_returns_false_empty_content(self):
+        assert not _is_action_intent(self._ai(""))
+
+    def test_returns_false_whitespace_only(self):
+        assert not _is_action_intent(self._ai("   \n  "))
+
+    def test_returns_false_non_string_content(self):
+        msg = SimpleNamespace(content=["list", "content"], tool_calls=[])
+        assert not _is_action_intent(msg)
+
+    def test_returns_false_pure_text_explanation(self):
+        """'I'll explain' — 'explain' is not a tool-action verb."""
+        assert not _is_action_intent(self._ai("I'll explain how this algorithm works."))
+
+    def test_returns_false_summarize(self):
+        assert not _is_action_intent(self._ai("I'll summarize what I found above."))
+
+    def test_returns_false_note(self):
+        assert not _is_action_intent(self._ai("I should note that this approach has tradeoffs."))
+
+    def test_returns_false_provide_answer(self):
+        assert not _is_action_intent(self._ai("I'll provide the answer directly."))
+
+    def test_returns_false_no_intent_phrase(self):
+        """Tool verb present but no intent lead phrase."""
+        assert not _is_action_intent(
+            self._ai("The build process requires installing dependencies.")
+        )
+
+    def test_returns_false_past_tense_completed_action(self):
+        """Past tense — action already done, not pending."""
+        assert not _is_action_intent(self._ai("I created the file and saved it."))
+
+    def test_returns_false_question_about_tool(self):
+        """Question about a tool action — no intent to call it."""
+        assert not _is_action_intent(self._ai("Should I run the tests?"))
+
+    def test_returns_false_missing_tool_calls_attribute(self):
+        """Object with no tool_calls attribute defaults to no tool calls."""
+        msg = SimpleNamespace(content="I'll explain the architecture.")
+        assert not _is_action_intent(msg)

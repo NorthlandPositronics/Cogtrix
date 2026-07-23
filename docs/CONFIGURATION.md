@@ -430,7 +430,7 @@ parallel_tool_execution: true
 
 ### Allowed Write Paths
 
-By default, file write operations (`write_file`, `append_file`) are restricted to the current working directory. You can extend this with additional directories:
+By default, file write operations (`write_file`, `append_file`, `patch_file`) are restricted to the current working directory. You can extend this with additional directories:
 
 ```yaml
 allowed_write_paths:

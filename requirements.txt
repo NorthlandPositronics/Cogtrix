@@ -16,7 +16,7 @@ annotated-types==0.7.0
     # via pydantic
 anthropic==0.86.0
     # via langchain-anthropic
-anyio==4.12.1
+anyio==4.13.0
     # via
     #   anthropic
     #   google-genai
@@ -31,7 +31,7 @@ attrs==26.1.0
     #   aiohttp
     #   jsonschema
     #   referencing
-bandit==1.9.3
+bandit==1.9.4
     # via cogtrix
 bcrypt==5.0.0
     # via cogtrix
@@ -39,7 +39,7 @@ black==26.3.1
     # via cogtrix
 brotli==1.2.0 ; platform_python_implementation == 'CPython'
     # via httpx
-brotlicffi==1.2.0.0 ; platform_python_implementation != 'CPython'
+brotlicffi==1.2.0.1 ; platform_python_implementation != 'CPython'
     # via httpx
 certifi==2026.1.4
     # via
@@ -50,7 +50,7 @@ cffi==2.0.0
     # via
     #   brotlicffi
     #   cryptography
-charset-normalizer==3.4.4
+charset-normalizer==3.4.6
     # via requests
 click==8.3.1
     # via
@@ -65,17 +65,17 @@ colorama==0.4.6 ; sys_platform == 'win32'
     #   pytest
     #   tqdm
     #   uvicorn
-coverage==7.13.4
+coverage==7.13.5
     # via
     #   cogtrix
     #   pytest-cov
-cryptography==46.0.5
+cryptography==46.0.6
     # via
     #   google-auth
     #   pyjwt
 dataclasses-json==0.6.7
     # via langchain-community
-ddgs==9.11.4
+ddgs==9.12.0
     # via cogtrix
 distro==1.9.0
     # via
@@ -86,7 +86,7 @@ dnspython==2.8.0
     # via email-validator
 docstring-parser==0.17.0
     # via anthropic
-email-validator==2.2.0
+email-validator==2.3.0
     # via cogtrix
 exa-py==2.9.0
     # via cogtrix
@@ -94,7 +94,7 @@ faiss-cpu==1.13.2
     # via cogtrix
 fake-useragent==2.2.0
     # via ddgs
-fastapi==0.135.1
+fastapi==0.135.2
     # via cogtrix
 filetype==1.2.0
     # via langchain-google-genai
@@ -108,7 +108,7 @@ google-genai==1.68.0
     # via langchain-google-genai
 google-search-results==2.4.2
     # via cogtrix
-greenlet==3.3.1
+greenlet==3.3.2
     # via sqlalchemy
 h11==0.16.0
     # via
@@ -159,7 +159,7 @@ joblib==1.5.3
     # via nltk
 jsonpatch==1.33
     # via langchain-core
-jsonpointer==3.0.0
+jsonpointer==3.1.1
     # via jsonpatch
 jsonschema==4.26.0
     # via mcp
@@ -171,7 +171,7 @@ langchain-classic==1.0.3
     # via langchain-community
 langchain-community==0.4.1
     # via cogtrix
-langchain-core==1.2.20
+langchain-core==1.2.22
     # via
     #   cogtrix
     #   langchain-anthropic
@@ -184,11 +184,11 @@ langchain-core==1.2.20
     #   langgraph
     #   langgraph-checkpoint
     #   langgraph-prebuilt
-langchain-google-genai==4.0.0
+langchain-google-genai==4.2.1
     # via cogtrix
 langchain-ollama==1.0.1
     # via cogtrix
-langchain-openai==1.1.11
+langchain-openai==1.1.12
     # via cogtrix
 langchain-text-splitters==1.1.1
     # via
@@ -196,7 +196,7 @@ langchain-text-splitters==1.1.1
     #   langchain-classic
 langgraph==1.1.3
     # via cogtrix
-langgraph-checkpoint==4.0.0
+langgraph-checkpoint==4.0.1
     # via
     #   langgraph
     #   langgraph-prebuilt
@@ -219,7 +219,7 @@ markdown-it-py==4.0.0
     # via rich
 markupsafe==3.0.3
     # via mako
-marshmallow==3.26.2
+marshmallow==4.2.3
     # via dataclasses-json
 mcp==1.26.0
     # via cogtrix
@@ -233,7 +233,7 @@ mypy-extensions==1.1.0
     # via
     #   black
     #   typing-inspect
-nltk==3.9.3
+nltk==3.9.4
     # via textblob
 nodeenv==1.10.0
     # via pyright
@@ -245,7 +245,7 @@ numpy==2.4.3
     #   scipy
 ollama==0.6.1
     # via langchain-ollama
-openai==2.29.0
+openai==2.30.0
     # via
     #   cogtrix
     #   exa-py
@@ -266,13 +266,13 @@ packaging==26.0
     #   pytest
 pathspec==1.0.4
     # via black
-platformdirs==4.8.0
+platformdirs==4.9.4
     # via black
 pluggy==1.6.0
     # via
     #   pytest
     #   pytest-cov
-primp==1.1.3
+primp==1.2.0
     # via ddgs
 propcache==0.4.1
     # via
@@ -303,7 +303,7 @@ pydantic==2.12.5
     #   ollama
     #   openai
     #   pydantic-settings
-pydantic-core==2.41.5
+pydantic-core==2.44.0
     # via pydantic
 pydantic-settings==2.13.1
     # via
@@ -317,7 +317,7 @@ pyjwt==2.12.1
     # via
     #   cogtrix
     #   mcp
-pypdf==6.9.1
+pypdf==6.9.2
     # via cogtrix
 pyright==1.1.408
     # via cogtrix
@@ -330,7 +330,7 @@ pytest==9.0.2
     #   pytest-timeout
 pytest-asyncio==1.3.0
     # via cogtrix
-pytest-cov==7.0.0
+pytest-cov==7.1.0
     # via cogtrix
 pytest-structlog==1.2
     # via cogtrix
@@ -340,7 +340,7 @@ python-dateutil==2.9.0.post0
     # via cogtrix
 python-docx==1.2.0
     # via cogtrix
-python-dotenv==1.2.1
+python-dotenv==1.2.2
     # via
     #   cogtrix
     #   exa-py
@@ -370,7 +370,7 @@ regex==2026.2.28
     # via
     #   nltk
     #   tiktoken
-requests==2.32.5
+requests==2.33.0
     # via
     #   cogtrix
     #   exa-py
@@ -395,7 +395,7 @@ rpds-py==0.30.0
     #   referencing
 rsa==4.9.1
     # via google-auth
-ruff==0.15.7
+ruff==0.15.8
     # via cogtrix
 scipy==1.17.1
     # via cogtrix
@@ -408,19 +408,19 @@ sniffio==1.3.1
     #   openai
 socksio==1.0.0
     # via httpx
-sqlalchemy==2.0.46
+sqlalchemy==2.0.48
     # via
     #   alembic
     #   cogtrix
     #   langchain-classic
     #   langchain-community
-sse-starlette==3.0.3
+sse-starlette==3.3.3
     # via mcp
-starlette==0.52.1
+starlette==1.0.0
     # via
     #   fastapi
     #   mcp
-stevedore==5.6.0
+stevedore==5.7.0
     # via bandit
 structlog==25.5.0
     # via pytest-structlog

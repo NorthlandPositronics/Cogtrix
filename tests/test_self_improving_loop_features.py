@@ -400,6 +400,38 @@ class TestGitToolsModule:
             result = _run_git("status")
         assert "not installed" in result.lower() or "Error" in result
 
+    def test_git_log_rejects_dash_prefixed_branch(self):
+        """Argument injection: branch starting with '-' is rejected."""
+        from src.tools.git_tools import git_log
+
+        result = git_log(branch="--exec=whoami")
+        assert "Error" in result
+        assert "must not start with" in result
+
+    def test_git_checkout_rejects_dash_prefixed_ref(self):
+        """Argument injection: ref starting with '-' is rejected."""
+        from src.tools.git_tools import git_checkout
+
+        result = git_checkout(ref="--exec=id")
+        assert "Error" in result
+        assert "must not start with" in result
+
+    def test_git_create_branch_rejects_dash_prefixed_name(self):
+        """Argument injection: branch name starting with '-' is rejected."""
+        from src.tools.git_tools import git_create_branch
+
+        result = git_create_branch(name="--track")
+        assert "Error" in result
+        assert "must not start with" in result
+
+    def test_git_create_branch_rejects_dash_prefixed_base(self):
+        """Argument injection: base starting with '-' is rejected."""
+        from src.tools.git_tools import git_create_branch
+
+        result = git_create_branch(name="ok-branch", base="--orphan")
+        assert "Error" in result
+        assert "must not start with" in result
+
 
 # ===========================================================================
 # #211 — DonePayload.text field
@@ -491,6 +523,7 @@ pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient  # noqa: E402
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine  # noqa: E402
 
+from src.api.db import models as _models  # noqa: E402, F401
 from src.api.db.engine import Base, get_db  # noqa: E402
 
 _VALID_PASSWORD = "TestPass1!"

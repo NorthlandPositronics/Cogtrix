@@ -225,9 +225,16 @@ class TestSessionListExtra:
         data = r.json()["data"]
         assert len(data["items"]) <= 1
 
-    def test_limit_over_max_still_succeeds(self, client, tokens):
+    def test_limit_over_max_returns_422(self, client, tokens):
         r = client.get(
             "/api/v1/sessions?limit=99999",
+            headers=_h(tokens["owner"]),
+        )
+        assert r.status_code == 422
+
+    def test_limit_at_max_succeeds(self, client, tokens):
+        r = client.get(
+            "/api/v1/sessions?limit=100",
             headers=_h(tokens["owner"]),
         )
         assert r.status_code == 200

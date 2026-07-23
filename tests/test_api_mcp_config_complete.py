@@ -864,7 +864,9 @@ class TestWizardEndpoints:
         wid = start_r.json()["data"]["wizard_id"]
 
         with (
-            patch("src.api.routes.config._wizard_test_connection", return_value=MagicMock()),
+            patch(
+                "src.api.routes.config._wizard_test_connection", return_value=(MagicMock(), None)
+            ),
             patch("src.api.routes.config._wizard_load_docs", return_value="docs content"),
             patch("src.api.routes.config._wizard_invoke_llm", return_value="Hi, I can help!"),
         ):
@@ -909,7 +911,9 @@ class TestWizardEndpoints:
             return "Hi, I can help!"
 
         with (
-            patch("src.api.routes.config._wizard_test_connection", return_value=MagicMock()),
+            patch(
+                "src.api.routes.config._wizard_test_connection", return_value=(MagicMock(), None)
+            ),
             patch("src.api.routes.config._wizard_load_docs", return_value="docs content"),
             patch("src.api.routes.config._wizard_invoke_llm", side_effect=_capture_invoke),
         ):
@@ -938,15 +942,12 @@ class TestWizardEndpoints:
             captured_messages[1].content == "Start."
         ), f"seed message content must be 'Start.', got {captured_messages[1].content!r}"
 
-    def test_advance_wizard_step0_invoke_failure_soft_fails_to_default_question(
-        self, client, tokens
-    ):
+    def test_advance_wizard_step0_invoke_failure_returns_422(self, client, tokens):
         """If the first LLM invocation (seeding the conversation) raises, the wizard
-        must NOT return 422.  Instead it soft-fails and returns the default first
-        question so the user can proceed despite a misbehaving provider.
+        must return 422 PROVIDER_UNREACHABLE so the frontend can show a clear error.
 
-        Regression: strict providers (e.g. reasoning models) may return HTTP 400 for
-        a cold first-call even though subsequent calls work fine.
+        The connection probe succeeded (LLM object was created), but the initial
+        Q&A call failed — this indicates the provider is unusable for this session.
         """
         with (
             patch("src.api.routes.config._wizard_detect_env") as mock_env,
@@ -963,7 +964,9 @@ class TestWizardEndpoints:
         wid = start_r.json()["data"]["wizard_id"]
 
         with (
-            patch("src.api.routes.config._wizard_test_connection", return_value=MagicMock()),
+            patch(
+                "src.api.routes.config._wizard_test_connection", return_value=(MagicMock(), None)
+            ),
             patch("src.api.routes.config._wizard_load_docs", return_value="docs"),
             patch(
                 "src.api.routes.config._wizard_invoke_llm",
@@ -984,13 +987,8 @@ class TestWizardEndpoints:
                 },
             )
 
-        assert r.status_code == 200, f"wizard must soft-fail provider errors, got: {r.text}"
-        data = r.json()["data"]
-        assert data["step"] == 1
-        assert data["complete"] is False
-        from src.api.routes.config import _WIZARD_DEFAULT_FIRST_QUESTION
-
-        assert data["question"] == _WIZARD_DEFAULT_FIRST_QUESTION
+        assert r.status_code == 422, f"expected 422 PROVIDER_UNREACHABLE, got: {r.text}"
+        assert r.json()["error"]["code"] == "PROVIDER_UNREACHABLE"
 
     def test_advance_wizard_step0_null_content_falls_back_to_default_question(self, client, tokens):
         """If the LLM returns None/empty content (reasoning models), the wizard must
@@ -1011,7 +1009,9 @@ class TestWizardEndpoints:
         wid = start_r.json()["data"]["wizard_id"]
 
         with (
-            patch("src.api.routes.config._wizard_test_connection", return_value=MagicMock()),
+            patch(
+                "src.api.routes.config._wizard_test_connection", return_value=(MagicMock(), None)
+            ),
             patch("src.api.routes.config._wizard_load_docs", return_value="docs"),
             patch("src.api.routes.config._wizard_invoke_llm", return_value=""),
         ):
@@ -1107,7 +1107,7 @@ providers:
 
         def _capture_test(provider_type, model, api_key, base_url):
             captured_key.append(api_key)
-            return MagicMock()
+            return MagicMock(), None
 
         with (
             patch("src.api.routes.config._wizard_test_connection", side_effect=_capture_test),

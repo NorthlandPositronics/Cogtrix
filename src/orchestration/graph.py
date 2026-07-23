@@ -64,6 +64,117 @@ def _get_tool_executor() -> concurrent.futures.ThreadPoolExecutor:
 
 _INVALID_TOOL_RE = re.compile(r"^Error:\s*(\S+)\s+is not a valid tool")
 
+# ── Action-intent detection ───────────────────────────────────────────────────
+# Catches "I'll create X" / "Let me write Y" responses that contain no tool
+# calls — the model expressed intent but didn't act on it.
+
+# Phrases that introduce a planned future action
+_INTENT_LEAD_RE = re.compile(
+    r"\b(?:"
+    # First-person modal / future forms
+    r"I(?:"
+    r"'ll\b"  # I'll
+    r"|\s+will\b"  # I will
+    r"|\s+am\s+going\s+to\b"  # I am going to
+    r"|'m\s+going\s+to\b"  # I'm going to
+    r"|'m\s+about\s+to\b"  # I'm about to
+    r"|\s+need\s+to\b"  # I need to
+    r"|\s+have\s+to\b"  # I have to
+    r"|\s+should\b"  # I should
+    r"|\s+must\b"  # I must
+    r"|\s+will\s+now\b"  # I will now
+    r"|'ll\s+now\b"  # I'll now
+    r"|'m\s+now\b"  # I'm now [verb-ing]
+    r"|'ll\s+(?:proceed|go\s+ahead|start|begin|continue)\b"  # I'll proceed/...
+    r")"
+    # Imperative / collaborative
+    r"|Let(?:'s|\s+(?:me|us))\b"  # Let me / Let's / Let us
+    # Temporal modifiers + intent
+    r"|Now\s+(?:I(?:'ll\b|\s+will\b)|let\s+me\b)"  # Now I'll / Now let me
+    r"|(?:First|Next|Then|Finally|Additionally|Also)(?:\s*,)?\s+"
+    r"(?:I(?:'ll\b|\s+will\b)|let\s+me\b)"  # First/Next/Then ... I'll
+    # Implicit future
+    r"|(?:Going|About)\s+to\b"  # Going to / About to
+    r"|Time\s+to\b"  # Time to
+    r"|I\s+can\s+now\b"  # I can now
+    r")",
+    re.IGNORECASE,
+)
+
+# Verb stems that indicate a tool-requiring operation.
+# Long stems (5+ chars) use \w{0,8} for inflection coverage.
+# Short/ambiguous stems use explicit endings to prevent overmatch.
+_TOOL_VERB_RE = re.compile(
+    r"\b(?:"
+    # File / content operations — long stems
+    r"creat\w{0,8}|generat\w{0,8}|overwrite\w{0,8}|append\w{0,8}"
+    r"|delet\w{0,8}|remov\w{0,8}|replac\w{0,8}|insert\w{0,8}|rename\w{0,8}"
+    r"|modif\w{0,8}|patch\w{0,8}|refactor\w{0,8}"
+    # Read / fetch
+    r"|fetch\w{0,8}|retriev\w{0,8}|download\w{0,8}" r"|search\w{0,8}|crawl\w{0,8}|scrape\w{0,8}"
+    # Build / execution
+    r"|build\w{0,8}|compil\w{0,8}|execut\w{0,8}|launch\w{0,8}"
+    r"|install\w{0,8}|deploy\w{0,8}|configur\w{0,8}|initializ\w{0,8}"
+    r"|bootstrap\w{0,8}|provision\w{0,8}|scaffold\w{0,8}"
+    # Code / dev
+    r"|implement\w{0,8}|develop\w{0,8}|debug\w{0,8}|resolv\w{0,8}"
+    # Network / API
+    r"|upload\w{0,8}|commit\w{0,8}|invok\w{0,8}|submit\w{0,8}|request\w{0,8}"
+    r"|publish\w{0,8}|broadcast\w{0,8}"
+    # Data processing
+    r"|transform\w{0,8}|extract\w{0,8}|analyz\w{0,8}|analys\w{0,8}"
+    r"|comput\w{0,8}|calculat\w{0,8}|process\w{0,8}|pars\w{0,8}"
+    r"|export\w{0,8}|migrat\w{0,8}|convert\w{0,8}"
+    # Infra
+    r"|register\w{0,8}|connect\w{0,8}|verif\w{0,8}|inspect\w{0,8}|examin\w{0,8}" r"|clone\w{0,8}"
+    # Short stems — explicit inflections only
+    r"|writ(?:e|es|ing|ten)\b"
+    r"|read(?:s|ing)?\b"
+    r"|open(?:s|ing|ed)?\b"
+    r"|load(?:s|ing|ed)?\b"
+    r"|run(?:s|ning)?\b"
+    r"|start(?:s|ing|ed)?\b"
+    r"|send(?:s|ing)?\b|sent\b"
+    r"|post(?:s|ing|ed)?\b"
+    r"|call(?:s|ing|ed)?\b"
+    r"|pull(?:s|ing|ed)?\b"
+    r"|push(?:es|ing|ed)?\b"
+    r"|fix(?:es|ing|ed)?\b"
+    r"|test(?:s|ing|ed)?\b"
+    r"|edit(?:s|ing|ed)?\b"
+    r"|update(?:s|d|ing)?\b"
+    r"|sav(?:e|es|ing|ed)\b"
+    r"|stor(?:e|es|ing|ed)\b"
+    r"|add(?:s|ing|ed)?\b"
+    r"|cod(?:e|es|ing|ed)\b"
+    r"|defin(?:e|es|ing|ed)\b"
+    r"|list(?:s|ing|ed)?\b"
+    r"|output(?:s|ting|ted)?\b"
+    r"|check(?:s|ing|ed)?\b"
+    # Multi-word constructions
+    r"|set\s+up\b" r"|spin\s+up\b" r"|look\s+up\b" r"|wire\s+up\b" r"|stand\s+up\b" r")\b",
+    re.IGNORECASE,
+)
+
+
+def _is_action_intent(message: Any) -> bool:
+    """Return True when the model describes a planned action but emits no tool calls.
+
+    Checks for an intent-lead phrase (``I'll``, ``Let me``, ``Going to``, etc.)
+    paired with a tool-action verb (``create``, ``run``, ``fetch``, etc.).
+    The two-part AND prevents false positives on pure-text responses like
+    ``I'll explain...`` where the verb is not tool-requiring.
+    """
+    if getattr(message, "tool_calls", None):
+        return False
+    content = getattr(message, "content", "")
+    if not isinstance(content, str):
+        return False
+    text = content.strip()
+    if not text:
+        return False
+    return bool(_INTENT_LEAD_RE.search(text)) and bool(_TOOL_VERB_RE.search(text))
+
 
 @dataclass
 class ToolManagementRequest:
@@ -413,10 +524,12 @@ def build_agent_graph(
         session_state = SessionState()
 
     phantom_count = [0]
+    action_intent_count = [0]
     expansion_count = [0]
     auto_expansion_count = [0]
     call_count = [0]
     _MAX_PHANTOM_RETRIES = 3
+    _MAX_ACTION_INTENT_RETRIES = 3
     _MAX_TOOL_EXPANSIONS = 3
     request_tools_noop_count = [0]
     _MAX_REQUEST_TOOLS_NOOPS = 3
@@ -535,6 +648,29 @@ def build_agent_graph(
                         "enough information, provide your answer directly."
                     )
                 ),
+            ]
+        }
+
+    def handle_action_intent(state: CogtrixState) -> dict:
+        action_intent_count[0] += 1
+        log = get_logger()
+        log.warning(
+            "Action-intent without tool call detected, attempt %d/%d. Injecting nudge.",
+            action_intent_count[0],
+            _MAX_ACTION_INTENT_RETRIES,
+        )
+        if action_intent_count[0] > _MAX_ACTION_INTENT_RETRIES:
+            # Give up and let the model's last response stand as-is.
+            return {"messages": []}
+        return {
+            "messages": [
+                HumanMessage(
+                    content=(
+                        "You described an action but did not call any tools. "
+                        "Please proceed now: call the appropriate tool(s) to carry "
+                        "out what you described, rather than explaining it in text."
+                    )
+                )
             ]
         }
 
@@ -1106,6 +1242,10 @@ def build_agent_graph(
             if tool_calls:
                 return "process_tools"
 
+            # Has content but no tool calls — check for intention-without-action.
+            if _is_action_intent(last):
+                return "handle_action_intent"
+
         return END
 
     def route_after_phantom(state: CogtrixState) -> str:
@@ -1113,20 +1253,36 @@ def build_agent_graph(
             return END
         return "call_model"
 
+    def route_after_action_intent(state: CogtrixState) -> str:  # noqa: ARG001
+        if action_intent_count[0] > _MAX_ACTION_INTENT_RETRIES:
+            return END
+        return "call_model"
+
     graph: Any = StateGraph(CogtrixState)
     graph.add_node("call_model", call_model)
     graph.add_node("handle_phantom", handle_phantom)
+    graph.add_node("handle_action_intent", handle_action_intent)
     graph.add_node("process_tools", process_tools)
     graph.set_entry_point("call_model")
     graph.add_conditional_edges(
         "call_model",
         route_after_model,
-        {"process_tools": "process_tools", "handle_phantom": "handle_phantom", END: END},
+        {
+            "process_tools": "process_tools",
+            "handle_phantom": "handle_phantom",
+            "handle_action_intent": "handle_action_intent",
+            END: END,
+        },
     )
     graph.add_edge("process_tools", "call_model")
     graph.add_conditional_edges(
         "handle_phantom",
         route_after_phantom,
+        {"call_model": "call_model", END: END},
+    )
+    graph.add_conditional_edges(
+        "handle_action_intent",
+        route_after_action_intent,
         {"call_model": "call_model", END: END},
     )
     return graph.compile()

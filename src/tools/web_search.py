@@ -225,12 +225,9 @@ TOOL_CONFIGS = [
             "Supports regional search via the 'region' parameter.\n"
             "\n"
             "USE THIS TOOL WHEN:\n"
-            "- You need a quick, low-stakes web lookup\n"
-            "- Other search tools (Tavily, Google, etc.) are unavailable\n"
-            "- No API key is configured for premium search providers\n"
-            "\n"
-            "For more accurate or detailed results, prefer tavily_search, "
-            "google_search, or exa_search when available."
+            "- You need a quick, free web lookup\n"
+            "- Other search tools are unavailable or have returned errors\n"
+            "- No API key is configured for premium search providers"
         ),
         "input_schema": WebSearchInput,
         "requires_confirmation": False,

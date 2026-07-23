@@ -1,6 +1,6 @@
 # Cogtrix Tools Reference
 
-Complete documentation of all 51 built-in tools. You don't need to memorize these — the agent picks the right tool automatically based on your request. This page is a reference for when you want to know exactly what's available, what parameters a tool accepts, or how to configure optional providers.
+Complete documentation of all 60 built-in tools. You don't need to memorize these — the agent picks the right tool automatically based on your request. This page is a reference for when you want to know exactly what's available, what parameters a tool accepts, or how to configure optional providers.
 
 **Quick orientation:**
 
@@ -14,6 +14,7 @@ Complete documentation of all 51 built-in tools. You don't need to memorize thes
 - [Overview](#overview)
 - [System Tools](#system-tools)
 - [File Operations](#file-operations)
+- [Git Operations](#git-operations)
 - [Math & Calculation](#math--calculation)
 - [Date & Time](#date--time)
 - [Text Processing](#text-processing)
@@ -233,7 +234,7 @@ Read file: /path/to/config.json
 
 ### write_file ⚠️
 
-Write content to a file (creates if not exists).
+Write content to a file (creates if not exists, overwrites if it does).
 
 **Requires Confirmation:** Yes
 
@@ -244,6 +245,28 @@ Write content to a file (creates if not exists).
 | `path` | string | Yes | File path to write (must be within working directory) |
 | `content` | string | Yes | Content to write |
 | `encoding` | string | No | File encoding (default: "utf-8") |
+
+---
+
+### patch_file ⚠️
+
+Surgically replace an exact string in a file without rewriting the whole file.
+
+**Requires Confirmation:** Yes
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `path` | string | Yes | File path to edit (must be within an allowed write root) |
+| `old_str` | string | Yes | Exact string to find (must appear exactly once in the file) |
+| `new_str` | string | Yes | Replacement string (may be empty to delete the match) |
+
+**Notes:**
+
+- Fails with a clear error if `old_str` is not found or appears more than once — add more surrounding context to make the match unique.
+- Writes the result atomically; the file is never left in a partial state.
+- Prefer this over `write_file` for targeted edits to existing files.
 
 ---
 
@@ -290,6 +313,107 @@ Get detailed information about a file or directory.
 | `path` | string | Yes | File or directory path |
 
 **Returns:** Size, creation date, modification date, permissions
+
+---
+
+## Git Operations
+
+Run Git commands from within Cogtrix to inspect and manage a repository. Read-only tools (`git_status`, `git_diff`, `git_log`) run without confirmation. Write tools (`git_add`, `git_commit`, `git_create_branch`, `git_checkout`) require confirmation. All commands use `os.getcwd()` as the working directory. Arguments are passed as list tokens — no shell interpolation occurs.
+
+### git_status
+
+Show the working tree status: staged changes, unstaged changes, and untracked files.
+
+**Parameters:** None
+
+**Returns:** Short-format status output with branch name.
+
+---
+
+### git_diff
+
+Show a unified diff of changes in the working tree (or staged changes).
+
+**Parameters:**
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `path` | string | No | `""` (all) | Specific file or directory to diff. Leave empty to diff all changes. |
+| `staged` | bool | No | `false` | Show staged (cached) diff instead of unstaged working-tree diff. |
+
+**Returns:** `git diff --stat --patch` output.
+
+---
+
+### git_log
+
+Show recent commit history with hash, date, author, and subject.
+
+**Parameters:**
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `max_count` | int | No | `10` | Number of commits to show (1–100). |
+| `branch` | string | No | `""` (current) | Branch or ref to show history for. |
+
+**Returns:** Formatted one-line-per-commit log.
+
+---
+
+### git_add ⚠️
+
+Stage one or more files for the next commit.
+
+**Requires Confirmation:** Yes
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `paths` | array of strings | Yes | File paths to stage. Pass `["."]` to stage all changes. |
+
+---
+
+### git_commit ⚠️
+
+Create a commit from all currently staged changes.
+
+**Requires Confirmation:** Yes
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `message` | string | Yes | Commit message (max 4096 chars). |
+
+---
+
+### git_create_branch ⚠️
+
+Create a new branch and switch to it.
+
+**Requires Confirmation:** Yes
+
+**Parameters:**
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `name` | string | Yes | — | New branch name (max 256 chars). |
+| `base` | string | No | `"HEAD"` | Starting point: branch name, tag, or commit hash. |
+
+---
+
+### git_checkout ⚠️
+
+Switch to a branch or restore a file to its last committed state.
+
+**Requires Confirmation:** Yes
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `ref` | string | Yes | Branch name to switch to, or file path to restore to HEAD. |
 
 ---
 
@@ -574,7 +698,7 @@ Convert JSON to human-readable text.
 
 ## Search
 
-Cogtrix includes 10 search tools across 6 providers. All API-key-gated tools (search, weather, WhatsApp) are automatically hidden from the agent when not configured — they simply don't appear in the tool list. DuckDuckGo is always available (no API key). Other providers are automatically enabled when their API key is configured, and hidden from the agent otherwise.
+Cogtrix includes 11 search tools across 6 providers. All API-key-gated tools (search, weather, WhatsApp) are automatically hidden from the agent when not configured — they simply don't appear in the tool list. DuckDuckGo is always available (no API key, provides both `search_web` and `search_news`). Other providers are automatically enabled when their API key is configured, and hidden from the agent otherwise.
 
 ### search_web
 

@@ -5,6 +5,7 @@ Endpoints:
     POST   /api/v1/assistant/start                     — start the assistant service (admin)
     POST   /api/v1/assistant/stop                      — stop the assistant service (admin)
     POST   /api/v1/assistant/outbound                  — send an outbound message (admin)
+    POST   /api/v1/assistant/simulate                  — simulate a message turn (no delivery)
     GET    /api/v1/assistant/chats                     — list active chat sessions (paginated)
     GET    /api/v1/assistant/chats/{key}/messages      — per-chat conversation history
     GET    /api/v1/assistant/scheduled                 — list scheduled messages (paginated)
@@ -57,6 +58,8 @@ from src.api.schemas.assistant import (
     OutboundResponse,
     ScheduledMessageEditRequest,
     ScheduledMessageOut,
+    SimulateOut,
+    SimulateRequest,
     ViolationRecordOut,
 )
 from src.api.schemas.common import APIResponse, CursorPage
@@ -399,6 +402,79 @@ async def send_outbound(
         contact_name=contact_name,
         response_text=response_text,
         message_id=message_id,
+    )
+    return APIResponse(data=out)
+
+
+@router.post(
+    "/simulate",
+    summary="Simulate a message turn",
+    description=(
+        "Run the full agent pipeline for a synthetic message without delivering anything "
+        "to the real channel. Useful for testing system-prompt behaviour, workflow responses, "
+        "guardrail reactions, and deferral logic without touching live contacts. "
+        "Supports both inbound (user → agent) and outbound (operator → agent) directions. "
+        "Memory is only updated when persist=true is explicitly set."
+    ),
+    response_model=APIResponse[SimulateOut],
+    responses={
+        200: {"description": "Simulation completed; result returned."},
+        401: {"description": "Not authenticated."},
+        403: {"description": "Admin required (FORBIDDEN)."},
+        409: {"description": "Service not running (ASSISTANT_NOT_RUNNING)."},
+        503: {"description": "Handler not available (SERVICE_UNAVAILABLE)."},
+    },
+)
+async def simulate_turn(
+    request: Request,
+    body: SimulateRequest,
+    current_user: TokenData = Depends(require_admin),
+) -> APIResponse[SimulateOut]:
+    """Simulate a single message turn without sending anything to a real channel (admin only).
+
+    Auth: admin bearer token required.
+    Error codes: UNAUTHORIZED, TOKEN_EXPIRED, FORBIDDEN, ASSISTANT_NOT_RUNNING,
+    SERVICE_UNAVAILABLE.
+    """
+    svc = _require_service(request)
+
+    handler = getattr(svc, "_handler", None)
+    if handler is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "code": "SERVICE_UNAVAILABLE",
+                "message": "Assistant message handler is not available.",
+            },
+        )
+
+    from src.assistant.handler import SimulateResult
+
+    sim_result: SimulateResult = await asyncio.to_thread(
+        handler.simulate,
+        channel_name=body.channel,
+        chat_id=body.chat_id,
+        message=body.message,
+        direction=body.direction,
+        instructions=body.instructions,
+        sender_id=body.sender_id,
+        sender_name=body.sender_name,
+        persist=body.persist,
+    )
+
+    session_key = f"{body.channel}::{body.chat_id}"
+    out = SimulateOut(
+        channel=body.channel,
+        chat_id=body.chat_id,
+        session_key=session_key,
+        direction=body.direction,
+        response=sim_result.response,
+        suppressed=sim_result.suppressed,
+        deferred=sim_result.deferred,
+        blocked_by_guardrails=sim_result.blocked_by_guardrails,
+        guardrail_reason=sim_result.guardrail_reason,
+        duration_ms=sim_result.duration_ms,
+        memory_persisted=sim_result.memory_persisted,
     )
     return APIResponse(data=out)
 

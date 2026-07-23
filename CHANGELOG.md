@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.1.39](https://github.com/NorthlandPositronics/Cogtrix/compare/v0.1.38...v0.1.39) (2026-03-27)
+
+
+### Bug Fixes
+
+* **ci,tests:** advisory docker build + xfail flaky 3-turn test ([3565791](https://github.com/NorthlandPositronics/Cogtrix/commit/3565791c8f03592ce3289551d24f7d14d8c11ba1))
+* **ci:** exclude docker-marker tests from unit test job ([f25c967](https://github.com/NorthlandPositronics/Cogtrix/commit/f25c9674c858a39be5c0e07adb8fd8429acb60cc))
+* **tests:** relax models endpoint assertion to accept any non-empty model list ([dc5e253](https://github.com/NorthlandPositronics/Cogtrix/commit/dc5e253a63cc72376f56ffbb7daec19fecea15c5))
+
 ## [0.1.38](https://github.com/NorthlandPositronics/Cogtrix/compare/v0.1.37...v0.1.38) (2026-03-26)
 
 
@@ -89,32 +98,6 @@
 
 * holistic accuracy audit — secondary guides and API spec verification ([89fcffa](https://github.com/NorthlandPositronics/Cogtrix/commit/89fcffaea228c9bb22b03fd817f3e948d56a53fb))
 * holistic documentation audit — BUG-AUDIT-001/002 coverage + accuracy fixes ([ff7a6ec](https://github.com/NorthlandPositronics/Cogtrix/commit/ff7a6ec6b16fd26c83bd61debbd691007fc58539))
-
-## [Unreleased]
-
-### Features
-
-* **api:** permanent session delete — `DELETE /sessions/{id}?permanent=true` removes the session row and all messages (non-recoverable) (#94) ([4630c77](https://github.com/NorthlandPositronics/Cogtrix/commit/4630c77))
-* **api:** session restore — `POST /sessions/{id}/restore` unarchives a soft-deleted session (#94) ([4630c77](https://github.com/NorthlandPositronics/Cogtrix/commit/4630c77))
-* **api:** runtime provider CRUD — `POST/PATCH/DELETE /config/providers` (admin only); changes are persisted atomically to the YAML config file (#95) ([4630c77](https://github.com/NorthlandPositronics/Cogtrix/commit/4630c77))
-
-### Bug Fixes
-
-* **api:** sync `send_message` path sets sentinel `Future` as `turn_task` before releasing `turn_lock` — concurrent `?sync=true` requests now correctly receive 409 `TURN_IN_PROGRESS` (BUG-215) ([6ba904b](https://github.com/NorthlandPositronics/Cogtrix/commit/6ba904b))
-* **api:** think pipeline stores only the `## Final Solution` section in memory/DB — full Tree-of-Thought report is no longer persisted verbatim (BUG-002) ([6ba904b](https://github.com/NorthlandPositronics/Cogtrix/commit/6ba904b))
-* **api:** remove dead `QueueFull` except clause from `done`-message handler in `turn_runner.py` — `asyncio.Queue.put()` never raises `QueueFull` (BUG-AUDIT-001) ([57c2d95](https://github.com/NorthlandPositronics/Cogtrix/commit/57c2d95))
-* **api:** hoist `_POLL_INTERVAL` from loop body to module-level constant in `confirmation.py` — eliminates ~600 redundant assignments per confirmation cycle (BUG-AUDIT-002) ([57c2d95](https://github.com/NorthlandPositronics/Cogtrix/commit/57c2d95))
-
-### Tests
-
-* **api:** 22 regression tests for permanent delete, session restore, and runtime provider CRUD (#94 #95) ([4630c77](https://github.com/NorthlandPositronics/Cogtrix/commit/4630c77))
-* **api:** add regression suite for forge audit fixes — 23 tests covering BUG-AUDIT-001 and BUG-AUDIT-002 ([1531ff8](https://github.com/NorthlandPositronics/Cogtrix/commit/1531ff8))
-* **api:** holistic coverage for all 13 API route modules — +466 tests (#83) ([27b1188](https://github.com/NorthlandPositronics/Cogtrix/commit/27b1188))
-
-### Documentation
-
-* **api:** update client contract and OpenAPI schema for permanent delete, restore, and runtime provider CRUD ([b13e7e7](https://github.com/NorthlandPositronics/Cogtrix/commit/b13e7e7))
-* **api:** exhaustive accuracy audit of API documentation (#81) ([d5d6bfd](https://github.com/NorthlandPositronics/Cogtrix/commit/d5d6bfd))
 
 ## [0.1.33](https://github.com/NorthlandPositronics/Cogtrix/compare/v0.1.32...v0.1.33) (2026-03-24)
 

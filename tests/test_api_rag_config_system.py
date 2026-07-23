@@ -1514,6 +1514,60 @@ class TestWizardSessionLock:
         ), "advance_wizard must acquire ws['lock'] to prevent concurrent corruption (BUG-239)"
 
 
+class TestWizardProbeFailureFix:
+    """Issue #129 — wizard initial LLM call failure must raise 422, not silently fall back."""
+
+    def test_wizard_test_connection_returns_tuple(self) -> None:
+        """_wizard_test_connection must return (llm, probe_warning) — not bare llm."""
+        import inspect
+
+        import src.api.routes.config as _mod
+
+        src = inspect.getsource(_mod._wizard_test_connection)
+        assert (
+            "probe_warning" in src
+        ), "_wizard_test_connection must capture and return probe_warning"
+        assert (
+            "return llm, probe_warning" in src
+        ), "_wizard_test_connection must return (llm, probe_warning) tuple"
+
+    def test_advance_wizard_raises_on_initial_llm_failure(self) -> None:
+        """Step 0 handler must raise 422 PROVIDER_UNREACHABLE if initial LLM call fails."""
+        import inspect
+
+        import src.api.routes.config as _mod
+
+        src = inspect.getsource(_mod._advance_wizard_locked)
+        # The initial LLM call failure must raise, not log a warning and proceed
+        assert (
+            "Wizard initial LLM call failed, using default question" not in src
+        ), "Step 0 must not silently swallow initial LLM failures (issue #129)"
+        assert (
+            "PROVIDER_UNREACHABLE" in src
+        ), "Step 0 must raise PROVIDER_UNREACHABLE when initial LLM call fails"
+
+    def test_probe_warning_included_in_step_response(self) -> None:
+        """Step 0 response must include probe_warning in warnings list when present."""
+        import inspect
+
+        import src.api.routes.config as _mod
+
+        src = inspect.getsource(_mod._advance_wizard_locked)
+        assert "probe_warning" in src, "Step 0 handler must read probe_warning from wizard session"
+        assert "warnings" in src, "Step 0 handler must populate a warnings list for the response"
+
+    def test_probe_warning_stored_in_session(self) -> None:
+        """_wizard_test_connection result must store probe_warning in wizard session dict."""
+        import inspect
+
+        import src.api.routes.config as _mod
+
+        src = inspect.getsource(_mod._advance_wizard_locked)
+        assert (
+            'ws["probe_warning"]' in src or "probe_warning" in src
+        ), "Step 0 handler must store probe_warning in wizard session"
+
+
 # ===========================================================================
 # Issue #95 — Provider CRUD: additional coverage
 # ===========================================================================

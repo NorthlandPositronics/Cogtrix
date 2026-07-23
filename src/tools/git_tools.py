@@ -147,6 +147,13 @@ def git_diff(path: str = "", staged: bool = False) -> str:
     return _run_git(*args)
 
 
+def _validate_ref(ref: str) -> str | None:
+    """Reject refs that look like option flags to prevent argument injection."""
+    if ref.startswith("-"):
+        return f"Error: invalid ref name — must not start with '-': {ref}"
+    return None
+
+
 def git_log(max_count: int = 10, branch: str = "") -> str:
     """Show recent commits with author, date, and subject."""
     args = [
@@ -156,6 +163,8 @@ def git_log(max_count: int = 10, branch: str = "") -> str:
         "--date=short",
     ]
     if branch:
+        if err := _validate_ref(branch):
+            return err
         args.append(branch)
     return _run_git(*args)
 
@@ -172,11 +181,17 @@ def git_commit(message: str) -> str:
 
 def git_create_branch(name: str, base: str = "HEAD") -> str:
     """Create a new branch from the given base and switch to it."""
+    if err := _validate_ref(name):
+        return err
+    if err := _validate_ref(base):
+        return err
     return _run_git("checkout", "-b", name, base)
 
 
 def git_checkout(ref: str) -> str:
     """Switch to a branch or restore a file to its last committed state."""
+    if err := _validate_ref(ref):
+        return err
     return _run_git("checkout", ref)
 
 

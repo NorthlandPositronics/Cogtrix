@@ -1053,7 +1053,7 @@ async def _advance_wizard_locked(
 
         # Test connection off the event loop
         try:
-            llm = await asyncio.to_thread(
+            llm, probe_warning = await asyncio.to_thread(
                 _wizard_test_connection, provider_type, model, api_key, base_url
             )
         except Exception as exc:
@@ -1073,6 +1073,7 @@ async def _advance_wizard_locked(
             "type": provider_type,
         }
         ws["llm"] = llm
+        ws["probe_warning"] = probe_warning
 
         # Build system prompt and start conversation
         docs = await asyncio.to_thread(_wizard_load_docs, ws.get("docs_url"))
@@ -1103,13 +1104,26 @@ async def _advance_wizard_locked(
         try:
             ai_text = await asyncio.to_thread(_wizard_invoke_llm, llm, messages)
         except Exception as exc:
-            log.warning("Wizard initial LLM call failed, using default question: %s", exc)
-            ai_text = None
+            # The provider accepted the connection but cannot serve the first real
+            # LLM call — raise immediately so the user knows before typing answers.
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail={
+                    "code": "PROVIDER_UNREACHABLE",
+                    "message": str(exc),
+                },
+            ) from exc
         if not ai_text:
             ai_text = _WIZARD_DEFAULT_FIRST_QUESTION
         messages.append(AIMessage(content=ai_text))
         ws["messages"] = messages
         ws["step"] = 1
+
+        warnings: list[str] = []
+        if probe_warning:
+            warnings.append(
+                f"Connection probe returned a warning — provider may be unstable: {probe_warning}"
+            )
 
         return APIResponse(
             data=WizardStepOut(
@@ -1120,7 +1134,7 @@ async def _advance_wizard_locked(
                 question=ai_text,
                 yaml_preview=None,
                 complete=False,
-                warnings=[],
+                warnings=warnings,
             )
         )
 
@@ -1295,8 +1309,8 @@ def _resolve_api_key_from_existing(
 
 def _wizard_test_connection(
     provider_type: str, model: str, api_key: str | None, base_url: str | None
-) -> Any:
-    """Test LLM connection for API wizard. Returns LLM on success, raises on failure.
+) -> tuple[Any, str | None]:
+    """Test LLM connection for API wizard. Returns (llm, probe_warning) on success, raises on failure.
 
     Two-phase test:
     - Phase 1 (hard fail): LLM object creation. A failure here means the config
@@ -1304,9 +1318,10 @@ def _wizard_test_connection(
       The exception propagates so the caller returns 422 PROVIDER_UNREACHABLE.
     - Phase 2 (soft fail): a live "Say ok" probe. Some valid providers return
       transient or setup-related errors (e.g. 'No connected db.') for cold pings
-      while working fine for real conversations. A probe failure is logged as a
-      warning but does NOT block the wizard — the LLM is returned so the user
-      can proceed. The first real wizard message will surface any actual problem.
+      while working fine for real conversations. A probe failure is logged and
+      returned as ``probe_warning`` so callers can surface it to the user — but
+      the LLM object is still returned so the wizard step can attempt the real
+      initial Q&A call and raise a proper error if that also fails.
     """
     import logging as _logging
 
@@ -1320,15 +1335,17 @@ def _wizard_test_connection(
     mc = ModelConfig(provider=provider_type, model=model)
     llm = create_llm_from_provider_config(pc, mc)
 
-    # Phase 2: live probe — soft fail
+    # Phase 2: live probe — soft fail; capture warning for callers to surface
+    probe_warning: str | None = None
     try:
         llm.invoke([_HumanMessage(content="Say 'ok' in one word.")])
     except Exception as exc:
+        probe_warning = str(exc)
         _logging.getLogger("cogtrix.api").warning(
             "Wizard connection probe returned an error (proceeding anyway): %s", exc
         )
 
-    return llm
+    return llm, probe_warning
 
 
 def _wizard_invoke_llm(llm: Any, messages: list[Any]) -> str:

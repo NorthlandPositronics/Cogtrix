@@ -204,6 +204,17 @@ def parse_arguments():
         help="Disable streaming (for piping)",
     )
     mode_group.add_argument(
+        "-S",
+        "--silent",
+        action="store_true",
+        default=False,
+        help=(
+            "Silent scripting mode: no spinner/ANSI, plain stdout, "
+            "tool confirmations auto-denied (use -y to auto-approve). "
+            "Prompt via --prompt, --prompt-file, positional arg, or stdin."
+        ),
+    )
+    mode_group.add_argument(
         "--assistant",
         action="store_true",
         default=False,
@@ -330,11 +341,29 @@ def parse_arguments():
         help="Output path (default: ~/.cogtrix.yaml)",
     )
 
+    # Positional prompt — accepted as a convenience shorthand for --silent mode.
+    # Hidden from --help to avoid cluttering the usage line; examples section above
+    # documents the usage pattern.
+    parser.add_argument(
+        "inline_prompt",
+        nargs="?",
+        default=None,
+        metavar="PROMPT",
+        help=argparse.SUPPRESS,
+    )
+
     args = parser.parse_args()
 
     if getattr(args, "prompt", None) and getattr(args, "prompt_file", None):
         parser.error("--prompt and --prompt-file are mutually exclusive")
     if getattr(args, "system_prompt", None) and getattr(args, "system_prompt_file", None):
         parser.error("--system-prompt and --system-prompt-file are mutually exclusive")
+    if (
+        getattr(args, "inline_prompt", None)
+        and not getattr(args, "silent", False)
+        and not getattr(args, "prompt", None)
+    ):
+        # Positional prompt without --silent implies --silent for convenience
+        args.silent = True
 
     return args

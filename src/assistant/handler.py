@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 import time
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -586,8 +587,12 @@ class MessageHandler:
                         create_defer_processing_tool(defer_state, schedule_state=schedule_state)
                     )
 
-            # Inject suppress_reply only during re-processing passes
-            if is_reprocessing and "suppress_reply" not in self._excluded_tools:
+            # Inject suppress_reply in all turns so the agent can cleanly suppress
+            # a reply without leaking reasoning text or tool-name artifacts into
+            # the message body.  (Previously restricted to re-processing passes,
+            # which caused the agent to emit "(No reply...)" or "suppress_reply"
+            # as plain text when the tool was absent.)
+            if "suppress_reply" not in self._excluded_tools:
                 active_tools.append(create_suppress_reply_tool(suppress_state))
 
             # Inject report_campaign_outcome when this chat is an active campaign target
@@ -747,6 +752,11 @@ class MessageHandler:
             )
 
             active_tools: list[Any] = list(self._active_tools)
+            # Inject suppress_reply so the agent can cleanly decline without
+            # leaking "suppress_reply" or "(No reply...)" into the sent text.
+            outbound_suppress_state = SuppressReplyState()
+            if "suppress_reply" not in self._excluded_tools:
+                active_tools.append(create_suppress_reply_tool(outbound_suppress_state))
 
             response, turn_loaded_tools = self._run_agent(
                 user_input=user_input,
@@ -765,6 +775,25 @@ class MessageHandler:
                     session.session_key,
                     turn_loaded_tools,
                 )
+
+            if outbound_suppress_state.was_called:
+                log.info(
+                    "Agent suppressed outbound reply for %s (contact: %s)",
+                    chat_id,
+                    contact_name,
+                )
+                session.memory_manager.update(
+                    f"[Operator instruction] {instructions}", "[Outbound suppressed by agent]"
+                )
+                try:
+                    session.memory_manager.save()
+                except Exception as exc:
+                    log.warning(
+                        "Failed to save memory for suppressed outbound %s: %s",
+                        session.session_key,
+                        exc,
+                    )
+                return "[Outbound suppressed by agent]", None
 
             response = self._guardrails.sanitize_output(response)
             if len(response) > self._max_response_length:
@@ -796,3 +825,163 @@ class MessageHandler:
                 )
 
         return response, message_id
+
+    def simulate(
+        self,
+        *,
+        channel_name: str,
+        chat_id: str,
+        message: str,
+        direction: str = "inbound",
+        instructions: str | None = None,
+        sender_id: str = "simulator",
+        sender_name: str = "Simulator",
+        persist: bool = False,
+    ) -> SimulateResult:
+        """Run the full agent pipeline without delivering a message.
+
+        Intended for testing system-prompt behaviour, workflow responses, and
+        guardrail reactions without touching a live channel.
+
+        Args:
+            channel_name: Logical channel name (e.g. 'whatsapp', 'telegram').
+            chat_id: Chat identifier on the channel.
+            message: User message text (inbound) or context text (outbound).
+            direction: 'inbound' (user → agent) or 'outbound' (operator → agent).
+            instructions: Operator instructions for outbound simulation.
+                          Falls back to *message* when absent.
+            sender_id: Sender identifier inserted into the synthetic message.
+            sender_name: Human-readable sender name.
+            persist: When True, update and save session memory after the turn.
+
+        Returns:
+            SimulateResult with the agent response and pipeline metadata.
+        """
+        t_start = time.monotonic()
+
+        if direction == "outbound":
+            contact_label = sender_name
+            framed_text = (
+                f"[Operator instruction — initiate conversation with {contact_label}]\n"
+                f"{instructions or message}"
+            )
+            effective_sender_id = "operator"
+            effective_sender_name = "Operator"
+        else:
+            framed_text = message
+            effective_sender_id = sender_id
+            effective_sender_name = sender_name
+
+        synthetic_msg = IncomingMessage(
+            channel=channel_name,
+            chat_id=chat_id,
+            message_id=f"sim-{uuid.uuid4().hex[:12]}",
+            sender_id=effective_sender_id,
+            sender_name=effective_sender_name,
+            text=framed_text,
+            timestamp=time.time(),
+            metadata={"simulation": True},
+        )
+
+        session = self._session_mgr.get_or_create(synthetic_msg)
+        with session.lock:
+            # Input guardrails — skipped for outbound (mirrors handle_outbound behaviour).
+            if direction == "inbound":
+                guard_result = self._guardrails.check_input(framed_text, chat_id)
+                if not guard_result.is_safe:
+                    session.guardrail_violations += 1
+                    return SimulateResult(
+                        response=_BLOCKED_RESPONSE,
+                        suppressed=False,
+                        deferred=False,
+                        blocked_by_guardrails=True,
+                        guardrail_reason=guard_result.reason,
+                        duration_ms=(time.monotonic() - t_start) * 1000,
+                        memory_persisted=False,
+                    )
+
+            session.last_activity = time.monotonic()
+            context, combined_prefix = self._prepare_context(synthetic_msg, session)
+
+            suppress_state = SuppressReplyState()
+            defer_state = DeferReplyState()
+            active_tools: list[Any] = list(self._active_tools)
+
+            if "suppress_reply" not in self._excluded_tools:
+                active_tools.append(create_suppress_reply_tool(suppress_state))
+
+            if self._deferral_mgr and "defer_processing" not in self._excluded_tools:
+                if 0 < self._deferral_mgr.max_depth:
+                    active_tools.append(
+                        create_defer_processing_tool(defer_state, schedule_state=None)
+                    )
+
+            effective_prompt, user_input, history, wf_excluded, wf_approved = (
+                self._prepare_agent_call(synthetic_msg, context, session=session)
+            )
+            response, _ = self._run_agent(
+                user_input=user_input,
+                history_messages=history,
+                context_prefix=combined_prefix,
+                effective_prompt=effective_prompt,
+                active_tools=active_tools,
+                session=session,
+                extra_excluded=wf_excluded or None,
+                extra_approvals=wf_approved or None,
+            )
+
+            suppressed = suppress_state.was_called
+            deferred = defer_state.was_called
+
+            if not suppressed and not deferred:
+                response = self._guardrails.sanitize_output(response)
+                if len(response) > self._max_response_length:
+                    response = response[: self._max_response_length - 3] + "..."
+
+            memory_persisted = False
+            if persist and not deferred:
+                try:
+                    if direction == "outbound":
+                        user_mem = f"[Operator instruction] {instructions or message}"
+                    else:
+                        user_mem = message
+                    agent_mem = "" if suppressed else response
+                    session.memory_manager.update(user_mem, agent_mem)
+                    session.memory_manager.save()
+                    memory_persisted = True
+                except Exception as exc:
+                    log.warning(
+                        "Simulate: memory persist failed for %s: %s",
+                        session.session_key,
+                        exc,
+                    )
+
+        return SimulateResult(
+            response="" if suppressed else response,
+            suppressed=suppressed,
+            deferred=deferred,
+            blocked_by_guardrails=False,
+            guardrail_reason=None,
+            duration_ms=(time.monotonic() - t_start) * 1000,
+            memory_persisted=memory_persisted,
+        )
+
+
+@dataclass
+class SimulateResult:
+    """Result of a MessageHandler.simulate() call."""
+
+    response: str
+    """Agent-generated response text (empty when suppressed)."""
+    suppressed: bool
+    """True when the agent called suppress_reply — no message would have been sent."""
+    deferred: bool
+    """True when the agent called defer_processing — turn would have been re-queued."""
+    blocked_by_guardrails: bool
+    """True when the input was blocked by the guardrail pipeline before reaching the agent."""
+    guardrail_reason: str | None
+    """Human-readable guard reason when blocked_by_guardrails is True, else None."""
+    duration_ms: float
+    """Wall-clock milliseconds for the full pipeline (LLM call included)."""
+    memory_persisted: bool
+    """True when persist=True was passed and memory was successfully saved."""

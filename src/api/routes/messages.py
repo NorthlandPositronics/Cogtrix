@@ -197,14 +197,18 @@ async def send_message(
         if not sync:
             # Async path: launch background task, return 202 immediately.
             async def _run() -> None:
-                async with AsyncSessionLocal() as turn_db:
-                    await run_message_turn(
-                        session=sess,
-                        text=body.content,
-                        mode=body.mode,
-                        db=turn_db,
-                        app_state=request.app.state,
-                    )
+                try:
+                    async with AsyncSessionLocal() as turn_db:
+                        await run_message_turn(
+                            session=sess,
+                            text=body.content,
+                            mode=body.mode,
+                            db=turn_db,
+                            app_state=request.app.state,
+                        )
+                finally:
+                    # Release the task reference so completed tasks are GC'd promptly.
+                    sess.turn_task = None
 
             sess.turn_task = asyncio.create_task(_run(), name=f"turn-{session_id}")
         else:
@@ -231,6 +235,7 @@ async def send_message(
             )
     finally:
         sentinel.set_result(None)
+        sess.turn_task = None
 
     # Drain ws_queue to find the done message (which carries the response text).
     # Items accumulate in the queue when no WebSocket drain task is active.
@@ -241,11 +246,14 @@ async def send_message(
     output_tokens = 0
     duration_ms = 0
     tool_calls = 0
+    agent_error: str | None = None
 
     while True:
         try:
             item = sess.ws_queue.get_nowait()
-            if item.get("type") == "done":
+            if item.get("type") == "error":
+                agent_error = item.get("payload", {}).get("message", "Agent turn failed.")
+            elif item.get("type") == "done":
                 p = item.get("payload", {})
                 response_text = p.get("text", "")
                 ai_message_id = p.get("message_id", ai_message_id)
@@ -254,9 +262,18 @@ async def send_message(
                 output_tokens = p.get("output_tokens", 0)
                 duration_ms = p.get("duration_ms", 0)
                 tool_calls = p.get("tool_calls", 0)
+                # done payload carries an error key when the turn failed
+                if not agent_error and p.get("error"):
+                    agent_error = p["error"]
                 break
         except asyncio.QueueEmpty:
             break
+
+    if agent_error is not None:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"code": "AGENT_ERROR", "message": agent_error},
+        )
 
     return APIResponse(
         data=SyncTurnOut(
@@ -606,14 +623,18 @@ async def session_websocket(
                         log.warning("Could not persist WS user message: %s", exc)
 
                     async def _run_turn(t: str = text, m: str = mode) -> None:
-                        async with AsyncSessionLocal() as turn_db:
-                            await run_message_turn(
-                                session=sess,
-                                text=t,
-                                mode=m,
-                                db=turn_db,
-                                app_state=websocket.app.state,
-                            )
+                        try:
+                            async with AsyncSessionLocal() as turn_db:
+                                await run_message_turn(
+                                    session=sess,
+                                    text=t,
+                                    mode=m,
+                                    db=turn_db,
+                                    app_state=websocket.app.state,
+                                )
+                        finally:
+                            # Release the task reference so completed tasks are GC'd promptly.
+                            sess.turn_task = None
 
                     sess.turn_task = asyncio.create_task(_run_turn(), name=f"turn-ws-{session_id}")
 

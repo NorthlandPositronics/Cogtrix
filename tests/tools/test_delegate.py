@@ -48,7 +48,7 @@ class TestConfiguration:
         )
 
         # Config should be updated (we test via _resolve_model_alias)
-        provider, model, alias_config = _resolve_model_alias(None, "fast")
+        provider, model, _ = _resolve_model_alias(None, "fast")
         assert provider == "ollama"
         assert model == "gemma3:12b"
 
@@ -445,6 +445,9 @@ class TestCircuitBreaker:
                 "enabled": True,
                 "default_provider": "ollama",
                 "allowed_providers": ["openai", "ollama"],
+                "allowed_models": None,
+                "models": {},
+                "default_model_alias": None,
                 "max_consecutive_failures": 5,
                 "circuit_breaker_cooldown": 300,
             }
@@ -695,6 +698,17 @@ class TestCheckAllowedModel:
 
 class TestResolveDefaults:
     """Tests for _resolve_defaults — filling in missing provider/model."""
+
+    def setup_method(self):
+        """Reset delegate config to a clean baseline before each test."""
+        configure_delegate(
+            {
+                "default_provider": "ollama",
+                "default_model": None,
+                "default_model_alias": None,
+                "models": {},
+            }
+        )
 
     def test_both_provided(self):
         """When both provider and model are given, they should pass through."""

@@ -20,6 +20,7 @@ import logging
 import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -165,7 +166,11 @@ def _build_memory_manager(session_id: str, config: dict, app_state: Any) -> Any:
         if not MemoryFactory.is_registered(mode):
             mode = "conversation"
 
-        store = JsonFileMemoryStore()
+        app_cfg = getattr(app_state, "config", None)
+        history_dir = (
+            str(Path(app_cfg.data_dir) / "history") if app_cfg is not None else "data/history"
+        )
+        store = JsonFileMemoryStore(history_dir)
         manager = MemoryFactory.create(mode, store, session_id)
         manager.load()
         return manager

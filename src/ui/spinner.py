@@ -183,6 +183,8 @@ class ActivityIndicator:
     def _tty_output_enabled() -> bool:
         import os
 
+        if os.environ.get("NO_COLOR") is not None:
+            return False
         return sys.stdout.isatty() or bool(os.environ.get("FORCE_COLOR"))
 
     def start(self) -> None:

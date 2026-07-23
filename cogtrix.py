@@ -2698,6 +2698,7 @@ def run_single_prompt(
     active_tools_list: list | None = None,
     config: Any = None,
     max_context_tokens: int | None = None,
+    deny_all_tools: bool = False,
 ) -> int:
     """
     Process a single prompt in non-interactive mode.
@@ -2724,6 +2725,8 @@ def run_single_prompt(
         new_request_id()
 
         _session.reset_for_new_prompt()
+        if deny_all_tools:
+            _session.deny_all = True
 
         # Log user message
         log_user_message(prompt_text)
@@ -3052,6 +3055,13 @@ def main():
     """Main CLI loop."""
     # Parse command line arguments
     args = parse_arguments()
+
+    # Silent mode: disable all ANSI/spinner output before any Rich or spinner
+    # initialization so NO_COLOR is effective from the very start.
+    if getattr(args, "silent", False):
+        import os as _os
+
+        _os.environ.setdefault("NO_COLOR", "1")
 
     # Load configuration (CLI > env > config file > defaults)
     try:
@@ -3592,7 +3602,8 @@ def main():
         service.run()
         sys.exit(0)
 
-    # Handle non-interactive mode (--prompt or --prompt-file)
+    # Handle non-interactive mode (--prompt, --prompt-file, --silent, or positional PROMPT)
+    _silent_mode = getattr(args, "silent", False)
     prompt_text = None
     if hasattr(args, "prompt") and args.prompt:
         prompt_text = args.prompt
@@ -3600,15 +3611,32 @@ def main():
         try:
             prompt_file = Path(args.prompt_file)
             if not prompt_file.exists():
-                print(f"\n⚠️  Prompt file not found: {args.prompt_file}")
+                print(f"\n⚠️  Prompt file not found: {args.prompt_file}", file=sys.stderr)
                 sys.exit(1)
             prompt_text = prompt_file.read_text(encoding="utf-8").strip()
             if not prompt_text:
-                print(f"\n⚠️  Prompt file is empty: {args.prompt_file}")
+                print(f"\n⚠️  Prompt file is empty: {args.prompt_file}", file=sys.stderr)
                 sys.exit(1)
         except Exception as e:
-            print(f"\n⚠️  Error reading prompt file: {e}")
+            print(f"\n⚠️  Error reading prompt file: {e}", file=sys.stderr)
             sys.exit(1)
+    elif _silent_mode:
+        # In silent mode, accept the prompt from the positional arg or stdin
+        inline = getattr(args, "inline_prompt", None)
+        if inline:
+            prompt_text = inline.strip()
+        elif not sys.stdin.isatty():
+            prompt_text = sys.stdin.read().strip()
+        if not prompt_text:
+            print(
+                "Error: --silent requires a prompt "
+                "(pass it as a positional argument, via --prompt, or pipe it via stdin).",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+    elif getattr(args, "inline_prompt", None):
+        # Positional prompt without --silent was already flagged as silent in parse_arguments
+        prompt_text = args.inline_prompt.strip()
 
     if prompt_text:
         # Non-interactive mode: process single prompt and exit
@@ -3620,13 +3648,16 @@ def main():
                 callbacks.append(obs_handler)
                 log.debug("LLM observability handler enabled")
 
+        # --silent: auto-deny tool confirmations unless -y was given
+        _deny_all = _silent_mode and not getattr(args, "no_confirm", False)
+
         exit_code = run_single_prompt(
             prompt_text=prompt_text,
             memory_manager=memory_manager,
             registry=registry,
             approvals=approvals,
             output_file=getattr(args, "output", None),
-            no_stream=getattr(args, "no_stream", False),
+            no_stream=_silent_mode or getattr(args, "no_stream", False),
             log=log,
             callbacks=callbacks if callbacks else None,
             llm=llm,
@@ -3639,6 +3670,7 @@ def main():
             active_tools_list=tools,
             config=config,
             max_context_tokens=max_context_tokens,
+            deny_all_tools=_deny_all,
         )
         sys.exit(exit_code)
 

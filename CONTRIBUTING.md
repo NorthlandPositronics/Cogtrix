@@ -39,7 +39,12 @@ See the [LICENSE](LICENSE) file for full terms.
 
 ### Submitting Code
 
-1. Create a feature branch from `main`.
+1. Create a feature branch from `next` (the integration branch — not `main`):
+   ```bash
+   git checkout next
+   git checkout -b feat/my-feature
+   ```
+   Use the naming convention `feat/<short-description>` or `fix/<short-description>`.
 2. Make your changes following the code style guidelines below.
 3. Add or update tests as appropriate.
 4. Run all quality checks:
@@ -51,9 +56,11 @@ uv run pyright cogtrix.py src/
 uv run pytest tests/ -v
 ```
 
-5. Submit a pull request with:
+5. Submit a pull request targeting `next` with:
    - A clear description of what the change does and why
    - Reference to any related issues
+
+> **Branch policy:** `main` is release-only. All pull requests must target `next`. The CI enforces this — PRs directly to `main` from non-release branches are blocked.
 
 ### Your First Contribution
 

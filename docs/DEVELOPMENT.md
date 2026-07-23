@@ -99,7 +99,7 @@ The tool is automatically discovered:
 
 ```bash
 uv run python cogtrix.py
-# ✓ Loaded 51 tool(s):
+# ✓ Loaded 60 tool(s):
 #   - my_tool
 ```
 
@@ -411,12 +411,31 @@ Handlers receive `self` (the registry instance) which provides access to:
 # Using uv (recommended)
 uv run pytest tests/ -v
 
-# Unit tests only (fast, excludes integration tests)
-uv run pytest tests/ -q -k "not test_agent_workflow"
+# Unit tests only (fast, excludes all integration tests)
+uv run pytest tests/ -q -m "not agent_workflow and not live_llm"
 
 # Or with pip/venv
 python -m pytest tests/ -v
 ```
+
+### Pytest Markers
+
+| Marker | Description | Requires |
+|--------|-------------|----------|
+| `agent_workflow` | Full agent message lifecycle integration tests | Live LLM endpoint |
+| `live_llm` | Integration tests backed by the local Gemma 3 270M container | Container at `localhost:18080` |
+| `docker` | Tests that require a running Docker daemon | Running Docker daemon |
+
+To run the live LLM tests locally, start the Gemma container first:
+
+```bash
+docker run -d --name gemma-test -p 18080:8080 \
+    ghcr.io/northlandpositronics/cogtrix-gemma3-270m:latest
+
+uv run pytest tests/ -m live_llm -v --timeout=300
+```
+
+The `live_llm` tests include a session-scoped `require_gemma_container` autouse fixture that skips the entire suite automatically if `localhost:18080` is not reachable — so they are safe to run without the container.
 
 ### Run Specific Tests
 
@@ -659,14 +678,15 @@ cogtrix/
 │   ├── rag/
 │   │   └── ingest.py         # Document ingestion
 │   │
-│   └── tools/                # Built-in tool modules (51 tools)
+│   └── tools/                # Built-in tool modules (60 tools)
 │       ├── brave_search.py   # Brave Search API
 │       ├── calculator.py     # Math expressions
 │       ├── datetime_tool.py  # Date/time utilities
 │       ├── deep_think.py     # Tree-of-Thought reasoning
-│       ├── delegate.py       # Task delegation
-│       ├── exa_search.py     # Exa semantic search
-│       ├── file_ops.py       # File operations
+│       ├── delegate.py       # Task delegation (2 tools)
+│       ├── exa_search.py     # Exa semantic search (3 tools)
+│       ├── file_ops.py       # File operations (6 tools, incl. patch_file)
+│       ├── git_tools.py      # Git operations (7 tools)
 │       ├── google_search.py  # Google Custom Search
 │       ├── http_request.py   # HTTP requests
 │       ├── json_tool.py      # JSON processing
@@ -675,10 +695,10 @@ cogtrix/
 │       ├── rag.py            # Knowledge base queries
 │       ├── serpapi_search.py # SerpAPI (Google/Bing)
 │       ├── shell.py          # Shell commands
-│       ├── tavily_search.py  # Tavily AI search
+│       ├── tavily_search.py  # Tavily AI search (2 tools)
 │       ├── text_tools.py     # Text processing
 │       ├── weather.py        # Weather information
-│       ├── web_search.py     # DuckDuckGo search
+│       ├── web_search.py     # DuckDuckGo search (search_web + search_news)
 │       ├── whatsapp.py       # WhatsApp messaging
 │       ├── _whatsapp_client.py # Waha HTTP client
 │       ├── telegram.py       # Telegram messaging
@@ -711,16 +731,20 @@ cogtrix/
 
 ### Pull Request Process
 
-1. Fork the repository
-2. Create a feature branch
-3. Make changes with tests
+1. Fork the repository.
+2. Create a feature branch from `next` (not `main`):
+   ```bash
+   git checkout next
+   git checkout -b feat/my-feature
+   ```
+3. Make changes with tests.
 4. Run all checks:
    ```bash
    uv run black .
    uv run ruff check .
    uv run pytest tests/ -v
    ```
-5. Submit pull request
+5. Submit a pull request targeting `next`.
 
 ### Commit Messages
 

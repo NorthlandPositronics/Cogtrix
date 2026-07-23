@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -233,7 +234,11 @@ async def switch_memory_mode(
                 log.warning("Could not save old memory before mode switch: %s", exc)
 
         def _create_and_load() -> Any:
-            store = JsonFileMemoryStore()
+            app_cfg = getattr(request.app.state, "config", None)
+            history_dir = (
+                str(Path(app_cfg.data_dir) / "history") if app_cfg is not None else "data/history"
+            )
+            store = JsonFileMemoryStore(history_dir)
             mm = MemoryFactory.create(target_mode, store, session_id)
             mm.load()
             return mm

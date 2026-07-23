@@ -189,12 +189,17 @@ async def ingest_document(
             },
         )
 
-    # Persist to disk
+    # Persist to disk — run in a thread to avoid blocking the event loop for
+    # large uploads (up to 50 MB) with blocking mkdir + write_bytes calls.
     doc_id = str(uuid.uuid4())
     upload_dir = _get_uploads_dir() / doc_id
-    upload_dir.mkdir(parents=True, exist_ok=True)
     file_path = upload_dir / filename
-    file_path.write_bytes(data)
+
+    def _write_upload() -> None:
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        file_path.write_bytes(data)
+
+    await asyncio.to_thread(_write_upload)
     log.info("rag_upload: doc_id=%s file=%s size=%d", doc_id, filename, len(data))
 
     # Create DB record
@@ -212,7 +217,7 @@ async def ingest_document(
     # task's fresh AsyncSessionLocal sees the persisted row.
     background_tasks.add_task(ingest_document_task, doc_id, file_path)
 
-    return APIResponse(data=_doc_to_out(doc))
+    return APIResponse(data=await asyncio.to_thread(_doc_to_out, doc))
 
 
 @router.get(

@@ -139,6 +139,23 @@ class ExaGetContentsInput(BaseModel):
     )
 
 
+# -- Helpers -------------------------------------------------------------------
+
+
+def _exa_error(operation: str, exc: Exception) -> str:
+    """Return a user-facing error message, with a fallback hint on credits errors."""
+    err = str(exc)
+    if any(
+        marker in err
+        for marker in ("402", "credit", "quota", "payment", "Payment", "Credit", "Quota")
+    ):
+        return (
+            "Error: Exa API credits exhausted or payment required. "
+            "Use search_web or search_news as a free fallback instead."
+        )
+    return f"Error performing {operation}: {exc}"
+
+
 # -- Tool functions ------------------------------------------------------------
 
 
@@ -189,7 +206,7 @@ def exa_search(
     except RuntimeError as e:
         return f"Error: {e}"
     except Exception as e:
-        return f"Error performing Exa search: {e}"
+        return _exa_error("Exa search", e)
 
     return _format_search_results(query, results)
 
@@ -234,7 +251,7 @@ def exa_find_similar(
     except RuntimeError as e:
         return f"Error: {e}"
     except Exception as e:
-        return f"Error performing Exa find_similar: {e}"
+        return _exa_error("Exa find_similar", e)
 
     return _format_search_results(f"pages similar to {url}", results)
 
@@ -266,7 +283,7 @@ def exa_get_contents(urls: list[str]) -> str:
     except RuntimeError as e:
         return f"Error: {e}"
     except Exception as e:
-        return f"Error extracting content: {e}"
+        return _exa_error("Exa get_contents", e)
 
     output: list[str] = []
     result_list = getattr(results, "results", [])

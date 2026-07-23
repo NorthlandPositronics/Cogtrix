@@ -64,7 +64,7 @@ Cogtrix is a modular LangChain-based AI agent built with a layered architecture:
 ┌───────────────┴───────────────┐ ┌───────────────┴───────────────┐
 │        Memory System          │ │        Tool Modules           │
 │       (src/memory/)           │ │       (src/tools/)            │
-│  • Mode managers              │ │  • 51 built-in tools          │
+│  • Mode managers              │ │  • 60 built-in tools          │
 │  • Context preparation        │ │  • Auto-discovery             │
 │  • JSON persistence           │ │  • Pydantic schemas           │
 └───────────────────────────────┘ └───────────────────────────────┘
@@ -220,9 +220,10 @@ src/
 │   ├── calculator.py      # Math expressions
 │   ├── datetime_tool.py   # Date/time utilities
 │   ├── deep_think.py      # Tree-of-Thought reasoning
-│   ├── delegate.py        # Task delegation
+│   ├── delegate.py        # Task delegation (2 tools)
 │   ├── exa_search.py      # Exa semantic search (3 tools)
-│   ├── file_ops.py        # File operations
+│   ├── file_ops.py        # File operations (6 tools, incl. patch_file)
+│   ├── git_tools.py       # Git operations (7 tools)
 │   ├── google_search.py   # Google Custom Search API
 │   ├── http_request.py    # HTTP requests with SSRF protection
 │   ├── json_tool.py       # JSON processing
@@ -234,7 +235,7 @@ src/
 │   ├── tavily_search.py   # Tavily AI search (2 tools)
 │   ├── text_tools.py      # Text processing
 │   ├── weather.py         # Weather information
-│   ├── web_search.py      # DuckDuckGo search
+│   ├── web_search.py      # DuckDuckGo search (2 tools: search_web, search_news)
 │   ├── whatsapp.py        # WhatsApp messaging (4 tools)
 │   ├── _whatsapp_client.py # Waha HTTP client
 │   ├── telegram.py        # Telegram messaging (4 tools)
@@ -600,8 +601,10 @@ Wraps sensitive tools with confirmation prompts.
 - `execute_shell_command`
 - `execute_python`
 - `write_file`
+- `patch_file`
 - `append_file`
 - `http_post`
+- `git_add`, `git_commit`, `git_create_branch`, `git_checkout` (confirmation required)
 - `whatsapp_send`, `whatsapp_send_image` (configurable)
 - `telegram_send`, `telegram_send_photo` (configurable)
 
@@ -1025,7 +1028,7 @@ Incoming Message (from channel.poll())
 | Per-chat context | Private to each `(channel, chat_id)` | `data/history/{session_key}.json` | Independent conversation history, summarization, vector recall |
 | Shared knowledge | Cross-chat | `data/knowledge/facts.json` + `data/vectordb/knowledge/` | Entity-centric facts recalled when relevant to any chat |
 
-**Default Excluded Tools:** `whatsapp_send`, `whatsapp_check`, `whatsapp_send_image`, `whatsapp_contacts`, `telegram_send`, `telegram_check`, `telegram_send_photo`, `telegram_contacts`, `shell`, `write_file`, `append_file`, `read_file`, `read_pdf`, `list_directory`, `file_info`
+**Default Excluded Tools:** `whatsapp_send`, `whatsapp_check`, `whatsapp_send_image`, `whatsapp_contacts`, `telegram_send`, `telegram_check`, `telegram_send_photo`, `telegram_contacts`, `execute_shell_command`, `execute_python`, `write_file`, `append_file`, `read_file`, `read_pdf`, `list_directory`, `file_info`
 
 **Security Guardrails (`src/assistant/guardrails.py`):**
 
@@ -1360,15 +1363,15 @@ memory_manager.save()
 
 | Category | Tools | Confirmation |
 |----------|-------|--------------|
-| Read-only | `read_file`, `list_directory`, `search_web` | No |
-| Sensitive | `execute_shell_command`, `write_file`, `execute_python` | Yes |
+| Read-only | `read_file`, `list_directory`, `search_web`, `git_status`, `git_diff`, `git_log` | No |
+| Sensitive | `execute_shell_command`, `write_file`, `patch_file`, `append_file`, `execute_python`, `git_add`, `git_commit`, `git_create_branch`, `git_checkout` | Yes |
 | External | `http_post` | Yes |
 
 Tool confirmation checks are serialized inside `_confirmation_lock` in `create_safe_tool_wrapper()` to eliminate TOCTOU races between `deny_all` / `denials` checks and the prompt display.
 
 ### File Path Safety
 
-All file operations (`read_file`, `write_file`, `append_file`, `list_directory`, `file_info`) validate paths through `_validate_path()` in `src/tools/file_ops.py` before any filesystem access.
+All file operations (`read_file`, `write_file`, `patch_file`, `append_file`, `list_directory`, `file_info`) validate paths through `_validate_path()` in `src/tools/file_ops.py` before any filesystem access.
 
 **Allowed roots:**
 

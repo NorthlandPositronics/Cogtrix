@@ -104,7 +104,7 @@ docker pull ghcr.io/northlandpositronics/cogtrix-webui:latest
 
 ## Bug Reports
 
-The [`docs/bugs/`](bugs/) directory contains 61 bug report files produced during
+The [`docs/bugs/`](bugs/) directory contains 62 bug report files produced during
 automated and manual audit sweeps. Each file documents findings from a single
 audit session with BUG-IDs, root-cause analysis, and fix status.
 

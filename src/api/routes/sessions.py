@@ -281,7 +281,7 @@ async def create_session(
 async def list_sessions(
     request: Request,
     cursor: str | None = None,
-    limit: int = 20,
+    limit: int = Query(default=20, ge=1, le=100),
     include_archived: bool = False,
     current_user: TokenData = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
@@ -296,7 +296,6 @@ async def list_sessions(
     Auth: bearer token required.
     Error codes: UNAUTHORIZED, TOKEN_EXPIRED, INVALID_CURSOR.
     """
-    limit = max(1, min(limit, 100))
     after_id = _decode_cursor(cursor) if cursor else None
 
     repo = SessionRepository(db)
