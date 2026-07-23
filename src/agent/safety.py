@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import difflib
 import enum
+import re
 import threading
 from collections.abc import Callable
 from pathlib import Path
@@ -15,6 +16,16 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 from src.logging_config import get_logger
 
 log = get_logger()
+
+# Regex to strip absolute paths from exception messages so internal filesystem
+# layout is not exposed to the agent.  Replaces paths like /home/user/file or
+# C:\Users\user\file with <path>.
+_ABS_PATH_RE = re.compile(
+    r"(?:"
+    r"(?:/[a-zA-Z0-9_.@-]+){2,}"  # POSIX absolute path (/home/user/...)
+    r"|(?:[A-Za-z]:\\(?:[^\\/:*?\"<>|\r\n]+\\)*[^\\/:*?\"<>|\r\n]*)"  # Windows path
+    r")"
+)
 
 try:
     from src.ui.spinner import _spinner as _activity_spinner
@@ -179,7 +190,8 @@ def _compute_file_diff(tool_name: str, tool_input: dict) -> tuple[str, list[str]
                 )
             )
             return (path_str, diff) if diff else None
-    except Exception:
+    except Exception as exc:  # noqa: BLE001
+        log.debug("_compute_file_diff failed for tool %r: %s", tool_name, exc)
         return None
     return None
 
@@ -279,7 +291,7 @@ def create_safe_tool_wrapper(
                         except Exception:
                             pass
                     with _confirmation_lock:
-                        if ss.deny_all or tool_name in ss.denials:
+                        if ss.is_denied(tool_name):
                             return "User denied execution"
                         if tool_name in approvals:
                             pass
@@ -314,11 +326,11 @@ def create_safe_tool_wrapper(
                             elif result == ConfirmationResult.APPROVED_ONCE:
                                 pass
                             elif result == ConfirmationResult.DENIED_ALL:
-                                ss.deny_all = True
+                                ss.set_deny_all()
                                 ui.show_message("✗ All tool requests will be forbidden", "red")
                                 return "User denied execution"
                             elif result == ConfirmationResult.DENIED_DISABLE:
-                                ss.denials.add(tool_name)
+                                ss.deny_tool(tool_name)
                                 ui.show_message(
                                     f"✗ Tool '{tool_name}' disabled for this session", "red"
                                 )
@@ -357,7 +369,11 @@ def create_safe_tool_wrapper(
             return _result
         except Exception as e:
             log.warning("Tool %s execution error: %s", tool_name, e, exc_info=True)
-            return f"Tool execution error ({type(e).__name__}): {e}"
+            # Sanitize absolute paths from the error message before returning
+            # to the agent — FileNotFoundError, PermissionError etc. can expose
+            # internal filesystem layout.
+            sanitized_msg = _ABS_PATH_RE.sub("<path>", str(e))
+            return f"Tool execution error ({type(e).__name__}): {sanitized_msg}"
         finally:
             if _activity_spinner is not None:
                 _activity_spinner.clear_context()

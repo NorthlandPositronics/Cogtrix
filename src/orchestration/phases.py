@@ -133,7 +133,23 @@ def _looks_like_research_query(text: str) -> bool:
     false positives from substrings (e.g. "test" inside "latest").
     """
     lower = text.lower()
-    has_research_intent = any(phrase in lower for phrase in _RESEARCH_INTENT_PHRASES)
+
+    # Check for negation preceding matched phrases (e.g. "don't research", "no need to find")
+    _neg_re = re.compile(
+        r"\b(?:not|no|never|don'?t|doesn'?t|can'?t|cannot|without|stop|avoid)\b",
+        re.IGNORECASE,
+    )
+
+    def _phrase_is_negated(phrase: str) -> bool:
+        pos = lower.find(phrase)
+        if pos < 0:
+            return False
+        window = lower[max(0, pos - 25) : pos]
+        return bool(_neg_re.search(window))
+
+    has_research_intent = any(
+        phrase in lower and not _phrase_is_negated(phrase) for phrase in _RESEARCH_INTENT_PHRASES
+    )
     has_action_intent = any(
         (
             re.search(r"\b" + re.escape(phrase) + r"\b", lower) is not None
@@ -644,12 +660,13 @@ def run_research_delegate(
         return ""
 
     _URL_BATCH = 10
-    if len(urls) > _URL_BATCH:
+    _dropped_count = max(0, len(urls) - _URL_BATCH)
+    if _dropped_count:
         log.warning(
             "run_research_delegate: %d URLs provided, processing first %d; %d dropped",
             len(urls),
             _URL_BATCH,
-            len(urls) - _URL_BATCH,
+            _dropped_count,
         )
 
     from src.tools.delegate import (
@@ -667,8 +684,14 @@ def run_research_delegate(
 
     # Build a focused research prompt
     url_list = "\n".join(f"  - {u}" for u in urls[:_URL_BATCH])
+    _truncation_note = (
+        f"\n\n**Note:** {_dropped_count} URL(s) were omitted due to the "
+        f"batch limit ({_URL_BATCH}). Research covers only the first {_URL_BATCH} URLs."
+        if _dropped_count
+        else ""
+    )
     research_prompt = (
-        f"## Research task\n\n{task}\n\n"
+        f"## Research task\n\n{task}{_truncation_note}\n\n"
         "## URLs to fetch and extract\n\n"
         f"{url_list}\n\n"
         "## Instructions\n\n"
@@ -1003,7 +1026,21 @@ def is_step_limit_apology(text: str) -> bool:
     if not text or len(text) > 300:
         return False
     lower = text.lower()
-    return any(phrase in lower for phrase in STEP_LIMIT_PHRASES)
+    # Check for negation: "I don't need more steps" should NOT trigger recovery
+    _NEGATION_RE = re.compile(
+        r"\b(?:not|no|never|don'?t|doesn'?t|can'?t|cannot|without)\b"
+        r".{0,20}(?:need|require|want)",
+        re.IGNORECASE,
+    )
+    for phrase in STEP_LIMIT_PHRASES:
+        if phrase in lower:
+            # Find phrase position and check for negation in the surrounding context
+            pos = lower.find(phrase)
+            window = lower[max(0, pos - 30) : pos + len(phrase) + 10]
+            if _NEGATION_RE.search(window):
+                continue  # negated — not a step-limit apology
+            return True
+    return False
 
 
 def extract_partial_results(messages: list) -> str | None:

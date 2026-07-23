@@ -122,6 +122,22 @@ def json_schema_to_pydantic(name: str, schema: dict[str, Any]) -> type:
             python_type = _JSON_SCHEMA_TYPE_MAP.get(first_type, str)
             if has_null:
                 python_type = Optional[python_type]  # noqa: UP045
+        elif "allOf" in prop_schema:
+            # Use the first concrete type from allOf subschemas
+            sub_type = "string"
+            for sub in prop_schema.get("allOf", []):
+                if sub.get("type") in _JSON_SCHEMA_TYPE_MAP:
+                    sub_type = sub["type"]
+                    break
+            python_type = _JSON_SCHEMA_TYPE_MAP.get(sub_type, str)
+        elif "enum" in prop_schema:
+            # enum values — all values as str (Pydantic Literal is impractical for
+            # dynamic schema construction; str covers the common case)
+            python_type = str
+        elif "$ref" in prop_schema or "const" in prop_schema:
+            # $ref requires schema resolution; const is a single fixed value — both
+            # fall back to str for simplicity since we can't resolve $ref at runtime
+            python_type = str
         else:
             python_type = _JSON_SCHEMA_TYPE_MAP.get(raw_type)
             if python_type is None:
@@ -363,8 +379,10 @@ class MCPManager:
         self._ensure_loop()
         with self._loop_lock:
             loop = self._loop
-        if loop is None:
-            raise RuntimeError("MCP event loop is not running")
+        # Guard against the loop being closed between _ensure_loop() releasing
+        # the lock and this acquisition (e.g. close_all() running concurrently).
+        if loop is None or loop.is_closed():
+            raise RuntimeError("MCP event loop is not running or has been closed")
         future = asyncio.run_coroutine_threadsafe(coro, loop)
         try:
             return future.result(timeout=timeout)
@@ -402,7 +420,10 @@ class MCPManager:
         for cfg, outcome in zip(configs, raw, strict=True):
             if isinstance(outcome, BaseException):
                 get_logger().warning(
-                    "MCP: unexpected error connecting to server '%s': %s", cfg.name, outcome
+                    "MCP: unexpected error connecting to server '%s': %s",
+                    cfg.name,
+                    outcome,
+                    exc_info=outcome,  # preserve full traceback
                 )
                 results.append((cfg.name, None))
             else:
@@ -551,6 +572,11 @@ class MCPManager:
 
         if self._thread is not None:
             self._thread.join(timeout=5)
+            if self._thread.is_alive():
+                get_logger().warning(
+                    "MCP background thread did not stop within 5s — "
+                    "in-flight MCP calls may be dangling. Proceeding anyway."
+                )
             self._thread = None
 
         if self._loop is not None and not self._loop.is_closed():

@@ -1,6 +1,6 @@
 # Cogtrix Tools Reference
 
-Complete documentation of all 72 built-in tools. You don't need to memorize these — the agent picks the right tool automatically based on your request. This page is a reference for when you want to know exactly what's available, what parameters a tool accepts, or how to configure optional providers.
+Complete documentation of all 79 built-in tools. You don't need to memorize these — the agent picks the right tool automatically based on your request. This page is a reference for when you want to know exactly what's available, what parameters a tool accepts, or how to configure optional providers.
 
 **Quick orientation:**
 
@@ -73,7 +73,7 @@ Execute shell commands with timeout protection.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `cmd` | string | Yes | Shell command to execute |
+| `command` | string | Yes | Shell command to execute |
 | `working_directory` | string | No | Working directory (default: current) |
 | `timeout` | int | No | Timeout in seconds (default: 30) |
 

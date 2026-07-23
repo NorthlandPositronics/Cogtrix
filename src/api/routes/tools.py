@@ -115,7 +115,7 @@ def _tool_to_out(
 
 
 def _classify_tool_status(name: str, session_state: Any) -> str:
-    if name in session_state.denials:
+    if session_state.is_denied(name):
         return "disabled"
     if name in getattr(session_state, "pinned_tools", set()):
         return "pinned"
@@ -415,12 +415,12 @@ async def patch_session_tools(
 
         if body.enable:
             for name in body.enable:
-                ss.denials.discard(name)
+                ss.allow_tool(name)
 
         if body.disable:
             for name in body.disable:
                 _assert_tool_exists(name)
-                ss.denials.add(name)
+                ss.deny_tool(name)
                 ss.loaded_tools.discard(name)
                 ss.pinned_tools.discard(name)
                 # Also remove from run_config active tools so the LLM can't invoke it.

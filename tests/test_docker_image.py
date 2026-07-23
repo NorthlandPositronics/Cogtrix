@@ -48,7 +48,7 @@ def docker_available():
 def docker_image(docker_available):
     """Build the image once; yield tag; remove after all tests."""
     result = subprocess.run(
-        ["docker", "build", "-t", IMAGE_TAG, str(ROOT)],
+        ["docker", "build", "-f", str(ROOT / "docker" / "Dockerfile"), "-t", IMAGE_TAG, str(ROOT)],
         capture_output=True,
         timeout=600,
     )

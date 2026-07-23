@@ -72,7 +72,14 @@ class TestDeepSeekChatModelReasoning:
             "so DeepSeek's API does not return 400"
         )
 
-    def test_no_reasoning_content_leaves_dict_unchanged(self) -> None:
+    def test_no_reasoning_content_gets_empty_placeholder(self) -> None:
+        """Assistant messages with no reasoning_content get an empty placeholder.
+
+        DeepSeek requires reasoning_content on every assistant message in
+        reasoning-model conversations.  Using "" satisfies the API for
+        messages where the original reasoning chain is unavailable (e.g. old
+        history files, /think synthetic messages).
+        """
         from unittest.mock import patch
 
         from langchain_core.messages import AIMessage, HumanMessage
@@ -99,7 +106,8 @@ class TestDeepSeekChatModelReasoning:
         ):
             payload = model._get_request_payload(messages)
 
-        assert "reasoning_content" not in payload["messages"][1]
+        # Always gets the field — empty string when no rc is available
+        assert payload["messages"][1].get("reasoning_content") == ""
 
     def test_reasoning_content_not_added_to_user_messages(self) -> None:
         from unittest.mock import patch
@@ -347,13 +355,24 @@ class TestDeepSeekStreamingCapture:
         )
 
     def test_streaming_chunk_reasoning_content_captured(self) -> None:
+        """reasoning_content is captured from choices[0].delta — NOT from top-level chunk."""
         from langchain_core.messages import AIMessageChunk
 
         model = self._make_model()
+        # Real OpenAI streaming format: delta is nested under choices[0]
         chunk = {
-            "delta": {"role": "assistant", "content": "Hi", "reasoning_content": "Let me think"},
-            "finish_reason": None,
-            "index": 0,
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {
+                        "role": "assistant",
+                        "content": "Hi",
+                        "reasoning_content": "Let me think",
+                    },
+                    "finish_reason": None,
+                }
+            ],
+            "model": "deepseek-reasoner",
         }
         result = model._convert_chunk_to_generation_chunk(chunk, AIMessageChunk, {})
         if result is not None:
@@ -366,9 +385,14 @@ class TestDeepSeekStreamingCapture:
 
         model = self._make_model()
         chunk = {
-            "delta": {"role": "assistant", "content": "Hi"},
-            "finish_reason": None,
-            "index": 0,
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {"role": "assistant", "content": "Hi"},
+                    "finish_reason": None,
+                }
+            ],
+            "model": "deepseek-reasoner",
         }
         result = model._convert_chunk_to_generation_chunk(chunk, AIMessageChunk, {})
         if result is not None:
@@ -488,3 +512,76 @@ class TestResponsesApiPayloadInjection:
             payload = model._get_request_payload(messages)
         # Should not crash and should return the payload unchanged
         assert payload == base_payload
+
+    def test_empty_rc_placeholder_when_some_messages_missing_rc(self) -> None:
+        """When some AIMessages have rc and others don't, missing ones get empty placeholder.
+
+        This covers history loaded from old JSON files that pre-date rc serialization.
+        Without this, DeepSeek returns 400 because the conversation is 'in thinking mode'
+        but some assistant messages are missing reasoning_content.
+        """
+        from unittest.mock import patch
+
+        from langchain_core.messages import AIMessage, HumanMessage
+
+        from src.providers.openai import _DeepSeekChatModel
+
+        model = _DeepSeekChatModel(
+            model="deepseek-reasoner", api_key="sk-test", base_url="https://api.deepseek.com/v1"
+        )
+        messages = [
+            HumanMessage(content="q1"),
+            AIMessage(content="a1"),  # old message — no reasoning_content
+            HumanMessage(content="q2"),
+            AIMessage(content="a2", additional_kwargs={"reasoning_content": "rc2"}),
+            HumanMessage(content="q3"),
+        ]
+        base_payload = {
+            "messages": [
+                {"role": "user", "content": "q1"},
+                {"role": "assistant", "content": "a1"},
+                {"role": "user", "content": "q2"},
+                {"role": "assistant", "content": "a2"},
+                {"role": "user", "content": "q3"},
+            ]
+        }
+        with patch.object(
+            _DeepSeekChatModel.__bases__[0], "_get_request_payload", return_value=base_payload
+        ):
+            payload = model._get_request_payload(messages)
+
+        # old message gets empty placeholder so DeepSeek doesn't reject the request
+        assert payload["messages"][1].get("reasoning_content") == ""
+        # new message gets its actual reasoning content
+        assert payload["messages"][3].get("reasoning_content") == "rc2"
+
+    def test_all_assistant_messages_get_placeholder_even_without_any_rc(self) -> None:
+        """Even when NO messages carry reasoning_content, all assistant dicts get ''.
+
+        This covers sessions loaded from old JSON history (pre-rc-serialization) and
+        /think synthetic messages — both have no rc in additional_kwargs, yet the
+        DeepSeek reasoning model requires the field on every assistant message.
+        """
+        from unittest.mock import patch
+
+        from langchain_core.messages import AIMessage, HumanMessage
+
+        from src.providers.openai import _DeepSeekChatModel
+
+        model = _DeepSeekChatModel(
+            model="deepseek-chat", api_key="sk-test", base_url="https://api.deepseek.com/v1"
+        )
+        messages = [HumanMessage(content="q"), AIMessage(content="a")]
+        base_payload = {
+            "messages": [
+                {"role": "user", "content": "q"},
+                {"role": "assistant", "content": "a"},
+            ]
+        }
+        with patch.object(
+            _DeepSeekChatModel.__bases__[0], "_get_request_payload", return_value=base_payload
+        ):
+            payload = model._get_request_payload(messages)
+
+        assert payload["messages"][1].get("reasoning_content") == ""
+        assert "reasoning_content" not in payload["messages"][0]

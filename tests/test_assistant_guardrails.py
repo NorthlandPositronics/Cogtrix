@@ -628,12 +628,14 @@ class TestLLMJudge:
         assert not result.is_safe
         assert "Extra explanation" not in (result.reason or "")
 
-    def test_exception_returns_safe_fail_open(self):
+    def test_exception_returns_blocked_fail_closed(self):
+        """LLMJudge blocks content on exception — fail-closed prevents bypass via crash."""
         llm = MagicMock()
         llm.invoke.side_effect = RuntimeError("LLM unavailable")
         judge = LLMJudge(llm)
         result = judge.classify("some message")
-        assert result.is_safe
+        assert not result.is_safe
+        assert result.reason == "LLM judge unavailable"
 
     def test_response_without_content_attribute(self):
         llm = MagicMock()

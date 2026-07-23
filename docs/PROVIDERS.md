@@ -47,7 +47,7 @@ Cogtrix supports four provider types:
 
 | Type | Protocol | Use For |
 |------|----------|---------|
-| `openai` | OpenAI API | OpenAI, Groq, Together, vLLM, LocalAI |
+| `openai` | OpenAI API | OpenAI, Groq, Together, vLLM, LocalAI, xAI, DeepSeek |
 | `ollama` | Ollama API | Ollama servers |
 | `anthropic` | Anthropic API | Anthropic Claude (requires `cogtrix[anthropic]`) |
 | `google` | Google Generative AI | Google Gemini (requires `cogtrix[google]`) |

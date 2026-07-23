@@ -116,7 +116,8 @@ async def warm_session(record: ApiSessionRecord, app_state: Any) -> ApiSession:
     # Deny shell/exec tools unless explicitly enabled in config
     app_config = getattr(app_state, "config", None)
     if not getattr(app_config, "api_dangerous_tools", False):
-        session_state.denials.update({"shell", "bash", "python_exec"})
+        for _t in ("shell", "bash", "python_exec"):
+            session_state.deny_tool(_t)
 
     # 3 & 4. Build memory manager and LLM concurrently — both are I/O-bound and independent.
     memory_manager, llm = await asyncio.gather(

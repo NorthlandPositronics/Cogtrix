@@ -7,8 +7,31 @@ import json
 import logging
 import os
 import tempfile
+import threading
 from pathlib import Path
 from typing import Any
+
+# Best-effort file locking for concurrent same-session writes.
+# fcntl is POSIX-only; on Windows we fall back to a threading lock (which at
+# least guards the in-process case).
+try:
+    import fcntl as _fcntl
+
+    def _lock_file(fd: int) -> None:
+        _fcntl.flock(fd, _fcntl.LOCK_EX)
+
+    def _unlock_file(fd: int) -> None:
+        _fcntl.flock(fd, _fcntl.LOCK_UN)
+
+except ImportError:  # Windows / non-POSIX
+    _fcntl = None  # type: ignore[assignment]
+
+    def _lock_file(fd: int) -> None:  # type: ignore[misc]
+        pass
+
+    def _unlock_file(fd: int) -> None:  # type: ignore[misc]
+        pass
+
 
 from src.memory.base import BaseMemoryStore
 
@@ -68,6 +91,12 @@ def _message_to_dict(msg: Any) -> dict:
                     }
                     for tc in tool_calls
                 ]
+            # Preserve reasoning_content for DeepSeek round-trip: the API
+            # requires this field to be echoed back in subsequent calls.
+            # Without serialization it is lost on save/load, causing 400 errors.
+            rc = (msg.additional_kwargs or {}).get("reasoning_content")
+            if rc:
+                d["reasoning_content"] = rc
 
         if ts:
             d["timestamp"] = ts
@@ -109,6 +138,10 @@ def _dict_to_message(data: dict) -> Any:
 
     # ── AIMessage (optionally with tool_calls) ────────────────────
     if msg_type == "ai" and AIMessage is not None:
+        # Restore reasoning_content so DeepSeek re-injection works after reload
+        rc = data.get("reasoning_content")
+        if rc:
+            additional["reasoning_content"] = rc
         tool_calls_data = data.get("tool_calls")
         if tool_calls_data:
             return AIMessage(
@@ -132,6 +165,20 @@ def _dict_to_message(data: dict) -> Any:
 class JsonFileMemoryStore(BaseMemoryStore):
     """Persist conversation history as JSON files."""
 
+    # In-process per-session locks so concurrent threads sharing the same
+    # JsonFileMemoryStore instance don't interleave writes.  Combined with
+    # OS-level flock (see _lock_file) this guards both in-process and
+    # multi-process concurrent access to the same session file.
+    _session_locks: dict[str, threading.Lock] = {}
+    _session_locks_meta = threading.Lock()
+
+    @classmethod
+    def _get_session_lock(cls, session_id: str) -> threading.Lock:
+        with cls._session_locks_meta:
+            if session_id not in cls._session_locks:
+                cls._session_locks[session_id] = threading.Lock()
+            return cls._session_locks[session_id]
+
     def __init__(self, base_dir: str = "data/history"):
         self.base_path = Path(base_dir)
         self._save_disabled = False
@@ -150,9 +197,17 @@ class JsonFileMemoryStore(BaseMemoryStore):
             session_id.replace("\x00", "_").replace("/", "_").replace("\\", "_").replace("..", "_")
         )
 
-        # Enforce a reasonable length (filesystem limit is typically 255)
+        # Enforce a reasonable length (filesystem limit is typically 255).
+        # Truncate before any incomplete percent-encoding so we never leave a
+        # bare '%' or '%X' at the end of the filename component.
         if len(safe_id) > 128:
-            safe_id = safe_id[:128]
+            truncated = safe_id[:128]
+            # Walk back from the cut point to skip any incomplete %XX sequence
+            while truncated and truncated[-1] == "%":
+                truncated = truncated[:-1]
+            if len(truncated) >= 2 and truncated[-2] == "%":
+                truncated = truncated[:-2]
+            safe_id = truncated or "_"
 
         # Resolve and verify the path stays inside base_path
         full_path = (self.base_path / f"{safe_id}.json").resolve()
@@ -183,36 +238,59 @@ class JsonFileMemoryStore(BaseMemoryStore):
             return
         path = self._session_path(session_id)
         serializable = [_message_to_dict(m) for m in messages]
+        # Acquire in-process lock first, then OS-level flock on the lock file
+        # so concurrent writes from different processes don't corrupt history.
+        with self._get_session_lock(session_id):
+            self._save_history_locked(path, serializable, session_id)
+
+    def _save_history_locked(self, path: Path, serializable: list[Any], session_id: str) -> None:
+        """Write history while holding the in-process lock for this session."""
+        lock_path = path.with_suffix(".lock")
         try:
-            tmp_fd, tmp_path = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
+            lock_fd = os.open(str(lock_path), os.O_CREAT | os.O_WRONLY, 0o600)
+        except OSError:
+            lock_fd = -1
+        try:
+            if lock_fd >= 0:
+                _lock_file(lock_fd)
             try:
-                with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
-                    json.dump(serializable, f, ensure_ascii=False)
-                os.replace(tmp_path, path)
-                self._consecutive_save_failures = 0
-            except Exception:
+                tmp_fd, tmp_path = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
                 try:
-                    os.close(tmp_fd)
+                    with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
+                        json.dump(serializable, f, ensure_ascii=False)
+                    os.replace(tmp_path, path)
+                    self._consecutive_save_failures = 0
+                except Exception:
+                    # Do NOT call os.close(tmp_fd) here — os.fdopen took ownership
+                    # of the fd and its context-manager __exit__ already closed it
+                    # when the 'with' block exited on exception.  An explicit close
+                    # would be a double-close (fd leak on repeated close is harmless
+                    # but os.close mock counts expose the bug in tests).
+                    try:
+                        os.unlink(tmp_path)
+                    except OSError:
+                        pass
+                    raise
+            except Exception as exc:
+                self._consecutive_save_failures += 1
+                if self._consecutive_save_failures >= 3:
+                    self._save_disabled = True
+                    log.warning(
+                        "Cannot save history to %s: %s. Disabling saves after 3 consecutive failures.",
+                        path,
+                        exc,
+                    )
+                else:
+                    log.warning(
+                        "History save failed for %s (attempt %d/3): %s",
+                        path,
+                        self._consecutive_save_failures,
+                        exc,
+                    )
+        finally:
+            if lock_fd >= 0:
+                _unlock_file(lock_fd)
+                try:
+                    os.close(lock_fd)
                 except OSError:
                     pass
-                try:
-                    os.unlink(tmp_path)
-                except OSError:
-                    pass
-                raise
-        except Exception as exc:
-            self._consecutive_save_failures += 1
-            if self._consecutive_save_failures >= 3:
-                self._save_disabled = True
-                log.warning(
-                    "Cannot save history to %s: %s. Disabling saves after 3 consecutive failures.",
-                    path,
-                    exc,
-                )
-            else:
-                log.warning(
-                    "History save failed for %s (attempt %d/3): %s",
-                    path,
-                    self._consecutive_save_failures,
-                    exc,
-                )

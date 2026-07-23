@@ -405,20 +405,18 @@ task_ownership_classifier:
 
 ### Pre-Action Confirmation
 
-When enabled, the agent is instructed to state what it is about to do and ask "Shall I proceed?" before any irreversible operation (delete, install, deploy to production, drop table, overwrite data).
+When enabled, the agent will be instructed to request confirmation before irreversible operations (delete, install, deploy to production, drop tables, overwrite data). This is a planned feature — the configuration field is accepted and stored, but the constraint injection is not yet active in this release. Setting `enabled: true` has no effect on current behavior.
 
-**Off by default** — opt in for autonomous workflows where you want explicit consent gates before destructive actions.
+For the functional pre-execution safety gate available now, see [Task Ownership Classifier](#task-ownership-classifier) above — it constrains the agent to explain rather than act when it detects informational or advisory intent, and prompts for clarification on ambiguous requests.
 
 ```yaml
 pre_action_confirmation:
-  enabled: true
+  enabled: false   # currently a no-op; constraint injection is planned
 ```
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `enabled` | bool | `false` | Inject the pre-action confirmation prompt. The agent will pause and ask before irreversible operations. |
-
-**Exception:** If the user's message already contains explicit execution consent ("go ahead", "yes do it", "proceed", "confirmed"), the agent skips the confirmation step.
+| `enabled` | bool | `false` | Reserved for future use. No behavior change in current version. |
 
 ### Prompt Optimizer
 
@@ -523,7 +521,7 @@ This is especially useful in Docker deployments where the working directory diff
 
 ```bash
 # Via environment variable (colon-separated)
-docker run -it -e COGTRIX_ALLOWED_WRITE_PATHS="/app:/data" -w /tmp ghcr.io/northlandpositronics/cogtrix:latest
+docker run -it -e COGTRIX_ALLOWED_WRITE_PATHS="/tmp:/data/output:/shared" ghcr.io/northlandpositronics/cogtrix:latest
 
 # Via CLI flag (repeatable)
 cogtrix.py --allow-write-path /data/output --allow-write-path /shared/workspace
@@ -1227,7 +1225,7 @@ Rate limit violations are recorded but do not increment the security violation c
 - PII is replaced with typed placeholders: `[EMAIL_REDACTED]`, `[CREDIT_CARD_REDACTED]`, `[SSN_REDACTED]`, `[IP_ADDRESS_REDACTED]`.
 - URLs are replaced with `[link removed]` when `block_urls_in_output` is true.
 
-**LLM judge:** When `llm_judge.enabled: true`, an additional LLM call classifies the input as SAFE or UNSAFE. The judge is fail-open — if the LLM call fails, the message is allowed through. Use `llm_judge.model` to point the judge at a fast/cheap model alias to avoid adding 500ms–2s to every request.
+**LLM judge:** When `llm_judge.enabled: true`, an additional LLM call classifies the input as SAFE or UNSAFE. The judge is fail-closed — if the LLM call fails or returns an empty response, the message is blocked. This is intentional secure-by-default behavior: a deliberate crash of the judge must not bypass the guardrail. Use `llm_judge.model` to point the judge at a fast/cheap model alias to avoid adding 500ms–2s to every request.
 
 **Disabling:** Set `guardrails.enabled: false` to bypass the entire pipeline. The `GuardrailPipeline` still exists in the handler but all checks return safe immediately.
 
@@ -1241,9 +1239,9 @@ Rate limit violations are recorded but do not increment the security violation c
 | `COGTRIX_MODEL` | Active model alias (sets `models.default` at runtime) | `oss` |
 | `COGTRIX_SESSION` | Session ID | `my-project` |
 | `COGTRIX_MEMORY_MODE` | Memory mode | `code` |
-| `COGTRIX_DATA_DIR` | Root directory for data storage | `./data` |
+| `COGTRIX_DATA_DIR` | Root directory for data storage. Docker images default to `/data`; bare Python defaults to `./data`. | `/data` |
 | `COGTRIX_ALLOWED_READ_PATHS` | Colon-separated list of absolute directory paths the agent is allowed to read. When set, restricts file read operations to these directories. | `/workspace:/data/external` |
-| `COGTRIX_ALLOWED_WRITE_PATHS` | Colon-separated extra write-allowed paths | `/app:/data` |
+| `COGTRIX_ALLOWED_WRITE_PATHS` | Colon-separated extra write-allowed paths. Docker default: `/tmp:/data/output`. | `/tmp:/data/output` |
 | `COGTRIX_OLLAMA` | Ollama server address (`host` or `host:port`) | `192.168.1.100` or `192.168.1.100:8080` |
 | `OPENAI_API_KEY` | OpenAI API key | `sk-...` |
 | `ANTHROPIC_API_KEY` | Anthropic API key | `sk-ant-...` |

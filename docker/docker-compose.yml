@@ -49,12 +49,10 @@ services:
     env_file:
       - ./config/cogtrix.env
     environment:
-      # Tell the app where the persistent volume is mounted.
-      # The Dockerfile default is /app/data; here we override it so the app
-      # writes to the named volume at /data/cogtrix instead.
-      COGTRIX_DATA_DIR: /data/cogtrix
+      # /data is the Dockerfile default; explicit here for clarity.
+      COGTRIX_DATA_DIR: /data
       COGTRIX_WHATSAPP_URL: "http://waha:3000"
-      COGTRIX_ALLOWED_WRITE_PATHS: "/data/cogtrix/log,/data/cogtrix/output"
+      COGTRIX_ALLOWED_WRITE_PATHS: "/data/log,/data/output"
     user: "1000:1000"
     command: api
     expose:
@@ -67,11 +65,11 @@ services:
       start_period: 20s
       retries: 3
     volumes:
-      - cogtrix-data:/data/cogtrix
-      - ./data/log:/data/cogtrix/log
-      - ./data/output:/data/cogtrix/output
-      - ./data/prompts:/data/cogtrix/prompts:ro
-      - ./data/documents:/data/cogtrix/documents
+      - cogtrix-data:/data
+      - ./data/log:/data/log
+      - ./data/output:/data/output
+      - ./data/prompts:/data/prompts:ro
+      - ./data/documents:/data/documents
       - ./config/cogtrix.yml:/app/.cogtrix.yaml:ro
     networks:
       - cogtrix-net

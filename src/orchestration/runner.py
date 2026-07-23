@@ -617,8 +617,12 @@ def _handle_extend_run(
                     if synth_response:
                         return synth_response
                 except RecursionError:
-                    log.warning("Recursion limit during delegation synthesis; using raw results")
-                # Fallback: return the raw delegation results
+                    log.warning(
+                        "Recursion limit hit during delegation synthesis — "
+                        "returning raw delegation results (may be incomplete)"
+                    )
+                # Fallback: return the raw delegation results (may be incomplete
+                # if synthesis hit RecursionError above)
                 return delegation_result
         except Exception as e:
             log.warning("Delegation in extend_run failed: %s", e, exc_info=True)
@@ -923,10 +927,12 @@ def run_agent(
 
         if use_per_session_caches:
             # API mode: snapshot local copies from per-session caches; merge back after.
-            # Asserts narrow the type for Pyright — the boolean guard already guarantees
-            # these are non-None when use_per_session_caches is True.
-            assert config.bound_cache is not None  # noqa: S101
-            assert config.compression_cache is not None  # noqa: S101
+            if config.bound_cache is None or config.compression_cache is None:
+                raise RuntimeError(
+                    "run_agent: use_per_session_caches=True but bound_cache or "
+                    "compression_cache is None — AgentRunConfig was not properly "
+                    "initialised for API mode."
+                )
             local_bound_cache = OrderedDict(config.bound_cache)
             local_compression_cache = OrderedDict(config.compression_cache)
             current_llm_id = (id(config.llm), 0)
@@ -1088,10 +1094,8 @@ def run_agent(
         finally:
             if use_per_session_caches:
                 # Merge local snapshots back into the per-session caches.
-                # Asserts narrow OrderedDict | None for Pyright — the boolean guard
-                # already guarantees non-None when use_per_session_caches is True.
-                assert config.bound_cache is not None  # noqa: S101
-                assert config.compression_cache is not None  # noqa: S101
+                if config.bound_cache is None or config.compression_cache is None:
+                    raise RuntimeError("run_agent: per-session caches became None during execution")
                 for key, value in local_bound_cache.items():
                     config.bound_cache[key] = value
                     config.bound_cache.move_to_end(key)

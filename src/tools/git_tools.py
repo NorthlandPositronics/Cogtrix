@@ -11,6 +11,7 @@ shell interpolation) so tool argument values cannot inject shell commands.
 from __future__ import annotations
 
 import os
+import re as _re
 import subprocess
 from typing import Any
 
@@ -147,10 +148,22 @@ def git_diff(path: str = "", staged: bool = False) -> str:
     return _run_git(*args)
 
 
+_SAFE_REF_RE = _re.compile(r"^[a-zA-Z0-9_./@#\-][a-zA-Z0-9_./@#\-]*$")
+
+
 def _validate_ref(ref: str) -> str | None:
-    """Reject refs that look like option flags to prevent argument injection."""
+    """Reject refs that could inject shell metacharacters or option flags."""
+    if not ref:
+        return "Error: ref name must not be empty"
     if ref.startswith("-"):
         return f"Error: invalid ref name — must not start with '-': {ref}"
+    # Block shell metacharacters and whitespace that could escape subprocess quoting
+    if not _SAFE_REF_RE.match(ref):
+        bad_chars = "".join(sorted({c for c in ref if not _SAFE_REF_RE.match(c)}))
+        return (
+            f"Error: invalid ref name '{ref}' — contains unsafe characters: {bad_chars!r}. "
+            "Only alphanumerics, '.', '/', '@', '#', '_', '-' are allowed."
+        )
     return None
 
 

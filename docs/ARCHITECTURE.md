@@ -64,7 +64,7 @@ Cogtrix is a modular LangChain-based AI agent built with a layered architecture:
 ┌───────────────┴───────────────┐ ┌───────────────┴───────────────┐
 │        Memory System          │ │        Tool Modules           │
 │       (src/memory/)           │ │       (src/tools/)            │
-│  • Mode managers              │ │  • 72 built-in tools          │
+│  • Mode managers              │ │  • 79 built-in tools          │
 │  • Context preparation        │ │  • Auto-discovery             │
 │  • JSON persistence           │ │  • Pydantic schemas           │
 └───────────────────────────────┘ └───────────────────────────────┘
@@ -109,17 +109,18 @@ src/
 │   ├── anthropic.py       # Anthropic Claude
 │   └── google.py          # Google Gemini
 ├── orchestration/
-│   ├── run_config.py      # AgentRunConfig dataclass (15 session-constant parameters)
+│   ├── run_config.py      # AgentRunConfig dataclass (29 fields: LLM, tools, compression, ownership classifier, decision accountability)
 │   ├── runner.py          # run_agent() entry point, response extraction, ToolCallLogger
 │   ├── graph.py           # LangGraph StateGraph: call_model, process_tools, handle_phantom
 │   ├── phases.py          # Research delegation, deep think, execution phase, step-limit recovery
-│   ├── intent.py          # Intent detection: user_wants_deep_think(), classify_think_task()
+│   ├── intent.py          # Intent detection, task complexity, ownership classification pipeline
 │   ├── compression.py     # Context compression: apply_message_compression()
 │   ├── session_state.py   # SessionState dataclass (replaces 7 former module-level globals)
 │   └── session_orchestrator.py  # SessionOrchestrator snapshot()/rollback()
 ├── agent/
 │   ├── core.py            # CogtrixState schema, system prompt builder, LLM factory
-│   └── safety.py          # SafeTool wrapper, create_safe_tool_wrapper(), ConfirmationUI protocol
+│   ├── safety.py          # SafeTool wrapper, create_safe_tool_wrapper(), ConfirmationUI protocol
+│   └── agents_md.py   # AGENTS.md parser — load named AgentDefinition objects from Markdown
 ├── api/
 │   ├── app.py             # FastAPI application factory (create_app()), CORS, lifespan, routers
 │   ├── auth.py            # JWT validation (HS256), get_current_user, require_admin, validate_api_key
@@ -148,9 +149,9 @@ src/
 │   │   ├── memory.py      # Get memory state, switch mode, clear memory (3 endpoints)
 │   │   ├── tools.py       # List tools, load, enable, disable (4 endpoints)
 │   │   ├── config.py      # Read/write config sections, provider management, model aliases (12 endpoints)
-│   │   ├── assistant.py   # Start/stop assistant, channel management, phonebook, outbound, campaigns (23 endpoints)
+│   │   ├── assistant.py   # Start/stop assistant, channel management, phonebook, outbound, campaigns (24 endpoints)
 │   │   ├── workflows.py   # Workflow CRUD, per-workflow docs, chat bindings (11 endpoints)
-│   │   ├── users.py       # User management: list, create, update role, delete (4 admin endpoints)
+│   │   ├── users.py       # User management: list, create, update role, delete (5 admin endpoints)
 │   │   ├── rag.py         # Upload documents, list, delete, query knowledge base (5 endpoints)
 │   │   ├── mcp.py         # List servers, connect, disconnect, restart, list tools (5 endpoints)
 │   │   ├── system.py      # Server info, shutdown; live log WebSocket (2 REST + 1 WS endpoint)
@@ -385,26 +386,53 @@ The agent execution pipeline was extracted from `cogtrix.py` into a dedicated pa
 
 #### 3a. AgentRunConfig (`src/orchestration/run_config.py`)
 
-`AgentRunConfig` is a dataclass that bundles the 15 session-constant parameters required by `run_agent()`, `build_agent_graph()`, and `run_execution_phase()`. Using a single config object instead of positional kwargs makes omissions visible as `AttributeError` at call time and keeps function signatures readable.
+`AgentRunConfig` is a dataclass that bundles the 29 fields required by `run_agent()`, `build_agent_graph()`, and `run_execution_phase()`. Using a single config object instead of positional kwargs makes omissions visible as `AttributeError` at call time and keeps function signatures readable.
 
 ```python
 @dataclass
 class AgentRunConfig:
+    # Core LLM and tools
     llm: Any = None
     system_prompt: str | None = None
     available_tools: dict[str, Any] | None = None
     active_tools_list: list[Any] | None = None
-    max_context_tokens: int | None = None
     preset_tools: set[str] | None = None
+    max_context_tokens: int | None = None
+
+    # Context compression
     context_compression: bool = True
     compression_min_age: int | None = None
     compression_min_chars: int | None = None
     compression_llm: Any = None
+
+    # Session and UI
     tool_call_guard: Any | None = None
     session_state: Any = None
     confirmation_ui: Any | None = None
     on_tool_expansion: Any | None = None
+
+    # Execution options
     parallel_tool_execution: bool = True
+    git_native: bool = False
+    tool_context_limit_pct: float = 0.80
+    tier_cache_enabled: bool = True
+
+    # Performance caches (excluded from equality/repr)
+    bound_cache: OrderedDict | None = None
+    compression_cache: OrderedDict | None = None
+
+    # Decision accountability (ADR-0052)
+    decision_accountability_enabled: bool = False
+    decision_accountability_report_uncertainty: bool = True
+    decision_accountability_min_confidence: float = 7.0
+
+    # Task ownership classifier
+    task_ownership_classifier_enabled: bool = True
+    task_ownership_classifier_llm_fallback: bool = False
+    task_ownership_ambiguous_action: str = "ask"   # "ask" | "inform" | "execute"
+
+    # Pre-action confirmation gate
+    pre_action_confirmation_enabled: bool = False
 ```
 
 Individual kwargs are preserved in `run_agent()` for backward compatibility; when `config` is `None`, a temporary `AgentRunConfig` is assembled from the flat kwargs.
@@ -423,6 +451,10 @@ Individual kwargs are preserved in `run_agent()` for backward compatibility; whe
 | `has_phantom_tool_call(result)` | Detect empty AIMessage with `finish_reason=tool_calls` |
 | `format_agent_error(e)` | Categorize exceptions into user-friendly Markdown error messages |
 | `ToolCallLogger` | Tracks tool invocations by `call_id` for accurate duration measurement |
+| `classify_task_ownership(prompt, ...)` | 3-layer pipeline defined in `intent.py`; called by `run_agent()` to determine execution ownership |
+| `_build_ownership_constraint(mode)` | Generates system-prompt constraint text for INFORM/ADVISE/AMBIGUOUS modes; called inside `run_agent()` to inject the constraint before the graph starts |
+
+Before `run_agent()` starts the LangGraph graph, it calls `classify_task_ownership()` to determine whether the prompt is an execution request (EXECUTE), an information request (INFORM/ADVISE), or ambiguous. For INFORM and ADVISE modes, `_build_ownership_constraint()` generates a system-prompt constraint that instructs the agent not to execute operations — only explain. For AMBIGUOUS mode with `ambiguous_action="ask"`, the agent is constrained to ask one focused clarifying question before proceeding.
 
 `ToolCallLogger` uses `call_id` (LangChain's unique per-call ID) as the timing key so concurrent calls to the same tool each get accurate duration measurements. Stale entries are evicted after 10 minutes to prevent memory leaks.
 
@@ -505,6 +537,11 @@ Classifies user prompts to determine which pipeline branches to activate.
 | `prompt_requests_action(prompt)` | Verb+target matching for action-oriented prompts |
 | `classify_think_task(prompt, llm)` | LLM-based classification into one of 23 `ThinkCategory` definitions |
 | `THINK_CATEGORIES` | Tuple of 23 `ThinkCategory` objects with gather/analysis templates |
+| `TaskComplexity` | Enum: `SIMPLE`, `MODERATE`, `COMPLEX_ACTION`, `COMPLEX_RESEARCH` |
+| `classify_task_complexity(prompt)` | Regex-based complexity classification; determines step-limit and auto-loads search tools |
+| `OwnershipMode` | Enum: `EXECUTE`, `INFORM`, `ADVISE`, `AMBIGUOUS` |
+| `OwnershipResult` | Dataclass: `mode`, `confidence`, `is_reversible`, `raw_signal`, `inferred_action` |
+| `classify_task_ownership(prompt, llm, ...)` | 3-layer ownership pipeline: structural regex → optional LLM micro-call (10s timeout) → reversibility override |
 
 Each `ThinkCategory` defines keywords for fast pattern matching, a `gather_template` for Stage 1 data collection, an `analysis_preamble` and `stage2_task_framing` for the deep_think call, and a `tool_intensive` flag. When `tool_intensive=True`, automatic `_force_deep_think` is suppressed in normal prompts — the `/think` command still works.
 
@@ -545,6 +582,8 @@ class SessionState:
     pinned_tools: set[str]      # manually pinned tools (persist across prompt cycles)
     all_tool_descriptions: dict[str, str]   # process-scoped, populated at startup
     all_tool_originals: dict[str, Any]      # process-scoped, populated at startup
+    checkpoint_store: Any | None = None     # CheckpointStore for checkpoint tool
+    _lock: threading.Lock       # guards denials/deny_all against concurrent access
 ```
 
 **Two-tier tool loading:**
@@ -558,6 +597,18 @@ class SessionState:
 - `all_tool_descriptions`, `all_tool_originals` — process-scoped; populated once at startup
 
 In assistant mode, each call receives its own `SessionState(no_confirm=True)` to prevent any state bleeding between concurrent conversations.
+
+**Thread-safe denial access:** `SessionState` carries a `threading.Lock` (`_lock`) that guards `denials` and `deny_all` against TOCTOU races between the tool-executor `ThreadPoolExecutor` (8 workers) and API/CLI mutation paths. All callers must use the helper methods rather than accessing fields directly:
+
+| Method | Purpose |
+|--------|---------|
+| `is_denied(tool_name)` | Atomic check: `deny_all or tool_name in denials` |
+| `deny_tool(tool_name)` | Atomic add to `denials` |
+| `allow_tool(tool_name)` | Atomic remove from `denials` |
+| `set_deny_all()` | Atomic set `deny_all = True` |
+| `get_denials_snapshot()` | Immutable `frozenset` snapshot for safe off-lock inspection |
+
+`reset_for_new_session()` and `reset_for_new_prompt()` also acquire `_lock` before mutating `denials`/`deny_all`.
 
 #### 3h. Session Orchestrator (`src/orchestration/session_orchestrator.py`)
 
@@ -598,7 +649,7 @@ Wraps sensitive tools with confirmation prompts.
 **Mechanism:**
 
 1. Tools marked with `requires_confirmation: True` are wrapped via `create_safe_tool_wrapper()`
-2. Wrapper intercepts execution and checks `session_state.deny_all` and `session_state.denials` inside `_confirmation_lock` to eliminate TOCTOU races
+2. Wrapper intercepts execution and calls `session_state.is_denied(tool_name)` — an atomic check under `SessionState._lock` — to eliminate TOCTOU races between tool-executor threads and API/CLI mutations to `deny_all`/`denials`
 3. When `session_state.no_confirm` is `True` (assistant mode), the tool is auto-approved silently
 4. Otherwise, the confirmation prompt is shown; the user can choose:
    - `y` — Yes, allow once
@@ -675,7 +726,7 @@ Resolution order:
 3. Fuzzy match (Jaccard token overlap + substring/prefix bonuses) → `("name", "available"|"active")`
 4. No match → `(None, "none")`
 
-The fuzzy threshold is `FUZZY_MATCH_THRESHOLD = 0.40`. Token overlap uses underscore-split normalization. Substring containment and token-prefix hits add score bonuses so abbreviated names (e.g., `search` → `search_web`) resolve correctly.
+The fuzzy threshold is `FUZZY_MATCH_THRESHOLD = 0.65` (raised from 0.40 to prevent false positives such as `read_file`↔`write_file`). Token overlap uses underscore-split normalization. Substring containment and token-prefix hits add score bonuses (prefix bonus: +0.35) so abbreviated names (e.g., `search` → `search_web`, `shell_exec` → `shell_execute`) resolve correctly.
 
 ### 7. Tool Registry (`src/registry.py`)
 
@@ -1054,7 +1105,7 @@ Every message in assistant mode passes through a `GuardrailPipeline` that wraps 
 | `InputGuard` | Length limit, Unicode steganography detection, 15 pre-compiled injection regex patterns, optional custom patterns. |
 | `EncodingDetectionGuard` | Detects encoding-based bypass attempts (Morse code, Base64, hex, leetspeak/ROT13). Scores each message with four sub-detectors (0–1 each); blocks when max score exceeds configurable threshold (default 0.6). |
 | `ToolCallGuard` | Inspects tool arguments before execution. Injection scan across all arguments; path blocking for file tools (blocks /etc/, /proc/, .env, id_rsa, and configurable custom paths); exfiltration detection for web tools (flags API keys, SSH keys, and SSNs in URL/query arguments). |
-| `LLMJudge` | Opt-in LLM-as-judge classifier. Fail-open on error. Disabled by default (adds 500ms–2s). |
+| `LLMJudge` | Opt-in LLM-as-judge classifier. Fail-closed on error (blocks content if the judge crashes or returns empty — intentional secure-by-default). Disabled by default (adds 500ms–2s). |
 | `OutputGuard` | Strips markdown images, HTML tags, banned strings, PII (email, credit card, SSN, private IP), and URLs (matched case-insensitively). Runs before memory update so conversation history only stores sanitized content. |
 
 The pipeline order for input checks is: `blacklist → rate_limiter → input_guard → encoding_guard → llm_judge`.
@@ -1380,7 +1431,7 @@ memory_manager.save()
 | Sensitive | `execute_shell_command`, `write_file`, `patch_file`, `append_file`, `execute_python`, `git_add`, `git_commit`, `git_create_branch`, `git_checkout` | Yes |
 | External | `http_post` | Yes |
 
-Tool confirmation checks are serialized inside `_confirmation_lock` in `create_safe_tool_wrapper()` to eliminate TOCTOU races between `deny_all` / `denials` checks and the prompt display.
+Denial checks (`is_denied()`) are atomic under `SessionState._lock`, eliminating TOCTOU races between tool-executor threads and API/CLI mutations. `_confirmation_lock` in `create_safe_tool_wrapper()` is a separate, narrower lock that serializes the confirmation prompt UI so concurrent tool calls do not interleave their prompts.
 
 ### File Path Safety
 

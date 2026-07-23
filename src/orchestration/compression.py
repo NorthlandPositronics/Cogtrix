@@ -34,7 +34,9 @@ _MID_TURN_COMPRESSION_THRESHOLD: float = (
     0.60  # char-based threshold for pre-invoke mid-turn compression
 )
 _CHARS_PER_TOKEN: int = (
-    2  # conservative chars-per-token estimate; web/JSON content averages ~1.5-2.5
+    2  # conservative chars-per-token estimate; web/JSON content averages ~1.5-2.5.
+    # Used only for emergency compression triggers where precision is not critical.
+    # Code/JSON content tokenises at ~2 chars/token; natural language at ~3-4.
 )
 _EMERGENCY_THRESHOLD_RATIO = 0.85  # trigger emergency min_age=0 pass above this (char-based)
 _EMERGENCY_TOKEN_THRESHOLD_RATIO = (
@@ -300,7 +302,7 @@ def apply_message_compression(
             try:
                 return idx, compress_tool_message(content, tool_name, llm)
             except Exception as exc:
-                log.debug("Compression failed for tool %s: %s", tool_name, exc)
+                log.debug("Compression failed for tool %s: %s", tool_name, exc, exc_info=True)
                 return idx, truncate_tool_output(
                     content, min(len(content) * 3 // 4, _FALLBACK_MAX_CHARS)
                 )
@@ -460,7 +462,7 @@ def apply_message_compression(
             summary = getattr(resp, "content", "").strip()
             return idx, summary if summary else None
         except Exception as exc:
-            log.debug("AIMessage compression failed at index %d: %s", idx, exc)
+            log.debug("AIMessage compression failed at index %d: %s", idx, exc, exc_info=True)
             return idx, None
 
     # Submit eligible AIMessages to the pool — check deadline before each submission.
@@ -493,7 +495,9 @@ def apply_message_compression(
                     continue
                 except Exception as exc:
                     idx = ai_futures[future]
-                    log.debug("AIMessage compression failed at index %d: %s", idx, exc)
+                    log.debug(
+                        "AIMessage compression failed at index %d: %s", idx, exc, exc_info=True
+                    )
                     _ai_completed_count += 1
                     continue
                 _ai_completed_count += 1
@@ -573,7 +577,7 @@ def create_compression_llm(model_ref: str, config: Any) -> Any:
             try:
                 active_mc = config.get_active_model()
                 provider_name = active_mc.provider
-            except Exception:
+            except Exception as _cmp_exc:  # noqa: BLE001
                 provider_name = next(iter(config.providers), "ollama")
             model_name = model_ref
 
@@ -591,5 +595,5 @@ def create_compression_llm(model_ref: str, config: Any) -> Any:
         log.info("Compression LLM created: %s/%s", provider_name, model_name)
         return llm
     except Exception as exc:
-        log.warning("Failed to create compression LLM '%s': %s", model_ref, exc)
+        log.warning("Failed to create compression LLM '%s': %s", model_ref, exc, exc_info=True)
         return None

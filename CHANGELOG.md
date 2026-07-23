@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.6](https://github.com/NorthlandPositronics/Cogtrix/compare/v0.2.5...v0.2.6) (2026-04-26)
+
+
+### Bug Fixes
+
+* **docker:** harden Dockerfiles — /data volume, read-only /app, security fixes ([#52](https://github.com/NorthlandPositronics/Cogtrix/issues/52)) ([e9073f8](https://github.com/NorthlandPositronics/Cogtrix/commit/e9073f8419a2e53e8fe13fafa643c2a88125422b))
+
 ## [0.2.5](https://github.com/NorthlandPositronics/Cogtrix/compare/v0.2.4...v0.2.5) (2026-04-25)
 
 

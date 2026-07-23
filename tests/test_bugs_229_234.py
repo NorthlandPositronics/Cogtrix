@@ -345,20 +345,20 @@ class TestBug236HealthcheckCLIMode:
     """HEALTHCHECK must exit 0 immediately in CLI mode (no sentinel file)."""
 
     def test_dockerfile_healthcheck_checks_sentinel(self):
-        """Dockerfile HEALTHCHECK CMD must check for /tmp/.cogtrix-api-mode."""
+        """Dockerfile HEALTHCHECK CMD must check for /run/cogtrix/api-mode sentinel."""
         src = (Path(__file__).parent.parent / "docker" / "Dockerfile").read_text()
         assert (
-            "/tmp/.cogtrix-api-mode" in src
-        ), "Dockerfile HEALTHCHECK must gate on /tmp/.cogtrix-api-mode sentinel (BUG-236)"
+            "/run/cogtrix/api-mode" in src
+        ), "Dockerfile HEALTHCHECK must gate on /run/cogtrix/api-mode sentinel (BUG-236)"
 
     def test_entrypoint_creates_sentinel_in_api_mode(self):
         """docker-entrypoint.sh must create sentinel before exec in API mode."""
         src = (Path(__file__).parent.parent / "docker" / "docker-entrypoint.sh").read_text()
         assert (
-            "touch /tmp/.cogtrix-api-mode" in src
-        ), "docker-entrypoint.sh must create /tmp/.cogtrix-api-mode in API mode (BUG-236)"
+            "touch /run/cogtrix/api-mode" in src
+        ), "docker-entrypoint.sh must create /run/cogtrix/api-mode in API mode (BUG-236)"
         # Ensure sentinel is created before exec
-        sentinel_pos = src.index("touch /tmp/.cogtrix-api-mode")
+        sentinel_pos = src.index("touch /run/cogtrix/api-mode")
         exec_pos = src.index("exec python -m src.api")
         assert sentinel_pos < exec_pos, "sentinel must be created before exec"
 
@@ -367,7 +367,7 @@ class TestBug236HealthcheckCLIMode:
         # Run the healthcheck logic without the sentinel present.
         cmd = (
             "import os, sys; "
-            "sys.exit(0) if not os.path.exists('/tmp/.cogtrix-api-mode-test') else None; "
+            "sys.exit(0) if not os.path.exists('/run/cogtrix/api-mode-test') else None; "
             "sys.exit(99)"  # would probe HTTP — sentinel absent so we never reach here
         )
         result = subprocess.run(["python", "-c", cmd], capture_output=True)

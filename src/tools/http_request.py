@@ -291,8 +291,9 @@ def _read_bounded_response(response: "Any") -> tuple[bytes, bool]:
                 total += len(chunk)
                 if total > _MAX_RESPONSE_BYTES:
                     break
-    except Exception:
+    except Exception as exc:  # noqa: BLE001
         # Network error mid-stream — return what we have, marked truncated
+        log.debug("Stream read interrupted: %s", exc)
         raw = b"".join(chunks)
         return raw[:_MAX_RESPONSE_BYTES], True
     raw = b"".join(chunks)
@@ -483,8 +484,9 @@ def http_get(
         return f"Error: Connection failed - {e}"
     except requests.exceptions.RequestException as e:
         return f"Error: Request failed - {e}"
-    except Exception as e:
-        return f"Error: {e}"
+    except Exception as e:  # noqa: BLE001
+        log.debug("Unexpected error: %s", e, exc_info=True)
+        return f"Error ({type(e).__name__}): {e}"
 
 
 def http_post(
@@ -592,8 +594,9 @@ def http_post(
         return f"Error: Connection failed - {e}"
     except requests.exceptions.RequestException as e:
         return f"Error: Request failed - {e}"
-    except Exception as e:
-        return f"Error: {e}"
+    except Exception as e:  # noqa: BLE001
+        log.debug("Unexpected error: %s", e, exc_info=True)
+        return f"Error ({type(e).__name__}): {e}"
 
 
 # Tool configurations for registry

@@ -667,7 +667,11 @@ _DELEGATE_AGENT_SYSTEM_PROMPT = (
 
 
 def _extract_content(result: Any) -> str:
-    """Extract text content from an LLM response object."""
+    """Extract text content from an LLM response object.
+
+    Multi-modal responses (tool_use blocks, reasoning blocks) are reduced
+    to their text parts.  Non-text blocks are logged at debug level.
+    """
     if hasattr(result, "content"):
         content = result.content
         if isinstance(content, list):
@@ -677,6 +681,12 @@ def _extract_content(result: Any) -> str:
                     text_parts.append(part)
                 elif isinstance(part, dict) and "text" in part:
                     text_parts.append(part["text"])
+                elif isinstance(part, dict):
+                    block_type = part.get("type", "unknown")
+                    log.debug(
+                        "_extract_content: dropping non-text content block of type '%s'",
+                        block_type,
+                    )
             return "\n".join(text_parts) if text_parts else str(content)
         return str(content) if content is not None else ""
     return str(result)
@@ -742,7 +752,7 @@ def run_delegate_agent(
 
     except Exception as exc:
         if "recursion" in type(exc).__name__.lower() or "recursion" in str(exc).lower():
-            log.warning("Delegate exceeded step limit: %s", exc)
+            log.warning("Delegate exceeded step limit: %s", exc, exc_info=True)
             return f"Error: delegate exceeded step limit ({exc})"
         log.warning("Delegate agent creation/execution failed: %s", exc, exc_info=True)
         return f"Error: delegate agent failed ({type(exc).__name__}: {exc})"

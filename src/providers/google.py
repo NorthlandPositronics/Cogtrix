@@ -57,11 +57,17 @@ def create_chat_model(
         )
 
     if base_url:
-        log.warning("Google provider does not support custom base_url; ignoring '%s'", base_url)
+        log.warning(
+            "Google provider does not support custom base_url and will ignore '%s'. "
+            "If you need a proxy or Vertex AI endpoint, configure GOOGLE_API_KEY to "
+            "point to your instance or use the 'google' provider's transport= kwarg.",
+            base_url,
+        )
 
     llm_kwargs: dict[str, Any] = {
         "model": model or CHAT_MODELS["google"],
         "temperature": temperature,
+        "max_retries": 3,
     }
     if api_key:
         llm_kwargs["google_api_key"] = api_key
@@ -94,7 +100,12 @@ def create_embeddings(
         )
 
     if base_url:
-        log.warning("Google provider does not support custom base_url; ignoring '%s'", base_url)
+        log.warning(
+            "Google provider does not support custom base_url and will ignore '%s'. "
+            "If you need a proxy or Vertex AI endpoint, configure GOOGLE_API_KEY to "
+            "point to your instance or use the 'google' provider's transport= kwarg.",
+            base_url,
+        )
 
     resolved_model = model or EMBEDDING_MODELS["google"]
     if not resolved_model.startswith("models/"):

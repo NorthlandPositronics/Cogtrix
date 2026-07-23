@@ -134,12 +134,10 @@ def _make_registry(
 
 
 def _make_live_session(tool_names=("web_search", "write_file", "shell", "mcp_browser")):
-    ss = MagicMock()
-    ss.denials = set()
-    ss.loaded_tools = set()
-    ss.pinned_tools = set()
-    ss.approvals = set()
-    ss.all_tool_originals = {}
+    from src.orchestration.session_state import SessionState
+
+    # Use a real SessionState so is_denied() / deny_tool() / allow_tool() work correctly.
+    ss = SessionState()
 
     live = MagicMock()
     live.session_state = ss

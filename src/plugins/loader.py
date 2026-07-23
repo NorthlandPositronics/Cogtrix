@@ -102,7 +102,7 @@ class ToolPluginLoader:
             log.debug("Loaded file-drop plugin: %s", py_file)
             return module
         except Exception as exc:
-            log.warning("Failed to import plugin file %s: %s", py_file, exc)
+            log.warning("Failed to import plugin file %s: %s", py_file, exc, exc_info=True)
             # Clean up partial module registration on failure
             sys.modules.pop(module_name, None)
             return None
@@ -121,7 +121,7 @@ class ToolPluginLoader:
 
             eps = _entry_points(group=ENTRY_POINT_GROUP)
         except Exception as exc:
-            log.warning("Entry-point discovery failed: %s", exc)
+            log.warning("Entry-point discovery failed: %s", exc, exc_info=True)
             return []
 
         modules: list[types.ModuleType] = []
@@ -129,7 +129,7 @@ class ToolPluginLoader:
             try:
                 obj = ep.load()
             except Exception as exc:
-                log.warning("Failed to load entry-point %r: %s", ep.name, exc)
+                log.warning("Failed to load entry-point %r: %s", ep.name, exc, exc_info=True)
                 continue
 
             module = self._entrypoint_to_module(obj, ep.name)
@@ -157,7 +157,9 @@ class ToolPluginLoader:
             try:
                 instance = obj()
             except Exception as exc:
-                log.warning("Failed to instantiate entry-point class %r: %s", ep_name, exc)
+                log.warning(
+                    "Failed to instantiate entry-point class %r: %s", ep_name, exc, exc_info=True
+                )
                 return None
             return self._instance_to_module(instance, ep_name)
 

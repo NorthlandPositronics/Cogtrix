@@ -88,6 +88,7 @@ if CHAT_AVAILABLE:
                     "DeepSeek _create_chat_result: unexpected error capturing "
                     "reasoning_content: %s",
                     _exc,
+                    exc_info=True,
                 )
 
             result = super()._create_chat_result(response, generation_info)
@@ -111,11 +112,18 @@ if CHAT_AVAILABLE:
             if result is None:
                 return result
             try:
-                delta = chunk.get("delta", {}) if isinstance(chunk, dict) else {}
-                rc = delta.get("reasoning_content") if isinstance(delta, dict) else None
-                if rc and hasattr(result, "message"):
-                    result.message.additional_kwargs["reasoning_content"] = rc
-            except (AttributeError, KeyError, TypeError):
+                # chunk is the full streaming response dict: {"choices": [{"delta": {...}}]}
+                # reasoning_content lives at choices[0]["delta"], NOT at the top-level chunk.
+                if isinstance(chunk, dict):
+                    choices = (
+                        chunk.get("choices") or (chunk.get("chunk") or {}).get("choices") or []
+                    )
+                    if choices:
+                        delta = choices[0].get("delta") if isinstance(choices[0], dict) else None
+                        rc = delta.get("reasoning_content") if isinstance(delta, dict) else None
+                        if rc and hasattr(result, "message"):
+                            result.message.additional_kwargs["reasoning_content"] = rc
+            except (AttributeError, KeyError, TypeError, IndexError):
                 pass
             return result
 
@@ -127,19 +135,33 @@ if CHAT_AVAILABLE:
                 if hasattr(msgs, "to_messages"):
                     msgs = msgs.to_messages()
                 if isinstance(msgs, list):
-                    # Handle both standard chat completions ("messages") and
-                    # Responses API ("input") payload shapes (M4).
+                    # _DeepSeekChatModel is only instantiated for api.deepseek.com.
+                    # Reasoning-capable DeepSeek models require reasoning_content on
+                    # EVERY assistant message in the history — always, not only when
+                    # some messages already carry it.  Two cases require the fill:
+                    #
+                    #   1. /think result messages: created as plain AIMessage(content=…)
+                    #      via memory_manager.update legacy path — no reasoning_content.
+                    #   2. Sessions loaded from old JSON (before rc serialization was
+                    #      added): ALL messages lack the field.
+                    #
+                    # Using "" satisfies the DeepSeek API for messages where the
+                    # original reasoning chain is unavailable.  Non-reasoning models
+                    # (deepseek-chat) ignore the extra field.
                     for key in ("messages", "input"):
                         msg_dicts = payload.get(key, [])
                         if msg_dicts:
                             for msg, msg_dict in zip(msgs, msg_dicts, strict=False):
-                                rc = getattr(msg, "additional_kwargs", {}).get("reasoning_content")
-                                if (
-                                    rc
-                                    and isinstance(msg_dict, dict)
+                                if not (
+                                    isinstance(msg_dict, dict)
                                     and msg_dict.get("role") == "assistant"
                                 ):
+                                    continue
+                                rc = getattr(msg, "additional_kwargs", {}).get("reasoning_content")
+                                if rc:
                                     msg_dict["reasoning_content"] = rc
+                                else:
+                                    msg_dict.setdefault("reasoning_content", "")
                             break  # only process the first key that has entries
             except (AttributeError, KeyError, TypeError):
                 pass  # introspection failure — payload still sent without reasoning_content
@@ -150,6 +172,7 @@ if CHAT_AVAILABLE:
                     "DeepSeek _get_request_payload: unexpected error re-injecting "
                     "reasoning_content: %s",
                     _exc,
+                    exc_info=True,
                 )
             return payload
 

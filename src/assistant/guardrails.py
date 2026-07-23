@@ -158,18 +158,23 @@ def _skeleton(text: str) -> str:
 
 
 # ── Tool-call guard ──────────────────────────────────────────────────
-_SENSITIVE_PATH_PREFIXES: tuple[str, ...] = (
-    "/etc/",
-    "/proc/",
-    "/sys/",
-    "/dev/",
-    "~/.ssh/",
-    os.path.expanduser("~/.ssh/"),
-    "~/.gnupg/",
-    os.path.expanduser("~/.gnupg/"),
-    "~/.aws/",
-    os.path.expanduser("~/.aws/"),
-    "/root/",
+# Use only expanded absolute paths so matching is unambiguous.  The tilde
+# literals ("~/.ssh/") were kept alongside the expanded forms previously,
+# creating functional duplicates.  Now we expand unconditionally and
+# deduplicate via dict.fromkeys to preserve insertion order.
+_SENSITIVE_PATH_PREFIXES: tuple[str, ...] = tuple(
+    dict.fromkeys(
+        [
+            "/etc/",
+            "/proc/",
+            "/sys/",
+            "/dev/",
+            os.path.expanduser("~/.ssh/"),
+            os.path.expanduser("~/.gnupg/"),
+            os.path.expanduser("~/.aws/"),
+            "/root/",
+        ]
+    )
 )
 _SENSITIVE_PATH_SUBSTRINGS: tuple[str, ...] = (
     ".env",
@@ -224,7 +229,21 @@ _INJECTION_SCAN_EXEMPT_TOOLS: frozenset[str] = frozenset(
         "request_tools",
     }
 )
-_URL_ARG_KEYS: frozenset[str] = frozenset({"url", "urls", "query", "data"})
+_URL_ARG_KEYS: frozenset[str] = frozenset(
+    {
+        "url",
+        "urls",
+        "query",
+        "data",  # GET query data
+        # POST/PUT body keys — an attacker could POST credentials via these
+        "body",
+        "payload",
+        "content",
+        "json",
+        "form",
+        "params",
+    }
+)
 _EXFIL_PATTERNS: list[re.Pattern[str]] = [
     re.compile(p, re.IGNORECASE)
     for p in [
@@ -437,12 +456,17 @@ class ChatRateLimiter:
         self._per_hour: int = rate_cfg.get("per_hour", 60)
         self._windows: dict[str, _ChatWindow] = {}
         self._lock = threading.Lock()
+        self._last_cleanup: float = 0.0  # throttle cleanup to at most once per 60s
 
     def check_and_record(self, chat_id: str) -> GuardrailResult:
         """Check rate limits and record the message atomically under a single lock."""
         with self._lock:
-            if len(self._windows) > 100:
+            now = time.monotonic()
+            # Throttle O(n) cleanup to once per 60s to avoid lock contention
+            # under high load with many short-lived chats.
+            if len(self._windows) > 100 and (now - self._last_cleanup) > 60.0:
                 self._cleanup_stale()
+                self._last_cleanup = now
 
             window = self._windows.get(chat_id)
             if window is None:
@@ -618,7 +642,21 @@ class ViolationTracker:
                 if valid:
                     self._violations[chat_id] = deque(valid)
         except Exception as exc:
-            log.debug("ViolationTracker: failed to load persisted state: %s", exc)
+            # A corrupted violations file must NOT silently reset tracking — a
+            # blacklisted user would become unblocked after every restart.
+            # Warn loudly and rename the bad file so the operator can inspect it.
+            log.warning(
+                "ViolationTracker: failed to load persisted state from %s: %s. "
+                "Renaming to .corrupt and starting with empty state — previously "
+                "tracked violations are lost. Inspect the file to restore if needed.",
+                self._persist_path,
+                exc,
+            )
+            try:
+                corrupt_path = self._persist_path.with_suffix(".corrupt")
+                self._persist_path.rename(corrupt_path)
+            except OSError as rename_exc:
+                log.warning("ViolationTracker: could not rename corrupt file: %s", rename_exc)
 
 
 class LLMJudge:
@@ -636,6 +674,16 @@ class LLMJudge:
             response = self._llm.invoke(messages)
             raw: str = (response.content if hasattr(response, "content") else str(response)).strip()
 
+            if not raw:
+                # Empty response from LLM judge — fail closed (block) rather than
+                # silently passing the content.
+                log.warning("LLM judge returned empty response — blocking content as precaution")
+                return GuardrailResult(
+                    is_safe=False,
+                    reason="LLM judge returned empty response",
+                    guard_name="llm_judge",
+                )
+
             first_line = raw.split("\n", 1)[0].strip()
             if first_line.upper().startswith("UNSAFE"):
                 reason = first_line[7:].strip() if len(first_line) > 7 else "LLM judge flagged"
@@ -644,8 +692,16 @@ class LLMJudge:
             return GuardrailResult(is_safe=True)
 
         except Exception as exc:
-            log.debug("LLM judge failed (fail-open): %s", exc)
-            return GuardrailResult(is_safe=True)
+            # Fail closed: any exception in the judge blocks the content.
+            # Silently passing (fail-open) on a judge crash would violate
+            # secure-by-default principles — an attacker could trigger a
+            # deliberate crash to bypass the guardrail.
+            log.warning("LLM judge raised an exception — blocking content as precaution: %s", exc)
+            return GuardrailResult(
+                is_safe=False,
+                reason="LLM judge unavailable",
+                guard_name="llm_judge",
+            )
 
 
 class ToolCallGuard:
@@ -682,7 +738,13 @@ class ToolCallGuard:
 
     def _scan_injection(self, tool_name: str, tool_args: dict[str, Any]) -> GuardrailResult:
         if tool_name in _INJECTION_SCAN_EXEMPT_TOOLS:
-            return GuardrailResult(is_safe=True)
+            # Partially exempt: skip add/remove/names (tool name lists) but still
+            # scan free-text fields like 'reason' or 'query' for injection patterns.
+            _TEXT_ARGS_TO_SCAN = {"reason", "query", "message", "description", "note"}
+            args_to_scan = {k: v for k, v in tool_args.items() if k in _TEXT_ARGS_TO_SCAN}
+            if not args_to_scan:
+                return GuardrailResult(is_safe=True)
+            tool_args = args_to_scan
         for key, value in tool_args.items():
             if not isinstance(value, str):
                 continue

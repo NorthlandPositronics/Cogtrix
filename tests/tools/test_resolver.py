@@ -143,7 +143,7 @@ class TestResolveToolNameFuzzy:
         """Token prefix bonus: 'shell_exec' matches 'shell_execute' via prefix scoring.
 
         Jaccard({"shell","exec"}, {"shell","execute"}) = 1/3 ≈ 0.33
-        Prefix hit: "exec" vs "execute" → +0.30 → total ≥ 0.40 → match.
+        Prefix hit: "exec" vs "execute" → +0.35 → total ≈ 0.68 ≥ 0.65 → match.
         """
         available = {"shell_execute": self._tool("shell_execute")}
         name, source = resolve_tool_name("shell_exec", available)

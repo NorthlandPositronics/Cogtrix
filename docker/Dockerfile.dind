@@ -2,7 +2,7 @@ ARG TARGETPLATFORM
 ARG BUILDPLATFORM
 
 # ── Stage 1: Build ────────────────────────────────────────────
-FROM python:3.13-slim AS builder
+FROM python:3.13-slim@sha256:a0779d7c12fc20be6ec6b4ddc901a4fd7657b8a6bc9def9d3fde89ed5efe0a3d AS builder
 
 # Pin to a specific patch version for reproducibility.
 # Update this when intentionally upgrading uv.
@@ -11,11 +11,14 @@ COPY --from=ghcr.io/astral-sh/uv:0.10.12 /uv /uvx /usr/local/bin/
 
 WORKDIR /app
 
+ENV PYTHONDONTWRITEBYTECODE=1
+
 # Dependency manifests first — changes here bust only the install layer.
 COPY pyproject.toml uv.lock ./
 
-# Install all production extras; strip bytecode caches and test trees to
-# reduce the layer size before the venv is copied to the runtime stage.
+# Install all production extras; strip test trees and dist-info RECORD files
+# to reduce the layer size before the venv is copied to the runtime stage.
+# __pycache__ cleanup is included for safety (no-op without --compile-bytecode).
 RUN uv sync --frozen --no-dev --no-install-project \
     --extra search \
     --extra anthropic \
@@ -27,10 +30,11 @@ RUN uv sync --frozen --no-dev --no-install-project \
     find /app/.venv -type d -name tests     -exec rm -rf {} + 2>/dev/null || true && \
     find /app/.venv -type d -name test      -exec rm -rf {} + 2>/dev/null || true && \
     find /app/.venv -name '*.dist-info/RECORD' -delete 2>/dev/null || true && \
+    find /app/.venv -name 'direct_url.json' -delete 2>/dev/null || true && \
     rm -rf /root/.cache/uv /root/.cache/pip
 
 # ── Stage 2: Runtime ─────────────────────────────────────────
-FROM python:3.13-slim AS runtime
+FROM python:3.13-slim@sha256:a0779d7c12fc20be6ec6b4ddc901a4fd7657b8a6bc9def9d3fde89ed5efe0a3d AS runtime
 
 ARG TARGETPLATFORM
 ARG BUILDPLATFORM
@@ -72,41 +76,48 @@ RUN apt-get update && \
 RUN groupadd --gid 1000 cogtrix && \
     useradd --uid 1000 --gid cogtrix --no-log-init --create-home cogtrix
 
+# Add cogtrix to the docker group so /var/run/docker.sock is accessible at runtime.
+# The || true handles the case where gid 999 is already taken by another name.
+RUN groupadd --gid 999 docker || true && \
+    usermod --append --groups docker cogtrix
+
 WORKDIR /app
 
 # PYTHONPATH ensures "python -m src.api" and "import src.*" resolve from /app
+# COGTRIX_DATA_DIR=/data moves all runtime writes outside /app, keeping /app read-only.
 ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONPATH="/app" \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    COGTRIX_ALLOWED_WRITE_PATHS="/tmp"
+    COGTRIX_DATA_DIR="/data" \
+    COGTRIX_ALLOWED_WRITE_PATHS="/tmp:/data/output"
 
-# Virtual environment from builder — --link enables independent layer caching
-COPY --from=builder --link --chown=cogtrix:cogtrix /app/.venv /app/.venv
+# Virtual environment from builder — --link enables independent layer caching.
+# Root-owned so /app/.venv is read-only for the cogtrix runtime user.
+COPY --from=builder --link /app/.venv /app/.venv
 
-# Application source ordered least-to-most-frequently-changed for cache efficiency.
-# alembic.ini is included so "python -m alembic" works inside the container.
-COPY --chown=cogtrix:cogtrix docker/docker-entrypoint.sh alembic.ini ./
-COPY --chown=cogtrix:cogtrix alembic/ ./alembic/
-COPY --chown=cogtrix:cogtrix cogtrix.py ./
-COPY --chown=cogtrix:cogtrix src/ ./src/
-COPY --chown=cogtrix:cogtrix docs/ ./docs/
-
-# Create the full data-directory tree that the application expects.
-# This runs as root so we can chown; USER is set to cogtrix below.
-# The VOLUME declaration comes after so Docker initialises the mount point
-# with these pre-created directories and ownership.
+# Create the data directory tree at /data (not /app/data) so /app stays read-only.
+# Placed before app COPY layers so it is not invalidated by source changes.
 RUN mkdir -p \
-        /app/data/history \
-        /app/data/knowledge \
-        /app/data/vectordb \
-        /app/data/api/uploads \
-        /app/data/assistant \
-        /app/data/workflows && \
-    chown -R cogtrix:cogtrix /app/data && \
-    chmod +x /app/docker-entrypoint.sh
+        /data/history \
+        /data/knowledge \
+        /data/vectordb \
+        /data/api/uploads \
+        /data/assistant \
+        /data/workflows && \
+    chown -R cogtrix:cogtrix /data && \
+    mkdir -p /run/cogtrix && \
+    chown cogtrix:cogtrix /run/cogtrix
 
-VOLUME /app/data
+# Application source — root-owned so /app is read-only for the cogtrix runtime user.
+COPY docker/docker-entrypoint.sh alembic.ini ./
+RUN chmod +x /app/docker-entrypoint.sh
+COPY alembic/ ./alembic/
+COPY cogtrix.py ./
+COPY src/ ./src/
+COPY docs/ ./docs/
+
+VOLUME /data
 
 # API server port
 EXPOSE 8000
@@ -115,6 +126,12 @@ EXPOSE 8000
 # A VOLUME declaration creates a directory, not a socket, so it would shadow the
 # bind-mount and prevent Docker-in-Docker from working.
 # Run with: -v /var/run/docker.sock:/var/run/docker.sock
+#
+# SECURITY WARNING: Mounting the host Docker socket grants the container
+# (and any LLM agent running inside it) the ability to launch privileged containers
+# on the host — equivalent to root access on the host machine.
+# Do NOT use -y (auto-confirm) with this image in untrusted environments.
+# Consider rootless Docker or a TLS-secured DinD sidecar for production use.
 
 # Uvicorn handles SIGTERM for graceful shutdown
 STOPSIGNAL SIGTERM
@@ -122,13 +139,13 @@ STOPSIGNAL SIGTERM
 # Healthcheck for container orchestrators.
 # In CLI mode the HTTP server is not running, so the probe exits 0 immediately
 # (healthy by convention — the process is simply not a server). In API mode the
-# entrypoint creates /tmp/.cogtrix-api-mode before exec, which signals that the
+# entrypoint creates /run/cogtrix/api-mode before exec, which signals that the
 # HTTP endpoint must be reachable (BUG-236).
 # Uses Python's built-in urllib — no curl/wget required in the slim image.
 # The 4-second socket timeout keeps the probe within Docker's 5-second deadline.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
     CMD ["python", "-c", \
-         "import os, sys; sys.exit(0) if not os.path.exists('/tmp/.cogtrix-api-mode') else None; import urllib.request; r = urllib.request.urlopen('http://localhost:8000/api/v1/health', timeout=4); sys.exit(0 if r.status == 200 else 1)"]
+         "import os, sys; sys.exit(0) if not os.path.exists('/run/cogtrix/api-mode') else None; import urllib.request; r = urllib.request.urlopen('http://localhost:8000/api/v1/health', timeout=4); sys.exit(0 if r.status == 200 else 1)"]
 
 USER cogtrix
 

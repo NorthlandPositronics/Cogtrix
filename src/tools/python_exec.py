@@ -1064,6 +1064,7 @@ def _execute_code_internal(
         # Exclude: internal names, builtins, preloaded modules (unless user reassigned)
         internal_names = {"__builtins__", "__name__", "__doc__", "_last_result_"}
         module_names = set(_PRELOADED_MODULES.keys())
+        _dropped_vars_inline: list[str] = []
 
         for k, v in restricted_globals.items():
             # Skip internal names
@@ -1081,7 +1082,16 @@ def _execute_code_internal(
                 repr(v)  # Test if value can be represented
                 context[k] = v
             except Exception:  # noqa: BLE001  # nosec B110
-                pass
+                _dropped_vars_inline.append(k)
+
+        if _dropped_vars_inline:
+            import logging as _lg
+
+            _lg.getLogger("cogtrix.python_exec").debug(
+                "execute_python: %d variable(s) dropped from context " "(not repr()-able): %s",
+                len(_dropped_vars_inline),
+                _dropped_vars_inline,
+            )
 
         # Get output
         stdout_output = stdout_capture.getvalue()

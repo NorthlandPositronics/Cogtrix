@@ -111,6 +111,22 @@ class TestMessageToDict:
         d = _message_to_dict(msg)
         assert d.get("timestamp") == "2024-06-01T12:00:00"
 
+    def test_ai_message_reasoning_content_serialized(self):
+        """reasoning_content must survive _message_to_dict for DeepSeek round-trip."""
+        if not _LC_AVAILABLE:
+            pytest.skip("langchain not installed")
+        msg = AIMessage(content="answer", additional_kwargs={"reasoning_content": "Let me think"})
+        d = _message_to_dict(msg)
+        assert d.get("reasoning_content") == "Let me think"
+
+    def test_human_message_reasoning_content_not_serialized(self):
+        """Human messages should never carry reasoning_content."""
+        if not _LC_AVAILABLE:
+            pytest.skip("langchain not installed")
+        msg = HumanMessage(content="question")
+        d = _message_to_dict(msg)
+        assert "reasoning_content" not in d
+
 
 # ---------------------------------------------------------------------------
 # _dict_to_message
@@ -158,6 +174,37 @@ class TestDictToMessage:
                     result = _dict_to_message({"type": "human", "content": "hello"})
                     assert isinstance(result, dict)
                     assert result["content"] == "hello"
+
+    def test_ai_message_reasoning_content_deserialized(self):
+        """reasoning_content must be restored into additional_kwargs by _dict_to_message."""
+        if not _LC_AVAILABLE:
+            pytest.skip("langchain not installed")
+        data = {"type": "ai", "content": "answer", "reasoning_content": "Let me think"}
+        msg = _dict_to_message(data)
+        assert isinstance(msg, AIMessage)
+        assert msg.additional_kwargs.get("reasoning_content") == "Let me think"
+
+    def test_ai_message_reasoning_content_roundtrip(self):
+        """reasoning_content must survive a full serialize → deserialize cycle."""
+        if not _LC_AVAILABLE:
+            pytest.skip("langchain not installed")
+        original = AIMessage(
+            content="final answer",
+            additional_kwargs={"reasoning_content": "Deep reasoning chain here"},
+        )
+        serialized = _message_to_dict(original)
+        restored = _dict_to_message(serialized)
+        assert isinstance(restored, AIMessage)
+        assert restored.additional_kwargs.get("reasoning_content") == "Deep reasoning chain here"
+
+    def test_ai_message_without_reasoning_content_roundtrip(self):
+        """AIMessages without reasoning_content should not gain the key after roundtrip."""
+        if not _LC_AVAILABLE:
+            pytest.skip("langchain not installed")
+        original = AIMessage(content="plain response")
+        serialized = _message_to_dict(original)
+        restored = _dict_to_message(serialized)
+        assert "reasoning_content" not in restored.additional_kwargs
 
     def test_timestamp_preserved(self):
         if not _LC_AVAILABLE:

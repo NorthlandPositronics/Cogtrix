@@ -131,8 +131,8 @@ def execute_shell_command(
         return f"Error: Command not found: {cmd_name}"
     except PermissionError:
         return "Error: Permission denied executing command"
-    except Exception as e:
-        return f"Error executing command: {str(e)}"
+    except Exception as e:  # noqa: BLE001
+        return f"Error executing command ({type(e).__name__}): {e}"
 
 
 # Tool metadata for registry

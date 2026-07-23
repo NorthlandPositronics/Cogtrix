@@ -92,6 +92,7 @@ def _parse_yaml_block(raw: str, agents_dir: Path) -> dict[str, Any]:
         return {}
 
     out: dict[str, Any] = {}
+    _prompt_file_content: str | None = None  # separate buffer avoids set-iteration-order bug
     for key in _KNOWN_FIELDS:
         if key not in data:
             continue
@@ -112,12 +113,34 @@ def _parse_yaml_block(raw: str, agents_dir: Path) -> dict[str, Any]:
                     log.warning("prompt_file %r is outside AGENTS.md directory — skipping", val)
                     continue
                 try:
-                    out["system_prompt"] = pf.read_text(encoding="utf-8")
+                    _prompt_file_content = pf.read_text(encoding="utf-8")
                     out["prompt_file"] = str(val)
                 except OSError as exc:
                     log.warning("Cannot read prompt_file %s: %s", pf, exc)
+        elif key == "memory_mode":
+            _valid_modes = {"", "conversation", "code", "reasoning"}
+            _mode_val = str(val) if val is not None else ""
+            if _mode_val and _mode_val not in _valid_modes:
+                log.warning(
+                    "Unknown memory_mode %r in AGENTS.md — valid values: %s. Using empty (default).",
+                    _mode_val,
+                    ", ".join(sorted(_valid_modes - {""})),
+                )
+                _mode_val = ""
+            out[key] = _mode_val
         else:
             out[key] = str(val) if val is not None else ""
+
+    # Mutual exclusivity: prompt_file always wins over inline system_prompt.
+    # Apply file content last so set-iteration order over _KNOWN_FIELDS doesn't matter.
+    if _prompt_file_content is not None:
+        if "system_prompt" in out:
+            log.warning(
+                "AGENTS.md agent has both 'system_prompt' and 'prompt_file' — "
+                "'prompt_file' takes precedence and 'system_prompt' is ignored."
+            )
+        out["system_prompt"] = _prompt_file_content
+
     return out
 
 

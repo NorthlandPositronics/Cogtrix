@@ -1,9 +1,9 @@
-#!/bin/sh
-set -e
+#!/bin/bash
+set -euo pipefail
 
 # Resolve data directory — allows overriding the default /app/data mount point
 # via COGTRIX_DATA_DIR, e.g. when the volume is mounted elsewhere in compose.
-DATA_DIR="${COGTRIX_DATA_DIR:-/app/data}"
+DATA_DIR="${COGTRIX_DATA_DIR:-/data}"
 
 # Ensure the full directory tree exists and is writable regardless of how the
 # volume was mounted (freshly created volume, host bind-mount, etc.).
@@ -34,26 +34,30 @@ if [ "${1}" = "api" ] || [ "${1}" = "--api" ]; then
     # Mark API mode so the HEALTHCHECK can skip the HTTP probe in CLI mode
     # (BUG-236). The sentinel is created before exec so it persists across the
     # process replacement and is visible to subsequent `docker exec` probes.
-    touch /tmp/.cogtrix-api-mode
+    touch /run/cogtrix/api-mode
 
     exec python -m src.api "$@"
 fi
 
 # ── Interactive CLI mode ─────────────────────────────────────
 # Auto-start the setup wizard when all of the following are true:
-#   1. No config file is present at /app/.cogtrix.yaml, /app/.cogtrix.yml,
-#      or /app/.cogtrix.json
+#   1. No config file is found by the Python config resolver (find_config_file)
 #   2. No provider API key env var is set
 #   3. stdin is a TTY (i.e. the container is running interactively)
 #   4. No arguments were passed — explicit args mean the user knows what they
 #      want; pass them straight through to cogtrix.py instead of the wizard
 #
-# The COGTRIX_CONFIG_FILE env var is intentionally NOT checked here — if the
-# user has set that, python cogtrix.py will find it and the wizard is skipped.
-#
 # Tip: to reach an Ollama instance running on the Docker host, add
 # --network host so the wizard can auto-detect it at 127.0.0.1:11434.
-if [ $# -eq 0 ] && [ ! -f /app/.cogtrix.yaml ] && [ ! -f /app/.cogtrix.yml ] && [ ! -f /app/.cogtrix.json ] && [ -t 0 ]; then
+
+# Check all paths the Python config resolver searches (src/config.py:find_config_file).
+# Missing any of these would wrongly trigger the setup wizard even when a config exists.
+_cogtrix_has_config() {
+    [ -f "/app/.cogtrix.yaml" ] || [ -f "/app/.cogtrix.yml" ] || [ -f "/app/.cogtrix.json" ] || \
+    [ -f "${HOME}/.cogtrix.yaml" ] || [ -f "${HOME}/.cogtrix.yml" ] || [ -f "${HOME}/.cogtrix.json" ] || \
+    [ -n "${COGTRIX_CONFIG_FILE:-}" ]
+}
+if [ $# -eq 0 ] && ! _cogtrix_has_config && [ -t 0 ]; then
     if [ -z "$OPENAI_API_KEY" ] && \
        [ -z "$ANTHROPIC_API_KEY" ] && \
        [ -z "$GEMINI_API_KEY" ] && \

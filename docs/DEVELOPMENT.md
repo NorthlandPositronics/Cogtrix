@@ -494,7 +494,7 @@ docker run -p 8000:8000 \
 # Mount a config and persist data
 docker run -it --network host \
   -v "$HOME/.cogtrix.yaml:/app/.cogtrix.yaml:ro" \
-  -v cogtrix-data:/app/data \
+  -v cogtrix-data:/data \
   cogtrix:dev
 ```
 

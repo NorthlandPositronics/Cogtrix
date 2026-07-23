@@ -81,7 +81,24 @@ _CONTEXT_OVERFLOW_PATTERNS = (
 
 
 def _is_context_overflow_error(exc: Exception) -> bool:
-    """Return True if *exc* is a provider context-length rejection."""
+    """Return True if *exc* is a provider context-length rejection.
+
+    Checks structured provider error fields first (OpenAI ``error.code``,
+    HTTP status codes, Anthropic ``type``), then falls back to string
+    matching against ``_CONTEXT_OVERFLOW_PATTERNS``.
+    """
+    # Structured checks — faster and language-independent
+    # OpenAI / OpenAI-compatible: BadRequestError with code field
+    code = getattr(exc, "code", None) or getattr(getattr(exc, "error", None), "code", None)
+    if code and "context_length" in str(code).lower():
+        return True
+    # HTTP status 400 paired with overflow-related type/param
+    status = getattr(exc, "status_code", None) or getattr(exc, "status", None)
+    if status == 400:
+        etype = getattr(exc, "type", None) or getattr(getattr(exc, "error", None), "type", None)
+        if etype and any(p in str(etype).lower() for p in ("context", "length", "token")):
+            return True
+    # String fallback — covers providers that embed the message in the exc string
     msg = str(exc).lower()
     return any(p in msg for p in _CONTEXT_OVERFLOW_PATTERNS)
 
@@ -182,8 +199,20 @@ _TOOL_VERB_RE = re.compile(
 # Phrases that LOOK like intent leads but are actually conversational.
 # "let me know" is the most common false positive.
 _INTENT_FALSE_POSITIVE_RE = re.compile(
-    r"\blet\s+me\s+know\b",
-    re.IGNORECASE,
+    r"""
+    \b(?:
+        let\s+me\s+know\b                   # "let me know if..."
+      | let\s+me\s+(?:explain|clarify|describe|summarize|outline|walk\s+you\s+through)\b
+      | I\s+(?:want\s+to|need\s+to|would\s+like\s+to)\s+(?:mention|note|clarify|explain|point\s+out)\b
+      | I\s+should\s+(?:mention|note|clarify|point\s+out)\b
+      | please\s+(?:note|be\s+aware|keep\s+in\s+mind)\b
+      | (?:^|(?:please|just|do)\s+)note\s+that\b    # "note that" / "please note that"
+      | (?:^|(?:please|just)\s+)keep\s+in\s+mind\b  # sentence-initial or after polite prefix
+      | (?:it(?:'s|\s+is)\s+)?worth\s+(?:noting|mentioning)\b
+      | it(?:'s|\s+is)\s+(?:worth|important\s+to)\s+(?:note|mention)\b
+    )
+    """,
+    re.IGNORECASE | re.VERBOSE,
 )
 
 
@@ -214,11 +243,29 @@ def _is_action_intent(message: Any) -> bool:
         s = sentence.strip()
         if not s:
             continue
-        # Skip sentences that match known false-positive patterns
-        if _INTENT_FALSE_POSITIVE_RE.search(s):
+        has_intent = bool(_INTENT_LEAD_RE.search(s))
+        has_verb = bool(_TOOL_VERB_RE.search(s))
+        if not (has_intent and has_verb):
             continue
-        if _INTENT_LEAD_RE.search(s) and _TOOL_VERB_RE.search(s):
-            return True
+        # A real intent+verb pair exists in this sentence.  Only suppress it
+        # when the FP phrase is the SOLE intent-shaped construct — i.e. it
+        # appears but there is no additional "I'll / Let me / Going to" lead-in
+        # that could pair with the verb.  This prevents "please note that I'll
+        # run the build" from being silently dropped.  The original "let me
+        # know" case still suppresses correctly because "let me know" fires the
+        # FP regex AND does not typically combine with an action verb in the
+        # same sentence.
+        fp_match = _INTENT_FALSE_POSITIVE_RE.search(s)
+        if fp_match:
+            # Re-check: is the intent lead-in ONLY the FP phrase itself, or is
+            # there a genuine action lead-in beyond the FP match?
+            text_after_fp = s[fp_match.end() :]
+            text_before_fp = s[: fp_match.start()]
+            if not (
+                _INTENT_LEAD_RE.search(text_after_fp) or _INTENT_LEAD_RE.search(text_before_fp)
+            ):
+                continue  # FP phrase is the only lead-in — suppress
+        return True
     return False
 
 
@@ -475,6 +522,14 @@ def _correct_tool_args(tool: Any, args: dict) -> dict:
         "search_query": "query",
         "dir": "path",
         "directory": "path",
+        # Additional common LLM variants (ratio 0.75–0.84 — below old threshold)
+        "infile": "input_file",
+        "input_file": "infile",
+        "workdir": "working_dir",
+        "working_dir": "workdir",
+        "verbose": "verbosity",
+        "verbosity": "verbose",
+        "filenamestr": "file_name",
     }
     for provided_key in list(corrected.keys()):
         if provided_key in expected_names:
@@ -829,29 +884,71 @@ def build_agent_graph(
     # ── LLM call with timeout ─────────────────────────────────────
     # Prevents indefinite hangs when the LLM backend disconnects.
     _LLM_RETRY_TIMEOUT = 300  # seconds — retry timeout after first attempt fails
+    _LLM_MAX_RETRIES = 3  # total attempts (1 initial + 2 retries)
+    _LLM_RETRY_BASE_DELAY = 2.0  # seconds — doubles on each retry (2, 4)
+
+    def _is_retryable_error(exc: Exception) -> bool:
+        """Return True for transient errors worth retrying (rate limits, 5xx)."""
+        msg = str(exc).lower()
+        return any(
+            p in msg
+            for p in (
+                "rate limit",
+                "rate_limit",
+                "too many requests",
+                "429",
+                "503",
+                "502",
+                "500",
+                "server error",
+                "overloaded",
+                "capacity",
+                "temporarily",
+            )
+        )
 
     def _invoke_with_timeout(_model: Any, _messages: list, _cfg: Any, _timeout: int) -> Any:
         import concurrent.futures as _cf
 
-        with _cf.ThreadPoolExecutor(max_workers=1) as _pool:
+        last_exc: Exception | None = None
+        for _attempt in range(_LLM_MAX_RETRIES):
+            # NOT using `with` (context manager) — __exit__ calls shutdown(wait=True)
+            # which blocks until the hung LLM thread finishes, defeating the timeout.
+            _pool = _cf.ThreadPoolExecutor(max_workers=1)
             _fut = _pool.submit(_model.invoke, _messages, _cfg)
+            _pool.shutdown(wait=False)  # allow thread to finish naturally; don't block
             try:
-                return _fut.result(timeout=_timeout)
+                _timeout_for_attempt = _LLM_RETRY_TIMEOUT if _attempt > 0 else _timeout
+                return _fut.result(timeout=_timeout_for_attempt)
             except _cf.TimeoutError:
-                _graph_log.warning(
-                    "LLM call timed out after %ds — retrying with %ds timeout",
-                    _timeout,
-                    _LLM_RETRY_TIMEOUT,
+                last_exc = RuntimeError(
+                    f"LLM backend not responding (timed out after {_timeout_for_attempt}s)"
                 )
-                _fut2 = _pool.submit(_model.invoke, _messages, _cfg)
-                try:
-                    return _fut2.result(timeout=_LLM_RETRY_TIMEOUT)
-                except _cf.TimeoutError as _te:
-                    raise RuntimeError(
-                        f"LLM backend not responding (timed out after "
-                        f"{_timeout}s + {_LLM_RETRY_TIMEOUT}s retry). "
-                        "Check the model server connection."
-                    ) from _te
+                _graph_log.warning(
+                    "LLM call timed out after %ds (attempt %d/%d)",
+                    _timeout_for_attempt,
+                    _attempt + 1,
+                    _LLM_MAX_RETRIES,
+                )
+            except Exception as _exc:
+                if _is_retryable_error(_exc) and _attempt < _LLM_MAX_RETRIES - 1:
+                    last_exc = _exc
+                    _delay = _LLM_RETRY_BASE_DELAY * (2**_attempt)
+                    _graph_log.warning(
+                        "LLM call failed with retryable error (attempt %d/%d, "
+                        "retrying in %.0fs): %s",
+                        _attempt + 1,
+                        _LLM_MAX_RETRIES,
+                        _delay,
+                        _exc,
+                    )
+                    time.sleep(_delay)
+                    continue
+                raise
+            if _attempt < _LLM_MAX_RETRIES - 1:
+                _delay = _LLM_RETRY_BASE_DELAY * (2**_attempt)
+                time.sleep(_delay)
+        raise last_exc or RuntimeError("LLM invocation failed after all retries")
 
     def call_model(state: CogtrixState, config: RunnableConfig) -> dict:
         if llm is None:
@@ -1353,7 +1450,7 @@ def build_agent_graph(
                 # of the "Tool names must be unique" 400 on re-add).
                 _tool_lookup.pop(tool_name, None)
                 _active_names.discard(tool_name)
-                session_state.denials.add(tool_name)
+                session_state.deny_tool(tool_name)
                 try:
                     _disabled_obj = next(
                         t for t in active_tools_list if getattr(t, "name", "") == tool_name
@@ -1501,7 +1598,7 @@ def build_agent_graph(
                     match, source = None, ""
 
                 if match and source == "available":
-                    if match in session_state.denials:
+                    if session_state.is_denied(match):
                         result_msgs.append(
                             ToolMessage(
                                 content=f"Tool '{match}' is disabled by the user.",
@@ -1649,6 +1746,76 @@ def build_agent_graph(
                     )
 
         # ── Parallel execution ───────────────────────────────────
+        # Pre-filter: resolve alias/unknown names before submitting to the pool.
+        # The serial-first path already does fuzzy alias resolution; without
+        # this step parallel calls with unrecognised names bypass it entirely,
+        # producing a bare "Tool X is no longer active" message with no hint.
+        if not cancel_requested and parallel_calls:
+            resolved_parallel: list = []
+            for _pcall in parallel_calls:
+                _pname = _pcall["name"]
+                if _pname in _tool_lookup:
+                    resolved_parallel.append(_pcall)
+                    continue
+                # Fuzzy-resolve against active + available pools
+                _pmatch, _psource = _resolve_tool_name(
+                    _pname, _available_tools_ref[0], active_names_ref
+                )
+                if _pmatch and _pmatch in session_state.denials:
+                    # F4: pre-filter must respect denials, same as serial path
+                    guidance_lines.append(
+                        f"'{_pname}' has been disabled this session and cannot be re-loaded."
+                    )
+                    result_msgs.append(
+                        ToolMessage(
+                            content=f"'{_pname}' is disabled for this session.",
+                            tool_call_id=_pcall["id"],
+                            name=_pname,
+                        )
+                    )
+                elif _pmatch and _psource == "active":
+                    guidance_lines.append(
+                        f"'{_pname}' is not a tool name. "
+                        f"Use the already-active tool '{_pmatch}' instead."
+                    )
+                    result_msgs.append(
+                        ToolMessage(
+                            content=(
+                                f"'{_pname}' is not a valid tool. "
+                                f"Did you mean '{_pmatch}'? It is already active."
+                            ),
+                            tool_call_id=_pcall["id"],
+                            name=_pname,
+                        )
+                    )
+                elif _pmatch and _psource == "available":
+                    # F3: tool exists in the on-demand pool but is not yet active —
+                    # give an actionable hint rather than the generic "not resolved"
+                    guidance_lines.append(
+                        f"'{_pname}' matched '{_pmatch}' which is available but not active. "
+                        f"Call request_tools(add=['{_pmatch}']) first, then retry."
+                    )
+                    result_msgs.append(
+                        ToolMessage(
+                            content=(
+                                f"'{_pname}' matched '{_pmatch}' but it is not yet active. "
+                                f"Use request_tools(add=['{_pmatch}']) to load it first."
+                            ),
+                            tool_call_id=_pcall["id"],
+                            name=_pname,
+                        )
+                    )
+                else:
+                    guidance_lines.append(f"'{_pname}' does not match any known tool.")
+                    result_msgs.append(
+                        ToolMessage(
+                            content=f"'{_pname}' is not a valid tool and could not be resolved.",
+                            tool_call_id=_pcall["id"],
+                            name=_pname,
+                        )
+                    )
+            parallel_calls = resolved_parallel
+
         if cancel_requested:
             for call in parallel_calls:
                 result_msgs.append(
@@ -1748,9 +1915,17 @@ def build_agent_graph(
                         if resolved and source == "available":
                             rname = resolved
                     _existing_active = {getattr(t, "name", "") for t in active_tools_list}
-                    if rname in session_state.denials:
+                    if session_state.is_denied(rname):
                         guidance_lines.append(
                             f"'{rname}' has been disabled this session and cannot be re-loaded."
+                        )
+                        continue
+                    if rname not in _available_tools_ref[0] and rname not in _existing_active:
+                        # Tool is not known at all — give early feedback so the
+                        # model doesn't keep requesting a non-existent tool name.
+                        guidance_lines.append(
+                            f"'{rname}' is not a recognised tool name and cannot be loaded. "
+                            "Call request_tools() with no arguments to see the available catalog."
                         )
                         continue
                     if (
@@ -1854,7 +2029,7 @@ def build_agent_graph(
                     tool_catalog,
                     active_names=active_names_ref,
                     protected_names=protected,
-                    denials=session_state.denials,
+                    denials=session_state.get_denials_snapshot(),
                 )
                 if rt:
                     active_tools_list.append(rt)

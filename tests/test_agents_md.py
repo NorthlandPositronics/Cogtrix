@@ -207,6 +207,32 @@ def test_prompt_file_path_traversal_is_blocked(tmp_path, caplog):
     assert any("outside" in r.message for r in caplog.records)
 
 
+def test_prompt_file_wins_over_inline_system_prompt(tmp_path, caplog):
+    """When both prompt_file and system_prompt are present, prompt_file content wins."""
+    import logging
+
+    prompt_path = tmp_path / "file_prompt.txt"
+    prompt_path.write_text("From file.", encoding="utf-8")
+
+    p = _write(
+        tmp_path,
+        """
+        ## Dual
+
+        ```yaml
+        system_prompt: "Inline prompt — should be ignored."
+        prompt_file: file_prompt.txt
+        ```
+        """,
+    )
+    with caplog.at_level(logging.WARNING, logger="cogtrix.agents_md"):
+        agents = load_agents_md(p)
+    a = agents["dual"]
+    assert a.system_prompt == "From file."
+    assert a.prompt_file == "file_prompt.txt"
+    assert any("prompt_file" in r.message and "precedence" in r.message for r in caplog.records)
+
+
 # ── Edge cases ────────────────────────────────────────────────────────────────
 
 

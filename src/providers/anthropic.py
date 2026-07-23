@@ -48,6 +48,7 @@ def create_chat_model(
     llm_kwargs: dict[str, Any] = {
         "model": model or CHAT_MODELS["anthropic"],
         "temperature": temperature,
+        "max_retries": 3,
     }
     if api_key:
         llm_kwargs["api_key"] = api_key

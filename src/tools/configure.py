@@ -550,7 +550,10 @@ def filter_unconfigured_tools(registry: ToolRegistry) -> None:
 
         try:
             configured = checker()
-        except Exception:  # noqa: BLE001
+        except Exception as _chk_exc:  # noqa: BLE001
+            log.debug(
+                "Tool %s is_configured() raised — treating as configured: %s", module_name, _chk_exc
+            )
             configured = True
 
         module_status[module_name] = configured
@@ -606,7 +609,7 @@ def create_request_tools_tool(
     active_names: set[str] | None = None,
     protected_names: set[str] | None = None,
     tool_index: Any = None,
-    denials: set[str] | None = None,
+    denials: frozenset[str] | set[str] | None = None,
 ) -> Any:
     """
     Create the ``request_tools`` meta-tool.

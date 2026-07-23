@@ -89,3 +89,14 @@ docs/testing
 docs/ux
 docs/*.pdf
 #docker/
+
+# Experimental Docker subdirectories — not referenced by any Dockerfile instruction
+docker/gemma-config/
+docker/gemma-test/
+
+# Scripts and man pages — not needed in image context
+scripts/
+man/
+
+# Design documents and signed artifacts
+DESIGN.md

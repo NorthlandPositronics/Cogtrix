@@ -501,7 +501,7 @@ docker run -d \
   -p 8000:8000 \
   -e COGTRIX_JWT_SECRET="$(python3 -c 'import secrets; print(secrets.token_hex(32))')" \
   -e COGTRIX_DB_URL="postgresql+asyncpg://cogtrix:secret@db:5432/cogtrix" \
-  -v cogtrix-data:/app/data \
+  -v cogtrix-data:/data \
   ghcr.io/northlandpositronics/cogtrix:v0.2.0 api
 ```
 
@@ -534,7 +534,7 @@ services:
       COGTRIX_JWT_SECRET: "change-me-to-a-random-32-char-string-here"
       COGTRIX_DB_URL: "postgresql+asyncpg://cogtrix:secret@db:5432/cogtrix"
     volumes:
-      - cogtrix-data:/app/data
+      - cogtrix-data:/data
       - ./cogtrix.yaml:/app/.cogtrix.yaml:ro
     depends_on:
       db:

@@ -97,7 +97,7 @@ def _call_llm(llm: Any, prompt: str) -> str:
             content = " ".join(str(c.get("text", c) if isinstance(c, dict) else c) for c in content)
         return str(content) if content else ""
     except Exception as exc:  # noqa: BLE001
-        log.warning("reflection_delegate LLM call failed: %s", exc)
+        log.warning("reflection_delegate LLM call failed: %s", exc, exc_info=True)
         return ""
 
 

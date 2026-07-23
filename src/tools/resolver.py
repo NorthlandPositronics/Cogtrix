@@ -9,7 +9,9 @@ from __future__ import annotations
 
 from typing import Any
 
-FUZZY_MATCH_THRESHOLD = 0.40
+FUZZY_MATCH_THRESHOLD = (
+    0.65  # raised from 0.40; blocks read_file↔write_file (0.63), search_web↔search_news (0.63)
+)
 
 
 def _is_word_contained(short: str, long: str) -> bool:
@@ -79,7 +81,7 @@ def resolve_tool_name(
                 for b in tn_tokens
             )
             if _prefix_hit:
-                score += 0.30
+                score += 0.35
 
             if score > best[1]:
                 best = (tool_name, score, source)

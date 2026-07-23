@@ -53,7 +53,11 @@ def _build_history(memory_manager: Any, user_input: str = "") -> list:
         ctx = memory_manager.prepare_context(user_input)
         return list(ctx.messages)
     except Exception as exc:
-        log.warning("Could not prepare context from memory manager: %s", exc)
+        log.warning(
+            "Could not prepare context from memory manager — starting with empty history: %s",
+            exc,
+            exc_info=True,
+        )
         return []
 
 

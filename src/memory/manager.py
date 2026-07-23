@@ -52,6 +52,10 @@ _MIN_MEANINGFUL_CHARS_FOR_SUMMARY = 5000  # ignore tiny exchanges
 
 _SESSION_ID_MAX_LEN = 200
 _SLOW_PATH_MAX_FAILURES = 3
+# Max seconds a background summarization job may run before it is considered
+# stuck. The thread continues (Python cannot cancel it) but we stop waiting
+# and allow a fresh submission on the next turn.
+_BG_JOB_TIMEOUT_SECONDS = 120
 
 _SUMMARIZATION_POOL: ThreadPoolExecutor | None = None
 _SUMMARIZATION_POOL_LOCK = threading.Lock()
@@ -218,6 +222,7 @@ class BaseMemoryManager(ABC):
         # ── Background slow-path threading ───────────────────────────
         self._hybrid_lock = threading.Lock()
         self._bg_future: Future | None = None
+        self._bg_submitted_at: float = 0.0  # monotonic timestamp of last submit
         self._slow_path_failures: int = 0
 
         # ── Tiered Context Cache (TCC) ────────────────────────────────
@@ -542,9 +547,20 @@ class BaseMemoryManager(ABC):
             return
 
         if self._bg_future is not None and not self._bg_future.done():
-            if is_verbose():
-                log.debug("Background memory job still running — skipping")
-            return
+            elapsed = time.monotonic() - self._bg_submitted_at
+            if elapsed > _BG_JOB_TIMEOUT_SECONDS:
+                log.warning(
+                    "Background memory summarization has been running for %.0fs "
+                    "(limit %ds) — treating as stuck and allowing a fresh job. "
+                    "The original thread will continue until it finishes naturally.",
+                    elapsed,
+                    _BG_JOB_TIMEOUT_SECONDS,
+                )
+                # Fall through and submit a fresh job; old thread runs to completion.
+            else:
+                if is_verbose():
+                    log.debug("Background memory job still running — skipping")
+                return
 
         batch = [_shallow_copy(m) for m in messages[unsummarized_start:unsummarized_end]]
         unsummarized_end_snapshot = unsummarized_end
@@ -552,6 +568,7 @@ class BaseMemoryManager(ABC):
         self._bg_future = _get_summarization_pool().submit(
             self._run_slow_path, batch, unsummarized_end_snapshot
         )
+        self._bg_submitted_at = time.monotonic()
 
     def schedule_tier_roll_forward(
         self,
@@ -615,7 +632,12 @@ class BaseMemoryManager(ABC):
                         "— keeping cold-cache fallback"
                     )
             except Exception as exc:
-                log.warning("Tier roll-forward background job failed: %s", exc)
+                log.warning(
+                    "Tier roll-forward background job failed — agent will use "
+                    "cold sliding-window fallback this session: %s",
+                    exc,
+                    exc_info=True,
+                )
 
         try:
             _get_summarization_pool().submit(_do_roll_forward)

@@ -1,6 +1,6 @@
 # Cogtrix Agent
 
-A modular AI assistant with 72 built-in tools, multi-provider LLM support, and intelligent memory management.
+A modular AI assistant with 79 built-in tools, multi-provider LLM support, and intelligent memory management.
 
 ---
 
@@ -12,7 +12,7 @@ Cogtrix is an **interactive command-line AI assistant** that connects to large l
 
 **Highlights:**
 
-- 72 built-in tools across 6 search providers, file I/O, Git operations, shell, Python, HTTP, NLP, WhatsApp and Telegram messaging, and more
+- 79 built-in tools across 7 search providers, file I/O, Git operations, shell, Python, HTTP, NLP, WhatsApp and Telegram messaging, and more
 - Three memory modes optimized for conversation, coding, or strategic reasoning — with hybrid memory (rolling summary + semantic recall)
 - Deep reasoning engine (Tree-of-Thought with iterative reflection) via `/think`
 - Task delegation across multiple LLM models via `/delegate`
@@ -231,18 +231,22 @@ Arrow keys, Home/End, and input history work out of the box (via `readline`).
 
 ---
 
-## Built-in Tools (72)
+## Built-in Tools (79)
 
 | Category | Tools |
 |----------|-------|
-| **Search** (11) | DuckDuckGo web + news (free), Tavily, Exa, Brave, Google, SerpAPI |
+| **Search** (11) | DuckDuckGo web + news (free), Tavily, Exa, Brave, Google, SerpAPI, SearXNG |
 | **Files** (6) | `read_file`, `write_file`, `patch_file`, `append_file`, `list_directory`, `file_info` |
 | **Git** (7) | `git_status`, `git_diff`, `git_log`, `git_add`, `git_commit`, `git_create_branch`, `git_checkout` |
+| **GitHub** (4) | `gh_create_issue`, `gh_comment_issue`, `gh_list_prs`, `gh_get_file` |
 | **System** (2) | `execute_shell_command`, `execute_python` |
 | **Text & NLP** (10) | word count, find/replace, URLs, emails, compare, split, trim, sentiment, summarize, keywords |
 | **JSON & Math** (6) | parse, format, query, extract, convert, calculate |
 | **Web** (2) | `http_get`, `http_post` |
 | **Date & Weather** (4) | datetime, timezone, parse date, weather |
+| **Goal Tracking** (5) | `set_goal`, `add_subgoal`, `complete_goal`, `abandon_goal`, `list_goals` |
+| **Scheduling** (3) | `cron_add`, `cron_list`, `cron_remove` |
+| **Agent & Tasks** (7) | `spawn_agent`, `send_to_agent`, `read_agent_inbox`, `list_tasks`, `get_task_status`, `get_task_result`, `cancel_task` |
 | **WhatsApp** (4) | `whatsapp_send`, `whatsapp_send_image`, `whatsapp_check`, `whatsapp_contacts` |
 | **Telegram** (4) | `telegram_send`, `telegram_send_photo`, `telegram_check`, `telegram_contacts` |
 | **Reasoning** (3) | `deep_think`, `delegate_task`, `delegate_parallel` |
@@ -301,7 +305,7 @@ docker run -it --network host \
 
 ```bash
 docker run -it --network host \
-  -v cogtrix-data:/app/data \
+  -v cogtrix-data:/data \
   ghcr.io/northlandpositronics/cogtrix:latest
 ```
 
@@ -409,7 +413,7 @@ For detailed debugging, run with `--debug` (logs every LLM call, tool input/outp
 | **[Configuration](docs/CONFIGURATION.md)** | Every config option, environment variables, search providers |
 | **[Providers](docs/PROVIDERS.md)** | Step-by-step: Ollama, OpenAI, Anthropic, Google, DeepSeek, xAI, Groq, Together, vLLM |
 | **[Memory Modes](docs/MEMORY_MODES.md)** | Conversation, code, and reasoning modes + hybrid memory (summary + recall) |
-| **[Tools Reference](docs/TOOLS_REFERENCE.md)** | All 72 tools with parameters and examples |
+| **[Tools Reference](docs/TOOLS_REFERENCE.md)** | All 79 tools with parameters and examples |
 | **[WhatsApp Guide](docs/WHATSAPP_GUIDE.md)** | Use Cogtrix as a WhatsApp assistant (with Docker Compose) |
 | **[Telegram Guide](docs/TELEGRAM_GUIDE.md)** | Use Cogtrix as a Telegram assistant via a bot |
 | **[Assistant Mode](docs/CONFIGURATION.md#assistant-mode)** | Run Cogtrix as a headless WhatsApp/Telegram messaging daemon |
@@ -425,7 +429,7 @@ For detailed debugging, run with `--debug` (logs every LLM call, tool input/outp
 
 - Want to connect OpenAI, Groq, or another LLM? See [Providers](docs/PROVIDERS.md).
 - Want to customize settings, add search API keys, or set up messaging? See [Configuration](docs/CONFIGURATION.md).
-- Want to know what all 72 tools do? See [Tools Reference](docs/TOOLS_REFERENCE.md).
+- Want to know what all 79 tools do? See [Tools Reference](docs/TOOLS_REFERENCE.md).
 
 ---
 
