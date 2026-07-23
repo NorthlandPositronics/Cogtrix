@@ -1,13 +1,62 @@
 # Changelog
 
-## [0.1.39](https://github.com/NorthlandPositronics/Cogtrix/compare/v0.1.38...v0.1.39) (2026-03-27)
+## [0.2.0](https://github.com/NorthlandPositronics/Cogtrix/compare/v0.1.39...v0.2.0) (2026-04-02)
+
+
+### Features
+
+* v0.2.0 — cron tools, TCC, UX sprints, enterprise infra, task queue ([#201](https://github.com/NorthlandPositronics/Cogtrix/issues/201)) ([a8091e7](https://github.com/NorthlandPositronics/Cogtrix/commit/a8091e78816ecf02f8a231434cd7d19b757bfddb))
 
 
 ### Bug Fixes
 
-* **ci,tests:** advisory docker build + xfail flaky 3-turn test ([3565791](https://github.com/NorthlandPositronics/Cogtrix/commit/3565791c8f03592ce3289551d24f7d14d8c11ba1))
-* **ci:** exclude docker-marker tests from unit test job ([f25c967](https://github.com/NorthlandPositronics/Cogtrix/commit/f25c9674c858a39be5c0e07adb8fd8429acb60cc))
-* **tests:** relax models endpoint assertion to accept any non-empty model list ([dc5e253](https://github.com/NorthlandPositronics/Cogtrix/commit/dc5e253a63cc72376f56ffbb7daec19fecea15c5))
+* **api:** wizard step 0 always falls back to default question on LLM failure ([fcdddcb](https://github.com/NorthlandPositronics/Cogtrix/commit/fcdddcb8cc9b62d9b2c79cc8ef4a7c45bcfdbe83))
+* **assistant:** fix six bugs in simulate, guardrails, wizard, and context injection ([7db8309](https://github.com/NorthlandPositronics/Cogtrix/commit/7db830912782dc24ec2be917781a7e85896097e9))
+* **assistant:** fix six bugs in simulate, guardrails, wizard, and context injection ([b12f688](https://github.com/NorthlandPositronics/Cogtrix/commit/b12f6886c13fc14105db06a08e0a023fadec7873))
+* **assistant:** suppress_reply false-positive caused by datamark tokens ([a1127fb](https://github.com/NorthlandPositronics/Cogtrix/commit/a1127fbba0017fe646649d0d6065411c1428b9bf))
+* revert manifest to 0.1.39 so Release Please bumps to 0.2.0 ([7c6babf](https://github.com/NorthlandPositronics/Cogtrix/commit/7c6babfc91645334dd7f8b2046e280035aae9a00))
+* **security:** break CodeQL taint flows — helper function, regex sanitization, param rename ([84d8397](https://github.com/NorthlandPositronics/Cogtrix/commit/84d839735ddb15c1afd4574de986372110538749))
+* **security:** isolate API key hashing in separate module to break CodeQL taint ([1adf10a](https://github.com/NorthlandPositronics/Cogtrix/commit/1adf10abc06e1db335b038655c289d235398e855))
+* **security:** resolve 13 open CodeQL alerts ([f1a23a8](https://github.com/NorthlandPositronics/Cogtrix/commit/f1a23a854b218548ece9e814cb7665ee40cfbbb2))
+* **security:** resolve CodeQL findings — path sanitization, masking, test annotations ([c96b841](https://github.com/NorthlandPositronics/Cogtrix/commit/c96b8415b8a0eec2042eb28c2a56b361fa74c67c))
+* **security:** use HMAC-SHA256 for API key hashing — breaks CodeQL password taint ([c08685f](https://github.com/NorthlandPositronics/Cogtrix/commit/c08685fa0128410f6c92fb6be17abfdf899146be))
+* **tests:** replace deprecated asyncio.get_event_loop() with asyncio.run() ([c07c11f](https://github.com/NorthlandPositronics/Cogtrix/commit/c07c11f4532de29e42d8f3b9ae2995c6afe35aa3))
+* **tests:** resolve CodeQL URL substring sanitization warnings ([1116a07](https://github.com/NorthlandPositronics/Cogtrix/commit/1116a07844e44122e035cbafad81e6457d07a502))
+* **wizard:** fall back to default question when probe warned and first LLM call fails ([1e15753](https://github.com/NorthlandPositronics/Cogtrix/commit/1e157530a6798916c7b2e4c62ce161abe20dc0f4))
+
+## [0.2.0] — 2026-03-31
+
+### Highlights
+
+This release marks Cogtrix's first production milestone. It consolidates all
+backend infrastructure (M5–M7) and the UX sprint series (Sprints 1–4) into a
+stable, versioned public release.
+
+### Infrastructure (M5–M7)
+
+- **M5**: PostgreSQL as default DB, Redis session presence, OIDC/SSO integration,
+  structured audit log, per-user resource quotas
+- **M6**: CogTrixGo feature parity — 60 tools, Anthropic/Google providers,
+  multi-agent orchestration, REST API, WhatsApp/Telegram assistant mode
+- **M7**: Security audit (bandit), load test (p95 = 0.271 s), API stability
+  guarantee (VERSIONING.md + CI breaking-change check), migration guide, Docker
+  multi-arch image (bake.hcl)
+
+### UX Sprints (Sprints 1–4)
+
+- **Sprint 1** (#215–#217): COGTRIX.md auto-load, memory visibility (/memory),
+  @file/@folder inline context injection
+- **Sprint 2** (#218–#220): diff view before writes, tool name in spinner +
+  cumulative token counter, auto model routing (--auto-route/-R)
+- **Sprint 3** (#221–#224): --quick/-Q fast path, session export/share (/export),
+  context advisor (≥70% warning / ≥85% critical), git-native mode (--git-native/-G)
+- **Sprint 4** (#225–#228): shell completion (--install-completion), compact banner
+  (banner: compact/off, --no-banner), per-tool trust (tool_trust config),
+  named profiles (--profile/-P)
+
+### Bug Fixes
+
+See individual milestone changelogs for the full list of bug fixes (BUG-001 through BUG-236).
 
 ## [0.1.38](https://github.com/NorthlandPositronics/Cogtrix/compare/v0.1.37...v0.1.38) (2026-03-26)
 

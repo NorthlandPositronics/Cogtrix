@@ -179,12 +179,17 @@ class RAGConfig:
     chunk_size: int = 2000
     chunk_overlap: int = 200
     model: str | None = None  # references a key in Config.models for embedding
+    score_threshold: float = 0.0  # minimum similarity score for RAG retrieval (M4.3)
 
     def __post_init__(self) -> None:
         if self.chunk_overlap >= self.chunk_size:
             raise ConfigError(
                 f"rag.chunk_overlap ({self.chunk_overlap}) must be less than "
                 f"rag.chunk_size ({self.chunk_size})"
+            )
+        if not (0.0 <= self.score_threshold <= 1.0):
+            raise ConfigError(
+                f"rag.score_threshold must be in [0.0, 1.0], got {self.score_threshold}"
             )
 
 
@@ -220,20 +225,72 @@ class Config:
     # Prompt optimizer — rewrite complex prompts before agent execution
     prompt_optimizer: bool = True
 
+    # Adaptive memory — auto-select and switch memory mode based on prompt heuristics
+    adaptive_memory: bool = True
+
+    # Auto model routing — use a fast model for simple queries
+    auto_route: bool = False
+    auto_route_fast_model: str | None = None  # model alias in models registry
+
+    # Quick mode — skip optimizer, memory, and compression for one-off queries
+    quick_mode: bool = False
+
+    # Git-native mode — auto stage+commit after each file write
+    git_native: bool = False
+
+    # Banner display mode: "compact" (default), "full", or "off"
+    banner: str = "compact"
+
+    theme: str = "default"
+    """UI colour theme. Built-in values: default, minimal, dracula."""
+
+    # Per-tool trust overrides: tool_name -> "always" | "ask" | "deny"
+    tool_trust: dict[str, str] = field(default_factory=dict)
+
+    # Allow shell/bash/python_exec in API sessions (disabled by default for safety)
+    api_dangerous_tools: bool = False
+
+    # Named flag profiles: profile_name -> {config_key: value}
+    profiles: dict[str, dict[str, Any]] = field(default_factory=dict)
+
     # Parallel tool execution — run independent tool calls concurrently
     parallel_tool_execution: bool = True
 
     # File operations — extra directories allowed for write operations
     allowed_write_paths: list[str] = field(default_factory=list)
 
+    # Plugin tools — extra directories to scan for file-drop tool modules
+    tool_dirs: list[str] = field(default_factory=list)
+
     # Context compression — summarize old ToolMessages during agent loop
     context_compression: bool = True
     context_compression_min_age: int = 6
     context_compression_min_chars: int = 2000
+    context_compression_emergency_threshold: float = 0.85
+    """Context ratio (0–1) above which min_age_cycles drops to 1 for emergency compression."""
+    context_compression_human_msg_max_chars: int = 20_000
+    """Maximum HumanMessage content length before middle-truncation. 0 = disabled."""
     context_compression_model: str | None = None  # model name or "provider/model"
+
+    # Tiered Context Cache (TCC) — pre-compressed tier snapshots for accurate
+    # context size tracking and O(1) context assembly.
+    tier_cache_enabled: bool = True
+    tier0_fraction: float = 0.60
+    """Fraction of available tokens for the verbatim (Tier 0) window."""
+    tier1_fraction: float = 0.30
+    """Fraction of available tokens for lightly-compressed (Tier 1) history."""
+    tier2_fraction: float = 0.08
+    """Fraction of available tokens for heavily-compressed (Tier 2) history."""
+
+    # Per-turn context budget guard — abort tool loop when this fraction of
+    # max_context_tokens has been consumed (0–1, default 80%).
+    tool_context_limit_pct: float = 0.80
 
     # MCP server configurations
     mcp_servers: dict[str, dict[str, Any]] = field(default_factory=dict)
+
+    # Named agent configurations (loaded lazily by AgentRegistry)
+    agents: dict[str, Any] = field(default_factory=dict)
 
     # RAG settings
     rag: RAGConfig = field(default_factory=RAGConfig)
@@ -242,6 +299,34 @@ class Config:
     debug: bool = False
     verbose: bool = False  # Log full message content without truncation
     log_file: str | None = None  # None = no logging, "" = default file
+    verbosity: int = 0  # 0=normal, 1=debug, 2=verbose, 3=trace
+
+    # Audit log (M5.4)
+    audit_log_enabled: bool = True
+    audit_log_path: str = "data/audit/audit.log"
+
+    # Redis session presence (M5.2)
+    redis_url: str = ""  # empty = disabled
+    redis_session_ttl: int = 7200
+
+    # OIDC/SSO (M5.3)
+    oidc_enabled: bool = False
+    oidc_issuer: str | None = None
+    oidc_audience: str | None = None
+    oidc_jwks_uri: str | None = None
+    oidc_role_claim: str = "roles"
+    oidc_default_role: str = "user"
+
+    # Per-user quotas (M5.5)
+    quota_token_budget_per_day: int | None = None
+    quota_requests_per_hour: int | None = None
+    quota_max_concurrent_sessions: int | None = None
+
+    # Self-improvement loop (M4.1)
+    self_improve_auto_commit: bool = False
+
+    # Semantic tool index (M4.4)
+    semantic_tool_index: bool = True
 
     # Track where config was loaded from (for display)
     config_file_path: Path | None = None
@@ -257,6 +342,10 @@ class Config:
     research_delegate_enabled: bool = True
     research_delegate_timeout: int = 300
     research_delegate_cap_ratio: float = 0.85
+    research_delegate_auto: bool = False
+    """When True, research queries are delegated pre-flight when context exceeds the threshold."""
+    research_delegate_auto_threshold: float = 0.50
+    """Session context ratio (0–1) above which research_delegate_auto activates."""
 
     # ── Service key accessors ─────────────────────────────────────
     # These provide a clean API for tool configuration code, reading
@@ -277,6 +366,10 @@ class Config:
     @property
     def brave_api_key(self) -> str | None:
         return self.services.get("brave", {}).get("api_key")
+
+    @property
+    def searxng_url(self) -> str | None:
+        return self.services.get("searxng", {}).get("url") or os.getenv("SEARXNG_URL")
 
     @property
     def serpapi_api_key(self) -> str | None:
@@ -342,6 +435,7 @@ class Config:
             f"  research_delegate:    {self.research_delegate_enabled}",
             f"  debug:                {self.debug}",
             f"  verbose:              {self.verbose}",
+            f"  verbosity:            {self.verbosity}",
             f"  log_file:             {self.log_file}",
         ]
         # Providers
@@ -493,15 +587,20 @@ class Config:
         if self.active_model_alias:
             mc = self.models.get(self.active_model_alias)
             if mc is None:
+                cfg_hint = f" (config: {self.config_file_path})" if self.config_file_path else ""
                 raise ConfigError(
-                    f"Active model alias '{self.active_model_alias}' not found in models registry. "
-                    f"Available: {', '.join(sorted(self.models)) or '(none)'}"
+                    f"Model '{self.active_model_alias}' not found in models registry{cfg_hint}. "
+                    f"Available: {', '.join(sorted(self.models)) or '(none)'}. "
+                    f"Run /setup or edit your config file to add this model."
                 )
             return mc
         if self.models:
             first_alias = next(iter(self.models))
             return self.models[first_alias]
-        raise ConfigError("No models configured and no active_model_alias set.")
+        cfg_hint = f" (config: {self.config_file_path})" if self.config_file_path else ""
+        raise ConfigError(
+            f"No models configured{cfg_hint}. Run /setup or cogtrix.py --setup to configure a model."
+        )
 
     def get_active_provider(self) -> "ProviderConfig":
         """Get the provider config for the active model.
@@ -884,8 +983,67 @@ def _apply_config_file(config: Config, path: Path) -> None:
     if "prompt_optimizer" in data:
         config.prompt_optimizer = bool(data["prompt_optimizer"])
 
+    if "adaptive_memory" in data:
+        config.adaptive_memory = bool(data["adaptive_memory"])
+
+    if "auto_route" in data:
+        config.auto_route = bool(data["auto_route"])
+    if "quick_mode" in data:
+        config.quick_mode = bool(data["quick_mode"])
+    if "git_native" in data:
+        config.git_native = bool(data["git_native"])
+    if "banner" in data:
+        _banner_val = str(data["banner"]).lower().strip()
+        if _banner_val in ("full", "compact", "off", "none", "false", "0"):
+            config.banner = "off" if _banner_val in ("off", "none", "false", "0") else _banner_val
+    if "theme" in data:
+        val = data["theme"]
+        if isinstance(val, str) and val in ("default", "minimal", "dracula"):
+            config.theme = val
+    if "auto_route_fast_model" in data:
+        config.auto_route_fast_model = (
+            str(data["auto_route_fast_model"]) if data["auto_route_fast_model"] else None
+        )
+
     if "parallel_tool_execution" in data:
         config.parallel_tool_execution = bool(data["parallel_tool_execution"])
+
+    if "tool_trust" in data and isinstance(data["tool_trust"], dict):
+        _valid_trust = {"always", "ask", "deny"}
+        config.tool_trust = {
+            str(k): str(v).lower()
+            for k, v in data["tool_trust"].items()
+            if str(v).lower() in _valid_trust
+        }
+
+    if "api_dangerous_tools" in data:
+        val = data["api_dangerous_tools"]
+        if isinstance(val, bool):
+            config.api_dangerous_tools = val
+        else:
+            _log.warning("api_dangerous_tools must be a boolean, ignoring")
+
+    if "profiles" in data and isinstance(data["profiles"], dict):
+        config.profiles = {
+            str(k): dict(v) if isinstance(v, dict) else {} for k, v in data["profiles"].items()
+        }
+
+    # ── Verbosity / debug settings ───────────────────────────────
+    if "verbosity" in data:
+        val = _safe_int(data["verbosity"], "verbosity")
+        if val is not None and 0 <= val <= 3:
+            config.verbosity = val
+            if val >= 1:
+                config.debug = True
+            if val >= 2:
+                config.verbose = True
+        elif val is not None:
+            _log.warning("verbosity must be 0–3, using default 0")
+    elif data.get("debug"):
+        # Legacy: debug: true → verbosity 1
+        config.debug = True
+        if config.verbosity == 0:
+            config.verbosity = 1
 
     # ── Allowed write paths ──────────────────────────────────────
     if "allowed_write_paths" in data:
@@ -896,6 +1054,16 @@ def _apply_config_file(config: Config, path: Path) -> None:
             config.allowed_write_paths = [str(p) for p in val]
         else:
             _log.warning("allowed_write_paths must be a string or list, ignoring")
+
+    # ── Plugin tool directories ───────────────────────────────────
+    if "tool_dirs" in data:
+        val = data["tool_dirs"]
+        if isinstance(val, str):
+            config.tool_dirs = [val]
+        elif isinstance(val, list):
+            config.tool_dirs = [str(p) for p in val]
+        else:
+            _log.warning("tool_dirs must be a string or list, ignoring")
 
     # ── Context compression ──────────────────────────────────────
     if "context_compression" in data:
@@ -920,14 +1088,54 @@ def _apply_config_file(config: Config, path: Path) -> None:
                         "context_compression.min_chars must be >= 0, using default %d",
                         config.context_compression_min_chars,
                     )
+            if "emergency_threshold" in cc:
+                val = cc["emergency_threshold"]
+                if isinstance(val, (int, float)) and 0 < val <= 1:
+                    config.context_compression_emergency_threshold = float(val)
+            if "human_msg_max_chars" in cc:
+                val = _safe_int(
+                    cc["human_msg_max_chars"], "context_compression.human_msg_max_chars"
+                )
+                if val is not None and val >= 0:
+                    config.context_compression_human_msg_max_chars = val
             if "model" in cc:
                 config.context_compression_model = str(cc["model"])
+            # ── Tiered Context Cache keys ──────────────────────────────
+            if "tiered_cache" in cc:
+                config.tier_cache_enabled = bool(cc["tiered_cache"])
+            for _frac_key, _frac_attr in (
+                ("tier0_fraction", "tier0_fraction"),
+                ("tier1_fraction", "tier1_fraction"),
+                ("tier2_fraction", "tier2_fraction"),
+            ):
+                if _frac_key in cc:
+                    _fval = _safe_float(cc[_frac_key], f"context_compression.{_frac_key}")
+                    if _fval is not None:
+                        if not (0.01 <= _fval <= 0.95):
+                            raise ConfigError(
+                                f"context_compression.{_frac_key} must be in [0.01, 0.95], "
+                                f"got {_fval}"
+                            )
+                        setattr(config, _frac_attr, _fval)
+            # Validate that the three tier fractions sum to <= 1.0
+            _frac_sum = config.tier0_fraction + config.tier1_fraction + config.tier2_fraction
+            if _frac_sum > 1.0 + 1e-9:
+                raise ConfigError(
+                    f"context_compression tier fractions must sum to <= 1.0, "
+                    f"got {_frac_sum:.4f} "
+                    f"(tier0={config.tier0_fraction}, tier1={config.tier1_fraction}, "
+                    f"tier2={config.tier2_fraction})"
+                )
         else:
             config.context_compression = bool(cc)
 
     # ── MCP servers ──────────────────────────────────────────────
     if "mcp_servers" in data and isinstance(data["mcp_servers"], dict):
         config.mcp_servers = dict(data["mcp_servers"])
+
+    # ── Agent configurations ──────────────────────────────────────
+    if "agents" in data and isinstance(data["agents"], dict):
+        config.agents = dict(data["agents"])
 
     # ── RAG settings ──────────────────────────────────────────────
     if "rag" in data and isinstance(data["rag"], dict):
@@ -956,6 +1164,12 @@ def _apply_config_file(config: Config, path: Path) -> None:
                 )
         if "model" in rag_cfg:
             config.rag.model = rag_cfg["model"]
+        if "score_threshold" in rag_cfg:
+            fval = _safe_float(rag_cfg["score_threshold"], "rag.score_threshold")
+            if fval is not None and 0.0 <= fval <= 1.0:
+                config.rag.score_threshold = fval
+            elif fval is not None:
+                _log.warning("rag.score_threshold must be in [0.0, 1.0], using default")
         if config.rag.chunk_overlap >= config.rag.chunk_size:
             _log.warning(
                 "rag.chunk_overlap (%d) must be less than rag.chunk_size (%d); "
@@ -982,6 +1196,69 @@ def _apply_config_file(config: Config, path: Path) -> None:
                 config.research_delegate_cap_ratio = fval
             elif fval is not None:
                 _log.warning("research_delegate.cap_ratio must be in (0, 1], using default")
+        if "auto" in rd:
+            config.research_delegate_auto = bool(rd["auto"])
+        if "auto_threshold" in rd:
+            fval = _safe_float(rd["auto_threshold"], "research_delegate.auto_threshold")
+            if fval is not None and 0 < fval <= 1:
+                config.research_delegate_auto_threshold = fval
+            elif fval is not None:
+                _log.warning("research_delegate.auto_threshold must be in (0, 1], using default")
+
+    # ── Audit log ─────────────────────────────────────────────────
+    audit_data = data.get("audit_log", {}) or {}
+    if audit_data:
+        if "enabled" in audit_data:
+            config.audit_log_enabled = bool(audit_data["enabled"])
+        if "path" in audit_data:
+            config.audit_log_path = str(audit_data["path"])
+
+    # ── Redis session presence ─────────────────────────────────────
+    if "redis_url" in data:
+        config.redis_url = str(data.get("redis_url", ""))
+    if "redis_session_ttl" in data:
+        val = _safe_int(data["redis_session_ttl"], "redis_session_ttl")
+        if val is not None and val > 0:
+            config.redis_session_ttl = val
+
+    # ── OIDC/SSO ──────────────────────────────────────────────────
+    oidc_data = data.get("oidc", {}) or {}
+    if oidc_data:
+        config.oidc_enabled = bool(oidc_data.get("enabled", False))
+        for _field, _attr in (
+            ("issuer", "oidc_issuer"),
+            ("audience", "oidc_audience"),
+            ("jwks_uri", "oidc_jwks_uri"),
+        ):
+            _raw = oidc_data.get(_field)
+            _val: str | None = str(_raw).strip() if _raw is not None else None
+            setattr(config, _attr, _val or None)
+        if "role_claim" in oidc_data:
+            config.oidc_role_claim = str(oidc_data["role_claim"])
+        _dr = str(oidc_data.get("default_role", "")).strip()
+        if _dr in ("user", "admin"):
+            config.oidc_default_role = _dr
+
+    # ── Per-user quotas ───────────────────────────────────────────
+    quota_data = data.get("quotas", {}) or {}
+    if quota_data:
+        v = quota_data.get("token_budget_per_day")
+        if v is not None and int(v) > 0:
+            config.quota_token_budget_per_day = int(v)
+        v = quota_data.get("requests_per_hour")
+        if v is not None and int(v) > 0:
+            config.quota_requests_per_hour = int(v)
+        v = quota_data.get("max_concurrent_sessions")
+        if v is not None and int(v) > 0:
+            config.quota_max_concurrent_sessions = int(v)
+
+    # ── Self-improvement loop ─────────────────────────────────────
+    if "self_improve_auto_commit" in data:
+        config.self_improve_auto_commit = bool(data["self_improve_auto_commit"])
+
+    # ── Semantic tool index ───────────────────────────────────────
+    if "semantic_tool_index" in data:
+        config.semantic_tool_index = bool(data["semantic_tool_index"])
 
     # ── Legacy top-level provider/model → derive active_model_alias ──
     if config.active_model_alias is None and (_legacy_provider or _legacy_model):
@@ -1304,6 +1581,10 @@ def _apply_env_vars(config: Config) -> None:
     if env_val := os.getenv("COGTRIX_ALLOWED_WRITE_PATHS"):
         config.allowed_write_paths = [p.strip() for p in env_val.split(":") if p.strip()]
 
+    # Plugin tool directories
+    if env_val := os.getenv("COGTRIX_TOOL_DIRS"):
+        config.tool_dirs = [p.strip() for p in env_val.split(":") if p.strip()]
+
 
 def _apply_cli_args(config: Config, args) -> None:
     """Apply settings from command line arguments."""
@@ -1318,17 +1599,33 @@ def _apply_cli_args(config: Config, args) -> None:
     if hasattr(args, "memory_mode") and args.memory_mode:
         config.memory_mode = args.memory_mode
 
-    # Debug and logging settings
-    if hasattr(args, "debug") and args.debug:
+    # Debug and logging settings — --verbosity takes priority over --debug
+    raw_verbosity = getattr(args, "verbosity", None)
+    debug_flag = getattr(args, "debug", False)
+    if raw_verbosity is not None:
+        config.verbosity = max(0, min(3, int(raw_verbosity)))
+        if config.verbosity >= 1:
+            config.debug = True
+            if config.log_file is None:
+                config.log_file = ""
+        if config.verbosity >= 2:
+            config.verbose = True
+    elif debug_flag:
+        # --debug implies full debug+verbose output (verbosity 2)
+        config.verbosity = 2
         config.debug = True
-        # Debug mode auto-enables logging and verbose if not already set
+        config.verbose = True
         if config.log_file is None:
-            config.log_file = ""  # Empty string = use default file
-        config.verbose = True  # Debug mode enables verbose logging
+            config.log_file = ""
 
-    # --verbose can be used without --debug
+    # --verbose without --debug: verbosity 1 (shows LLM interactions)
     if hasattr(args, "verbose") and args.verbose:
         config.verbose = True
+        if config.verbosity == 0:
+            config.verbosity = 1
+            config.debug = True
+            if config.log_file is None:
+                config.log_file = ""
 
     # --log can be used without --debug
     if hasattr(args, "log") and args.log is not None:

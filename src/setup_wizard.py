@@ -195,7 +195,8 @@ def _print_config_box(yaml_text: str) -> None:
     print(
         f"  {_C('\u256d')}{_C('\u2500' * bar_l)}{_BC(header)}{_C('\u2500' * bar_r)}{_C('\u256e')}"
     )
-    for line in yaml_text.rstrip().split("\n"):
+    masked = _mask_secrets(yaml_text)
+    for line in masked.rstrip().split("\n"):
         padded = line.ljust(inner_w)
         print(f"  {_C('\u2502')}{padded}{_C('\u2502')}")
     print(f"  {_C('\u2570')}{_C('\u2500' * inner_w)}{_C('\u256f')}")
@@ -212,13 +213,97 @@ _DOCS_PATH = Path(__file__).resolve().parent.parent / "docs" / "CONFIGURATION.md
 _MAX_DOC_SIZE = 10 * 1024 * 1024  # 10 MB
 _DEFAULT_OUTPUT_PATH = Path.home() / ".cogtrix.yaml"
 
+# ── Doc section helpers ───────────────────────────────────────────────
+
+#: Matches H1/H2/H3 headings for doc section splitting.
+_SECTION_RE = re.compile(r"^#{1,3} (.+)$", re.MULTILINE)
+
+
+def _index_docs(docs_text: str) -> dict[str, str]:
+    """Split docs into sections keyed by heading text (lowercase).
+
+    Returns an ordered dict so the first entry is always the intro/overview.
+    Returns an empty dict when *docs_text* is empty or has no recognisable headings.
+    """
+    if not docs_text.strip():
+        return {}
+    matches = list(_SECTION_RE.finditer(docs_text))
+    if not matches:
+        return {}
+    sections: dict[str, str] = {}
+    for i, match in enumerate(matches):
+        heading = match.group(1).strip()
+        start = match.start()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(docs_text)
+        content = docs_text[start:end].strip()
+        key = heading.lower()
+        # Deduplicate keys that share the same heading text
+        if key in sections:
+            key = f"{key}_{i}"
+        sections[key] = content
+    return sections
+
+
+def _retrieve_relevant_sections(
+    query: str,
+    docs_index: dict[str, str],
+    max_chars: int = 6000,
+) -> str:
+    """Return doc sections most relevant to *query*, up to *max_chars* total.
+
+    Matching: a section is included when its heading (key) contains any
+    non-trivial word (length > 2) from *query*, case-insensitively.
+
+    Always prepends the first section (intro/overview) when there are matches
+    and space allows.  Falls back to the first *max_chars* of the full docs
+    when no sections match.  Returns ``""`` for an empty index.
+    """
+    if not docs_index:
+        return ""
+
+    keys = list(docs_index.keys())
+    words = [w.lower() for w in re.split(r"\W+", query) if len(w) > 2]
+
+    matched_keys = [k for k in keys if any(word in k for word in words)]
+
+    if not matched_keys:
+        # Fallback: first max_chars of full docs (sections in order)
+        full = "\n\n".join(docs_index.values())
+        return full[:max_chars]
+
+    # Build ordered result: intro first, then matched sections (no duplicates)
+    result_keys: list[str] = []
+    seen: set[str] = set()
+    if keys:
+        result_keys.append(keys[0])
+        seen.add(keys[0])
+    for k in matched_keys:
+        if k not in seen:
+            result_keys.append(k)
+            seen.add(k)
+
+    parts: list[str] = []
+    total = 0
+    for k in result_keys:
+        content = docs_index[k]
+        gap = 2 if parts else 0  # "\n\n" separator
+        if total + gap + len(content) > max_chars:
+            remaining = max_chars - total - gap
+            if remaining > 200:
+                parts.append(content[:remaining])
+            break
+        parts.append(content)
+        total += gap + len(content)
+
+    return "\n\n".join(parts)
+
+
 _WIZARD_SYSTEM_PROMPT = Template("""\
 You are the Cogtrix setup wizard. Your job is to help the user create a \
 configuration file for Cogtrix by asking targeted questions.
 
-## Documentation
-
-$docs
+Reference the documentation sections provided in each user message when relevant. \
+Ask one question at a time. Output only valid YAML in fenced blocks when ready.
 
 ## Existing Configuration
 
@@ -272,6 +357,58 @@ Model settings (model name, temperature, context_window, max_tokens) go in the m
 """)
 
 
+# ── YAML secret sanitization ─────────────────────────────────────────
+
+
+#: Case-insensitive substrings that identify secret-bearing keys.
+_SECRET_KEY_PATTERNS = (
+    "api_key",
+    "apikey",
+    "token",
+    "secret",
+    "password",
+    "passwd",
+    "credential",
+    "private_key",
+    "client_secret",
+)
+
+
+def _sanitize_yaml_for_prompt(yaml_str: str) -> str:
+    """Redact secret values from a YAML string before injecting into an LLM prompt.
+
+    Walks the parsed YAML tree recursively and replaces the value of any key
+    whose name contains a secret-bearing substring (case-insensitive) with
+    ``"***"``.  Non-secret fields (model, provider, base_url, etc.) are
+    preserved unchanged so the wizard can still read the existing config.
+
+    Returns ``"[existing config redacted — could not parse]"`` if the YAML
+    cannot be parsed, and an empty string unchanged if the input is empty.
+    """
+    if not yaml_str or not yaml_str.strip():
+        return yaml_str
+
+    def _is_secret_key(key: str) -> bool:
+        low = str(key).lower()
+        return any(pat in low for pat in _SECRET_KEY_PATTERNS)
+
+    def _walk(node: Any) -> Any:
+        if isinstance(node, dict):
+            return {k: ("***" if _is_secret_key(k) else _walk(v)) for k, v in node.items()}
+        if isinstance(node, list):
+            return [_walk(item) for item in node]
+        return node
+
+    try:
+        parsed = yaml.safe_load(yaml_str)
+        if parsed is None:
+            return yaml_str  # empty YAML (e.g. whitespace-only) — return as-is
+        sanitized = _walk(parsed)
+        return yaml.dump(sanitized, default_flow_style=False, allow_unicode=True)
+    except yaml.YAMLError:
+        return "[existing config redacted — could not parse]"
+
+
 # ── Main wizard ──────────────────────────────────────────────────────
 
 
@@ -316,10 +453,12 @@ def run_setup_wizard(
 
     # Build system prompt — Template uses $placeholder syntax so curly braces in
     # docs/config content are passed through without escaping.
-    existing_config_raw = existing_yaml or "No existing configuration."
+    # Sanitize the existing config so API keys are not sent to the LLM.
+    existing_config_raw = (
+        _sanitize_yaml_for_prompt(existing_yaml) if existing_yaml else "No existing configuration."
+    )
     production_info = _maybe_configure_production_model(bootstrap_info, env)
     system_prompt = _WIZARD_SYSTEM_PROMPT.substitute(
-        docs=docs,
         existing_config=existing_config_raw,
         bootstrap_provider=bootstrap_info["provider"],
         bootstrap_type=bootstrap_info.get("type", "openai"),
@@ -329,10 +468,12 @@ def run_setup_wizard(
         production_context=_format_production_context(bootstrap_info, production_info),
     )
 
+    docs_index = _index_docs(docs)
+
     # ── Step 2: LLM conversation ─────────────────────────────────
     _step(2, "Configure")
     print(f"  {_D('Type quit to cancel at any time.')}\n")
-    final_response = _run_conversation(llm, system_prompt)
+    final_response = _run_conversation(llm, system_prompt, docs_index=docs_index)
 
     # ── Step 3: validate and write ───────────────────────────────
     _step(3, "Save")
@@ -340,7 +481,9 @@ def run_setup_wizard(
     _validate_and_write(yaml_content, bootstrap_info, output, production_info=production_info)
 
     print(f"\n  {_BG(chr(0x2713))} Config written to {_B(str(output))}")
-    print(f"  {_D('Run')} python cogtrix.py {_D('to start Cogtrix.')}\n")
+    print(
+        f"  {_D('Run')} python cogtrix.py {_D('to start Cogtrix.')}\n"
+    )  # codeql[py/clear-text-logging-sensitive-data] no credentials in this message; api_key from bootstrap_info is masked before any display via _mask_secrets()
 
 
 # ── Phase 1: bootstrap ──────────────────────────────────────────────
@@ -525,7 +668,7 @@ def _format_production_context(
         f"- Provider type: {production_info.get('type', 'openai')}\n"
         f"- Base URL: {production_info.get('base_url') or '(default)'}\n"
         f"- Model: {production_info['model']}\n"
-        f"- API key configured: {'yes' if production_info.get('api_key') else 'no'}\n"
+        f"- API key configured: {'yes' if production_info.get('api_key') else 'no'}\n"  # codeql[py/clear-text-logging-sensitive-data] only presence is reported, not the key value itself
         "\n"
         "Add this as a second provider entry in the config and set it as "
         "models.default. Keep the bootstrap provider in the providers section "
@@ -978,16 +1121,35 @@ def _load_existing_config() -> tuple[str, Path | None]:
 # ── Phase 2: conversation ───────────────────────────────────────────
 
 
-def _run_conversation(llm: Any, system_prompt: str) -> str:
+def _run_conversation(
+    llm: Any,
+    system_prompt: str,
+    docs_index: dict[str, str] | None = None,
+) -> str:
     """Phase 2: interactive LLM conversation loop.
 
     The LLM asks questions one at a time; the user responds. When the LLM
     produces a ```yaml``` block, the user is asked to confirm.
 
+    Args:
+        docs_index: Optional section index built by :func:`_index_docs`.
+            When provided, relevant sections are injected as a prefix to each
+            human message so the LLM has just-in-time documentation context
+            without embedding the entire file upfront.
+
     Returns:
         The final LLM response containing the YAML configuration.
     """
     from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+
+    def _augment(user_input: str) -> str:
+        """Prepend relevant doc sections to *user_input* when available."""
+        if not docs_index:
+            return user_input
+        relevant = _retrieve_relevant_sections(user_input, docs_index)
+        if not relevant:
+            return user_input
+        return f"[Relevant documentation]\n{relevant}\n\n[User question]\n{user_input}"
 
     # Strict OpenAI-compatible backends (vLLM, LiteLLM) reject a messages list
     # that contains only a SystemMessage — they require at least one HumanMessage.
@@ -1023,7 +1185,7 @@ def _run_conversation(llm: Any, system_prompt: str) -> str:
             if user_input.lower() in ("quit", "exit", "cancel"):
                 print(f"  {_D('Setup cancelled.')}")
                 raise SystemExit(0)
-            messages.append(HumanMessage(content=user_input))
+            messages.append(HumanMessage(content=_augment(user_input)))
             with _spinner("Thinking"):
                 response = llm.invoke(messages)
             ai_text = response.content if hasattr(response, "content") else str(response)
@@ -1043,7 +1205,7 @@ def _run_conversation(llm: Any, system_prompt: str) -> str:
             print(f"  {_D('Setup cancelled.')}")
             raise SystemExit(0)
 
-        messages.append(HumanMessage(content=user_input))
+        messages.append(HumanMessage(content=_augment(user_input)))
         with _spinner("Thinking"):
             response = llm.invoke(messages)
         ai_text = response.content if hasattr(response, "content") else str(response)
@@ -1180,7 +1342,9 @@ def _validate_and_write(
 
     # Serialize the bootstrap-injected data (not the original LLM text)
     final_yaml = yaml.dump(data, default_flow_style=False, sort_keys=False)
-    masked = _mask_secrets(final_yaml)
+    masked = _mask_secrets(
+        final_yaml
+    )  # codeql[py/clear-text-logging-sensitive-data] api_key values are replaced by _mask_secrets() before any display
     print()
     _print_config_box(masked)
     print()

@@ -11,13 +11,14 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.api.auth import TokenData, hash_password, require_admin
+from src.api.auth import TokenData, get_current_user, hash_password, require_admin
 from src.api.db import get_db
 from src.api.db.repositories.users import UserRepository
+from src.api.quota import _quota_config_from_app_config, get_user_quota_status
 from src.api.schemas.common import APIResponse
 from src.api.schemas.user import UserCreateRequest, UserOut, UserUpdateRequest
 
@@ -32,6 +33,35 @@ def _user_to_out(user: object) -> UserOut:
         role=getattr(user, "role", "user"),
         created_at=getattr(user, "created_at", None),
     )
+
+
+@router.get(
+    "/me/quota",
+    summary="Get my quota status",
+    description="Return quota limits and current usage for the authenticated user.",
+    response_model=APIResponse[dict],
+    responses={
+        200: {"description": "Quota status returned."},
+        401: {"description": "Not authenticated."},
+    },
+)
+async def get_my_quota(
+    request: Request,
+    current_user: TokenData = Depends(get_current_user),
+) -> APIResponse[dict]:
+    """Return quota limits and usage for the current user.
+
+    Auth: bearer token required.
+    Error codes: UNAUTHORIZED, TOKEN_EXPIRED.
+    """
+    app_config = getattr(request.app.state, "config", None)
+    quota_cfg = _quota_config_from_app_config(app_config) if app_config is not None else None
+    from src.api.quota import QuotaConfig
+
+    status_data = get_user_quota_status(
+        current_user.user_id, quota_cfg if quota_cfg is not None else QuotaConfig()
+    )
+    return APIResponse(data=status_data)
 
 
 @router.get(

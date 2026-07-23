@@ -27,6 +27,31 @@ DEFAULT_LOG_FILE = "cogtrix.log"
 # Verbose logging flag - when True, log full content without truncation
 _verbose_logging: bool = False
 
+# Verbosity level: 0=normal, 1=debug, 2=verbose, 3=trace
+_verbosity: int = 0
+
+
+def get_verbosity() -> int:
+    """Return the current verbosity level (0–3)."""
+    return _verbosity
+
+
+def set_verbosity(level: int) -> None:
+    """Set the verbosity level (0–3), clamped to valid range."""
+    global _verbosity, _verbose_logging
+    _verbosity = max(0, min(3, int(level)))
+    _verbose_logging = _verbosity >= 2
+
+
+def is_verbose() -> bool:
+    """Return True when verbosity is 2 (verbose) or higher."""
+    return _verbosity >= 2
+
+
+def is_trace() -> bool:
+    """Return True when verbosity is 3 (trace)."""
+    return _verbosity >= 3
+
 
 # Patterns that look like secrets (compiled once at import time)
 _SENSITIVE_RE = _re.compile(
@@ -109,6 +134,7 @@ def setup_logging(
     console_output: bool = False,
     verbose: bool = True,
     stream_output: bool = False,
+    verbosity: int = 0,
 ) -> logging.Logger:
     """
     Configure logging for Cogtrix application.
@@ -122,12 +148,23 @@ def setup_logging(
         stream_output: Route logs to stdout/stderr instead of a file.
                        DEBUG/INFO → stdout; WARNING/ERROR/CRITICAL → stderr.
                        Ignored when log_file is explicitly provided.
+        verbosity: Verbosity level 0–3.  0=INFO, 1+=DEBUG.  Levels 2+ enable
+                   full tool I/O logging; level 3 enables LangGraph/memory trace
+                   logging.  When provided, overrides the ``debug`` bool for
+                   level selection and sets the module-level ``_verbosity`` flag
+                   so ``is_verbose()`` / ``is_trace()`` reflect the active level.
 
     Returns:
         Configured logger instance.
     """
     global _verbose_logging
-    _verbose_logging = verbose
+    # verbosity takes precedence over the legacy debug/verbose booleans when non-zero
+    if verbosity:
+        set_verbosity(verbosity)
+        debug = verbosity >= 1
+        verbose = verbosity >= 2
+    else:
+        _verbose_logging = verbose
 
     # Clear any existing handlers
     logger.handlers.clear()

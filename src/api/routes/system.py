@@ -24,6 +24,7 @@ from fastapi import APIRouter, Depends, Query, Request, WebSocket, WebSocketDisc
 from src.api.auth import TokenData, _decode_jwt, get_current_user, require_admin
 from src.api.schemas.common import APIResponse
 from src.api.schemas.system import DebugToggleRequest, SystemInfoOut
+from src.logging_config import get_verbosity, set_verbosity
 
 log = logging.getLogger("cogtrix.api.system")
 
@@ -53,6 +54,7 @@ def _make_system_info(request: Request) -> SystemInfoOut:
         python_version=sys.version.split()[0],
         debug=bool(getattr(cfg, "debug", False) if cfg else False),
         verbose=bool(getattr(cfg, "verbose", False) if cfg else False),
+        verbosity=int(getattr(cfg, "verbosity", get_verbosity()) if cfg else get_verbosity()),
         uptime_s=uptime,
         started_at=_STARTUP_DT,
     )
@@ -102,18 +104,32 @@ async def toggle_debug(
     Error codes: UNAUTHORIZED, TOKEN_EXPIRED, FORBIDDEN.
     """
     cfg = getattr(request.app.state, "config", None)
-    if body is None or body.debug is None:
-        # No body or no explicit debug value — toggle current debug state
-        current_debug = getattr(cfg, "debug", False) if cfg else False
-        target_debug = not current_debug
+
+    if body is not None and body.verbosity is not None:
+        # Verbosity field takes full control
+        new_verbosity = body.verbosity
+        target_debug = new_verbosity >= 1
+        target_verbose = new_verbosity >= 2
     else:
-        target_debug = body.debug
+        # Legacy debug toggle behaviour
+        if body is None or body.debug is None:
+            current_debug = getattr(cfg, "debug", False) if cfg else False
+            target_debug = not current_debug
+        else:
+            target_debug = body.debug
+        target_verbose = body.verbose if body is not None and body.verbose is not None else None
+        new_verbosity = 1 if target_debug else 0
+
     level = logging.DEBUG if target_debug else logging.INFO
     logging.getLogger("cogtrix").setLevel(level)
+    set_verbosity(new_verbosity)
+
     if cfg is not None:
         cfg.debug = target_debug
-        if body is not None and body.verbose is not None:
-            cfg.verbose = body.verbose
+        cfg.verbosity = new_verbosity
+        if target_verbose is not None:
+            cfg.verbose = target_verbose
+
     return APIResponse(data=_make_system_info(request))
 
 

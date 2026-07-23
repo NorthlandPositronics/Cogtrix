@@ -11,23 +11,39 @@ import concurrent.futures
 import re
 import secrets
 import threading
+import time
+from collections.abc import Callable
 from typing import Any
 
 from src.logging_config import get_logger
 
 try:
-    from langchain_core.messages import AIMessage, ToolMessage
+    from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
     _HAS_LANGCHAIN = True
 except ImportError:
     AIMessage = None  # type: ignore[misc, assignment]
+    HumanMessage = None  # type: ignore[misc, assignment]
     ToolMessage = None  # type: ignore[misc, assignment]
     _HAS_LANGCHAIN = False
 
 COMPRESSION_MIN_AGE_CYCLES = 3
 COMPRESSION_MIN_CHARS = 2_000
 _COMPRESSION_THRESHOLD_RATIO = 0.72
+_MID_TURN_COMPRESSION_THRESHOLD: float = (
+    0.60  # char-based threshold for pre-invoke mid-turn compression
+)
+_CHARS_PER_TOKEN: int = (
+    2  # conservative chars-per-token estimate; web/JSON content averages ~1.5-2.5
+)
+_EMERGENCY_THRESHOLD_RATIO = 0.85  # trigger emergency min_age=0 pass above this (char-based)
+_EMERGENCY_TOKEN_THRESHOLD_RATIO = (
+    0.90  # trigger emergency min_age=0 pass when token pressure >= 90%
+)
+_DEFAULT_HUMAN_MSG_MAX_CHARS = 20_000  # HumanMessage cap; 0 = disabled
 _FALLBACK_MAX_CHARS = 30_000
+_COMPRESSION_TOTAL_TIMEOUT_SECS: int = 120  # 2-minute hard deadline for entire compression pass
+_COMPRESSION_PER_CALL_TIMEOUT_SECS: int = 30  # 30-second per-LLM-call timeout
 
 _COMPRESSION_POOL: concurrent.futures.ThreadPoolExecutor | None = None
 _COMPRESSION_POOL_LOCK = threading.Lock()
@@ -141,6 +157,13 @@ def apply_message_compression(
     max_context_tokens: int | None,
     min_age_cycles: int = COMPRESSION_MIN_AGE_CYCLES,
     min_chars: int = COMPRESSION_MIN_CHARS,
+    emergency_threshold: float = _EMERGENCY_THRESHOLD_RATIO,
+    human_msg_max_chars: int = _DEFAULT_HUMAN_MSG_MAX_CHARS,
+    ai_min_chars: int = 500,
+    actual_input_tokens: int = 0,
+    timeout_info: dict | None = None,
+    progress_callback: Callable[[int, int], None] | None = None,
+    min_age_override: int | None = None,
 ) -> list:
     """Build a compressed copy of messages for the LLM invocation.
 
@@ -166,11 +189,24 @@ def apply_message_compression(
         return messages
 
     total_chars = sum(_content_len(m) for m in messages)
-    context_chars = max_context_tokens * 4
+    context_chars = max_context_tokens * _CHARS_PER_TOKEN
     threshold_chars = int(context_chars * _COMPRESSION_THRESHOLD_RATIO)
 
-    if total_chars < threshold_chars:
-        return messages
+    # When min_age_override is set, the caller (_maybe_compress) has already verified
+    # the threshold — bypass token/char threshold checks and compress immediately.
+    if min_age_override is None:
+        # Token-based trigger (primary — uses actual prompt token count, not char estimate)
+        if actual_input_tokens > 0 and max_context_tokens > 0:
+            token_pressure = actual_input_tokens / max_context_tokens
+            if token_pressure < _COMPRESSION_THRESHOLD_RATIO:
+                return messages
+            # Emergency: >= 90% token pressure — override min_age/min_chars to compress aggressively
+            if token_pressure >= _EMERGENCY_TOKEN_THRESHOLD_RATIO:
+                min_age_cycles = 0
+                min_chars = 0
+        elif total_chars < threshold_chars:
+            # Fallback when no actual token data is available
+            return messages
 
     log = get_logger()
     log.debug(
@@ -179,6 +215,29 @@ def apply_message_compression(
         total_chars,
         threshold_chars,
     )
+
+    # Overall deadline for this entire compression pass
+    _compress_deadline = time.monotonic() + _COMPRESSION_TOTAL_TIMEOUT_SECS
+    _timed_out = False
+    _tool_completed_count = 0
+    _ai_completed_count = 0
+
+    # Determine effective age threshold.
+    # When min_age_override is set, use it directly (caller controls the age policy).
+    # Otherwise, lower min_age_cycles to 1 when context is at emergency char level.
+    if min_age_override is not None:
+        effective_min_age = min_age_override
+    else:
+        effective_min_age = min_age_cycles
+        emergency_chars = int(context_chars * emergency_threshold)
+        if total_chars >= emergency_chars:
+            effective_min_age = min(1, min_age_cycles)
+            log.debug(
+                "Emergency compression pass at cycle %d (total_chars=%d >= emergency=%d)",
+                call_count,
+                total_chars,
+                emergency_chars,
+            )
 
     # Calculate age of each ToolMessage (number of AIMessages after it).
     ai_count_from_end = 0
@@ -202,7 +261,7 @@ def apply_message_compression(
             continue
         content = raw_content or ""
         age = msg_age.get(i, 0)
-        if age < min_age_cycles or len(content) < min_chars:
+        if age < effective_min_age or len(content) < min_chars:
             continue
         if tcid and tcid in compression_cache:
             cached[i] = compression_cache[tcid]
@@ -210,6 +269,26 @@ def apply_message_compression(
             tool_name = getattr(msg, "name", "unknown_tool")
             tool_name = re.sub(r"[\r\n\x00]", "", tool_name)[:100]
             eligible[i] = (content, tool_name, tcid or "")
+
+    # Pre-compute AI-eligible count so the progress callback knows the total upfront.
+    _ai_indices_pre = [
+        i
+        for i, m in enumerate(messages)
+        if isinstance(m, AIMessage) and isinstance(getattr(m, "content", ""), str)
+    ]
+    _ai_protected_pre = (
+        set(_ai_indices_pre[-2:]) if len(_ai_indices_pre) >= 2 else set(_ai_indices_pre)
+    )
+    _ai_eligible_count_pre = sum(
+        1
+        for i in _ai_indices_pre
+        if i not in _ai_protected_pre
+        and isinstance(getattr(messages[i], "content", ""), str)
+        and len(getattr(messages[i], "content", "")) >= ai_min_chars
+        and sum(1 for j in _ai_indices_pre if j > i) >= effective_min_age
+    )
+    _total_eligible = len(eligible) + _ai_eligible_count_pre
+    _progress_completed = 0
 
     # Compress eligible messages in parallel. LangChain LLM.invoke() makes
     # stateless HTTP calls that are safe for concurrent use.
@@ -231,9 +310,22 @@ def apply_message_compression(
         total_timeout = 60 * len(eligible)
         try:
             for future in concurrent.futures.as_completed(futures, timeout=total_timeout):
+                # Check overall compression deadline
+                if time.monotonic() > _compress_deadline:
+                    _timed_out = True
+                    log.warning(
+                        "Compression deadline reached — partial compression applied"
+                        " (%d/%d done)",
+                        _tool_completed_count,
+                        len(futures),
+                    )
+                    for f in futures:
+                        if not f.done():
+                            f.cancel()
+                    break
                 idx = futures[future]
                 try:
-                    _, compressed = future.result(timeout=120)
+                    _, compressed = future.result(timeout=_COMPRESSION_PER_CALL_TIMEOUT_SECS)
                 except (TimeoutError, concurrent.futures.TimeoutError):
                     content = eligible[idx][0]
                     log.warning(
@@ -245,7 +337,12 @@ def apply_message_compression(
                         content, min(len(content) * 3 // 4, _FALLBACK_MAX_CHARS)
                     )
                 compressed_results[idx] = compressed
+                _tool_completed_count += 1
+                _progress_completed += 1
+                if progress_callback:
+                    progress_callback(_progress_completed, _total_eligible)
         except (TimeoutError, concurrent.futures.TimeoutError):
+            _timed_out = True
             not_done = len(futures) - len(compressed_results)
             log.warning(
                 "Compression pool timed out (%ds) — %d message(s) not compressed,"
@@ -267,6 +364,31 @@ def apply_message_compression(
             tcid = eligible[idx][2]
             if tcid:
                 compression_cache[tcid] = compressed
+
+    # Apply HumanMessage size cap
+    if human_msg_max_chars > 0:
+        try:
+            from langchain_core.messages import HumanMessage as _HM
+
+            truncated_messages = []
+            for msg in messages:
+                if isinstance(msg, _HM):
+                    content = getattr(msg, "content", "")
+                    if isinstance(content, str) and len(content) > human_msg_max_chars:
+                        half = human_msg_max_chars // 2
+                        truncated = (
+                            content[:half]
+                            + f"\n\n[... truncated {len(content) - human_msg_max_chars:,} chars ...]\n\n"
+                            + content[-half:]
+                        )
+                        truncated_messages.append(_HM(content=truncated))
+                    else:
+                        truncated_messages.append(msg)
+                else:
+                    truncated_messages.append(msg)
+            messages = truncated_messages
+        except ImportError:
+            pass
 
     # Assemble result list, tracking saved chars incrementally.
     result = []
@@ -295,6 +417,129 @@ def apply_message_compression(
             new_total,
             (1 - new_total / total_chars) * 100 if total_chars else 0,
         )
+
+    # --- AIMessage compression pass ---
+    # Count total AIMessages to identify the most recent 2 (always protected).
+    ai_indices = [
+        i
+        for i, m in enumerate(result)
+        if isinstance(m, AIMessage) and isinstance(getattr(m, "content", ""), str)
+    ]
+    protected = set(ai_indices[-2:]) if len(ai_indices) >= 2 else set(ai_indices)
+
+    ai_eligible: list[int] = []
+    for i, msg in enumerate(result):
+        if not isinstance(msg, AIMessage):
+            continue
+        if i in protected:
+            continue
+        content = getattr(msg, "content", "")
+        if not isinstance(content, str) or len(content) < ai_min_chars:
+            continue
+        # Age: number of AIMessages after this one in the result list.
+        age = sum(1 for j in ai_indices if j > i)
+        if age < effective_min_age:
+            continue
+        ai_eligible.append(i)
+
+    ai_compressed_count = 0
+
+    def _compress_ai_one(idx: int, content: str) -> tuple[int, str | None]:
+        """Compress one AIMessage via LLM; returns (idx, summary) or (idx, None)."""
+        try:
+            resp = llm.invoke(
+                [
+                    HumanMessage(
+                        content=(
+                            f"Summarise this assistant response concisely, preserving all "
+                            f"key facts, conclusions, and data:\n\n{content[:8000]}"
+                        )
+                    )
+                ]
+            )
+            summary = getattr(resp, "content", "").strip()
+            return idx, summary if summary else None
+        except Exception as exc:
+            log.debug("AIMessage compression failed at index %d: %s", idx, exc)
+            return idx, None
+
+    # Submit eligible AIMessages to the pool — check deadline before each submission.
+    ai_futures: dict[concurrent.futures.Future, int] = {}
+    pool = _get_compression_pool()
+    for i in ai_eligible:
+        if _timed_out or time.monotonic() > _compress_deadline:
+            _timed_out = True
+            log.warning(
+                "Compression deadline reached — %d/%d AI messages skipped",
+                len(ai_eligible) - len(ai_futures),
+                len(ai_eligible),
+            )
+            break
+        msg = result[i]
+        content = getattr(msg, "content", "")
+        ai_futures[pool.submit(_compress_ai_one, i, content)] = i
+
+    # Collect results with per-call timeout, bounded by the overall deadline.
+    if ai_futures:
+        remaining_secs = max(0.1, _compress_deadline - time.monotonic())
+        try:
+            for future in concurrent.futures.as_completed(ai_futures, timeout=remaining_secs):
+                try:
+                    idx, summary = future.result(timeout=_COMPRESSION_PER_CALL_TIMEOUT_SECS)
+                except (TimeoutError, concurrent.futures.TimeoutError):
+                    idx = ai_futures[future]
+                    log.debug("AIMessage compression per-call timed out at index %d", idx)
+                    _ai_completed_count += 1
+                    continue
+                except Exception as exc:
+                    idx = ai_futures[future]
+                    log.debug("AIMessage compression failed at index %d: %s", idx, exc)
+                    _ai_completed_count += 1
+                    continue
+                _ai_completed_count += 1
+                _progress_completed += 1
+                if progress_callback:
+                    progress_callback(_progress_completed, _total_eligible)
+                if summary:
+                    msg = result[idx]
+                    result[idx] = AIMessage(
+                        content=f"[Summary: {summary}]",
+                        id=getattr(msg, "id", None),
+                    )
+                    ai_compressed_count += 1
+                    log.debug("Compressed AIMessage at index %d", idx)
+                if time.monotonic() > _compress_deadline:
+                    _timed_out = True
+                    not_done = len(ai_futures) - _ai_completed_count
+                    log.warning(
+                        "Compression deadline reached — %d AIMessage(s) not compressed",
+                        not_done,
+                    )
+                    for f in ai_futures:
+                        if not f.done():
+                            f.cancel()
+                    break
+        except (TimeoutError, concurrent.futures.TimeoutError):
+            _timed_out = True
+            not_done = len(ai_futures) - _ai_completed_count
+            log.warning(
+                "Compression deadline reached — %d AIMessage(s) not compressed",
+                not_done,
+            )
+            for f in ai_futures:
+                if not f.done():
+                    f.cancel()
+
+    if ai_compressed_count > 0:
+        log.info("Compressed %d AI messages", ai_compressed_count)
+
+    # Populate timeout_info output param when provided.
+    if timeout_info is not None:
+        total_eligible_for_llm = len(eligible) + len(ai_eligible)
+        completed = _tool_completed_count + _ai_completed_count
+        timeout_info["timed_out"] = _timed_out
+        timeout_info["completed"] = completed
+        timeout_info["total"] = total_eligible_for_llm
 
     return result
 

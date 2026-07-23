@@ -1,0 +1,29 @@
+.TH COGTRIX 8 "2026-03-30" "cogtrix 1.0.0" "Cogtrix Manual"
+.SH NAME
+cogtrix \- system administration notes
+.SH DESCRIPTION
+This page covers installation, upgrades, and operational considerations
+for Cogtrix running as a user or system tool.
+.SH INSTALLATION
+Install from source:
+.PP
+.nf
+    git clone https://github.com/NorthlandPositronics/Cogtrix
+    cd Cogtrix
+    uv sync
+    uv run cogtrix.py --setup
+.fi
+.SH CONFIGURATION
+See
+.BR cogtrix (5)
+for config file format and environment variables.
+.SH FILES
+.TP
+.B ~/.cogtrix.json
+User configuration.
+.TP
+.B COGTRIX.md
+Project-level context file auto-loaded on startup.
+.SH SEE ALSO
+.BR cogtrix (1),
+.BR cogtrix (5)

@@ -51,9 +51,18 @@ DEFAULT_SYSTEM_PROMPT = """You are a capable AI assistant that COMPLETES TASKS e
 
 ## Core Principles
 - Execute every task step-by-step until complete. Never stop halfway.
-- Use tools proactively — never ask for data you can obtain yourself.
+- Use tools when needed — if a task requires external data or actions, use the
+  appropriate tools. For conversational exchanges, respond directly.
 - Synthesize tool results into one complete, polished response.
 - For complex requests: break down, execute each part, combine results.
+
+## When NOT to use tools
+For conversational messages, greetings, or questions answerable from training data
+(e.g. "hi", "how are you", "what is 2+2", "explain X"), respond directly without
+calling any tools. Reserve tools for tasks that genuinely require:
+- External data (web search, file read, API call)
+- Computation or actions beyond text generation
+- Information that may have changed since training
 
 ## Accuracy
 - Base answers strictly on tool results. Do not fill gaps with assumptions.
@@ -72,8 +81,10 @@ You start with one meta-tool: `request_tools`. Call it to see the catalog, then 
 ### Batching
 Batch independent tool calls in a single response for parallel execution. Keep dependent operations sequential. Keep `request_tools` calls alone.
 
-## Research
-Issue at least three varied searches before synthesizing. Fetch full pages via `http_get` when snippets are insufficient.
+## Research (only when web search is genuinely needed)
+When the task requires current or external information: issue at least three varied
+searches before synthesizing. Fetch full pages via `http_get` when snippets are
+insufficient. Do NOT search for information you already know from training.
 
 ## User Constraints
 Trust user-stated facts. Don't verify unless they demonstrably fail.
@@ -535,10 +546,13 @@ def prepare_messages_with_context(
 
     result: list[Any] = []
 
-    # Inject context prefix as a SystemMessage if present
-    if context_prefix and SystemMessage is not None:
+    # Inject context prefix as a HumanMessage.  Using SystemMessage here
+    # would place a second system-role message after position 0, which
+    # strict OpenAI-compatible providers (vLLM, Qwen3) reject with a
+    # validation error (BUG-238).
+    if context_prefix:
         ctx_content = f"Current context:\n{context_prefix}"
-        result.append(SystemMessage(content=ctx_content))
+        result.append(HumanMessage(content=ctx_content))
 
     # Add conversation history
     result.extend(history_messages)

@@ -155,9 +155,7 @@ def tavily_search(
         Formatted search results with extracted content.
     """
     if not TAVILY_AVAILABLE:
-        return (
-            "Error: tavily-python is not installed. " "Install it with: pip install tavily-python"
-        )
+        return "Error: tavily-python is not installed. " "Run: uv add tavily-python"
 
     if not query.strip():
         return "Error: Empty search query"
@@ -234,9 +232,7 @@ def tavily_extract(urls: list[str]) -> str:
         Extracted text content from each URL.
     """
     if not TAVILY_AVAILABLE:
-        return (
-            "Error: tavily-python is not installed. " "Install it with: pip install tavily-python"
-        )
+        return "Error: tavily-python is not installed. " "Run: uv add tavily-python"
 
     if not urls:
         return "Error: No URLs provided"

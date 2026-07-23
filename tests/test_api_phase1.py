@@ -26,6 +26,7 @@ from sqlalchemy.ext.asyncio import (  # noqa: E402
     async_sessionmaker,
     create_async_engine,
 )
+from sqlalchemy.pool import StaticPool
 
 # ---------------------------------------------------------------------------
 # Environment setup — must happen before any src.api imports
@@ -57,7 +58,12 @@ from src.api.db.repositories.users import UserRepository  # noqa: E402
 @pytest_asyncio.fixture()
 async def db_session() -> AsyncGenerator[AsyncSession]:
     """Yield a fresh in-memory SQLite session for each test."""
-    engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
+    engine = create_async_engine(
+        "sqlite+aiosqlite:///:memory:",
+        echo=False,
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
@@ -230,7 +236,12 @@ def test_app():
     from src.api.db.engine import Base as _Base
 
     # Build a dedicated in-memory engine for the test app
-    test_engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
+    test_engine = create_async_engine(
+        "sqlite+aiosqlite:///:memory:",
+        echo=False,
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
     test_session_factory = async_sessionmaker(test_engine, expire_on_commit=False)
 
     # Synchronously create tables

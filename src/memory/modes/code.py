@@ -196,6 +196,7 @@ class CodeDevelopmentMemoryManager(BaseMemoryManager):
         self._messages = self.store.load_history(self.session_id)
         self._messages = self.sanitize_history(self._messages)
         self._load_hybrid_meta()
+        self._load_tier_cache()
         self._load_mode_meta()
         self._clamp_summary_idx()
         self._loaded = True
@@ -238,13 +239,8 @@ class CodeDevelopmentMemoryManager(BaseMemoryManager):
         # Record the moment the user sent this message
         self._pending_user_ts = self._now_ts()
 
-        window_size = self._mode_config["working_memory_size"]
-        context_messages = self._messages[-window_size:] if self._messages else []
-
-        # Inject timestamps so the LLM has temporal awareness
-        context_messages = self._inject_timestamps(context_messages)
-
-        # Build context prefix with code-specific information
+        # ── Mode-specific prefix (task, files, errors, changes) ──────────
+        # Built before message selection so both paths return a consistent prefix.
         prefix_parts = []
 
         # Hybrid memory (summary + recall)
@@ -259,14 +255,14 @@ class CodeDevelopmentMemoryManager(BaseMemoryManager):
 
             if self._current_task.steps_completed:
                 steps = self._current_task.steps_completed[-5:]
-                steps_text = "\n".join(f"  ✓ {s}" for s in steps)
+                steps_text = "\n".join(f"  \u2713 {s}" for s in steps)
                 task_lines.append(f"**Completed:**\n{steps_text}")
 
             if self._current_task.current_step:
                 task_lines.append(f"**Working on:** {self._current_task.current_step}")
 
             if self._current_task.blockers:
-                blockers = "\n".join(f"  ⚠ {b}" for b in self._current_task.blockers)
+                blockers = "\n".join(f"  \u26a0 {b}" for b in self._current_task.blockers)
                 task_lines.append(f"**Blockers:**\n{blockers}")
 
             prefix_parts.append("\n".join(task_lines))
@@ -296,15 +292,57 @@ class CodeDevelopmentMemoryManager(BaseMemoryManager):
 
         # Recent errors
         if self._recent_errors:
-            errors_text = "\n".join(f"  • {e[:100]}" for e in self._recent_errors)
+            errors_text = "\n".join(f"  \u2022 {e[:100]}" for e in self._recent_errors)
             prefix_parts.append(f"**Recent errors:**\n{errors_text}")
 
         # Recent changes
         if self._changes_made:
-            changes_text = "\n".join(f"  • {c}" for c in self._changes_made[-5:])
+            changes_text = "\n".join(f"  \u2022 {c}" for c in self._changes_made[-5:])
             prefix_parts.append(f"**Recent changes:**\n{changes_text}")
 
         context_prefix = "\n\n".join(prefix_parts) if prefix_parts else None
+
+        # ── Tiered context assembly ──────────────────────────────────────
+        with self._hybrid_lock:
+            tier_ready = self._tier_cache_ready
+            tier_cache = self._tier_cache
+            summary = self._summary or ""
+            summary_msg_idx = self._summary_msg_idx
+
+        if tier_ready and tier_cache is not None:
+            from src.memory.tier_cache import assemble_from_tiers
+
+            assembled, tier_counts = assemble_from_tiers(
+                snapshot=tier_cache,
+                messages=self._messages,
+                summary=summary,
+                summary_msg_idx=summary_msg_idx,
+            )
+            total_tokens = sum(tier_counts.values())
+
+            return MemoryContext(
+                messages=assembled,
+                system_additions=self.get_system_prompt_additions(),
+                context_prefix=context_prefix,
+                mode=self.mode_name,
+                total_messages_stored=len(self._messages),
+                context_messages_count=len(assembled),
+                token_estimate=total_tokens,
+                tier_token_counts=tier_counts,
+                metadata={
+                    "files_tracked": len(self._files),
+                    "current_file": self._current_file,
+                    "has_task": self._current_task is not None,
+                    "error_count": len(self._recent_errors),
+                },
+            )
+
+        # ── Sliding window fallback (cold cache) ─────────────────────────
+        window_size = self._mode_config["working_memory_size"]
+        context_messages = self._messages[-window_size:] if self._messages else []
+
+        # Inject timestamps so the LLM has temporal awareness
+        context_messages = self._inject_timestamps(context_messages)
 
         if log.isEnabledFor(logging.DEBUG):
             token_estimate = self._estimate_tokens(context_messages)
@@ -362,6 +400,16 @@ class CodeDevelopmentMemoryManager(BaseMemoryManager):
         # Incrementally summarize messages outside the sliding window
         window_size = self._mode_config["working_memory_size"]
         self._schedule_slow_path(self._messages, window_size)
+
+        # Schedule tier cache roll-forward only when history exceeds the window.
+        if len(self._messages) > window_size:
+            try:
+                self.schedule_tier_roll_forward(
+                    max_context_tokens=getattr(self, "_max_context_tokens", 0) or 128_000,
+                    llm=getattr(self, "_compression_llm", None),
+                )
+            except Exception as exc:
+                log.debug("Tier roll-forward scheduling failed: %s", exc)
 
         # Extract file references
         if self._mode_config["track_files"]:

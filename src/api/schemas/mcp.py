@@ -104,3 +104,13 @@ class MCPServerAddRequest(BaseModel):
         default=None,
         description="Optional environment variables for the subprocess.",
     )
+    headers: dict[str, str] = Field(
+        default_factory=dict,
+        description="Optional HTTP headers for SSE transport (e.g. Authorization).",
+    )
+    timeout: int = Field(
+        default=30,
+        ge=1,
+        le=300,
+        description="Connection timeout in seconds.",
+    )

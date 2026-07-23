@@ -287,7 +287,7 @@ def telegram_send(to: str, message: str) -> str:
         Confirmation string or error message.
     """
     if not REQUESTS_AVAILABLE:
-        return "Error: requests library not available. Install with: pip install requests"
+        return "Error: requests library not available. Run: uv add requests"
 
     if not _cfg.bot_token:
         return "Error: Telegram bot token not configured."
@@ -336,7 +336,7 @@ def telegram_send_photo(
         Confirmation string or error message.
     """
     if not REQUESTS_AVAILABLE:
-        return "Error: requests library not available. Install with: pip install requests"
+        return "Error: requests library not available. Run: uv add requests"
 
     if not _cfg.bot_token:
         return "Error: Telegram bot token not configured."
@@ -373,7 +373,7 @@ def telegram_check(limit: int = 10) -> str:
         Formatted list of recent messages.
     """
     if not REQUESTS_AVAILABLE:
-        return "Error: requests library not available. Install with: pip install requests"
+        return "Error: requests library not available. Run: uv add requests"
 
     if not _cfg.bot_token:
         return "Error: Telegram bot token not configured."

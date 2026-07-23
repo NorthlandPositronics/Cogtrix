@@ -392,3 +392,62 @@ class TestParseHeaders:
         assert err is None
         assert result["Authorization"] == "Bearer abc"
         assert result["Content-Type"] == "application/json"
+
+
+class TestHttpGetMaxChars:
+    """Tests for the max_chars parameter on http_get (#253)."""
+
+    def test_http_get_default_max_chars_is_10000(self) -> None:
+        """Default max_chars is 10,000."""
+        from src.tools.http_request import HttpGetInput
+
+        schema = HttpGetInput(url="http://example.com")
+        assert schema.max_chars == 10_000
+
+    def test_http_get_max_chars_respected(self) -> None:
+        """http_get respects a custom max_chars value."""
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.reason = "OK"
+        mock_resp.encoding = "utf-8"
+        mock_resp.headers = {"Content-Type": "text/plain"}
+        mock_resp.url = "http://example.com"
+        mock_resp.close = MagicMock()
+
+        with (
+            patch("src.tools.http_request._validate_url", return_value=(True, "", "1.2.3.4")),
+            patch("src.tools.http_request._check_recent_failure", return_value=None),
+            patch("src.tools.http_request._follow_redirects", return_value=mock_resp),
+            patch(
+                "src.tools.http_request._read_bounded_response",
+                return_value=(b"x" * 500, False),
+            ),
+        ):
+            result = http_get("http://example.com", max_chars=100)
+
+        assert "truncated" in result
+
+    def test_http_get_large_max_chars_not_truncated(self) -> None:
+        """http_get with large max_chars returns full content."""
+        body = b"hello world"
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.reason = "OK"
+        mock_resp.encoding = "utf-8"
+        mock_resp.headers = {"Content-Type": "text/plain"}
+        mock_resp.url = "http://example.com"
+        mock_resp.close = MagicMock()
+
+        with (
+            patch("src.tools.http_request._validate_url", return_value=(True, "", "1.2.3.4")),
+            patch("src.tools.http_request._check_recent_failure", return_value=None),
+            patch("src.tools.http_request._follow_redirects", return_value=mock_resp),
+            patch(
+                "src.tools.http_request._read_bounded_response",
+                return_value=(body, False),
+            ),
+        ):
+            result = http_get("http://example.com", max_chars=50_000)
+
+        assert "hello world" in result
+        assert "truncated" not in result

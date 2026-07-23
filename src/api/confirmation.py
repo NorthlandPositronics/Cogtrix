@@ -185,6 +185,9 @@ class ApiConfirmationUI:
     def show_message(self, message: str, style: str) -> None:  # noqa: ARG002
         pass
 
+    def show_diff_preview(self, path: str, diff_lines: list[str]) -> None:  # noqa: ARG002
+        pass
+
     def pause_spinner(self) -> None:
         pass
 

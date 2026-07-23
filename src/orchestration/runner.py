@@ -7,7 +7,6 @@ and phantom-call detection.
 
 from __future__ import annotations
 
-import logging
 import threading
 import time
 from collections import OrderedDict
@@ -15,7 +14,7 @@ from typing import Any
 
 from src.agent.core import prepare_messages_with_context
 from src.agent.safety import UserCancelledRun
-from src.logging_config import get_logger, log_tool_call
+from src.logging_config import get_logger, is_trace, is_verbose, log_tool_call
 from src.orchestration.compression import (
     COMPRESSION_MIN_AGE_CYCLES,
     COMPRESSION_MIN_CHARS,
@@ -106,6 +105,10 @@ class ToolCallLogger:
             if key in self._tool_start_times:
                 duration = time.monotonic() - self._tool_start_times.pop(key)
         log_tool_call(tool_name, output=output, duration=duration)
+        # TODO(#269): wire render_tool_panel here once a console/args ref is threaded
+        # through ToolCallLogger (or via a registered _display_callback similar to
+        # deep_think.py's _progress_callback pattern). Inputs are: tool_name, args dict
+        # (needs to be captured in on_tool_start), output, elapsed=duration.
 
     def on_tool_error(self, tool_name: str, error: str, call_id: str = "") -> None:
         """Log when a tool encounters an error."""
@@ -528,6 +531,9 @@ def run_agent(
     confirmation_ui: Any | None = None,
     on_tool_expansion: Any | None = None,
     parallel_tool_execution: bool = True,
+    git_native: bool = False,
+    tool_context_limit_pct: float = 0.80,
+    tier_cache_enabled: bool = True,
 ) -> str:
     """Run agent using a custom LangGraph StateGraph.
 
@@ -574,6 +580,9 @@ def run_agent(
             confirmation_ui=confirmation_ui,
             on_tool_expansion=on_tool_expansion,
             parallel_tool_execution=parallel_tool_execution,
+            git_native=git_native,
+            tool_context_limit_pct=tool_context_limit_pct,
+            tier_cache_enabled=tier_cache_enabled,
         )
 
     _compression_min_age = config.compression_min_age
@@ -603,8 +612,9 @@ def run_agent(
         )
         _mark("prepare_messages")
 
-        log.debug("Sending %d messages to agent", len(input_messages))
-        if log.isEnabledFor(logging.DEBUG):
+        if is_verbose():
+            log.debug("Sending %d messages to agent", len(input_messages))
+        if is_trace():
             for i, msg in enumerate(input_messages):
                 msg_type = type(msg).__name__
                 content = ""
@@ -659,6 +669,7 @@ def run_agent(
             compression_min_chars=_compression_min_chars,
             bound_cache=local_bound_cache,
             compression_cache_in=local_compression_cache,
+            tool_context_limit_pct=getattr(config, "tool_context_limit_pct", 0.80),
         )
         _mark("build_graph")
 
@@ -671,6 +682,12 @@ def run_agent(
                 max_context_tokens=config.max_context_tokens,
                 min_age_cycles=_compression_min_age,
                 min_chars=_compression_min_chars,
+                emergency_threshold=getattr(
+                    config, "context_compression_emergency_threshold", 0.85
+                ),
+                human_msg_max_chars=getattr(
+                    config, "context_compression_human_msg_max_chars", 20_000
+                ),
             )
         _mark("compression")
 
@@ -692,6 +709,26 @@ def run_agent(
             _mark("graph.stream")
 
             log_tool_calls_from_result(result, prior_count=prior_msg_count)
+
+            # Post-turn compression: compress the final message list so the
+            # memory manager stores a compact context and the next turn starts
+            # within budget.  Without this, the context bar shows the raw
+            # uncompressed size and the next turn inherits inflated history.
+            # When TCC is active the background roll-forward handles compression
+            # incrementally, so this O(N) bulk pass is redundant.
+            _tcc_active = getattr(config, "tier_cache_enabled", False)
+            if config.context_compression and result.get("messages") and not _tcc_active:
+                _post_llm = config.compression_llm or config.llm
+                if _post_llm is not None:
+                    result["messages"] = apply_message_compression(
+                        result["messages"],
+                        call_count=999,  # high count ensures all messages are "old enough"
+                        compression_cache=local_compression_cache,
+                        llm=_post_llm,
+                        max_context_tokens=config.max_context_tokens,
+                        min_age_cycles=1,
+                        min_chars=_compression_min_chars,
+                    )
 
             if result_messages is not None:
                 result_messages.extend(result.get("messages", []))

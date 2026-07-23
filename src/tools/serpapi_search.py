@@ -141,10 +141,7 @@ def serpapi_search(
         Formatted search results.
     """
     if not SERPAPI_AVAILABLE:
-        return (
-            "Error: google-search-results is not installed. "
-            "Install it with: pip install google-search-results"
-        )
+        return "Error: google-search-results is not installed. " "Run: uv add google-search-results"
 
     api_key = _get_api_key()
     if not api_key:

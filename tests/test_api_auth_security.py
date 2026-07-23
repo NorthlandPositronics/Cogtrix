@@ -12,7 +12,6 @@ Covers:
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import os
 import secrets
 import uuid
@@ -29,6 +28,7 @@ from sqlalchemy.ext.asyncio import (  # noqa: E402
     async_sessionmaker,
     create_async_engine,
 )
+from sqlalchemy.pool import StaticPool
 
 # ---------------------------------------------------------------------------
 # Environment — must be set before importing any src.api modules
@@ -57,7 +57,12 @@ from src.api.db.repositories.users import UserRepository  # noqa: E402
 @pytest.fixture()
 def test_app():
     """FastAPI app backed by an isolated in-memory SQLite database."""
-    test_engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
+    test_engine = create_async_engine(
+        "sqlite+aiosqlite:///:memory:",
+        echo=False,
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
     test_session_factory = async_sessionmaker(test_engine, expire_on_commit=False)
 
     async def _create():
@@ -262,7 +267,12 @@ class TestApiKeyAuth:
 
         from fastapi import HTTPException
 
-        engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
+        engine = create_async_engine(
+            "sqlite+aiosqlite:///:memory:",
+            echo=False,
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
 
         async def _run():
             async with engine.begin() as conn:
@@ -280,7 +290,12 @@ class TestApiKeyAuth:
         """validate_api_key updates last_used_at on the key record."""
         import asyncio as _asyncio
 
-        engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
+        engine = create_async_engine(
+            "sqlite+aiosqlite:///:memory:",
+            echo=False,
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
 
         async def _run():
             async with engine.begin() as conn:
@@ -300,7 +315,9 @@ class TestApiKeyAuth:
 
                 # Create an API key.
                 raw_key = "cgx_live_" + secrets.token_urlsafe(32)
-                key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
+                from src.api.auth import _hash_api_key
+
+                key_hash = _hash_api_key(raw_key)
                 key_repo = ApiKeyRepository(db)
                 key_record = await key_repo.create(
                     key_id=str(uuid.uuid4()),

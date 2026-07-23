@@ -120,10 +120,7 @@ def search_web(query: str, num_results: int = 5, region: str = "wt-wt") -> str:
         Search results with titles, URLs, and snippets
     """
     if not DDGS_AVAILABLE:
-        return (
-            "Error: DuckDuckGo search not available. "
-            "Install it with: pip install duckduckgo-search"
-        )
+        return "Error: DuckDuckGo search not available. " "Run: uv add duckduckgo-search"
 
     if not query.strip():
         return "Error: Empty search query"
@@ -172,10 +169,7 @@ def search_news(query: str, num_results: int = 5, timelimit: str | None = "w") -
         News results with titles, URLs, dates, and snippets
     """
     if not DDGS_AVAILABLE:
-        return (
-            "Error: DuckDuckGo search not available. "
-            "Install it with: pip install duckduckgo-search"
-        )
+        return "Error: DuckDuckGo search not available. " "Run: uv add duckduckgo-search"
 
     if not query.strip():
         return "Error: Empty search query"

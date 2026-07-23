@@ -1,0 +1,33 @@
+.TH COGTRIX-API 5 "2026-03-30" "cogtrix 1.0.0" "Cogtrix Manual"
+.SH NAME
+cogtrix-api \- API server configuration
+.SH DESCRIPTION
+The Cogtrix REST API server is configured via environment variables and
+the shared
+.B .cogtrix.json
+file. See
+.BR cogtrix (5)
+for the config file format.
+.SH ENVIRONMENT
+.TP
+.B ANTHROPIC_API_KEY
+Required. Anthropic API key.
+.TP
+.B DATABASE_URL
+PostgreSQL connection string (e.g. \(lqpostgresql://user:pass@localhost/cogtrix\(rq).
+.TP
+.B REDIS_URL
+Redis connection string for session presence. Default: \(lqredis://localhost:6379\(rq.
+.TP
+.B SECRET_KEY
+JWT signing secret. Must be set in production.
+.TP
+.B COGTRIX_ENV
+Deployment environment: \(lqdevelopment\(rq or \(lqproduction\(rq.
+.TP
+.B COGTRIX_LOG_LEVEL
+Logging level: DEBUG, INFO, WARNING, ERROR. Default: INFO.
+.SH SEE ALSO
+.BR cogtrix-api (1),
+.BR cogtrix-api (8),
+.BR cogtrix (5)

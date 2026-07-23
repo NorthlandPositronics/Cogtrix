@@ -1039,6 +1039,11 @@ async def _advance_wizard_locked(
         model = data.get("model")
         provider_name = data.get("provider_name", provider_type)
 
+        # Resolve presets/aliases (e.g. "groq", "xai") → native type + concrete base_url/key
+        native_type, base_url, api_key = _resolve_wizard_provider(
+            provider_type, api_key, base_url, ws.get("env") or {}
+        )
+
         # If no api_key was submitted, try to resolve one from the existing config
         # (user is re-configuring and the key is already stored — no need to re-enter).
         if not api_key and ws.get("existing_yaml"):
@@ -1048,13 +1053,15 @@ async def _advance_wizard_locked(
 
         if not model:
             from src.providers import get_default_model
+            from src.providers.defaults import OPENAI_PRESETS
 
-            model = get_default_model(provider_type)
+            preset_model = OPENAI_PRESETS.get(provider_type, {}).get("model")
+            model = preset_model or get_default_model(native_type)
 
         # Test connection off the event loop
         try:
             llm, probe_warning = await asyncio.to_thread(
-                _wizard_test_connection, provider_type, model, api_key, base_url
+                _wizard_test_connection, native_type, model, api_key, base_url
             )
         except Exception as exc:
             raise HTTPException(
@@ -1070,21 +1077,30 @@ async def _advance_wizard_locked(
             "model": model,
             "api_key": api_key,
             "base_url": base_url,
-            "type": provider_type,
+            "type": native_type,
         }
         ws["llm"] = llm
         ws["probe_warning"] = probe_warning
 
         # Build system prompt and start conversation
         docs = await asyncio.to_thread(_wizard_load_docs, ws.get("docs_url"))
-        from src.setup_wizard import _WIZARD_SYSTEM_PROMPT
+        from src.setup_wizard import (
+            _WIZARD_SYSTEM_PROMPT,
+            _index_docs,
+            _sanitize_yaml_for_prompt,
+        )
 
         # The API wizard does not offer a separate production model step; the
         # bootstrap model is also the active (production) model.
         production_context = f"Same as bootstrap: use {provider_name} / {model} as models.default."
+        _raw_existing = ws["existing_yaml"]
+        _safe_existing = (
+            _sanitize_yaml_for_prompt(_raw_existing)
+            if _raw_existing
+            else "No existing configuration."
+        )
         system_prompt = _WIZARD_SYSTEM_PROMPT.substitute(
-            docs=docs,
-            existing_config=ws["existing_yaml"] or "No existing configuration.",
+            existing_config=_safe_existing,
             bootstrap_provider=provider_name,
             bootstrap_type=provider_type,
             bootstrap_base_url=base_url or "(default)",
@@ -1092,6 +1108,7 @@ async def _advance_wizard_locked(
             bootstrap_has_key="yes" if api_key else "no",
             production_context=production_context,
         )
+        ws["docs_index"] = _index_docs(docs)
 
         # Strict OpenAI-compatible backends (vLLM, LiteLLM) reject a messages
         # list that contains only a SystemMessage — seed with HumanMessage("Start.")
@@ -1104,15 +1121,17 @@ async def _advance_wizard_locked(
         try:
             ai_text = await asyncio.to_thread(_wizard_invoke_llm, llm, messages)
         except Exception as exc:
-            # The provider accepted the connection but cannot serve the first real
-            # LLM call — raise immediately so the user knows before typing answers.
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-                detail={
-                    "code": "PROVIDER_UNREACHABLE",
-                    "message": str(exc),
-                },
-            ) from exc
+            # Phase 1 already hard-fails on genuine misconfiguration (SDK init error).
+            # If we reach here, the provider is reachable but the initial Q&A call failed
+            # (e.g. context size overflow, transient error, or a flaky provider flagged by
+            # the probe).  In all cases, fall back to the default question so the wizard
+            # can advance — the user can still configure even with a limited-context model
+            # (BUG-242, BUG-244).
+            log.warning(
+                "Wizard initial LLM call failed, using default question: %s",
+                exc,
+            )
+            ai_text = ""  # falls through to default-question assignment below
         if not ai_text:
             ai_text = _WIZARD_DEFAULT_FIRST_QUESTION
         messages.append(AIMessage(content=ai_text))
@@ -1164,6 +1183,15 @@ async def _advance_wizard_locked(
                 return await _wizard_save(wizard_id, ws, request)
 
         messages = ws["messages"]
+        docs_index: dict[str, str] = ws.get("docs_index") or {}
+        if docs_index:
+            from src.setup_wizard import _retrieve_relevant_sections
+
+            relevant = _retrieve_relevant_sections(user_answer, docs_index)
+            if relevant:
+                user_answer = (
+                    f"[Relevant documentation]\n{relevant}\n\n[User question]\n{user_answer}"
+                )
         messages.append(HumanMessage(content=user_answer))
 
         llm = ws["llm"]
@@ -1307,6 +1335,51 @@ def _resolve_api_key_from_existing(
     return None
 
 
+def _resolve_wizard_provider(
+    provider_name: str,
+    api_key: str | None,
+    base_url: str | None,
+    env: dict[str, str],
+) -> tuple[str, str | None, str | None]:
+    """Resolve a wizard provider name to ``(native_type, base_url, api_key)``.
+
+    Resolution order:
+    1. Native provider type (openai, ollama, anthropic, google) → unchanged.
+    2. OpenAI-compatible preset (xai, groq) → type="openai" + preset base_url/key.
+    3. Configured alias in the running config → use the alias's ProviderConfig.
+    4. Fallback → return as-is (ProviderConfig validation will raise later).
+    """
+    from src.providers import PROVIDER_TYPES
+    from src.providers.defaults import OPENAI_PRESETS
+
+    # 1. Already a native type
+    if provider_name in PROVIDER_TYPES:
+        return provider_name, base_url, api_key
+
+    # 2. OpenAI-compatible preset
+    if provider_name in OPENAI_PRESETS:
+        preset = OPENAI_PRESETS[provider_name]
+        resolved_base_url = base_url or preset["base_url"]
+        env_key = preset.get("env_key", "")
+        resolved_key = api_key or (env.get(env_key) if env_key else None)
+        return "openai", resolved_base_url, resolved_key
+
+    # 3. Configured alias in the running config
+    try:
+        from src.config import Config
+
+        cfg = Config()
+        providers = cfg.providers or {}
+        if provider_name in providers:
+            pc = providers[provider_name]
+            return pc.type, base_url or pc.base_url, api_key or pc.api_key
+    except Exception:
+        pass
+
+    # 4. Fallback — return unchanged (will raise at ProviderConfig.__post_init__)
+    return provider_name, base_url, api_key
+
+
 def _wizard_test_connection(
     provider_type: str, model: str, api_key: str | None, base_url: str | None
 ) -> tuple[Any, str | None]:
@@ -1430,13 +1503,17 @@ def _wizard_validate_and_write(raw_yaml: str, bootstrap_info: dict[str, Any]) ->
 
     import yaml
 
-    from src.setup_wizard import _inject_bootstrap
+    from src.setup_wizard import _inject_bootstrap, _strip_nulls
 
     data = yaml.safe_load(raw_yaml)
     if not isinstance(data, dict):
         raise ValueError("Generated config is not a valid YAML mapping")
 
     _inject_bootstrap(data, bootstrap_info)
+    # Remove None values and empty dicts so the round-trip validation and the
+    # written config are clean — identical to what the CLI wizard does after
+    # inject_bootstrap (BUG-239).
+    data = _strip_nulls(data)
 
     # Validate via round-trip
     tmp_path: Path | None = None

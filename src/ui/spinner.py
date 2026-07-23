@@ -240,6 +240,7 @@ class ActivityIndicator:
     # -- internals ----------------------------------------------------------
 
     def _animate(self) -> None:
+        import shutil
         import time
 
         if not self._tty_output_enabled():
@@ -260,6 +261,14 @@ class ActivityIndicator:
                     char = _SPINNER_CHARS[idx % len(_SPINNER_CHARS)]
                     color = _SPINNER_GRADIENT[idx % grad_len]
                     ctx = self._context
+                    cols = shutil.get_terminal_size(fallback=(80, 24)).columns
+                    # Visible layout: "⠋ [ctx: ]message"
+                    # 2 = braille char + space; 2 = ": " separator when ctx present
+                    fixed_width = 2 + (len(ctx) + 2 if ctx else 0)
+                    max_msg = max(5, cols - 1 - fixed_width)
+                    msg = self._message
+                    if len(msg) > max_msg:
+                        msg = msg[: max_msg - 1] + "…"
                     # Always use raw stdout — Rich console.print doesn't
                     # handle carriage-return rewriting correctly.
                     # \033[2K = erase entire line, \r = return to column 0
@@ -267,12 +276,11 @@ class ActivityIndicator:
                     if ctx:
                         frame = (
                             f"\033[2K\r\033[1;38;5;{color}m{char}\033[0m"
-                            f" \033[1m{ctx}\033[22m: \033[2m{self._message}\033[0m"
+                            f" \033[1m{ctx}\033[22m: \033[2m{msg}\033[0m"
                         )
                     else:
                         frame = (
-                            f"\033[2K\r\033[1;38;5;{color}m{char}\033[0m"
-                            f" \033[2m{self._message}\033[0m"
+                            f"\033[2K\r\033[1;38;5;{color}m{char}\033[0m" f" \033[2m{msg}\033[0m"
                         )
                     idx += 1
                     frame_count += 1

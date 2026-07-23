@@ -24,6 +24,7 @@ from sqlalchemy.ext.asyncio import (  # noqa: E402
     async_sessionmaker,
     create_async_engine,
 )
+from sqlalchemy.pool import StaticPool
 
 # ---------------------------------------------------------------------------
 # Environment setup — must happen before any src.api imports
@@ -52,7 +53,12 @@ from src.api.db.repositories.users import UserRepository  # noqa: E402
 @pytest_asyncio.fixture()
 async def db_session() -> AsyncGenerator[AsyncSession]:
     """Yield a fresh in-memory SQLite session for each test."""
-    engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
+    engine = create_async_engine(
+        "sqlite+aiosqlite:///:memory:",
+        echo=False,
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
@@ -315,7 +321,12 @@ async def test_message_cursor_pagination(db_session: AsyncSession, user_id: str)
 @pytest_asyncio.fixture()
 async def http_db_engine():
     """Create a dedicated in-memory engine for HTTP endpoint tests."""
-    engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
+    engine = create_async_engine(
+        "sqlite+aiosqlite:///:memory:",
+        echo=False,
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     yield engine

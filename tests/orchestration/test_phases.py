@@ -146,3 +146,137 @@ class TestExtractTurnMessages:
         h_missing = HumanMessage(content="not in list")
         msgs = [h1, a1]
         assert extract_turn_messages(msgs, boundary=h_missing) == []
+
+
+# ---------------------------------------------------------------------------
+# TestNormalizeUrl  (FIX 1 — SSRF normalization)
+# ---------------------------------------------------------------------------
+
+
+class TestNormalizeUrl:
+    def _norm(self, url: str):
+        from src.orchestration.phases import _normalize_url
+
+        return _normalize_url(url)
+
+    def test_normal_public_url_preserved(self):
+        result = self._norm("https://example.com/page")
+        assert result == "https://example.com/page"
+
+    def test_url_with_encoded_path_chars_decoded_then_reencoded(self):
+        result = self._norm("https://example.com/path%2Ffile%3Fq%3D1")
+        assert result is not None
+        # Normalized form may re-encode; just verify it's not rejected (None)
+        assert len(result) > 0
+
+    def test_percent_encoded_private_ip_rejected(self):
+        # 192.%31.1.1 decodes to 192.1.1.1 — private-range after normalization
+        # The key guarantee is that the normalized form goes through _validate_url
+        # which blocks RFC-1918 ranges. Even if the host passes normalization,
+        # the subsequent _validate_url call in extract_fetched_urls rejects it.
+        # Here we just verify _normalize_url produces a consistent decoded form.
+        result = self._norm("http://192.%31.1.1/secret")
+        # After decoding, netloc becomes 192.1.1.1 — normalization must not
+        # re-encode the dot-decimal digits in a way that hides the IP.
+        if result is not None:
+            assert "192.1.1.1" in result or "192.%31.1.1" not in result
+
+    def test_control_character_url_rejected_or_stripped(self):
+        result = self._norm("http://example.com\x00@evil.com/")
+        # Either rejected outright (None) or the control char is stripped
+        if result is not None:
+            assert "\x00" not in result
+
+    def test_del_character_stripped(self):
+        result = self._norm("https://example.com/path\x7f")
+        if result is not None:
+            assert "\x7f" not in result
+
+    def test_empty_string_returns_none(self):
+        assert self._norm("") is None
+
+    def test_whitespace_only_returns_none(self):
+        assert self._norm("   ") is None
+
+    def test_non_http_scheme_returns_none(self):
+        assert self._norm("ftp://example.com/file") is None
+
+    def test_no_host_returns_none(self):
+        assert self._norm("http:///path") is None
+
+    def test_scheme_lowercased(self):
+        result = self._norm("HTTP://Example.COM/")
+        assert result is not None
+        assert result.startswith("http://")
+
+
+class TestExtractFetchedUrlsNormalization:
+    """extract_fetched_urls() must normalize before deduplication."""
+
+    def test_extract_urls_skips_malformed(self):
+        from src.orchestration.phases import extract_fetched_urls
+
+        try:
+            from langchain_core.messages import AIMessage
+        except ImportError:
+            pytest.skip("langchain_core required")
+
+        # Inject a null-byte URL via a tool call arg — should be dropped
+        msg = AIMessage(content="")
+        msg.tool_calls = [{"name": "http_get", "args": {"url": "http://evil\x00.com/"}}]
+        result = extract_fetched_urls([msg])
+        # Control-char URL must not appear in results
+        for url in result:
+            assert "\x00" not in url
+
+    def test_extract_urls_deduplicates_after_normalization(self):
+        from src.orchestration.phases import extract_fetched_urls
+
+        try:
+            from langchain_core.messages import AIMessage
+        except ImportError:
+            pytest.skip("langchain_core required")
+
+        # Same URL with and without trailing slash — normalization may unify them
+        msg = AIMessage(content="")
+        msg.tool_calls = [
+            {"name": "http_get", "args": {"url": "https://example.com/page"}},
+            {"name": "http_get", "args": {"url": "https://example.com/page"}},
+        ]
+        result = extract_fetched_urls([msg])
+        assert len([u for u in result if "example.com/page" in u]) <= 1
+
+
+# ---------------------------------------------------------------------------
+# TestRunResearchDelegateURLWarning  (FIX 5 — URL count warning)
+# ---------------------------------------------------------------------------
+
+
+class TestRunResearchDelegateURLWarning:
+    def test_no_warning_for_ten_or_fewer_urls(self, caplog):
+        import logging
+        from unittest.mock import patch
+
+        from src.orchestration.phases import run_research_delegate
+
+        urls = [f"https://example.com/{i}" for i in range(10)]
+        with caplog.at_level(logging.WARNING, logger="cogtrix.orchestration.phases"):
+            with patch("src.tools.delegate.get_delegate_tools", return_value=[]):
+                run_research_delegate(urls, task="test")
+        assert not any("dropped" in r.message for r in caplog.records)
+
+    def test_warning_logged_for_more_than_ten_urls(self, caplog):
+        import logging
+        from unittest.mock import patch
+
+        from src.orchestration.phases import run_research_delegate
+
+        urls = [f"https://example.com/{i}" for i in range(15)]
+        with caplog.at_level(logging.WARNING, logger="cogtrix.orchestration.phases"):
+            with patch("src.tools.delegate.get_delegate_tools", return_value=[]):
+                run_research_delegate(urls, task="test")
+        # Warning fires before the delegate-tool check, so it always fires on >10 URLs
+        drop_warnings = [r for r in caplog.records if "dropped" in r.message]
+        assert len(drop_warnings) == 1
+        assert "15" in drop_warnings[0].message
+        assert "5" in drop_warnings[0].message

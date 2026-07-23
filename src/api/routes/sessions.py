@@ -202,6 +202,16 @@ async def create_session(
     """
     repo = SessionRepository(db)
 
+    # Enforce concurrent session quota
+    app_config = getattr(request.app.state, "config", None)
+    if app_config is not None:
+        from src.api.quota import _quota_config_from_app_config, get_enforcer
+
+        quota_cfg = _quota_config_from_app_config(app_config)
+        if quota_cfg.max_concurrent_sessions is not None:
+            count = await repo.count_by_user(current_user.user_id)
+            get_enforcer(quota_cfg).check_concurrent_sessions(current_user.user_id, count)
+
     # Enforce session name uniqueness per user
     if await repo.name_exists_for_user(current_user.user_id, body.name):
         raise HTTPException(

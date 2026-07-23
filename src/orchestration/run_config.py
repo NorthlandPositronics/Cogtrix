@@ -40,5 +40,8 @@ class AgentRunConfig:
     confirmation_ui: ConfirmationUI | None = None
     on_tool_expansion: Any | None = None
     parallel_tool_execution: bool = True
+    git_native: bool = False
+    tool_context_limit_pct: float = 0.80
+    tier_cache_enabled: bool = True
     bound_cache: OrderedDict | None = field(default=None, compare=False, repr=False)
     compression_cache: OrderedDict | None = field(default=None, compare=False, repr=False)

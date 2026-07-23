@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cogtrix"
-version = "0.1.39"
-description = "Modular AI assistant with 51 built-in tools, multi-provider LLM support, and hybrid memory"
+version = "0.2.0"
+description = "Modular AI assistant with 60 built-in tools, multi-provider LLM support, and hybrid memory"
 readme = "README.md"
 requires-python = "~=3.13.0"
 
@@ -22,45 +22,44 @@ classifiers = [
 
 dependencies = [
     # LangChain Ecosystem
-    "langchain-core~=1.2.22",
+    "langchain-core~=1.2.23",
     "langchain-ollama~=1.0.1",
     "langchain-openai~=1.1.12",
     "langchain-text-splitters~=1.1.0",
     "langchain-community~=0.4.1",
     "langgraph~=1.1.3",
-
     # LLM Providers
     "openai~=2.30.0",
-
     # Data Validation
     "pydantic~=2.12.0",
-
-    # RAG - Vector Store & Document Processing
-    "faiss-cpu~=1.13.0",
-    "pypdf~=6.9.2",
-    "python-docx~=1.2.0",
-
     # CLI & Display
     "rich~=14.3.0",
-
     # Utilities
     "python-dotenv~=1.2.2",
     "requests~=2.33.0",
+    "slowapi~=0.1",
     "pyyaml~=6.0.3",           # YAML config file support
-
     # Tools Dependencies
     "python-dateutil~=2.9.0",   # datetime_tool.py
     "pytz~=2026.1",             # datetime_tool.py (calendar-versioned)
     "ddgs~=9.12.0",             # web_search.py
-    "textblob~=0.19.0",         # nlp_tools.py
+    "croniter~=6.0",             # cron_tools.py
+    "pluggy~=1.6",               # src/plugins/ — tool plugin system
+    "prompt-toolkit>=3.0",       # pinned prompt input session
 ]
 
 [project.optional-dependencies]
+rag = [
+    "faiss-cpu~=1.13.0",
+    "pypdf~=6.9.2",
+    "python-docx~=1.2.0",
+]
 search = [
     "tavily-python~=0.7.21",
     "exa-py~=2.9.0",
     "google-search-results~=2.4.2",
 ]
+postgresql = ["asyncpg>=0.29.0"]
 dev = [
     "pytest~=9.0.2",
     "pytest-structlog~=1.2",
@@ -78,10 +77,17 @@ dev = [
     "mcp~=1.26.0",
     "langchain-anthropic~=1.4.0",
     "langchain-google-genai~=4.2.1",
+    "argparse-manpage>=4",
 ]
 science = [
-    "numpy~=2.4.3",
-    "scipy~=1.17.0",
+    "numpy~=2.4.4",
+    "scipy~=1.17.1",
+]
+discord = [
+    "discord.py>=2.3",
+]
+slack = [
+    "slack-sdk>=3.19",
 ]
 mcp = [
     "mcp~=1.26.0",
@@ -91,6 +97,9 @@ anthropic = [
 ]
 google = [
     "langchain-google-genai~=4.2.1",
+    "google-api-python-client>=2.0",
+    "google-auth-oauthlib>=1.0",
+    "google-auth-httplib2>=0.2",
 ]
 api = [
     "fastapi~=0.135.2",
@@ -102,6 +111,12 @@ api = [
     "bcrypt~=5.0.0",
     "email-validator~=2.3.0",
 ]
+
+[tool.hatch.build.targets.wheel]
+include = ["src/**", "man/**"]
+
+[project.scripts]
+make-man = "argparse_manpage:main"
 
 [tool.ruff]
 line-length = 100
@@ -158,6 +173,7 @@ testpaths = ["tests"]
 timeout = 30
 markers = [
     "agent_workflow: integration tests that require live LLM endpoints",
+    "benchmark: concurrency and performance benchmarks (no live LLM required)",
     "docker: integration tests that require a running Docker daemon",
     "live_llm: integration tests backed by the local Gemma 3 270M container (localhost:18080)",
 ]
@@ -168,7 +184,7 @@ omit = ["tests/*", "venv/*", ".venv/*"]
 
 [tool.coverage.report]
 show_missing = true
-fail_under = 25    # current: ~29% — raise as test coverage improves
+fail_under = 65    # measured 2026-03-30: 72% — floor set conservatively below actual
 
 [dependency-groups]
 dev = [
@@ -188,5 +204,6 @@ dev = [
     "mcp~=1.26.0",
     "langchain-anthropic~=1.4.0",
     "langchain-google-genai~=4.2.1",
+    "argparse-manpage>=4",
 ]
 

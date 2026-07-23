@@ -2,6 +2,8 @@ import argparse
 import os
 import sys
 
+from src._version import __version__
+
 
 def color_enabled() -> bool:
     """Check if ANSI color output is supported."""
@@ -35,8 +37,8 @@ class ColorHelpFormatter(argparse.RawDescriptionHelpFormatter):
         super().start_section(heading)
 
 
-def parse_arguments():
-    """Parse command line arguments."""
+def build_parser() -> argparse.ArgumentParser:
+    """Build and return the argument parser (without calling parse_args)."""
     B = bold
     D = dim
 
@@ -85,7 +87,8 @@ def parse_arguments():
         f"  {B('Logging:')}\n"
         f"    cogtrix.py --log                           {D('Log to cogtrix.log')}\n"
         f"    cogtrix.py --log myrun.log -v              {D('Verbose log to custom file')}\n"
-        f"    cogtrix.py --debug                         {D('Full debug (implies --log -v)')}\n"
+        f"    cogtrix.py --debug                         {D('Full debug — alias for --verbosity 1')}\n"
+        f"    cogtrix.py --verbosity 2                   {D('Set verbosity: 0=normal 1=debug 2=verbose 3=trace')}\n"
         f"\n"
         f"  {B('RAG:')}\n"
         f"    cogtrix.py --ingest --docs-dir ./docs      {D('Build RAG vector database')}\n"
@@ -134,6 +137,12 @@ def parse_arguments():
         description=desc,
         formatter_class=ColorHelpFormatter,
         epilog=epilog,
+    )
+
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"cogtrix {__version__}",
     )
 
     # ── Getting started ──────────────────────────────────────────────
@@ -251,6 +260,44 @@ def parse_arguments():
         action="store_true",
         help="Auto-approve all tool confirmations",
     )
+    out_group.add_argument(
+        "-R",
+        "--auto-route",
+        action="store_true",
+        help="Route simple queries to a fast model (requires auto_route_fast_model in config)",
+    )
+    out_group.add_argument(
+        "-Q",
+        "--quick",
+        action="store_true",
+        help="Skip optimizer, memory, and compression (fast one-off queries)",
+    )
+    out_group.add_argument(
+        "-G",
+        "--git-native",
+        action="store_true",
+        help="Auto stage and commit after each file write (requires git repo)",
+    )
+    out_group.add_argument(
+        "--no-banner",
+        action="store_true",
+        help="Suppress the startup banner",
+    )
+    out_group.add_argument(
+        "-I",
+        "--pipe",
+        action="store_true",
+        help=(
+            "Read prompt from stdin, run once, exit. "
+            "Suppresses the startup banner when stdout is not a tty."
+        ),
+    )
+    out_group.add_argument(
+        "-P",
+        "--profile",
+        metavar="NAME",
+        help="Apply a named config profile (defined in config file)",
+    )
 
     # ── Logging ──────────────────────────────────────────────────────
     log_group = parser.add_argument_group("Logging")
@@ -266,12 +313,20 @@ def parse_arguments():
         "-v",
         "--verbose",
         action="store_true",
-        help="Log full LLM interactions",
+        help="Verbose mode — verbosity 1 (LLM interactions)",
     )
     log_group.add_argument(
         "--debug",
         action="store_true",
-        help="Full debug mode (implies --log -v)",
+        help="Full debug mode — verbosity 2 (LLM interactions + debug logs)",
+    )
+    log_group.add_argument(
+        "--verbosity",
+        type=int,
+        metavar="N",
+        choices=[0, 1, 2, 3],
+        default=None,
+        help="Verbosity level: 0=normal, 1=debug, 2=verbose, 3=trace",
     )
 
     # ── Tools ────────────────────────────────────────────────────────
@@ -326,6 +381,16 @@ def parse_arguments():
         help="Embedding model name",
     )
 
+    # ── Shell completion ──────────────────────────────────────────────
+    comp_group = parser.add_argument_group("Shell completion")
+    comp_group.add_argument(
+        "--install-completion",
+        nargs="?",
+        const="auto",
+        metavar="SHELL",
+        help="Print shell completion script (bash/zsh). Source it to enable tab-completion.",
+    )
+
     # ── Setup wizard options ─────────────────────────────────────────
     setup_group = parser.add_argument_group("Setup wizard options")
     setup_group.add_argument(
@@ -352,6 +417,12 @@ def parse_arguments():
         help=argparse.SUPPRESS,
     )
 
+    return parser
+
+
+def parse_arguments():
+    """Parse command line arguments."""
+    parser = build_parser()
     args = parser.parse_args()
 
     if getattr(args, "prompt", None) and getattr(args, "prompt_file", None):

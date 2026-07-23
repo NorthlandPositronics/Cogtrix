@@ -861,9 +861,12 @@ class MessageHandler:
 
         if direction == "outbound":
             contact_label = sender_name
+            if instructions and message:
+                task = f"{instructions}\nOpening line to use: {message}"
+            else:
+                task = instructions or message
             framed_text = (
-                f"[Operator instruction — initiate conversation with {contact_label}]\n"
-                f"{instructions or message}"
+                f"[Operator instruction — initiate conversation with {contact_label}]\n" f"{task}"
             )
             effective_sender_id = "operator"
             effective_sender_name = "Operator"
@@ -903,9 +906,46 @@ class MessageHandler:
             session.last_activity = time.monotonic()
             context, combined_prefix = self._prepare_context(synthetic_msg, session)
 
+            schedule_state = ScheduleReplyState()
+            edit_state = EditReplyState()
+            queue_state = QueueReplyState()
             suppress_state = SuppressReplyState()
             defer_state = DeferReplyState()
             active_tools: list[Any] = list(self._active_tools)
+
+            # Inject the same scheduler tools that handle() injects for inbound
+            # turns so the agent can schedule, queue, or suppress replies during
+            # a simulation (BUG-240).
+            if direction == "inbound":
+                if self._scheduler and "schedule_reply" not in self._excluded_tools:
+                    active_tools.append(create_schedule_reply_tool(schedule_state))
+                if self._scheduler and "queue_reply" not in self._excluded_tools:
+                    active_tools.append(create_queue_reply_tool(queue_state))
+                if "edit_last_reply" not in self._excluded_tools and session.last_sent_message_id:
+                    active_tools.append(create_edit_reply_tool(edit_state))
+                if self._scheduler:
+                    if "list_scheduled_messages" not in self._excluded_tools:
+                        active_tools.append(
+                            create_list_scheduled_tool(
+                                self._scheduler,
+                                self._services_config,
+                                caller_chat_id=chat_id,
+                            )
+                        )
+                    if "edit_scheduled_message" not in self._excluded_tools:
+                        active_tools.append(
+                            create_edit_scheduled_tool(
+                                self._scheduler,
+                                caller_chat_id=chat_id,
+                            )
+                        )
+                    if "cancel_scheduled_message" not in self._excluded_tools:
+                        active_tools.append(
+                            create_cancel_scheduled_tool(
+                                self._scheduler,
+                                caller_chat_id=chat_id,
+                            )
+                        )
 
             if "suppress_reply" not in self._excluded_tools:
                 active_tools.append(create_suppress_reply_tool(suppress_state))
@@ -916,19 +956,55 @@ class MessageHandler:
                         create_defer_processing_tool(defer_state, schedule_state=None)
                     )
 
+            # Wrap tool_call_guard to detect in-graph tool blocks so that
+            # blocked_by_guardrails can be set accurately in SimulateResult
+            # (BUG-241).
+            _tool_guard_blocked = [False]
+            _tool_guard_reason: list[str | None] = [None]
+
+            def _tracking_tool_guard(tool_name: str, tool_args: dict[str, Any]) -> Any:
+                result = self._guardrails.check_tool_call(tool_name, tool_args)
+                if not result.is_safe and not _tool_guard_blocked[0]:
+                    _tool_guard_blocked[0] = True
+                    _tool_guard_reason[0] = result.reason
+                return result
+
             effective_prompt, user_input, history, wf_excluded, wf_approved = (
                 self._prepare_agent_call(synthetic_msg, context, session=session)
             )
-            response, _ = self._run_agent(
-                user_input=user_input,
-                history_messages=history,
-                context_prefix=combined_prefix,
-                effective_prompt=effective_prompt,
-                active_tools=active_tools,
-                session=session,
-                extra_excluded=wf_excluded or None,
-                extra_approvals=wf_approved or None,
+
+            from src.orchestration.run_config import AgentRunConfig
+
+            call_session_state = SessionState(no_confirm=True)
+            available = dict(self._available_tools)
+            if wf_excluded:
+                available = {k: v for k, v in available.items() if k not in wf_excluded}
+            call_approvals = set(self._approvals)
+            if wf_approved:
+                call_approvals |= wf_approved
+            sim_run_config = AgentRunConfig(
+                llm=self._llm,
+                system_prompt=effective_prompt,
+                available_tools=available,
+                active_tools_list=active_tools,
+                max_context_tokens=self._max_context_tokens,
+                compression_llm=self._compression_llm,
+                tool_call_guard=_tracking_tool_guard,
+                session_state=call_session_state,
+                parallel_tool_execution=self._parallel_tool_execution,
             )
+            try:
+                response = self._agent_runner(
+                    user_input=user_input,
+                    history_messages=history,
+                    registry=self._registry,
+                    approvals=call_approvals,
+                    context_prefix=combined_prefix,
+                    config=sim_run_config,
+                )
+            except Exception as exc:
+                log.error("Simulate agent error for %s: %s", session.session_key, exc)
+                response = "I encountered an error processing your message. Please try again."
 
             suppressed = suppress_state.was_called
             deferred = defer_state.was_called
@@ -960,8 +1036,8 @@ class MessageHandler:
             response="" if suppressed else response,
             suppressed=suppressed,
             deferred=deferred,
-            blocked_by_guardrails=False,
-            guardrail_reason=None,
+            blocked_by_guardrails=_tool_guard_blocked[0],
+            guardrail_reason=_tool_guard_reason[0] if _tool_guard_blocked[0] else None,
             duration_ms=(time.monotonic() - t_start) * 1000,
             memory_persisted=memory_persisted,
         )

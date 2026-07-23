@@ -22,10 +22,14 @@ from typing import Any
 from src.agent.core import CogtrixState
 from src.agent.safety import UserCancelledRun
 from src.agent.safety import create_safe_tool_wrapper as _safe_wrap
-from src.logging_config import get_logger
+from src.logging_config import get_logger, is_trace
 from src.orchestration.compression import (
+    _CHARS_PER_TOKEN,
+    _EMERGENCY_THRESHOLD_RATIO,
+    _MID_TURN_COMPRESSION_THRESHOLD,
     COMPRESSION_MIN_AGE_CYCLES,
     COMPRESSION_MIN_CHARS,
+    _content_len,
     apply_message_compression,
 )
 from src.orchestration.run_config import AgentRunConfig
@@ -63,6 +67,23 @@ def _get_tool_executor() -> concurrent.futures.ThreadPoolExecutor:
 
 
 _INVALID_TOOL_RE = re.compile(r"^Error:\s*(\S+)\s+is not a valid tool")
+
+_CONTEXT_OVERFLOW_PATTERNS = (
+    "context_length_exceeded",
+    "context window",
+    "too long",
+    "maximum context",
+    "reduce the length",
+    "input is too long",
+    "prompt is too long",
+)
+
+
+def _is_context_overflow_error(exc: Exception) -> bool:
+    """Return True if *exc* is a provider context-length rejection."""
+    msg = str(exc).lower()
+    return any(p in msg for p in _CONTEXT_OVERFLOW_PATTERNS)
+
 
 # ── Action-intent detection ───────────────────────────────────────────────────
 # Catches "I'll create X" / "Let me write Y" responses that contain no tool
@@ -459,6 +480,8 @@ def build_agent_graph(
     confirmation_ui: Any | None = None,
     on_tool_expansion: Any | None = None,
     parallel_tool_execution: bool = True,
+    git_native: bool = False,
+    tool_context_limit_pct: float = 0.80,
     *,
     config: AgentRunConfig | None = None,
     bound_cache: OrderedDict | None = None,
@@ -505,6 +528,7 @@ def build_agent_graph(
         if config.on_tool_expansion is not None:
             on_tool_expansion = config.on_tool_expansion
         parallel_tool_execution = config.parallel_tool_execution
+        git_native = config.git_native
         context_compression = config.context_compression
         if config.compression_llm is not None:
             compression_llm = config.compression_llm
@@ -512,6 +536,11 @@ def build_agent_graph(
             compression_min_age = config.compression_min_age
         if config.compression_min_chars is not None:
             compression_min_chars = config.compression_min_chars
+        if hasattr(config, "tool_context_limit_pct"):
+            tool_context_limit_pct = config.tool_context_limit_pct
+        _tier_cache_enabled = getattr(config, "tier_cache_enabled", True)
+    else:
+        _tier_cache_enabled = False
 
     if active_tools_list is None:
         active_tools_list = []
@@ -528,6 +557,7 @@ def build_agent_graph(
     expansion_count = [0]
     auto_expansion_count = [0]
     call_count = [0]
+    _last_input_tokens = [0]  # actual input tokens from the previous model call
     _MAX_PHANTOM_RETRIES = 3
     _MAX_ACTION_INTENT_RETRIES = 3
     _MAX_TOOL_EXPANSIONS = 3
@@ -543,6 +573,12 @@ def build_agent_graph(
         "list_scheduled_messages",
         "edit_scheduled_message",
         "cancel_scheduled_message",
+        # These control tools must always return a fresh result; caching a
+        # prior error (e.g. from a ToolCallGuard block) would cause a retry
+        # to receive the stale "duplicate" error instead of being evaluated
+        # on its own merits (BUG-237).
+        "suppress_reply",
+        "defer_processing",
     }
     protected = (preset_tools or set()) | {"request_tools"}
     _bound_cache: OrderedDict[tuple[str, ...], Any] = (
@@ -571,6 +607,60 @@ def build_agent_graph(
 
     _graph_log = get_logger()
 
+    def _maybe_compress(msgs: list) -> list:
+        """Pre-invoke compression check (mid-turn guard).
+
+        Uses actual token counts from the previous model call when available,
+        falling back to char-based estimates.  Fires at
+        _MID_TURN_COMPRESSION_THRESHOLD (0.60) — lower than the turn-start
+        token-based threshold (0.72) — so context can never grow to 100%
+        during a long tool loop before compression triggers.
+
+        When TCC is active, this guard is a safety net only — the background
+        roll-forward handles compression incrementally.  The threshold is raised
+        to 0.80 to avoid redundant mid-turn LLM calls.
+
+        At 85%+ char pressure (emergency), min_age_override=0 forces all
+        eligible ToolMessages to be compressed regardless of age.
+        """
+        _comp_llm = compression_llm or llm
+        if not context_compression or _comp_llm is None:
+            return msgs
+        if max_context_tokens is None or max_context_tokens < 16_384:
+            return msgs
+        total_chars = sum(_content_len(m) for m in msgs)
+        context_chars = max_context_tokens * _CHARS_PER_TOKEN
+        if context_chars <= 0:
+            return msgs
+        ratio = total_chars / context_chars
+        # Also check token-based ratio when real data is available — the
+        # char estimate underestimates web/JSON content density.
+        token_ratio = 0.0
+        last_tokens = _last_input_tokens[0]
+        if last_tokens > 0 and max_context_tokens > 0:
+            token_ratio = last_tokens / max_context_tokens
+        effective_ratio = max(ratio, token_ratio)
+        # When TCC is active, raise the threshold to 0.80 — the mid-turn guard
+        # is a safety net only; roll-forward handles most compression.
+        _mid_turn_threshold = 0.80 if _tier_cache_enabled else _MID_TURN_COMPRESSION_THRESHOLD
+        if effective_ratio < _mid_turn_threshold:
+            return msgs
+        # Emergency: min_age_override=0 compresses regardless of message age.
+        # Non-emergency: min_age_override=compression_min_age bypasses the
+        # internal token/char threshold check while keeping the age guard.
+        min_age_ovr = 0 if effective_ratio >= _EMERGENCY_THRESHOLD_RATIO else compression_min_age
+        return apply_message_compression(
+            msgs,
+            call_count=call_count[0],
+            compression_cache=_compression_cache,
+            llm=_comp_llm,
+            max_context_tokens=max_context_tokens,
+            min_age_cycles=compression_min_age,
+            min_chars=compression_min_chars,
+            min_age_override=min_age_ovr,
+            actual_input_tokens=last_tokens,
+        )
+
     def call_model(state: CogtrixState, config: RunnableConfig) -> dict:
         if llm is None:
             raise RuntimeError(
@@ -595,23 +685,74 @@ def build_agent_graph(
                     _bound_cache.popitem(last=False)
                 _bound_cache[fingerprint] = llm.bind_tools(tool_list) if tool_list else llm
             model = _bound_cache[fingerprint]
-        _graph_log.debug("⏱ call_model bind_tools: %.0fms", (time.monotonic() - _cm_t0) * 1000)
+        if is_trace():
+            _graph_log.debug("⏱ call_model bind_tools: %.0fms", (time.monotonic() - _cm_t0) * 1000)
         msgs = list(state["messages"])
         _comp_llm = compression_llm or llm
-        if context_compression and _comp_llm is not None and call_count[0] > 1:
+        # Pre-invoke compression: char-based estimate fires at 60% threshold
+        # before every model.invoke() — catches mid-turn context growth that
+        # the previous token-based check (using stale _last_input_tokens) would miss.
+        msgs = _maybe_compress(msgs)
+        full_messages = [_sys_msg, *msgs] if _sys_msg is not None else list(msgs)
+        _cm_t1 = time.monotonic()
+        try:
+            response = model.invoke(full_messages, config)
+        except Exception as _invoke_exc:
+            if not _is_context_overflow_error(_invoke_exc):
+                raise
+            _graph_log.warning(
+                "Context overflow from model (%s) — applying emergency compression and retrying",
+                type(_invoke_exc).__name__,
+            )
             msgs = apply_message_compression(
                 msgs,
                 call_count=call_count[0],
                 compression_cache=_compression_cache,
                 llm=_comp_llm,
                 max_context_tokens=max_context_tokens,
-                min_age_cycles=compression_min_age,
-                min_chars=compression_min_chars,
+                min_age_cycles=0,
+                min_chars=0,
+                emergency_threshold=0.0,
+                actual_input_tokens=_last_input_tokens[0],
             )
-        full_messages = [_sys_msg, *msgs] if _sys_msg is not None else list(msgs)
-        _cm_t1 = time.monotonic()
-        response = model.invoke(full_messages, config)
-        _graph_log.debug("⏱ call_model model.invoke: %.0fms", (time.monotonic() - _cm_t1) * 1000)
+            full_messages = [_sys_msg, *msgs] if _sys_msg is not None else list(msgs)
+            try:
+                response = model.invoke(full_messages, config)
+            except Exception as _retry_exc:
+                raise RuntimeError(
+                    f"Context overflow: unable to fit conversation into model context window "
+                    f"({max_context_tokens:,} tokens) even after emergency compression. "
+                    "Start a new session with /session new."
+                ) from _retry_exc
+        if is_trace():
+            _graph_log.debug(
+                "⏱ call_model model.invoke: %.0fms", (time.monotonic() - _cm_t1) * 1000
+            )
+        # Store actual input token count for next-turn compression trigger
+        _resp_um = getattr(response, "usage_metadata", None)
+        if _resp_um and isinstance(_resp_um, dict):
+            _resp_input = _resp_um.get("input_tokens", 0)
+            if isinstance(_resp_input, int) and _resp_input > 0:
+                _last_input_tokens[0] = _resp_input
+        # ── Per-turn context budget guard ────────────────────────────────────
+        # If the model wants more tool calls but we've already consumed a large
+        # fraction of the context window this turn, abort the loop by stripping
+        # tool_calls from the response and injecting a warning.
+        if max_context_tokens and getattr(response, "tool_calls", None):
+            um = getattr(response, "usage_metadata", None)
+            if um and isinstance(um, dict):
+                turn_input = um.get("input_tokens", 0)
+                if turn_input > max_context_tokens * tool_context_limit_pct:
+                    pct_used = int(turn_input * 100 / max_context_tokens)
+                    warning = (
+                        f"[Context budget reached — {pct_used}% of {max_context_tokens:,} "
+                        f"tokens used this turn (limit: {int(tool_context_limit_pct * 100)}%). "
+                        "Tool execution halted. Summarising based on available information.]"
+                    )
+                    response = AIMessage(
+                        content=warning,
+                        id=getattr(response, "id", None),
+                    )
         return {"messages": [response]}
 
     def handle_phantom(state: CogtrixState) -> dict:
@@ -879,6 +1020,7 @@ def build_agent_graph(
                             approvals,
                             session_state=session_state,
                             ui=confirmation_ui,
+                            git_native=git_native,
                         )
                     active_tools_list.append(tool_obj)
                     active_names_ref.add(match)
@@ -1099,6 +1241,7 @@ def build_agent_graph(
                                 approvals,
                                 session_state=session_state,
                                 ui=confirmation_ui,
+                                git_native=git_native,
                             )
                         active_tools_list.append(tool_obj)
                         active_names_ref.add(rname)

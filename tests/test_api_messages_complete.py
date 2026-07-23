@@ -30,6 +30,7 @@ os.environ.setdefault("COGTRIX_DB_URL", "sqlite+aiosqlite:///:memory:")
 
 from fastapi.testclient import TestClient  # noqa: E402
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine  # noqa: E402
+from sqlalchemy.pool import StaticPool  # noqa: E402
 
 from src.api.db.engine import Base, get_db  # noqa: E402
 
@@ -40,7 +41,12 @@ _VALID_PASSWORD = "TestPass1!"
 def app():
     from src.api.app import create_app
 
-    engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
+    engine = create_async_engine(
+        "sqlite+aiosqlite:///:memory:",
+        echo=False,
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
     factory = async_sessionmaker(engine, expire_on_commit=False)
 
     async def _create():
@@ -606,3 +612,257 @@ class TestSendMessage:
         )
         assert r.status_code == 409
         assert r.json()["error"]["code"] == "TURN_IN_PROGRESS"
+
+
+# ---------------------------------------------------------------------------
+# DELETE /sessions/{id}/messages — additional keep_last coverage
+# ---------------------------------------------------------------------------
+
+
+class TestDeleteMessagesKeepLast:
+    """Additional tests for DELETE /sessions/{id}/messages with keep_last parameter."""
+
+    def test_delete_with_keep_last_zero_clears_all(self, client, tokens, sid):
+        """keep_last=0 (default via query param) deletes all messages."""
+        resp = client.delete(
+            f"/api/v1/sessions/{sid}/messages",
+            headers=_h(tokens["owner"]),
+        )
+        assert resp.status_code == 200
+        assert resp.json()["data"] is None
+
+    def test_delete_with_keep_last_positive_via_query(self, client, tokens, sid):
+        """keep_last > 0 via JSON body triggers the bulk-delete path."""
+        resp = client.request(
+            "DELETE",
+            f"/api/v1/sessions/{sid}/messages",
+            headers=_h(tokens["owner"]),
+            json={"keep_last": 5},
+        )
+        assert resp.status_code == 200
+
+    def test_delete_messages_unknown_session_returns_404(self, client, tokens):
+        """Deleting messages for a non-existent session returns 404."""
+        resp = client.delete(
+            f"/api/v1/sessions/{uuid.uuid4()}/messages",
+            headers=_h(tokens["owner"]),
+        )
+        assert resp.status_code == 404
+        assert resp.json()["error"]["code"] == "SESSION_NOT_FOUND"
+
+    def test_delete_messages_non_owner_returns_403(self, client, tokens, sid):
+        """Non-owner cannot delete messages."""
+        resp = client.delete(
+            f"/api/v1/sessions/{sid}/messages",
+            headers=_h(tokens["other"]),
+        )
+        assert resp.status_code == 403
+
+    def test_delete_messages_no_auth_returns_401(self, client, sid):
+        """Unauthenticated delete returns 401."""
+        resp = client.delete(f"/api/v1/sessions/{sid}/messages")
+        assert resp.status_code == 401
+
+    def test_delete_with_keep_last_positive(self, client, tokens):
+        """keep_last > 0 via query param triggers the bulk-delete path."""
+        r = client.post("/api/v1/sessions", json={}, headers=_h(tokens["owner"]))
+        if r.status_code != 201:
+            pytest.skip("Session creation unavailable")
+        session_id = r.json()["data"]["id"]
+
+        resp = client.delete(
+            f"/api/v1/sessions/{session_id}/messages?keep_last=5",
+            headers=_h(tokens["owner"]),
+        )
+        assert resp.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# POST /api/v1/sessions/{id}/messages?sync=true — synchronous turn path
+# ---------------------------------------------------------------------------
+
+
+class TestSendMessageSync:
+    """Tests for the sync=True query parameter path in send_message.
+
+    sync=True blocks until the agent turn completes and returns the assembled
+    response text in the HTTP body (SyncTurnOut schema).
+    """
+
+    def _make_live(self):
+        ss = MagicMock()
+        ss.no_confirm = True
+        ss.denials = set()
+        ss.loaded_tools = set()
+        ss.pinned_tools = set()
+        ss.approvals = set()
+
+        live = MagicMock()
+        live.session_state = ss
+        live.ws_queue = _asyncio.Queue(maxsize=10_000)
+        live.cancel_event = _asyncio.Event()
+        live.turn_lock = _asyncio.Lock()
+        live.turn_task = None
+        live.active_confirmation_ui = None
+        live.drain_task = None
+        live.agent_state = "idle"
+        live.memory_manager = None
+        live.run_config = None
+        live.token_counts = {}
+        live.last_activity = 0.0
+        live.config = {}
+        return live
+
+    def test_sync_returns_200_with_assembled_response(self, client, tokens, sid, app):
+        """sync=True blocks until done and returns 200 with SyncTurnOut fields."""
+        live = self._make_live()
+
+        async def _mock_turn(**kwargs):
+            await live.ws_queue.put(
+                {
+                    "type": "done",
+                    "payload": {
+                        "text": "hello back",
+                        "message_id": "msg-1",
+                        "total_tokens": 20,
+                        "input_tokens": 10,
+                        "output_tokens": 10,
+                        "duration_ms": 50,
+                        "tool_calls": 0,
+                    },
+                }
+            )
+
+        mock_reg = MagicMock()
+        mock_reg.get_cached = AsyncMock(return_value=live)
+        mock_reg.get_or_warm = AsyncMock(return_value=live)
+        app.state.session_registry = mock_reg
+
+        with patch("src.api.routes.messages.run_message_turn", new=_mock_turn):
+            r = client.post(
+                f"/api/v1/sessions/{sid}/messages?sync=true",
+                headers=_h(tokens["owner"]),
+                json={"content": "ping"},
+            )
+        assert r.status_code == 200
+        data = r.json()["data"]
+        assert data["text"] == "hello back"
+        assert data["total_tokens"] == 20
+        assert data["input_tokens"] == 10
+        assert data["output_tokens"] == 10
+        assert data["duration_ms"] == 50
+        assert data["tool_calls"] == 0
+
+    def test_sync_empty_queue_returns_200_with_empty_text(self, client, tokens, sid, app):
+        """sync=True with nothing in the queue returns 200 with empty response text."""
+        live = self._make_live()
+
+        async def _mock_turn(**kwargs):
+            pass  # deliberately empty — no messages put in queue
+
+        mock_reg = MagicMock()
+        mock_reg.get_cached = AsyncMock(return_value=live)
+        mock_reg.get_or_warm = AsyncMock(return_value=live)
+        app.state.session_registry = mock_reg
+
+        with patch("src.api.routes.messages.run_message_turn", new=_mock_turn):
+            r = client.post(
+                f"/api/v1/sessions/{sid}/messages?sync=true",
+                headers=_h(tokens["owner"]),
+                json={"content": "ping"},
+            )
+        assert r.status_code == 200
+        assert r.json()["data"]["text"] == ""
+
+    def test_sync_error_message_in_queue_returns_500(self, client, tokens, sid, app):
+        """sync=True with an error message followed by done returns 500 AGENT_ERROR."""
+        live = self._make_live()
+
+        async def _mock_turn(**kwargs):
+            await live.ws_queue.put({"type": "error", "payload": {"message": "LLM exploded"}})
+            await live.ws_queue.put(
+                {
+                    "type": "done",
+                    "payload": {
+                        "text": "",
+                        "message_id": "m1",
+                        "total_tokens": 0,
+                        "input_tokens": 0,
+                        "output_tokens": 0,
+                        "duration_ms": 0,
+                        "tool_calls": 0,
+                    },
+                }
+            )
+
+        mock_reg = MagicMock()
+        mock_reg.get_cached = AsyncMock(return_value=live)
+        mock_reg.get_or_warm = AsyncMock(return_value=live)
+        app.state.session_registry = mock_reg
+
+        with patch("src.api.routes.messages.run_message_turn", new=_mock_turn):
+            r = client.post(
+                f"/api/v1/sessions/{sid}/messages?sync=true",
+                headers=_h(tokens["owner"]),
+                json={"content": "ping"},
+            )
+        assert r.status_code == 500
+        assert r.json()["error"]["code"] == "AGENT_ERROR"
+        assert "LLM exploded" in r.json()["error"]["message"]
+
+    def test_sync_no_auth_returns_401(self, client, sid):
+        """sync=True without auth returns 401."""
+        r = client.post(
+            f"/api/v1/sessions/{sid}/messages?sync=true",
+            json={"content": "ping"},
+        )
+        assert r.status_code == 401
+
+    def test_sync_non_owner_returns_403(self, client, tokens, sid, app):
+        """sync=True for another user's session returns 403."""
+        mock_reg = MagicMock()
+        mock_reg.get_cached = AsyncMock(return_value=None)
+        mock_reg.get_or_warm = AsyncMock(return_value=None)
+        app.state.session_registry = mock_reg
+
+        r = client.post(
+            f"/api/v1/sessions/{sid}/messages?sync=true",
+            headers=_h(tokens["other"]),
+            json={"content": "ping"},
+        )
+        assert r.status_code == 403
+
+    def test_sync_done_error_key_in_payload_returns_500(self, client, tokens, sid, app):
+        """sync=True with done.payload.error set returns 500."""
+        live = self._make_live()
+
+        async def _mock_turn(**kwargs):
+            await live.ws_queue.put(
+                {
+                    "type": "done",
+                    "payload": {
+                        "text": "",
+                        "message_id": "m1",
+                        "total_tokens": 0,
+                        "input_tokens": 0,
+                        "output_tokens": 0,
+                        "duration_ms": 0,
+                        "tool_calls": 0,
+                        "error": "turn failed internally",
+                    },
+                }
+            )
+
+        mock_reg = MagicMock()
+        mock_reg.get_cached = AsyncMock(return_value=live)
+        mock_reg.get_or_warm = AsyncMock(return_value=live)
+        app.state.session_registry = mock_reg
+
+        with patch("src.api.routes.messages.run_message_turn", new=_mock_turn):
+            r = client.post(
+                f"/api/v1/sessions/{sid}/messages?sync=true",
+                headers=_h(tokens["owner"]),
+                json={"content": "ping"},
+            )
+        assert r.status_code == 500
+        assert r.json()["error"]["code"] == "AGENT_ERROR"

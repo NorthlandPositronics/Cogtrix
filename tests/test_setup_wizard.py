@@ -23,6 +23,7 @@ from src.setup_wizard import (
     _mask_secrets,
     _print_detections,
     _run_conversation,
+    _sanitize_yaml_for_prompt,
     _strip_nulls,
     _test_connection,
 )
@@ -702,7 +703,6 @@ class TestWizardSystemPromptTemplate:
         from src.setup_wizard import _WIZARD_SYSTEM_PROMPT
 
         defaults = dict(
-            docs="doc content",
             existing_config="cfg content",
             bootstrap_provider="openai",
             bootstrap_type="openai",
@@ -714,15 +714,17 @@ class TestWizardSystemPromptTemplate:
         defaults.update(overrides)
         return _WIZARD_SYSTEM_PROMPT.substitute(**defaults)
 
-    def test_curly_braces_in_docs_do_not_crash(self):
-        result = self._full_substitute(docs="example {curly} and {{double}} and }}}")
+    def test_curly_braces_in_existing_config_do_not_crash(self):
+        # Docs are now injected per-turn, not in the system prompt — verify
+        # curly braces in existing_config still don't crash Template.substitute.
+        result = self._full_substitute(existing_config="example {curly} and {{double}} and }}}")
         assert "{curly}" in result
         assert "{{double}}" in result
         assert "}}}" in result
 
     def test_substitution_inserts_all_fields(self):
         result = self._full_substitute()
-        assert "doc content" in result
+        # Docs are now injected per-turn; system prompt contains config and bootstrap info.
         assert "cfg content" in result
         assert "openai" in result
         assert "gpt-4" in result
@@ -1259,3 +1261,43 @@ class TestStripNulls:
     def test_empty_dict_literal_is_removed(self):
         data = {"services": {}, "session": "default"}
         assert _strip_nulls(data) == {"session": "default"}
+
+
+class TestSanitizeYamlForPrompt:
+    """_sanitize_yaml_for_prompt() must redact secret fields before sending to LLM."""
+
+    def test_api_key_redacted(self):
+        yaml_str = "api_key: sk-super-secret-key-value\nmodel: gpt-4\n"
+        result = _sanitize_yaml_for_prompt(yaml_str)
+        assert "sk-super-secret-key-value" not in result
+        assert "***" in result
+
+    def test_token_and_password_redacted(self):
+        yaml_str = "token: tok123\npassword: hunter2\nuser: admin\n"
+        result = _sanitize_yaml_for_prompt(yaml_str)
+        assert "tok123" not in result
+        assert "hunter2" not in result
+        assert "admin" in result
+
+    def test_non_secret_fields_preserved(self):
+        yaml_str = "model: gpt-4.1-mini\nprovider: openai\nbase_url: http://localhost\n"
+        result = _sanitize_yaml_for_prompt(yaml_str)
+        assert "gpt-4.1-mini" in result
+        assert "openai" in result
+        assert "http://localhost" in result
+
+    def test_nested_secret_redacted(self):
+        yaml_str = "services:\n  email:\n    password: smtp-pass\n    host: mail.example.com\n"
+        result = _sanitize_yaml_for_prompt(yaml_str)
+        assert "smtp-pass" not in result
+        assert "mail.example.com" in result
+
+    def test_invalid_yaml_returns_placeholder(self):
+        result = _sanitize_yaml_for_prompt("{bad: yaml: content")
+        assert "redacted" in result
+
+    def test_empty_string_returns_unchanged(self):
+        assert _sanitize_yaml_for_prompt("") == ""
+
+    def test_whitespace_only_returns_unchanged(self):
+        assert _sanitize_yaml_for_prompt("   ") == "   "

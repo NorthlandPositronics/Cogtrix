@@ -57,14 +57,14 @@ def _get_append_lock(path: str) -> _RefLock:
             _append_locks[path] = ref_lock
         with ref_lock._ref_lock:
             ref_lock.ref_count += 1
-        skipped = 0
-        max_skip = min(len(_append_locks), 32)
-        while len(_append_locks) >= _APPEND_LOCK_MAX and skipped < max_skip:
+        n_seen = 0
+        n_to_scan = len(_append_locks)
+        while len(_append_locks) >= _APPEND_LOCK_MAX and n_seen < n_to_scan:
             key, lock_ref = next(iter(_append_locks.items()))
             with lock_ref._ref_lock:
                 if lock_ref.ref_count > 0:
                     _append_locks.move_to_end(key)
-                    skipped += 1
+                    n_seen += 1
                     continue
                 del _append_locks[key]
         return ref_lock

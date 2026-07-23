@@ -23,6 +23,7 @@ from unittest.mock import patch  # noqa: E402
 
 from fastapi.testclient import TestClient  # noqa: E402
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine  # noqa: E402
+from sqlalchemy.pool import StaticPool  # noqa: E402
 
 from src.api.auth import create_access_token  # noqa: E402
 from src.api.db.engine import Base, get_db  # noqa: E402
@@ -37,7 +38,12 @@ def app():
     """FastAPI app backed by an in-memory SQLite database."""
     from src.api.app import create_app
 
-    engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
+    engine = create_async_engine(
+        "sqlite+aiosqlite:///:memory:",
+        echo=False,
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
     factory = async_sessionmaker(engine, expire_on_commit=False)
 
     async def _create():
@@ -191,6 +197,28 @@ class TestRegister:
         r = _register(client)
         assert isinstance(r.json()["data"]["refresh_token"], str)
 
+    def test_integrity_error_race_returns_409(self, client):
+        """Concurrent registrations that slip past the uniqueness check raise IntegrityError → 409."""
+        from unittest.mock import AsyncMock, patch
+
+        from sqlalchemy.exc import IntegrityError
+
+        with patch(
+            "src.api.db.repositories.users.UserRepository.create_with_role_election",
+            new_callable=AsyncMock,
+            side_effect=IntegrityError("stmt", "params", Exception("unique constraint")),
+        ):
+            resp = client.post(
+                "/api/v1/auth/register",
+                json={
+                    "username": "raceuser",
+                    "email": "race@example.com",
+                    "password": _VALID_PASSWORD,
+                },
+            )
+        assert resp.status_code == 409
+        assert resp.json()["error"]["code"] == "VALIDATION_ERROR"
+
 
 # ---------------------------------------------------------------------------
 # Login
@@ -286,6 +314,60 @@ class TestRefresh:
     def test_empty_body_returns_422(self, client):
         r = client.post("/api/v1/auth/refresh")
         assert r.status_code in (422, 400)
+
+    def test_refresh_with_expired_token_returns_401(self, client):
+        """A token whose expires_at is in the past returns 401 TOKEN_EXPIRED."""
+        from datetime import UTC, datetime, timedelta
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        expired_record = MagicMock()
+        expired_record.revoked = False
+        expired_record.expires_at = datetime.now(UTC) - timedelta(days=1)
+
+        with patch(
+            "src.api.db.repositories.tokens.RefreshTokenRepository.get_by_hash",
+            new_callable=AsyncMock,
+            return_value=expired_record,
+        ):
+            resp = client.post(
+                "/api/v1/auth/refresh",
+                json={"refresh_token": "any.token.here"},
+            )
+        assert resp.status_code == 401
+        assert resp.json()["error"]["code"] == "TOKEN_EXPIRED"
+
+    def test_refresh_with_deleted_user_returns_401(self, client):
+        """If the user no longer exists after token lookup, return 401."""
+        from datetime import UTC, datetime, timedelta
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        valid_record = MagicMock()
+        valid_record.revoked = False
+        valid_record.expires_at = datetime.now(UTC) + timedelta(days=30)
+        valid_record.id = "tok-1"
+        valid_record.user_id = "deleted-user"
+
+        with (
+            patch(
+                "src.api.db.repositories.tokens.RefreshTokenRepository.get_by_hash",
+                new_callable=AsyncMock,
+                return_value=valid_record,
+            ),
+            patch(
+                "src.api.db.repositories.tokens.RefreshTokenRepository.revoke",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "src.api.db.repositories.users.UserRepository.get_by_id",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+        ):
+            resp = client.post(
+                "/api/v1/auth/refresh",
+                json={"refresh_token": "any.token.here"},
+            )
+        assert resp.status_code == 401
 
 
 # ---------------------------------------------------------------------------
@@ -417,15 +499,56 @@ class TestApiKeyList:
         # limit is clamped to 1; should still succeed
         assert r2.status_code == 200
 
-    def test_list_keys_cursor_param_accepted(self, client):
+    def test_list_keys_invalid_cursor_returns_400(self, client):
         r = _register(client)
         token = r.json()["data"]["access_token"]
-        # Pass a cursor that doesn't exist — should return empty
+        # Pass a raw UUID (not base64) — must be rejected
         r2 = client.get(
             f"/api/v1/auth/api-keys?cursor={uuid.uuid4()}",
             headers={"Authorization": f"Bearer {token}"},
         )
+        assert r2.status_code == 400
+        assert r2.json()["error"]["code"] == "INVALID_CURSOR"
+
+    def test_list_keys_cursor_is_opaque_base64(self, client):
+        r = _register(client)
+        token = r.json()["data"]["access_token"]
+        headers = {"Authorization": f"Bearer {token}"}
+        # Create two keys so pagination has something to return as next_cursor
+        for i in range(3):
+            client.post("/api/v1/auth/api-keys", headers=headers, json={"label": f"k{i}"})
+        r2 = client.get("/api/v1/auth/api-keys?limit=1", headers=headers)
         assert r2.status_code == 200
+        data = r2.json()["data"]
+        assert data["has_more"] is True
+        cursor = data["next_cursor"]
+        assert cursor is not None
+        # Cursor must be decodable base64url
+        import base64
+
+        decoded = base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4)).decode()
+        # Decoded value must be a UUID (the raw ID)
+        uuid.UUID(decoded)  # raises if not valid UUID
+
+    def test_list_keys_cursor_pagination_works(self, client):
+        r = _register(client)
+        token = r.json()["data"]["access_token"]
+        headers = {"Authorization": f"Bearer {token}"}
+        for i in range(3):
+            client.post("/api/v1/auth/api-keys", headers=headers, json={"label": f"p{i}"})
+        # Fetch page 1
+        r1 = client.get("/api/v1/auth/api-keys?limit=2", headers=headers)
+        data1 = r1.json()["data"]
+        assert data1["has_more"] is True
+        cursor = data1["next_cursor"]
+        # Fetch page 2 using the opaque cursor
+        r2 = client.get(f"/api/v1/auth/api-keys?limit=2&cursor={cursor}", headers=headers)
+        assert r2.status_code == 200
+        data2 = r2.json()["data"]
+        # Page 2 must not overlap with page 1
+        ids1 = {item["id"] for item in data1["items"]}
+        ids2 = {item["id"] for item in data2["items"]}
+        assert ids1.isdisjoint(ids2)
 
 
 class TestApiKeyCreate:

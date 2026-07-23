@@ -739,11 +739,17 @@ class TestMCPEndpoints:
         assert resp.json()["data"] == []
 
     def test_list_mcp_servers_with_client(self) -> None:
-        from src.mcp_client import MCPServerConfig
-
         mock_client = MagicMock()
-        sc = MCPServerConfig(name="my-server", command="npx", args=["some-pkg"])
-        mock_client.servers = {"my-server": sc}
+        mock_client.get_server_info.return_value = [
+            {
+                "name": "my-server",
+                "connected": True,
+                "tool_count": 0,
+                "tools": [],
+                "transport": "stdio",
+                "endpoint": "npx",
+            }
+        ]
 
         with _api_client(extra_state={"mcp_client": mock_client}) as (
             client,
@@ -752,6 +758,9 @@ class TestMCPEndpoints:
             admin_token,
             _,
         ):
+            config.mcp_servers = {
+                "my-server": {"command": "npx", "args": ["some-pkg"], "requires_confirmation": True}
+            }
             resp = client.get(
                 "/api/v1/mcp/servers",
                 headers={"Authorization": f"Bearer {admin_token}"},
@@ -764,11 +773,8 @@ class TestMCPEndpoints:
         assert data[0]["status"] == "connected"
 
     def test_get_mcp_server_details(self) -> None:
-        from src.mcp_client import MCPServerConfig
-
         mock_client = MagicMock()
-        sc = MCPServerConfig(name="srv1", command="python", args=["-m", "server"])
-        mock_client.servers = {"srv1": sc}
+        mock_client.get_server_info.return_value = []
 
         with _api_client(extra_state={"mcp_client": mock_client}) as (
             client,
@@ -777,6 +783,13 @@ class TestMCPEndpoints:
             admin_token,
             _,
         ):
+            config.mcp_servers = {
+                "srv1": {
+                    "command": "python",
+                    "args": ["-m", "server"],
+                    "requires_confirmation": True,
+                }
+            }
             resp = client.get(
                 "/api/v1/mcp/servers/srv1",
                 headers={"Authorization": f"Bearer {admin_token}"},
@@ -793,41 +806,29 @@ class TestMCPEndpoints:
         assert resp.status_code == 404
         assert resp.json()["error"]["code"] == "MCP_SERVER_NOT_FOUND"
 
-    def test_add_mcp_server_returns_501(self) -> None:
-        from fastapi.testclient import TestClient as _TC
-
-        from src.api.app import create_app
-
-        app = create_app()
-        admin_token = create_access_token(user_id=str(uuid.uuid4()), role="admin")
-        with _TC(app, raise_server_exceptions=False) as client:
+    def test_add_mcp_server_no_config_file_returns_503(self) -> None:
+        """POST /mcp/servers returns 503 when no config file is set (cannot persist)."""
+        with _api_client() as (client, registry, config, admin_token, _):
+            # _make_config() sets config_file_path = None → persist raises RuntimeError → 503
             resp = client.post(
                 "/api/v1/mcp/servers",
                 json={"name": "test", "transport": "stdio", "command": "npx"},
                 headers={"Authorization": f"Bearer {admin_token}"},
             )
-        assert resp.status_code == 501
+        assert resp.status_code == 503
+        assert resp.json()["error"]["code"] == "SERVICE_UNAVAILABLE"
 
-    def test_remove_mcp_server_returns_501(self) -> None:
-        from src.mcp_client import MCPServerConfig
-
-        mock_client = MagicMock()
-        sc = MCPServerConfig(name="srv1", command="python", args=[])
-        mock_client.servers = {"srv1": sc}
-
-        from fastapi.testclient import TestClient as _TC
-
-        from src.api.app import create_app
-
-        app = create_app()
-        admin_token = create_access_token(user_id=str(uuid.uuid4()), role="admin")
-        with _TC(app, raise_server_exceptions=False) as client:
-            app.state.mcp_client = mock_client
+    def test_remove_mcp_server_returns_204(self) -> None:
+        """DELETE /mcp/servers/{name} returns 204 when server exists in config."""
+        with _api_client() as (client, registry, config, admin_token, _):
+            config.mcp_servers = {
+                "srv1": {"command": "python", "args": [], "requires_confirmation": True}
+            }
             resp = client.delete(
                 "/api/v1/mcp/servers/srv1",
                 headers={"Authorization": f"Bearer {admin_token}"},
             )
-        assert resp.status_code == 501
+        assert resp.status_code == 204
 
     def test_list_mcp_servers_requires_auth(self) -> None:
         with _api_client() as (client, *_):

@@ -347,7 +347,7 @@ def whatsapp_send(to: str, message: str) -> str:
         Confirmation string or error message.
     """
     if not REQUESTS_AVAILABLE:
-        return "Error: requests library not available. Install with: pip install requests"
+        return "Error: requests library not available. Run: uv add requests"
 
     # Contact filter
     allowed, reason = _check_contact(to)
@@ -393,7 +393,7 @@ def whatsapp_send_image(
         Confirmation string or error message.
     """
     if not REQUESTS_AVAILABLE:
-        return "Error: requests library not available. Install with: pip install requests"
+        return "Error: requests library not available. Run: uv add requests"
 
     allowed, reason = _check_contact(to)
     if not allowed:
@@ -431,7 +431,7 @@ def whatsapp_check(
         Formatted list of recent messages.
     """
     if not REQUESTS_AVAILABLE:
-        return "Error: requests library not available. Install with: pip install requests"
+        return "Error: requests library not available. Run: uv add requests"
 
     limit = min(max(1, limit), 50)
     chat_id = _to_chat_id(contact) if contact else None

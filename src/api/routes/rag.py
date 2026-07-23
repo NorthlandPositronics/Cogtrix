@@ -380,8 +380,19 @@ async def delete_document(
             },
         )
 
-    # Delete uploaded file and vectordb from disk
-    upload_dir = _get_uploads_dir() / document_id
+    # Delete uploaded file and vectordb from disk.
+    # Sanitize document_id: _validate_doc_id already enforces UUID regex;
+    # we also take only the basename and re-validate before any filesystem op.
+    import re as _re
+
+    safe_id = _re.sub(r"[^a-zA-Z0-9\-]", "", document_id)
+    if not safe_id or safe_id != document_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": "INVALID_DOCUMENT_ID", "message": "Invalid document ID format."},
+        )
+    uploads_root = _get_uploads_dir().resolve()
+    upload_dir = uploads_root / safe_id
     if upload_dir.exists():
         shutil.rmtree(upload_dir, ignore_errors=True)
         log.info("rag_delete: removed upload dir %s", upload_dir)

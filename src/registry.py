@@ -25,6 +25,8 @@ except ImportError:  # pragma: no cover
 if TYPE_CHECKING:
     from langchain_core.tools import StructuredTool as _StructuredToolType
 
+    from src.config import Config
+
 from src.agent.safety import create_safe_tool
 
 
@@ -262,9 +264,17 @@ class ToolRegistry:
             log.error("Error registering tool %s: %s", config.get("name", "unknown"), e)
             return None
 
-    def load_all_tools(self) -> dict[str, _StructuredToolType]:
-        """
-        Scan tools directory and load all available tools.
+    def load_all_tools(self, config: Config | None = None) -> dict[str, _StructuredToolType]:
+        """Scan tools directory and load all available tools.
+
+        If *config* is provided, any built-in module that exposes a
+        ``TOOL_SETUP(config)`` callable will have it invoked after import,
+        and external tools from ``config.tool_dirs`` and installed
+        ``cogtrix.tools`` entry-points will be loaded after the built-ins.
+
+        Args:
+            config: Optional Cogtrix configuration object.  When present,
+                enables TOOL_SETUP dispatch and plugin loading.
 
         Returns:
             Dictionary mapping tool names to StructuredTool objects
@@ -279,6 +289,13 @@ class ToolRegistry:
             if module is None:
                 log.debug("Skipped module: %s (import failed)", module_name)
                 continue
+
+            # Call TOOL_SETUP if the module exposes one and config is available
+            if config is not None and hasattr(module, "TOOL_SETUP") and callable(module.TOOL_SETUP):
+                try:
+                    module.TOOL_SETUP(config)
+                except Exception as exc:
+                    log.warning("TOOL_SETUP failed for %s: %s", module_name, exc)
 
             # Skip modules that declare is_configured() and return False
             if hasattr(module, "is_configured") and callable(module.is_configured):
@@ -295,13 +312,49 @@ class ToolRegistry:
                 log.debug("No tool function found in module: %s", module_name)
                 continue
 
-            for func, config in results:
-                tool = self.register_tool(func, config)
+            for func, tool_config in results:
+                tool = self.register_tool(func, tool_config)
                 if tool:
-                    log.debug("Registered tool: %s", config.get("name", func.__name__))
+                    log.debug("Registered tool: %s", tool_config.get("name", func.__name__))
+
+        # Load external plugins when config is available
+        if config is not None:
+            self._load_plugin_tools(config, log)
 
         log.info("Loaded %d tools", len(self.tools))
         return self.tools
+
+    def _load_plugin_tools(self, config: Config, log: Any) -> None:
+        """Load tools from file-drop directories and installed entry-points."""
+        tool_dirs: list[str] = getattr(config, "tool_dirs", []) or []
+
+        from src.plugins.loader import ToolPluginLoader
+
+        loader = ToolPluginLoader()
+        ext_modules = loader.load_all(tool_dirs)
+
+        for module in ext_modules:
+            module_label = getattr(module, "__name__", repr(module))
+
+            if hasattr(module, "TOOL_SETUP") and callable(module.TOOL_SETUP):
+                try:
+                    module.TOOL_SETUP(config)
+                except Exception as exc:
+                    log.warning("TOOL_SETUP failed for plugin %s: %s", module_label, exc)
+
+            results = self.extract_tool_functions(module)
+            if not results:
+                log.debug("No tool functions found in plugin module: %s", module_label)
+                continue
+
+            for func, tool_config in results:
+                tool = self.register_tool(func, tool_config)
+                if tool:
+                    log.debug(
+                        "Registered plugin tool: %s (from %s)",
+                        tool_config.get("name", func.__name__),
+                        module_label,
+                    )
 
     def get_tool(self, name: str) -> _StructuredToolType | None:
         """Get a tool by name."""

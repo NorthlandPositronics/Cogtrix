@@ -1205,12 +1205,14 @@ class TestCompressionPerFutureTimeout:
 
     def test_future_result_has_timeout(self):
         import inspect
+        import re
 
         from src.orchestration import compression
 
         source = inspect.getsource(compression.apply_message_compression)
-        assert (
-            "future.result(timeout=" in source or ".result(timeout=" in source
+        # The timeout= kwarg may be on the same line or the next (black wraps long calls)
+        assert re.search(
+            r"\.result\(\s*timeout=", source
         ), "future.result() must include a timeout parameter (BUG-219)"
 
 
@@ -1369,3 +1371,57 @@ class TestUpdateWorkflowReturnsUpdated:
         assert (
             "_wf_to_out(updated)" in source
         ), "update_workflow must return _wf_to_out(updated), not _wf_to_out(wf)"
+
+
+# ── Bug 6 — context_prefix must be injected as HumanMessage, not SystemMessage ──
+
+
+class TestContextPrefixIsHumanMessage:
+    """Bug 6 regression: prepare_messages_with_context must inject context_prefix
+    as HumanMessage so that strict OpenAI-compatible providers (vLLM, Qwen3) that
+    reject a second SystemMessage outside position 0 do not receive a 400/422
+    response (BUG-238)."""
+
+    def test_context_prefix_produces_human_message(self):
+        """context_prefix must appear in a HumanMessage, not a SystemMessage."""
+        from langchain_core.messages import HumanMessage, SystemMessage
+
+        from src.agent.core import prepare_messages_with_context
+
+        msgs = prepare_messages_with_context(
+            history_messages=[],
+            user_input="What day is it?",
+            context_prefix="User's name is Alice.",
+        )
+
+        human_content = " ".join(
+            m.content if isinstance(m.content, str) else ""
+            for m in msgs
+            if isinstance(m, HumanMessage)
+        )
+        system_content = " ".join(
+            m.content if isinstance(m.content, str) else ""
+            for m in msgs
+            if isinstance(m, SystemMessage)
+        )
+
+        assert "Alice" in human_content, "context_prefix must appear in a HumanMessage"
+        assert "Alice" not in system_content, "context_prefix must NOT appear in a SystemMessage"
+
+    def test_no_extra_system_messages_with_prefix(self):
+        """With context_prefix provided, no SystemMessage should be injected."""
+        from langchain_core.messages import SystemMessage
+
+        from src.agent.core import prepare_messages_with_context
+
+        msgs = prepare_messages_with_context(
+            history_messages=[],
+            user_input="hello",
+            context_prefix="some context here",
+        )
+
+        system_count = sum(1 for m in msgs if isinstance(m, SystemMessage))
+        assert system_count == 0, (
+            f"prepare_messages_with_context injected {system_count} SystemMessage(s); "
+            f"context_prefix must use HumanMessage instead"
+        )

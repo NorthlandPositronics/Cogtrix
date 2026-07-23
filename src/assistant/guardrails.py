@@ -38,7 +38,10 @@ _INJECTION_PATTERNS: list[re.Pattern[str]] = [
         r"override\s+(previous|all|your)\b",
         r"forget\s+(everything|all|previous|your)\b",
         r"(drop|clear|reset|erase|wipe)\s+(all|everything|previous|prior|your|the)\b",
-        r"(drop|clear|reset|erase|wipe)\s+.{0,200}\b(context|history|memory|instructions?|rules?|prompts?)\b",
+        # "clear/reset/drop the context" — use `clear` only with an explicit determiner so
+        # adjective uses like "no clear context" or "a clear professional context" don't match.
+        r"\bclear\s+(all|the|your|my|previous|prior|entire)\s+.{0,50}\b(context|history|memory|instructions?|rules?|prompts?)\b",
+        r"\b(drop|reset|erase|wipe)\s+.{0,100}\b(context|history|memory|instructions?|rules?|prompts?)\b",
         r"now\s+you\s+are\s+(a|an|the|my)\b",
         r"from\s+now\s+on\s+you\s+(are|will|should|must)\b",
         r"stop\s+being\s+(a|an|the)\b",
@@ -208,6 +211,19 @@ _WEB_TOOLS: frozenset[str] = frozenset(
     }
 )
 _PATH_ARG_KEYS: frozenset[str] = frozenset({"path", "working_directory"})
+
+# Agent-internal meta-tools whose arguments are always agent-generated reasoning,
+# never user-supplied text.  Injection-scanning them produces false positives because
+# the agent's own reasoning can contain phrases that look like injection commands
+# (e.g. "no clear context", "default to no reply").
+_INJECTION_SCAN_EXEMPT_TOOLS: frozenset[str] = frozenset(
+    {
+        "suppress_reply",
+        "defer_processing",
+        "report_progress",
+        "request_tools",
+    }
+)
 _URL_ARG_KEYS: frozenset[str] = frozenset({"url", "urls", "query", "data"})
 _EXFIL_PATTERNS: list[re.Pattern[str]] = [
     re.compile(p, re.IGNORECASE)
@@ -665,6 +681,8 @@ class ToolCallGuard:
         return GuardrailResult(is_safe=True)
 
     def _scan_injection(self, tool_name: str, tool_args: dict[str, Any]) -> GuardrailResult:
+        if tool_name in _INJECTION_SCAN_EXEMPT_TOOLS:
+            return GuardrailResult(is_safe=True)
         for key, value in tool_args.items():
             if not isinstance(value, str):
                 continue

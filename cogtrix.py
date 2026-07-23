@@ -7,7 +7,9 @@ Supports multiple LLM providers: OpenAI, Ollama.
 
 import atexit
 import concurrent.futures as _cf
+import difflib
 import os
+import re
 import sys
 import time as _time_mod
 import warnings
@@ -28,6 +30,8 @@ from src.cli.input import (
     read_multiline,
     run_inline_shell,
     save_input_history,
+    set_slash_commands,
+    setup_readline_completion,
 )
 from src.config import Config, ConfigError, _resolve_model, load_config
 from src.logging_config import (
@@ -41,7 +45,10 @@ from src.logging_config import (
     setup_logging,
 )
 from src.memory import JsonFileMemoryStore, MemoryFactory
+from src.memory.context import MemoryContext
+from src.memory.mode_selector import classify_memory_mode, should_switch_mode
 from src.orchestration.compression import (
+    _CHARS_PER_TOKEN,
     COMPRESSION_MIN_AGE_CYCLES,
     COMPRESSION_MIN_CHARS,
     apply_message_compression,
@@ -74,6 +81,7 @@ from src.orchestration.phases import (  # noqa: F401
     STEP_LIMIT_PHRASES,
     WEB_TOOL_NAMES,
     WRITE_FAILURE_PREFIXES,
+    _looks_like_research_query,
     agent_performed_writes,
     agent_used_web_tools,
     build_llm_for_decomposition,
@@ -123,14 +131,17 @@ from src.tools.configure import (
     build_tool_catalog,
     compute_tool_output_cap,
     configure_brave_tool,
+    configure_cron_tool,
     configure_deep_think_tool,
     configure_delegate_tool,
     configure_delegate_tools,
+    configure_email_tool,
     configure_exa_tool,
     configure_file_ops_tool,
     configure_google_search_tool,
     configure_python_exec_tool,
     configure_rag_tool,
+    configure_searxng_tool,
     configure_serpapi_tool,
     configure_tavily_tool,
     create_request_tools_tool,
@@ -144,6 +155,7 @@ from src.tools.report_progress import (
 from src.tools.report_progress import (
     set_progress_callback as set_milestone_callback,
 )
+from src.ui.input_session import create_session as _create_input_session
 from src.ui.spinner import _spinner
 
 try:
@@ -183,7 +195,18 @@ except ImportError:
     MCPServerConfig = None  # type: ignore[misc, assignment]
 
 # Initialize rich console if available
-console = Console() if Console is not None else None
+if Console is not None:
+
+    class _Console(Console):  # type: ignore[misc, valid-type]
+        """Console variant that defaults crop=False so panel closing borders are never clipped."""
+
+        def print(self, *objects: Any, crop: bool = False, **kwargs: Any) -> None:
+            super().print(*objects, crop=crop, **kwargs)
+
+    console: _Console | None = _Console()
+else:
+    _Console = None  # type: ignore[assignment, misc]
+    console = None
 
 # Backward-compat aliases for compression functions (used by test imports)
 _apply_message_compression = apply_message_compression
@@ -201,7 +224,7 @@ def _tool_expansion_ui(added: list[str], released: list[str], total: int) -> Non
         parts.append(f"Added: {', '.join(added)}")
     if released:
         parts.append(f"Released: {', '.join(released)}")
-    print(f"  [tools] {'; '.join(parts)} ({total} total)")
+    get_logger().debug("[tools] %s (%d total)", "; ".join(parts), total)
     _spinner.resume()
 
 
@@ -272,11 +295,70 @@ _TOOL_CATEGORIES: dict[str, list[str]] = {
     ],
 }
 
+# Secondary category map for tools not covered by _TOOL_CATEGORIES.
+# These override the "Other" fallback and are displayed after core categories.
+_TOOL_CATEGORY_MAP: dict[str, str] = {
+    # Git
+    "git_add": "Git",
+    "git_checkout": "Git",
+    "git_commit": "Git",
+    "git_create_branch": "Git",
+    "git_diff": "Git",
+    "git_log": "Git",
+    "git_status": "Git",
+    # GitHub
+    "gh_comment_issue": "GitHub",
+    "gh_create_issue": "GitHub",
+    "gh_get_file": "GitHub",
+    "gh_list_prs": "GitHub",
+    # WhatsApp
+    "whatsapp_check": "WhatsApp",
+    "whatsapp_contacts": "WhatsApp",
+    "whatsapp_send": "WhatsApp",
+    "whatsapp_send_image": "WhatsApp",
+    # Cron
+    "cron_add": "Cron",
+    "cron_list": "Cron",
+    "cron_remove": "Cron",
+    # Goals
+    "abandon_goal": "Goals",
+    "add_subgoal": "Goals",
+    "complete_goal": "Goals",
+    "list_goals": "Goals",
+    "set_goal": "Goals",
+    # Tasks & Agents
+    "cancel_task": "Tasks & Agents",
+    "get_task_result": "Tasks & Agents",
+    "get_task_status": "Tasks & Agents",
+    "list_tasks": "Tasks & Agents",
+    "spawn_agent": "Tasks & Agents",
+    "send_to_agent": "Tasks & Agents",
+    "read_agent_inbox": "Tasks & Agents",
+    "report_progress": "Tasks & Agents",
+    # Development
+    "generate_tests": "Development",
+    "patch_file": "Development",
+    "self_improve": "Development",
+}
+
+# Ordered list of secondary categories for display (after core categories).
+_SECONDARY_CATEGORY_ORDER: list[str] = [
+    "Git",
+    "GitHub",
+    "WhatsApp",
+    "Cron",
+    "Goals",
+    "Tasks & Agents",
+    "Development",
+]
+
 # Build reverse lookup: tool_name → category
 _TOOL_TO_CATEGORY: dict[str, str] = {}
 for _cat, _names in _TOOL_CATEGORIES.items():
     for _tname in _names:
         _TOOL_TO_CATEGORY[_tname] = _cat
+for _tname, _cat in _TOOL_CATEGORY_MAP.items():
+    _TOOL_TO_CATEGORY.setdefault(_tname, _cat)
 
 
 _tool_logger = ToolCallLogger()
@@ -300,6 +382,7 @@ class _TokenAccumulator(_BaseCallback):  # type: ignore[misc]
         super().__init__()
         self.input_tokens: int = 0
         self.output_tokens: int = 0
+        self.last_input_tokens: int = 0
 
     def on_llm_end(self, response: Any, **kwargs: Any) -> None:
         if not hasattr(self, "input_tokens"):
@@ -308,8 +391,11 @@ class _TokenAccumulator(_BaseCallback):  # type: ignore[misc]
         if llm_output:
             usage = llm_output.get("token_usage") or llm_output.get("usage")
             if usage:
-                self.input_tokens += usage.get("prompt_tokens", 0)
+                prompt = usage.get("prompt_tokens", 0)
+                self.input_tokens += prompt
                 self.output_tokens += usage.get("completion_tokens", 0)
+                if prompt > 0:
+                    self.last_input_tokens = prompt
                 return
         gens = getattr(response, "generations", None)
         if gens:
@@ -319,24 +405,112 @@ class _TokenAccumulator(_BaseCallback):  # type: ignore[misc]
                     if msg:
                         um = getattr(msg, "usage_metadata", None)
                         if um:
-                            self.input_tokens += getattr(um, "input_tokens", 0)
+                            inp = getattr(um, "input_tokens", 0)
+                            self.input_tokens += inp
                             self.output_tokens += getattr(um, "output_tokens", 0)
+                            if inp > 0:
+                                self.last_input_tokens = inp
 
 
-def _format_stats_line(elapsed: float, acc: _TokenAccumulator) -> str | None:
+def _format_stats_line(
+    elapsed: float,
+    acc: _TokenAccumulator,
+    session_acc: "_TokenAccumulator | None" = None,
+) -> str | None:
     """Build a compact stats string for display after agent responses."""
     parts: list[str] = []
     if elapsed > 0:
         parts.append(f"[dim yellow]{elapsed:.1f}s[/dim yellow]")
     if acc.input_tokens or acc.output_tokens:
-        parts.append(
-            f"[dim #8BC34A]{acc.input_tokens:,}\u2191[/dim #8BC34A]"
-            f" [dim red]{acc.output_tokens:,}\u2193[/dim red]"
-        )
+        parts.append(f"[dim]↑ {acc.input_tokens:,}  ↓ {acc.output_tokens:,}[/dim]")
+    if session_acc is not None and (session_acc.input_tokens or session_acc.output_tokens):
+        total = session_acc.input_tokens + session_acc.output_tokens
+        parts.append(f"[dim]session: {total:,} tok[/dim]")
     return "[dim] \u00b7 [/dim]".join(parts) if parts else None
 
 
+def _apply_profile(config: "Config", profile_name: str) -> None:
+    """Apply a named profile's settings to config.
+
+    Profile keys map directly to Config field names.
+    Unrecognised keys are silently skipped.
+    """
+    profile = config.profiles.get(profile_name)
+    if profile is None:
+        _log = get_logger()
+        _log.warning(
+            "Profile '%s' not found in config. Available: %s",
+            profile_name,
+            list(config.profiles.keys()),
+        )
+        if console:
+            console.print(f"[yellow]Profile '{profile_name}' not found.[/yellow]")
+        return
+    _PROFILE_FIELDS = {
+        "model",
+        "memory_mode",
+        "prompt_optimizer",
+        "quick_mode",
+        "auto_route",
+        "auto_route_fast_model",
+        "git_native",
+        "banner",
+        "no_confirm",
+    }
+    for key, value in profile.items():
+        if key not in _PROFILE_FIELDS:
+            continue
+        if key == "model":
+            config.active_model_alias = str(value)
+        elif key == "no_confirm":
+            pass  # applied separately via _session.no_confirm
+        elif key == "banner":
+            _banner_val = str(value).lower().strip()
+            if _banner_val in ("full", "compact", "off", "none", "false", "0"):
+                config.banner = (
+                    "off" if _banner_val in ("off", "none", "false", "0") else _banner_val
+                )
+        elif hasattr(config, key):
+            try:
+                setattr(config, key, type(getattr(config, key))(value))
+            except Exception:
+                setattr(config, key, value)
+    get_logger().info("Applied profile '%s'", profile_name)
+
+
+def _context_advisory(
+    used_tokens: int,
+    max_tokens: int | None,
+    console: "object | None" = None,
+) -> None:
+    """Print a context-usage advisory when session token usage crosses warning thresholds.
+
+    Thresholds:
+      >= 70% and < 85%: dim yellow warning
+      >= 85%:           dim red warning (approaching hard limit)
+    """
+    if not max_tokens or max_tokens <= 0 or used_tokens <= 0:
+        return
+    pct = int(used_tokens * 100 / max_tokens)
+    if pct < 70:
+        return
+    if pct >= 85:
+        msg = f"\u26a0 Context at {pct}% \u2014 approaching limit; start /session new"
+        style = "dim red"
+    else:
+        msg = f"\u26a0 Context at {pct}% \u2014 consider /session new or --quick"
+        style = "dim yellow"
+    if console is not None:
+        try:
+            console.print(f"  [{style}]{msg}[/{style}]")  # type: ignore[union-attr]
+        except Exception:
+            print(f"  {msg}")
+    else:
+        print(f"  {msg}")
+
+
 _session = SessionState()
+_session_tokens = _TokenAccumulator()
 _active_milestones: list = []
 
 
@@ -373,14 +547,14 @@ class _RichConfirmationUI:
             exec_msg = f"Agent wants to execute: [bold]{tool_name}[/bold]\n\n"
             params_msg = f"[dim]Parameters:[/dim]\n{params_text}\n"
             hint_msg = (
-                "\n[bright_white]"
-                "[bold bright_red]Y[/bold bright_red]es  "
-                "[bold bright_red]N[/bold bright_red]o  "
-                "[bold bright_red]A[/bold bright_red]llow all  "
-                "[bold bright_red]D[/bold bright_red]isable tool  "
-                "[bold bright_red]F[/bold bright_red]orbid all  "
-                "[bold bright_red]C[/bold bright_red]ancel"
-                "[/bright_white]\n"
+                "\n[dim]"
+                "[[bold white]y[/bold white]] allow once  "
+                "[[bold white]n[/bold white]] deny  "
+                "[[bold yellow]a[/bold yellow]] allow always  "
+                "[[bold red]d[/bold red]] disable tool  "
+                "[[bold red]f[/bold red]] forbid all  "
+                "[[bold white]c[/bold white]] cancel"
+                "[/dim]\n"
             )
             markup = f"{warn}{exec_msg}{params_msg}{hint_msg}"
             content = Text.from_markup(markup)
@@ -396,16 +570,46 @@ class _RichConfirmationUI:
                     print(f"  {key}: {_preview(tool_input[key])}")
             else:
                 print(f"Input: {_preview(tool_input)}")
-            print("  Y=yes  N=no  A=allow all  D=disable tool  F=forbid all  C=cancel")
+            print(
+                "  [y] allow once  [n] deny  [a] allow always  [d] disable tool  [f] forbid all  [c] cancel"
+            )
 
     def read_choice(self) -> str:
-        return input("Allow? ")
+        return input("  Choice [y/n/a/d/f/c]: ")
 
     def show_message(self, message: str, style: str) -> None:
         if console:
             console.print(f"[{style}]{message}[/{style}]")
         else:
             print(message)
+
+    def show_diff_preview(self, path: str, diff_lines: list[str]) -> None:
+        if not diff_lines:
+            return
+        if console:
+            from rich.syntax import Syntax
+
+            diff_text = "\n".join(diff_lines)
+            syntax = Syntax(
+                diff_text,
+                "diff",
+                theme="monokai",
+                line_numbers=False,
+                word_wrap=False,
+            )
+            console.print(
+                Panel(
+                    syntax,
+                    title=f"[bold]Proposed changes to[/bold] [cyan]{path}[/cyan]",
+                    border_style="cyan",
+                    padding=(0, 1),
+                )
+            )
+        else:
+            print(f"\nProposed changes to {path}:")
+            for line in diff_lines:
+                print(line)
+            print()
 
     def pause_spinner(self) -> None:
         _spinner.pause()
@@ -425,18 +629,58 @@ __license__ = "Cogtrix Source-Available License 1.0"
 _cleanup_resources: list = []
 
 
+_PROVIDER_ENV_VARS: dict[str, str] = {
+    "openai": "OPENAI_API_KEY",
+    "anthropic": "ANTHROPIC_API_KEY",
+    "google": "GOOGLE_API_KEY",
+    "gemini": "GEMINI_API_KEY",
+    "xai": "XAI_API_KEY",
+    "groq": "GROQ_API_KEY",
+    "mistral": "MISTRAL_API_KEY",
+    "cohere": "COHERE_API_KEY",
+    "together": "TOGETHER_API_KEY",
+}
+
+
 def _friendly_error(exc: Exception, provider: str = "", base_url: str = "") -> str:
     """Return a concise, user-friendly message for common exceptions.
 
     Falls back to ``str(exc)`` for truly unexpected errors.
     """
     msg = str(exc).lower()
-    if "api_key" in msg or "api key" in msg or "authentication" in msg or "unauthorized" in msg:
-        hint = (
-            f"Provider '{provider}' requires an API key." if provider else "An API key is required."
-        )
+    if any(
+        x in msg for x in ("rate limit", "rate_limit", "429", "quota exceeded", "too many requests")
+    ):
         return (
-            f"{hint}\n"
+            f"Rate limit reached for provider '{provider}'.\n"
+            "   Wait a moment and try again, or switch to a different model with /model."
+        )
+    if any(
+        x in msg
+        for x in (
+            "context_length_exceeded",
+            "context window",
+            "maximum context length",
+            "too many tokens",
+            "reduce the length",
+            "context length",
+        )
+    ):
+        return (
+            "Message history is too long for this model's context window.\n"
+            "   Options: /session <name> to start fresh, /mode to change memory mode,\n"
+            "   or switch to a larger-context model with /model."
+        )
+    if "api_key" in msg or "api key" in msg or "authentication" in msg or "unauthorized" in msg:
+        if provider:
+            env_var = _PROVIDER_ENV_VARS.get(provider.lower(), "")
+            env_hint = f"Set {env_var}" if env_var else "Set the appropriate environment variable"
+            return (
+                f"Provider '{provider}' requires an API key.\n"
+                f"   {env_hint} or add 'api_key' under '{provider}' in your config file."
+            )
+        return (
+            "An API key is required.\n"
             "   Set the appropriate environment variable or add 'api_key' to your config."
         )
     if "could not connect" in msg or "connection refused" in msg or "connection error" in msg:
@@ -450,6 +694,408 @@ def _friendly_error(exc: Exception, provider: str = "", base_url: str = "") -> s
     # Fallback: first line only, strip stack-trace noise
     first_line = str(exc).split("\n")[0].strip()
     return first_line
+
+
+def _load_project_context() -> tuple[str, str | None]:
+    """Load COGTRIX.md from cwd, home, or XDG config dir.
+
+    Returns (content, path) where content is truncated to 4000 chars.
+    Returns ("", None) if no file found.
+    """
+    search_paths = [
+        Path.cwd() / "COGTRIX.md",
+        Path.home() / "COGTRIX.md",
+        Path.home() / ".config" / "cogtrix" / "COGTRIX.md",
+    ]
+    for path in search_paths:
+        if path.exists() and path.is_file():
+            try:
+                content = path.read_text(encoding="utf-8", errors="replace")
+                if len(content) > 4000:
+                    content = content[:4000] + "\n[... truncated at 4000 chars ...]"
+                return content, str(path)
+            except OSError:
+                continue
+    return "", None
+
+
+_AT_FILE_RE = re.compile(r"@([\w./\-]+)")
+_AT_MAX_FILE_CHARS = 50_000
+_AT_MAX_FILES = 5
+
+_SIMPLE_QUERY_KEYWORDS = frozenset(
+    {
+        "fix",
+        "what",
+        "list",
+        "show",
+        "rename",
+        "explain",
+        "format",
+        "define",
+        "find",
+        "count",
+        "print",
+        "display",
+        "describe",
+        "translate",
+        "summarize",
+        "convert",
+        "check",
+        "get",
+        "set",
+        "is",
+        "are",
+        "can",
+        "does",
+        "do",
+        "tell",
+        "how",
+        "why",
+        "when",
+        "where",
+        "which",
+        "who",
+    }
+)
+
+_COMPLEX_QUERY_MARKERS = frozenset(
+    {
+        "implement",
+        "build",
+        "create",
+        "write",
+        "design",
+        "refactor",
+        "migrate",
+        "analyze",
+        "debug",
+        "optimize",
+        "architect",
+        "develop",
+        "generate",
+        "test",
+        "deploy",
+        "integrate",
+        "research",
+    }
+)
+
+
+def _build_completion_script(shell: str, data_dir: str | None = None) -> str:
+    """Build a bash or zsh completion script for the cogtrix CLI."""
+    flags = [
+        "--help",
+        "--setup",
+        "--check-config",
+        "--model",
+        "--session",
+        "--memory-mode",
+        "--config-file",
+        "--data-dir",
+        "--prompt",
+        "--prompt-file",
+        "--no-stream",
+        "--silent",
+        "--system-prompt",
+        "--system-prompt-file",
+        "--output",
+        "--no-confirm",
+        "--auto-route",
+        "--quick",
+        "--git-native",
+        "--log",
+        "--verbose",
+        "--debug",
+        "--verbosity",
+        "--tools",
+        "--activate-tools",
+        "--allow-write-path",
+        "--ingest",
+        "--docs-dir",
+        "--vectordb-dir",
+        "--embedding-provider",
+        "--embedding-model",
+        "--assistant",
+        "--setup-docs",
+        "--setup-output",
+        "--install-completion",
+    ]
+    short_flags = [
+        "-h",
+        "-m",
+        "-s",
+        "-M",
+        "-c",
+        "-o",
+        "-y",
+        "-R",
+        "-Q",
+        "-G",
+        "-S",
+        "-v",
+    ]
+    memory_modes = "conversation code reasoning"
+
+    # Discover session names from data_dir
+    sessions = ""
+    if data_dir:
+        try:
+            sessions_path = Path(data_dir) / "history"
+            if sessions_path.is_dir():
+                names = [p.stem for p in sessions_path.glob("*.json") if p.is_file()]
+                sessions = " ".join(sorted(names))
+        except Exception:
+            pass
+
+    all_flags = " ".join(flags + short_flags)
+
+    if shell == "zsh":
+        return f"""#compdef cogtrix
+
+_cogtrix() {{
+  local context state state_descr line
+  typeset -A opt_args
+
+  _arguments \\
+    "(--help -h)"{{"(--help -h)",-h,--help}}"[show help]" \\
+    "(--session -s)"{{"(--session -s)",-s,--session}}"[session ID]: :->sessions" \\
+    "(--memory-mode -M)"{{"(--memory-mode -M)",-M,--memory-mode}}"[memory mode]: :(conversation code reasoning)" \\
+    "(--model -m)"{{"(--model -m)",-m,--model}}"[model alias]:model alias:" \\
+    "(--quick -Q)"{{"(--quick -Q)",-Q,--quick}}"[quick mode]" \\
+    "(--auto-route -R)"{{"(--auto-route -R)",-R,--auto-route}}"[auto model routing]" \\
+    "(--git-native -G)"{{"(--git-native -G)",-G,--git-native}}"[git auto-commit mode]" \\
+    "(--no-confirm -y)"{{"(--no-confirm -y)",-y,--no-confirm}}"[auto-approve tools]" \\
+    "(--prompt)--prompt[single prompt]: :_message prompt" \\
+    "*: :_message args"
+
+  case $state in
+    sessions)
+      local sessions=({sessions})
+      _describe "session" sessions
+      ;;
+  esac
+}}
+
+_cogtrix "$@"
+
+# To install: add this to ~/.zshrc
+#   source <(cogtrix --install-completion zsh)
+"""
+    else:
+        # bash
+        return f"""# Bash completion for cogtrix
+_cogtrix_completion() {{
+  local cur prev opts
+  COMPREPLY=()
+  cur="${{COMP_WORDS[COMP_CWORD]}}"
+  prev="${{COMP_WORDS[COMP_CWORD-1]}}"
+  opts="{all_flags}"
+
+  case "$prev" in
+    --memory-mode|-M)
+      COMPREPLY=( $(compgen -W "{memory_modes}" -- "$cur") )
+      return 0
+      ;;
+    --session|-s)
+      COMPREPLY=( $(compgen -W "{sessions}" -- "$cur") )
+      return 0
+      ;;
+    --model|-m|--config-file|-c|--prompt-file|--system-prompt-file|--output|-o|--data-dir|--log|--docs-dir|--vectordb-dir|--setup-output|--setup-docs|--allow-write-path)
+      COMPREPLY=( $(compgen -f -- "$cur") )
+      return 0
+      ;;
+    --embedding-provider)
+      COMPREPLY=( $(compgen -W "openai ollama" -- "$cur") )
+      return 0
+      ;;
+    --tools)
+      COMPREPLY=( $(compgen -W "all none minimal" -- "$cur") )
+      return 0
+      ;;
+  esac
+
+  if [[ "$cur" == -* ]]; then
+    COMPREPLY=( $(compgen -W "$opts" -- "$cur") )
+    return 0
+  fi
+}}
+
+complete -F _cogtrix_completion cogtrix cogtrix.py
+
+# To install: add this to ~/.bashrc
+#   source <(cogtrix --install-completion)
+"""
+
+
+def _classify_query_complexity(text: str) -> str:
+    """Return 'simple' or 'complex' based on a fast local heuristic.
+
+    Heuristic:
+    - Any complex marker → complex
+    - Word count > 80 → complex (long query likely needs deep reasoning)
+    - First word is a simple keyword AND word count <= 30 → simple
+    - Otherwise → complex (conservative default)
+    """
+    words = text.lower().split()
+    if not words:
+        return "simple"
+    if any(w in _COMPLEX_QUERY_MARKERS for w in words):
+        return "complex"
+    if len(words) > 80:
+        return "complex"
+    if words[0] in _SIMPLE_QUERY_KEYWORDS and len(words) <= 30:
+        return "simple"
+    return "complex"
+
+
+def _export_markdown(turns: list[tuple[str, str]], session_id: str, timestamp: str) -> str:
+    """Render conversation turns as Markdown."""
+    lines = [
+        f"# Cogtrix Session: {session_id}",
+        "",
+        f"_Exported: {timestamp.replace('-', ' ', 1).replace('-', ':')}_",
+        "",
+        "---",
+        "",
+    ]
+    for i, (human, ai) in enumerate(turns, 1):
+        lines.append(f"## Turn {i}")
+        lines.append("")
+        lines.append(f"**You:** {human}")
+        lines.append("")
+        lines.append("**Agent:**")
+        lines.append("")
+        lines.append(ai)
+        lines.append("")
+        lines.append("---")
+        lines.append("")
+    return "\n".join(lines)
+
+
+def _export_html(turns: list[tuple[str, str]], session_id: str, timestamp: str) -> str:
+    """Render conversation turns as a clean HTML page."""
+    import html as _html_mod
+    import re as _re
+
+    def esc(s: str) -> str:
+        return _html_mod.escape(s)
+
+    def md_to_html(s: str) -> str:
+        """Minimal markdown: code blocks, inline code, bold, newlines."""
+        # Fenced code blocks
+        s = _re.sub(
+            r"```(\w*)\n(.*?)```",
+            lambda m: f'<pre><code class="language-{m.group(1)}">{esc(m.group(2))}</code></pre>',
+            s,
+            flags=_re.DOTALL,
+        )
+        # Inline code
+        s = _re.sub(r"`([^`]+)`", lambda m: f"<code>{esc(m.group(1))}</code>", s)
+        # Bold
+        s = _re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", s)
+        # Newlines to <br>
+        s = s.replace("\n", "<br>\n")
+        return s
+
+    ts_display = timestamp.replace("-", " ", 1).replace("-", ":")
+    turns_html = []
+    for i, (human, ai) in enumerate(turns, 1):
+        turns_html.append(f"""
+    <div class="turn">
+      <div class="turn-num">Turn {i}</div>
+      <div class="bubble user"><span class="label">You</span><div class="body">{esc(human)}</div></div>
+      <div class="bubble agent"><span class="label">Agent</span><div class="body">{md_to_html(ai)}</div></div>
+    </div>""")
+
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Cogtrix \u2014 {esc(session_id)}</title>
+<style>
+  body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+          max-width: 860px; margin: 40px auto; padding: 0 20px;
+          background: #0d1117; color: #c9d1d9; line-height: 1.6; }}
+  h1 {{ color: #58a6ff; border-bottom: 1px solid #30363d; padding-bottom: 12px; }}
+  .meta {{ color: #8b949e; font-size: 0.85em; margin-bottom: 32px; }}
+  .turn {{ margin-bottom: 28px; }}
+  .turn-num {{ font-size: 0.75em; color: #8b949e; margin-bottom: 8px; text-transform: uppercase; letter-spacing: 0.08em; }}
+  .bubble {{ border-radius: 8px; padding: 12px 16px; margin-bottom: 8px; }}
+  .user {{ background: #161b22; border: 1px solid #30363d; }}
+  .agent {{ background: #0d2137; border: 1px solid #1c4a6e; }}
+  .label {{ font-size: 0.75em; font-weight: 600; text-transform: uppercase;
+             letter-spacing: 0.06em; display: block; margin-bottom: 6px; }}
+  .user .label {{ color: #58a6ff; }}
+  .agent .label {{ color: #3fb950; }}
+  .body {{ font-size: 0.95em; }}
+  code {{ background: #161b22; border: 1px solid #30363d; padding: 1px 5px;
+          border-radius: 4px; font-size: 0.88em; }}
+  pre {{ background: #161b22; border: 1px solid #30363d; padding: 12px;
+         border-radius: 6px; overflow-x: auto; }}
+  pre code {{ border: none; padding: 0; background: none; }}
+  strong {{ color: #e6edf3; }}
+</style>
+</head>
+<body>
+<h1>Cogtrix Session: {esc(session_id)}</h1>
+<div class="meta">Exported: {esc(ts_display)} &nbsp;&middot;&nbsp; {len(turns)} turn{'s' if len(turns) != 1 else ''}</div>
+{''.join(turns_html)}
+</body>
+</html>
+"""
+
+
+def _expand_at_references(text: str) -> tuple[str, list[str]]:
+    """Expand @file and @folder references in user input.
+
+    Returns (expanded_text, list_of_injected_paths).
+    Binary files and missing paths are left as-is with an inline note.
+    """
+    injected: list[str] = []
+    count = [0]  # mutable for closure
+
+    def _replace(m: re.Match[str]) -> str:
+        ref = m.group(1)
+        if count[0] >= _AT_MAX_FILES:
+            return m.group(0)
+        path = Path(ref)
+        if not path.is_absolute():
+            path = Path.cwd() / ref
+        if path.is_dir():
+            count[0] += 1
+            lines = [f"[Directory: {ref}]"]
+            try:
+                all_entries = sorted(path.rglob("*"))
+                for entry in all_entries[:60]:
+                    if entry.is_file():
+                        rel = entry.relative_to(path)
+                        size = entry.stat().st_size
+                        lines.append(f"  {rel}  ({size:,} bytes)")
+                if len(all_entries) > 60:
+                    lines.append("  ... (truncated)")
+            except OSError:
+                pass
+            injected.append(str(path))
+            return "\n".join(lines)
+        elif path.is_file():
+            count[0] += 1
+            try:
+                content = path.read_text(encoding="utf-8", errors="replace")
+                truncated = len(content) > _AT_MAX_FILE_CHARS
+                if truncated:
+                    content = content[:_AT_MAX_FILE_CHARS]
+                header = f"[Content of {ref}{'  (truncated)' if truncated else ''}]\n"
+                injected.append(str(path))
+                return header + content
+            except OSError as exc:
+                return f"[@{ref}: error reading — {exc}]"
+        else:
+            return m.group(0)  # not found, leave as-is
+
+    expanded = _AT_FILE_RE.sub(_replace, text)
+    return expanded, injected
 
 
 def _cleanup():
@@ -581,6 +1227,11 @@ class SlashCommandRegistry:
         self.available_tools: dict[str, Any] = {}
         self.system_prompt: str | None = None
         self.mcp_manager: Any = None
+        self.project_context_path: str | None = None
+        self.last_input: str | None = None  # last user prompt, for /retry
+        self.compression_llm: Any = None
+        self.max_context_tokens: int | None = None
+        self.last_input_tokens: int = 0
 
     # -- registration -------------------------------------------------------
 
@@ -629,7 +1280,18 @@ class SlashCommandRegistry:
         cmd = self._resolve(cmd_name)
         if cmd is None:
             print(f"Unknown command: /{cmd_name}")
-            print("Type /help for a list of commands.")
+            # Suggest closest known command using difflib
+            known_commands = list(self._commands.keys()) + [
+                a for aliases in [c.aliases for c in self._commands.values()] for a in aliases
+            ]
+            suggestions = difflib.get_close_matches(
+                cmd_name.lower(), [c.lower() for c in known_commands], n=3, cutoff=0.3
+            )
+            if suggestions:
+                sug_list = ", ".join("/" + s for s in suggestions)
+                print(f"Did you mean one of: {sug_list}?")
+            else:
+                print("Type /help for a list of commands.")
             return "continue"
 
         return cmd.handler(self, cmd_args)
@@ -657,7 +1319,18 @@ class SlashCommandRegistry:
                 cmd = self._resolve(args.lower())
             if cmd is None:
                 print(f"Unknown command: {args}")
-                print("Type /help for a list of commands.")
+                # Suggest closest known command using difflib
+                known_commands = list(self._commands.keys()) + [
+                    a for aliases in [c.aliases for c in self._commands.values()] for a in aliases
+                ]
+                suggestions = difflib.get_close_matches(
+                    args.lower(), [c.lower() for c in known_commands], n=3, cutoff=0.3
+                )
+                if suggestions:
+                    sug_list = ", ".join("/" + s for s in suggestions)
+                    print(f"Did you mean one of: {sug_list}?")
+                else:
+                    print("Type /help for a list of commands.")
                 return "continue"
 
             if console is not None:
@@ -708,10 +1381,11 @@ class SlashCommandRegistry:
 
         sp = self.system_prompt
         mm_mcp = self.mcp_manager
+        pcp = self.project_context_path
         if console is not None and Panel is not None:
-            _info_rich(cfg, provider_cfg, model_cfg, stats, msg_count, sp, mm_mcp)
+            _info_rich(cfg, provider_cfg, model_cfg, stats, msg_count, sp, mm_mcp, pcp)
         else:
-            _info_plain(cfg, provider_cfg, model_cfg, stats, msg_count, sp, mm_mcp)
+            _info_plain(cfg, provider_cfg, model_cfg, stats, msg_count, sp, mm_mcp, pcp)
         return "continue"
 
     @staticmethod
@@ -732,20 +1406,15 @@ class SlashCommandRegistry:
                 else:
                     print("Usage: /tools enable <tool-name>")
                 return "continue"
+            enabled_name: str | None = None
             if term in _session.denials:
                 _session.denials.discard(term)
-                if console is not None:
-                    console.print(f"[green]✓ Tool '{term}' re-enabled.[/green]")
-                else:
-                    print(f"Tool '{term}' re-enabled.")
+                enabled_name = term
             else:
                 matches = [n for n in _session.denials if term in n]
                 if len(matches) == 1:
                     _session.denials.discard(matches[0])
-                    if console is not None:
-                        console.print(f"[green]✓ Tool '{matches[0]}' re-enabled.[/green]")
-                    else:
-                        print(f"Tool '{matches[0]}' re-enabled.")
+                    enabled_name = matches[0]
                 elif len(matches) > 1:
                     msg = f"Ambiguous: '{term}' matches {', '.join(matches)}. Be more specific."
                     if console is not None:
@@ -757,6 +1426,43 @@ class SlashCommandRegistry:
                         console.print(f"[dim]Tool '{term}' is not disabled.[/dim]")
                     else:
                         print(f"Tool '{term}' is not disabled.")
+            if enabled_name is not None:
+                if console is not None:
+                    console.print(f"[green]✓ Tool '{enabled_name}' re-enabled.[/green]")
+                else:
+                    print(f"Tool '{enabled_name}' re-enabled.")
+                tool_obj = (
+                    _session.all_tool_originals.get(enabled_name)
+                    or available.get(enabled_name)
+                    or reg.tools.get(enabled_name)
+                )
+                if tool_obj is not None:
+                    desc = getattr(tool_obj, "description", "") or ""
+                    short_desc = desc.split(". ")[0].split(".\n")[0]
+                    if len(short_desc) > 120:
+                        short_desc = short_desc[:117] + "..."
+                    if short_desc:
+                        if console is not None:
+                            console.print(f"  [dim]{short_desc}[/dim]")
+                        else:
+                            print(f"  {short_desc}")
+                    func = getattr(tool_obj, "_uncapped_func", None) or getattr(
+                        tool_obj, "func", None
+                    )
+                    module_name = getattr(func, "__module__", "") if func is not None else ""
+                    module = sys.modules.get(module_name) if module_name else None
+                    checker = getattr(module, "is_configured", None) if module is not None else None
+                    if checker is not None:
+                        try:
+                            configured = checker()
+                        except Exception:  # noqa: BLE001
+                            configured = True
+                        if not configured:
+                            _not_cfg = "  ⚠ Not configured — check environment variables or config."
+                            if console is not None:
+                                console.print(f"  [yellow]{_not_cfg.strip()}[/yellow]")
+                            else:
+                                print(_not_cfg)
             return "continue"
 
         if args.startswith("disable") and (len(args) == 7 or args[7] == " "):
@@ -932,6 +1638,212 @@ class SlashCommandRegistry:
             print(f"✓ Cleared {count} messages from memory.")
         return "continue"
 
+    def _cmd_undo(self, _args: str) -> str:
+        """Handler for /undo — remove the last exchange from memory."""
+        mm = self.memory_manager
+        if not mm:
+            print("Memory manager not available.")
+            return "continue"
+        removed = mm.pop_last_turn()
+        if removed == 0:
+            if console is not None:
+                console.print("[dim]Nothing to undo — no previous exchange in memory.[/dim]")
+            else:
+                print("Nothing to undo — no previous exchange in memory.")
+        else:
+            if console is not None:
+                console.print(
+                    f"[green]✓ Undone:[/green] removed last exchange "
+                    f"([dim]{removed} message(s) removed[/dim])"
+                )
+            else:
+                print(f"✓ Undone: removed last exchange ({removed} message(s) removed)")
+        return "continue"
+
+    @staticmethod
+    def _cmd_compact(self, args: str) -> str:
+        """Handler for /compact — manually trigger context compression."""
+        mm = self.memory_manager
+        if not mm:
+            print("Memory manager not available.")
+            return "continue"
+
+        messages = getattr(mm, "_messages", None)
+        if not messages:
+            if console is not None:
+                console.print("[dim]Nothing to compress — no messages in memory.[/dim]")
+            else:
+                print("Nothing to compress — no messages in memory.")
+            return "continue"
+
+        aggressive = args.strip().lower() == "aggressive"
+
+        llm = self.compression_llm or getattr(mm, "_llm", None)
+        max_ctx = self.max_context_tokens or 16_384
+
+        # For aggressive mode force the threshold trigger by computing effective max_context_tokens
+        # from the actual message content so that total_chars >= threshold_chars always holds.
+        if aggressive:
+            total_chars = sum(
+                len(c) for m in messages if isinstance((c := getattr(m, "content", "")), str)
+            )
+            if total_chars > 0:
+                # threshold_chars = int(max_ctx * 4 * 0.72); we want total_chars >= threshold_chars
+                # Setting max_ctx = total_chars // 3 gives threshold_chars ≈ total_chars * 0.96
+                max_ctx = max(16_384, total_chars // 3)
+
+        before_contents = [getattr(m, "content", None) for m in messages]
+
+        _timeout_info: dict = {}
+
+        # Show a percentage progress bar while compression LLM calls complete.
+        def _run_compression(_on_progress=None):
+            if aggressive:
+                return apply_message_compression(
+                    messages,
+                    call_count=999,
+                    compression_cache={},
+                    llm=llm,
+                    max_context_tokens=max_ctx,
+                    min_age_cycles=0,
+                    min_chars=0,
+                    emergency_threshold=0.0,
+                    timeout_info=_timeout_info,
+                    progress_callback=_on_progress,
+                )
+            else:
+                return apply_message_compression(
+                    messages,
+                    call_count=999,
+                    compression_cache={},
+                    llm=llm,
+                    max_context_tokens=max_ctx,
+                    min_age_cycles=COMPRESSION_MIN_AGE_CYCLES,
+                    min_chars=COMPRESSION_MIN_CHARS,
+                    timeout_info=_timeout_info,
+                    progress_callback=_on_progress,
+                )
+
+        if console is not None:
+            try:
+                from rich.align import Align
+                from rich.progress import BarColumn, Progress, TaskProgressColumn, TextColumn
+                from rich.rule import Rule
+
+                class _RightProgress(Progress):
+                    """Progress bar with a teal rule above, right-aligned."""
+
+                    def get_renderables(self):
+                        yield Rule(style="dim blue")
+                        yield Align.right(self.make_tasks_table(self.tasks))
+
+                with _RightProgress(
+                    TextColumn("[cyan]Compressing context:[/cyan]"),
+                    BarColumn(bar_width=20),
+                    TaskProgressColumn(),
+                    console=console,
+                    transient=True,
+                ) as progress:
+                    task_id = progress.add_task("compress", total=None)
+
+                    def _on_progress(completed: int, total: int) -> None:
+                        progress.update(task_id, total=total, completed=completed)
+
+                    compressed = _run_compression(_on_progress)
+            except Exception:
+                compressed = _run_compression()
+        else:
+            compressed = _run_compression()
+
+        changed_indices = [
+            i
+            for i, (before, after) in enumerate(zip(before_contents, compressed, strict=False))
+            if before != getattr(after, "content", before)
+        ]
+        changed = len(changed_indices)
+
+        if changed == 0:
+            last_tokens = self.last_input_tokens
+            pct = int(last_tokens / max_ctx * 100) if max_ctx and last_tokens else 0
+            # Print directly to stdout so prompt_toolkit's post-dispatch
+            # redraw doesn't erase the message.
+            print(
+                f"Nothing to compress. (Messages are too recent or too short. Context at {pct}%.)"
+            )
+            return "continue"
+
+        mm._messages = compressed
+        mm.save()
+
+        tool_changed = sum(
+            1 for i in changed_indices if type(messages[i]).__name__ == "ToolMessage"
+        )
+        ai_changed = sum(1 for i in changed_indices if type(messages[i]).__name__ == "AIMessage")
+
+        before_chars = sum(len(getattr(m, "content", "") or "") for m in messages)
+        after_chars = sum(len(getattr(m, "content", "") or "") for m in compressed)
+        reduction = int((1 - after_chars / before_chars) * 100) if before_chars else 0
+
+        prefix = "Aggressive compression:" if aggressive else "Compressed:"
+        if tool_changed > 0 or ai_changed > 0:
+            parts = []
+            if tool_changed > 0:
+                parts.append(f"{tool_changed} tool result{'s' if tool_changed != 1 else ''}")
+            if ai_changed > 0:
+                parts.append(f"{ai_changed} assistant response{'s' if ai_changed != 1 else ''}")
+            summary_str = " + ".join(parts) + " summarised."
+        else:
+            summary_str = f"{changed} message(s) summarised."
+
+        # Timeout note computed later in the print() output path
+
+        # Proportional scaling from the last real token count is far more
+        # accurate than chars/_CHARS_PER_TOKEN (which assumes a fixed ratio
+        # that varies wildly between prose ~4 and URLs ~1.5 chars/token).
+        if self.last_input_tokens > 0 and before_chars > 0:
+            estimated_tokens = int(self.last_input_tokens * (after_chars / before_chars))
+        else:
+            estimated_tokens = after_chars // _CHARS_PER_TOKEN
+        self.last_input_tokens = estimated_tokens
+
+        # Update toolbar stats so the next prompt shows updated context %
+        try:
+            from src.ui.stats import print_stats_footer as _print_stats_footer_compact
+
+            _print_stats_footer_compact(
+                console=console,
+                session_tokens=estimated_tokens,
+                max_context_tokens=self.max_context_tokens or 16_384,
+            )
+        except Exception:
+            pass
+
+        # Use print() not console.print() — prompt_toolkit's post-dispatch
+        # redraw erases console.print() output but leaves print() visible.
+        _timeout_note_plain = ""
+        if _timeout_info.get("timed_out"):
+            _done = _timeout_info.get("completed", 0)
+            _ttotal = _timeout_info.get("total", 0)
+            _timeout_note_plain = f" ⚠ Timed out — {_done}/{_ttotal} items."
+        print(f"✓ {prefix} {summary_str}{_timeout_note_plain}")
+        print(f"  Context reduced by ~{reduction}%" f" ({before_chars:,} → {after_chars:,} chars)")
+        return "continue"
+
+    def _cmd_retry(self, _args: str) -> str:
+        """Handler for /retry — re-run the last prompt.
+
+        Returns a special signal that is handled in the main loop,
+        which sets user_input = last_input and falls through to processing.
+        """
+        if not self.last_input:
+            if console is not None:
+                console.print("[dim]Nothing to retry — no previous prompt in this session.[/dim]")
+            else:
+                print("Nothing to retry — no previous prompt in this session.")
+            return "continue"
+        # Signal to main loop (handled specially alongside /paste)
+        return f"retry:{self.last_input}"
+
     @staticmethod
     def _cmd_think(self, args: str) -> str:
         """Handler for /think <task>.
@@ -1060,6 +1972,181 @@ class SlashCommandRegistry:
             _mode_rich(cfg, _VALID_MODES, wm_sizes)
         else:
             _mode_plain(cfg, _VALID_MODES, wm_sizes)
+        return "continue"
+
+    @staticmethod
+    def _cmd_memory(self, _args: str) -> str:
+        """Handler for /memory."""
+        mm = self.memory_manager
+        cfg = self.config
+        if not mm or not cfg:
+            print("Memory not available.")
+            return "continue"
+
+        stats = mm.get_stats()
+        msg_count = stats.get("total_messages", mm.get_message_count())
+        session_id = stats.get("session_id", cfg.session)
+
+        if msg_count == 0 and not stats.get("has_summary"):
+            if console is not None:
+                console.print(
+                    "\n  [bold]Memory[/bold] — fresh session [dim](no history loaded)[/dim]\n"
+                )
+            else:
+                print("\nMemory — fresh session (no history loaded)\n")
+            return "continue"
+
+        has_summary = stats.get("has_summary", False)
+        vector_ready = stats.get("vector_recall_ready", False)
+        summary_text: str | None = getattr(mm, "_summary", None)
+
+        if console is not None and Panel is not None:
+            lines: list[str] = []
+            lines.append(f"[bold cyan]Memory[/bold cyan] — session: {session_id}")
+            lines.append(f"  [bold]{'Mode':<16s}[/bold]  {stats.get('mode', cfg.memory_mode)}")
+            lines.append(f"  [bold]{'Messages':<16s}[/bold]  {msg_count} in history")
+            summary_status = "✓ Rolling summary active" if has_summary else "✗ No summary yet"
+            summary_style = "green" if has_summary else "dim"
+            lines.append(
+                f"  [bold]{'Summary':<16s}[/bold]  [{summary_style}]{summary_status}[/{summary_style}]"
+            )
+            if vector_ready:
+                vec_count = stats.get("vector_count", "")
+                vec_detail = f" ({vec_count} embeddings)" if vec_count else ""
+                lines.append(
+                    f"  [bold]{'Semantic recall':<16s}[/bold]  [green]✓ Active{vec_detail}[/green]"
+                )
+            else:
+                lines.append(
+                    f"  [bold]{'Semantic recall':<16s}[/bold]  [dim]✗ Not configured[/dim]"
+                )
+            if summary_text:
+                truncated = len(summary_text) > 200
+                if truncated:
+                    tail = summary_text[-200:]
+                    # Snap to the next word boundary so we don't cut mid-word
+                    space_idx = tail.find(" ")
+                    if 0 < space_idx < 40:
+                        tail = tail[space_idx + 1 :]
+                    preview = f"…{tail.strip()}"
+                else:
+                    preview = summary_text.strip()
+                lines.append("")
+                lines.append("[bold]Summary preview[/bold]:")
+                lines.append(f'  [dim]"{preview}"[/dim]')
+            body = "\n".join(lines)
+            console.print()
+            console.print(Panel(body, border_style="cyan", padding=(1, 2)))
+            console.print()
+        else:
+            print(f"\nMemory — session: {session_id}")
+            print(f"  {'Mode':<16s}{stats.get('mode', cfg.memory_mode)}")
+            print(f"  {'Messages':<16s}{msg_count} in history")
+            summary_status = "✓ Rolling summary active" if has_summary else "✗ No summary yet"
+            print(f"  {'Summary':<16s}{summary_status}")
+            if vector_ready:
+                vec_count = stats.get("vector_count", "")
+                vec_detail = f" ({vec_count} embeddings)" if vec_count else ""
+                print(f"  {'Semantic recall':<16s}✓ Active{vec_detail}")
+            else:
+                print(f"  {'Semantic recall':<16s}✗ Not configured")
+            if summary_text:
+                if len(summary_text) > 200:
+                    _tail = summary_text[-200:]
+                    _si = _tail.find(" ")
+                    if 0 < _si < 40:
+                        _tail = _tail[_si + 1 :]
+                    preview = f"…{_tail.strip()}"
+                else:
+                    preview = summary_text.strip()
+                print(f'\nSummary preview:\n  "{preview}"')
+            print()
+        return "continue"
+
+    def _cmd_export(self, args: str) -> str:
+        """Handler for /export."""
+        from datetime import datetime as _dt
+
+        mm = self.memory_manager
+        cfg = self.config
+        if not mm or not cfg:
+            if console is not None:
+                console.print("[red]Memory not available.[/red]")
+            else:
+                print("Memory not available.")
+            return "continue"
+
+        # Collect (human, ai) turn pairs from _messages
+        raw_messages = getattr(mm, "_messages", [])
+        turns: list[tuple[str, str]] = []
+        pending_human: str | None = None
+        for msg in raw_messages:
+            content = ""
+            if hasattr(msg, "content") and msg.content:
+                c = msg.content
+                content = c if isinstance(c, str) else str(c)
+            cls_name = type(msg).__name__
+            if cls_name == "HumanMessage":
+                pending_human = content
+            elif cls_name == "AIMessage" and pending_human is not None:
+                turns.append((pending_human, content))
+                pending_human = None
+
+        if not turns:
+            if console is not None:
+                console.print("[dim]No conversation to export yet.[/dim]")
+            else:
+                print("No conversation to export yet.")
+            return "continue"
+
+        # Parse args: optional format keyword and/or path
+        args = args.strip()
+        fmt = "md"
+        out_path: str | None = None
+
+        parts = args.split() if args else []
+        if parts and parts[0].lower() in ("html", "md", "markdown"):
+            fmt = "html" if parts[0].lower() == "html" else "md"
+            parts = parts[1:]
+        if parts:
+            out_path = " ".join(parts)
+
+        session_id = cfg.session or "default"
+        timestamp = _dt.now().strftime("%Y%m%d-%H%M%S")
+        ext = ".html" if fmt == "html" else ".md"
+        default_name = f"conversation-{session_id}-{timestamp}{ext}"
+
+        if out_path:
+            path = Path(out_path).expanduser()
+            if path.is_dir():
+                path = path / default_name
+        else:
+            path = Path.cwd() / default_name
+
+        content_str = (
+            _export_html(turns, session_id, timestamp)
+            if fmt == "html"
+            else _export_markdown(turns, session_id, timestamp)
+        )
+
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content_str, encoding="utf-8")
+            n = len(turns)
+            label = f"{n} turn{'s' if n != 1 else ''}"
+            if console is not None:
+                console.print(
+                    f"  [green]\u2713[/green] Exported to [cyan]{path}[/cyan] "
+                    f"[dim]({label})[/dim]"
+                )
+            else:
+                print(f"  \u2713 Exported to {path} ({label})")
+        except OSError as e:
+            if console is not None:
+                console.print(f"[red]Export failed: {e}[/red]")
+            else:
+                print(f"Export failed: {e}")
+
         return "continue"
 
     @staticmethod
@@ -1218,41 +2305,85 @@ class SlashCommandRegistry:
         stats = mm.get_stats()
         msg_count = stats.get("total_messages", mm.get_message_count())
 
+        # Use last real token count if available; otherwise call
+        # prepare_context() for a calibrated estimate (tier cache when warm,
+        # chars-based heuristic on cold start).
+        _ctx_tokens = self.last_input_tokens
+        _tier_counts: dict | None = None
+        if not _ctx_tokens and msg_count > 0:
+            try:
+                ctx = mm.prepare_context("")
+                _ctx_tokens = getattr(ctx, "token_estimate", 0) or 0
+                _tier_counts = getattr(ctx, "tier_token_counts", None) or None
+                if not _ctx_tokens:
+                    _total_chars = sum(len(getattr(m, "content", "") or "") for m in ctx.messages)
+                    _ctx_tokens = _total_chars // _CHARS_PER_TOKEN
+            except Exception:
+                pass
+        elif msg_count > 0:
+            try:
+                ctx = mm.prepare_context("")
+                _tier_counts = getattr(ctx, "tier_token_counts", None) or None
+            except Exception:
+                pass
+
         if console is not None and Panel is not None:
-            _session_rich(cfg, stats, msg_count)
+            _session_rich(
+                cfg,
+                stats,
+                msg_count,
+                session_tokens=_ctx_tokens,
+                max_context_tokens=self.max_context_tokens,
+                tier_token_counts=_tier_counts,
+            )
         else:
-            _session_plain(cfg, msg_count)
+            _session_plain(
+                cfg,
+                msg_count,
+                session_tokens=_ctx_tokens,
+                max_context_tokens=self.max_context_tokens,
+            )
         return "continue"
 
     @staticmethod
     def _cmd_debug(self, _args: str) -> str:
-        """Handler for /debug — toggle debug mode."""
+        """Handler for /debug [0-3] — cycle or set verbosity level."""
+        from src.logging_config import get_verbosity, set_verbosity
+
         cfg = self.config
         if not cfg:
             print("Config not available.")
             return "continue"
 
-        cfg.debug = not cfg.debug
-        if cfg.debug:
-            # Auto-enable logging and verbose when debug turns on
-            if cfg.log_file is None:
-                cfg.log_file = ""
-            cfg.verbose = True
-            setup_logging(log_file=cfg.log_file, debug=True, verbose=True)
-            if console is not None:
-                console.print(
-                    "[green]Debug mode [bold]ON[/bold][/green] "
-                    "[dim](logging + verbose enabled)[/dim]"
-                )
-            else:
-                print("Debug mode ON (logging + verbose enabled)")
+        arg = _args.strip()
+        if arg in ("0", "1", "2", "3"):
+            new_level = int(arg)
         else:
-            setup_logging(log_file=cfg.log_file, debug=False, verbose=cfg.verbose)
-            if console is not None:
-                console.print("[yellow]Debug mode [bold]OFF[/bold][/yellow]")
-            else:
-                print("Debug mode OFF")
-        # Signal main loop to rebuild callbacks
+            # Cycle: 0→1→2→3→0
+            new_level = (get_verbosity() + 1) % 4
+
+        cfg.verbosity = new_level
+        cfg.debug = new_level >= 1
+        cfg.verbose = new_level >= 2
+        if cfg.debug and cfg.log_file is None:
+            cfg.log_file = ""
+
+        setup_logging(
+            log_file=cfg.log_file,
+            debug=cfg.debug,
+            verbose=cfg.verbose,
+            verbosity=new_level,
+        )
+        set_verbosity(new_level)
+
+        _LEVEL_NAMES = {0: "normal", 1: "debug", 2: "verbose", 3: "trace"}
+        label = _LEVEL_NAMES[new_level]
+        msg = f"Verbosity: {label} ({new_level})"
+        if console is not None:
+            color = "green" if new_level > 0 else "yellow"
+            console.print(f"[{color}]{msg}[/{color}]")
+        else:
+            print(msg)
         return "rebuild_callbacks"
 
     @staticmethod
@@ -1347,8 +2478,12 @@ class SlashCommandRegistry:
         sp_tokens = sp_chars // 4  # rough estimate
 
         if console is not None and Panel is not None:
-            escaped = sp.replace("[", "\\[")
-            body = f"[dim]{escaped}[/dim]"
+            try:
+                from rich.markdown import Markdown as _Md
+
+                body = _Md(sp)
+            except ImportError:
+                body = sp.replace("[", "\\[")
             title = f"System Prompt  ~{sp_tokens:,} tokens ({sp_chars:,} chars)"
             console.print()
             console.print(Panel(body, title=title, border_style="cyan", padding=(1, 2)))
@@ -1481,6 +2616,473 @@ class SlashCommandRegistry:
         return "continue"
 
     @staticmethod
+    def _cmd_agents(_self, args: str) -> str:
+        """Handler for /agents [name | reload]."""
+        from src.agent.agents_md import (  # codeql[py/clear-text-logging-sensitive-data] no sensitive data logged here; agent metadata contains no credentials
+            get_agent,
+            list_agents,
+            load_default_agents,
+        )
+
+        args = args.strip()
+
+        if args == "reload":
+            agents = load_default_agents()
+            count = len(agents)
+            if console is not None:
+                console.print(f"[dim]Reloaded AGENTS.md — {count} agent(s) loaded.[/dim]")
+            else:
+                print(f"Reloaded AGENTS.md — {count} agent(s) loaded.")
+            return "continue"
+
+        if args:
+            # Show details of one agent
+            agent = get_agent(args)
+            if agent is None:
+                if console is not None:
+                    console.print(f"[red]Unknown agent:[/red] [bold]{args}[/bold]")
+                    console.print("[dim]Use /agents to list available agents.[/dim]")
+                else:
+                    print(f"Unknown agent: {args}")
+                    print("Use /agents to list available agents.")
+                return "continue"
+            if console is not None and Panel is not None and Table is not None:
+                tbl = Table(show_header=False, box=None, padding=(0, 1))
+                tbl.add_column("Field", style="bold cyan", min_width=14)
+                tbl.add_column("Value")
+                tbl.add_row("Name", agent.name)
+                tbl.add_row("Model alias", agent.model_alias or "[dim]default[/dim]")
+                tbl.add_row("Memory mode", agent.memory_mode or "[dim]default[/dim]")
+                if agent.tools_include:
+                    tbl.add_row("Tools include", ", ".join(agent.tools_include))
+                if agent.tools_exclude:
+                    tbl.add_row("Tools exclude", ", ".join(agent.tools_exclude))
+                if agent.prompt_file:
+                    tbl.add_row("Prompt file", agent.prompt_file)
+                if agent.description:
+                    tbl.add_row("Description", agent.description)
+                if agent.system_prompt:
+                    preview = agent.system_prompt[:200]
+                    if len(agent.system_prompt) > 200:
+                        preview += "…"
+                    tbl.add_row("System prompt", preview)
+                console.print()
+                console.print(
+                    Panel(tbl, title=f"Agent: {agent.name}", border_style="cyan", padding=(0, 1))
+                )
+                console.print()
+            else:
+                print(f"\n  Agent: {agent.name}")
+                print(f"  Model alias  : {agent.model_alias or '(default)'}")
+                print(f"  Memory mode  : {agent.memory_mode or '(default)'}")
+                if agent.tools_include:
+                    print(f"  Tools include: {', '.join(agent.tools_include)}")
+                if agent.tools_exclude:
+                    print(f"  Tools exclude: {', '.join(agent.tools_exclude)}")
+                if agent.prompt_file:
+                    print(f"  Prompt file  : {agent.prompt_file}")
+                if agent.description:
+                    print(f"  Description  : {agent.description}")
+                if agent.system_prompt:
+                    preview = agent.system_prompt[:200]
+                    if len(agent.system_prompt) > 200:
+                        preview += "..."
+                    print(f"  System prompt: {preview}")
+                print()
+            return "continue"
+
+        # List all agents
+        agents = list_agents()
+        if not agents:
+            if console is not None:
+                console.print(
+                    "[dim]No agents loaded. Create an AGENTS.md in your project directory.[/dim]"
+                )
+            else:
+                print("No agents loaded. Create an AGENTS.md in your project directory.")
+            return "continue"
+
+        if console is not None and Panel is not None and Table is not None:
+            tbl = Table(show_header=True, box=None, padding=(0, 1))
+            tbl.add_column("Name", style="bold")
+            tbl.add_column("Model", style="cyan")
+            tbl.add_column("Mode", style="green")
+            tbl.add_column("Description", style="dim")
+            for a in agents:
+                desc_line = a.description.splitlines()[0] if a.description else ""
+                tbl.add_row(
+                    a.name,
+                    a.model_alias or "-",
+                    a.memory_mode or "-",
+                    desc_line[:60],
+                )
+            console.print()
+            console.print(Panel(tbl, title="Agents", border_style="cyan", padding=(0, 1)))
+            console.print("[dim]  /agents <name>    — show agent details[/dim]")
+            console.print("[dim]  /agents reload    — reload from AGENTS.md[/dim]")
+            console.print()
+        else:
+            print("\n  Agents")
+            print("  " + "-" * 60)
+            for a in agents:
+                desc_line = a.description.splitlines()[0] if a.description else ""
+                model = a.model_alias or "-"
+                mode = a.memory_mode or "-"
+                print(f"  {a.name:<20}  {model:<10}  {mode:<14}  {desc_line[:40]}")
+            print()
+            print("  /agents <name>  — show agent details")
+            print("  /agents reload  — reload from AGENTS.md")
+            print()
+        return "continue"
+
+    @staticmethod
+    def _cmd_tasks(self, args: str) -> str:
+        """Handler for /tasks [status | task_id]."""
+        try:
+            from src.tasks.queue import TaskStatus, get_task_queue
+        except ImportError:
+            if console is not None:
+                console.print("[red]Task queue module not available.[/red]")
+            else:
+                print("Task queue module not available.")
+            return "continue"
+
+        args = args.strip()
+
+        try:
+            queue = get_task_queue()
+        except RuntimeError as exc:
+            if console is not None:
+                console.print(f"[dim]{exc}[/dim]")
+            else:
+                print(str(exc))
+            return "continue"
+
+        _STATUS_STYLE: dict[str, str] = {
+            "PENDING": "yellow",
+            "RUNNING": "blue",
+            "COMPLETED": "green",
+            "FAILED": "red",
+            "CANCELLED": "dim",
+        }
+
+        # Check if args looks like a task ID (8+ hex chars, not a known status word)
+        _args_lower = args.lower()
+        _is_id_lookup = (
+            args
+            and len(args) >= 8
+            and all(c in "0123456789abcdefABCDEF-" for c in args)
+            and _args_lower not in {s.value.lower() for s in TaskStatus}
+        )
+        if _is_id_lookup:
+            task = queue.get(args)
+            if task is None:
+                # Try prefix match
+                all_tasks = queue.list(limit=200)
+                matches = [t for t in all_tasks if t.task_id.startswith(args)]
+                task = matches[0] if len(matches) == 1 else None
+            if task is None:
+                if console is not None:
+                    console.print(f"[red]Task not found:[/red] {args}")
+                else:
+                    print(f"Task not found: {args}")
+                return "continue"
+
+            sty = _STATUS_STYLE.get(task.status.value, "")
+            status_str = f"[{sty}]{task.status.value}[/{sty}]" if sty else task.status.value
+            duration_str = ""
+            if task.started_at is not None and task.finished_at is not None:
+                duration_str = f"  duration: {task.finished_at - task.started_at:.1f}s"
+            elif task.started_at is not None:
+                import time as _time
+
+                duration_str = f"  running for {_time.time() - task.started_at:.1f}s"
+
+            if console is not None and Panel is not None:
+                import datetime
+
+                def _fmt_ts(ts: float | None) -> str:
+                    if ts is None:
+                        return "—"
+                    return datetime.datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
+
+                lines = [
+                    f"[bold]ID[/bold]      {task.task_id}",
+                    f"[bold]Agent[/bold]   [cyan]{task.agent_name}[/cyan]",
+                    f"[bold]Status[/bold]  {status_str}",
+                    f"[bold]Created[/bold] {_fmt_ts(task.created_at)}",
+                    f"[bold]Started[/bold] {_fmt_ts(task.started_at)}",
+                    f"[bold]Finished[/bold] {_fmt_ts(task.finished_at)}"
+                    + (
+                        f"  ({task.finished_at - task.started_at:.1f}s)"
+                        if task.started_at and task.finished_at
+                        else ""
+                    ),
+                    "",
+                    "[bold]Prompt[/bold]",
+                    task.prompt,
+                ]
+                if task.error:
+                    lines += ["", f"[bold][red]Error[/red][/bold]  {task.error}"]
+
+                from rich.console import Group
+
+                parts: list = ["\n".join(lines)]
+                if task.result:
+                    try:
+                        from rich.markdown import Markdown as _TaskMd
+
+                        parts.append("")
+                        parts.append("[bold]Result[/bold]")
+                        parts.append(_TaskMd(task.result))
+                    except ImportError:
+                        parts.append(f"\n[bold]Result[/bold]\n{task.result}")
+
+                console.print()
+                console.print(
+                    Panel(
+                        Group(*parts),
+                        title=f"Task {task.task_id[:8]}",
+                        border_style="cyan",
+                        padding=(0, 1),
+                    )
+                )
+                console.print()
+            else:
+                print(f"\n  Task {task.task_id}")
+                print(f"  Agent:   {task.agent_name}")
+                print(f"  Status:  {task.status.value}{duration_str}")
+                print(f"  Prompt:  {task.prompt}")
+                if task.result:
+                    print(f"  Result:  {task.result}")
+                if task.error:
+                    print(f"  Error:   {task.error}")
+                print()
+            return "continue"
+
+        # Otherwise treat args as a status filter
+        status_filter: TaskStatus | None = None
+        if args:
+            try:
+                status_filter = TaskStatus(_args_lower.upper())
+            except ValueError:
+                valid = ", ".join(s.value.lower() for s in TaskStatus)
+                if console is not None:
+                    console.print(f"[red]Unknown status or task ID:[/red] {args}")
+                    console.print(f"[dim]Valid statuses: {valid}[/dim]")
+                else:
+                    print(f"Unknown status: {args}")
+                    print(f"Valid statuses: {valid}")
+                return "continue"
+
+        _sid = getattr(self.config, "session", "default") if self.config else "default"
+        tasks = queue.list(status=status_filter, limit=50, session_id=_sid)
+        if not tasks:
+            msg = "No tasks found." if not args else f"No {_args_lower.upper()} tasks found."
+            if console is not None:
+                console.print(f"[dim]{msg}[/dim]")
+            else:
+                print(msg)
+            return "continue"
+
+        if console is not None and Panel is not None and Table is not None:
+            tbl = Table(show_header=True, box=None, padding=(0, 1))
+            tbl.add_column("ID", style="bold", min_width=10)
+            tbl.add_column("Agent", style="cyan")
+            tbl.add_column("Status", min_width=12)
+            tbl.add_column("Prompt", style="dim")
+            for t in tasks:
+                sty = _STATUS_STYLE.get(t.status.value, "")
+                status_cell = f"[{sty}]{t.status.value}[/{sty}]" if sty else t.status.value
+                tbl.add_row(t.task_id[:8], t.agent_name, status_cell, t.prompt)
+            title = f"Tasks ({len(tasks)})" + (f" — {_args_lower.upper()}" if args else "")
+            console.print()
+            console.print(Panel(tbl, title=title, border_style="cyan", padding=(0, 1)))
+            console.print("[dim]  /spawn <agent> <desc>   — submit a new task[/dim]")
+            console.print("[dim]  /tasks <id>             — view task details and result[/dim]")
+            console.print()
+        else:
+            print(f"\n  Tasks ({len(tasks)})")
+            print("  " + "-" * 70)
+            for t in tasks:
+                print(f"  {t.task_id[:8]}  {t.agent_name:<20}  {t.status.value:<12}  {t.prompt}")
+            print()
+        return "continue"
+
+    @staticmethod
+    def _cmd_spawn(self, args: str) -> str:
+        """Handler for /spawn <agent_name> <task_description>."""
+        try:
+            from src.tasks.queue import get_task_queue, submit_task
+        except ImportError:
+            if console is not None:
+                console.print("[red]Task queue module not available.[/red]")
+            else:
+                print("Task queue module not available.")
+            return "continue"
+
+        args = args.strip()
+        if not args:
+            if console is not None:
+                console.print("[red]Usage:[/red] /spawn <agent_name> <task_description>")
+            else:
+                print("Usage: /spawn <agent_name> <task_description>")
+            return "continue"
+
+        parts = args.split(None, 1)
+        if len(parts) < 2:
+            if console is not None:
+                console.print("[red]Usage:[/red] /spawn <agent_name> <task_description>")
+            else:
+                print("Usage: /spawn <agent_name> <task_description>")
+            return "continue"
+
+        agent_name, prompt = parts[0], parts[1]
+        try:
+            get_task_queue()
+        except RuntimeError as exc:
+            if console is not None:
+                console.print(f"[dim]{exc}[/dim]")
+            else:
+                print(str(exc))
+            return "continue"
+
+        _sid = getattr(self.config, "session", "default") if self.config else "default"
+        task_id = submit_task(agent_name, prompt, session_id=_sid)
+        if console is not None:
+            console.print(
+                f"[green]Task submitted:[/green] [bold]{task_id[:8]}[/bold]"
+                f"  agent=[cyan]{agent_name}[/cyan]"
+            )
+            console.print(f"[dim]  {prompt}[/dim]")
+        else:
+            print(f"Task submitted: {task_id[:8]}  agent={agent_name}")
+            print(f"  {prompt}")
+        return "continue"
+
+    def _cmd_goal(self, args: str) -> str:
+        """Handler for /goal [set <desc> | complete <id> | abandon <id> | list]."""
+        try:
+            from src.tasks.goal_tracker import get_goal_stack
+        except ImportError:
+            if console is not None:
+                console.print("[red]Goal tracker module not available.[/red]")
+            else:
+                print("Goal tracker module not available.")
+            return "continue"
+
+        cfg = self.config
+        session_id = cfg.session if cfg else "default"
+        data_dir = cfg.data_dir if cfg else "data"
+
+        stack = get_goal_stack(session_id, data_dir)
+
+        args_stripped = args.strip()
+        subcmd, _, rest = args_stripped.partition(" ")
+        subcmd = subcmd.lower()
+        rest = rest.strip()
+
+        if not args_stripped or subcmd == "list":
+            goals = stack.list_active()
+            if not goals:
+                if console is not None:
+                    console.print(
+                        "[dim]No active goals. Use /goal set <description> to add one.[/dim]"
+                    )
+                else:
+                    print("No active goals. Use /goal set <description> to add one.")
+                return "continue"
+            if console is not None and Panel is not None and Table is not None:
+                tbl = Table(show_header=True, box=None, padding=(0, 1))
+                tbl.add_column("ID", style="bold", min_width=8)
+                tbl.add_column("Status", style="green", min_width=10)
+                tbl.add_column("Description")
+                for g in goals:
+                    indent = "  " if g.parent_id else ""
+                    tbl.add_row(g.goal_id, g.status.value, f"{indent}{g.description}")
+                console.print()
+                console.print(
+                    Panel(
+                        tbl,
+                        title=f"Active Goals ({len(goals)})",
+                        border_style="green",
+                        padding=(0, 1),
+                    )
+                )
+                console.print()
+            else:
+                print(f"\n  Active Goals ({len(goals)})")
+                print("  " + "-" * 60)
+                for g in goals:
+                    indent = "    " if g.parent_id else "  "
+                    print(f"{indent}{g.goal_id}  {g.status.value:<12}  {g.description}")
+                print()
+            return "continue"
+
+        if subcmd == "set":
+            if not rest:
+                if console is not None:
+                    console.print("[red]Usage:[/red] /goal set <description>")
+                else:
+                    print("Usage: /goal set <description>")
+                return "continue"
+            goal_id = stack.push(rest)
+            if console is not None:
+                console.print(f"[green]Goal set:[/green] [bold]{goal_id}[/bold]  {rest[:80]}")
+            else:
+                print(f"Goal set: {goal_id}  {rest[:80]}")
+            return "continue"
+
+        if subcmd == "complete":
+            if not rest:
+                if console is not None:
+                    console.print("[red]Usage:[/red] /goal complete <goal_id>")
+                else:
+                    print("Usage: /goal complete <goal_id>")
+                return "continue"
+            if stack.complete(rest):
+                if console is not None:
+                    console.print(f"[green]Goal completed:[/green] {rest}")
+                else:
+                    print(f"Goal completed: {rest}")
+            else:
+                if console is not None:
+                    console.print(f"[red]Unknown goal:[/red] {rest}")
+                else:
+                    print(f"Unknown goal: {rest}")
+            return "continue"
+
+        if subcmd == "abandon":
+            if not rest:
+                if console is not None:
+                    console.print("[red]Usage:[/red] /goal abandon <goal_id>")
+                else:
+                    print("Usage: /goal abandon <goal_id>")
+                return "continue"
+            if stack.abandon(rest):
+                if console is not None:
+                    console.print(f"[dim]Goal abandoned: {rest}[/dim]")
+                else:
+                    print(f"Goal abandoned: {rest}")
+            else:
+                if console is not None:
+                    console.print(f"[red]Unknown goal:[/red] {rest}")
+                else:
+                    print(f"Unknown goal: {rest}")
+            return "continue"
+
+        # Unknown subcommand
+        if console is not None:
+            console.print(f"[red]Unknown subcommand:[/red] {subcmd}")
+            console.print(
+                "[dim]Usage: /goal [set <desc> | complete <id> | abandon <id> | list][/dim]"
+            )
+        else:
+            print(f"Unknown subcommand: {subcmd}")
+            print("Usage: /goal [set <desc> | complete <id> | abandon <id> | list]")
+        return "continue"
+
+    @staticmethod
     def _cmd_paste(_self, _args: str) -> str:
         """Handler for /paste (normally intercepted in the main loop)."""
         # /paste is intercepted before dispatch() so this handler is a
@@ -1502,47 +3104,40 @@ class SlashCommandRegistry:
 
 def _help_rich(self_reg: SlashCommandRegistry) -> None:
     """Render the /help listing using Rich panels and tables."""
-    # Group commands by category
+    from rich.table import Table
+
     categories = [
-        (
-            "Session & Config",
-            ["info", "session", "mode", "model", "provider", "setup"],
-        ),
-        (
-            "Tools & Reasoning",
-            ["tools", "think", "delegate", "approve", "optimizer"],
-        ),
-        (
-            "Logging",
-            ["debug", "verbose"],
-        ),
-        (
-            "Input & Other",
-            ["paste", "clear", "help", "quit"],
-        ),
+        ("Session & Config", ["info", "session", "mode", "model", "provider", "setup", "compact"]),
+        ("Tools & Reasoning", ["tools", "think", "delegate", "approve", "optimizer"]),
+        ("Logging", ["debug", "verbose"]),
+        ("Input & Other", ["paste", "clear", "undo", "retry", "help", "quit"]),
     ]
 
-    lines: list[str] = []
+    renderables: list[Any] = []
     for cat_name, cmd_names in categories:
-        lines.append(f"[bold cyan]{cat_name}[/bold cyan]")
+        renderables.append(Text.from_markup(f"  [bold cyan]{cat_name}[/bold cyan]"))
+        tbl = Table(box=None, padding=(0, 2, 0, 0), show_header=False, expand=False)
+        tbl.add_column(style="bold", no_wrap=True, min_width=16)
+        tbl.add_column()
+        tbl.add_column(style="dim")
         for name in cmd_names:
             cmd = self_reg._commands.get(name)
             if cmd is None:
                 continue
-            aliases = ""
-            if cmd.aliases:
-                aliases = f"  [dim]({', '.join('/' + a for a in cmd.aliases)})[/dim]"
-            desc = cmd.short_help.ljust(30)
-            lines.append(f"  [bold]/{cmd.name:<14s}[/bold] {desc}{aliases}")
-        lines.append("")
-
-    lines.append("[dim]Type [bold]/help <command>[/bold] for detailed information.[/dim]")
-    lines.append(
-        '[dim]Use [bold]"""[/bold] or [bold]/paste[/bold] to enter multi-line input mode.[/dim]'
+            aliases_str = ", ".join("/" + a for a in cmd.aliases) if cmd.aliases else ""
+            tbl.add_row(f"  /{cmd.name}", cmd.short_help, aliases_str)
+        renderables.append(tbl)
+        renderables.append(Text(""))
+    renderables.append(
+        Text.from_markup(
+            "  [dim]Type [bold white]/help <command>[/bold white] for detailed information.[/dim]"
+        )
     )
-
-    body = "\n".join(lines)
-    console.print(Panel(body, title="Commands", border_style="cyan", padding=(1, 2)))  # type: ignore[union-attr]
+    console.print()  # type: ignore[union-attr]
+    console.print(  # type: ignore[union-attr]
+        Panel(Group(*renderables), title="Commands", border_style="cyan", padding=(1, 2))
+    )
+    console.print()  # type: ignore[union-attr]
 
 
 def _help_plain(self_reg: SlashCommandRegistry) -> None:
@@ -1550,7 +3145,7 @@ def _help_plain(self_reg: SlashCommandRegistry) -> None:
     categories = [
         (
             "Session & Config",
-            ["info", "session", "mode", "model", "provider", "setup"],
+            ["info", "session", "mode", "model", "provider", "setup", "compact"],
         ),
         (
             "Tools & Reasoning",
@@ -1562,7 +3157,7 @@ def _help_plain(self_reg: SlashCommandRegistry) -> None:
         ),
         (
             "Input & Other",
-            ["paste", "clear", "help", "quit"],
+            ["paste", "clear", "undo", "retry", "help", "quit"],
         ),
     ]
 
@@ -1612,15 +3207,15 @@ def _tool_status_tag(name: str, reg: Any, rich_mode: bool = False, on_demand: bo
         return mcp_tag + "[disabled] "
     if name in _session.pinned_tools:
         if rich_mode:
-            return mcp_tag + "[bright_green]\\[pinned]   [/bright_green]"
+            return mcp_tag + "[cyan]\\[pinned]   [/cyan]"
         return mcp_tag + "[pinned]   "
     if name in _session.loaded_tools:
         if rich_mode:
-            return mcp_tag + "[bright_green]\\[loaded]   [/bright_green]"
+            return mcp_tag + "[green]\\[loaded]   [/green]"
         return mcp_tag + "[loaded]   "
     if on_demand:
         if rich_mode:
-            return mcp_tag + "[dim]\\[on-demand][/dim]"
+            return mcp_tag + "[bright_magenta]\\[on-demand][/bright_magenta]"
         return mcp_tag + "[on-demand]"
     if not reg.requires_confirmation(name):
         return mcp_tag
@@ -1641,7 +3236,6 @@ def _categorize_tools(
     """
     # Collect tools into their categories (preserve order of _TOOL_CATEGORIES)
     cat_tools: dict[str, list[str]] = {}
-    uncategorized: list[str] = []
     tool_set = set(tool_names)
 
     for cat_name, members in _TOOL_CATEGORIES.items():
@@ -1649,16 +3243,29 @@ def _categorize_tools(
         if matched:
             cat_tools[cat_name] = matched
 
-    # Find tools not in any category
-    known = {n for names in _TOOL_CATEGORIES.values() for n in names}
-    uncategorized = sorted(n for n in tool_names if n not in known)
+    # Find tools not in any primary category
+    known_primary = {n for names in _TOOL_CATEGORIES.values() for n in names}
+    not_primary = [n for n in tool_names if n not in known_primary]
+
+    # Apply secondary category map; anything left is truly "Other"
+    secondary_tools: dict[str, list[str]] = {}
+    truly_other: list[str] = []
+    for name in sorted(not_primary):
+        sec_cat = _TOOL_CATEGORY_MAP.get(name)
+        if sec_cat:
+            secondary_tools.setdefault(sec_cat, []).append(name)
+        else:
+            truly_other.append(name)
 
     result: list[tuple[str, list[str]]] = []
     for cat_name in _TOOL_CATEGORIES:
         if cat_name in cat_tools:
             result.append((cat_name, cat_tools[cat_name]))
-    if uncategorized:
-        result.append(("Other", uncategorized))
+    for cat_name in _SECONDARY_CATEGORY_ORDER:
+        if cat_name in secondary_tools:
+            result.append((cat_name, secondary_tools[cat_name]))
+    if truly_other:
+        result.append(("Other", truly_other))
     return result
 
 
@@ -1865,6 +3472,7 @@ def _info_rich(
     msg_count: int,
     system_prompt: str | None = None,
     mcp_manager: Any = None,
+    project_context_path: str | None = None,
 ) -> None:
     """Render /info output using Rich."""
     if console is None or Panel is None:  # pragma: no cover
@@ -1890,6 +3498,8 @@ def _info_rich(
             f"  [bold]{'System prompt':<13s}[/bold]  ~{sp_tokens:,} tokens"
             f" [dim]({sp_chars:,} chars)[/dim]"
         )
+    if project_context_path:
+        lines.append(f"  [bold]{'COGTRIX.md':<13s}[/bold]  [dim]{project_context_path}[/dim]")
     if mcp_manager is not None:
         server_info = mcp_manager.get_server_info()
         connected = sum(1 for s in server_info if s["connected"])
@@ -1910,17 +3520,20 @@ def _info_rich(
         lines.append(f"  [bold]{'Working mem':<13s}[/bold]  {wm_size} messages")
 
     # Mode-specific extras
-    extras: list[str] = []
-    if stats.get("entity_count"):
-        extras.append(f"Entities: {stats['entity_count']}")
-    if stats.get("files_tracked"):
-        extras.append(f"Files tracked: {stats['files_tracked']}")
-    if stats.get("decision_count"):
-        extras.append(f"Decisions: {stats['decision_count']}")
     if stats.get("has_summary"):
-        extras.append("Summary: yes")
-    if extras:
-        lines.append(f"  [dim]{' · '.join(extras)}[/dim]")
+        lines.append(f"  [bold]{'Summary':<13s}[/bold]  Active")
+    if stats.get("entity_count"):
+        lines.append(f"  [bold]{'Entities':<13s}[/bold]  {stats['entity_count']}")
+    if stats.get("files_tracked"):
+        lines.append(f"  [bold]{'Files':<13s}[/bold]  {stats['files_tracked']} tracked")
+    if stats.get("decision_count"):
+        lines.append(f"  [bold]{'Decisions':<13s}[/bold]  {stats['decision_count']}")
+
+    # TCC status — emitted when mode subclass includes tier_cache_ready in get_stats()
+    _tcc_ready = stats.get("tier_cache_ready")
+    if _tcc_ready is not None:
+        tcc_status = "active" if _tcc_ready else "warming"
+        lines.append(f"  [bold]{'TCC':<13s}[/bold]  {tcc_status}")
 
     body = "\n".join(lines)
     console.print()
@@ -1936,6 +3549,7 @@ def _info_plain(
     msg_count: int,
     system_prompt: str | None = None,
     mcp_manager: Any = None,
+    project_context_path: str | None = None,
 ) -> None:
     """Render /info output as plain text."""
     alias = cfg.active_model_alias or model_cfg.model
@@ -1949,6 +3563,8 @@ def _info_plain(
         sp_chars = len(system_prompt)
         sp_tokens = sp_chars // 4
         print(f"  System prompt ~{sp_tokens:,} tokens ({sp_chars:,} chars)")
+    if project_context_path:
+        print(f"  COGTRIX.md    {project_context_path}")
     if mcp_manager is not None:
         server_info = mcp_manager.get_server_info()
         connected = sum(1 for s in server_info if s["connected"])
@@ -1973,7 +3589,14 @@ def _info_plain(
     print()
 
 
-def _session_rich(cfg: Any, stats: dict, msg_count: int) -> None:
+def _session_rich(
+    cfg: Any,
+    stats: dict,
+    msg_count: int,
+    session_tokens: int = 0,
+    max_context_tokens: int | None = None,
+    tier_token_counts: dict | None = None,
+) -> None:
     """Render /session output using Rich."""
     if console is None or Panel is None:  # pragma: no cover
         return
@@ -1983,15 +3606,24 @@ def _session_rich(cfg: Any, stats: dict, msg_count: int) -> None:
     lines.append(f"  [bold]Mode[/bold]      {cfg.memory_mode}")
     lines.append(f"  [bold]Messages[/bold]  {msg_count}")
 
-    wm_size = stats.get("working_memory_size")
-    if wm_size is not None:
-        bar_max = wm_size
-        bar_fill = min(msg_count, bar_max)
-        pct = int(bar_fill / bar_max * 100) if bar_max else 0
-        filled = int(bar_fill / bar_max * 20) if bar_max else 0
+    if max_context_tokens and max_context_tokens > 0:
+        pct = int(min(1.0, session_tokens / max_context_tokens) * 100) if session_tokens else 0
+        filled = int(pct * 20 // 100)
         bar = "█" * filled + "░" * (20 - filled)
-        color = "green" if pct < 70 else ("yellow" if pct < 90 else "red")
-        lines.append(f"  [bold]Context[/bold]   [{color}]{bar}[/{color}] {pct}% of {bar_max}")
+        color = "green" if pct < 70 else ("yellow" if pct < 85 else "red")
+        lines.append(
+            f"  [bold]Context[/bold]   [{color}]{bar}[/{color}] "
+            f"{pct}% of {max_context_tokens:,} tokens"
+        )
+
+    if tier_token_counts:
+        tier_parts = [
+            f"T{t}: {tier_token_counts[t]:,}"
+            for t in sorted(tier_token_counts)
+            if tier_token_counts[t] > 0
+        ]
+        if tier_parts:
+            lines.append(f"  [dim]Tiers     {' · '.join(tier_parts)}[/dim]")
 
     body = "\n".join(lines)
     console.print()
@@ -1999,11 +3631,21 @@ def _session_rich(cfg: Any, stats: dict, msg_count: int) -> None:
     console.print()
 
 
-def _session_plain(cfg: Any, msg_count: int) -> None:
+def _session_plain(
+    cfg: Any,
+    msg_count: int,
+    session_tokens: int = 0,
+    max_context_tokens: int | None = None,
+) -> None:
     """Render /session output as plain text."""
     print(f"\n  Session   {cfg.session}")
     print(f"  Mode      {cfg.memory_mode}")
     print(f"  Messages  {msg_count}")
+    if max_context_tokens and max_context_tokens > 0:
+        pct = int(min(1.0, session_tokens / max_context_tokens) * 100) if session_tokens else 0
+        filled = int(pct * 20 // 100)
+        bar = "█" * filled + "░" * (20 - filled)
+        print(f"  Context   {bar} {pct}% of {max_context_tokens:,} tokens")
     print()
 
 
@@ -2025,7 +3667,7 @@ def _build_slash_commands() -> SlashCommandRegistry:
                 "  /help info     Detailed help for /info\n"
                 "  /help think    Detailed help for /think"
             ),
-            aliases=["h", "?"],
+            aliases=[],
         )
     )
 
@@ -2042,7 +3684,7 @@ def _build_slash_commands() -> SlashCommandRegistry:
                 "The bare commands 'exit', 'quit', and 'q' (without /)\n"
                 "also work for backward compatibility."
             ),
-            aliases=["exit", "q"],
+            aliases=[],
         )
     )
 
@@ -2060,7 +3702,7 @@ def _build_slash_commands() -> SlashCommandRegistry:
                 "  - Session ID and message count\n"
                 "  - Mode-specific tracking (entities, files, decisions)"
             ),
-            aliases=["i"],
+            aliases=[],
         )
     )
 
@@ -2096,7 +3738,7 @@ def _build_slash_commands() -> SlashCommandRegistry:
                 "  /tools disable shell       Disable execute_shell_command\n"
                 "  /tools enable shell        Re-enable it"
             ),
-            aliases=["t", "tool"],
+            aliases=[],
         )
     )
 
@@ -2133,7 +3775,7 @@ def _build_slash_commands() -> SlashCommandRegistry:
                 "are reset.\n\n"
                 "This action cannot be undone."
             ),
-            aliases=["c"],
+            aliases=[],
         )
     )
 
@@ -2159,7 +3801,7 @@ def _build_slash_commands() -> SlashCommandRegistry:
                 "  /think Compare REST vs GraphQL for our API\n"
                 "  /think How to migrate from monolith to services?"
             ),
-            aliases=["T"],
+            aliases=[],
         )
     )
 
@@ -2184,7 +3826,7 @@ def _build_slash_commands() -> SlashCommandRegistry:
                 "  /delegate Compare Python, Rust, and Go for web backends\n"
                 "  /delegate Translate this text into French, German, Spanish"
             ),
-            aliases=["d"],
+            aliases=[],
         )
     )
 
@@ -2208,7 +3850,115 @@ def _build_slash_commands() -> SlashCommandRegistry:
                 "Switching preserves the current session but rebuilds the\n"
                 "system prompt and memory context for the new mode."
             ),
-            aliases=["M"],
+            aliases=[],
+        )
+    )
+
+    reg.register(
+        SlashCommand(
+            name="memory",
+            handler=SlashCommandRegistry._cmd_memory,
+            short_help="Show memory state for the current session",
+            long_help=(
+                "Usage: /memory\n\n"
+                "Displays the current memory state including message count,\n"
+                "rolling summary status, and semantic recall availability.\n\n"
+                "Also shows a preview of the rolling summary when one exists."
+            ),
+            aliases=["mem"],
+        )
+    )
+
+    reg.register(
+        SlashCommand(
+            name="agents",
+            handler=SlashCommandRegistry._cmd_agents,
+            short_help="List / inspect named agents from AGENTS.md",
+            long_help=(
+                "Usage: /agents [name | reload]\n\n"
+                "Without arguments, lists all agents loaded from AGENTS.md.\n\n"
+                "Subcommands:\n"
+                "  /agents <name>    Show full details of a named agent\n"
+                "  /agents reload    Reload AGENTS.md from disk\n\n"
+                "AGENTS.md is searched for in the current directory, then\n"
+                "the home directory.  Each level-2 heading (## Name) defines\n"
+                "an agent block with an optional yaml config fence:\n\n"
+                "  ## My Agent\n"
+                "  Description text.\n"
+                "  ```yaml\n"
+                "  system_prompt: You are helpful.\n"
+                "  model_alias: fast\n"
+                "  memory_mode: conversation\n"
+                "  tools_include: [web_search]\n"
+                "  tools_exclude: [shell]\n"
+                "  ```\n\n"
+                "Examples:\n"
+                "  /agents              List all loaded agents\n"
+                "  /agents researcher   Show details of 'researcher'\n"
+                "  /agents reload       Reload from AGENTS.md"
+            ),
+        )
+    )
+
+    reg.register(
+        SlashCommand(
+            name="tasks",
+            handler=SlashCommandRegistry._cmd_tasks,
+            short_help="List background tasks or view task details",
+            long_help=(
+                "Usage: /tasks [status | task_id]\n\n"
+                "Without arguments, lists the 50 most recent background tasks.\n\n"
+                "Pass a task ID (or 8-char prefix) to view full details and result:\n"
+                "  /tasks 869e4a2f\n\n"
+                "Optional status filter:\n"
+                "  pending, running, completed, failed, cancelled\n\n"
+                "Examples:\n"
+                "  /tasks               List all recent tasks\n"
+                "  /tasks running       Show only running tasks\n"
+                "  /tasks 869e4a2f     View full result for task 869e4a2f\n"
+                "  /task failed         Show failed tasks (short alias)"
+            ),
+            aliases=["task"],
+        )
+    )
+
+    reg.register(
+        SlashCommand(
+            name="spawn",
+            handler=SlashCommandRegistry._cmd_spawn,
+            short_help="Submit a background task to the task queue",
+            long_help=(
+                "Usage: /spawn <agent_name> <task_description>\n\n"
+                "Submits a background task to the queue for the named agent.\n"
+                "The task runs asynchronously; track progress with /tasks.\n\n"
+                "Examples:\n"
+                "  /spawn researcher Summarise the latest arXiv ML papers\n"
+                "  /spawn coder Refactor src/tools/shell.py for better error handling"
+            ),
+        )
+    )
+
+    reg.register(
+        SlashCommand(
+            name="goal",
+            handler=SlashCommandRegistry._cmd_goal,
+            short_help="Manage session goals",
+            long_help=(
+                "Usage: /goal [set <desc> | complete <id> | abandon <id> | list]\n\n"
+                "Track objectives for the current session.  Goals are persisted\n"
+                "to disk and survive session restarts.\n\n"
+                "Subcommands:\n"
+                "  /goal                  List active goals\n"
+                "  /goal list             List active goals\n"
+                "  /goal set <desc>       Create a new goal\n"
+                "  /goal complete <id>    Mark a goal as completed\n"
+                "  /goal abandon <id>     Mark a goal as abandoned\n\n"
+                "Examples:\n"
+                "  /goal set Migrate auth module to JWT\n"
+                "  /goal complete a1b2c3d4\n"
+                "  /goals                 (short alias)"
+            ),
+            aliases=["goals"],
         )
     )
 
@@ -2231,7 +3981,7 @@ def _build_slash_commands() -> SlashCommandRegistry:
                 "  /model fast        Switch to the 'fast' alias\n"
                 "  /m gpt-4.1         Switch to gpt-4.1"
             ),
-            aliases=["m"],
+            aliases=[],
         )
     )
 
@@ -2253,7 +4003,7 @@ def _build_slash_commands() -> SlashCommandRegistry:
                 "  /provider                 List providers\n"
                 "  /p                        Same (short alias)"
             ),
-            aliases=["p"],
+            aliases=[],
         )
     )
 
@@ -2274,7 +4024,7 @@ def _build_slash_commands() -> SlashCommandRegistry:
                 "  /session project-x     Switch to 'project-x'\n"
                 "  /s debug-issue         Start a new 'debug-issue' session"
             ),
-            aliases=["s"],
+            aliases=[],
         )
     )
 
@@ -2282,16 +4032,18 @@ def _build_slash_commands() -> SlashCommandRegistry:
         SlashCommand(
             name="debug",
             handler=SlashCommandRegistry._cmd_debug,
-            short_help="Toggle debug mode",
+            short_help="Cycle or set verbosity level (0–3)",
             long_help=(
-                "Usage: /debug\n\n"
-                "Toggles debug mode on/off.  When enabled:\n"
-                "  - Log level is set to DEBUG\n"
-                "  - Verbose logging is auto-enabled\n"
-                "  - File logging starts (default: cogtrix.log)\n\n"
-                "Equivalent to the --debug CLI flag."
+                "Usage: /debug [0|1|2|3]\n\n"
+                "Without an argument, cycles through verbosity levels 0→1→2→3→0.\n"
+                "With a numeric argument, jumps directly to that level:\n\n"
+                "  0 = normal  (no debug logging)\n"
+                "  1 = debug   (DEBUG log level; equivalent to --debug)\n"
+                "  2 = verbose (DEBUG + full LLM interactions)\n"
+                "  3 = trace   (verbose + fine-grained internal tracing)\n\n"
+                "Levels 1–3 auto-enable file logging (cogtrix.log by default)."
             ),
-            aliases=["D"],
+            aliases=[],
         )
     )
 
@@ -2307,7 +4059,7 @@ def _build_slash_commands() -> SlashCommandRegistry:
                 "logged without truncation.\n\n"
                 "Equivalent to the -v / --verbose CLI flag."
             ),
-            aliases=["v"],
+            aliases=[],
         )
     )
 
@@ -2325,7 +4077,7 @@ def _build_slash_commands() -> SlashCommandRegistry:
                 "and all disabled tools are re-enabled.\n\n"
                 "Equivalent to the -y / --no-confirm CLI flag."
             ),
-            aliases=["a"],
+            aliases=[],
         )
     )
 
@@ -2345,7 +4097,7 @@ def _build_slash_commands() -> SlashCommandRegistry:
                 "  /optimizer Search for MCP server docs\n"
                 "                          Optimize and run this prompt"
             ),
-            aliases=["o"],
+            aliases=[],
         )
     )
 
@@ -2367,7 +4119,62 @@ def _build_slash_commands() -> SlashCommandRegistry:
                 "Single-line shortcut:\n"
                 '  """some text in one shot"""'
             ),
-            aliases=["P"],
+            aliases=[],
+        )
+    )
+
+    reg.register(
+        SlashCommand(
+            name="undo",
+            handler=SlashCommandRegistry._cmd_undo,
+            short_help="Remove the last exchange from memory",
+            long_help=(
+                "Usage: /undo\n\n"
+                "Removes the last user message and assistant response\n"
+                "from conversation memory.\n\n"
+                "Useful when you want to rephrase or retry a prompt\n"
+                "without the failed or unwanted exchange in history.\n\n"
+                "This action cannot itself be undone."
+            ),
+            aliases=[],
+        )
+    )
+
+    reg.register(
+        SlashCommand(
+            name="compact",
+            handler=SlashCommandRegistry._cmd_compact,
+            short_help="Compress context in place — summarise old messages",
+            long_help=(
+                "Usage: /compact [aggressive]\n\n"
+                "Summarises old messages in place to reduce context usage.\n"
+                "History is preserved — messages are condensed, not deleted.\n\n"
+                "  /compact             Standard: messages older than 3 turns, >2000 chars\n"
+                "  /compact aggressive  Emergency: compress all messages regardless of age or size\n\n"
+                "Use when the context bar shows high usage but you want to continue\n"
+                "the current session rather than starting a new one.\n\n"
+                "See also: /clear (delete history), /session new (fresh session)"
+            ),
+            aliases=[],
+        )
+    )
+
+    reg.register(
+        SlashCommand(
+            name="retry",
+            handler=SlashCommandRegistry._cmd_retry,
+            short_help="Re-run the last prompt through the agent",
+            long_help=(
+                "Usage: /retry\n\n"
+                "Re-sends your last prompt to the agent without\n"
+                "re-typing it.\n\n"
+                "Useful when a response was incomplete, incorrect,\n"
+                "or interrupted. Combine with /undo first to remove\n"
+                "the failed exchange before retrying:\n\n"
+                "  /undo   → remove last exchange\n"
+                "  /retry  → re-run the same prompt fresh"
+            ),
+            aliases=[],
         )
     )
 
@@ -2390,13 +4197,38 @@ def _build_slash_commands() -> SlashCommandRegistry:
         )
     )
 
+    reg.register(
+        SlashCommand(
+            name="export",
+            handler=SlashCommandRegistry._cmd_export,
+            short_help="Export conversation to markdown or HTML",
+            long_help=(
+                "Usage: /export [html|md] [path]\n\n"
+                "Saves the current session conversation to a file.\n\n"
+                "Format (optional, default: md):\n"
+                "  md / markdown   Plain Markdown file\n"
+                "  html            Styled HTML page (dark theme)\n\n"
+                "Path (optional):\n"
+                "  If omitted, saves to current directory with auto name.\n"
+                "  conversation-<session>-<timestamp>.md\n\n"
+                "Examples:\n"
+                "  /export                    Save as markdown\n"
+                "  /export html               Save as HTML\n"
+                "  /export ~/notes/chat.md    Save to explicit path\n"
+                "  /export html ~/chat.html   HTML at explicit path\n"
+                "  /save                      Alias for /export"
+            ),
+            aliases=["save"],
+        )
+    )
+
     # Hidden commands (not listed in /help categories)
     reg.register(
         SlashCommand(
             name="system_prompt",
             handler=SlashCommandRegistry._cmd_system_prompt,
             short_help="Display the full system prompt",
-            aliases=["sp"],
+            aliases=[],
         )
     )
 
@@ -2663,6 +4495,8 @@ def create_safe_tool_wrapper(
     registry: ToolRegistry,
     approvals: set,
     session_state: SessionState | None = None,
+    git_native: bool = False,
+    tool_trust: dict | None = None,
 ):
     """Wrap a tool with confirmation gate. Delegates to src.agent.safety."""
     from src.agent.safety import create_safe_tool_wrapper as _safety_wrapper
@@ -2674,6 +4508,8 @@ def create_safe_tool_wrapper(
         approvals,
         session_state=session_state or _session,
         ui=_rich_ui,
+        git_native=git_native,
+        tool_trust=tool_trust,
     )
 
 
@@ -2775,35 +4611,81 @@ def run_single_prompt(
             if config and config.context_compression_model:
                 compression_llm = create_compression_llm(config.context_compression_model, config)
 
+            # ── Research delegate pre-flight ─────────────────────────────────────
+            # When research_delegate_auto is enabled and session context is above the
+            # threshold, research queries are routed to a subagent instead of the
+            # main agent to prevent raw web content from filling the main context.
+            _preflight_output: str | None = None
+            _rd_auto = getattr(config, "research_delegate_auto", False) if config else False
+            if _rd_auto and max_context_tokens and max_context_tokens > 0:
+                _rd_threshold = (
+                    getattr(config, "research_delegate_auto_threshold", 0.50) if config else 0.50
+                )
+                _ctx_est = getattr(context, "token_estimate", 0) or 0
+                _session_ratio = _ctx_est / max_context_tokens
+                if _session_ratio >= _rd_threshold and _looks_like_research_query(original_input):
+                    from src.tools.delegate import delegate_task, get_delegate_tools
+
+                    if get_delegate_tools():
+                        log.info(
+                            "research_delegate_auto: pre-flighting research query "
+                            "(session context %.0f%%, threshold %.0f%%)",
+                            _session_ratio * 100,
+                            _rd_threshold * 100,
+                        )
+                        _spinner.start()
+                        try:
+                            _preflight_output = delegate_task(
+                                task=original_input,
+                                use_tools=True,
+                                timeout=(
+                                    getattr(config, "research_delegate_timeout", 300)
+                                    if config
+                                    else 300
+                                ),
+                            )
+                        except Exception as _e:
+                            log.warning(
+                                "research_delegate_auto pre-flight failed: %s — falling back", _e
+                            )
+                            _preflight_output = None
+                        finally:
+                            _spinner.stop()
+
             _acc = _TokenAccumulator()
             _agent_cbs = (callbacks or []) + [_acc]
-            output = run_agent(
-                prompt_text,
-                context.messages,
-                registry,
-                approvals,
-                context_prefix=context.context_prefix,
-                callbacks=_agent_cbs,
-                result_messages=agent_msgs,
-                llm=llm,
-                system_prompt=_run_sys_prompt,
-                available_tools=dict(available_tools) if available_tools else available_tools,
-                active_tools_list=active_tools_list,
-                max_context_tokens=max_context_tokens,
-                preset_tools=(TOOL_PRESETS.get(config.memory_mode, set()) if config else set()),
-                context_compression=config.context_compression if config else True,
-                compression_min_age=(
-                    config.context_compression_min_age if config else COMPRESSION_MIN_AGE_CYCLES
-                ),
-                compression_min_chars=(
-                    config.context_compression_min_chars if config else COMPRESSION_MIN_CHARS
-                ),
-                compression_llm=compression_llm,
-                session_state=_session,
-                confirmation_ui=_rich_ui,
-                on_tool_expansion=_tool_expansion_ui,
-                parallel_tool_execution=config.parallel_tool_execution if config else True,
-            )
+            if _preflight_output:
+                output = _preflight_output
+            else:
+                output = run_agent(
+                    prompt_text,
+                    context.messages,
+                    registry,
+                    approvals,
+                    context_prefix=context.context_prefix,
+                    callbacks=_agent_cbs,
+                    result_messages=agent_msgs,
+                    llm=llm,
+                    system_prompt=_run_sys_prompt,
+                    available_tools=dict(available_tools) if available_tools else available_tools,
+                    active_tools_list=active_tools_list,
+                    max_context_tokens=max_context_tokens,
+                    preset_tools=(TOOL_PRESETS.get(config.memory_mode, set()) if config else set()),
+                    context_compression=config.context_compression if config else True,
+                    compression_min_age=(
+                        config.context_compression_min_age if config else COMPRESSION_MIN_AGE_CYCLES
+                    ),
+                    compression_min_chars=(
+                        config.context_compression_min_chars if config else COMPRESSION_MIN_CHARS
+                    ),
+                    compression_llm=compression_llm,
+                    session_state=_session,
+                    confirmation_ui=_rich_ui,
+                    on_tool_expansion=_tool_expansion_ui,
+                    parallel_tool_execution=config.parallel_tool_execution if config else True,
+                    git_native=config.git_native if config else False,
+                    tool_context_limit_pct=config.tool_context_limit_pct if config else 0.80,
+                )
         finally:
             _spinner.stop()
             _cleanup_milestones(_progress_tool, _al, _active_milestones)
@@ -2932,6 +4814,7 @@ def run_single_prompt(
                     session_state=_session,
                     on_tool_expansion=_tool_expansion_ui,
                     parallel_tool_execution=config.parallel_tool_execution if config else True,
+                    git_native=config.git_native if config else False,
                 )
             finally:
                 _spinner.stop()
@@ -2976,16 +4859,26 @@ def run_single_prompt(
         else:
             # Print to stdout
             if not no_stream and console is not None and Markdown is not None:
-                console.rule("Agent", style="blue")
+                console.rule(style="dim blue")
                 console.print(
                     Padding(
                         Markdown(preserve_tables_for_markdown(output)),
                         (1, 0, 1, 2),
                     )
                 )
-                stats_text = _format_stats_line(_agent_elapsed, _acc)
-                if stats_text:
-                    console.print(Align.right(Text.from_markup(stats_text)))
+                _session_tokens.input_tokens += _acc.input_tokens
+                _session_tokens.output_tokens += _acc.output_tokens
+                # print_stats_footer emits the progress bar and context warnings
+                # (replaces _format_stats_line + _context_advisory)
+                from src.ui.stats import print_stats_footer as _print_stats_footer
+
+                _print_stats_footer(
+                    console=console,
+                    session_tokens=_acc.last_input_tokens or _acc.input_tokens,
+                    max_context_tokens=max_context_tokens,
+                    input_tokens=_acc.input_tokens,
+                    output_tokens=_acc.output_tokens,
+                )
                 console.rule(style="dim blue")
             else:
                 print(output)
@@ -3056,6 +4949,16 @@ def main():
     # Parse command line arguments
     args = parse_arguments()
 
+    # Shell completion — handled before config loading (no config needed)
+    if getattr(args, "install_completion", None) is not None:
+        import os as _os
+
+        _shell = args.install_completion
+        if _shell == "auto" or not _shell:
+            _shell = "zsh" if "zsh" in _os.environ.get("SHELL", "") else "bash"
+        print(_build_completion_script(_shell, data_dir=getattr(args, "data_dir", None)))
+        raise SystemExit(0)
+
     # Silent mode: disable all ANSI/spinner output before any Rich or spinner
     # initialization so NO_COLOR is effective from the very start.
     if getattr(args, "silent", False):
@@ -3070,9 +4973,20 @@ def main():
         if console:
             console.print("\n[bold red]Configuration Error[/bold red]\n")
             console.print(f"[yellow]{e}[/yellow]\n")
+            console.print(
+                "[dim]  → Run [bold]cogtrix.py --setup[/bold] to generate a new config file.[/dim]"
+            )
+            console.print(
+                "[dim]  → Run [bold]cogtrix.py --check-config[/bold] to validate an existing one.[/dim]\n"  # noqa: E501
+            )
         else:
             print(f"\nConfiguration Error:\n{e}\n")
+            print("  → Run `cogtrix.py --setup` to generate a new config file.")
+            print("  → Run `cogtrix.py --check-config` to validate an existing one.\n")
         sys.exit(1)
+
+    # Load COGTRIX.md project context (cwd → home → XDG config dir)
+    _project_context, _project_context_path = _load_project_context()
 
     # Handle --check-config mode (early exit)
     if args.check_config:
@@ -3132,7 +5046,12 @@ def main():
             sys.exit(1)
 
     # Initialize logging (must be done early, after config is loaded)
-    setup_logging(log_file=config.log_file, debug=config.debug, verbose=config.verbose)
+    setup_logging(
+        log_file=config.log_file,
+        debug=config.debug,
+        verbose=config.verbose,
+        verbosity=config.verbosity,
+    )
     log = get_logger()
 
     if config.log_file is not None:
@@ -3149,8 +5068,46 @@ def main():
     # Memory manager setup
     memory_store = JsonFileMemoryStore(str(config.resolve_data_path("history")))
 
-    # --no-confirm / -y: skip all tool safety confirmations
-    _session.no_confirm = getattr(args, "no_confirm", False)
+    # --profile / -P: apply a named config profile (before individual flag overrides)
+    _profile_name = getattr(args, "profile", None)
+    if _profile_name:
+        _apply_profile(config, _profile_name)
+        _profile_data = config.profiles.get(_profile_name, {})
+        if _profile_data.get("no_confirm"):
+            _session.no_confirm = True
+
+    # --no-confirm / -y: skip all tool safety confirmations (overrides profile)
+    if getattr(args, "no_confirm", False):
+        _session.no_confirm = True
+
+    # --auto-route / -R: enable auto model routing from CLI
+    if getattr(args, "auto_route", False):
+        config.auto_route = True
+
+    # --quick / -Q: skip optimizer, memory, and compression
+    if getattr(args, "quick", False):
+        config.quick_mode = True
+
+    # --git-native / -G: auto stage+commit after each file write
+    if getattr(args, "git_native", False):
+        config.git_native = True
+    _git_native = config.git_native
+
+    # --no-banner: suppress the startup banner
+    if getattr(args, "no_banner", False):
+        config.banner = "off"
+    if getattr(args, "pipe", False) and not sys.stdout.isatty():
+        config.banner = "off"
+
+    # Apply theme
+    if config:
+        from src.ui.theme import set_theme
+
+        try:
+            set_theme(config.theme)
+        except ValueError:
+            pass  # unknown theme name — keep default
+
     approvals = _session.approvals
 
     try:
@@ -3173,6 +5130,7 @@ def main():
     configure_tavily_tool(config)
     configure_exa_tool(config)
     configure_brave_tool(config)
+    configure_searxng_tool(config)
     configure_serpapi_tool(config)
     configure_google_search_tool(config)
 
@@ -3181,7 +5139,7 @@ def main():
     if tool_filter == "none":
         registry = ToolRegistry()
     else:
-        registry = load_tools(tool_filter)
+        registry = load_tools(tool_filter, config=config)
     try:
         tool_names = registry.list_tools()
         if not tool_names:
@@ -3206,6 +5164,33 @@ def main():
 
     configure_file_ops_tool(config)
 
+    # Wire cron tools: LLM factory always reflects the current llm variable
+    # (which is a mutable reference updated on model/provider switches).
+    _cron_llm_ref: list = []  # [llm] — updated after each model switch
+    configure_cron_tool(config, llm_factory=lambda: _cron_llm_ref[0] if _cron_llm_ref else None)
+    configure_email_tool(config)
+
+    # Load named agent definitions from AGENTS.md (cwd or home dir)
+    from src.agent import registry as _agent_registry
+    from src.agent.agents_md import load_default_agents as _load_agents_md
+
+    _agents_md = _load_agents_md()
+    _agent_registry.load_from_config(config)
+    _agent_registry.merge_from_agents_md(_agents_md)
+
+    # Initialise background task queue for /spawn and /tasks commands
+    try:
+        from src.tasks.queue import init_task_queue
+
+        _data_dir = Path(getattr(config, "data_dir", "data"))
+        _tasks_db = _data_dir / "tasks" / "tasks.db"
+        _tasks_log = _data_dir / "tasks"
+        _tasks_db.parent.mkdir(parents=True, exist_ok=True)
+        _task_queue = init_task_queue(_tasks_db, _tasks_log)
+        # start() is deferred until after set_runner() — see below
+    except Exception as _tq_exc:
+        log.debug("Task queue init skipped: %s", _tq_exc)
+
     def _reconfigure_all_tools(cfg: Any, ctx_tokens: int, tool_list: list) -> None:
         """Call every configure_* function and recompute the tool output cap."""
         configure_delegate_tool(cfg, status_callback=_delegation_status)
@@ -3213,11 +5198,13 @@ def main():
         configure_tavily_tool(cfg)
         configure_exa_tool(cfg)
         configure_brave_tool(cfg)
+        configure_searxng_tool(cfg)
         configure_serpapi_tool(cfg)
         configure_google_search_tool(cfg)
         configure_python_exec_tool(cfg)
         configure_file_ops_tool(cfg)
         configure_rag_tool(cfg)
+        configure_email_tool(cfg)
         cap = _compute_tool_output_cap(ctx_tokens)
         for t in tool_list:
             apply_output_cap(t, cap)
@@ -3388,6 +5375,10 @@ def main():
         else 0
     )
 
+    # Configure embeddings early so has_embeddings reflects the real state in the banner
+    _try_configure_embeddings(memory_manager, config)
+    _has_embeddings = getattr(memory_manager, "_vector_store", None) is not None
+
     print_startup(
         config,
         tools_text=tools_text,
@@ -3397,6 +5388,8 @@ def main():
         msg_count=_startup_msg_count,
         no_confirm=_session.no_confirm,
         confirm_count=_confirm_count,
+        project_context_path=_project_context_path,
+        has_embeddings=_has_embeddings,
     )
 
     # Check if LangGraph is available (modern agent API)
@@ -3422,7 +5415,13 @@ def main():
     for tool_name, tool in registry.tools.items():
         if registry.requires_confirmation(tool_name):
             safe_tool = create_safe_tool_wrapper(
-                tool, tool_name, registry, approvals, session_state=_session
+                tool,
+                tool_name,
+                registry,
+                approvals,
+                session_state=_session,
+                git_native=_git_native,
+                tool_trust=config.tool_trust,
             )
             tools.append(safe_tool)
         else:
@@ -3481,6 +5480,8 @@ def main():
             tool_instructions=provider_config.tool_instructions,
             active_tool_names={getattr(t, "name", "") for t in tools} | set(available_tools),
         )
+        if _project_context:
+            system_prompt = f"## Project Context (from COGTRIX.md)\n\n{_project_context}\n\n---\n\n{system_prompt}"
         log.debug("System prompt length: %d chars", len(system_prompt))
         log.debug("Mode additions: %s", mode_adds if mode_adds else "None")
         log.debug("=== System prompt ===\n%s\n=== End system prompt ===", system_prompt)
@@ -3496,6 +5497,26 @@ def main():
             model_config = _copy(model_config)
             model_config.max_tokens = _DEFAULT_MAX_TOKENS
         llm = create_chat_model_from_configs(provider_config, model_config)
+
+        # Auto model routing: build a fast LLM for simple queries
+        _fast_llm = None
+        _fast_model_name: str | None = None
+        _auto_route_enabled = getattr(args, "auto_route", False) or config.auto_route
+        _quick_mode = config.quick_mode
+        if _auto_route_enabled and config.auto_route_fast_model:
+            try:
+                _fast_pc, _fast_mc = config.resolve_llm_config_for(config.auto_route_fast_model)
+                if _fast_mc.max_tokens is None:
+                    from copy import copy as _copy_fast
+
+                    _fast_mc = _copy_fast(_fast_mc)
+                    _fast_mc.max_tokens = _DEFAULT_MAX_TOKENS
+                _fast_llm = create_chat_model_from_configs(_fast_pc, _fast_mc)
+                _fast_model_name = _fast_mc.model
+                log.info("Auto-route fast model ready: %s", _fast_model_name)
+            except Exception as _e:
+                log.warning("Auto-route fast model failed to load: %s — routing disabled", _e)
+                _auto_route_enabled = False
 
         # Token budget for context trimming (from model context_window or default)
         from src.agent.core import _DEFAULT_CONTEXT_WINDOW
@@ -3516,10 +5537,61 @@ def main():
 
         # Wire LLM into memory manager for hybrid summarization
         memory_manager.set_llm(llm)
-        _try_configure_embeddings(memory_manager, config)
+        memory_manager._max_context_tokens = max_context_tokens  # type: ignore[attr-defined]
 
         # Register LLM for cleanup on exit
         _cleanup_resources.append(llm)
+        _cron_llm_ref[:] = [llm]  # make current LLM available to cron jobs
+
+        # Wire the background task runner now that llm / tools are ready
+        if "_task_queue" in dir():
+            try:
+                _tq_llm = llm
+                _tq_registry = registry
+                _tq_available_tools = available_tools
+                _tq_tools = tools
+                _tq_max_context_tokens = max_context_tokens
+                _tq_config = config
+                _tq_system_prompt = system_prompt
+
+                def _task_runner(record: Any) -> str:
+                    from src.agent import registry as _ar
+                    from src.orchestration.session_state import SessionState
+
+                    agent_cfg = _ar.get(record.agent_name)
+                    _sp = (
+                        getattr(agent_cfg, "system_prompt", None) or _tq_system_prompt
+                        if agent_cfg is not None
+                        else _tq_system_prompt
+                    )
+                    try:
+                        # Start with just request_tools — the agent loads
+                        # what it needs on demand (same as a fresh session).
+                        result = run_agent(
+                            record.prompt,
+                            [],
+                            _tq_registry,
+                            set(),
+                            llm=_tq_llm,
+                            system_prompt=_sp,
+                            available_tools=(
+                                dict(_tq_available_tools) if _tq_available_tools else None
+                            ),
+                            active_tools_list=list(_tq_tools) if _tq_tools else None,
+                            max_context_tokens=_tq_max_context_tokens,
+                            session_state=SessionState(no_confirm=True),
+                            parallel_tool_execution=(
+                                _tq_config.parallel_tool_execution if _tq_config else True
+                            ),
+                        )
+                        return result or "[no output]"
+                    except Exception as _exc:  # noqa: BLE001
+                        return f"[error] {type(_exc).__name__}: {_exc}"
+
+                _task_queue.set_runner(_task_runner)
+                _task_queue.start()  # deferred from init — runner must be set first
+            except Exception as _tr_exc:
+                log.debug("Task runner wiring skipped: %s", _tr_exc)
 
         # Use actual model name (resolved from model config), not CLI alias
         actual_model = model_config.model
@@ -3620,6 +5692,18 @@ def main():
         except Exception as e:
             print(f"\n⚠️  Error reading prompt file: {e}", file=sys.stderr)
             sys.exit(1)
+    elif getattr(args, "pipe", False):
+        # --pipe: read prompt from stdin (--prompt takes precedence)
+        if not (hasattr(args, "prompt") and args.prompt):
+            if sys.stdin.isatty():
+                print("cogtrix --pipe: enter prompt (Ctrl-D to submit):", file=sys.stderr)
+            prompt_text = sys.stdin.read().strip()
+        if not prompt_text:
+            print(
+                "Error: --pipe requires a prompt (pipe it via stdin or use --prompt).",
+                file=sys.stderr,
+            )
+            sys.exit(1)
     elif _silent_mode:
         # In silent mode, accept the prompt from the positional arg or stdin
         inline = getattr(args, "inline_prompt", None)
@@ -3648,8 +5732,10 @@ def main():
                 callbacks.append(obs_handler)
                 log.debug("LLM observability handler enabled")
 
-        # --silent: auto-deny tool confirmations unless -y was given
-        _deny_all = _silent_mode and not getattr(args, "no_confirm", False)
+        # --silent / --pipe: auto-deny tool confirmations unless -y was given
+        _deny_all = (_silent_mode or getattr(args, "pipe", False)) and not getattr(
+            args, "no_confirm", False
+        )
 
         exit_code = run_single_prompt(
             prompt_text=prompt_text,
@@ -3683,6 +5769,8 @@ def main():
     slash_cmds.available_tools = available_tools
     slash_cmds.system_prompt = system_prompt
     slash_cmds.mcp_manager = _mcp_manager
+    slash_cmds.project_context_path = _project_context_path
+    slash_cmds.max_context_tokens = max_context_tokens
 
     # Session orchestrator: snapshot/rollback helper for switch handlers
     session_orch = SessionOrchestrator(config, slash_cmds)
@@ -3704,8 +5792,19 @@ def main():
             " /quit or Ctrl+D to exit."
         )
 
-    # Load input history from previous sessions
+    # Load input history and set up tab completion for slash commands.
+    # Only full command names — short aliases (/h, /t, etc.) are excluded
+    # from autocompletion since tab-complete makes them redundant.
     load_input_history()
+    _all_cmds = [f"/{name}" for name in slash_cmds._commands]
+    set_slash_commands(_all_cmds)
+    try:
+        from src.ui.input_session import set_slash_commands as _pt_set_cmds
+
+        _pt_set_cmds(_all_cmds)
+    except Exception:
+        pass
+    setup_readline_completion()
     atexit.register(save_input_history)
     if _escape_monitor is not None and _escape_monitor.available:
         atexit.register(_escape_monitor._restore_terminal)
@@ -3721,6 +5820,109 @@ def main():
     compression_llm = None
     if config.context_compression_model:
         compression_llm = create_compression_llm(config.context_compression_model, config)
+    slash_cmds.compression_llm = compression_llm
+    memory_manager._compression_llm = compression_llm  # type: ignore[attr-defined]
+
+    # Adaptive memory tracking
+    _user_manually_set_mode: bool = False
+    _prompt_count: int = 0
+    _recent_prompts: list[str] = []
+
+    def _do_mode_switch(new_mode: str) -> bool:
+        """Perform a live memory mode switch. Returns True on success."""
+        nonlocal memory_manager, system_prompt, available_tools, tools
+        _snap = session_orch.snapshot(
+            memory_manager=memory_manager,
+            system_prompt=system_prompt,
+            registry_tools=registry.tools,
+            available_tools=available_tools,
+            tools=tools,
+        )
+        try:
+            memory_manager.save()
+            new_mode_config = config.memory_modes.get(new_mode)
+            memory_manager = MemoryFactory.create(
+                mode=new_mode,
+                store=memory_store,
+                session_id=config.session,
+                config=new_mode_config,
+            )
+            memory_manager.load()
+            config.memory_mode = new_mode
+            config.memory_config = new_mode_config
+            memory_manager.set_llm(llm)
+            _try_configure_embeddings(memory_manager, config)
+            mode_adds = memory_manager.get_system_prompt_additions()
+            system_prompt = build_system_prompt(
+                mode_additions=mode_adds,
+                models=config.models,
+                delegation_models=config.delegate_allowed_models,
+                tool_instructions=provider_config.tool_instructions,
+                active_tool_names={getattr(t, "name", "") for t in tools} | set(available_tools),
+            )
+            if _project_context:
+                system_prompt = f"## Project Context (from COGTRIX.md)\n\n{_project_context}\n\n---\n\n{system_prompt}"
+            if tool_filter is None:
+                registry.tools = dict(_session.all_tool_originals)
+                active_dict, available_tools = _apply_tool_preset(registry, new_mode)
+                if available_tools:
+                    registry.tools = active_dict
+                if rag_should_auto_activate() and "query_knowledge_base" in available_tools:
+                    _rag = available_tools.pop("query_knowledge_base")
+                    _update_rag_tool_description(_rag)
+                    registry.tools["query_knowledge_base"] = _rag
+                    _session.loaded_tools.add("query_knowledge_base")
+                    _session.pinned_tools.add("query_knowledge_base")
+                for _pname in list(_session.pinned_tools):
+                    if _pname in available_tools:
+                        registry.tools[_pname] = available_tools.pop(_pname)
+                _session.loaded_tools &= _session.pinned_tools
+                tools.clear()
+                for tn, tl in registry.tools.items():
+                    if registry.requires_confirmation(tn):
+                        tools.append(
+                            create_safe_tool_wrapper(
+                                tl,
+                                tn,
+                                registry,
+                                approvals,
+                                session_state=_session,
+                                git_native=_git_native,
+                                tool_trust=config.tool_trust,
+                            )
+                        )
+                    else:
+                        tools.append(tl)
+                _preset_names = TOOL_PRESETS.get(new_mode, set())
+                if available_tools:
+                    rt = _create_request_tools_tool(
+                        available_tools,
+                        _session.all_tool_descriptions,
+                        active_names=set(registry.tools.keys()),
+                        protected_names=_preset_names,
+                    )
+                    if rt:
+                        tools.append(rt)
+            slash_cmds.memory_manager = memory_manager
+            slash_cmds.system_prompt = system_prompt
+            slash_cmds.available_tools = available_tools
+            return True
+        except Exception as exc:
+            restored = session_orch.rollback(_snap, tools_list=tools)
+            memory_manager = restored["memory_manager"]
+            system_prompt = restored["system_prompt"]
+            available_tools = restored["available_tools"]
+            registry.tools = _snap.registry_tools
+            log.error("Mode switch failed: %s", exc)
+            return False
+
+    # Create prompt_toolkit session for pinned input prompt
+    _pt_session: object = None
+    if sys.stdout.isatty() and not getattr(args, "pipe", False):
+        try:
+            _pt_session = _create_input_session()
+        except Exception:
+            _pt_session = None
 
     # Main input/output loop
     while True:
@@ -3728,10 +5930,33 @@ def main():
             if color_enabled():
                 # \001/\002 are readline markers for non-printing chars
                 # so readline calculates prompt width correctly.
-                _prompt = "\n\001\033[36m\002\u276f\001\033[0m\002 "
+                _mode = getattr(config, "memory_mode", "conversation")
+                _mode_prefix = (
+                    f"\001\033[35m\002{_mode}\001\033[0m\002 " if _mode != "conversation" else ""
+                )
+                _prompt = f"\n{_mode_prefix}\001\033[36m\002\u276f\001\033[0m\002 "
             else:
-                _prompt = "\n> "
-            user_input = input(_prompt).strip()
+                _mode = getattr(config, "memory_mode", "conversation")
+                _mode_prefix = f"{_mode} " if _mode != "conversation" else ""
+                _prompt = f"\n{_mode_prefix}> "
+            if _pt_session is not None:
+                try:
+                    _raw = _pt_session.prompt()
+                    user_input = _raw.strip() if _raw is not None else ""
+                    # Erase separator + stats + ❯ lines from scrollback immediately
+                    # after Enter so the Rich "you" panel is the only echo visible.
+                    if sys.stdout.isatty() and console is not None:
+                        from src.ui.input_session import _toolbar_stats as _ts
+
+                        sys.stdout.write("\033[1A\033[2K\r")  # erase ❯ input line
+                        if _ts.strip():
+                            sys.stdout.write("\033[1A\033[2K\r")  # erase stats line
+                        sys.stdout.write("\033[1A\033[2K\r")  # erase separator line
+                        sys.stdout.flush()
+                except (EOFError, KeyboardInterrupt):
+                    raise
+            else:
+                user_input = input(_prompt).strip()
 
             if not user_input:
                 continue
@@ -3762,102 +5987,27 @@ def main():
                     user_input = read_multiline(first)
                     if not user_input:
                         continue
+                elif cmd_word == "retry":
+                    if not slash_cmds.last_input:
+                        if console is not None:
+                            console.print(
+                                "[dim]Nothing to retry — no previous prompt in this session.[/dim]"
+                            )
+                        else:
+                            print("Nothing to retry — no previous prompt in this session.")
+                        continue
+                    user_input = slash_cmds.last_input
+                    # fall through to normal prompt processing (no continue)
                 else:
                     # Regular slash commands (e.g. /help, /quit, /info)
+                    # ── Wrap output in patch_stdout to suppress prompt redraws ──────────
                     result = slash_cmds.dispatch(user_input)
                     if result == "break":
                         break
                     if isinstance(result, str) and result.startswith("switch_mode:"):
+                        _user_manually_set_mode = True
                         new_mode = result.split(":", 1)[1]
-                        _snap = session_orch.snapshot(
-                            memory_manager=memory_manager,
-                            system_prompt=system_prompt,
-                            registry_tools=registry.tools,
-                            available_tools=available_tools,
-                            tools=tools,
-                        )
-                        try:
-                            # Save current memory state before switching
-                            memory_manager.save()
-                            # Look up the correct mode config (not the old mode's)
-                            new_mode_config = config.memory_modes.get(new_mode)
-                            # Create new memory manager for the target mode
-                            memory_manager = MemoryFactory.create(
-                                mode=new_mode,
-                                store=memory_store,
-                                session_id=config.session,
-                                config=new_mode_config,
-                            )
-                            memory_manager.load()
-                            config.memory_mode = new_mode
-                            config.memory_config = new_mode_config
-                            # Wire LLM and embeddings into the new manager
-                            memory_manager.set_llm(llm)
-                            _try_configure_embeddings(memory_manager, config)
-                            # Rebuild system prompt with new mode additions
-                            mode_adds = memory_manager.get_system_prompt_additions()
-                            system_prompt = build_system_prompt(
-                                mode_additions=mode_adds,
-                                models=config.models,
-                                delegation_models=config.delegate_allowed_models,
-                                tool_instructions=provider_config.tool_instructions,
-                                active_tool_names={getattr(t, "name", "") for t in tools}
-                                | set(available_tools),
-                            )
-
-                            # Re-apply tool presets for the new mode:
-                            # rebuild from _session.all_tool_originals (which has
-                            # every tool before splitting) so dynamically
-                            # activated tools aren't lost.
-                            if tool_filter is None:
-                                registry.tools = dict(_session.all_tool_originals)
-                                active_dict, available_tools = _apply_tool_preset(
-                                    registry, new_mode
-                                )
-                                if available_tools:
-                                    registry.tools = active_dict
-                                # Re-apply RAG auto-activation
-                                if (
-                                    rag_should_auto_activate()
-                                    and "query_knowledge_base" in available_tools
-                                ):
-                                    _rag = available_tools.pop("query_knowledge_base")
-                                    _update_rag_tool_description(_rag)
-                                    registry.tools["query_knowledge_base"] = _rag
-                                    _session.loaded_tools.add("query_knowledge_base")
-                                    _session.pinned_tools.add("query_knowledge_base")
-                                # Re-promote pinned tools that landed in available
-                                for _pname in list(_session.pinned_tools):
-                                    if _pname in available_tools:
-                                        registry.tools[_pname] = available_tools.pop(_pname)
-                                _session.loaded_tools &= _session.pinned_tools
-                                # Re-wrap tools with safety interceptors
-                                tools.clear()
-                                for tn, tl in registry.tools.items():
-                                    if registry.requires_confirmation(tn):
-                                        tools.append(
-                                            create_safe_tool_wrapper(
-                                                tl, tn, registry, approvals, session_state=_session
-                                            )
-                                        )
-                                    else:
-                                        tools.append(tl)
-                                # Add request_tools meta-tool if needed
-                                _preset_names = TOOL_PRESETS.get(new_mode, set())
-                                if available_tools:
-                                    rt = _create_request_tools_tool(
-                                        available_tools,
-                                        _session.all_tool_descriptions,
-                                        active_names=set(registry.tools.keys()),
-                                        protected_names=_preset_names,
-                                    )
-                                    if rt:
-                                        tools.append(rt)
-
-                            # Update slash command references
-                            slash_cmds.memory_manager = memory_manager
-                            slash_cmds.system_prompt = system_prompt
-                            slash_cmds.available_tools = available_tools
+                        if _do_mode_switch(new_mode):
                             if console is not None:
                                 console.print(
                                     f"[green]Switched to [bold]{new_mode}[/bold] mode.[/green]"
@@ -3865,17 +6015,11 @@ def main():
                             else:
                                 print(f"Switched to {new_mode} mode.")
                             log.info("Live mode switch: %s", new_mode)
-                        except Exception as exc:
-                            restored = session_orch.rollback(_snap, tools_list=tools)
-                            memory_manager = restored["memory_manager"]
-                            system_prompt = restored["system_prompt"]
-                            available_tools = restored["available_tools"]
-                            registry.tools = _snap.registry_tools
-                            log.error("Mode switch failed: %s", exc)
+                        else:
                             if console is not None:
-                                console.print(f"[red]Mode switch failed:[/red] {exc}")
+                                console.print("[red]Mode switch failed.[/red]")
                             else:
-                                print(f"Mode switch failed: {exc}")
+                                print("Mode switch failed.")
 
                     elif isinstance(result, str) and result.startswith("switch_model:"):
                         new_model = result.split(":", 1)[1]
@@ -3921,6 +6065,8 @@ def main():
                                 active_tool_names={getattr(t, "name", "") for t in tools}
                                 | set(available_tools),
                             )
+                            if _project_context:
+                                system_prompt = f"## Project Context (from COGTRIX.md)\n\n{_project_context}\n\n---\n\n{system_prompt}"
                             slash_cmds.system_prompt = system_prompt
 
                             # All potential failures are past — now atomically swap
@@ -3929,7 +6075,9 @@ def main():
                             max_context_tokens = (
                                 model_config.context_window or _DEFAULT_CONTEXT_WINDOW
                             )
+                            slash_cmds.max_context_tokens = max_context_tokens
                             _cleanup_resources.append(llm)
+                            _cron_llm_ref[:] = [llm]
 
                             # Update hybrid memory LLM reference
                             memory_manager.set_llm(llm)
@@ -3947,6 +6095,9 @@ def main():
                                     compression_llm = None
                             else:
                                 compression_llm = None
+                            slash_cmds.compression_llm = compression_llm
+                            memory_manager._compression_llm = compression_llm  # type: ignore[attr-defined]
+                            memory_manager._max_context_tokens = max_context_tokens  # type: ignore[attr-defined]
 
                             # Close old LLM last — it's no longer referenced
                             _close_llm(old_llm)
@@ -4017,6 +6168,8 @@ def main():
                                 active_tool_names={getattr(t, "name", "") for t in tools}
                                 | set(available_tools),
                             )
+                            if _project_context:
+                                system_prompt = f"## Project Context (from COGTRIX.md)\n\n{_project_context}\n\n---\n\n{system_prompt}"
                             # Success — commit the new memory manager
                             memory_manager = new_mm
 
@@ -4068,7 +6221,13 @@ def main():
                                 if _session.no_confirm:
                                     approvals.add(load_name)
                                 tool_obj = create_safe_tool_wrapper(
-                                    tool_obj, load_name, registry, approvals, session_state=_session
+                                    tool_obj,
+                                    load_name,
+                                    registry,
+                                    approvals,
+                                    session_state=_session,
+                                    git_native=_git_native,
+                                    tool_trust=config.tool_trust,
                                 )
                             tools.append(tool_obj)
                             registry.tools[load_name] = _session.all_tool_originals.get(
@@ -4197,6 +6356,7 @@ def main():
                                     confirmation_ui=_rich_ui,
                                     on_tool_expansion=_tool_expansion_ui,
                                     parallel_tool_execution=config.parallel_tool_execution,
+                                    git_native=_git_native,
                                 )
                             finally:
                                 _spinner.stop()
@@ -4383,6 +6543,7 @@ def main():
                                 model_config.context_window or _DEFAULT_CONTEXT_WINDOW
                             )
                             _cleanup_resources.append(llm)
+                            _cron_llm_ref[:] = [llm]
 
                             memory_manager.set_llm(llm)
                             _reconfigure_all_tools(config, max_context_tokens, tools)
@@ -4396,6 +6557,8 @@ def main():
                                 active_tool_names={getattr(t, "name", "") for t in tools}
                                 | set(available_tools),
                             )
+                            if _project_context:
+                                system_prompt = f"## Project Context (from COGTRIX.md)\n\n{_project_context}\n\n---\n\n{system_prompt}"
                             slash_cmds.system_prompt = system_prompt
 
                             if config.context_compression:
@@ -4407,6 +6570,8 @@ def main():
                                     compression_llm = None
                             else:
                                 compression_llm = None
+                            memory_manager._compression_llm = compression_llm  # type: ignore[attr-defined]
+                            memory_manager._max_context_tokens = max_context_tokens  # type: ignore[attr-defined]
 
                             slash_cmds.config = config
                             actual_model = model_config.model
@@ -4454,12 +6619,18 @@ def main():
                         )
                         user_input = _pending_plan.text
                         already_optimized = True
+                    elif isinstance(result, str) and result.startswith("retry:"):
+                        # Re-run the last prompt, then fall through to agent
+                        user_input = result.split(":", 1)[1]
                     else:
                         continue
 
-                    # All slash-command handlers return to the prompt
-                    # except "optimize:" which falls through to agent execution.
-                    if not (isinstance(result, str) and result.startswith("optimize:")):
+                    # All slash-command handlers return to the prompt except
+                    # "optimize:" and "retry:" which fall through to agent execution.
+                    if not (
+                        isinstance(result, str)
+                        and (result.startswith("optimize:") or result.startswith("retry:"))
+                    ):
                         continue
 
             # Backward compat: bare exit/quit/q still works
@@ -4467,6 +6638,17 @@ def main():
                 log.info("Session ended by user")
                 print("\nGoodbye!")
                 break
+
+            # Expand @file / @folder references before sending to the agent
+            _expanded_input, _at_injected = _expand_at_references(user_input)
+            if _at_injected:
+                if console is not None:
+                    for _p in _at_injected:
+                        console.print(f"  [dim]↳ Injected: {_p}[/dim]")
+                else:
+                    for _p in _at_injected:
+                        print(f"  ↳ Injected: {_p}")
+                user_input = _expanded_input
 
             # Start new request tracking
             new_request_id()
@@ -4488,6 +6670,32 @@ def main():
                 tools[:] = [t for t in tools if getattr(t, "name", None) not in _unloaded_names]
                 log.debug("Auto-unloaded %d agent-loaded tools: %s", len(_unloaded), _unloaded)
 
+            # Adaptive memory mode auto-selection
+            if config.adaptive_memory and not _user_manually_set_mode:
+                _recent_prompts.append(user_input)
+                if len(_recent_prompts) > 3:
+                    _recent_prompts.pop(0)
+                _prompt_count += 1
+                _auto_mode: str | None = None
+                if _prompt_count == 1 and config.memory_mode == "conversation":
+                    # Session-start: classify the first prompt
+                    _classified = classify_memory_mode(user_input)
+                    if _classified != "conversation":
+                        _auto_mode = _classified
+                elif _prompt_count % 5 == 0:
+                    # Mid-session: check last 3 prompts every 5 turns
+                    _auto_mode = should_switch_mode(config.memory_mode, _recent_prompts)
+                if _auto_mode is not None:
+                    if _do_mode_switch(_auto_mode):
+                        if console is not None:
+                            console.print(
+                                f"[dim]Memory mode auto-switched to "
+                                f"[bold]{_auto_mode}[/bold].[/dim]"
+                            )
+                        else:
+                            print(f"Memory mode auto-switched to {_auto_mode}.")
+                        log.info("Adaptive mode switch: %s", _auto_mode)
+
             # Log user message
             log_user_message(user_input)
 
@@ -4496,17 +6704,30 @@ def main():
             # output file must all record what the user actually typed.
             # Set before try so KeyboardInterrupt handlers can use it.
             original_input = user_input
+            slash_cmds.last_input = original_input
+
+            if console is not None:
+                from src.ui.turns import print_user_turn
+
+                print_user_turn(console, original_input)
 
             _progress_tool_interactive: object = None
             _run_sys_prompt_interactive = system_prompt
             _agent_t0 = _time_mod.monotonic()
             _spinner.start()
+            if _quick_mode:
+                if console is not None:
+                    console.print("  [dim]⚡ quick: optimizer · memory · compression skipped[/dim]")
+                else:
+                    print("  [quick] optimizer · memory · compression skipped")
             try:
                 _t0_prep = _time_mod.monotonic()
                 # Run prepare_context and optimize_prompt concurrently when optimizer is enabled.
                 # The two operations are independent: the optimizer rewrites the prompt text
                 # while prepare_context reads conversation history — no data dependency.
-                if config.prompt_optimizer and not already_optimized:
+                if _quick_mode:
+                    context = MemoryContext(mode="quick")
+                elif config.prompt_optimizer and not already_optimized:
                     with _cf.ThreadPoolExecutor(max_workers=2, thread_name_prefix="prep") as _pool:
                         _ctx_future = _pool.submit(memory_manager.prepare_context, user_input)
                         _opt_future = _pool.submit(
@@ -4542,38 +6763,98 @@ def main():
 
                 wants_deep = user_wants_deep_think(original_input)
 
+                # Auto model routing: use fast LLM for simple queries
+                _routed_llm = llm
+                if _auto_route_enabled and _fast_llm is not None and not wants_deep:
+                    _complexity = _classify_query_complexity(original_input)
+                    if _complexity == "simple":
+                        _routed_llm = _fast_llm
+                        if console is not None:
+                            console.print(f"  [dim]⚡ auto: {_fast_model_name}[/dim]")
+                        else:
+                            print(f"  [auto] fast: {_fast_model_name}")
+                        log.debug("Auto-route: simple query → %s", _fast_model_name)
+                    else:
+                        log.debug("Auto-route: complex query → primary model")
+
                 agent_msgs: list = []
+
+                # ── Research delegate pre-flight ─────────────────────────────
+                # When research_delegate_auto is enabled and session context is
+                # above the threshold, route research queries to a subagent to
+                # prevent raw web content from filling the main context.
+                _preflight_output_i: str | None = None
+                if getattr(config, "research_delegate_auto", False):
+                    if max_context_tokens and max_context_tokens > 0:
+                        _i_rd_threshold = getattr(config, "research_delegate_auto_threshold", 0.50)
+                        _i_ctx_est = getattr(context, "token_estimate", 0) or 0
+                        _i_session_ratio = _i_ctx_est / max_context_tokens
+                        if _i_session_ratio >= _i_rd_threshold and _looks_like_research_query(
+                            original_input
+                        ):
+                            from src.tools.delegate import delegate_task, get_delegate_tools
+
+                            if get_delegate_tools():
+                                log.info(
+                                    "research_delegate_auto: pre-flighting research query "
+                                    "(session context %.0f%%, threshold %.0f%%)",
+                                    _i_session_ratio * 100,
+                                    _i_rd_threshold * 100,
+                                )
+                                _spinner.start()
+                                try:
+                                    _preflight_output_i = delegate_task(
+                                        task=original_input,
+                                        use_tools=True,
+                                        timeout=getattr(config, "research_delegate_timeout", 300),
+                                    )
+                                except Exception as _e:
+                                    log.warning(
+                                        "research_delegate_auto pre-flight failed: "
+                                        "%s — falling back",
+                                        _e,
+                                    )
+                                    _preflight_output_i = None
+                                finally:
+                                    _spinner.stop()
 
                 _acc = _TokenAccumulator()
                 _agent_cbs = (callbacks or []) + [_acc]
                 _t0_agent = _time_mod.monotonic()
-                output = run_agent(
-                    user_input,
-                    context.messages,
-                    registry,
-                    approvals,
-                    context_prefix=context.context_prefix,
-                    callbacks=_agent_cbs,
-                    result_messages=agent_msgs,
-                    llm=llm,
-                    system_prompt=_run_sys_prompt_interactive,
-                    available_tools=(
-                        dict(available_tools)
-                        if (available_tools or TOOL_PRESETS.get(config.memory_mode))
-                        else None
-                    ),
-                    active_tools_list=tools,
-                    max_context_tokens=max_context_tokens,
-                    preset_tools=TOOL_PRESETS.get(config.memory_mode, set()),
-                    context_compression=config.context_compression,
-                    compression_min_age=config.context_compression_min_age,
-                    compression_min_chars=config.context_compression_min_chars,
-                    compression_llm=compression_llm,
-                    session_state=_session,
-                    confirmation_ui=_rich_ui,
-                    on_tool_expansion=_tool_expansion_ui,
-                    parallel_tool_execution=config.parallel_tool_execution,
-                )
+                if _preflight_output_i:
+                    output = _preflight_output_i
+                    _spinner.stop()
+                else:
+                    output = run_agent(
+                        user_input,
+                        context.messages,
+                        registry,
+                        approvals,
+                        context_prefix=context.context_prefix,
+                        callbacks=_agent_cbs,
+                        result_messages=agent_msgs,
+                        llm=_routed_llm,
+                        system_prompt=_run_sys_prompt_interactive,
+                        available_tools=(
+                            dict(available_tools)
+                            if (available_tools or TOOL_PRESETS.get(config.memory_mode))
+                            else None
+                        ),
+                        active_tools_list=tools,
+                        max_context_tokens=max_context_tokens,
+                        preset_tools=TOOL_PRESETS.get(config.memory_mode, set()),
+                        context_compression=False if _quick_mode else config.context_compression,
+                        compression_min_age=config.context_compression_min_age,
+                        compression_min_chars=config.context_compression_min_chars,
+                        compression_llm=compression_llm,
+                        session_state=_session,
+                        confirmation_ui=_rich_ui,
+                        on_tool_expansion=_tool_expansion_ui,
+                        parallel_tool_execution=config.parallel_tool_execution,
+                        git_native=_git_native,
+                        tool_context_limit_pct=config.tool_context_limit_pct,
+                        tier_cache_enabled=config.tier_cache_enabled,
+                    )
                 log.debug(
                     "⏱ run_agent total: %.0fms",
                     (_time_mod.monotonic() - _t0_agent) * 1000,
@@ -4697,6 +6978,7 @@ def main():
                             session_state=_session,
                             on_tool_expansion=_tool_expansion_ui,
                             parallel_tool_execution=config.parallel_tool_execution,
+                            git_native=_git_native,
                         )
                     finally:
                         _spinner.stop()
@@ -4716,17 +6998,39 @@ def main():
 
                 # Display output with rich formatting if available
                 if console is not None and Markdown is not None:
-                    console.rule("Agent", style="blue")
-                    console.print(
-                        Padding(
-                            Markdown(preserve_tables_for_markdown(output)),
-                            (1, 0, 1, 2),
+                    if _pt_session is not None:
+                        from prompt_toolkit.patch_stdout import patch_stdout as _patch_stdout
+
+                        _patch_ctx = _patch_stdout(raw=True)
+                        _patch_ctx.__enter__()
+                    else:
+                        _patch_ctx = None
+                    try:
+                        from src.ui.turns import print_assistant_turn_header
+
+                        print_assistant_turn_header(console)
+                        console.print(
+                            Padding(
+                                Markdown(preserve_tables_for_markdown(output)),
+                                (0, 0, 0, 2),
+                            )
                         )
-                    )
-                    stats_text = _format_stats_line(_agent_elapsed, _acc)
-                    if stats_text:
-                        console.print(Align.right(Text.from_markup(stats_text)))
-                    console.rule(style="dim blue")
+                        _session_tokens.input_tokens += _acc.input_tokens
+                        _session_tokens.output_tokens += _acc.output_tokens
+                        slash_cmds.last_input_tokens = _acc.last_input_tokens or _acc.input_tokens
+                        # print_stats_footer stores stats for the toolbar display
+                        from src.ui.stats import print_stats_footer as _print_stats_footer
+
+                        _print_stats_footer(
+                            console=console,
+                            session_tokens=_acc.last_input_tokens or _acc.input_tokens,
+                            max_context_tokens=max_context_tokens,
+                            input_tokens=_acc.input_tokens,
+                            output_tokens=_acc.output_tokens,
+                        )
+                    finally:
+                        if _patch_ctx is not None:
+                            _patch_ctx.__exit__(None, None, None)
                 else:
                     print(f"\nAgent: {output}")
 
@@ -4744,10 +7048,10 @@ def main():
                 # Only save valid responses to history (skip empty/error).
                 # Pass the full agent chain so the agent can continue
                 # iterating on complex tasks across restarts (Ralph Loop).
-                if _is_valid_response(output):
+                if _is_valid_response(output) and not _quick_mode:
                     memory_manager.update(original_input, output, agent_messages=turn_msgs or None)
                     memory_manager.save()
-                else:
+                elif not _is_valid_response(output):
                     log.warning("Skipping history save: empty or error response")
 
             except UserCancelledRun:

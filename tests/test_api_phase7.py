@@ -43,6 +43,7 @@ import jwt as jose_jwt  # noqa: E402
 from fastapi import HTTPException  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine  # noqa: E402
+from sqlalchemy.pool import StaticPool  # noqa: E402
 
 from src.api.app import (  # noqa: E402
     _generic_exception_handler,
@@ -84,7 +85,12 @@ def test_app():
     from src.api.db.engine import Base as _Base
     from src.api.db.engine import get_db
 
-    test_engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
+    test_engine = create_async_engine(
+        "sqlite+aiosqlite:///:memory:",
+        echo=False,
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
     test_session_factory = async_sessionmaker(test_engine, expire_on_commit=False)
 
     async def _create():

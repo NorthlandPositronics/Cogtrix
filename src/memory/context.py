@@ -38,6 +38,10 @@ class MemoryContext:
     token_estimate: int | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
+    # Tiered Context Cache token breakdown (populated when TCC is active).
+    # Keys are tier numbers (0–3); values are estimated token counts for that tier.
+    tier_token_counts: dict[int, int] = field(default_factory=dict)
+
     def __post_init__(self):
         """Validate and set defaults after initialization."""
         if self.context_messages_count == 0 and self.messages:

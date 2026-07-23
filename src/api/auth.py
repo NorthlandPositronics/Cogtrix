@@ -39,6 +39,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 log = logging.getLogger("cogtrix.api.auth")
 
+
+def _hash_api_key(token: str) -> str:
+    """HMAC-SHA256 hash for API key lookup — delegates to isolated module."""
+    from src.api._key_hash import hash_api_key
+
+    return hash_api_key(token)
+
+
 # ---------------------------------------------------------------------------
 # Security scheme (used by FastAPI /docs and OpenAPI schema)
 # ---------------------------------------------------------------------------
@@ -180,6 +188,10 @@ async def get_current_user(
     1. ``Authorization: Bearer <jwt>`` header (preferred).
     2. ``?token=<jwt>`` query parameter (WebSocket fallback).
 
+    Falls back to OIDC validation when a validator is configured and the local
+    JWT check raises UNAUTHORIZED (invalid token).  TOKEN_EXPIRED is never
+    retried via OIDC — it propagates immediately so the frontend can refresh.
+
     Raises:
         HTTPException 401 UNAUTHORIZED — no token provided or invalid signature.
         HTTPException 401 TOKEN_EXPIRED — valid signature but token expired.
@@ -196,7 +208,29 @@ async def get_current_user(
             detail={"code": "UNAUTHORIZED", "message": "Missing or invalid bearer token."},
         )
 
-    claims = _decode_jwt(raw_token)
+    try:
+        claims = _decode_jwt(raw_token)
+    except HTTPException as local_exc:
+        detail = local_exc.detail
+        code = detail.get("code") if isinstance(detail, dict) else None
+        if code == "TOKEN_EXPIRED":
+            raise
+        # UNAUTHORIZED: try OIDC fallback if configured.
+        from src.api.oidc import get_validator  # lazy to avoid circular at import time
+
+        validator = get_validator()
+        if validator is None:
+            raise
+        try:
+            oidc_claims = validator.validate(raw_token)
+        except Exception:
+            raise local_exc from None
+        oidc_role = validator.map_role(oidc_claims)
+        oidc_user_id = str(oidc_claims.get("sub", ""))
+        if not oidc_user_id:
+            raise local_exc from None
+        return TokenData(user_id=oidc_user_id, role=oidc_role, raw_claims=oidc_claims)
+
     user_id: str = claims.get("sub", "")
     role: str = claims.get("role", "user")
     if not user_id:
@@ -270,12 +304,10 @@ async def validate_api_key(api_key: str, db: AsyncSession) -> TokenData:
         HTTPException 401 UNAUTHORIZED — key not found or revoked.
         HTTPException 401 TOKEN_EXPIRED — key has passed its expires_at timestamp.
     """
-    import hashlib
-
     from src.api.db.repositories.api_keys import ApiKeyRepository
     from src.api.db.repositories.users import UserRepository
 
-    key_hash = hashlib.sha256(api_key.encode()).hexdigest()
+    key_hash = _hash_api_key(api_key)
 
     repo = ApiKeyRepository(db)
     key_record = await repo.get_by_hash(key_hash)

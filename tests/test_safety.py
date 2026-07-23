@@ -17,10 +17,15 @@ from src.orchestration.session_state import SessionState
 
 
 class _StubUI:
-    """Minimal ConfirmationUI for testing."""
+    """Minimal ConfirmationUI for testing.
 
-    def __init__(self, choice: str = "y"):
-        self._choice = choice
+    Pass a single string for a constant response, or a list of strings to
+    return each value in sequence (last entry repeated when exhausted).
+    """
+
+    def __init__(self, choice: str | list[str] = "y"):
+        self._choices = [choice] if isinstance(choice, str) else list(choice)
+        self._index = 0
         self.rendered = False
         self.messages: list[tuple[str, str]] = []
         self.paused = 0
@@ -29,10 +34,16 @@ class _StubUI:
         self.rendered = True
 
     def read_choice(self) -> str:
-        return self._choice
+        val = self._choices[self._index]
+        if self._index < len(self._choices) - 1:
+            self._index += 1
+        return val
 
     def show_message(self, message: str, style: str) -> None:
         self.messages.append((message, style))
+
+    def show_diff_preview(self, path: str, diff_lines: list[str]) -> None:
+        pass
 
     def pause_spinner(self) -> None:
         self.paused += 1
@@ -54,8 +65,15 @@ class TestConfirmationResult:
         assert run_confirmation_prompt("t", {}, _StubUI("f")) == ConfirmationResult.DENIED_ALL
         assert run_confirmation_prompt("t", {}, _StubUI("c")) == ConfirmationResult.CANCELLED
 
-    def test_unknown_choice_denies(self):
-        assert run_confirmation_prompt("t", {}, _StubUI("xyz")) == ConfirmationResult.DENIED_ONCE
+    def test_unknown_choice_reprompts_then_denies(self):
+        # "xyz" is invalid → show_message is called, then "n" is accepted
+        ui = _StubUI(["xyz", "n"])
+        result = run_confirmation_prompt("t", {}, ui)
+        assert result == ConfirmationResult.DENIED_ONCE
+        assert any("Invalid choice" in msg for msg, _ in ui.messages)
+
+    def test_empty_string_approves_once(self):
+        assert run_confirmation_prompt("t", {}, _StubUI("")) == ConfirmationResult.APPROVED_ONCE
 
 
 class TestUserCancelledRun:
@@ -223,3 +241,108 @@ class TestCreateSafeToolWrapper:
         wrapped = create_safe_tool_wrapper(tool, "test_tool", reg, set(), session_state=ss, ui=None)
         result = wrapped.invoke({})
         assert "PermissionError" in result
+
+
+class TestComputeDiff:
+    """Tests for _compute_file_diff() — the diff preview helper."""
+
+    def test_write_file_new_file_returns_diff(self, tmp_path):
+        from src.agent.safety import _compute_file_diff
+
+        p = tmp_path / "new.txt"
+        result = _compute_file_diff("write_file", {"path": str(p), "content": "hello\n"})
+        assert result is not None
+        path_str, diff_lines = result
+        assert path_str == str(p)
+        assert any("+hello" in line for line in diff_lines)
+
+    def test_write_file_no_change_returns_none(self, tmp_path):
+        from src.agent.safety import _compute_file_diff
+
+        p = tmp_path / "existing.txt"
+        p.write_text("hello\n")
+        result = _compute_file_diff("write_file", {"path": str(p), "content": "hello\n"})
+        assert result is None
+
+    def test_write_file_existing_file_returns_diff(self, tmp_path):
+        from src.agent.safety import _compute_file_diff
+
+        p = tmp_path / "existing.txt"
+        p.write_text("old content\n")
+        result = _compute_file_diff("write_file", {"path": str(p), "content": "new content\n"})
+        assert result is not None
+        _, diff_lines = result
+        assert any("-old content" in line for line in diff_lines)
+        assert any("+new content" in line for line in diff_lines)
+
+    def test_write_file_missing_path_returns_none(self):
+        from src.agent.safety import _compute_file_diff
+
+        result = _compute_file_diff("write_file", {"path": "", "content": "x"})
+        assert result is None
+
+    def test_patch_file_not_exists_returns_none(self, tmp_path):
+        from src.agent.safety import _compute_file_diff
+
+        p = tmp_path / "missing.txt"
+        result = _compute_file_diff("patch_file", {"path": str(p), "old_str": "x", "new_str": "y"})
+        assert result is None
+
+    def test_patch_file_ambiguous_returns_none(self, tmp_path):
+        from src.agent.safety import _compute_file_diff
+
+        p = tmp_path / "f.txt"
+        p.write_text("x\nx\n")
+        result = _compute_file_diff("patch_file", {"path": str(p), "old_str": "x", "new_str": "y"})
+        assert result is None
+
+    def test_patch_file_returns_diff(self, tmp_path):
+        from src.agent.safety import _compute_file_diff
+
+        p = tmp_path / "f.txt"
+        p.write_text("hello world\n")
+        result = _compute_file_diff(
+            "patch_file", {"path": str(p), "old_str": "world", "new_str": "earth"}
+        )
+        assert result is not None
+        _, diff_lines = result
+        assert any("-hello world" in line for line in diff_lines)
+
+    def test_unknown_tool_returns_none(self):
+        from src.agent.safety import _compute_file_diff
+
+        result = _compute_file_diff("read_file", {"path": "/tmp/x"})
+        assert result is None
+
+    def test_patch_file_missing_path_returns_none(self):
+        from src.agent.safety import _compute_file_diff
+
+        result = _compute_file_diff("patch_file", {"path": "", "old_str": "x", "new_str": "y"})
+        assert result is None
+
+
+class TestRunConfirmationPromptExtended:
+    def _make_ui(self, choices):
+        if isinstance(choices, str):
+            choices = [choices]
+        return _StubUI(choices)
+
+    def test_forbid_all_returns_denied_all(self):
+        ui = self._make_ui("f")
+        result = run_confirmation_prompt("shell", {}, ui)
+        assert result == ConfirmationResult.DENIED_ALL
+
+    def test_forbid_long_form_returns_denied_all(self):
+        ui = self._make_ui("forbid-all")
+        result = run_confirmation_prompt("shell", {}, ui)
+        assert result == ConfirmationResult.DENIED_ALL
+
+    def test_cancel_returns_cancelled(self):
+        ui = self._make_ui("c")
+        result = run_confirmation_prompt("shell", {}, ui)
+        assert result == ConfirmationResult.CANCELLED
+
+    def test_disable_returns_denied_disable(self):
+        ui = self._make_ui("d")
+        result = run_confirmation_prompt("shell", {}, ui)
+        assert result == ConfirmationResult.DENIED_DISABLE

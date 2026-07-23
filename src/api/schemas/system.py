@@ -33,6 +33,13 @@ class SystemInfoOut(BaseModel):
     )
     debug: bool = Field(..., description="True when debug logging is active.")
     verbose: bool = Field(..., description="True when verbose logging is active.")
+    verbosity: int = Field(
+        ...,
+        description="Active verbosity level: 0=normal, 1=debug, 2=verbose, 3=trace.",
+        ge=0,
+        le=3,
+        examples=[0],
+    )
     uptime_s: float = Field(
         ...,
         description="API server uptime in seconds.",
@@ -98,6 +105,12 @@ class DebugToggleRequest(BaseModel):
     verbose: bool | None = Field(
         default=None,
         description="Target verbose mode state; null leaves unchanged.",
+    )
+    verbosity: int | None = Field(
+        default=None,
+        description="Target verbosity level (0–3); supersedes debug/verbose when provided.",
+        ge=0,
+        le=3,
     )
 
 

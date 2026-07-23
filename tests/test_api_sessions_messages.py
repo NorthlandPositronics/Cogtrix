@@ -33,6 +33,7 @@ from sqlalchemy.ext.asyncio import (  # noqa: E402
     async_sessionmaker,
     create_async_engine,
 )
+from sqlalchemy.pool import StaticPool
 
 # ---------------------------------------------------------------------------
 # Environment — must be set before any src.api import
@@ -59,7 +60,12 @@ from src.api.db.repositories.users import UserRepository  # noqa: E402
 @pytest_asyncio.fixture()
 async def http_db_engine():
     """In-memory SQLite engine for HTTP tests; recreated per test."""
-    engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
+    engine = create_async_engine(
+        "sqlite+aiosqlite:///:memory:",
+        echo=False,
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     yield engine
@@ -941,11 +947,15 @@ class TestMessageSend:
             "data"
         ]["id"]
 
-        resp = client.post(
-            f"/api/v1/sessions/{sid}/messages",
-            json={"content": "Think hard", "mode": "think"},
-            headers=_auth(tok),
-        )
+        # Patch run_message_turn to prevent the background asyncio task from
+        # spawning deep_think threads that outlive the test fixture.  This test
+        # only verifies the 202 response; agent execution is covered by live_llm tests.
+        with patch("src.api.routes.messages.run_message_turn", new_callable=AsyncMock):
+            resp = client.post(
+                f"/api/v1/sessions/{sid}/messages",
+                json={"content": "Think hard", "mode": "think"},
+                headers=_auth(tok),
+            )
         assert resp.status_code == 202
 
     @pytest.mark.asyncio

@@ -1,32 +1,56 @@
 import logging
 from typing import Any
 
-from src._version import __copyright__, __version__
+from src._version import __version__
 
 log = logging.getLogger("cogtrix")
 
 try:
-    from rich import box as rich_box
-    from rich.align import Align
-    from rich.console import Console, Group
-    from rich.panel import Panel
-    from rich.text import Text
+    from rich.console import Console
 
     _console: Any = Console()
 except ImportError:
-    rich_box = None  # type: ignore[assignment]
-    Align = None  # type: ignore[assignment]
-    Group = None  # type: ignore[assignment]
-    Panel = None  # type: ignore[assignment]
-    Text = None  # type: ignore[assignment]
     _console = None
 
 
-LOGO_LINES = [
-    "░█▀▀░█▀█░█▀▀░▀█▀░█▀▄░▀█▀░█░█",
-    "░█░░░█░█░█░█░░█░░█▀▄░░█░░▄▀▄",
-    "░▀▀▀░▀▀▀░▀▀▀░░▀░░▀░▀░▀▀▀░▀░▀",
-]
+def startup_compact(config: Any, **extra: Any) -> None:
+    """Render a single-line compact startup indicator."""
+    try:
+        mc = config.get_active_model()
+        model_str = mc.model
+        provider_str = mc.provider
+    except Exception:
+        model_str = "?"
+        provider_str = "?"
+
+    session_id = extra.get("session_id", getattr(config, "session", "default"))
+    msg_count = extra.get("msg_count", 0)
+    has_embeddings = extra.get("has_embeddings", False)
+
+    if msg_count == 0:
+        status = "new"
+    elif has_embeddings:
+        status = f"{msg_count} msgs + recall"
+    else:
+        status = f"{msg_count} msgs"
+
+    ver = f"[bold steel_blue1]v{__version__}[/bold steel_blue1]"
+    status_styled = f"[bold steel_blue1]{status}[/bold steel_blue1]"
+    base = f"cogtrix v{__version__} · {provider_str}/{model_str} · {session_id} ({status})"
+    rich_base = (
+        f"[dim]cogtrix {ver} · {provider_str}/{model_str} · {session_id} ({status_styled})[/dim]"
+    )
+
+    if _console is not None:
+        try:
+            if msg_count == 0:
+                _console.print(f"{rich_base}  [dim]/help for commands[/dim]", highlight=False)
+            else:
+                _console.print(rich_base, highlight=False)
+        except Exception:
+            print(base)
+    else:
+        print(base)
 
 
 def print_startup(config: Any, **extra: Any) -> None:
@@ -38,6 +62,12 @@ def print_startup(config: Any, **extra: Any) -> None:
     Optional keyword arguments (forwarded to renderers):
         tools_text, session_id, msg_count, no_confirm, confirm_count
     """
+    banner_mode = getattr(config, "banner", "compact")
+    if banner_mode == "off":
+        return
+    if banner_mode == "compact":
+        startup_compact(config, **extra)
+        return
     if _console is not None:
         startup_rich(config, **extra)
     else:
@@ -54,153 +84,94 @@ def startup_rich(config: Any, **extra: Any) -> None:
         no_confirm:    True if safety confirmations are disabled
         confirm_count: number of confirm-gated tools
     """
-    if _console is None or Align is None or Group is None or Text is None:  # pragma: no cover
+    if _console is None:
+        startup_plain(config, **extra)
         return
 
-    # Resolve model alias + derived provider
     alias = getattr(config, "active_model_alias", None)
     try:
         mc = config.get_active_model()
-        model = mc.model
-        provider_name = mc.provider
+        model_str = mc.model
+        provider_str = mc.provider
     except Exception as exc:
         log.debug("Failed to resolve active model for banner: %s", exc)
-        model = "?"
-        provider_name = "?"
-    prov_type = "?"
-    try:
-        pc = config.get_provider_config(provider_name)
-        prov_type = pc.type
-    except (ValueError, KeyError):
-        pass
+        model_str = "?"
+        provider_str = "?"
 
-    # ── Build renderables ─────────────────────────────────────
-    parts: list = []
-
-    # Centered ASCII art logo
-    logo_text = Text("\n".join(LOGO_LINES), style="bright_blue")
-    parts.append(Align.center(logo_text))
-    parts.append(Text())  # blank line
-
-    # Left-aligned config section (with leading indent)
-    lbl = 12  # label column width
-    info = Text()
-    info.append(f"    {'Model':<{lbl}}", style="bold")
-    if alias and alias != model:
-        info.append(f": {alias} ")
-        info.append(f"({model})\n", style="dim")
-    else:
-        info.append(f": {model}\n")
-    info.append(f"    {'Provider':<{lbl}}", style="bold")
-    info.append(f": {provider_name} ")
-    info.append(f"({prov_type})\n", style="dim")
-    info.append(f"    {'Mode':<{lbl}}", style="bold")
-    info.append(f": {config.memory_mode}\n")
-    if config.config_file_path:
-        info.append(f"    {'Config':<{lbl}}", style="bold")
-        info.append(f": {config.config_file_path}\n", style="dim")
-
-    # Tools & session (bar = configured / total registered)
+    memory_mode = getattr(config, "memory_mode", "conversation")
+    session_id = extra.get("session_id", getattr(config, "session", "default"))
+    msg_count = extra.get("msg_count", 0)
+    has_embeddings = extra.get("has_embeddings", False)
+    no_confirm = extra.get("no_confirm", False)
     tools_text = extra.get("tools_text")
-    configured_count = extra.get("configured_count", 0)
-    total_registered = extra.get("total_registered", 0)
-    session_id = extra.get("session_id")
-    if tools_text:
-        bar_len = 12
-        if tools_text == "disabled":
-            filled = 0
-        elif total_registered > 0:
-            filled = max(1, round(configured_count / total_registered * bar_len))
+
+    try:
+        _console.rule(
+            f"[bold steel_blue1]cogtrix v{__version__}[/bold steel_blue1]",
+            style="steel_blue1",
+        )
+        _console.print()
+
+        # Primary info line
+        if alias and alias != model_str:
+            model_part = f"[bold]{alias}[/bold] [dim]({model_str})[/dim]"
         else:
-            filled = bar_len if configured_count > 0 else 0
-        bar_str = "█" * filled + "░" * (bar_len - filled)
-        info.append(f"    {'Tools':<{lbl}}", style="bold")
-        info.append(f": [{bar_str}] {tools_text}\n")
-    if session_id is not None:
-        msg_count = extra.get("msg_count", 0)
-        info.append(f"    {'Session':<{lbl}}", style="bold")
-        info.append(f": {session_id} ")
-        info.append(f"({msg_count} messages)\n", style="dim")
-    if extra.get("no_confirm") and extra.get("confirm_count"):
-        info.append(
-            f"    ⚡ Safety confirmations disabled for {extra['confirm_count']} tool(s)\n",
-            style="yellow",
-        )
+            model_part = f"[bold]{model_str}[/bold]"
+        provider_part = f"via [cyan]{provider_str}[/cyan]"
+        mode_part = f"[dim]{memory_mode} memory[/dim]"
 
-    # Strip trailing newline
-    info.rstrip()
-    parts.append(info)
+        info_parts = [f"  {model_part} {provider_part}", mode_part]
+        if tools_text:
+            info_parts.append(f"[dim]{tools_text}[/dim]")
+        _console.print("  ·  ".join(info_parts))
 
-    # Centered copyright at the bottom
-    parts.append(Text())  # blank line
-    copyright_text = Text(f"{__copyright__} · v{__version__}", style="dim")
-    parts.append(Align.center(copyright_text))
+        # Session line — only when non-trivial
+        if session_id and (session_id != "default" or msg_count > 0):
+            if msg_count == 0:
+                sess_text = f"  [dim]session: {session_id} · new[/dim]"
+            elif has_embeddings:
+                sess_text = (
+                    f"  [dim]session: {session_id} · resumed · {msg_count} msgs + recall[/dim]"
+                )
+            else:
+                sess_text = f"  [dim]session: {session_id} · resumed · {msg_count} msgs[/dim]"
+            _console.print(sess_text)
 
-    body = Group(*parts)
-    _console.print()
-    _console.print(
-        Panel(
-            body,
-            box=rich_box.DOUBLE if rich_box else None,  # type: ignore[arg-type]
-            border_style="bright_blue",
-            expand=False,
-            padding=(1, 2),
-        )
-    )
+        if getattr(config, "config_file_path", None):
+            _console.print(f"  [dim]config: {config.config_file_path}[/dim]")
+
+        if no_confirm:
+            _console.print("  [yellow]⚠ Tool confirmations disabled (auto-approved)[/yellow]")
+
+        _console.print()
+
+        if msg_count == 0:
+            _console.print(
+                "  [dim]Type [bold white]/help[/bold white] for commands  "
+                "· [bold white]!cmd[/bold white] to run shell  "
+                "· [bold white]/setup[/bold white] to reconfigure[/dim]"
+            )
+            _console.print()
+
+        _console.rule(style="dim steel_blue1")
+        _console.print()
+    except Exception:  # pragma: no cover
+        startup_plain(config, **extra)
 
 
 def startup_plain(config: Any, **extra: Any) -> None:
-    """Render startup info as plain text."""
-    print()
-    for logo_line in LOGO_LINES:
-        print(f"  {logo_line}")
-    print()
-
-    alias = getattr(config, "active_model_alias", None)
+    """Plain-text startup banner (no Rich/ANSI)."""
     try:
         mc = config.get_active_model()
-        model = mc.model
-        provider_name = mc.provider
-    except Exception as exc:
-        log.debug("Failed to resolve active model for banner: %s", exc)
-        model = "?"
-        provider_name = "?"
-    prov_type = "?"
-    try:
-        pc = config.get_provider_config(provider_name)
-        prov_type = pc.type
-    except (ValueError, KeyError):
-        pass
-
-    lbl = 12
-    if alias and alias != model:
-        print(f"  {'Model':<{lbl}}: {alias} ({model})")
-    else:
-        print(f"  {'Model':<{lbl}}: {model}")
-    print(f"  {'Provider':<{lbl}}: {provider_name} ({prov_type})")
-    print(f"  {'Mode':<{lbl}}: {config.memory_mode}")
-    if config.config_file_path:
-        print(f"  {'Config':<{lbl}}: {config.config_file_path}")
-
-    tools_text = extra.get("tools_text")
-    configured_count = extra.get("configured_count", 0)
-    total_registered = extra.get("total_registered", 0)
-    session_id = extra.get("session_id")
-    if tools_text:
-        bar_len = 12
-        if tools_text == "disabled":
-            filled = 0
-        elif total_registered > 0:
-            filled = max(1, round(configured_count / total_registered * bar_len))
-        else:
-            filled = bar_len if configured_count > 0 else 0
-        bar_str = "█" * filled + "░" * (bar_len - filled)
-        print(f"  {'Tools':<{lbl}}: [{bar_str}] {tools_text}")
-    if session_id is not None:
-        msg_count = extra.get("msg_count", 0)
-        print(f"  {'Session':<{lbl}}: {session_id} ({msg_count} messages)")
-    if extra.get("no_confirm") and extra.get("confirm_count"):
-        print(f"  ⚡ Safety confirmations disabled for {extra['confirm_count']} tool(s)")
-    print()
-    print(f"  {__copyright__} · v{__version__}")
+        model_str = f"{mc.provider}/{mc.model}"
+    except Exception:
+        model_str = "unknown"
+    session_id = extra.get("session_id", getattr(config, "session", "default"))
+    msg_count = extra.get("msg_count", 0)
+    version_line = f"cogtrix v{__version__} · {model_str} · session: {session_id}"
+    print("-" * len(version_line))
+    print(version_line)
+    print("-" * len(version_line))
+    if msg_count == 0:
+        print("Type /help for commands.")
     print()

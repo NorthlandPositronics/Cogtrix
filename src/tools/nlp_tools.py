@@ -8,15 +8,6 @@ from collections import Counter
 
 from pydantic import BaseModel, Field
 
-# Try to import TextBlob for sentiment analysis
-try:
-    from textblob import TextBlob  # type: ignore[import-untyped]
-
-    TEXTBLOB_AVAILABLE = True
-except ImportError:
-    TextBlob = None  # type: ignore[misc, assignment]
-    TEXTBLOB_AVAILABLE = False
-
 
 class SentimentAnalysisInput(BaseModel):
     """Input schema for sentiment analysis."""
@@ -319,14 +310,9 @@ def analyze_sentiment(text: str) -> str:
         return "Error: Empty text provided"
 
     try:
-        if TEXTBLOB_AVAILABLE and TextBlob is not None:
-            blob = TextBlob(text)
-            polarity = blob.sentiment.polarity
-            subjectivity = blob.sentiment.subjectivity
-        else:
-            sentiment_result = _simple_sentiment(text)
-            polarity = sentiment_result["polarity"]
-            subjectivity = sentiment_result["subjectivity"]
+        sentiment_result = _simple_sentiment(text)
+        polarity = sentiment_result["polarity"]
+        subjectivity = sentiment_result["subjectivity"]
 
         # Classify sentiment
         if polarity > 0.1:
@@ -350,21 +336,16 @@ def analyze_sentiment(text: str) -> str:
         else:
             subj_label = "Objective (fact-based)"
 
-        result = [
-            "Sentiment Analysis Results:",
-            "",
-            f"Overall Sentiment: {sentiment}",
-            f"Polarity Score: {polarity:.3f} (range: -1 to +1)",
-            f"Subjectivity Score: {subjectivity:.3f} (range: 0 to 1)",
-            f"Subjectivity: {subj_label}",
-        ]
-
-        if not TEXTBLOB_AVAILABLE:
-            result.append("")
-            result.append("Note: Using basic analysis. Install textblob for better accuracy:")
-            result.append("  pip install textblob")
-
-        return "\n".join(result)
+        return "\n".join(
+            [
+                "Sentiment Analysis Results:",
+                "",
+                f"Overall Sentiment: {sentiment}",
+                f"Polarity Score: {polarity:.3f} (range: -1 to +1)",
+                f"Subjectivity Score: {subjectivity:.3f} (range: 0 to 1)",
+                f"Subjectivity: {subj_label}",
+            ]
+        )
 
     except Exception as e:
         return f"Error analyzing sentiment: {e}"

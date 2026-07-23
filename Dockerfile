@@ -1,9 +1,13 @@
+ARG TARGETPLATFORM
+ARG BUILDPLATFORM
+
 # ── Stage 1: Build ────────────────────────────────────────────
 FROM python:3.13-slim AS builder
 
 # Pin to a specific patch version for reproducibility.
 # Update this when intentionally upgrading uv.
-COPY --from=ghcr.io/astral-sh/uv:0.10.12 /uv /usr/local/bin/uv
+# uv 0.10.12 publishes multi-arch manifests for linux/amd64 and linux/arm64.
+COPY --from=ghcr.io/astral-sh/uv:0.10.12 /uv /uvx /usr/local/bin/
 
 WORKDIR /app
 
@@ -28,10 +32,12 @@ RUN uv sync --frozen --no-dev --no-install-project \
 # ── Stage 2: Runtime ─────────────────────────────────────────
 FROM python:3.13-slim AS runtime
 
+ARG TARGETPLATFORM
+ARG BUILDPLATFORM
 LABEL org.opencontainers.image.title="Cogtrix" \
-      org.opencontainers.image.description="Modular AI assistant with 51 built-in tools and REST/WebSocket API" \
+      org.opencontainers.image.description="Modular AI assistant" \
       org.opencontainers.image.source="https://github.com/NorthlandPositronics/Cogtrix" \
-      org.opencontainers.image.licenses="LicenseRef-Cogtrix-Source-Available-1.0"
+      org.opencontainers.image.licenses="MIT"
 
 # --no-log-init prevents sparse utmp/wtmp files for high-numbered UIDs
 RUN groupadd --gid 1000 cogtrix && \

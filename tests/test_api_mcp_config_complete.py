@@ -2,9 +2,9 @@
 
 MCP endpoints:
     GET    /api/v1/mcp/servers             — list
-    POST   /api/v1/mcp/servers             — add (501)
+    POST   /api/v1/mcp/servers             — add (201); 409 on conflict, 503 on persist failure
     GET    /api/v1/mcp/servers/{name}      — get detail
-    DELETE /api/v1/mcp/servers/{name}      — remove (501 when found)
+    DELETE /api/v1/mcp/servers/{name}      — remove (204)
     POST   /api/v1/mcp/servers/{name}/restart — restart
 
 Config endpoints:
@@ -39,6 +39,7 @@ os.environ.setdefault("COGTRIX_DB_URL", "sqlite+aiosqlite:///:memory:")
 
 from fastapi.testclient import TestClient  # noqa: E402
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine  # noqa: E402
+from sqlalchemy.pool import StaticPool  # noqa: E402
 
 from src.api.app import create_app  # noqa: E402
 from src.api.db.engine import Base, get_db  # noqa: E402
@@ -53,7 +54,12 @@ _VALID_PASSWORD = "TestPass1!"  # lowercase + uppercase + digit + special
 
 @pytest.fixture()
 def app():
-    engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
+    engine = create_async_engine(
+        "sqlite+aiosqlite:///:memory:",
+        echo=False,
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
     factory = async_sessionmaker(engine, expire_on_commit=False)
 
     async def _setup():
@@ -137,6 +143,7 @@ def _uh(tokens):
 class TestMCPListServers:
     def test_no_mcp_client_returns_empty(self, client, tokens, app_engine):
         app, _ = app_engine
+        app.state.config = _make_mock_config()
         app.state.mcp_client = None
         r = client.get("/api/v1/mcp/servers", headers=_ah(tokens))
         assert r.status_code == 200
@@ -144,14 +151,17 @@ class TestMCPListServers:
 
     def test_with_mcp_client_returns_servers(self, client, tokens, app_engine):
         app, _ = app_engine
-        sc = MagicMock()
-        sc.url = None
-        sc.command = "python"
-        sc.args = ["-m", "myserver"]
-        sc.requires_confirmation = True
-
+        cfg = _make_mock_config()
+        cfg.mcp_servers = {
+            "my_server": {
+                "command": "python",
+                "args": ["-m", "myserver"],
+                "requires_confirmation": True,
+            }
+        }
+        app.state.config = cfg
         mcp = MagicMock()
-        mcp.servers = {"my_server": sc}
+        mcp.get_server_info.return_value = []
         app.state.mcp_client = mcp
 
         r = client.get("/api/v1/mcp/servers", headers=_ah(tokens))
@@ -163,14 +173,13 @@ class TestMCPListServers:
 
     def test_sse_transport_detected(self, client, tokens, app_engine):
         app, _ = app_engine
-        sc = MagicMock()
-        sc.url = "http://localhost:8080/sse"
-        sc.command = None
-        sc.args = []
-        sc.requires_confirmation = False
-
+        cfg = _make_mock_config()
+        cfg.mcp_servers = {
+            "sse_server": {"url": "http://localhost:8080/sse", "requires_confirmation": False}
+        }
+        app.state.config = cfg
         mcp = MagicMock()
-        mcp.servers = {"sse_server": sc}
+        mcp.get_server_info.return_value = []
         app.state.mcp_client = mcp
 
         r = client.get("/api/v1/mcp/servers", headers=_ah(tokens))
@@ -179,31 +188,77 @@ class TestMCPListServers:
 
     def test_requires_auth(self, client, app_engine):
         app, _ = app_engine
+        app.state.config = _make_mock_config()
         app.state.mcp_client = None
         r = client.get("/api/v1/mcp/servers")
         assert r.status_code == 401
 
     def test_non_admin_can_list(self, client, tokens, app_engine):
         app, _ = app_engine
+        app.state.config = _make_mock_config()
         app.state.mcp_client = None
         r = client.get("/api/v1/mcp/servers", headers=_uh(tokens))
         assert r.status_code == 200
 
 
 class TestMCPAddServer:
-    def test_add_returns_501(self, client, tokens):
+    def test_add_stdio_success_returns_201(self, client, tokens, app_engine):
+        app, _ = app_engine
+        cfg = _make_mock_config()
+        cfg.mcp_servers = {}
+        app.state.config = cfg
+        app.state.mcp_client = None
+
+        with patch("src.api.routes.mcp._persist_mcp_servers"):
+            r = client.post(
+                "/api/v1/mcp/servers",
+                headers=_ah(tokens),
+                json={
+                    "name": "new_server",
+                    "transport": "stdio",
+                    "command": "python",
+                    "args": ["-m", "srv"],
+                },
+            )
+        assert r.status_code == 201
+        data = r.json()["data"]
+        assert data["name"] == "new_server"
+        assert data["transport"] == "stdio"
+        assert data["command"] == "python"
+
+    def test_add_conflict_returns_409(self, client, tokens, app_engine):
+        app, _ = app_engine
+        cfg = _make_mock_config()
+        cfg.mcp_servers = {"new_server": {"command": "python"}}
+        app.state.config = cfg
         r = client.post(
             "/api/v1/mcp/servers",
             headers=_ah(tokens),
-            json={
-                "name": "new_server",
-                "transport": "stdio",
-                "command": "python",
-                "args": ["-m", "srv"],
-            },
+            json={"name": "new_server", "transport": "stdio", "command": "python"},
         )
-        assert r.status_code == 501
-        assert r.json()["error"]["code"] == "NOT_IMPLEMENTED"
+        assert r.status_code == 409
+        assert r.json()["error"]["code"] == "VALIDATION_ERROR"
+
+    def test_add_persist_failure_returns_503(self, client, tokens, app_engine):
+        app, _ = app_engine
+        cfg = _make_mock_config()
+        cfg.mcp_servers = {}
+        app.state.config = cfg
+        app.state.mcp_client = None
+
+        with patch(
+            "src.api.routes.mcp._persist_mcp_servers",
+            side_effect=RuntimeError("No config file path"),
+        ):
+            r = client.post(
+                "/api/v1/mcp/servers",
+                headers=_ah(tokens),
+                json={"name": "new_server", "transport": "stdio", "command": "python"},
+            )
+        assert r.status_code == 503
+        assert r.json()["error"]["code"] == "SERVICE_UNAVAILABLE"
+        # In-memory state must be rolled back on failure
+        assert "new_server" not in cfg.mcp_servers
 
     def test_non_admin_returns_403(self, client, tokens):
         r = client.post(
@@ -220,15 +275,16 @@ class TestMCPAddServer:
 
 class TestMCPGetServer:
     @pytest.fixture(autouse=True)
-    def _setup_mcp(self, app_engine):
+    def _setup_mcp(self, client, app_engine):
+        # client dependency ensures TestClient lifespan runs before we override app.state.config
         app, _ = app_engine
-        sc = MagicMock()
-        sc.url = None
-        sc.command = "node"
-        sc.args = ["server.js"]
-        sc.requires_confirmation = True
+        cfg = _make_mock_config()
+        cfg.mcp_servers = {
+            "node_server": {"command": "node", "args": ["server.js"], "requires_confirmation": True}
+        }
+        app.state.config = cfg
         mcp = MagicMock()
-        mcp.servers = {"node_server": sc}
+        mcp.get_server_info.return_value = []
         app.state.mcp_client = mcp
 
     def test_get_existing_server(self, client, tokens):
@@ -245,6 +301,7 @@ class TestMCPGetServer:
 
     def test_no_mcp_client_404(self, client, tokens, app_engine):
         app, _ = app_engine
+        # "any_server" is not in the config (only "node_server" from autouse fixture)
         app.state.mcp_client = None
         r = client.get("/api/v1/mcp/servers/any_server", headers=_ah(tokens))
         assert r.status_code == 404
@@ -256,25 +313,27 @@ class TestMCPGetServer:
 
 class TestMCPRemoveServer:
     @pytest.fixture(autouse=True)
-    def _setup_mcp(self, app_engine):
+    def _setup_mcp(self, client, app_engine):
+        # client dependency ensures TestClient lifespan runs before we override app.state.config
         app, _ = app_engine
-        sc = MagicMock()
-        sc.url = None
-        sc.command = "py"
-        sc.args = []
-        sc.requires_confirmation = True
+        cfg = _make_mock_config()
+        cfg.mcp_servers = {
+            "py_server": {"command": "py", "args": [], "requires_confirmation": True}
+        }
+        app.state.config = cfg
         mcp = MagicMock()
-        mcp.servers = {"py_server": sc}
+        mcp.get_server_info.return_value = []
         app.state.mcp_client = mcp
 
-    def test_remove_existing_returns_501(self, client, tokens):
+    def test_remove_existing_returns_204(self, client, tokens):
         r = client.delete("/api/v1/mcp/servers/py_server", headers=_ah(tokens))
-        assert r.status_code == 501
-        assert r.json()["error"]["code"] == "NOT_IMPLEMENTED"
+        assert r.status_code == 204
+        assert r.content == b""
 
     def test_remove_nonexistent_returns_404(self, client, tokens):
         r = client.delete("/api/v1/mcp/servers/no_such", headers=_ah(tokens))
         assert r.status_code == 404
+        assert r.json()["error"]["code"] == "MCP_SERVER_NOT_FOUND"
 
     def test_non_admin_returns_403(self, client, tokens):
         r = client.delete("/api/v1/mcp/servers/py_server", headers=_uh(tokens))
@@ -288,13 +347,13 @@ class TestMCPRemoveServer:
 class TestMCPRestartServer:
     def _setup_mcp_with_restart(self, app_engine, succeed=True):
         app, _ = app_engine
-        sc = MagicMock()
-        sc.url = None
-        sc.command = "srv"
-        sc.args = []
-        sc.requires_confirmation = True
+        cfg = _make_mock_config()
+        cfg.mcp_servers = {
+            "restart_srv": {"command": "srv", "args": [], "requires_confirmation": True}
+        }
+        app.state.config = cfg
         mcp = MagicMock()
-        mcp.servers = {"restart_srv": sc}
+        mcp.get_server_info.return_value = []
         if succeed:
             mcp.restart_server = MagicMock(return_value=None)
         else:
@@ -315,8 +374,11 @@ class TestMCPRestartServer:
 
     def test_restart_nonexistent_returns_404(self, client, tokens, app_engine):
         app, _ = app_engine
+        cfg = _make_mock_config()
+        cfg.mcp_servers = {}
+        app.state.config = cfg
         mcp = MagicMock()
-        mcp.servers = {}
+        mcp.get_server_info.return_value = []
         app.state.mcp_client = mcp
         r = client.post("/api/v1/mcp/servers/nope/restart", headers=_ah(tokens))
         assert r.status_code == 404
@@ -341,6 +403,7 @@ def _make_mock_config(
     providers=None,
     models=None,
     active_model="default",
+    mcp_servers=None,
 ):
     cfg = MagicMock()
     cfg.active_model_alias = active_model
@@ -363,6 +426,9 @@ def _make_mock_config(
     if models is None:
         models = {}
     cfg.models = models
+
+    # MCP servers — source of truth for MCP routes
+    cfg.mcp_servers = {} if mcp_servers is None else mcp_servers
 
     return cfg
 
@@ -942,12 +1008,15 @@ class TestWizardEndpoints:
             captured_messages[1].content == "Start."
         ), f"seed message content must be 'Start.', got {captured_messages[1].content!r}"
 
-    def test_advance_wizard_step0_invoke_failure_returns_422(self, client, tokens):
-        """If the first LLM invocation (seeding the conversation) raises, the wizard
-        must return 422 PROVIDER_UNREACHABLE so the frontend can show a clear error.
+    def test_advance_wizard_step0_invoke_failure_falls_back_to_default_question(
+        self, client, tokens
+    ):
+        """If the first LLM invocation raises after a successful connection probe, the
+        wizard must fall back to the default question and advance to step 1 (soft-fail).
 
-        The connection probe succeeded (LLM object was created), but the initial
-        Q&A call failed — this indicates the provider is unusable for this session.
+        Phase 1 (LLM object creation) is the hard-fail gate for PROVIDER_UNREACHABLE.
+        Any subsequent _wizard_invoke_llm failure (context overflow, transient error)
+        is logged as a warning and the wizard continues so the user can still configure.
         """
         with (
             patch("src.api.routes.config._wizard_detect_env") as mock_env,
@@ -987,8 +1056,11 @@ class TestWizardEndpoints:
                 },
             )
 
-        assert r.status_code == 422, f"expected 422 PROVIDER_UNREACHABLE, got: {r.text}"
-        assert r.json()["error"]["code"] == "PROVIDER_UNREACHABLE"
+        assert r.status_code == 200, f"expected 200 with fallback question, got: {r.text}"
+        data = r.json()["data"]
+        assert data["step"] == 1
+        assert data["question"] is not None
+        assert "Welcome" in data["question"]
 
     def test_advance_wizard_step0_null_content_falls_back_to_default_question(self, client, tokens):
         """If the LLM returns None/empty content (reasoning models), the wizard must
@@ -1132,3 +1204,197 @@ providers:
         assert captured_key == [
             "sk-resolved-from-config"
         ], f"api_key must be resolved from existing config, got {captured_key!r}"
+
+
+class TestResolveWizardProvider:
+    """Unit tests for _resolve_wizard_provider()."""
+
+    @staticmethod
+    def _fn(provider_name, api_key=None, base_url=None, env=None):
+        from src.api.routes.config import _resolve_wizard_provider
+
+        return _resolve_wizard_provider(provider_name, api_key, base_url, env or {})
+
+    def test_native_openai_unchanged(self):
+        native, url, key = self._fn("openai", api_key="sk-x", base_url="http://localhost")
+        assert native == "openai"
+        assert url == "http://localhost"
+        assert key == "sk-x"
+
+    def test_native_anthropic_unchanged(self):
+        native, url, key = self._fn("anthropic", api_key="ak-x")
+        assert native == "anthropic"
+        assert key == "ak-x"
+
+    def test_groq_preset_resolves_to_openai(self):
+        native, url, key = self._fn("groq", api_key="groq-key")
+        assert native == "openai"
+        assert url == "https://api.groq.com/openai/v1"
+        assert key == "groq-key"
+
+    def test_xai_preset_resolves_to_openai(self):
+        native, url, key = self._fn("xai", api_key="xai-key")
+        assert native == "openai"
+        assert url == "https://api.x.ai/v1"
+        assert key == "xai-key"
+
+    def test_preset_custom_base_url_takes_priority(self):
+        native, url, key = self._fn("groq", base_url="http://my-groq-proxy")
+        assert native == "openai"
+        assert url == "http://my-groq-proxy"
+
+    def test_preset_key_resolved_from_env(self):
+        native, url, key = self._fn("groq", env={"GROQ_API_KEY": "env-groq-key"})
+        assert native == "openai"
+        assert key == "env-groq-key"
+
+    def test_preset_explicit_key_overrides_env(self):
+        native, url, key = self._fn("xai", api_key="direct-key", env={"XAI_API_KEY": "env-key"})
+        assert key == "direct-key"
+
+    def test_unknown_provider_returned_unchanged(self):
+        native, url, key = self._fn("unknownprovider", api_key="k", base_url="http://x")
+        assert native == "unknownprovider"
+        assert url == "http://x"
+        assert key == "k"
+
+
+class TestWizardStep0PresetResolution:
+    """Integration tests: Step 0 correctly resolves preset providers to native types."""
+
+    def _start_wizard(self, client, tokens):
+        with (
+            patch("src.api.routes.config._wizard_detect_env", return_value={}),
+            patch("src.api.routes.config._wizard_load_existing", return_value=None),
+        ):
+            r = client.post(
+                "/api/v1/config/wizard",
+                headers=_ah(tokens),
+                json={"edit_existing": False},
+            )
+        assert r.status_code == 201
+        return r.json()["data"]["wizard_id"]
+
+    def test_step0_groq_resolves_to_openai(self, client, tokens):
+        """provider_type='groq' must pass native_type='openai' to _wizard_test_connection."""
+        wid = self._start_wizard(client, tokens)
+        captured: list[str] = []
+
+        def _capture(provider_type, model, api_key, base_url):
+            captured.append(provider_type)
+            return MagicMock(), None
+
+        with (
+            patch("src.api.routes.config._wizard_test_connection", side_effect=_capture),
+            patch("src.api.routes.config._wizard_load_docs", return_value="docs"),
+            patch("src.api.routes.config._wizard_invoke_llm", return_value="Q?"),
+        ):
+            r = client.post(
+                f"/api/v1/config/wizard/{wid}/step",
+                headers=_ah(tokens),
+                json={"data": {"provider_type": "groq", "api_key": "sk-groq"}},
+            )
+
+        assert r.status_code == 200, r.text
+        assert captured == ["openai"], f"expected openai, got {captured!r}"
+
+    def test_step0_xai_resolves_to_openai(self, client, tokens):
+        """provider_type='xai' must pass native_type='openai' to _wizard_test_connection."""
+        wid = self._start_wizard(client, tokens)
+        captured: list[str] = []
+
+        def _capture(provider_type, model, api_key, base_url):
+            captured.append(provider_type)
+            return MagicMock(), None
+
+        with (
+            patch("src.api.routes.config._wizard_test_connection", side_effect=_capture),
+            patch("src.api.routes.config._wizard_load_docs", return_value="docs"),
+            patch("src.api.routes.config._wizard_invoke_llm", return_value="Q?"),
+        ):
+            r = client.post(
+                f"/api/v1/config/wizard/{wid}/step",
+                headers=_ah(tokens),
+                json={"data": {"provider_type": "xai", "api_key": "sk-xai"}},
+            )
+
+        assert r.status_code == 200, r.text
+        assert captured == ["openai"], f"expected openai, got {captured!r}"
+
+    def test_step0_groq_uses_preset_base_url(self, client, tokens):
+        """Step 0 with 'groq' must forward Groq's base_url to _wizard_test_connection."""
+        wid = self._start_wizard(client, tokens)
+        captured_url: list[str | None] = []
+
+        def _capture(provider_type, model, api_key, base_url):
+            captured_url.append(base_url)
+            return MagicMock(), None
+
+        with (
+            patch("src.api.routes.config._wizard_test_connection", side_effect=_capture),
+            patch("src.api.routes.config._wizard_load_docs", return_value="docs"),
+            patch("src.api.routes.config._wizard_invoke_llm", return_value="Q?"),
+        ):
+            r = client.post(
+                f"/api/v1/config/wizard/{wid}/step",
+                headers=_ah(tokens),
+                json={"data": {"provider_type": "groq", "api_key": "sk-groq"}},
+            )
+
+        assert r.status_code == 200, r.text
+        assert captured_url == [
+            "https://api.groq.com/openai/v1"
+        ], f"unexpected base_url: {captured_url!r}"
+
+    def test_step0_groq_uses_preset_default_model_when_none_given(self, client, tokens):
+        """Step 0 with 'groq' and no model must use the Groq preset's default model."""
+        wid = self._start_wizard(client, tokens)
+        captured_model: list[str] = []
+
+        def _capture(provider_type, model, api_key, base_url):
+            captured_model.append(model)
+            return MagicMock(), None
+
+        with (
+            patch("src.api.routes.config._wizard_test_connection", side_effect=_capture),
+            patch("src.api.routes.config._wizard_load_docs", return_value="docs"),
+            patch("src.api.routes.config._wizard_invoke_llm", return_value="Q?"),
+        ):
+            r = client.post(
+                f"/api/v1/config/wizard/{wid}/step",
+                headers=_ah(tokens),
+                # no "model" field — must default to preset model
+                json={"data": {"provider_type": "groq", "api_key": "sk-groq"}},
+            )
+
+        assert r.status_code == 200, r.text
+        assert captured_model == [
+            "llama-3.3-70b-versatile"
+        ], f"unexpected model: {captured_model!r}"
+
+    def test_step0_bootstrap_info_type_is_native(self, client, tokens):
+        """ws['bootstrap_info']['type'] must be 'openai', not 'groq'."""
+        wid = self._start_wizard(client, tokens)
+
+        with (
+            patch(
+                "src.api.routes.config._wizard_test_connection", return_value=(MagicMock(), None)
+            ),
+            patch("src.api.routes.config._wizard_load_docs", return_value="docs"),
+            patch("src.api.routes.config._wizard_invoke_llm", return_value="Q?"),
+        ):
+            r = client.post(
+                f"/api/v1/config/wizard/{wid}/step",
+                headers=_ah(tokens),
+                json={"data": {"provider_type": "groq", "api_key": "sk-groq"}},
+            )
+
+        assert r.status_code == 200, r.text
+        # Inspect the stored wizard session state via the internal registry
+        from src.api.routes.config import _wizard_sessions
+
+        ws = _wizard_sessions.get(wid)
+        assert ws is not None
+        assert (
+            ws["bootstrap_info"]["type"] == "openai"
+        ), f"bootstrap_info type should be 'openai', got {ws['bootstrap_info']['type']!r}"

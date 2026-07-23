@@ -113,6 +113,10 @@ async def warm_session(record: ApiSessionRecord, app_state: Any) -> ApiSession:
 
     # 2. Session state — API sessions never use CLI confirmation
     session_state = SessionState(no_confirm=True)
+    # Deny shell/exec tools unless explicitly enabled in config
+    app_config = getattr(app_state, "config", None)
+    if not getattr(app_config, "api_dangerous_tools", False):
+        session_state.denials.update({"shell", "bash", "python_exec"})
 
     # 3 & 4. Build memory manager and LLM concurrently — both are I/O-bound and independent.
     memory_manager, llm = await asyncio.gather(
@@ -128,6 +132,14 @@ async def warm_session(record: ApiSessionRecord, app_state: Any) -> ApiSession:
 
     # 5. Build AgentRunConfig
     run_config = _build_run_config(llm, session_state, config, app_state)
+
+    # Wire TCC helper attributes onto the memory manager so that background
+    # roll-forward jobs use the correct context budget and compression LLM.
+    if memory_manager is not None:
+        memory_manager._max_context_tokens = run_config.max_context_tokens  # type: ignore[attr-defined]
+        memory_manager._compression_llm = run_config.compression_llm  # type: ignore[attr-defined]
+        if llm is not None:
+            memory_manager.set_llm(llm)
 
     # 6. Parse token counts
     try:
@@ -318,6 +330,8 @@ def _build_run_config(
     if max_context_tokens is None:
         max_context_tokens = 32_768  # matches _DEFAULT_CONTEXT_WINDOW in core.py
 
+    tier_cache_enabled = _cfg_get("tier_cache_enabled", True)
+
     return AgentRunConfig(
         llm=llm,
         system_prompt=system_prompt or None,
@@ -326,6 +340,7 @@ def _build_run_config(
         max_context_tokens=max_context_tokens,
         context_compression=bool(context_compression),
         parallel_tool_execution=bool(parallel),
+        tier_cache_enabled=bool(tier_cache_enabled),
         session_state=session_state,
         bound_cache=OrderedDict(),
         compression_cache=OrderedDict(),

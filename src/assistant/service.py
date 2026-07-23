@@ -92,7 +92,7 @@ class AssistantService:
         asst_cfg: dict[str, Any] = (
             config.services.get("assistant", {}) if hasattr(config, "services") else {}
         )
-        max_concurrent: int = asst_cfg.get("max_concurrent", 4)
+        max_concurrent: int = asst_cfg.get("max_concurrent", 10)
         effective_prompt = self._build_system_prompt(
             asst_cfg,
             system_prompt,
@@ -347,15 +347,25 @@ class AssistantService:
         )
         ch_cfgs: dict[str, Any] = asst_cfg.get("channels", {})
 
+        # Merge top-level services.<channel> with channels.<channel> overrides to
+        # check whether a bot_token is present before submitting to the pool.
+        svc = config.services if hasattr(config, "services") else {}
+        dc_merged: dict[str, Any] = {**svc.get("discord", {}), **ch_cfgs.get("discord", {})}
+        sl_merged: dict[str, Any] = {**svc.get("slack", {}), **ch_cfgs.get("slack", {})}
+
         futures: dict[str, Any] = {}
-        with ThreadPoolExecutor(max_workers=2) as pool:
+        with ThreadPoolExecutor(max_workers=4) as pool:
             if ch_cfgs.get("whatsapp", {}).get("enabled", True):
                 futures["whatsapp"] = pool.submit(self._init_whatsapp, config, ch_cfgs)
             if ch_cfgs.get("telegram", {}).get("enabled", True):
                 futures["telegram"] = pool.submit(self._init_telegram, config, ch_cfgs)
+            if dc_merged.get("bot_token") and ch_cfgs.get("discord", {}).get("enabled", True):
+                futures["discord"] = pool.submit(self._init_discord, config, ch_cfgs)
+            if sl_merged.get("bot_token") and ch_cfgs.get("slack", {}).get("enabled", True):
+                futures["slack"] = pool.submit(self._init_slack, config, ch_cfgs)
 
         channels: list[Channel] = []
-        for name in ("whatsapp", "telegram"):
+        for name in ("whatsapp", "telegram", "discord", "slack"):
             if name in futures:
                 ch = futures[name].result()
                 if ch is not None:
@@ -399,6 +409,36 @@ class AssistantService:
             log.warning("Telegram channel enabled but not ready (check bot token)")
         except Exception as e:
             log.warning("Failed to init Telegram channel: %s", e)
+        return None
+
+    @staticmethod
+    def _init_discord(config: Any, ch_cfgs: dict[str, Any]) -> Channel | None:
+        try:
+            from src.assistant.channels.discord import DiscordChannel
+
+            svc = config.services if hasattr(config, "services") else {}
+            dc_cfg = {**svc.get("discord", {}), **ch_cfgs.get("discord", {})}
+            dc = DiscordChannel(dc_cfg)
+            if dc.is_ready():
+                return dc
+            log.warning("Discord channel enabled but not ready (check bot token)")
+        except Exception as e:
+            log.warning("Failed to init Discord channel: %s", e)
+        return None
+
+    @staticmethod
+    def _init_slack(config: Any, ch_cfgs: dict[str, Any]) -> Channel | None:
+        try:
+            from src.assistant.channels.slack import SlackChannel
+
+            svc = config.services if hasattr(config, "services") else {}
+            sl_cfg = {**svc.get("slack", {}), **ch_cfgs.get("slack", {})}
+            sl = SlackChannel(sl_cfg)
+            if sl.is_ready():
+                return sl
+            log.warning("Slack channel enabled but not ready (check bot token)")
+        except Exception as e:
+            log.warning("Failed to init Slack channel: %s", e)
         return None
 
     @staticmethod

@@ -54,6 +54,13 @@ class HttpGetInput(BaseModel):
         description='Optional headers as JSON string (e.g., \'{"Authorization": "Bearer token"}\')',
     )
     timeout: int = Field(default=30, description="Request timeout in seconds")
+    max_chars: int = Field(
+        default=10_000,
+        description=(
+            "Maximum characters of extracted text to return (default: 10,000). "
+            "Increase for long documents; decrease to save context."
+        ),
+    )
 
 
 class HttpPostInput(BaseModel):
@@ -360,7 +367,9 @@ _RE_STYLE = re.compile(r"<style[^>]*>.*?</style>", re.DOTALL | re.IGNORECASE)
 _RE_COMMENT = re.compile(r"<!--.*?-->", re.DOTALL)
 _RE_SVG = re.compile(r"<svg[^>]*>.*?</svg>", re.DOTALL | re.IGNORECASE)
 _RE_BLOCK_ELEMENT = re.compile(r"<(?:p|div|br|h[1-6]|li|tr|section|article)[^>]*>", re.IGNORECASE)
-_RE_HTML_TAG = re.compile(r"<[^>]{0,2000}>")
+_RE_HTML_TAG = re.compile(
+    r"<[^>]{0,2000}>"
+)  # codeql[py/bad-tag-filter] not a security sanitizer — used only for LLM text extraction, not XSS prevention
 _RE_INLINE_WS = re.compile(r"[^\S\n]+")
 _RE_MULTI_BLANK = re.compile(r"\n\s*\n+")
 
@@ -385,7 +394,9 @@ def _extract_text_from_html(html: str) -> str:
     return text.strip()
 
 
-def http_get(url: str, headers: str | None = None, timeout: int = 30) -> str:
+def http_get(
+    url: str, headers: str | None = None, timeout: int = 30, max_chars: int = 10_000
+) -> str:
     """
     Make an HTTP GET request.
 
@@ -398,7 +409,7 @@ def http_get(url: str, headers: str | None = None, timeout: int = 30) -> str:
         Response body or error message
     """
     if not REQUESTS_AVAILABLE:
-        return "Error: requests library not available. Install it with: pip install requests"
+        return "Error: requests library not available. Run: uv add requests"
 
     timeout = min(max(1, timeout), _MAX_TIMEOUT)
 
@@ -455,10 +466,10 @@ def http_get(url: str, headers: str | None = None, timeout: int = 30) -> str:
             if "html" in content_type.lower():
                 extracted = _extract_text_from_html(text)
                 result.append("Response (text extracted from HTML):")
-                result.append(_truncate_response(extracted))
+                result.append(_truncate_response(extracted, max_chars))
             else:
                 result.append("Response:")
-                result.append(_truncate_response(text))
+                result.append(_truncate_response(text, max_chars))
 
         return "\n".join(result)
 
@@ -496,7 +507,7 @@ def http_post(
         Response body or error message
     """
     if not REQUESTS_AVAILABLE:
-        return "Error: requests library not available. Install it with: pip install requests"
+        return "Error: requests library not available. Run: uv add requests"
 
     timeout = min(max(1, timeout), _MAX_TIMEOUT)
 
@@ -591,7 +602,8 @@ TOOL_CONFIGS = [
         "name": "http_get",
         "description": (
             "Make an HTTP GET request to a URL. "
-            "Returns status, headers, and response body. "
+            "Returns status, headers, and response body (default: 10,000 chars of extracted text). "
+            "Set max_chars higher for long documents, lower to save context budget. "
             "Use this to read full page content when a search snippet is too short. "
             "If the page does not contain the information you need, return to the "
             "search results and try another URL."

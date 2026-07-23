@@ -32,6 +32,7 @@ from sqlalchemy.ext.asyncio import (  # noqa: E402
     async_sessionmaker,
     create_async_engine,
 )
+from sqlalchemy.pool import StaticPool  # noqa: E402
 
 from src.api.db import models as _models  # noqa: E402, F401
 from src.api.db.engine import Base  # noqa: E402
@@ -40,7 +41,12 @@ from src.api.db.repositories.users import UserRepository  # noqa: E402
 
 @pytest_asyncio.fixture()
 async def db_session() -> AsyncGenerator[AsyncSession]:
-    engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
+    engine = create_async_engine(
+        "sqlite+aiosqlite:///:memory:",
+        echo=False,
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     Session = async_sessionmaker(engine, expire_on_commit=False)

@@ -292,6 +292,7 @@ class ReasoningMemoryManager(BaseMemoryManager):
         self._messages = self.store.load_history(self.session_id)
         self._messages = self.sanitize_history(self._messages)
         self._load_hybrid_meta()
+        self._load_tier_cache()
         self._load_mode_meta()
         self._clamp_summary_idx()
         self._loaded = True
@@ -347,12 +348,9 @@ class ReasoningMemoryManager(BaseMemoryManager):
         # Record the moment the user sent this message
         self._pending_user_ts = self._now_ts()
 
-        window_size = self._mode_config["working_memory_size"]
-        context_messages = self._messages[-window_size:] if self._messages else []
-
-        # Inject timestamps so the LLM has temporal awareness
-        context_messages = self._inject_timestamps(context_messages)
-
+        # ── Mode-specific prefix (objective, goals, decisions …) ─────────
+        # Computed before message selection so both the tier-cache and
+        # sliding-window paths return a consistent prefix.
         prefix_parts = []
 
         # Hybrid memory (summary + recall)
@@ -362,19 +360,19 @@ class ReasoningMemoryManager(BaseMemoryManager):
 
         # Primary objective — always include (small, essential)
         if self._primary_objective:
-            prefix_parts.append(f"🎯 **OBJECTIVE:** {self._primary_objective}")
+            prefix_parts.append(f"\U0001f3af **OBJECTIVE:** {self._primary_objective}")
 
         # Goals — gate by freshness
         if self._goals and self._is_section_fresh("goals"):
             status_icons = {
-                "pending": "○",
-                "in_progress": "◐",
-                "completed": "●",
-                "blocked": "✗",
+                "pending": "\u25cb",
+                "in_progress": "\u25d0",
+                "completed": "\u25cf",
+                "blocked": "\u2717",
             }
             goals_lines = []
             for g in self._goals[-5:]:
-                icon = status_icons.get(g.status, "○")
+                icon = status_icons.get(g.status, "\u25cb")
                 goals_lines.append(f"  {icon} {g.description}")
             goals_text = "\n".join(goals_lines)
             prefix_parts.append(f"**Goals:**\n{goals_text}")
@@ -420,7 +418,7 @@ class ReasoningMemoryManager(BaseMemoryManager):
 
         # Dead ends — gate by freshness
         if self._dead_ends and self._is_section_fresh("dead_ends"):
-            dead_lines = [f"  ✗ {d}" for d in self._dead_ends[-3:]]
+            dead_lines = [f"  \u2717 {d}" for d in self._dead_ends[-3:]]
             dead_text = "\n".join(dead_lines)
             prefix_parts.append(f"**Dead Ends (avoid):**\n{dead_text}")
 
@@ -434,7 +432,7 @@ class ReasoningMemoryManager(BaseMemoryManager):
             dec_lines = []
             for d in self._decisions[-3:]:
                 rationale_short = d.rationale[:50] + "..." if len(d.rationale) > 50 else d.rationale
-                dec_lines.append(f"  • {d.decision} — {rationale_short}")
+                dec_lines.append(f"  \u2022 {d.decision} \u2014 {rationale_short}")
             dec_text = "\n".join(dec_lines)
             prefix_parts.append(f"**Recent Decisions:**\n{dec_text}")
 
@@ -444,7 +442,63 @@ class ReasoningMemoryManager(BaseMemoryManager):
             questions_text = "\n".join(questions_lines)
             prefix_parts.append(f"**Open Questions:**\n{questions_text}")
 
+        # Active GoalStack goals — injected from goal_tracker if available
+        try:
+            from pathlib import Path
+
+            from src.tasks.goal_tracker import get_goal_stack
+
+            _goal_prefix = get_goal_stack(self.session_id, Path("data")).to_context_prefix()
+            if _goal_prefix:
+                prefix_parts.append(_goal_prefix)
+        except Exception:
+            pass  # goal tracking unavailable; do not break reasoning context
+
         context_prefix = "\n\n".join(prefix_parts) if prefix_parts else None
+
+        # ── Tiered context assembly ──────────────────────────────────────
+        with self._hybrid_lock:
+            tier_ready = self._tier_cache_ready
+            tier_cache = self._tier_cache
+            summary = self._summary or ""
+            summary_msg_idx = self._summary_msg_idx
+
+        if tier_ready and tier_cache is not None:
+            from src.memory.tier_cache import assemble_from_tiers
+
+            assembled, tier_counts = assemble_from_tiers(
+                snapshot=tier_cache,
+                messages=self._messages,
+                summary=summary,
+                summary_msg_idx=summary_msg_idx,
+            )
+            total_tokens = sum(tier_counts.values())
+
+            return MemoryContext(
+                messages=assembled,
+                system_additions=self.get_system_prompt_additions(),
+                context_prefix=context_prefix,
+                mode=self.mode_name,
+                total_messages_stored=len(self._messages),
+                context_messages_count=len(assembled),
+                token_estimate=total_tokens,
+                tier_token_counts=tier_counts,
+                metadata={
+                    "has_objective": self._primary_objective is not None,
+                    "goal_count": len(self._goals),
+                    "decision_count": len(self._decisions),
+                    "has_problem": self._current_problem is not None,
+                    "reasoning_steps": len(self._reasoning_chain),
+                    "alternative_count": len(self._alternatives),
+                },
+            )
+
+        # ── Sliding window fallback (cold cache) ─────────────────────────
+        window_size = self._mode_config["working_memory_size"]
+        context_messages = self._messages[-window_size:] if self._messages else []
+
+        # Inject timestamps so the LLM has temporal awareness
+        context_messages = self._inject_timestamps(context_messages)
 
         if log.isEnabledFor(logging.DEBUG):
             token_estimate = self._estimate_tokens(context_messages)
@@ -505,6 +559,16 @@ class ReasoningMemoryManager(BaseMemoryManager):
         # Incrementally summarize messages outside the sliding window
         window_size = self._mode_config["working_memory_size"]
         self._schedule_slow_path(self._messages, window_size)
+
+        # Schedule tier cache roll-forward only when history exceeds the window.
+        if len(self._messages) > window_size:
+            try:
+                self.schedule_tier_roll_forward(
+                    max_context_tokens=getattr(self, "_max_context_tokens", 0) or 128_000,
+                    llm=getattr(self, "_compression_llm", None),
+                )
+            except Exception as exc:
+                log.debug("Tier roll-forward scheduling failed: %s", exc)
 
     def get_system_prompt_additions(self) -> str | None:
         """Return reasoning-mode system prompt additions."""

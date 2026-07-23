@@ -1,0 +1,45 @@
+.TH COGTRIX-API 8 "2026-03-30" "cogtrix 1.0.0" "Cogtrix Manual"
+.SH NAME
+cogtrix-api \- API server system administration
+.SH SYNOPSIS
+.B python\ \-m\ src.api
+.RB [ \-\-host
+.IR HOST ]
+.RB [ \-\-port
+.IR PORT ]
+.SH DESCRIPTION
+The Cogtrix REST API server provides HTTP and WebSocket endpoints for
+AI-powered conversational sessions with tool execution.
+.SH STARTING THE SERVER
+.PP
+.nf
+    uv run python -m src.api --host 0.0.0.0 --port 8000
+.fi
+.SS systemd unit example
+.PP
+.nf
+    [Unit]
+    Description=Cogtrix API Server
+    After=network.target postgresql.service redis.service
+
+    [Service]
+    Type=simple
+    User=cogtrix
+    WorkingDirectory=/opt/cogtrix
+    EnvironmentFile=/etc/cogtrix/env
+    ExecStart=/opt/cogtrix/.venv/bin/python -m src.api
+    Restart=on-failure
+
+    [Install]
+    WantedBy=multi-user.target
+.fi
+.SH ENVIRONMENT
+See
+.BR cogtrix-api (5)
+for all environment variables.
+.SH RATE LIMITING
+The server enforces 120 requests/minute per IP by default via slowapi middleware.
+.SH SEE ALSO
+.BR cogtrix-api (1),
+.BR cogtrix-api (5),
+.BR cogtrix (5)

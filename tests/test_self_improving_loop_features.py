@@ -522,6 +522,7 @@ pytest.importorskip("fastapi")
 
 from fastapi.testclient import TestClient  # noqa: E402
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine  # noqa: E402
+from sqlalchemy.pool import StaticPool  # noqa: E402
 
 from src.api.db import models as _models  # noqa: E402, F401
 from src.api.db.engine import Base, get_db  # noqa: E402
@@ -531,7 +532,12 @@ _VALID_PASSWORD = "TestPass1!"
 
 @pytest.fixture(scope="module")
 def _engine():
-    eng = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
+    eng = create_async_engine(
+        "sqlite+aiosqlite:///:memory:",
+        echo=False,
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
     _asyncio.run(_create_tables(eng))
     yield eng
     _asyncio.run(eng.dispose())

@@ -18,9 +18,11 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from collections.abc import AsyncGenerator
 from pathlib import Path
 
+import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase
 
@@ -62,6 +64,7 @@ if _DB_URL.startswith("sqlite"):
 # Engine
 # ---------------------------------------------------------------------------
 
+# check_same_thread is a SQLite-only connect arg; passing it to asyncpg raises TypeError
 _connect_args: dict = {}
 if _DB_URL.startswith("sqlite"):
     _connect_args = {"check_same_thread": False}
@@ -92,6 +95,44 @@ AsyncSessionLocal = async_sessionmaker(
 
 class Base(DeclarativeBase):
     """Base class for all SQLAlchemy ORM models."""
+
+
+# ---------------------------------------------------------------------------
+# Connection validation (called from lifespan)
+# ---------------------------------------------------------------------------
+
+
+def _sanitize_url(url: str) -> str:
+    """Remove password from DB URL for safe logging/error messages."""
+    return re.sub(r":[^:@/]+@", ":***@", url)
+
+
+async def validate_connection() -> None:
+    """Test the database connection at startup.
+
+    Raises a clear, operator-actionable ``RuntimeError`` if the connection
+    fails — rather than letting a cryptic SQLAlchemy traceback surface on
+    the first request.
+
+    Called from the FastAPI lifespan context manager after table creation.
+    """
+    try:
+        async with engine.connect() as conn:
+            await conn.execute(sa.text("SELECT 1"))
+    except Exception as exc:
+        if "postgresql" in _DB_URL:
+            hint = (
+                f"Cannot connect to PostgreSQL at {_sanitize_url(_DB_URL)}. "
+                "Check: (1) DB server is running, (2) COGTRIX_DB_URL is correct, "
+                "(3) asyncpg is installed: pip install 'cogtrix[postgresql]', "
+                f"(4) user has CONNECT privilege. Original error: {exc}"
+            )
+        else:
+            hint = (
+                f"Cannot connect to SQLite at {_sanitize_url(_DB_URL)}. "
+                f"Check: directory exists and is writable. Original error: {exc}"
+            )
+        raise RuntimeError(hint) from exc
 
 
 # ---------------------------------------------------------------------------

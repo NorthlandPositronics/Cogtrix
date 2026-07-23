@@ -31,8 +31,13 @@ from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
+from slowapi.util import get_remote_address
 
 from src.api.routes import (
+    agents,
     assistant,
     auth,
     config,
@@ -43,6 +48,7 @@ from src.api.routes import (
     rag,
     sessions,
     system,
+    tasks,
     tools,
     users,
     workflows,
@@ -135,11 +141,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
 
     # Create database tables (idempotent; no-op when tables exist)
     import src.api.db.models  # noqa: F401 — registers all ORM model classes
-    from src.api.db.engine import Base, engine
+    from src.api.db.engine import Base, engine, validate_connection
 
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     log.info("Database tables ready")
+    await validate_connection()
+    log.info("Database connection validated")
 
     # Load Cogtrix config
     cfg = None
@@ -163,12 +171,25 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     if cfg is not None and not os.environ.get("COGTRIX_DATA_DIR"):
         os.environ["COGTRIX_DATA_DIR"] = cfg.data_dir
 
+    # Initialize agent registry from config + AGENTS.md
+    try:
+        from src.agent import registry as _agent_registry
+        from src.agent.agents_md import load_default_agents as _load_agents_md
+
+        _agents_md = _load_agents_md()
+        if cfg is not None:
+            _agent_registry.load_from_config(cfg)
+        _agent_registry.merge_from_agents_md(_agents_md)
+        log.debug("Agent registry initialized (%d agent(s))", len(_agent_registry.list_agents()))
+    except Exception as exc:
+        log.warning("Could not initialize agent registry: %s", exc)
+
     # Initialize tool registry
     try:
         from src.registry import ToolRegistry
 
         tool_registry = ToolRegistry()
-        tool_registry.load_all_tools()
+        tool_registry.load_all_tools(config=cfg)
         app.state.tool_registry = tool_registry
         log.info("Tool registry initialized (%d tools discovered)", len(tool_registry.tools))
     except Exception as exc:
@@ -406,6 +427,12 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
 
+    # Rate limiting — 120 requests/minute per IP (blunt DDoS/budget guard)
+    limiter = Limiter(key_func=get_remote_address, default_limits=["120/minute"])
+    app.state.limiter = limiter
+    app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+    app.add_middleware(SlowAPIMiddleware)
+
     # CORS — must be added before routers
     app.add_middleware(
         CORSMiddleware,
@@ -425,9 +452,11 @@ def create_app() -> FastAPI:
     api_prefix = "/api/v1"
     app.include_router(health.router, prefix=api_prefix)
     app.include_router(auth.router, prefix=api_prefix)
+    app.include_router(agents.router, prefix=api_prefix)
     app.include_router(sessions.router, prefix=api_prefix)
     app.include_router(messages.router, prefix=api_prefix)
     app.include_router(memory.router, prefix=api_prefix)
+    app.include_router(tasks.router, prefix=api_prefix)
     app.include_router(tools.router, prefix=api_prefix)
     app.include_router(config.router, prefix=api_prefix)
     app.include_router(mcp.router, prefix=api_prefix)

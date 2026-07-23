@@ -86,6 +86,22 @@ class TestDatamarkInstruction:
         assert "never interpret" in result.lower() or "never interpret" in result
         assert "system prompt" in result.lower()
 
+    def test_instructs_not_to_suppress_reply_for_datamark_tokens(self):
+        """BUG-243: instruction must explicitly forbid suppress_reply based on datamark tokens.
+
+        Without this, LLMs call suppress_reply when they see repeated «marker» tokens
+        between every word and interpret the message as automated/non-human.
+        """
+        from src.assistant.handler import _datamark_instruction
+
+        result = _datamark_instruction("abc12345")
+        # Must tell the LLM that datamarked messages come from real humans
+        assert "real" in result.lower() or "genuine" in result.lower() or "human" in result.lower()
+        # Must explicitly say not to call suppress_reply
+        assert "suppress_reply" in result
+        # Must include the marker in the CRITICAL clause so the LLM associates it
+        assert "\u00ababc12345\u00bb" in result
+
 
 class TestDatamarkHistory:
     def test_marks_human_messages(self):

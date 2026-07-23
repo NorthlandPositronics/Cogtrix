@@ -171,6 +171,17 @@ async def send_message(
         VALIDATION_ERROR.
     """
     await verify_session_owner(session_id, current_user, db)
+
+    # Enforce per-user rate and token-budget quotas before starting the turn.
+    app_config = getattr(request.app.state, "config", None)
+    if app_config is not None:
+        from src.api.quota import _quota_config_from_app_config, get_enforcer
+
+        quota_cfg = _quota_config_from_app_config(app_config)
+        enforcer = get_enforcer(quota_cfg)
+        enforcer.check_request_rate(current_user.user_id)
+        enforcer.check_token_budget(current_user.user_id)
+
     sess = await _get_session_or_404(session_id, request, db)
 
     # Atomically check-and-set turn_task under turn_lock to prevent a race
@@ -621,6 +632,26 @@ async def session_websocket(
                             await db.commit()
                     except Exception as exc:
                         log.warning("Could not persist WS user message: %s", exc)
+
+                    # Quota enforcement for WebSocket turns (mirrors REST /messages quota check)
+                    try:
+                        app_config = getattr(websocket.app.state, "config", None)
+                        if app_config is not None:
+                            from src.api.quota import _quota_config_from_app_config, get_enforcer
+
+                            quota_cfg = _quota_config_from_app_config(app_config)
+                            enforcer = get_enforcer(quota_cfg)
+                            enforcer.check_request_rate(current_user.user_id)
+                            enforcer.check_token_budget(current_user.user_id)
+                    except HTTPException as _quota_exc:
+                        await manager.send(
+                            session_id,
+                            "error",
+                            {"code": "QUOTA_EXCEEDED", "message": _quota_exc.detail},
+                        )
+                        continue
+                    except Exception as _quota_exc:
+                        log.warning("WS quota check error: %s", _quota_exc)
 
                     async def _run_turn(t: str = text, m: str = mode) -> None:
                         try:

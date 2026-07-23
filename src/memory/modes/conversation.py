@@ -92,6 +92,7 @@ class ConversationMemoryManager(BaseMemoryManager):
         self._messages = self.store.load_history(self.session_id)
         self._messages = self.sanitize_history(self._messages)
         self._load_hybrid_meta()
+        self._load_tier_cache()
         self._load_mode_meta()
         self._clamp_summary_idx()
         self._loaded = True
@@ -110,8 +111,10 @@ class ConversationMemoryManager(BaseMemoryManager):
         """
         Prepare conversation context for LLM.
 
-        Selects recent messages within the working memory window
-        and prepends any session summary.
+        When the tier cache is warm, assembles context from pre-compressed
+        tiers (T3 summary → T2 → T1 → T0 verbatim) for accurate token
+        estimates.  Falls back to the plain sliding window when the cache
+        is cold.
 
         Args:
             user_input: Current user input (for future relevance filtering)
@@ -122,18 +125,9 @@ class ConversationMemoryManager(BaseMemoryManager):
         # Record the moment the user sent this message
         self._pending_user_ts = self._now_ts()
 
-        # Get working memory window
-        window_size = self._mode_config["working_memory_size"]
-
-        if self._messages:
-            context_messages = self._messages[-window_size:]
-        else:
-            context_messages = []
-
-        # Inject timestamps so the LLM has temporal awareness
-        context_messages = self._inject_timestamps(context_messages)
-
-        # Build context prefix (hybrid summary + recall + entities)
+        # ── Mode-specific prefix (entities + hybrid recall) ──────────────
+        # Computed regardless of the message-selection path so both the
+        # tier-cache path and the sliding-window path return a consistent prefix.
         prefix_parts = []
 
         hybrid = self._build_hybrid_prefix(user_input)
@@ -145,6 +139,54 @@ class ConversationMemoryManager(BaseMemoryManager):
             prefix_parts.append(f"Known facts: {entity_str}")
 
         context_prefix = "\n\n".join(prefix_parts) if prefix_parts else None
+
+        # ── Tiered context assembly ──────────────────────────────────────
+        with self._hybrid_lock:
+            tier_ready = self._tier_cache_ready
+            tier_cache = self._tier_cache
+            summary = self._summary or ""
+            summary_msg_idx = self._summary_msg_idx
+
+        if tier_ready and tier_cache is not None:
+            from src.memory.tier_cache import assemble_from_tiers
+
+            assembled, tier_counts = assemble_from_tiers(
+                snapshot=tier_cache,
+                messages=self._messages,
+                summary=summary,
+                summary_msg_idx=summary_msg_idx,
+            )
+            total_tokens = sum(tier_counts.values())
+
+            if log.isEnabledFor(logging.DEBUG):
+                log_memory_context(
+                    mode=self.mode_name,
+                    message_count=len(assembled),
+                    token_estimate=total_tokens,
+                )
+
+            return MemoryContext(
+                messages=assembled,
+                system_additions=self.get_system_prompt_additions(),
+                context_prefix=context_prefix,
+                mode=self.mode_name,
+                total_messages_stored=len(self._messages),
+                context_messages_count=len(assembled),
+                token_estimate=total_tokens,
+                tier_token_counts=tier_counts,
+                metadata={
+                    "has_summary": bool(summary),
+                    "summary_coverage": summary_msg_idx,
+                    "entity_count": len(self._entities),
+                },
+            )
+
+        # ── Sliding window fallback (cold cache) ─────────────────────────
+        window_size = self._mode_config["working_memory_size"]
+        context_messages = self._messages[-window_size:] if self._messages else []
+
+        # Inject timestamps so the LLM has temporal awareness
+        context_messages = self._inject_timestamps(context_messages)
 
         token_estimate = self._estimate_tokens(context_messages)
 
@@ -224,6 +266,17 @@ class ConversationMemoryManager(BaseMemoryManager):
         window_size = self._mode_config["working_memory_size"]
         self._schedule_slow_path(self._messages, window_size)
 
+        # Schedule tier cache roll-forward only when history exceeds the window.
+        # No-op for short sessions that still fit in the verbatim sliding window.
+        if len(self._messages) > window_size:
+            try:
+                self.schedule_tier_roll_forward(
+                    max_context_tokens=getattr(self, "_max_context_tokens", 0) or 128_000,
+                    llm=getattr(self, "_compression_llm", None),
+                )
+            except Exception as exc:
+                log.debug("Tier roll-forward scheduling failed: %s", exc)
+
     def get_system_prompt_additions(self) -> str | None:
         """Return conversation-mode system prompt additions."""
         # Reinforce task completion and accuracy in conversation mode
@@ -243,6 +296,32 @@ class ConversationMemoryManager(BaseMemoryManager):
     def get_message_count(self) -> int:
         """Return total number of messages stored."""
         return len(self._messages)
+
+    def pop_last_turn(self) -> int:
+        """Remove the last user+assistant exchange from memory.
+
+        Scans _messages backwards for the last HumanMessage and removes
+        everything from that index to the end. Returns the number of
+        messages removed (0 if nothing to remove).
+        """
+        if not self._messages:
+            return 0
+        # Find the last HumanMessage index
+        last_human_idx = None
+        for i in range(len(self._messages) - 1, -1, -1):
+            msg = self._messages[i]
+            is_human = (HumanMessage is not None and isinstance(msg, HumanMessage)) or (
+                isinstance(msg, dict) and msg.get("type") == "human"
+            )
+            if is_human:
+                last_human_idx = i
+                break
+        if last_human_idx is None:
+            return 0
+        removed = len(self._messages) - last_human_idx
+        self._messages = self._messages[:last_human_idx]
+        self.save()
+        return removed
 
     def get_stats(self) -> dict[str, Any]:
         """Return conversation memory statistics."""

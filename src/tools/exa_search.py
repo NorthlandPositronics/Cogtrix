@@ -182,7 +182,7 @@ def exa_search(
         Formatted search results with content.
     """
     if not EXA_AVAILABLE:
-        return "Error: exa-py is not installed. Install it with: pip install exa-py"
+        return "Error: exa-py is not installed. Run: uv add exa-py"
 
     if not query.strip():
         return "Error: Empty search query"
@@ -231,7 +231,7 @@ def exa_find_similar(
         Formatted list of similar pages with content.
     """
     if not EXA_AVAILABLE:
-        return "Error: exa-py is not installed. Install it with: pip install exa-py"
+        return "Error: exa-py is not installed. Run: uv add exa-py"
 
     if not url.strip():
         return "Error: Empty URL"
@@ -270,7 +270,7 @@ def exa_get_contents(urls: list[str]) -> str:
         Extracted text content from each URL.
     """
     if not EXA_AVAILABLE:
-        return "Error: exa-py is not installed. Install it with: pip install exa-py"
+        return "Error: exa-py is not installed. Run: uv add exa-py"
 
     if not urls:
         return "Error: No URLs provided"

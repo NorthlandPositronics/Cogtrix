@@ -28,13 +28,15 @@ _DEFAULT_OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"
 _DEFAULT_OLLAMA_EMBEDDING_MODEL = os.getenv("OLLAMA_EMBEDDING_MODEL", "nomic-embed-text")
 
 # Runtime configuration (set by configure_rag())
-_rag_config: dict[str, str | None] = {
+_rag_config: dict[str, Any] = {
     "embedding_provider": _DEFAULT_EMBEDDING_PROVIDER,
     "embedding_model": _DEFAULT_OLLAMA_EMBEDDING_MODEL,
     "base_url": _DEFAULT_OLLAMA_BASE_URL,
     "api_key": None,
     "vectordb_dir": str(VECTOR_DIR),
     "api_uploads_dir": None,
+    "entity_index_path": None,
+    "score_threshold": 0.0,
 }
 
 
@@ -137,6 +139,7 @@ def _collect_faiss_dirs() -> list[Path]:
 def query_knowledge_base(
     question: str,
     k: int = 4,
+    score_threshold: float | None = None,
 ) -> str:
     """
     Search the knowledge base for information related to a question.
@@ -149,7 +152,7 @@ def query_knowledge_base(
         Relevant document chunks or error message
     """
     if not FAISS_AVAILABLE:
-        return "Error: FAISS not available. Install: pip install faiss-cpu"
+        return "Error: FAISS not available. Run: uv add faiss-cpu"
 
     faiss_dirs = _collect_faiss_dirs()
     if not faiss_dirs:
@@ -196,6 +199,24 @@ def query_knowledge_base(
 
         # Sort by score ascending (lower L2 distance = more relevant)
         scored_docs.sort(key=lambda x: x[1])
+
+        # Apply score_threshold: convert L2 distance to similarity = 1/(1+d)
+        effective_threshold = (
+            score_threshold
+            if score_threshold is not None
+            else float(_rag_config.get("score_threshold") or 0.0)
+        )
+        if effective_threshold > 0.0:
+            scored_docs = [
+                (doc, dist)
+                for doc, dist in scored_docs
+                if 1.0 / (1.0 + dist) >= effective_threshold
+            ]
+            if not scored_docs:
+                return (
+                    f"No results met the minimum similarity threshold ({effective_threshold:.2f}). "
+                    "Try lowering score_threshold or rephrasing your query."
+                )
 
         # Deduplicate by full content hash and take top k
         seen: set[str] = set()
@@ -347,6 +368,75 @@ def _build_description() -> str:
     )
 
 
+def rag_find_entity(entity_name: str, max_results: int = 10) -> str:
+    """Look up an entity in the RAG entity index and return source chunk references.
+
+    Args:
+        entity_name: The entity name to search for (case-insensitive).
+        max_results: Maximum number of chunk references to return.
+
+    Returns:
+        Chunk reference list or a message when the entity is not found.
+    """
+    import json as _json
+
+    entity_index_path = _rag_config.get("entity_index_path")
+    if not entity_index_path:
+        return "Entity index is not configured. Ingest documents first."
+
+    try:
+        raw = Path(str(entity_index_path)).read_text(encoding="utf-8")
+        index: dict[str, list[str]] = _json.loads(raw)
+    except Exception as exc:
+        return f"Error loading entity index: {exc}"
+
+    # Case-insensitive lookup
+    lower_query = entity_name.lower()
+    matched_key = next((k for k in index if k.lower() == lower_query), None)
+    if matched_key is None:
+        return f"Entity '{entity_name}' not found in the knowledge base."
+
+    refs = index[matched_key]
+    shown = refs[:max_results]
+    lines = [f"Entity: {matched_key}", f"Found in {len(refs)} chunk(s):"]
+    lines.extend(f"  - {r}" for r in shown)
+    if len(refs) > max_results:
+        lines.append(f"  ... and {len(refs) - max_results} more.")
+    return "\n".join(lines)
+
+
+def rag_ingest(paths: str) -> str:
+    """Ingest one or more document files into the knowledge base.
+
+    Args:
+        paths: Comma-separated file paths to ingest.
+
+    Returns:
+        Summary of ingestion results.
+    """
+    from src.rag.ingest import IngestConfig, ingest_many
+
+    path_list = [p.strip() for p in paths.split(",") if p.strip()]
+    if not path_list:
+        return "No file paths provided. Pass comma-separated file paths to ingest."
+
+    vectordb_dir = _rag_config.get("vectordb_dir") or str(VECTOR_DIR)
+    ingest_config = IngestConfig(
+        docs_dir=Path(path_list[0]).parent,
+        vectordb_dir=Path(str(vectordb_dir)),
+        embedding_provider=str(_rag_config.get("embedding_provider") or "ollama"),
+    )
+    results = ingest_many([Path(p) for p in path_list], ingest_config)
+    success = sum(1 for v in results.values() if v)
+    total = len(results)
+    parts = [f"Ingested {success}/{total} file(s) successfully."]
+    failed = [p for p, ok in results.items() if not ok]
+    if failed:
+        parts.append("Failed:")
+        parts.extend(f"  - {p}" for p in failed)
+    return "\n".join(parts)
+
+
 # Main tool config
 TOOL_CONFIG = {
     "name": "query_knowledge_base",
@@ -360,6 +450,8 @@ TOOL_CONFIG = {
 
 __all__ = [
     "query_knowledge_base",
+    "rag_find_entity",
+    "rag_ingest",
     "get_knowledge_base_info",
     "configure_rag",
     "knowledge_base_exists",

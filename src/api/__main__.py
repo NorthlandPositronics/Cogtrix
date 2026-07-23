@@ -18,7 +18,8 @@ import os
 import sys
 
 
-def main() -> None:
+def build_parser() -> argparse.ArgumentParser:
+    """Build and return the argument parser (without calling parse_args)."""
     parser = argparse.ArgumentParser(
         prog="cogtrix-api",
         description="Cogtrix REST + WebSocket API server",
@@ -69,8 +70,11 @@ def main() -> None:
         action="store_true",
         help="Enable uvicorn auto-reload (development)",
     )
+    return parser
 
-    args = parser.parse_args()
+
+def main() -> None:
+    args = build_parser().parse_args()
 
     # Resolve log destination:
     #   --log-file <path>          → file (highest priority)

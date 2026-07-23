@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import re
 import secrets
+import unicodedata
+import urllib.parse
 from copy import copy
 from typing import Any
 
@@ -60,6 +62,88 @@ WEB_TOOL_NAMES = frozenset(
 )
 
 RESEARCH_CAP_RATIO = 0.85
+
+# ── Research-query heuristic ──────────────────────────────────────────────
+
+_RESEARCH_INTENT_PHRASES = frozenset(
+    {
+        "research",
+        "find information",
+        "find out",
+        "search for",
+        "look up",
+        "look into",
+        "what is",
+        "what are",
+        "who is",
+        "who are",
+        "how does",
+        "how do",
+        "how is",
+        "tell me about",
+        "explain",
+        "give me information",
+        "give me details",
+        "learn about",
+        "find the best",
+        "find examples",
+        "show me examples",
+        "summarize",
+        "summarise",
+        "overview of",
+        "list of",
+    }
+)
+
+_ACTION_INTENT_PHRASES = frozenset(
+    {
+        "write",
+        "create",
+        "generate",
+        "edit",
+        "fix",
+        "run",
+        "execute",
+        "build",
+        "implement",
+        "deploy",
+        "install",
+        "configure",
+        "set up",
+        "refactor",
+        "debug",
+        "test",
+        "commit",
+        "push",
+        "delete",
+        "remove",
+    }
+)
+
+
+def _looks_like_research_query(text: str) -> bool:
+    """Lightweight heuristic: does this query look like a web research request?
+
+    No LLM call — fast enough to run synchronously before the main agent.
+    Returns True when the text contains research-intent phrases and does NOT
+    contain action-intent phrases (write/create/edit/run/etc.).
+
+    Multi-word research phrases use substring matching (they are specific
+    enough).  Single-word action phrases use word-boundary matching to avoid
+    false positives from substrings (e.g. "test" inside "latest").
+    """
+    lower = text.lower()
+    has_research_intent = any(phrase in lower for phrase in _RESEARCH_INTENT_PHRASES)
+    has_action_intent = any(
+        (
+            re.search(r"\b" + re.escape(phrase) + r"\b", lower) is not None
+            if " " not in phrase
+            else phrase in lower
+        )
+        for phrase in _ACTION_INTENT_PHRASES
+    )
+    return has_research_intent and not has_action_intent
+
 
 # ── Execution-phase: research → analyse → ACT pipeline ───────────────────
 
@@ -411,6 +495,57 @@ def collect_tool_outputs(messages: list) -> str:
     return "\n\n".join(parts)
 
 
+def _normalize_url(raw: str) -> str | None:
+    """Normalize a raw URL string before SSRF validation.
+
+    Applies percent-decoding, strips control characters, and Unicode NFC
+    normalization, then re-encodes to a canonical form.  Returns ``None``
+    if the URL cannot be safely normalized (malformed, empty host, etc.).
+
+    This prevents bypass attempts such as:
+      * Percent-encoded private IPs: ``http://192.%31.1.1/``
+      * Control-character injection: ``http://example.com\\x00@internal/``
+      * Unicode lookalike tricks in the host component
+    """
+    try:
+        # Strip surrounding whitespace and ASCII control chars (< 0x20 or DEL)
+        stripped = raw.strip()
+        stripped = "".join(ch for ch in stripped if ord(ch) >= 0x20 and ord(ch) != 0x7F)
+        if not stripped:
+            return None
+
+        # Decode percent-encoding so that encoded private IPs are exposed
+        parsed = urllib.parse.urlparse(stripped)
+        netloc_decoded = urllib.parse.unquote(parsed.netloc)
+        path_decoded = urllib.parse.unquote(parsed.path)
+
+        # Apply NFC Unicode normalization to collapse lookalike characters
+        netloc_norm = unicodedata.normalize("NFC", netloc_decoded)
+        path_norm = unicodedata.normalize("NFC", path_decoded)
+
+        # Re-encode with safe characters preserved so the URL remains valid
+        netloc_reenc = urllib.parse.quote(netloc_norm, safe=".:@[]!$&'()*+,;=-")
+        path_reenc = urllib.parse.quote(path_norm, safe="/:@!$&'()*+,;=-")
+
+        normalized = urllib.parse.urlunparse(
+            (
+                parsed.scheme.lower(),
+                netloc_reenc,
+                path_reenc,
+                urllib.parse.quote(urllib.parse.unquote(parsed.params), safe=";="),
+                urllib.parse.quote(urllib.parse.unquote(parsed.query), safe="=&+"),
+                urllib.parse.quote(urllib.parse.unquote(parsed.fragment), safe=""),
+            )
+        )
+        # Reject URLs that have no scheme or no host after normalization
+        reparsed = urllib.parse.urlparse(normalized)
+        if reparsed.scheme not in ("http", "https") or not reparsed.netloc:
+            return None
+        return normalized
+    except Exception:
+        return None
+
+
 def extract_fetched_urls(messages: list) -> list[str]:
     """Extract URLs the agent visited via web/content tools.
 
@@ -454,13 +589,16 @@ def extract_fetched_urls(messages: list) -> list[str]:
                     found = [re.sub(r"[),.:;!?]+$", "", u) for u in found]
                     urls.extend(u for u in found if len(u) > 15)
 
-    # Deduplicate while preserving order
+    # Normalize + deduplicate while preserving order
     seen: set[str] = set()
     unique: list[str] = []
     for u in urls:
-        if u not in seen:
-            seen.add(u)
-            unique.append(u)
+        normalized = _normalize_url(u)
+        if normalized is None:
+            continue
+        if normalized not in seen:
+            seen.add(normalized)
+            unique.append(normalized)
 
     # Filter SSRF-unsafe URLs
     try:
@@ -505,6 +643,15 @@ def run_research_delegate(
         log.debug("run_research_delegate called with no URLs — skipping")
         return ""
 
+    _URL_BATCH = 10
+    if len(urls) > _URL_BATCH:
+        log.warning(
+            "run_research_delegate: %d URLs provided, processing first %d; %d dropped",
+            len(urls),
+            _URL_BATCH,
+            len(urls) - _URL_BATCH,
+        )
+
     from src.tools.delegate import (
         create_delegate_llm,
         get_delegate_tools,
@@ -519,7 +666,7 @@ def run_research_delegate(
         return ""
 
     # Build a focused research prompt
-    url_list = "\n".join(f"  - {u}" for u in urls[:10])
+    url_list = "\n".join(f"  - {u}" for u in urls[:_URL_BATCH])
     research_prompt = (
         f"## Research task\n\n{task}\n\n"
         "## URLs to fetch and extract\n\n"
@@ -729,6 +876,7 @@ def run_execution_phase(
     session_state: Any = None,
     on_tool_expansion: Any = None,
     parallel_tool_execution: bool = True,
+    git_native: bool = False,
 ) -> tuple[str, list]:
     """Feed the analysis back to the agent with an explicit 'execute now' prompt.
 
@@ -797,6 +945,7 @@ def run_execution_phase(
                 session_state=session_state,
                 on_tool_expansion=on_tool_expansion,
                 parallel_tool_execution=parallel_tool_execution,
+                git_native=git_native,
             )
         if result and result.strip():
             wrote = agent_performed_writes(exec_msgs)

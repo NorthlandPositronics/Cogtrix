@@ -40,6 +40,13 @@ try:
                 "They return to the catalog and can be re-added later."
             ),
         )
+        query: str = Field(
+            default="",
+            description=(
+                "Natural-language description of what you need. "
+                "When provided (and add/remove are empty), returns semantically relevant tools."
+            ),
+        )
 
 except ImportError:
     RequestToolsInput = None  # type: ignore[assignment,misc]
@@ -75,7 +82,10 @@ def build_tool_catalog(tools: dict[str, Any]) -> dict[str, str]:
     return catalog
 
 
-def load_tools(tool_filter: str | None = None) -> ToolRegistry:
+def load_tools(
+    tool_filter: str | None = None,
+    config: Config | None = None,
+) -> ToolRegistry:
     """Load tools from the tools directory.
 
     Args:
@@ -83,6 +93,11 @@ def load_tools(tool_filter: str | None = None) -> ToolRegistry:
             - None/empty: load all tools
             - "none": load no tools
             - "minimal": load basic tools (file_ops, calculate)
+        config: Optional Cogtrix configuration.  When provided, TOOL_SETUP is
+            dispatched for each built-in module that declares it, and any
+            external tools configured via ``tool_dirs`` (or the
+            ``COGTRIX_TOOL_DIRS`` env var) and installed ``cogtrix.tools``
+            entry-points are also loaded.
 
     Returns:
         ToolRegistry with loaded tools
@@ -94,7 +109,8 @@ def load_tools(tool_filter: str | None = None) -> ToolRegistry:
     if tool_filter == "none":
         return registry
 
-    registry.load_all_tools()
+    configure_agent_tools()
+    registry.load_all_tools(config=config)
 
     if tool_filter is None or tool_filter == "":
         return registry
@@ -291,6 +307,19 @@ def configure_brave_tool(config: Config) -> None:
         pass
 
 
+def configure_searxng_tool(config: Config) -> None:
+    """Configure the SearXNG search tool with instance URL from config."""
+    try:
+        from src.tools.searxng_search import configure_searxng
+
+        searxng_cfg: dict[str, Any] = {}
+        if config.searxng_url:
+            searxng_cfg["url"] = config.searxng_url
+        configure_searxng(searxng_cfg)
+    except ImportError:
+        pass
+
+
 def configure_serpapi_tool(config: Config) -> None:
     """Configure the SerpAPI search tool with API key from config."""
     try:
@@ -336,6 +365,53 @@ def configure_file_ops_tool(config: Config) -> None:
     set_allowed_write_dirs(config.allowed_write_paths)
 
 
+def configure_cron_tool(
+    config: Config,
+    llm_factory: Callable[[], Any] | None = None,
+) -> None:
+    """Configure the cron scheduling tool.
+
+    Args:
+        config:      Active runtime config (used to resolve the data directory).
+        llm_factory: Zero-argument callable returning the active ``BaseChatModel``.
+                     Called fresh each time a job fires, so provider / model
+                     changes are reflected automatically.
+    """
+    try:
+        from src.tools.cron_tools import configure_cron
+
+        data_dir = config.resolve_data_path("cron")
+        configure_cron(data_dir=str(data_dir), llm_factory=llm_factory)
+    except (ImportError, OSError):
+        pass
+
+
+def configure_agent_tools() -> None:
+    """Initialise agent spawning and task management tools.
+
+    Called by :func:`load_tools` so the module-level imports in
+    ``src.tools.agent_tools`` are resolved at registry load time, surfacing
+    any dependency issues early.
+    """
+    try:
+        from src.tools.agent_tools import configure_agent_tools as _configure
+
+        _configure()
+    except (ImportError, OSError):
+        pass
+
+
+def configure_email_tool(config: Config) -> None:
+    """Configure the email tools with IMAP/SMTP settings from config."""
+    try:
+        from src.tools.email_tools import configure_email
+
+        email_cfg = config.services.get("email", {})
+        configure_email(email_cfg)
+    except ImportError:
+        pass
+
+
 def configure_rag_tool(config: Config) -> None:
     """Configure the RAG tool with runtime settings from config.
 
@@ -367,6 +443,13 @@ def configure_rag_tool(config: Config) -> None:
         data_dir = os.environ.get("COGTRIX_DATA_DIR", config.data_dir)
         api_uploads = Path(data_dir, "api", "uploads").resolve()
         rag_config["api_uploads_dir"] = str(api_uploads)
+
+        # Entity index (M4.3)
+        entity_index_path = Path(data_dir, "rag", "entity_index.json").resolve()
+        rag_config["entity_index_path"] = str(entity_index_path)
+
+        # Score threshold (M4.3)
+        rag_config["score_threshold"] = config.rag.score_threshold  # type: ignore[assignment]
 
         configure_rag(rag_config)
 
@@ -506,6 +589,7 @@ def create_request_tools_tool(
     catalog: dict[str, str],
     active_names: set[str] | None = None,
     protected_names: set[str] | None = None,
+    tool_index: Any = None,
 ) -> Any:
     """
     Create the ``request_tools`` meta-tool.
@@ -547,10 +631,32 @@ def create_request_tools_tool(
     else:
         remove_catalog = "  (none — all active tools are core to this mode)"
 
-    def request_tools(add: list[str] | None = None, remove: list[str] | None = None) -> str:
+    def request_tools(
+        add: list[str] | None = None,
+        remove: list[str] | None = None,
+        query: str = "",
+    ) -> str:
         """Add or remove tools from the active agent toolkit."""
         add = add or []
         remove = remove or []
+
+        # Semantic query: only used when add and remove are both empty.
+        if query and not add and not remove:
+            if tool_index is not None:
+                hits = tool_index.search(query, k=8)
+                if not hits:
+                    return (
+                        f"No tools matched '{query}'. "
+                        "Try different keywords or call with no arguments to see the full catalog."
+                    )
+                lines = []
+                for name in hits:
+                    desc = catalog.get(name, "")
+                    lines.append(f"  - {name}: {desc}")
+                return f"Semantic search results for '{query}':\n" + "\n".join(lines)
+            # No index — fall through to full catalog listing below.
+            add = []
+            remove = []
 
         # Resolve fuzzy/abbreviated names against both the available pool and the active set.
         # Track original → resolved mapping for name-correction guidance.

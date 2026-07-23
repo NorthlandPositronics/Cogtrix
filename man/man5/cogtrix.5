@@ -1,0 +1,70 @@
+.TH COGTRIX 5 "2026-03-30" "cogtrix 1.0.0" "Cogtrix Manual"
+.SH NAME
+cogtrix \- configuration file format
+.SH SYNOPSIS
+.B ~/.cogtrix.json
+.br
+.B ./.cogtrix.json
+.SH DESCRIPTION
+Cogtrix reads configuration from a JSON file named
+.B .cogtrix.json
+located in the current working directory or the user home directory.
+.SH OPTIONS
+.TP
+.B model
+Default model alias to use (e.g. \(lqsonnet\(rq, \(lqopus\(rq, \(lqhaiku\(rq).
+.TP
+.B memory_mode
+Conversation memory strategy: \(lqconversation\(rq (default), \(lqsummary\(rq, or \(lqoff\(rq.
+.TP
+.B banner
+Banner style on startup: \(lqcompact\(rq (default), \(lqfull\(rq, or \(lqoff\(rq.
+.TP
+.B max_tokens
+Maximum tokens per response. Default: 8192.
+.TP
+.B services
+Object containing service-specific configuration. Keys include:
+.RS
+.TP
+.B searxng.url
+URL of a SearXNG instance (e.g. \(lqhttp://localhost:8888\(rq).
+.TP
+.B exa.api_key
+API key for Exa neural search.
+.TP
+.B brave.api_key
+API key for Brave Search.
+.TP
+.B tavily.api_key
+API key for Tavily search.
+.RE
+.TP
+.B tool_trust
+Per-tool trust overrides. Keys are tool names, values are \(lqalways\(rq, \(lqdeny\(rq, or \(lqask\(rq.
+.TP
+.B api_dangerous_tools
+Boolean. When false (default), shell/bash/python_exec are denied in API sessions.
+.SH ENVIRONMENT
+.TP
+.B ANTHROPIC_API_KEY
+Required. Anthropic API key for Claude model access.
+.TP
+.B SEARXNG_URL
+URL of a SearXNG instance (overrides config file).
+.TP
+.B EXA_API_KEY
+Exa API key (overrides config file).
+.SH FILES
+.TP
+.B ~/.cogtrix.json
+User-level configuration file.
+.TP
+.B ./.cogtrix.json
+Project-level configuration file (takes precedence).
+.TP
+.B COGTRIX.md
+Optional project context file auto-loaded from cwd, home, or XDG config dir.
+.SH SEE ALSO
+.BR cogtrix (1),
+.BR cogtrix (8)

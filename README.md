@@ -41,6 +41,7 @@ uv pip install "cogtrix[google]"       # Google Gemini
 uv pip install "cogtrix[api]"          # REST API server
 uv pip install "cogtrix[mcp]"          # MCP server support
 uv pip install "cogtrix[search]"       # Tavily, Exa, Brave, SerpAPI search
+uv pip install "cogtrix[rag]"          # RAG/knowledge-base support (requires C++ build tools)
 ```
 
 > **Prerequisite:** Python 3.13.x and [uv](https://docs.astral.sh/uv/) (recommended) or pip.

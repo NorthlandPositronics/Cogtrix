@@ -1,3 +1,4 @@
+import re
 import shlex
 import subprocess
 from pathlib import Path
@@ -68,6 +69,71 @@ def load_input_history() -> None:
             _console.print(f"[dim yellow]{msg}[/dim yellow]")
         else:
             print(msg)
+
+
+_AT_PATH_RE = re.compile(r"@([\w./\-]*)$")
+
+
+_slash_commands: list[str] = []
+
+
+def set_slash_commands(commands: list[str]) -> None:
+    """Provide the list of slash command names (with leading /) for tab completion."""
+    global _slash_commands
+    _slash_commands = sorted(commands)
+
+
+def _completer(text: str, state: int) -> str | None:
+    """Tab-complete slash commands and @file references."""
+    if readline is None:
+        return None
+    try:
+        buf = readline.get_line_buffer()
+
+        # Slash command completion: /com<Tab> → /compact
+        if buf.startswith("/"):
+            partial = buf.split()[0] if buf.strip() else buf
+            matches = [c for c in _slash_commands if c.startswith(partial)]
+            if state < len(matches):
+                # Preserve any text after the command (e.g. "/compact aggressive")
+                rest = buf[len(partial) :]
+                return matches[state] + rest
+            return None
+
+        # @file path completion
+        at_match = _AT_PATH_RE.search(buf)
+        if not at_match:
+            return None
+        partial = at_match.group(1)
+        base_dir = Path.cwd()
+        if "/" in partial:
+            parent = base_dir / Path(partial).parent
+            prefix = Path(partial).name
+        else:
+            parent = base_dir
+            prefix = partial
+        try:
+            matches = [
+                str(p.relative_to(base_dir)) + ("/" if p.is_dir() else "")
+                for p in sorted(parent.iterdir())
+                if p.name.startswith(prefix)
+            ]
+        except OSError:
+            return None
+        if state < len(matches):
+            return "@" + matches[state]
+    except Exception:
+        pass
+    return None
+
+
+def setup_readline_completion() -> None:
+    """Register the slash-command and @-path completer with readline."""
+    if readline is None:
+        return
+    readline.set_completer(_completer)
+    readline.set_completer_delims(" \t\n")
+    readline.parse_and_bind("tab: complete")
 
 
 def save_input_history() -> None:

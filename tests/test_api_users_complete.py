@@ -29,6 +29,7 @@ from unittest.mock import patch  # noqa: E402
 
 from fastapi.testclient import TestClient  # noqa: E402
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine  # noqa: E402
+from sqlalchemy.pool import StaticPool  # noqa: E402
 
 from src.api.db.engine import Base, get_db  # noqa: E402
 
@@ -45,7 +46,12 @@ def app():
     """FastAPI app backed by a fresh in-memory SQLite DB per test."""
     from src.api.app import create_app
 
-    engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
+    engine = create_async_engine(
+        "sqlite+aiosqlite:///:memory:",
+        echo=False,
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
     factory = async_sessionmaker(engine, expire_on_commit=False)
 
     async def _setup():

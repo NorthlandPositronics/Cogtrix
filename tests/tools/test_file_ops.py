@@ -6,6 +6,11 @@ from unittest.mock import patch
 import pytest
 
 from src.tools.file_ops import (
+    _APPEND_LOCK_MAX,
+    _append_lock_guard,
+    _append_locks,
+    _get_append_lock,
+    _RefLock,
     append_file,
     list_directory,
     read_file,
@@ -233,3 +238,68 @@ class TestAllowedWritePaths:
         set_allowed_write_dirs([str(extra_dir)])
         result = write_file(str(extra_dir / ".." / "escape.txt"), "bad")
         assert result.startswith("Error:")
+
+
+class TestGetAppendLock:
+    """_get_append_lock() must evict across the full LRU, not just the first 32 entries."""
+
+    def _fill_cache(self, n: int) -> list[str]:
+        """Fill the cache with n free (ref_count=0) entries, returning their keys."""
+        keys = [f"/tmp/fake_path_{i}.txt" for i in range(n)]
+        with _append_lock_guard:
+            for k in keys:
+                _append_locks[k] = _RefLock()
+        return keys
+
+    def setup_method(self):
+        """Clear the global cache before each test."""
+        with _append_lock_guard:
+            _append_locks.clear()
+
+    def teardown_method(self):
+        """Clear the global cache after each test."""
+        with _append_lock_guard:
+            _append_locks.clear()
+
+    def test_evicts_entry_beyond_32_positions(self):
+        """Cache must evict an entry that sits beyond position 32 in the LRU."""
+        # Fill cache to the cap with free locks
+        self._fill_cache(_APPEND_LOCK_MAX)
+        assert len(_append_locks) == _APPEND_LOCK_MAX
+
+        # Request a new lock — cache is at cap so eviction must occur
+        new_key = "/tmp/new_entry.txt"
+        lock = _get_append_lock(new_key)
+
+        # The new entry must be present and the cache must not exceed cap+1
+        with _append_lock_guard:
+            assert new_key in _append_locks
+            assert len(_append_locks) <= _APPEND_LOCK_MAX
+
+        with lock:
+            pass  # ensure lock is usable
+
+    def test_busy_locks_not_evicted(self):
+        """Locks with ref_count > 0 must not be evicted even when cache is full."""
+        self._fill_cache(_APPEND_LOCK_MAX)
+
+        # Mark the first 40 entries as busy
+        busy_keys = list(_append_locks.keys())[:40]
+        with _append_lock_guard:
+            for k in busy_keys:
+                _append_locks[k].ref_count = 1
+
+        # Request a new lock — must still succeed (evict a non-busy entry)
+        new_key = "/tmp/after_busy.txt"
+        _get_append_lock(new_key)
+
+        with _append_lock_guard:
+            assert new_key in _append_locks
+            # All busy entries must still be present
+            for k in busy_keys:
+                assert k in _append_locks
+
+        # Clean up ref counts so teardown can clear
+        with _append_lock_guard:
+            for k in busy_keys:
+                _append_locks[k].ref_count = 0

@@ -22,6 +22,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from src.logging_config import is_verbose
 from src.memory.base import BaseMemoryStore
 from src.memory.context import MemoryContext
 
@@ -210,6 +211,15 @@ class BaseMemoryManager(ABC):
         self._bg_future: Future | None = None
         self._slow_path_failures: int = 0
 
+        # ── Tiered Context Cache (TCC) ────────────────────────────────
+        # Phase 1: data structures and persistence only.
+        # Roll-forward (Phase 3) and context assembly (Phase 2) are
+        # implemented in later phases.
+        from src.memory.tier_cache import TierCacheSnapshot
+
+        self._tier_cache: TierCacheSnapshot | None = None
+        self._tier_cache_ready: bool = False
+
     # ── Hybrid memory wiring ────────────────────────────────────────
 
     def set_llm(self, llm: Any) -> None:
@@ -336,6 +346,69 @@ class BaseMemoryManager(ABC):
         """
         pass
 
+    # ── Tiered Context Cache persistence ─────────────────────────────
+
+    def _tier_cache_path(self) -> Path:
+        """Return the path for the tier cache JSON file.
+
+        Follows the same pattern as ``_hybrid_meta_path()``.
+        """
+        safe_id = _sanitize_session_id(self.session_id)
+        base: Path = getattr(self.store, "base_path", Path("data/history"))
+        result = (base / f"{safe_id}_tier_cache.json").resolve()
+        try:
+            result.relative_to(base.resolve())
+        except ValueError:
+            raise ValueError(
+                f"Path traversal detected in session_id: {self.session_id!r}"
+            ) from None
+        return result
+
+    def _load_tier_cache(self) -> None:
+        """Load tier cache from disk into ``self._tier_cache``.
+
+        Missing or corrupt files silently leave the cache uninitialized
+        (``_tier_cache_ready = False``).  Called from ``load()``.
+        """
+        from src.memory.tier_cache import TierCacheSnapshot
+
+        cache_path = self._tier_cache_path()
+        if not cache_path.exists():
+            with self._hybrid_lock:
+                self._tier_cache = None
+                self._tier_cache_ready = False
+            return
+        try:
+            data = json.loads(cache_path.read_text(encoding="utf-8"))
+            snapshot = TierCacheSnapshot.from_dict(data)
+            with self._hybrid_lock:
+                self._tier_cache = snapshot
+                self._tier_cache_ready = True
+        except Exception as exc:
+            log.warning("Failed to load tier cache: %s", exc)
+            with self._hybrid_lock:
+                self._tier_cache = None
+                self._tier_cache_ready = False
+
+    def _save_tier_cache(self) -> None:
+        """Persist the tier cache to disk atomically.
+
+        No-op when ``_tier_cache`` is ``None``.  Called from ``save()``.
+        """
+        with self._hybrid_lock:
+            snapshot = self._tier_cache
+
+        if snapshot is None:
+            return
+        try:
+            from src.utils.atomic_write import atomic_write_json
+
+            cache_path = self._tier_cache_path()
+            with atomic_write_json(cache_path) as f:
+                json.dump(snapshot.to_dict(), f)
+        except Exception as exc:
+            log.warning("Failed to save tier cache: %s", exc)
+
     def _clamp_summary_idx(self) -> None:
         """Ensure ``_summary_msg_idx`` does not exceed the message count.
 
@@ -404,7 +477,8 @@ class BaseMemoryManager(ABC):
             return
 
         if self._bg_future is not None and not self._bg_future.done():
-            log.debug("Background memory job still running — skipping")
+            if is_verbose():
+                log.debug("Background memory job still running — skipping")
             return
 
         batch = [_shallow_copy(m) for m in messages[unsummarized_start:unsummarized_end]]
@@ -413,6 +487,75 @@ class BaseMemoryManager(ABC):
         self._bg_future = _get_summarization_pool().submit(
             self._run_slow_path, batch, unsummarized_end_snapshot
         )
+
+    def schedule_tier_roll_forward(
+        self,
+        max_context_tokens: int,
+        llm: Any | None = None,
+        compression_cache: dict[str, Any] | None = None,
+    ) -> None:
+        """Schedule a background roll-forward of the tier cache.
+
+        Runs on the existing summarization pool.  Thread-safe: reads message
+        state under ``_hybrid_lock``, performs LLM calls outside the lock,
+        writes back under the lock.
+
+        No-op when the pool cannot be acquired (logs a warning).
+        """
+        with self._hybrid_lock:
+            messages_snapshot = list(self._messages) if hasattr(self, "_messages") else []
+            current_snapshot = self._tier_cache
+            summary = self._summary or ""
+            summary_msg_idx = self._summary_msg_idx
+
+        if not messages_snapshot:
+            return
+
+        def _do_roll_forward() -> None:
+            from src.memory.tier_cache import roll_forward
+
+            try:
+                new_snapshot = roll_forward(
+                    messages=messages_snapshot,
+                    current_snapshot=current_snapshot,
+                    summary=summary,
+                    summary_msg_idx=summary_msg_idx,
+                    max_context_tokens=max_context_tokens,
+                    llm=llm,
+                    compression_cache=compression_cache,
+                )
+                # Only activate the tier path when the cache provides actual value:
+                # either some messages have been pushed into T1/T2, or the Tier 0
+                # boundary is non-zero (older messages excluded from verbatim window).
+                # An all-T0 snapshot with no compressed content is equivalent to
+                # the cold sliding-window fallback and should not override it.
+                has_value = (
+                    new_snapshot.tier0_boundary_idx > 0
+                    or new_snapshot.tier1_messages
+                    or new_snapshot.tier2_messages
+                )
+                if has_value:
+                    with self._hybrid_lock:
+                        self._tier_cache = new_snapshot
+                        self._tier_cache_ready = True
+                    log.debug(
+                        "Tier roll-forward complete: boundary=%d, t1=%d msgs, t2=%d msgs",
+                        new_snapshot.tier0_boundary_idx,
+                        len(new_snapshot.tier1_messages),
+                        len(new_snapshot.tier2_messages),
+                    )
+                else:
+                    log.debug(
+                        "Tier roll-forward produced empty snapshot (all messages fit in T0) "
+                        "— keeping cold-cache fallback"
+                    )
+            except Exception as exc:
+                log.warning("Tier roll-forward background job failed: %s", exc)
+
+        try:
+            _get_summarization_pool().submit(_do_roll_forward)
+        except Exception as exc:
+            log.warning("Failed to submit tier roll-forward to pool: %s", exc)
 
     def _run_slow_path(self, batch: list[Any], unsummarized_end: int) -> None:
         """Background: run summarization LLM + vector embedding + disk save."""
@@ -428,20 +571,22 @@ class BaseMemoryManager(ABC):
                 with self._hybrid_lock:
                     self._summary = new_summary
                     self._summary_msg_idx = unsummarized_end
-                log.debug(
-                    "Background summary updated in %.2fs, covers messages 0..%d (%d tokens est.)",
-                    time.monotonic() - t0,
-                    unsummarized_end,
-                    len(new_summary) // 4,
-                )
+                if is_verbose():
+                    log.debug(
+                        "Background summary updated in %.2fs, covers messages 0..%d (%d tokens est.)",
+                        time.monotonic() - t0,
+                        unsummarized_end,
+                        len(new_summary) // 4,
+                    )
 
                 if self._vector_store is not None:
                     t1 = time.monotonic()
                     self._vector_store.add_messages(batch)
-                    log.debug(
-                        "Background vector embedding completed in %.2fs",
-                        time.monotonic() - t1,
-                    )
+                    if is_verbose():
+                        log.debug(
+                            "Background vector embedding completed in %.2fs",
+                            time.monotonic() - t1,
+                        )
 
             self._save_hybrid_meta()
             if self._vector_store is not None:
@@ -566,6 +711,7 @@ class BaseMemoryManager(ABC):
         Called once at session start. Override to load mode-specific state.
         Base implementation just marks as loaded.
         """
+        self._load_tier_cache()
         self._loaded = True
 
     @staticmethod
@@ -865,6 +1011,7 @@ class BaseMemoryManager(ABC):
         if fut is None or fut.done():
             self._save_hybrid_meta()
         self._save_mode_meta()
+        self._save_tier_cache()
         if self._vector_store is not None:
             self._vector_store.save()
 
@@ -891,6 +1038,9 @@ class BaseMemoryManager(ABC):
         self.join_background()
         self._summary = None
         self._summary_msg_idx = 0
+        with self._hybrid_lock:
+            self._tier_cache = None
+            self._tier_cache_ready = False
         if self._vector_store is not None:
             self._vector_store.clear()
         # Remove persisted meta file
@@ -898,6 +1048,13 @@ class BaseMemoryManager(ABC):
             meta_path = self._hybrid_meta_path()
             if meta_path.exists():
                 meta_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        # Remove tier cache file
+        try:
+            cache_path = self._tier_cache_path()
+            if cache_path.exists():
+                cache_path.unlink(missing_ok=True)
         except Exception:
             pass
 
@@ -910,11 +1067,21 @@ class BaseMemoryManager(ABC):
         Returns:
             Dictionary with mode-specific statistics
         """
-        return {
+        with self._hybrid_lock:
+            tier_ready = self._tier_cache_ready
+            tier_cache = self._tier_cache
+
+        stats: dict[str, Any] = {
             "mode": self.mode_name,
             "session_id": self.session_id,
             "loaded": self._loaded,
+            "tier_cache_ready": tier_ready,
         }
+        if tier_cache is not None:
+            stats["tier0_boundary_idx"] = tier_cache.tier0_boundary_idx
+            stats["tier1_token_count"] = tier_cache.tier1_token_count
+            stats["tier2_token_count"] = tier_cache.tier2_token_count
+        return stats
 
     def get_message_count(self) -> int:
         """
@@ -924,6 +1091,17 @@ class BaseMemoryManager(ABC):
 
         Returns:
             Number of messages in memory
+        """
+        return 0
+
+    def pop_last_turn(self) -> int:
+        """Remove the last user+assistant exchange from memory.
+
+        Default implementation is a no-op. Subclasses that maintain
+        a message list should override this.
+
+        Returns:
+            Number of messages removed (0 if not supported or nothing to remove).
         """
         return 0
 

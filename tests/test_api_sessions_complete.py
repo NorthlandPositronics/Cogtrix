@@ -40,6 +40,7 @@ os.environ.setdefault("COGTRIX_DB_URL", "sqlite+aiosqlite:///:memory:")
 
 from fastapi.testclient import TestClient  # noqa: E402
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine  # noqa: E402
+from sqlalchemy.pool import StaticPool  # noqa: E402
 
 from src.api.db.engine import Base, get_db  # noqa: E402
 
@@ -55,7 +56,12 @@ _VALID_PASSWORD = "TestPass1!"
 def app():
     from src.api.app import create_app
 
-    engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
+    engine = create_async_engine(
+        "sqlite+aiosqlite:///:memory:",
+        echo=False,
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
     factory = async_sessionmaker(engine, expire_on_commit=False)
 
     async def _setup():
@@ -238,6 +244,85 @@ class TestSessionListExtra:
             headers=_h(tokens["owner"]),
         )
         assert r.status_code == 200
+
+
+class TestPatchSessionEdgeCases:
+    """Edge cases for PATCH /sessions/{id} — error paths not covered elsewhere."""
+
+    def test_patch_nonexistent_session_returns_404(self, client, tokens):
+        """Patching a session that doesn't exist returns 404 SESSION_NOT_FOUND."""
+        r = client.patch(
+            f"/api/v1/sessions/{uuid.uuid4()}",
+            headers=_h(tokens["owner"]),
+            json={"name": "ghost"},
+        )
+        assert r.status_code == 404
+        assert r.json()["error"]["code"] == "SESSION_NOT_FOUND"
+
+    def test_patch_no_auth_returns_401(self, client, tokens):
+        """PATCH without auth returns 401."""
+        session_r = _create_session(client, tokens["owner"])
+        sid = session_r.json()["data"]["id"]
+        r = client.patch(f"/api/v1/sessions/{sid}", json={"name": "nope"})
+        assert r.status_code == 401
+
+    def test_patch_empty_body_is_no_op(self, client, tokens):
+        """PATCH with empty body succeeds (no-op update)."""
+        session_r = _create_session(client, tokens["owner"])
+        sid = session_r.json()["data"]["id"]
+        r = client.patch(f"/api/v1/sessions/{sid}", headers=_h(tokens["owner"]), json={})
+        assert r.status_code == 200
+
+    def test_patch_name_to_new_value_succeeds(self, client, tokens):
+        """Renaming a session to a unique name succeeds."""
+        session_r = _create_session(client, tokens["owner"])
+        sid = session_r.json()["data"]["id"]
+        new_name = f"renamed_{uuid.uuid4().hex[:6]}"
+        r = client.patch(
+            f"/api/v1/sessions/{sid}",
+            headers=_h(tokens["owner"]),
+            json={"name": new_name},
+        )
+        assert r.status_code == 200
+        assert r.json()["data"]["name"] == new_name
+
+    def test_patch_duplicate_name_returns_409(self, client, tokens):
+        """Renaming a session to an existing name returns 409 SESSION_NAME_DUPLICATE."""
+        from unittest.mock import AsyncMock, patch
+
+        r1 = client.post("/api/v1/sessions", json={"name": "alpha"}, headers=_h(tokens["owner"]))
+        r2 = client.post("/api/v1/sessions", json={"name": "beta"}, headers=_h(tokens["owner"]))
+        if r1.status_code != 201 or r2.status_code != 201:
+            pytest.skip("Session creation failed — fixture issue")
+
+        sid = r1.json()["data"]["id"]
+
+        with patch(
+            "src.api.db.repositories.sessions.SessionRepository.name_exists_for_user",
+            new_callable=AsyncMock,
+            return_value=True,
+        ):
+            resp = client.patch(
+                f"/api/v1/sessions/{sid}",
+                json={"name": "beta"},
+                headers=_h(tokens["owner"]),
+            )
+        assert resp.status_code == 409
+        assert resp.json()["error"]["code"] == "SESSION_NAME_DUPLICATE"
+
+    def test_patch_invalid_model_returns_422_or_404(self, client, tokens):
+        """Patching a session with a non-existent model alias returns 422 or 404."""
+        r = client.post("/api/v1/sessions", json={}, headers=_h(tokens["owner"]))
+        if r.status_code != 201:
+            pytest.skip("Session creation failed")
+        sid = r.json()["data"]["id"]
+
+        resp = client.patch(
+            f"/api/v1/sessions/{sid}",
+            json={"config": {"model": "nonexistent-model-xyz"}},
+            headers=_h(tokens["owner"]),
+        )
+        assert resp.status_code in (422, 404)
 
 
 class TestSessionDeleteExtra:
@@ -849,7 +934,12 @@ class TestHardDeleteRowcount:
 
             from src.api.db.models import Base
 
-            engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+            engine = create_async_engine(
+                "sqlite+aiosqlite:///:memory:",
+                echo=False,
+                connect_args={"check_same_thread": False},
+                poolclass=StaticPool,
+            )
             async with engine.begin() as conn:
                 await conn.run_sync(Base.metadata.create_all)
             async_session = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
@@ -870,10 +960,16 @@ class TestHardDeleteRowcount:
         async def _run():
             from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
             from sqlalchemy.orm import sessionmaker
+            from sqlalchemy.pool import StaticPool
 
             from src.api.db.models import Base
 
-            engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+            engine = create_async_engine(
+                "sqlite+aiosqlite:///:memory:",
+                echo=False,
+                connect_args={"check_same_thread": False},
+                poolclass=StaticPool,
+            )
             async with engine.begin() as conn:
                 await conn.run_sync(Base.metadata.create_all)
             async_session = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)

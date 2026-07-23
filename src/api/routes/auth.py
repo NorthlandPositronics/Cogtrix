@@ -35,6 +35,7 @@ from src.api.db import get_db
 from src.api.db.repositories.api_keys import ApiKeyRepository
 from src.api.db.repositories.tokens import RefreshTokenRepository
 from src.api.db.repositories.users import UserRepository
+from src.api.pagination import decode_cursor, encode_cursor
 from src.api.schemas.auth import (
     APIKeyCreateRequest,
     APIKeyOut,
@@ -353,12 +354,23 @@ async def list_api_keys(
     Error codes: UNAUTHORIZED, TOKEN_EXPIRED, INVALID_CURSOR.
     """
     limit = max(1, min(limit, 100))
+
+    after_id: str | None = None
+    if cursor is not None:
+        try:
+            after_id = decode_cursor(cursor)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"code": "INVALID_CURSOR", "message": str(exc)},
+            ) from exc
+
     key_repo = ApiKeyRepository(db)
-    rows = await key_repo.list_for_user(current_user.user_id, after_id=cursor, limit=limit)
+    rows = await key_repo.list_for_user(current_user.user_id, after_id=after_id, limit=limit)
 
     has_more = len(rows) > limit
     items = rows[:limit]
-    next_cursor = items[-1].id if has_more and items else None
+    next_cursor = encode_cursor(items[-1].id) if has_more and items else None
 
     return APIResponse(
         data=CursorPage(
@@ -406,8 +418,10 @@ async def create_api_key(
     Auth: bearer token required.
     Error codes: UNAUTHORIZED, TOKEN_EXPIRED.
     """
+    from src.api.auth import _hash_api_key
+
     raw_key = _API_KEY_PREFIX + secrets.token_urlsafe(32)
-    key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
+    key_hash = _hash_api_key(raw_key)
     key_prefix = raw_key[:12]
 
     expires_at = None

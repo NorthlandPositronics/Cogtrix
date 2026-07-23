@@ -103,7 +103,7 @@ def get_weather(location: str, units: str = "metric") -> str:
         )
 
     if not REQUESTS_AVAILABLE:
-        return "Error: requests library not available. Install it with: pip install requests"
+        return "Error: requests library not available. Run: uv add requests"
 
     try:
         # Make API request

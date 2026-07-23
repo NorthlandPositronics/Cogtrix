@@ -1206,7 +1206,49 @@ def delegate_parallel(
                 output_parts.append(f"**JSON Valid:** {status}")
             output_parts.append(f"\n{result.response}\n")
         else:
-            output_parts.append(f"**Failed:** {result.error}\n")
+            if result.error and "timed out" in result.error.lower():
+                output_parts.append(f"**⏱ Timed out** (>{timeout}s)\n")
+            elif result.error and "timeout exceeded" in result.error.lower():
+                output_parts.append("**⏱ Timed out** (total timeout exceeded)\n")
+            else:
+                output_parts.append(f"**✗ Error:** {result.error}\n")
+
+    # Recovery guidance for partial or total failures
+    failed_count = len(tasks) - success_count
+    if failed_count > 0:
+        timeout_failures = sum(
+            1
+            for _, r in results
+            if not r.success
+            and r.error
+            and ("timed out" in r.error.lower() or "timeout exceeded" in r.error.lower())
+        )
+        other_failures = failed_count - timeout_failures
+
+        guidance = ["---", "### Recovery Guidance"]
+        if success_count == 0:
+            guidance.append(f"**All {len(tasks)} tasks failed.** Suggested next steps:")
+        else:
+            guidance.append(f"**{failed_count} task(s) did not complete.** Suggested next steps:")
+
+        if timeout_failures > 0:
+            guidance.append(
+                f"- **Timeout ({timeout_failures} task(s)):** Re-run with a higher "
+                f"`timeout` (current: {timeout}s, max: 600s), or use `delegate_task` "
+                f"to run each failed task individually with `timeout=300`."
+            )
+        if other_failures > 0:
+            guidance.append(
+                "- **Error failures:** Check that the specified provider/model is "
+                "available. Try `delegate_task` individually to isolate the problem."
+            )
+        if success_count > 0 and failed_count > 0:
+            guidance.append(
+                "- **Partial results above are usable.** Incorporate the successful "
+                "results and retry only the failed tasks."
+            )
+
+        output_parts.extend(guidance)
 
     return "\n".join(output_parts)
 
