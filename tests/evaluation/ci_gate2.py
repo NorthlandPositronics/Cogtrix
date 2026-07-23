@@ -7,6 +7,7 @@ does not change the pass/fail gate yet.
 
 from __future__ import annotations
 
+import argparse
 import os
 import sys
 from collections.abc import Callable
@@ -28,6 +29,85 @@ from tests.evaluation.runner import (
 from tests.quality.judge import score_scenario
 
 _DEFAULT_JUDGE_MODEL = "claude-sonnet-4-6"
+
+# Static LPT bin-pack of *smoke* scenarios into four shards.  Cost proxy is
+# each scenario's timeout_seconds; the shards are within ~60 s of each
+# other on that metric, and each shard runs its assigned scenarios against
+# ALL smoke models.  Expected wall time per shard with 4 parallel CI jobs
+# is roughly the original ~17 min / 4 ≈ 4-5 min, dominated by the heaviest
+# scenario in the shard.
+#
+# Only scenarios that pass the smoke filter ("smoke" tag, or no tags) are
+# assigned here.  Nightly-only scenarios tagged ``gate2`` without
+# ``smoke`` (e.g. finance_budget_variance_report) are intentionally
+# excluded because run_gate2_smoke never executes them.
+#
+# When a new smoke scenario is added to tests/evaluation/scenarios/, it
+# MUST be added to one of these shards or the runner will raise
+# ScenarioShardError.  Pick the shard with the lowest current
+# sum(timeout) to preserve balance.
+_SHARD_MAP: dict[str, frozenset[str]] = {
+    # 240s
+    "A": frozenset(
+        {
+            "regression_recovery_synthesis_no_meta_analysis",
+        }
+    ),
+    # 120 + 90 = 210s
+    "B": frozenset(
+        {
+            "procurement_po_approval_basic",
+            "safety_refuse_unauthorized_payment",
+        }
+    ),
+    # 120 + 60 = 180s
+    "C": frozenset(
+        {
+            "procurement_supplier_registration",
+            "regression_deepseek_native_tool_call_format",
+        }
+    ),
+    # 120 + 60 = 180s
+    "D": frozenset(
+        {
+            "finance_invoice_approval_workflow",
+            "regression_stuck_loop_identical_tool_calls",
+        }
+    ),
+}
+
+
+class ScenarioShardError(RuntimeError):
+    """Raised when a scenario is missing from _SHARD_MAP.
+
+    Triggered when a new scenario yaml is added to tests/evaluation/scenarios/
+    without being assigned to one of the four CI shards.  The fix is to add
+    the new scenario's id to whichever shard in _SHARD_MAP has the lowest
+    sum-of-timeouts and rebalance if needed.
+    """
+
+
+def _filter_scenarios_by_shard(
+    scenarios: list[EvalScenario],
+    shard: str,
+) -> list[EvalScenario]:
+    """Return only the scenarios assigned to the given shard letter."""
+    if shard not in _SHARD_MAP:
+        raise ScenarioShardError(f"unknown shard {shard!r}; expected one of {sorted(_SHARD_MAP)}")
+
+    # Every scenario in the input must be covered by some shard, otherwise
+    # the shard split would silently drop a scenario from CI coverage.
+    all_assigned: set[str] = set().union(*_SHARD_MAP.values())
+    unassigned = [s.id for s in scenarios if s.id not in all_assigned]
+    if unassigned:
+        raise ScenarioShardError(
+            "scenarios missing from _SHARD_MAP in tests/evaluation/ci_gate2.py "
+            f"(add each to one shard and rebalance): {sorted(unassigned)}"
+        )
+
+    target = _SHARD_MAP[shard]
+    return [s for s in scenarios if s.id in target]
+
 
 # Judge score at or above this threshold is treated as pass. Mirrors the 0.5
 # cutoff used by tests/evaluation/judge.py:judge_result. The runner's binary
@@ -65,6 +145,53 @@ def _eligible_models(
         # OpenRouter: include any model that has an openrouter_model_id
         return [m for m in models if m.openrouter_model_id]
     return [m for m in models if m.env_key in covers]
+
+
+def _candidate_keys_for_model(
+    candidate_keys: list[tuple[str, str]],
+    model: ModelConfig,
+) -> list[tuple[str, str]]:
+    """Reorder candidate keys so the model's *native* env_key is tried first.
+
+    The global ``_KEY_PRIORITY`` defaults to OpenRouter first because that
+    one key can reach every model in the registry, simplifying CI setup.
+    But OpenRouter is a pass-through router and some provider features do
+    not survive cleanly across it.  Two concrete cases observed in
+    production CI runs:
+
+    * DeepSeek-V4-Flash uses *thinking mode* and returns a
+      ``reasoning_content`` field that the API requires on subsequent
+      turns.  OpenRouter's request shape does not always thread it
+      back, producing
+      ``400 The reasoning_content in the thinking mode must be passed
+      back to the API`` after the first tool-call turn.
+    * Cerebras's bespoke streaming behaviour also differs from
+      OpenRouter's normalised passthrough on some scenarios.  Cerebras
+      also has a model-id catalogue distinct from OpenRouter's slug
+      namespace (e.g. it carries ``gpt-oss-120b`` directly), so a
+      native-API call uses the exact provider-side identifier.
+
+    Native APIs are authoritative for their own models — they emit the
+    exact shape the provider expects to see back.  Trying native first
+    gives us the best fidelity; falling back to OpenRouter only when the
+    native key is unavailable preserves the "one key gets everything to
+    work" property for solo developers.
+
+    Per-model escape hatch: when ``model.prefer_openrouter`` is True the
+    native promotion is skipped and the candidate-key list is returned
+    in the configured priority order (OpenRouter first).  This is for
+    models whose native provider has a known integration bug that
+    OpenRouter happens to absorb — currently ``deepseek-v4-flash`` while
+    issue #1391 (reasoning_content threading) is open.  Each flag flip
+    must reference its tracking issue in models.yaml so we know when to
+    flip it back off.
+    """
+    if model.prefer_openrouter:
+        return candidate_keys
+    native = next((k for k in candidate_keys if k[0] == model.env_key), None)
+    if native is None:
+        return candidate_keys
+    return [native] + [k for k in candidate_keys if k[0] != model.env_key]
 
 
 def score_result(
@@ -145,6 +272,40 @@ def _is_transient_error(exc: Exception) -> bool:
     )
 
 
+def _is_model_unavailable_error(exc: Exception) -> bool:
+    """Return True when the provider says the requested model isn't there.
+
+    Defensive fallback predicate: if a model entry in models.yaml maps to
+    a model_id that the provider has since deprecated, retired, or simply
+    never exposed to this org (e.g. Cerebras dropping llama-3.3-70b in
+    favour of gpt-oss-120b), the native-API call surfaces a
+    "model not found" / "model_not_found" / "does not exist" / "unknown
+    model" error.  These are NOT auth/quota or transient — they are
+    permanent on this provider for this key — but they ARE recoverable
+    by falling back to the next priority key (often OpenRouter, which
+    may still route via a different inference backend).
+
+    Treating these as fall-through-able rather than raising prevents a
+    single provider's catalogue change from breaking every Gate 2 cell
+    for the affected model.  Documenting this here because the trigger
+    is platform-side, not in our code — a future "why did this start
+    failing?" investigation will land on this predicate.
+    """
+    msg = str(exc).lower()
+    return any(
+        kw in msg
+        for kw in (
+            "model not found",
+            "model_not_found",
+            "does not exist",
+            "unknown model",
+            "model is not available",
+            "model is unavailable",
+            "no such model",
+        )
+    )
+
+
 def _is_empty_response(result: EvalResult) -> bool:
     """Return True for the "model produced nothing usable" flake pattern.
 
@@ -186,12 +347,15 @@ def _try_run_with_key(
        402, OpenAI 401, etc.).
 
     Both cases must trigger fallback to the next priority key.
+    "Model unavailable" errors (a provider deprecating a model_id, e.g.
+    Cerebras dropping llama-3.3-70b) take the same shape and the same
+    fallback path — see ``_is_model_unavailable_error``.
     """
     for attempt in range(max_retries + 1):
         try:
             result = run_scenario(scenario, model, active_key=key)
         except Exception as exc:
-            if _is_auth_or_quota_error(exc):
+            if _is_auth_or_quota_error(exc) or _is_model_unavailable_error(exc):
                 emit(f"[gate2] KEY_FAIL {key[0]} for {model.id}: {exc}")
                 return None
             if attempt < max_retries and _is_transient_error(exc):
@@ -199,7 +363,10 @@ def _try_run_with_key(
                 continue
             raise
 
-        if result.error and _is_auth_or_quota_error(Exception(result.error)):
+        if result.error and (
+            _is_auth_or_quota_error(Exception(result.error))
+            or _is_model_unavailable_error(Exception(result.error))
+        ):
             emit(f"[gate2] KEY_FAIL {key[0]} for {model.id}: {result.error}")
             return None
         if result.error and attempt < max_retries and _is_transient_error(Exception(result.error)):
@@ -270,9 +437,14 @@ def run_gate2_smoke(
 
     for scenario in smoke_scenarios:
         for model in all_smoke_models:
-            # Try each candidate key in order until one works.
+            # Try each candidate key in order until one works.  Native
+            # provider keys (e.g. DEEPSEEK_API_KEY for deepseek-v4-flash)
+            # are tried before OpenRouter so model-specific features like
+            # DeepSeek's thinking-mode reasoning_content threading work
+            # against the authoritative API.  See
+            # _candidate_keys_for_model for the full rationale.
             result: EvalResult | None = None
-            for key in candidate_keys:
+            for key in _candidate_keys_for_model(candidate_keys, model):
                 eligible = _eligible_models([model], key)
                 if not eligible:
                     emit(
@@ -331,7 +503,7 @@ def run_gate2_smoke(
     return 1 if any_failures else 0
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     """CLI entry point for the Gate 2 CI smoke runner.
 
     Forces line-buffered stdout so per-scenario progress is visible when the
@@ -341,12 +513,56 @@ def main() -> int:
     making a multi-minute run look like a hang.  ``_flushing_print``
     (the default ``emit``) flushes every individual line as a belt-and-
     braces backup when ``reconfigure`` is unavailable.
+
+    Filtering flags (CI matrix fan-out):
+
+    * ``--shard {A,B,C,D}`` runs only scenarios assigned to that shard.
+    * ``--model <id>`` runs only the named smoke model.
+
+    Both flags are optional and independent — without either, every smoke
+    scenario runs against every smoke model (the pre-matrix behaviour,
+    used for local invocations and ad-hoc runs).  CI uses both together
+    so each matrix cell is one shard × one model.
     """
     try:
         sys.stdout.reconfigure(line_buffering=True)  # type: ignore[attr-defined]
     except (AttributeError, OSError):
         pass
-    return run_gate2_smoke()
+
+    parser = argparse.ArgumentParser(prog="ci_gate2")
+    parser.add_argument(
+        "--shard",
+        choices=sorted(_SHARD_MAP),
+        default=None,
+        help="Run only the scenarios assigned to this CI shard letter.",
+    )
+    parser.add_argument(
+        "--model",
+        default=None,
+        help="Run only this smoke model id (must be smoke=true in models.yaml).",
+    )
+    args = parser.parse_args(argv)
+
+    scenarios: list[EvalScenario] | None = None
+    if args.shard is not None:
+        all_smoke = [s for s in load_all_scenarios() if "smoke" in s.tags or not s.tags]
+        scenarios = _filter_scenarios_by_shard(all_smoke, args.shard)
+
+    models: list[ModelConfig] | None = None
+    if args.model is not None:
+        all_smoke_models = smoke_models()
+        models = [m for m in all_smoke_models if m.id == args.model]
+        if not models:
+            available = sorted(m.id for m in all_smoke_models)
+            raise SystemExit(
+                f"--model {args.model!r} is not a smoke model; " f"available: {available}"
+            )
+
+    _flushing_print(
+        f"[gate2] shard={args.shard or 'ALL'} model={args.model or 'ALL'} "
+        f"scenarios={[s.id for s in (scenarios or [])] or 'ALL'}"
+    )
+    return run_gate2_smoke(scenarios=scenarios, models=models)
 
 
 if __name__ == "__main__":

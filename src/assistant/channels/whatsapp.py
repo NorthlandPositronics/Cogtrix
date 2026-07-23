@@ -21,6 +21,7 @@ from src.tools._whatsapp_client import REQUESTS_AVAILABLE, ChatOverview, Message
 log = logging.getLogger("cogtrix")
 
 _REACTIVATION_LOOKBACK: float = 300.0  # seconds; limits replay after watermark eviction
+_LID_RESOLVE_TIMEOUT: float = 10.0  # seconds; tests monkey-patch this down
 
 
 def _normalize_number(number: str) -> str:
@@ -296,10 +297,13 @@ class WhatsAppChannel(Channel):
             futures = [pool.submit(self._resolve_lid, number) for number in uncached]
             for future in futures:
                 try:
-                    future.result(timeout=10)
+                    future.result(timeout=_LID_RESOLVE_TIMEOUT)
                 except TimeoutError:
                     future.cancel()
-                    log.warning("LID resolution timed out after 10s — skipping one number")
+                    log.warning(
+                        "LID resolution timed out after %.1fs — skipping one number",
+                        _LID_RESOLVE_TIMEOUT,
+                    )
         finally:
             pool.shutdown(wait=False)
 

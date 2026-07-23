@@ -1,6 +1,9 @@
 """Unit tests for ReasoningMemoryManager."""
 
+import threading
 from datetime import datetime
+
+import pytest
 
 from src.memory.factory import MemoryFactory
 from src.memory.json_store import JsonFileMemoryStore
@@ -566,3 +569,138 @@ class TestReasoningTimestamps:
 
         for msg in m2._messages:
             assert m2._get_msg_ts(msg) is not None
+
+
+class TestReasoningClearDeadlockRegression:
+    """Regression tests for issue #1402: AB/BA deadlock in clear().
+
+    The bug: reasoning.py:clear() acquired _hybrid_lock via super().clear()
+    before acquiring _mode_lock — the reverse of the standard nesting order
+    (_mode_lock -> _hybrid_lock) used by every other method in the memory
+    subsystem. This created a deadlock when clear() ran concurrently with
+    prepare_context() on the same manager instance.
+
+    The fix: clear() now acquires _mode_lock first, then calls super().clear(),
+    matching the standard nesting order.
+    """
+
+    @pytest.fixture
+    def manager(self):
+        store = MockStore()
+        manager = ReasoningMemoryManager(store, "test_deadlock")
+        manager.load()
+        return manager
+
+    def test_clear_and_prepare_context_no_deadlock(self, manager):
+        """clear() and prepare_context() running concurrently must not deadlock."""
+        clear_exc = []
+        clear_done = threading.Event()
+        barrier = threading.Barrier(2)
+
+        def clear_worker():
+            try:
+                barrier.wait()
+                manager.clear()
+            except Exception as exc:
+                clear_exc.append(exc)
+            finally:
+                clear_done.set()
+
+        def context_worker():
+            try:
+                barrier.wait()
+                manager.prepare_context()
+            except Exception:
+                pass
+
+        ct = threading.Thread(target=clear_worker)
+        pt = threading.Thread(target=context_worker)
+        ct.start()
+        pt.start()
+        done = clear_done.wait(timeout=10)
+        assert done, "clear() timed out — possible deadlock"
+        ct.join(timeout=2)
+        pt.join(timeout=2)
+        assert clear_exc == [], f"clear() raised: {clear_exc}"
+
+    def test_clear_blocks_on_mode_lock_then_completes(self, manager):
+        """clear() must block when _mode_lock is held, then complete when released."""
+        clear_exc = []
+        clear_done = threading.Event()
+        start_gate = threading.Barrier(2)
+
+        def holder():
+            with manager._mode_lock:
+                start_gate.wait()
+
+        def clear_worker():
+            start_gate.wait()
+            try:
+                manager.clear()
+            except Exception as exc:
+                clear_exc.append(exc)
+            finally:
+                clear_done.set()
+
+        ht = threading.Thread(target=holder)
+        ct = threading.Thread(target=clear_worker)
+        ht.start()
+        ct.start()
+        done = clear_done.wait(timeout=10)
+        assert done, "clear() timed out — possible deadlock"
+        ht.join(timeout=2)
+        ct.join(timeout=2)
+        assert not clear_exc, f"clear() raised: {clear_exc}"
+        assert clear_done.is_set(), "clear() did not complete after lock release — deadlock"
+
+
+class TestTokensSinceSummaryLockRegression:
+    """Regression tests for #1295: _tokens_since_summary race between update()
+    and background summarizer. Token counter increments must be serialized by
+    _hybrid_lock to prevent lost updates when reset_summary() races with update().
+    """
+
+    def test_tokens_increment_protected_by_hybrid_lock(self):
+        """update() must increment _tokens_since_summary under _hybrid_lock."""
+        _ensure_registration()
+        manager = ReasoningMemoryManager(MockStore(), "test")
+        manager.load()
+        initial = manager._tokens_since_summary
+        manager.update("What is 2+2?", "4")
+        assert manager._tokens_since_summary > initial
+
+    def test_reset_summary_state_zeros_counter(self):
+        """_reset_summary_state() must reset _tokens_since_summary to 0."""
+        _ensure_registration()
+        manager = ReasoningMemoryManager(MockStore(), "test")
+        manager.load()
+        manager.update("Q", "A")
+        assert manager._tokens_since_summary > 0
+        manager._reset_summary_state()
+        assert manager._tokens_since_summary == 0
+
+    def test_concurrent_updates_serialized_by_hybrid_lock(self):
+        """Two threads calling update() concurrently must not raise or corrupt counter."""
+        _ensure_registration()
+        manager = ReasoningMemoryManager(MockStore(), "test")
+        manager.load()
+        errors = []
+        barrier = threading.Barrier(2)
+
+        def updater():
+            try:
+                barrier.wait()
+                for _ in range(20):
+                    manager.update("Q", "A")
+            except Exception as exc:
+                errors.append(("updater", exc))
+
+        t1 = threading.Thread(target=updater)
+        t2 = threading.Thread(target=updater)
+        t1.start()
+        t2.start()
+        t1.join(timeout=20)
+        t2.join(timeout=20)
+        assert t1.is_alive() is False, "thread t1 did not finish"
+        assert t2.is_alive() is False, "thread t2 did not finish"
+        assert errors == [], f"Concurrent access raised: {errors}"

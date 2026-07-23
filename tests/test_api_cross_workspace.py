@@ -104,47 +104,106 @@ class TestCrossWorkspaceMessage:
         assert "id" in d
 
 
+class TestUuidValidation:
+    """Regression tests for CodeQL CWE-22 — explicit UUID v4 sanitiser."""
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "not-a-uuid",
+            "../etc/passwd",
+            "a" * 36,  # right length, wrong chars
+            "00000000-0000-0000-0000-000000000000",  # not v4
+            "00000000-0000-5000-8000-000000000000",  # v5, not v4
+            "00000000-0000-4000-0000-000000000000",  # variant nibble 0 (invalid)
+            "foo/../../../bar",
+            "..%2f..%2f..%2fetc%2fpasswd",
+            "../../../../etc/passwd",
+            "../../../../../../../../etc/passwd",
+        ],
+    )
+    def test_invalid_uuid4_rejected_in_inbox_dir(self, tmp_path, value):
+        from src.api.cross_workspace import _inbox_dir
+
+        with pytest.raises(ValueError, match="Invalid workspace_id"):
+            _inbox_dir(tmp_path, value)
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "not-a-uuid",
+            "../etc/passwd",
+            "00000000-0000-0000-0000-000000000000",
+            "../../../../etc/passwd",
+        ],
+    )
+    def test_invalid_uuid4_rejected_in_delete_message(self, tmp_path, value):
+        # Pass a valid workspace_id so the message_id validation is reached
+        valid_ws = _uid()
+        with pytest.raises(ValueError, match="Invalid message_id"):
+            delete_message(valid_ws, value, data_root=tmp_path)
+
+    def test_valid_uuid4_passes_inbox_dir(self, tmp_path):
+        from src.api.cross_workspace import _inbox_dir
+
+        uid = _uid()
+        result = _inbox_dir(tmp_path, uid)
+        assert str(result).endswith(f"cross_workspace/{uid}")
+
+    def test_valid_uuid4_passes_delete_message(self, tmp_path):
+        # delete_message validates message_id before touching the filesystem
+        uid = _uid()
+        result = delete_message(_uid(), uid, data_root=tmp_path)
+        assert result is False  # no such file, but no exception
+
+
 class TestInboxHelpers:
     def test_write_and_read(self, tmp_path):
+        ws_from = _uid()
+        ws_to = _uid()
         msg = CrossWorkspaceMessage(
-            from_workspace_id="ws-a",
-            to_workspace_id="ws-b",
+            from_workspace_id=ws_from,
+            to_workspace_id=ws_to,
             sender_user_id="u1",
             subject="Test",
         )
         write_to_inbox(msg, data_root=tmp_path)
-        messages = read_inbox("ws-b", data_root=tmp_path)
+        messages = read_inbox(ws_to, data_root=tmp_path)
         assert len(messages) == 1
         assert messages[0]["subject"] == "Test"
 
     def test_read_empty_inbox(self, tmp_path):
-        assert read_inbox("no-such-ws", data_root=tmp_path) == []
+        assert read_inbox(_uid(), data_root=tmp_path) == []
 
     def test_delete_message(self, tmp_path):
+        ws_from = _uid()
+        ws_to = _uid()
         msg = CrossWorkspaceMessage(
-            from_workspace_id="ws-a",
-            to_workspace_id="ws-b",
+            from_workspace_id=ws_from,
+            to_workspace_id=ws_to,
             sender_user_id="u1",
             subject="Delete me",
         )
         write_to_inbox(msg, data_root=tmp_path)
-        deleted = delete_message("ws-b", msg.id, data_root=tmp_path)
+        deleted = delete_message(ws_to, msg.id, data_root=tmp_path)
         assert deleted is True
-        assert read_inbox("ws-b", data_root=tmp_path) == []
+        assert read_inbox(ws_to, data_root=tmp_path) == []
 
     def test_delete_nonexistent_returns_false(self, tmp_path):
-        assert delete_message("ws-b", _uid(), data_root=tmp_path) is False
+        assert delete_message(_uid(), _uid(), data_root=tmp_path) is False
 
     def test_read_respects_limit(self, tmp_path):
+        ws_from = _uid()
+        ws_to = _uid()
         for i in range(5):
             msg = CrossWorkspaceMessage(
-                from_workspace_id="ws-a",
-                to_workspace_id="ws-c",
+                from_workspace_id=ws_from,
+                to_workspace_id=ws_to,
                 sender_user_id="u1",
                 subject=f"msg {i}",
             )
             write_to_inbox(msg, data_root=tmp_path)
-        assert len(read_inbox("ws-c", data_root=tmp_path, limit=3)) == 3
+        assert len(read_inbox(ws_to, data_root=tmp_path, limit=3)) == 3
 
 
 # ---------------------------------------------------------------------------

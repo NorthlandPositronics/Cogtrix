@@ -162,6 +162,19 @@ class TestExecuteShellCommand:
         result = shell.execute_shell_command(large_command, timeout=30)
         assert "[... " in result and "chars truncated" in result
 
+    def test_massive_output_memory_cap(self) -> None:
+        """Regression for issue #1241 — output must not exhaust memory.
+
+        ``seq 1 50000`` produces ~290 k characters.  The hard cap in
+        ``_communicate_with_cap`` is 200 k characters, so the subprocess
+        is killed before all output is buffered.  The truncation logic
+        still produces a safely-bounded result.
+        """
+        result = shell.execute_shell_command("seq 1 50000", timeout=30)
+        assert "[... " in result and "chars truncated" in result
+        # Verify we did not buffer the full 290 k chars
+        assert len(result) < 60_000
+
     def test_command_with_backticks_blocked(self) -> None:
         """Test that command substitution via backticks is blocked for security."""
         result = shell.execute_shell_command("echo `echo test`")
@@ -261,6 +274,89 @@ class TestCommandSubstitutionBlocked:
         """Dollar sign in a literal string must still work."""
         result = shell.execute_shell_command("echo 'Price is $5'")
         assert "$5" in result
+        assert "blocked" not in result.lower()
+
+
+class TestProcessSubstitutionBlocked:
+    """Regression tests for issue #1238 — block <() and >() process substitution."""
+
+    def test_process_substitution_read_blocked(self) -> None:
+        """Process substitution <() must be rejected."""
+        result = shell.execute_shell_command("cat <(whoami)")
+        assert "blocked" in result.lower() or "substitution" in result.lower()
+
+    def test_process_substitution_write_blocked(self) -> None:
+        """Process substitution >() must be rejected."""
+        result = shell.execute_shell_command("tee >(cat)")
+        assert "blocked" in result.lower() or "substitution" in result.lower()
+
+    def test_process_substitution_in_larger_command_blocked(self) -> None:
+        """Process substitution embedded in a larger command must be blocked."""
+        result = shell.execute_shell_command("diff <(echo a) <(echo b)")
+        assert "blocked" in result.lower() or "substitution" in result.lower()
+
+    def test_process_substitution_with_space_does_not_execute(self) -> None:
+        """< (whoami) (with space) is not valid sh syntax and produces an error.
+
+        Unlike <() (no space) which Bash interprets as process substitution,
+        the spaced variant < ( fails in /bin/sh.  This is not a security bypass
+        because no command execution occurs — the shell rejects the syntax.
+        """
+        result = shell.execute_shell_command("cat < (whoami)")
+        # Must either be explicitly blocked or rejected by the shell as syntax error
+        assert (
+            "blocked" in result.lower()
+            or "substitution" in result.lower()
+            or "syntax error" in result.lower()
+            or "unexpected" in result.lower()
+        )
+
+
+class TestSafeEnv:
+    """Regression tests for issue #1239 — subprocess env must not leak secrets."""
+
+    def test_safe_env_excludes_secret_keys(self) -> None:
+        """_safe_env() must not include common secret-bearing variable names."""
+        safe = shell._safe_env()
+        forbidden = {
+            "OPENAI_API_KEY",
+            "ANTHROPIC_API_KEY",
+            "DATABASE_URL",
+            "POSTGRES_PASSWORD",
+            "AWS_SECRET_ACCESS_KEY",
+            "GITHUB_TOKEN",
+            "COGTRIX_API_KEY",
+            "SECRET",
+            "PASSWORD",
+            "TOKEN",
+        }
+        for key in forbidden:
+            assert key not in safe, f"{key} should not be in safe env"
+
+    def test_safe_env_includes_allowed_keys(self) -> None:
+        """_safe_env() must include explicitly whitelisted variables."""
+        safe = shell._safe_env()
+        # PATH is always set and must be present
+        assert "PATH" in safe
+        # HOME is typically set on Unix systems
+        assert "HOME" in safe
+
+    def test_secret_env_var_not_in_command_output(self) -> None:
+        """Setting a secret env var must not make it visible in shell output."""
+        os.environ["COGTRIX_FAKE_SECRET_API_KEY"] = "hunter2"
+        try:
+            # In a subprocess with sanitized env, this var should not be accessible
+            result = shell.execute_shell_command("env | grep COGTRIX_FAKE_SECRET")
+            assert "hunter2" not in result
+            assert "COGTRIX_FAKE_SECRET_API_KEY" not in result
+        finally:
+            del os.environ["COGTRIX_FAKE_SECRET_API_KEY"]
+
+    def test_allowed_env_var_accessible_in_subprocess(self) -> None:
+        """Whitelisted env vars (PATH, HOME) must remain accessible."""
+        result = shell.execute_shell_command("echo $HOME")
+        # HOME must be readable and must resolve to a path
+        assert "/" in result or "Error" in result
         assert "blocked" not in result.lower()
 
 

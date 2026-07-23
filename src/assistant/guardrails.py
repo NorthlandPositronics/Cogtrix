@@ -288,7 +288,13 @@ class InputGuard:
         for p in config.get("input_patterns", []):
             self._patterns.append(re.compile(p, re.IGNORECASE))
 
-    def check(self, text: str) -> GuardrailResult:
+    def check(self, text: str | None) -> GuardrailResult:
+        if text is None:
+            return GuardrailResult(
+                is_safe=False,
+                reason="Input text is None",
+                guard_name="input_validation",
+            )
         if len(text) > self._max_length:
             return GuardrailResult(
                 is_safe=False, reason="Message too long", guard_name="input_length"
@@ -326,9 +332,15 @@ class EncodingDetectionGuard:
         self._enabled: bool = enc_cfg.get("enabled", True)
         self._min_score: float = enc_cfg.get("min_score", 0.6)
 
-    def check(self, text: str) -> GuardrailResult:
+    def check(self, text: str | None) -> GuardrailResult:
         if not self._enabled:
             return GuardrailResult(is_safe=True)
+        if text is None:
+            return GuardrailResult(
+                is_safe=False,
+                reason="Input text is None",
+                guard_name="encoding_detection",
+            )
         score = self._compute_score(text)
         if score >= self._min_score:
             return GuardrailResult(
@@ -868,6 +880,18 @@ class GuardrailPipeline:
     def __init__(self, config: dict[str, Any], llm: Any | None = None) -> None:
         guardrail_cfg = config.get("guardrails", {})
         self._enabled: bool = guardrail_cfg.get("enabled", True)
+        if not self._enabled:
+            log.critical(
+                "GuardrailPipeline: guardrails.enabled is false — "
+                "all input, encoding, tool-call, and output checks are bypassed. "
+                "This is a critical security misconfiguration. "
+                "Set guardrails.enabled to true (or omit it) to enable protection."
+            )
+            raise ValueError(
+                "guardrails.enabled must not be False — all guardrail checks "
+                "would be bypassed, creating a prompt injection and data exfiltration risk. "
+                "Remove the guardrails.enabled=false setting from your config."
+            )
         self._input_guard = InputGuard(guardrail_cfg)
         self._output_guard = OutputGuard(guardrail_cfg)
         self._rate_limiter = ChatRateLimiter(guardrail_cfg)
@@ -882,32 +906,47 @@ class GuardrailPipeline:
         if judge_cfg.get("enabled", False) and llm is not None:
             self._llm_judge = LLMJudge(llm)
 
-    def check_input(self, text: str, chat_id: str) -> GuardrailResult:
+    def check_input(
+        self, text: str | None, chat_id: str, *, skip_trusted_checks: bool = False
+    ) -> GuardrailResult:
+        """Run input guardrail pipeline.
+
+        Args:
+            text: The message text to check.
+            chat_id: The chat session identifier.
+            skip_trusted_checks: If True, skip rate-limiting and blacklist checks
+                (suitable for trusted-operator flows). Injection detection and
+                encoding checks still run.
+        """
         if not self._enabled:
             return GuardrailResult(is_safe=True)
 
-        result = self._violation_tracker.is_blacklisted(chat_id)
-        if not result.is_safe:
-            return result
+        if not skip_trusted_checks:
+            result = self._violation_tracker.is_blacklisted(chat_id)
+            if not result.is_safe:
+                return result
 
-        result = self._rate_limiter.check_and_record(chat_id)
-        if not result.is_safe:
-            return result
+            result = self._rate_limiter.check_and_record(chat_id)
+            if not result.is_safe:
+                return result
 
         result = self._input_guard.check(text)
         if not result.is_safe:
-            self._violation_tracker.record_violation(chat_id)
+            if not skip_trusted_checks:
+                self._violation_tracker.record_violation(chat_id)
             return result
 
         result = self._encoding_guard.check(text)
         if not result.is_safe:
-            self._violation_tracker.record_violation(chat_id)
+            if not skip_trusted_checks:
+                self._violation_tracker.record_violation(chat_id)
             return result
 
         if self._llm_judge is not None:
             result = self._llm_judge.classify(text)
             if not result.is_safe:
-                self._violation_tracker.record_violation(chat_id)
+                if not skip_trusted_checks:
+                    self._violation_tracker.record_violation(chat_id)
                 return result
 
         return GuardrailResult(is_safe=True)

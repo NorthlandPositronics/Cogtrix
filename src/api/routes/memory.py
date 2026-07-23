@@ -164,7 +164,8 @@ async def clear_memory(
                     if hasattr(mm, "_summary"):
                         mm._summary = ""
 
-            await asyncio.to_thread(_do_clear)
+            async with live_session.turn_lock:
+                await asyncio.to_thread(_do_clear)
         except Exception as exc:
             log.warning("Memory clear failed for session %s: %s", session_id, exc)
             raise HTTPException(
@@ -244,9 +245,10 @@ async def switch_memory_mode(
             return mm
 
         new_mm = await asyncio.to_thread(_create_and_load)
-        live_session.memory_manager = new_mm
-        if live_session.config is not None:
-            live_session.config["memory_mode"] = target_mode
+        async with live_session.turn_lock:
+            live_session.memory_manager = new_mm
+            if live_session.config is not None:
+                live_session.config["memory_mode"] = target_mode
 
     except HTTPException:
         raise

@@ -238,45 +238,142 @@ class TestCreateSafeToolWrapper:
 
         assert ui.paused == 0
 
-    def test_file_not_found_error_type_in_message(self):
-        """When the underlying tool raises FileNotFoundError, the result names the exception type."""
+    def test_file_not_found_returns_sanitized_message(self):
+        """When the underlying tool raises FileNotFoundError, no exception class name is exposed."""
         tool = self._make_tool()
         tool.func = MagicMock(side_effect=FileNotFoundError("no such file"))
         reg = self._make_registry(confirms=False)
         ss = SessionState()
         wrapped = create_safe_tool_wrapper(tool, "test_tool", reg, set(), session_state=ss, ui=None)
         result = wrapped.invoke({})
-        assert "FileNotFoundError" in result
+        # Sanitized: no exception class name, no raw error content
+        assert "FileNotFoundError" not in result
+        assert "no such file" not in result
+        assert "Tool execution error:" in result
 
-    def test_tool_execution_error_includes_exception_class_name(self):
-        """The error message for any tool exception includes the exception class name."""
+    def test_permission_error_returns_sanitized_message(self):
+        """When the underlying tool raises PermissionError, no exception class name is exposed."""
         tool = self._make_tool()
         tool.func = MagicMock(side_effect=PermissionError("access denied"))
         reg = self._make_registry(confirms=False)
         ss = SessionState()
         wrapped = create_safe_tool_wrapper(tool, "test_tool", reg, set(), session_state=ss, ui=None)
         result = wrapped.invoke({})
-        assert "PermissionError" in result
+        # Sanitized: no exception class name, no raw error content
+        assert "PermissionError" not in result
+        assert "access denied" not in result
+        assert "Tool execution error:" in result
 
-    def test_error_message_sanitizes_absolute_path(self):
-        """When the underlying tool raises with an absolute path, the path is masked with <path>."""
+    def test_error_message_hides_path_and_class_name(self):
+        """When the underlying tool raises with an absolute path, no path or class name is exposed."""
         tool = self._make_tool()
         tool.func = MagicMock(side_effect=FileNotFoundError("No such file: /etc/passwd"))
         reg = self._make_registry(confirms=False)
         ss = SessionState()
         wrapped = create_safe_tool_wrapper(tool, "test_tool", reg, set(), session_state=ss, ui=None)
         result = wrapped.invoke({})
+        # Sanitized: no absolute path, no exception class name, no raw error content
         assert "/etc/passwd" not in result
-        assert "<path>" in result
-        assert "FileNotFoundError" in result
+        assert "FileNotFoundError" not in result
+        assert "No such file" not in result
+        assert "Tool execution error:" in result
+
+
+class TestErrorSanitization:
+    """Regression tests for error sanitization in create_safe_tool_wrapper (issue #1424).
+
+    Verifies that exception class names, library internals, filesystem paths,
+    and raw error content are never exposed to the LLM in tool error messages.
+    """
+
+    def _make_tool(self):
+        from pydantic import BaseModel
+
+        from src.tools.weather import get_weather
+
+        tool = MagicMock()
+        tool.name = "test_tool"
+        tool.func = get_weather
+        tool.input_schema = BaseModel
+        tool.args_schema = BaseModel  # must be BaseModel subclass, not MagicMock
+        tool.requires_confirmation = False
+        return tool
+
+    def _make_registry(self, confirms: bool = False):
+        from src.registry import ToolRegistry
+
+        reg = ToolRegistry()
+        return reg
+
+    def _invoke(self, side_effect):
+        tool = self._make_tool()
+        tool.func = MagicMock(side_effect=side_effect)
+        reg = self._make_registry()
+        ss = SessionState()
+        wrapped = create_safe_tool_wrapper(tool, "test_tool", reg, set(), session_state=ss, ui=None)
+        return wrapped.invoke({})
+
+    def test_os_error_errno_not_exposed(self):
+        """OSError with errno should not expose the errno number or class name."""
+        exc = OSError(28, "No space left on device")
+        result = self._invoke(exc)
+        assert "OSError" not in result
+        assert "28" not in result  # errno
+        assert "No space left on device" not in result
+        assert "Tool execution error:" in result
+
+    def test_subprocess_called_process_error_hides_output(self):
+        """CalledProcessError should not expose command output or class name."""
+        import subprocess
+
+        exc = subprocess.CalledProcessError(
+            1, "rm -rf /", stderr="rm: cannot remove '/': Permission denied"
+        )
+        result = self._invoke(exc)
+        assert "CalledProcessError" not in result
+        assert "Permission denied" not in result
+        assert "rm: cannot remove" not in result
+        assert "exit code 1" in result  # return code is safe to expose
+
+    def test_runtime_error_sanitized(self):
+        """RuntimeError should not expose the class name or message."""
+        exc = RuntimeError("Session state corrupted: missing required key 'agent_id'")
+        result = self._invoke(exc)
+        assert "RuntimeError" not in result
+        assert "Session state corrupted" not in result
+        assert "missing required key" not in result
+        assert "Tool execution error:" in result
+
+    def test_generic_exception_no_class_name(self):
+        """A bare Exception should not expose class name or message."""
+        exc = Exception("Internal error: database connection pool exhausted (max_connections=10)")
+        result = self._invoke(exc)
+        assert "Exception" not in result
+        assert "connection pool exhausted" not in result
+        assert "max_connections" not in result
+        assert "Tool execution error:" in result
+
+    def test_no_internal_paths_in_messages(self):
+        """Error messages must not contain filesystem paths."""
+        import pathlib
+
+        test_path = str(pathlib.Path("/home/user/.config/cogtrix/secrets.json"))
+        exc = FileNotFoundError(f"Config file not found at {test_path}")
+        result = self._invoke(exc)
+        assert test_path not in result
+        assert "/home/user/.config" not in result
+        assert "secrets.json" not in result
+        assert "FileNotFoundError" not in result
+        assert "Config file not found" not in result  # raw message content hidden
 
 
 class TestComputeDiff:
     """Tests for _compute_file_diff() — the diff preview helper."""
 
-    def test_write_file_new_file_returns_diff(self, tmp_path):
+    def test_write_file_new_file_returns_diff(self, tmp_path, monkeypatch):
         from src.agent.safety import _compute_file_diff
 
+        monkeypatch.chdir(tmp_path)
         p = tmp_path / "new.txt"
         result = _compute_file_diff("write_file", {"path": str(p), "content": "hello\n"})
         assert result is not None
@@ -284,17 +381,19 @@ class TestComputeDiff:
         assert path_str == str(p)
         assert any("+hello" in line for line in diff_lines)
 
-    def test_write_file_no_change_returns_none(self, tmp_path):
+    def test_write_file_no_change_returns_none(self, tmp_path, monkeypatch):
         from src.agent.safety import _compute_file_diff
 
+        monkeypatch.chdir(tmp_path)
         p = tmp_path / "existing.txt"
         p.write_text("hello\n")
         result = _compute_file_diff("write_file", {"path": str(p), "content": "hello\n"})
         assert result is None
 
-    def test_write_file_existing_file_returns_diff(self, tmp_path):
+    def test_write_file_existing_file_returns_diff(self, tmp_path, monkeypatch):
         from src.agent.safety import _compute_file_diff
 
+        monkeypatch.chdir(tmp_path)
         p = tmp_path / "existing.txt"
         p.write_text("old content\n")
         result = _compute_file_diff("write_file", {"path": str(p), "content": "new content\n"})
@@ -309,24 +408,27 @@ class TestComputeDiff:
         result = _compute_file_diff("write_file", {"path": "", "content": "x"})
         assert result is None
 
-    def test_patch_file_not_exists_returns_none(self, tmp_path):
+    def test_patch_file_not_exists_returns_none(self, tmp_path, monkeypatch):
         from src.agent.safety import _compute_file_diff
 
+        monkeypatch.chdir(tmp_path)
         p = tmp_path / "missing.txt"
         result = _compute_file_diff("patch_file", {"path": str(p), "old_str": "x", "new_str": "y"})
         assert result is None
 
-    def test_patch_file_ambiguous_returns_none(self, tmp_path):
+    def test_patch_file_ambiguous_returns_none(self, tmp_path, monkeypatch):
         from src.agent.safety import _compute_file_diff
 
+        monkeypatch.chdir(tmp_path)
         p = tmp_path / "f.txt"
         p.write_text("x\nx\n")
         result = _compute_file_diff("patch_file", {"path": str(p), "old_str": "x", "new_str": "y"})
         assert result is None
 
-    def test_patch_file_returns_diff(self, tmp_path):
+    def test_patch_file_returns_diff(self, tmp_path, monkeypatch):
         from src.agent.safety import _compute_file_diff
 
+        monkeypatch.chdir(tmp_path)
         p = tmp_path / "f.txt"
         p.write_text("hello world\n")
         result = _compute_file_diff(
@@ -346,6 +448,43 @@ class TestComputeDiff:
         from src.agent.safety import _compute_file_diff
 
         result = _compute_file_diff("patch_file", {"path": "", "old_str": "x", "new_str": "y"})
+        assert result is None
+
+    def test_write_file_path_traversal_returns_none(self):
+        from src.agent.safety import _compute_file_diff
+
+        result = _compute_file_diff("write_file", {"path": "/etc/passwd", "content": "pwned\n"})
+        assert result is None
+
+    def test_patch_file_path_traversal_returns_none(self):
+        from src.agent.safety import _compute_file_diff
+
+        result = _compute_file_diff(
+            "patch_file",
+            {"path": "/etc/passwd", "old_str": "root", "new_str": "toor"},
+        )
+        assert result is None
+
+    def test_write_file_dotdot_traversal_returns_none(self, tmp_path):
+        from src.agent.safety import _compute_file_diff
+
+        result = _compute_file_diff(
+            "write_file",
+            {"path": str(tmp_path / ".." / ".." / "secret.txt"), "content": "x"},
+        )
+        assert result is None
+
+    def test_patch_file_dotdot_traversal_returns_none(self, tmp_path):
+        from src.agent.safety import _compute_file_diff
+
+        result = _compute_file_diff(
+            "patch_file",
+            {
+                "path": str(tmp_path / ".." / ".." / "secret.txt"),
+                "old_str": "a",
+                "new_str": "b",
+            },
+        )
         assert result is None
 
 

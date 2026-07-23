@@ -7,25 +7,16 @@ from __future__ import annotations
 
 import difflib
 import enum
-import re
 import threading
 from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from src.logging_config import get_logger
+from src.tools.error_sanitizer import sanitize_error as _sanitize_error
+from src.tools.file_ops import _validate_path
 
 log = get_logger()
-
-# Regex to strip absolute paths from exception messages so internal filesystem
-# layout is not exposed to the agent.  Replaces paths like /home/user/file or
-# C:\Users\user\file with <path>.
-_ABS_PATH_RE = re.compile(
-    r"(?:"
-    r"(?:^|(?<=[\s/]))(?:/[a-zA-Z0-9_.@-]+)+"  # POSIX absolute path (/tmp, /etc, /home/user/...)
-    r"|(?:[A-Za-z]:\\(?:[^\\/:*?\"<>|\r\n]+\\)*[^\\/:*?\"<>|\r\n]*)"  # Windows path
-    r")"
-)
 
 try:
     from src.ui.spinner import _spinner as _activity_spinner
@@ -144,7 +135,11 @@ def _compute_file_diff(tool_name: str, tool_input: dict) -> tuple[str, list[str]
             new_content = tool_input.get("content", "")
             if not path_str:
                 return None
-            path = Path(path_str)
+            is_valid, error, resolved = _validate_path(path_str, is_write=True)
+            if not is_valid:
+                log.warning("_compute_file_diff path validation failed for %r: %s", path_str, error)
+                return None
+            path = resolved if resolved is not None else Path(path_str)
             if not path.is_absolute():
                 path = Path.cwd() / path_str
             old_content = (
@@ -169,7 +164,11 @@ def _compute_file_diff(tool_name: str, tool_input: dict) -> tuple[str, list[str]
             new_str = tool_input.get("new_str", "")
             if not path_str:
                 return None
-            path = Path(path_str)
+            is_valid, error, resolved = _validate_path(path_str, is_write=True)
+            if not is_valid:
+                log.warning("_compute_file_diff path validation failed for %r: %s", path_str, error)
+                return None
+            path = resolved if resolved is not None else Path(path_str)
             if not path.is_absolute():
                 path = Path.cwd() / path_str
             if not path.exists():
@@ -375,11 +374,9 @@ def create_safe_tool_wrapper(
             raise
         except Exception as e:
             log.warning("Tool %s execution error: %s", tool_name, e, exc_info=True)
-            # Sanitize absolute paths from the error message before returning
-            # to the agent — FileNotFoundError, PermissionError etc. can expose
-            # internal filesystem layout.
-            sanitized_msg = _ABS_PATH_RE.sub("<path>", str(e))
-            return f"Tool execution error ({type(e).__name__}): {sanitized_msg}"
+            # Sanitize the error message — no exception class names or library
+            # internals to the agent, and no absolute filesystem paths.
+            return f"Tool execution error: {_sanitize_error(e)}"
         finally:
             if _activity_spinner is not None:
                 _activity_spinner.clear_context()

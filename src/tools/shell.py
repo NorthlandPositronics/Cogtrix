@@ -10,9 +10,12 @@ import shlex
 import signal
 import subprocess  # nosec B404
 import sys
+import threading
 from pathlib import Path
 
 from pydantic import BaseModel, Field
+
+from src.tools.error_sanitizer import sanitize_shell_error as _sanitize_shell_error
 
 # Application install directory — allows read/write access similar to file_ops.
 _APP_DIR: Path = Path(__file__).resolve().parent.parent.parent
@@ -20,6 +23,20 @@ _APP_DIR: Path = Path(__file__).resolve().parent.parent.parent
 # Extra allowed directories, populated from file_ops configuration at import time
 # and kept in sync via the setter functions.
 _extra_allowed_dirs: list[Path] = []
+
+# Whitelisted env vars passed to subprocess — excludes all secret-bearing vars.
+# Issue #1239.
+_ALLOWED_ENV_KEYS = frozenset({"PATH", "HOME", "TERM", "LANG", "LC_ALL", "PWD", "USER"})
+
+
+def _safe_env() -> dict[str, str]:
+    """Return a sanitized environment dict for subprocess execution.
+
+    Only whitelisted, non-secret variables are included.  This prevents API keys,
+    database credentials, and other secrets inherited from the parent process
+    from leaking into shell command output or being accessible to the child.
+    """
+    return {k: v for k, v in os.environ.items() if k in _ALLOWED_ENV_KEYS}
 
 
 def _resolve_allowed_dirs() -> list[Path]:
@@ -72,6 +89,75 @@ def _validate_working_directory(path: str) -> tuple[bool, str, Path | None]:
     )
 
 
+def _communicate_with_cap(
+    proc: subprocess.Popen,
+    timeout: int,
+    max_chars: int,
+) -> tuple[str, str]:
+    """Read stdout/stderr with a hard character cap to avoid memory exhaustion.
+
+    Uses background threads to drain both pipes concurrently so the subprocess
+    never deadlocks because one buffer is full.  Once *max_chars* have been
+    accumulated the process group is killed and the remaining data is discarded.
+    If the subprocess does not finish within *timeout* seconds,
+    ``subprocess.TimeoutExpired`` is raised (mirroring ``Popen.communicate``).
+    """
+    stdout_chunks: list[str] = []
+    stderr_chunks: list[str] = []
+    total = 0
+    cap_hit = False
+    lock = threading.Lock()
+
+    def _drain(pipe: subprocess.PIPE, chunks: list[str]) -> None:  # type: ignore[type-arg]
+        nonlocal total, cap_hit
+        while True:
+            chunk = pipe.read(4096)
+            if not chunk:
+                break
+            with lock:
+                if not cap_hit:
+                    chunks.append(chunk)
+                    total += len(chunk)
+                    if total > max_chars:
+                        cap_hit = True
+                        # Stop the producer — kill the whole process group.
+                        try:
+                            os.killpg(proc.pid, signal.SIGKILL)
+                        except OSError:
+                            try:
+                                proc.kill()
+                            except OSError:
+                                pass
+                # After the cap is hit we keep reading (but discard) so the
+                # pipe does not deadlock.
+
+    t_out = threading.Thread(target=_drain, args=(proc.stdout, stdout_chunks))
+    t_err = threading.Thread(target=_drain, args=(proc.stderr, stderr_chunks))
+    t_out.start()
+    t_err.start()
+
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        # Replicate communicate() behaviour — kill and re-raise.
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except OSError as exc:
+            if exc.errno != errno.ESRCH:
+                print(
+                    f"Warning: os.killpg failed for process group {proc.pid}: {exc}",
+                    file=sys.stderr,
+                )
+            proc.kill()
+        proc.wait()
+        raise
+
+    t_out.join(timeout=5)
+    t_err.join(timeout=5)
+
+    return "".join(stdout_chunks), "".join(stderr_chunks)
+
+
 class ShellCommandInput(BaseModel):
     """Input schema for shell command execution."""
 
@@ -122,6 +208,11 @@ def execute_shell_command(
             "Error: Command substitution via backticks is blocked for security. "
             "Use a safe alternative or split the command into separate steps."
         )
+    if "<(" in command or ">(" in command:
+        return (
+            "Error: Command substitution via <() or >() process substitution is blocked for security. "
+            "Use a safe alternative or split the command into separate steps."
+        )
 
     # Validate and clamp timeout
     timeout = min(max(1, timeout), 300)
@@ -157,6 +248,7 @@ def execute_shell_command(
                 cwd=cwd,
                 shell=True,  # nosec B602
                 start_new_session=True,
+                env=_safe_env(),  # nosec B605 — _safe_env strips secrets
             )
         else:
             # Simple command — use shlex.split for cleaner execution
@@ -171,10 +263,14 @@ def execute_shell_command(
                 text=True,
                 cwd=cwd,
                 start_new_session=True,
+                env=_safe_env(),
             )
 
+        _SAFETY_CAP = 50_000
+        _HARD_CAP = _SAFETY_CAP * 4  # 200 k chars — enough for truncation logic
+
         try:
-            stdout, stderr = proc.communicate(timeout=timeout)
+            stdout, stderr = _communicate_with_cap(proc, timeout, _HARD_CAP)
         except subprocess.TimeoutExpired:
             # Kill the entire process group so grandchild processes are cleaned up
             try:
@@ -206,7 +302,6 @@ def execute_shell_command(
         if proc.returncode != 0:
             output += f"\n[exit code: {proc.returncode}]"
 
-        _SAFETY_CAP = 50_000
         if len(output) > _SAFETY_CAP:
             half = _SAFETY_CAP // 2
             output = (
@@ -227,7 +322,7 @@ def execute_shell_command(
     except PermissionError:
         return "Error: Permission denied executing command"
     except Exception as e:  # noqa: BLE001
-        return f"Error executing command ({type(e).__name__}): {e}"
+        return f"Error executing command: {_sanitize_shell_error(e)}"
 
 
 # Tool metadata for registry

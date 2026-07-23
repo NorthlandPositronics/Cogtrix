@@ -51,7 +51,14 @@ def client(engine):
     _app.state.startup_time = time.monotonic()
     _app.state.started_at = datetime.now(UTC)
     try:
-        yield TestClient(_app)
+        # ``with TestClient(...)`` runs the FastAPI lifespan startup hook,
+        # which resets the module-level ``_shutdown_initiated`` flag in
+        # ``src/api/app.py``. Without the context manager, the flag persists
+        # from any earlier test in the same worker that triggered the
+        # shutdown path, and the ``_request_context_middleware`` rejects
+        # every request with 503 Service Unavailable.
+        with TestClient(_app) as c:
+            yield c
     finally:
         _app.dependency_overrides.clear()
 

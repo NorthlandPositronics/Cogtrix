@@ -68,12 +68,26 @@ models:
     provider: deepseek
     display_name: "DeepSeek V3"
     tier: B
-    smoke: true
+    smoke: false
     env_key: DEEPSEEK_API_KEY
     model_id: deepseek-chat
     openrouter_model_id: deepseek/deepseek-chat
     input_price_per_1m: 0.27
     output_price_per_1m: 1.10
+
+# deepseek-v4-flash (deepseek-reasoner) — reasoning model with thinking mode.
+  # The runner now routes through create_chat_model (→ _DeepSeekChatModel) so
+  # reasoning_content is captured and re-injected automatically (issue #1391).
+  - id: deepseek-v4-flash
+    provider: deepseek
+    display_name: "DeepSeek V4 Flash"
+    tier: A
+    smoke: true
+    env_key: DEEPSEEK_API_KEY
+    model_id: deepseek-reasoner
+    openrouter_model_id: deepseek/deepseek-reasoner
+    input_price_per_1m: 0.55
+    output_price_per_1m: 2.20
 
   # ── Alibaba / Qwen ─────────────────────────────────────────────────────────
   - id: qwen3-72b
@@ -141,14 +155,46 @@ models:
     output_price_per_1m: 2.50
 
   # ── Cerebras ───────────────────────────────────────────────────────────────
-  - id: llama3-70b-cerebras
+  # Kept in the registry for documentation / nightly-only runs but
+  # ``smoke: false`` so it does NOT appear in the Gate 2 smoke matrix.
+  # Cerebras's 1M tokens-per-minute limit on gpt-oss-120b combined with
+  # the 4-parallel-cell smoke fan-out produced recurring 429 storms and
+  # cell timeouts that blocked PRs on every busy run.  Even after raising
+  # the per-job timeout to 15 min, adding the OpenRouter fallback, and
+  # marking Cerebras cells advisory, the operational signal-to-noise
+  # stayed bad enough to justify replacing Cerebras with Fireworks
+  # (gpt-oss-20b) in the smoke set.
+  - id: gpt-oss-120b-cerebras
     provider: openai_compatible
-    display_name: "Llama 3.3 70B (Cerebras)"
-    tier: B
-    smoke: true
+    display_name: "GPT-OSS 120B (Cerebras)"
+    tier: A
+    smoke: false
     env_key: CEREBRAS_API_KEY
-    model_id: llama-3.3-70b
+    model_id: gpt-oss-120b
     base_url: https://api.cerebras.ai/v1
-    openrouter_model_id: meta-llama/llama-3.3-70b-instruct
-    input_price_per_1m: 0.85
-    output_price_per_1m: 1.20
+    openrouter_model_id: openai/gpt-oss-120b
+
+  # ── Fireworks ──────────────────────────────────────────────────────────────
+  # Replaces gpt-oss-120b-cerebras in the smoke set.  Fireworks hosts
+  # OpenAI's gpt-oss-20b on a per-token billing plan with documented
+  # rate limits and an OpenAI-compatible REST API, which makes it a
+  # drop-in for the ``openai_compatible`` provider handler.  The 20B
+  # parameter count is smaller than the 120B model it replaces, but is
+  # still enough to exercise the agent loop end-to-end and catch the
+  # smoke-class regressions (tool calling, recovery synthesis, content
+  # sanitisation) that Gate 2 guards.
+  #
+  # The Fireworks model path uses the ``accounts/fireworks/models/…``
+  # convention.  If the exact slug differs in the user's Fireworks
+  # account, update model_id; the existing
+  # ``_is_model_unavailable_error`` fallback predicate will surface a
+  # clear "model not found" message rather than crashing the cell.
+  - id: gpt-oss-20b-fireworks
+    provider: openai_compatible
+    display_name: "GPT-OSS 20B (Fireworks)"
+    tier: A
+    smoke: true
+    env_key: FIREWORKS_API_KEY
+    model_id: accounts/fireworks/models/gpt-oss-20b
+    base_url: https://api.fireworks.ai/inference/v1
+    openrouter_model_id: openai/gpt-oss-20b

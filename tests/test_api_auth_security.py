@@ -70,7 +70,9 @@ def test_app():
         async with test_engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
 
-    asyncio.run(_create())
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(_create())
 
     with patch.dict(os.environ, {"COGTRIX_JWT_SECRET": _TEST_JWT_SECRET}):
         from src.api.app import create_app
@@ -92,7 +94,8 @@ def test_app():
 
         yield app
 
-    asyncio.run(test_engine.dispose())
+    loop.run_until_complete(test_engine.dispose())
+    loop.close()
 
 
 @pytest.fixture()

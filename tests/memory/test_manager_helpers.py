@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -374,13 +375,30 @@ class TestBaseMemoryManagerHelpers:
         mgr = _make_manager(tmp_path)
         mgr._summary = "test summary"
         mgr._summary_msg_idx = 5
-        # Hold the lock from another thread so non-blocking acquire fails
-        mgr._hybrid_lock.acquire()
+        # Hold the lock from another thread so non-blocking acquire fails.
+        # RLock allows same-thread re-entry, so we must use a separate thread.
+        # Use a Barrier to guarantee the worker has acquired the lock before
+        # the main thread attempts its own acquire(timeout=0.0).
+        barrier = threading.Barrier(2)
+
+        def hold_lock():
+            mgr._hybrid_lock.acquire()
+            try:
+                barrier.wait(timeout=5.0)  # signal: lock is held
+                barrier.wait(timeout=5.0)  # wait: safe to release
+            finally:
+                mgr._hybrid_lock.release()
+
+        t = threading.Thread(target=hold_lock)
+        t.start()
+        barrier.wait(timeout=5.0)  # wait: worker has the lock
         try:
             result = mgr._get_hybrid_snapshot(block=False, timeout=0.0)
             assert result is None
         finally:
-            mgr._hybrid_lock.release()
+            barrier.wait(timeout=5.0)  # signal: main thread done
+            t.join()
+            barrier.abort()  # clean up — we used barrier.wait twice in worker
 
     def test_save_hybrid_meta_skips_when_snapshot_none(self, tmp_path):
         mgr = _make_manager(tmp_path)
@@ -391,12 +409,29 @@ class TestBaseMemoryManagerHelpers:
         assert mgr._hybrid_meta_path().exists()
         mtime_before = mgr._hybrid_meta_path().stat().st_mtime
 
-        # Hold the lock so non-blocking snapshot returns None
-        mgr._hybrid_lock.acquire()
+        # Hold the lock from another thread so non-blocking snapshot returns None.
+        # RLock allows same-thread re-entry, so we must use a separate thread.
+        # Use a Barrier to guarantee the worker has acquired the lock before
+        # the main thread attempts its own acquire(timeout=0.0).
+        barrier = threading.Barrier(2)
+
+        def hold_lock():
+            mgr._hybrid_lock.acquire()
+            try:
+                barrier.wait(timeout=5.0)  # signal: lock is held
+                barrier.wait(timeout=5.0)  # wait: safe to release
+            finally:
+                mgr._hybrid_lock.release()
+
+        t = threading.Thread(target=hold_lock)
+        t.start()
+        barrier.wait(timeout=5.0)  # wait: worker has the lock
         try:
             mgr._save_hybrid_meta(block=False, timeout=0.0)
         finally:
-            mgr._hybrid_lock.release()
+            barrier.wait(timeout=5.0)  # signal: main thread done
+            t.join()
+            barrier.abort()
 
         # File should still exist and be unchanged (not deleted or overwritten)
         assert mgr._hybrid_meta_path().exists()
@@ -410,14 +445,31 @@ class TestBaseMemoryManagerHelpers:
         mgr._save_hybrid_meta()
         original_mtime = mgr._hybrid_meta_path().stat().st_mtime
 
-        # Change state but hold lock so shutdown-style save can't snapshot
+        # Change state but hold lock so shutdown-style save can't snapshot.
+        # RLock allows same-thread re-entry, so we must use a separate thread.
+        # Use a Barrier to guarantee the worker has acquired the lock before
+        # the main thread attempts its own acquire(timeout=0.0).
         mgr._summary = "new summary"
         mgr._summary_msg_idx = 10
-        mgr._hybrid_lock.acquire()
+        barrier = threading.Barrier(2)
+
+        def hold_lock():
+            mgr._hybrid_lock.acquire()
+            try:
+                barrier.wait(timeout=5.0)  # signal: lock is held
+                barrier.wait(timeout=5.0)  # wait: safe to release
+            finally:
+                mgr._hybrid_lock.release()
+
+        t = threading.Thread(target=hold_lock)
+        t.start()
+        barrier.wait(timeout=5.0)  # wait: worker has the lock
         try:
             mgr._save_hybrid_meta(block=False, timeout=0.0)
         finally:
-            mgr._hybrid_lock.release()
+            barrier.wait(timeout=5.0)  # signal: main thread done
+            t.join()
+            barrier.abort()
 
         # Reload and verify original state was preserved on disk
         mgr2 = _make_manager(tmp_path)

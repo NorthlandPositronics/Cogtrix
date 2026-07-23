@@ -15,7 +15,7 @@ import time
 import types
 import typing
 from collections import Counter, OrderedDict
-from dataclasses import asdict, dataclass, is_dataclass
+from dataclasses import asdict, dataclass, field, fields, is_dataclass
 from difflib import SequenceMatcher
 from typing import Any
 
@@ -512,7 +512,7 @@ _TOOL_VERB_RE = re.compile(
     # Data processing
     r"|transform\w{0,8}|extract\w{0,8}|analyz\w{0,8}|analys\w{0,8}"
     r"|comput\w{0,8}|calculat\w{0,8}|process\w{0,8}|pars\w{0,8}"
-    r"|export\w{0,8}|migrat\w{0,8}|convert\w{0,8}"
+    r"|export\w{0,8}|migrat\w{0,8}|convert\w{0,8}|classif\w{0,8}"
     # Infra
     r"|register\w{0,8}|connect\w{0,8}|verif\w{0,8}|inspect\w{0,8}|examin\w{0,8}" r"|clone\w{0,8}"
     # Short stems — explicit inflections only
@@ -615,6 +615,119 @@ def _is_action_intent(message: Any) -> bool:
             ):
                 continue  # FP phrase is the only lead-in — suppress
         return True
+    return False
+
+
+# Phrases that signal a multi-step task is incomplete — the model used
+# sequential language ("first", "to start") but stopped before finishing.
+# Only fires when paired with an action-intent detection (intent lead +
+# tool verb in the same sentence), which guards against false positives
+# from purely conversational uses of these words.
+_INCOMPLETENESS_SIGNAL_RE = re.compile(
+    r"\b(?:"
+    r"first\b"  # "create the PO first" → there's a second step
+    r"|to\s+start\b"  # "to start, let me..."
+    r"|to\s+begin\b"  # "to begin with..."
+    r"|initially\b"  # "initially create the PO"
+    r"|step\s*1\b"  # "step 1: create the PO"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def _has_incompleteness_signal(text: str) -> bool:
+    """Return True when the text signals an incomplete multi-step operation.
+
+    Detects language that implies the model planned more steps but
+    stopped early — e.g. "first", "to start", "step 1".  Only relevant
+    when ``_is_action_intent`` has already identified an intent-lead
+    + tool-verb pair in the same sentence; this function narrows the
+    nudge from generic to specific.
+    """
+    if not text or not isinstance(text, str):
+        return False
+    # Restrict to the sentence containing the incompleteness signal
+    # so a "first" in a generic intro doesn't contaminate a later sentence.
+    sentences = re.split(r"[.!?\n]", text)
+    for sentence in sentences:
+        s = sentence.strip()
+        if not s:
+            continue
+        if _INCOMPLETENESS_SIGNAL_RE.search(s) and _INTENT_LEAD_RE.search(s):
+            return True
+    return False
+
+
+# Past-tense action verbs at the start of numbered or bulleted list items.
+# Used to detect hallucinated-completion summaries where the model claims
+# "1. Notified the VP..." without actually calling notify_approver.
+_PAST_TENSE_LIST_VERB_RE = re.compile(
+    r"^\s*(?:\d+[.)]|[-*•])\s+([A-Z][a-z]{2,}(?:ied|ed))\b",
+    re.MULTILINE,
+)
+
+
+def _is_hallucinated_completion(
+    message: Any,
+    messages: typing.Sequence[Any],
+    available_tool_names: list[str],
+) -> bool:
+    """Return True when the final response claims past-tense completion
+    of an action whose corresponding tool was never actually called.
+
+    Pattern observed on gpt-oss-20b for finance_invoice_approval_workflow:
+
+        1. Classified as "medium" tier (amount $12,500).
+        2. Routed to the VP-level approval queue.
+        3. Notified the VP for review.   ← notify_approver never called
+
+    The standard ``_is_action_intent`` detector matches only future-tense
+    intent leads ("I'll notify", "Let me..."); past-tense passive claims
+    slip past it.  A weaker/cheaper model that confabulates a completion
+    summary without executing every required step would otherwise reach
+    the user, fail scenario assertions, and burn the run budget with no
+    recovery cycle.
+
+    Heuristic:
+    1. Find past-tense verbs at the start of numbered/bulleted list items
+       in the final text response.
+    2. For each verb, derive a stem by stripping ``ed`` / ``ied``.
+    3. If the stem appears in an *available* tool name, AND that tool was
+       not called in the conversation, treat as hallucinated completion.
+
+    Stem-matching is intentionally permissive ("notif" matches
+    ``notify_approver``); the false-positive ceiling is bounded by the
+    "in the available tool list" check — a verb that doesn't correspond
+    to any tool the agent could have called never triggers.
+    """
+    if getattr(message, "tool_calls", None):
+        return False
+    content = getattr(message, "content", "")
+    if not isinstance(content, str) or not content.strip():
+        return False
+
+    verbs = _PAST_TENSE_LIST_VERB_RE.findall(content)
+    if not verbs:
+        return False
+
+    called_names: set[str] = set()
+    for m in messages:
+        for tc in getattr(m, "tool_calls", None) or []:
+            name = tc.get("name") if isinstance(tc, dict) else None
+            if name:
+                called_names.add(name.lower())
+
+    available_lower = [t.lower() for t in available_tool_names]
+
+    for verb in verbs:
+        stem = re.sub(r"(?:ied|ed)$", "", verb.lower())
+        if len(stem) < 4:
+            # Too short to disambiguate ("Read"-ed → "read" is fine but
+            # "Set"-? doesn't end in ed/ied so won't match anyway).
+            continue
+        for tool_name in available_lower:
+            if stem in tool_name and tool_name not in called_names:
+                return True
     return False
 
 
@@ -1390,6 +1503,65 @@ def _safe_tool_name(name: str, max_len: int = 80) -> str:
     return sanitized[:max_len] if sanitized else "<unknown>"
 
 
+@dataclass
+class PerRunState:
+    """All mutable per-run state for a compiled agent graph.
+
+    Scalar fields are list-wrapped so that closures mutated inside
+    graph nodes see the current value without rebinding the closure.
+    A fresh instance is created by ``_reset_for_new_run()`` between
+    agent turns, which guarantees every counter and collection is
+    zeroed — a new field added here is automatically reset.
+    """
+
+    # Retry / loop counters
+    phantom_count: list[int] = field(default_factory=lambda: [0])
+    fabrication_count: list[int] = field(default_factory=lambda: [0])
+    action_intent_count: list[int] = field(default_factory=lambda: [0])
+    incompleteness_nudge_given: list[int] = field(default_factory=lambda: [0])
+    expansion_count: list[int] = field(default_factory=lambda: [0])
+    auto_expansion_count: list[int] = field(default_factory=lambda: [0])
+    call_count: list[int] = field(default_factory=lambda: [0])
+    last_input_tokens: list[int] = field(default_factory=lambda: [0])
+    request_tools_noop_count: list[int] = field(default_factory=lambda: [0])
+
+    # Tool tracking
+    tool_version: list[int] = field(default_factory=lambda: [0])
+    last_tool_version: list[int] = field(default_factory=lambda: [-1])
+    tool_call_history: OrderedDict[str, str] = field(default_factory=OrderedDict)
+    tool_call_counts: dict[str, int] = field(default_factory=dict)
+
+    # Reflection / health-check pacing
+    last_reflection_at: list[int] = field(default_factory=lambda: [0])
+    last_tool_health_check_at: list[int] = field(default_factory=lambda: [0])
+
+    # Stuck-detection state
+    stuck_threshold_calibrated: list[bool] = field(default_factory=lambda: [False])
+    stuck_no_checkpoint_threshold: list[int] = field(default_factory=lambda: [15])
+    consecutive_errors: list[int] = field(default_factory=lambda: [0])
+    force_thinking_break: list[bool] = field(default_factory=lambda: [False])
+    consecutive_identical_error_count: list[int] = field(default_factory=lambda: [0])
+    last_identical_error_signature: list[tuple[str, str] | None] = field(
+        default_factory=lambda: [None]
+    )
+
+    # Checkpoint pacing
+    last_checkpoint_count: list[int] = field(default_factory=lambda: [0])
+    rounds_since_checkpoint: list[int] = field(default_factory=lambda: [0])
+    calls_since_last_checkpoint: list[int] = field(default_factory=lambda: [0])
+
+    # File-write tracking
+    same_file_writes: dict[str, int] = field(default_factory=dict)
+
+    # Cache / lookup state
+    bound_cache: OrderedDict = field(default_factory=OrderedDict)
+    compression_cache: dict[str, str] = field(default_factory=dict)
+    tool_lookup: dict[str, Any] = field(default_factory=dict)
+    active_names: set[str] = field(default_factory=set)
+    tool_catalog: dict[str, str] = field(default_factory=dict)
+    available_tools_ref: list[dict] = field(default_factory=list)
+
+
 def build_agent_graph(
     llm: Any = None,
     system_prompt: str = "",
@@ -1554,28 +1726,27 @@ def build_agent_graph(
             available_tools["extend_run"] = _extend_tool
         except ImportError:
             pass
-
-    phantom_count = [0]
-    fabrication_count = [0]
-    action_intent_count = [0]
-    expansion_count = [0]
-    auto_expansion_count = [0]
-    call_count = [0]
-    _last_input_tokens = [0]  # actual input tokens from the previous model call
     _MAX_PHANTOM_RETRIES = 3
     _MAX_FABRICATION_RETRIES = 3
     _MAX_ACTION_INTENT_RETRIES = 3
+    # After the 3 standard action-intent nudges are exhausted, the model
+    # gets exactly one more chance if the response contains incompleteness
+    # language ("first", "to start", "step 1") — a stronger nudge that
+    # demands completion rather than a generic "call the appropriate tool".
+    _MAX_INCOMPLETENESS_NUDGES = 1
     _MAX_TOOL_EXPANSIONS = 3
-    request_tools_noop_count = [0]
     _MAX_REQUEST_TOOLS_NOOPS = 3
-    _tool_call_history: OrderedDict[str, str] = OrderedDict()
     _MAX_TOOL_CALL_HISTORY = 256
     _history_lock = threading.Lock()
+    # Pending events for in-flight tool calls (BUG-1293): maps call_key -> threading.Event.
+    # Used to block duplicate parallel threads until the first thread stores the result.
+    _pending_events: dict[str, threading.Event] = {}
     # Per-tool call counter: tracks how many times each tool is called this turn.
     # After _TOOL_BUDGET_SOFT calls, a synthesis hint is appended to the output.
     # After _TOOL_BUDGET_HARD calls, the tool returns a stop message.
-    _tool_call_counts: dict[str, int] = {}
-    _tool_budget_lock = threading.Lock()  # Protects _tool_call_counts and active_tools_list
+    _tool_budget_lock = (
+        threading.Lock()
+    )  # Protects _per_run_state[0].tool_call_counts and active_tools_list
     _TOOL_BUDGET_SOFT = 5  # nudge: "please synthesize"
     _TOOL_BUDGET_HARD = 8  # stop: "budget exhausted"
     _TOOL_BUDGET_SOFT_EXEMPT = {
@@ -1627,20 +1798,11 @@ def build_agent_graph(
         "defer_processing",
     }
     protected = (preset_tools or set()) | {"request_tools"}
-    _bound_cache: OrderedDict[tuple[str, ...], Any] = (
-        bound_cache if bound_cache is not None else OrderedDict()
-    )
-    # Lock protecting the per-graph _bound_cache; mirrors the module-level
-    # _persistent_bound_cache pattern in runner.py (BUG-233).
     _bound_cache_lock = threading.Lock()
-    _tool_version = [0]
-    _last_tool_version = [-1]
     _REFLECTION_INTERVAL = 10  # inject reflection every N call_model cycles
-    _last_reflection_at = [0]
     _TOOL_HEALTH_CHECK_INTERVAL = (
         getattr(config, "tool_health_check_interval", 20) if config is not None else 20
     )
-    _last_tool_health_check_at = [0]
     _TOOL_QUALITY_GATE_ENABLED = (
         getattr(config, "tool_quality_gate_enabled", True) if config is not None else True
     )
@@ -1654,17 +1816,7 @@ def build_agent_graph(
     # WITHOUT tools (forced thinking break) so the model must produce
     # a text-only Chain-of-Thought response before it can resume tool use.
     _STUCK_THRESHOLD = 5  # consecutive error results before forcing a break
-    _STUCK_NO_CHECKPOINT_THRESHOLD = [15]  # mutable — scaled on first call_model
-    _STUCK_THRESHOLD_CALIBRATED = [False]
-    _consecutive_errors = [0]
-    _force_thinking_break = [False]
-    _last_identical_error_signature: list[tuple[str, str] | None] = [None]
-    _consecutive_identical_error_count = [0]
-    _last_checkpoint_count = [0]
-    _rounds_since_checkpoint = [0]
-    _calls_since_last_checkpoint = [0]  # tool calls since last checkpoint
     _CHECKPOINT_NUDGE_INTERVAL = 8  # nudge after N tool calls without checkpoint
-    _same_file_writes: dict[str, int] = {}  # track repeated writes to same file
     _same_file_writes_lock = threading.Lock()
     _REWRITE_SEARCH_THRESHOLD = 2  # search reminder after N writes to same file
 
@@ -1675,17 +1827,25 @@ def build_agent_graph(
         else TOOL_OUTPUT_CAP_MIN_CHARS
     )
     _sys_msg = SystemMessage(content=system_prompt) if system_prompt else None
-    _tool_lookup: dict[str, Any] = {getattr(t, "name", ""): t for t in active_tools_list}
-    _tool_lookup.pop("", None)
-    _active_names: set[str] = set(_tool_lookup.keys())
-    # Wrap available_tools in a single-element list so the closure can be
-    # updated in-place when the graph is reused across agent turns (Fix 3).
-    _available_tools_ref: list[dict] = [available_tools]
-    tool_catalog: dict[str, str] = build_tool_catalog(available_tools)
 
-    _compression_cache: dict[str, str] = (
-        compression_cache_in if compression_cache_in is not None else {}
-    )
+    # ── Per-run mutable state (structurally reset) ────────────────────
+    # All counters, collections, and lookup tables that must be zeroed
+    # between agent turns live in a single dataclass.  A fresh instance
+    # is created by _reset_for_new_run(), so a newly-added field is
+    # automatically reset — no risk of forgetting a manual reset line.
+    _tool_lookup_init: dict[str, Any] = {getattr(t, "name", ""): t for t in active_tools_list}
+    _tool_lookup_init.pop("", None)
+    _active_names_init: set[str] = set(_tool_lookup_init.keys())
+    _per_run_state: list[PerRunState] = [
+        PerRunState(
+            tool_lookup=_tool_lookup_init,
+            active_names=_active_names_init,
+            tool_catalog=build_tool_catalog(available_tools),
+            available_tools_ref=[available_tools],
+            bound_cache=(bound_cache if bound_cache is not None else OrderedDict()),
+            compression_cache=(compression_cache_in if compression_cache_in is not None else {}),
+        )
+    ]
 
     # ── Checkpoint store ──────────────────────────────────────────────
     from src.tools.checkpoint import CheckpointStore, create_checkpoint_tool
@@ -1701,8 +1861,8 @@ def build_agent_graph(
         _existing_names = {getattr(t, "name", "") for t in active_tools_list}
         if "checkpoint" not in _existing_names:
             active_tools_list.append(_checkpoint_tool)
-            _active_names.add("checkpoint")
-            _tool_lookup["checkpoint"] = _checkpoint_tool
+            _per_run_state[0].active_names.add("checkpoint")
+            _per_run_state[0].tool_lookup["checkpoint"] = _checkpoint_tool
 
     _graph_log = get_logger()
 
@@ -1740,12 +1900,12 @@ def build_agent_graph(
         if not normalized_tools:
             return
         fingerprint = tuple(getattr(t, "name", "") for t in normalized_tools)
-        if fingerprint in _bound_cache:
+        if fingerprint in _per_run_state[0].bound_cache:
             return
         try:
-            if len(_bound_cache) >= 8:
-                _bound_cache.popitem(last=False)
-            _bound_cache[fingerprint] = llm.bind_tools(normalized_tools)
+            if len(_per_run_state[0].bound_cache) >= 8:
+                _per_run_state[0].bound_cache.popitem(last=False)
+            _per_run_state[0].bound_cache[fingerprint] = llm.bind_tools(normalized_tools)
             _cached_fingerprint[0] = fingerprint
             _graph_log.debug("⏱ bind_tools warm-up: %d tool(s)", len(normalized_tools))
         except Exception as exc:
@@ -1782,7 +1942,7 @@ def build_agent_graph(
         # Also check token-based ratio when real data is available — the
         # char estimate underestimates web/JSON content density.
         token_ratio = 0.0
-        last_tokens = _last_input_tokens[0]
+        last_tokens = _per_run_state[0].last_input_tokens[0]
         if last_tokens > 0 and max_context_tokens > 0:
             token_ratio = last_tokens / max_context_tokens
         effective_ratio = max(ratio, token_ratio)
@@ -1797,8 +1957,8 @@ def build_agent_graph(
         min_age_ovr = 0 if effective_ratio >= _EMERGENCY_THRESHOLD_RATIO else compression_min_age
         return apply_message_compression(
             msgs,
-            call_count=call_count[0],
-            compression_cache=_compression_cache,
+            call_count=_per_run_state[0].call_count[0],
+            compression_cache=_per_run_state[0].compression_cache,
             llm=_comp_llm,
             max_context_tokens=max_context_tokens,
             min_age_cycles=compression_min_age,
@@ -1922,15 +2082,15 @@ def build_agent_graph(
             llm=llm,
             tools_ready=tools_ready,
             active_tools_list=active_tools_list,
-            active_names=_active_names,
-            bound_cache=_bound_cache,
+            active_names=_per_run_state[0].active_names,
+            bound_cache=_per_run_state[0].bound_cache,
             bound_cache_lock=_bound_cache_lock,
             cached_fingerprint=_cached_fingerprint,
-            compression_cache=_compression_cache,
-            tool_version=_tool_version,
-            last_tool_version=_last_tool_version,
-            call_count=call_count,
-            last_input_tokens=_last_input_tokens,
+            compression_cache=_per_run_state[0].compression_cache,
+            tool_version=_per_run_state[0].tool_version,
+            last_tool_version=_per_run_state[0].last_tool_version,
+            call_count=_per_run_state[0].call_count,
+            last_input_tokens=_per_run_state[0].last_input_tokens,
             max_context_tokens=max_context_tokens,
             context_max_messages=_context_max_messages,
             context_max_tokens=_context_max_tokens,
@@ -1938,21 +2098,21 @@ def build_agent_graph(
             compression_llm=compression_llm,
             memory_manager=memory_manager,
             checkpoint_store=_checkpoint_store,
-            calls_since_last_checkpoint=_calls_since_last_checkpoint,
-            last_checkpoint_count=_last_checkpoint_count,
-            rounds_since_checkpoint=_rounds_since_checkpoint,
-            force_thinking_break=_force_thinking_break,
-            consecutive_errors=_consecutive_errors,
-            last_identical_error_signature=_last_identical_error_signature,
-            consecutive_identical_error_count=_consecutive_identical_error_count,
-            last_reflection_at=_last_reflection_at,
+            calls_since_last_checkpoint=_per_run_state[0].calls_since_last_checkpoint,
+            last_checkpoint_count=_per_run_state[0].last_checkpoint_count,
+            rounds_since_checkpoint=_per_run_state[0].rounds_since_checkpoint,
+            force_thinking_break=_per_run_state[0].force_thinking_break,
+            consecutive_errors=_per_run_state[0].consecutive_errors,
+            last_identical_error_signature=_per_run_state[0].last_identical_error_signature,
+            consecutive_identical_error_count=_per_run_state[0].consecutive_identical_error_count,
+            last_reflection_at=_per_run_state[0].last_reflection_at,
             tool_health_check_interval=_TOOL_HEALTH_CHECK_INTERVAL,
-            last_tool_health_check_at=_last_tool_health_check_at,
+            last_tool_health_check_at=_per_run_state[0].last_tool_health_check_at,
             tool_quality_gate_enabled=_TOOL_QUALITY_GATE_ENABLED,
             topic_switch_detection_enabled=_TOPIC_SWITCH_DETECTION_ENABLED,
             stuck_threshold=_STUCK_THRESHOLD,
-            stuck_no_checkpoint_threshold=_STUCK_NO_CHECKPOINT_THRESHOLD,
-            stuck_threshold_calibrated=_STUCK_THRESHOLD_CALIBRATED,
+            stuck_no_checkpoint_threshold=_per_run_state[0].stuck_no_checkpoint_threshold,
+            stuck_threshold_calibrated=_per_run_state[0].stuck_threshold_calibrated,
             checkpoint_nudge_interval=_CHECKPOINT_NUDGE_INTERVAL,
             reflection_interval=_REFLECTION_INTERVAL,
             max_request_tools_noops=_MAX_REQUEST_TOOLS_NOOPS,
@@ -1970,24 +2130,25 @@ def build_agent_graph(
     )
 
     handle_phantom = build_handle_phantom_node(
-        phantom_count=phantom_count,
+        phantom_count=_per_run_state[0].phantom_count,
         max_retries=_MAX_PHANTOM_RETRIES,
     )
     handle_action_intent = build_handle_action_intent_node(
-        action_intent_count=action_intent_count,
+        action_intent_count=_per_run_state[0].action_intent_count,
         max_retries=_MAX_ACTION_INTENT_RETRIES,
+        incompleteness_check=_has_incompleteness_signal,
     )
 
     def handle_fabrication(state: CogtrixState) -> dict:
-        fabrication_count[0] += 1
+        _per_run_state[0].fabrication_count[0] += 1
         last = state["messages"][-1]
         log = get_logger()
         log.warning(
             "Fabricated success-after-error detected, attempt %d/%d. Injecting correction.",
-            fabrication_count[0],
+            _per_run_state[0].fabrication_count[0],
             _MAX_FABRICATION_RETRIES,
         )
-        if fabrication_count[0] > _MAX_FABRICATION_RETRIES:
+        if _per_run_state[0].fabrication_count[0] > _MAX_FABRICATION_RETRIES:
             return {
                 "messages": [
                     RemoveMessage(id=last.id),
@@ -2012,19 +2173,42 @@ def build_agent_graph(
             ]
         }
 
+    def handle_incompleteness(state: CogtrixState) -> dict:
+        """Inject a strongly-worded final nudge when the model signalled
+        incomplete multi-step work but exhausted standard action-intent retries.
+        """
+        log = get_logger()
+        log.warning(
+            "Incompleteness signal detected after action-intent retries exhausted. "
+            "Injecting critical completion nudge."
+        )
+        return {
+            "messages": [
+                HumanMessage(
+                    content=(
+                        "CRITICAL: The task is incomplete. "
+                        "You used language like 'first' or 'to start', "
+                        "which implies there are more steps to complete. "
+                        "Do not explain what comes next — call the remaining "
+                        "tool(s) NOW."
+                    )
+                )
+            ]
+        }
+
     def _tool_call_key(call: dict) -> str | None:
         """Compute the deduplication key for a tool call, or None if not serializable.
 
-        Normalizes to the canonical tool name via ``_tool_lookup`` so that an
+        Normalizes to the canonical tool name via ``_per_run_state[0].tool_lookup`` so that an
         alias and its resolved canonical name share the same cache key.  When the
-        alias is not in ``_tool_lookup`` (e.g. during the auto-expansion serial
+        alias is not in ``_per_run_state[0].tool_lookup`` (e.g. during the auto-expansion serial
         path) the raw call name is used instead (BUG-234).
         """
         tool_name = call["name"]
         if tool_name in _DUPLICATE_EXEMPT:
             return None
         # Prefer the canonical name stored on the live tool object.
-        tool_obj = _tool_lookup.get(tool_name)
+        tool_obj = _per_run_state[0].tool_lookup.get(tool_name)
         if tool_obj is not None:
             tool_name = getattr(tool_obj, "name", tool_name) or tool_name
         args_json = _json.dumps(_stable_tool_call_value(call.get("args", {})), sort_keys=True)
@@ -2137,9 +2321,9 @@ def build_agent_graph(
         if key is None:
             return None
         with _history_lock:
-            cached = _tool_call_history.get(key)
+            cached = _per_run_state[0].tool_call_history.get(key)
             if cached is not None:
-                _tool_call_history.move_to_end(key)
+                _per_run_state[0].tool_call_history.move_to_end(key)
         if cached is None:
             return None
         log = get_logger()
@@ -2159,10 +2343,10 @@ def build_agent_graph(
         if key is None:
             return
         with _history_lock:
-            _tool_call_history[key] = result_text[:500]
-            _tool_call_history.move_to_end(key)
-            if len(_tool_call_history) > _MAX_TOOL_CALL_HISTORY:
-                _tool_call_history.popitem(last=False)
+            _per_run_state[0].tool_call_history[key] = result_text[:500]
+            _per_run_state[0].tool_call_history.move_to_end(key)
+            if len(_per_run_state[0].tool_call_history) > _MAX_TOOL_CALL_HISTORY:
+                _per_run_state[0].tool_call_history.popitem(last=False)
 
     def _cap_history_tool_content(content: str) -> str:
         """Cap tool output before it is stored in message history."""
@@ -2177,6 +2361,51 @@ def build_agent_graph(
         if dup is not None:
             return dup
 
+        # ── TOCTOU guard (BUG-1293) ───────────────────────────────────────
+        # Atomically check-and-reserve the cache slot so that parallel
+        # duplicate tool calls invoke the tool only once.  Threads that
+        # arrive while another thread is executing block on an Event until
+        # the result is stored, then return the cached result.
+        if call_key is not None:
+            with _history_lock:
+                cached = _per_run_state[0].tool_call_history.get(call_key)
+                if cached is not None:
+                    _per_run_state[0].tool_call_history.move_to_end(call_key)
+                    return ToolMessage(
+                        content=(
+                            "[Duplicate call — returning cached result. Do NOT repeat this call.]\n\n"
+                            + cached
+                        ),
+                        tool_call_id=call["id"],
+                        name=call["name"],
+                    )
+                if call_key in _pending_events:
+                    _wait_event = _pending_events[call_key]
+                else:
+                    _wait_event = None
+                    _pending_events[call_key] = threading.Event()
+            if _wait_event is not None:
+                _wait_event.wait(timeout=30.0)
+                with _history_lock:
+                    cached = _per_run_state[0].tool_call_history.get(call_key)
+                    if cached is not None:
+                        _per_run_state[0].tool_call_history.move_to_end(call_key)
+                        return ToolMessage(
+                            content=(
+                                "[Duplicate call — returning cached result. Do NOT repeat this call.]\n\n"
+                                + cached
+                            ),
+                            tool_call_id=call["id"],
+                            name=call["name"],
+                        )
+                # Should not reach here, but fall through to execute if it does
+                _log = get_logger()
+                _log.warning(
+                    "TOCTOU wait timed out for %s — falling through to execute",
+                    call_key,
+                )
+        # ───────────────────────────────────────────────────────────────────
+
         tool_name = call["name"]
 
         # ── Per-tool call budget ──────────────────────────────────────────
@@ -2185,20 +2414,20 @@ def build_agent_graph(
         # report_progress, etc.) are not counted.
         if tool_name not in _TOOL_BUDGET_HARD_EXEMPT:
             # Critical section: protect compound read-increment-write on
-            # _tool_call_counts and concurrent removal from active_tools_list
+            # _per_run_state[0].tool_call_counts and concurrent removal from active_tools_list
             with _tool_budget_lock:
-                count = _tool_call_counts.get(tool_name, 0) + 1
-                _tool_call_counts[tool_name] = count
+                count = _per_run_state[0].tool_call_counts.get(tool_name, 0) + 1
+                _per_run_state[0].tool_call_counts[tool_name] = count
                 if count > _TOOL_BUDGET_HARD:
                     # Remove from active set AND add to denials so the model
                     # can't re-load it via request_tools(add=[...]).
                     # Also remove from active_tools_list so bind_tools stops
                     # advertising the disabled tool to the LLM, and so
                     # _reset_for_new_run doesn't silently re-enable it by
-                    # rebuilding _tool_lookup from the stale list (root cause
+                    # rebuilding _per_run_state[0].tool_lookup from the stale list (root cause
                     # of the "Tool names must be unique" 400 on re-add).
-                    _tool_lookup.pop(tool_name, None)
-                    _active_names.discard(tool_name)
+                    _per_run_state[0].tool_lookup.pop(tool_name, None)
+                    _per_run_state[0].active_names.discard(tool_name)
                     session_state.deny_tool(tool_name)
                     _disabled_obj = next(
                         (t for t in active_tools_list if getattr(t, "name", "") == tool_name),
@@ -2210,7 +2439,7 @@ def build_agent_graph(
                                 active_tools_list.remove(_disabled_obj)
                             except ValueError:
                                 pass  # already removed by a concurrent invocation
-                    _tool_version[0] += 1  # force bind_tools refresh
+                    _per_run_state[0].tool_version[0] += 1  # force bind_tools refresh
                     return ToolMessage(
                         content=(
                             f"Tool '{tool_name}' has been disabled after {_TOOL_BUDGET_HARD} calls "
@@ -2243,7 +2472,7 @@ def build_agent_graph(
                 )
         try:
             with _tool_budget_lock:
-                tool = _tool_lookup.get(tool_name)
+                tool = _per_run_state[0].tool_lookup.get(tool_name)
             if tool is None:
                 return ToolMessage(
                     content=f"Tool '{tool_name}' is no longer active.",
@@ -2271,7 +2500,7 @@ def build_agent_graph(
 
                 # Soft budget nudge: after N calls to the same tool, hint to synthesize.
                 with _tool_budget_lock:
-                    _cnt = _tool_call_counts.get(tool_name, 0)
+                    _cnt = _per_run_state[0].tool_call_counts.get(tool_name, 0)
                 _nudge = ""
                 if _cnt >= _TOOL_BUDGET_SOFT and tool_name not in _TOOL_BUDGET_SOFT_EXEMPT:
                     _nudge = (
@@ -2285,7 +2514,18 @@ def build_agent_graph(
                     if _nudge:
                         content += _nudge
                     content = _cap_history_tool_content(content)
-                    _store_call_result(call, content, key=call_key)
+                    if call_key is not None:
+                        # Inlined from _store_call_result() so the history write
+                        # and Event signalling happen atomically under _history_lock.
+                        # Splitting them re-introduces the TOCTOU race (BUG-1293).
+                        with _history_lock:
+                            _per_run_state[0].tool_call_history[call_key] = content[:500]
+                            _per_run_state[0].tool_call_history.move_to_end(call_key)
+                            if len(_per_run_state[0].tool_call_history) > _MAX_TOOL_CALL_HISTORY:
+                                _per_run_state[0].tool_call_history.popitem(last=False)
+                            _event = _pending_events.pop(call_key, None)
+                        if _event is not None:
+                            _event.set()
                     result.content = content
                     _tool_span.set_attribute("tool.status", "success")
                     _tool_span.set_attribute(
@@ -2295,7 +2535,18 @@ def build_agent_graph(
                     return result
                 text = str(result) if result is not None else ""
                 text = _cap_history_tool_content(text)
-                _store_call_result(call, text, key=call_key)
+                if call_key is not None:
+                    # Inlined from _store_call_result() so the history write
+                    # and Event signalling happen atomically under _history_lock.
+                    # Splitting them re-introduces the TOCTOU race (BUG-1293).
+                    with _history_lock:
+                        _per_run_state[0].tool_call_history[call_key] = text[:500]
+                        _per_run_state[0].tool_call_history.move_to_end(call_key)
+                        if len(_per_run_state[0].tool_call_history) > _MAX_TOOL_CALL_HISTORY:
+                            _per_run_state[0].tool_call_history.popitem(last=False)
+                        _event = _pending_events.pop(call_key, None)
+                    if _event is not None:
+                        _event.set()
                 _tool_span.set_attribute("tool.status", "success")
                 _tool_span.set_attribute(
                     "tool.duration_ms", int((time.monotonic() - _tool_t0) * 1000)
@@ -2307,8 +2558,18 @@ def build_agent_graph(
                     name=tool_name,
                 )
         except UserCancelledRun:
+            if call_key is not None:
+                with _history_lock:
+                    _event = _pending_events.pop(call_key, None)
+                if _event is not None:
+                    _event.set()
             raise
         except Exception as exc:
+            if call_key is not None:
+                with _history_lock:
+                    _event = _pending_events.pop(call_key, None)
+                if _event is not None:
+                    _event.set()
             log = get_logger()
             log.warning("Tool %s raised: %s", tool_name, exc, exc_info=True)
             return ToolMessage(
@@ -2319,37 +2580,37 @@ def build_agent_graph(
 
     process_tools = build_process_tools_node(
         _invoke_one=_invoke_one,
-        _tool_lookup=_tool_lookup,
-        _active_names=_active_names,
-        _available_tools_ref=_available_tools_ref,
+        _tool_lookup=_per_run_state[0].tool_lookup,
+        _active_names=_per_run_state[0].active_names,
+        _available_tools_ref=_per_run_state[0].available_tools_ref,
         session_state=session_state,
         parallel_tool_execution=parallel_tool_execution,
         _identical_error_signature=_identical_error_signature,
         _tool_error_class=_tool_error_class,
         _tool_error_guidance=_tool_error_guidance,
-        _last_identical_error_signature=_last_identical_error_signature,
-        _consecutive_identical_error_count=_consecutive_identical_error_count,
-        _force_thinking_break=_force_thinking_break,
+        _last_identical_error_signature=_per_run_state[0].last_identical_error_signature,
+        _consecutive_identical_error_count=_per_run_state[0].consecutive_identical_error_count,
+        _force_thinking_break=_per_run_state[0].force_thinking_break,
         _graph_log=_graph_log,
         protected=protected,
-        tool_catalog=tool_catalog,
+        tool_catalog=_per_run_state[0].tool_catalog,
         registry=registry,
         approvals=approvals,
         confirmation_ui=confirmation_ui,
         git_native=git_native,
         on_tool_expansion=on_tool_expansion,
         output_cap=output_cap,
-        expansion_count=expansion_count,
-        auto_expansion_count=auto_expansion_count,
-        request_tools_noop_count=request_tools_noop_count,
+        expansion_count=_per_run_state[0].expansion_count,
+        auto_expansion_count=_per_run_state[0].auto_expansion_count,
+        request_tools_noop_count=_per_run_state[0].request_tools_noop_count,
         _MAX_REQUEST_TOOLS_NOOPS=_MAX_REQUEST_TOOLS_NOOPS,
         active_tools_list=active_tools_list,
-        _tool_version=_tool_version,
-        _calls_since_last_checkpoint=_calls_since_last_checkpoint,
-        _same_file_writes=_same_file_writes,
+        _tool_version=_per_run_state[0].tool_version,
+        _calls_since_last_checkpoint=_per_run_state[0].calls_since_last_checkpoint,
+        _same_file_writes=_per_run_state[0].same_file_writes,
         _same_file_writes_lock=_same_file_writes_lock,
         _REWRITE_SEARCH_THRESHOLD=_REWRITE_SEARCH_THRESHOLD,
-        _consecutive_errors=_consecutive_errors,
+        _consecutive_errors=_per_run_state[0].consecutive_errors,
         _STUCK_THRESHOLD=_STUCK_THRESHOLD,
         _stuck_detection_headline=_stuck_detection_headline,
         _get_tool_executor=lambda: _get_tool_executor(),
@@ -2407,20 +2668,39 @@ def build_agent_graph(
                 else:
                     return "handle_action_intent"
 
+            # Hallucinated completion: model wrote a past-tense summary
+            # ("Notified the VP...") claiming it called a tool that it never
+            # actually invoked. Route through the same retry/synthesis path
+            # so the model gets a chance to execute the missing step.
+            _available_names = [getattr(t, "name", "") for t in (active_tools_list or [])]
+            if _is_hallucinated_completion(last, msgs, _available_names):
+                return "handle_action_intent"
+
         return END
 
     def route_after_phantom(state: CogtrixState) -> str:
-        if phantom_count[0] > _MAX_PHANTOM_RETRIES:
+        if _per_run_state[0].phantom_count[0] > _MAX_PHANTOM_RETRIES:
             return END
         return "call_model"
 
     def route_after_action_intent(state: CogtrixState) -> str:  # noqa: ARG001
-        if action_intent_count[0] > _MAX_ACTION_INTENT_RETRIES:
+        if _per_run_state[0].action_intent_count[0] > _MAX_ACTION_INTENT_RETRIES:
+            # Standard retries exhausted.  Before ending, check whether
+            # the model used incompleteness language ("first", "to start")
+            # — a strong signal that it planned more steps but stopped.
+            # Give exactly one more chance with a targeted nudge.
+            if _per_run_state[0].incompleteness_nudge_given[0] < _MAX_INCOMPLETENESS_NUDGES:
+                msgs = state.get("messages") or []
+                last = msgs[-1] if msgs else None
+                content = getattr(last, "content", "") if last is not None else ""
+                if isinstance(content, str) and _has_incompleteness_signal(content):
+                    _per_run_state[0].incompleteness_nudge_given[0] += 1
+                    return "handle_incompleteness"
             return END
         return "call_model"
 
     def route_after_fabrication(state: CogtrixState) -> str:  # noqa: ARG001
-        if fabrication_count[0] > _MAX_FABRICATION_RETRIES:
+        if _per_run_state[0].fabrication_count[0] > _MAX_FABRICATION_RETRIES:
             return END
         return "call_model"
 
@@ -2433,56 +2713,48 @@ def build_agent_graph(
         """Reset all per-run mutable state so the compiled graph can be reused.
 
         Called by ``run_agent()`` when the graph fingerprint matches the
-        cached graph.  Resets per-run counters, clears duplicate-call history,
-        and refreshes mutable references that change between agent turns.
+        cached graph.  A fresh ``PerRunState`` instance is built and its
+        values are copied in-place into the existing instance so that
+        closures holding direct references to mutable fields still see
+        the reset values.  Any new field added to ``PerRunState`` is
+        automatically handled — no manual reset line required.
         """
-        phantom_count[0] = 0
-        fabrication_count[0] = 0
-        action_intent_count[0] = 0
-        expansion_count[0] = 0
-        auto_expansion_count[0] = 0
-        call_count[0] = 0
-        _last_input_tokens[0] = 0
-        request_tools_noop_count[0] = 0
-        _consecutive_errors[0] = 0
-        _force_thinking_break[0] = False
-        _consecutive_identical_error_count[0] = 0
-        _last_identical_error_signature[0] = None
-        _last_reflection_at[0] = 0
-        _last_tool_health_check_at[0] = 0
-        _rounds_since_checkpoint[0] = 0
-        _last_checkpoint_count[0] = 0
-        _calls_since_last_checkpoint[0] = 0
-        _STUCK_THRESHOLD_CALIBRATED[0] = False
-        _STUCK_NO_CHECKPOINT_THRESHOLD[0] = 15
-        with _same_file_writes_lock:
-            _same_file_writes.clear()
+        _fresh_tool_lookup = {
+            getattr(t, "name", ""): t for t in active_tools_list if getattr(t, "name", "")
+        }
+        fresh = PerRunState(
+            tool_lookup=_fresh_tool_lookup,
+            active_names=set(_fresh_tool_lookup.keys()),
+            tool_catalog=build_tool_catalog(new_available_tools),
+            available_tools_ref=[new_available_tools],
+            bound_cache=(new_bound_cache if new_bound_cache is not None else OrderedDict()),
+            compression_cache=(new_compression_cache if new_compression_cache is not None else {}),
+            tool_version=[_per_run_state[0].tool_version[0] + 1],
+            last_tool_version=[-1],
+        )
+
+        # Copy fresh values into the existing PerRunState instance in-place.
+        # This preserves object identity so closures that captured direct
+        # references to mutable fields (e.g. call_count, bound_cache) still
+        # see the reset values.
+        for _f in fields(PerRunState):
+            _current = getattr(_per_run_state[0], _f.name)
+            _new = getattr(fresh, _f.name)
+            if isinstance(_current, list):
+                _current[:] = _new
+            elif isinstance(_current, (dict, OrderedDict, set)):
+                _current.clear()
+                if _new:
+                    _current.update(_new)
+            else:
+                setattr(_per_run_state[0], _f.name, _new)
+
+        with _history_lock:
+            _pending_events.clear()
+
         with _checkpoint_store_lock:
             _checkpoint_store.clear()
-        with _tool_budget_lock:
-            _tool_call_counts.clear()
-        with _history_lock:
-            _tool_call_history.clear()
-        _available_tools_ref[0] = new_available_tools
-        tool_catalog.clear()
-        tool_catalog.update(build_tool_catalog(new_available_tools))
-        with _bound_cache_lock:
-            _bound_cache.clear()
-            _bound_cache.update(new_bound_cache)
-        _compression_cache.clear()
-        _compression_cache.update(new_compression_cache)
-        # Refresh _tool_lookup and _active_names from the current active_tools_list
-        # so any tools loaded/released in the previous run are reflected correctly.
-        _tool_lookup.clear()
-        _tool_lookup.update(
-            {getattr(t, "name", ""): t for t in active_tools_list if getattr(t, "name", "")}
-        )
-        _active_names.clear()
-        _active_names.update(_tool_lookup.keys())
-        # Reset tool-version tracking so bind_tools() fingerprint is recomputed.
-        _tool_version[0] += 1
-        _last_tool_version[0] = -1
-        # Swap extend_run state so the new run's tool closure uses the fresh instance.
+
         if extend_run_state is not None:
             extend_run_state_ref[0] = extend_run_state
 
@@ -2491,6 +2763,7 @@ def build_agent_graph(
     graph.add_node("handle_phantom", handle_phantom)
     graph.add_node("handle_fabrication", handle_fabrication)
     graph.add_node("handle_action_intent", handle_action_intent)
+    graph.add_node("handle_incompleteness", handle_incompleteness)
     graph.add_node("process_tools", process_tools)
     graph.set_entry_point("call_model")
     graph.add_conditional_edges(
@@ -2501,6 +2774,7 @@ def build_agent_graph(
             "handle_phantom": "handle_phantom",
             "handle_fabrication": "handle_fabrication",
             "handle_action_intent": "handle_action_intent",
+            "handle_incompleteness": "handle_incompleteness",
             END: END,
         },
     )
@@ -2520,6 +2794,10 @@ def build_agent_graph(
         route_after_fabrication,
         {"call_model": "call_model", END: END},
     )
+    # handle_incompleteness always routes back to call_model — exactly
+    # one chance to finish the task after a stronger nudge.
+    graph.add_edge("handle_incompleteness", "call_model")
     compiled = graph.compile()
     compiled._reset_for_new_run = _reset_for_new_run  # type: ignore[attr-defined]
+    compiled._per_run_state = _per_run_state  # type: ignore[attr-defined]
     return compiled

@@ -969,6 +969,58 @@ class TestBug110EditFailFallback:
         )
         assert result is None
 
+    def test_send_exception_in_immediate_path_returns_none(self):
+        """When channel.send() raises in the immediate send path, _route_response()
+        catches the exception, logs a warning, and returns None — enabling the
+        caller to invoke discard_prerecord() so orphaned prerecord files are
+        cleaned up (issue #1092)."""
+        from src.assistant.scheduler import EditReplyState, QueueReplyState, ScheduleReplyState
+
+        handler, session, channel, _ = self._make_handler_with_edit_state()
+
+        msg = _make_msg()
+        edit_state = EditReplyState(was_called=False)
+        schedule_state = ScheduleReplyState()
+        queue_state = QueueReplyState()
+
+        # Simulate channel.send() raising an exception (e.g. network error,
+        # transport closed, invalid state).
+        channel.send.side_effect = RuntimeError("connection closed")
+
+        result = handler._route_response(
+            msg, channel, "Agent response", schedule_state, edit_state, queue_state, session
+        )
+
+        # Must return None so caller (handle()) calls discard_prerecord().
+        assert result is None
+        # Must NOT raise — exception is absorbed internally.
+        channel.send.assert_called_once()
+
+    def test_send_exception_in_fallback_path_returns_none(self):
+        """When channel.send() raises in the edit-fallback send path, _route_response()
+        catches the exception, logs a warning, and returns None — enabling the
+        caller to invoke discard_prerecord() (issue #1092)."""
+        from src.assistant.scheduler import EditReplyState, QueueReplyState, ScheduleReplyState
+
+        handler, session, channel, _ = self._make_handler_with_edit_state()
+
+        msg = _make_msg()
+        edit_state = EditReplyState(was_called=True, new_text="Fallback text")
+        schedule_state = ScheduleReplyState()
+        queue_state = QueueReplyState()
+
+        channel.edit_message.return_value = SendResult(ok=False)
+        channel.send.side_effect = RuntimeError("transport error")
+
+        result = handler._route_response(
+            msg, channel, "original", schedule_state, edit_state, queue_state, session
+        )
+
+        # Must return None so caller (handle()) calls discard_prerecord().
+        assert result is None
+        # Must NOT raise — exception is absorbed internally.
+        channel.send.assert_called_once()
+
 
 # ---------------------------------------------------------------------------
 # TestMemoryOnSendFailure (issue #680)

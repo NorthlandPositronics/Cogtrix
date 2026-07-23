@@ -56,6 +56,13 @@ _VALID_PASSWORD = "TestPass1!"
 def app():
     from src.api.app import create_app
 
+    # Single explicit event loop kept alive across setup, test, and dispose.
+    # Using _asyncio.run() twice would close and recreate the loop, leaving
+    # aiosqlite worker threads holding a reference to a closed loop and
+    # surfacing PytestUnhandledThreadExceptionWarning during teardown.
+    loop = _asyncio.new_event_loop()
+    _asyncio.set_event_loop(loop)
+
     engine = create_async_engine(
         "sqlite+aiosqlite:///:memory:",
         echo=False,
@@ -68,7 +75,7 @@ def app():
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
 
-    _asyncio.run(_setup())
+    loop.run_until_complete(_setup())
 
     with patch.dict(os.environ, {"COGTRIX_JWT_SECRET": _TEST_JWT_SECRET}):
         _app = create_app()
@@ -85,7 +92,8 @@ def app():
         _app.dependency_overrides[get_db] = _override
         yield _app
 
-    _asyncio.run(engine.dispose())
+    loop.run_until_complete(engine.dispose())
+    loop.close()
 
 
 @pytest.fixture()
@@ -958,13 +966,21 @@ class TestHardDeleteRowcount:
                 connect_args={"check_same_thread": False},
                 poolclass=StaticPool,
             )
-            async with engine.begin() as conn:
-                await conn.run_sync(Base.metadata.create_all)
-            async_session = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-            async with async_session() as session:
-                repo = SessionRepository(session)
-                deleted = await repo.hard_delete(str(uuid.uuid4()))
-                return deleted
+            try:
+                async with engine.begin() as conn:
+                    await conn.run_sync(Base.metadata.create_all)
+                async_session = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+                async with async_session() as session:
+                    repo = SessionRepository(session)
+                    deleted = await repo.hard_delete(str(uuid.uuid4()))
+                    return deleted
+            finally:
+                # Must dispose before asyncio.run() closes its loop, otherwise
+                # the aiosqlite worker thread outlives the loop holding futures
+                # bound to it — and later fires "Event loop is closed" against
+                # whichever test happens to be running when the worker next
+                # attempts call_soon_threadsafe.
+                await engine.dispose()
 
         result = asyncio.run(_run())
         assert result is False, "hard_delete must return False for non-existent session (BUG-246)"
@@ -988,16 +1004,19 @@ class TestHardDeleteRowcount:
                 connect_args={"check_same_thread": False},
                 poolclass=StaticPool,
             )
-            async with engine.begin() as conn:
-                await conn.run_sync(Base.metadata.create_all)
-            async_session = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-            async with async_session() as session:
-                repo = SessionRepository(session)
-                record = await repo.create(user_id="u1", name="test")
-                await session.commit()
-                deleted = await repo.hard_delete(record.id)
-                await session.commit()
-                return deleted
+            try:
+                async with engine.begin() as conn:
+                    await conn.run_sync(Base.metadata.create_all)
+                async_session = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+                async with async_session() as session:
+                    repo = SessionRepository(session)
+                    record = await repo.create(user_id="u1", name="test")
+                    await session.commit()
+                    deleted = await repo.hard_delete(record.id)
+                    await session.commit()
+                    return deleted
+            finally:
+                await engine.dispose()
 
         result = asyncio.run(_run())
         assert result is True, "hard_delete must return True when a row was deleted"

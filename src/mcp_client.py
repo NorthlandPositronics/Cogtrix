@@ -672,6 +672,13 @@ class MCPManager:
         # so both loop-start and reconnect paths are blocked by one coordinated
         # state transition (#425, #546).
         self._shutting_down: bool = False
+        # Track in-flight concurrent.futures.Future objects created by _run()
+        # so close_all() can cancel them before stopping the event loop.
+        # Without this, a coroutine scheduled via run_coroutine_threadsafe()
+        # may still be executing when the loop is stopped, leaving it
+        # unreferenced and triggering "RuntimeWarning: coroutine was never
+        # awaited" at GC.
+        self._pending_futures: set[concurrent.futures.Future[Any]] = set()
         # Heartbeat runs as a native asyncio Task inside the background loop so
         # that list_tools() and reconnect close/connect calls share the same task
         # context, avoiding anyio cancel-scope task-locality violations.
@@ -709,7 +716,8 @@ class MCPManager:
             _log = get_logger()
 
             def _exception_handler(
-                loop: asyncio.AbstractEventLoop, context: dict  # type: ignore[type-arg]
+                loop: asyncio.AbstractEventLoop,
+                context: dict,  # type: ignore[type-arg]
             ) -> None:
                 exc = context.get("exception")
                 if isinstance(
@@ -788,12 +796,17 @@ class MCPManager:
 
         Runs as a long-lived asyncio Task so all connection operations share
         the correct task context, preventing anyio cancel-scope violations.
+        Exits when there are no connections AND no configs, or when the
+        manager is shutting down.
         """
         log = get_logger()
         while True:
             try:
                 await asyncio.sleep(self._HEARTBEAT_INTERVAL)
             except asyncio.CancelledError:
+                break
+            # Stop if the manager was garbage-collected without close_all().
+            if self._shutting_down or (not self._connections and not self._configs):
                 break
             for name, conn in list(self._connections.items()):
                 try:
@@ -832,16 +845,18 @@ class MCPManager:
         self._ensure_loop()
         with self._loop_lock:
             loop = self._loop
-        # Guard against the loop being closed between _ensure_loop() releasing
-        # the lock and this acquisition (e.g. close_all() running concurrently).
-        if loop is None or loop.is_closed():
-            raise RuntimeError("MCP event loop is not running or has been closed")
-        future = asyncio.run_coroutine_threadsafe(coro, loop)
+            if loop is None or loop.is_closed():
+                coro.close()
+                raise RuntimeError("MCP event loop is not running or has been closed")
+            future: concurrent.futures.Future[Any] = asyncio.run_coroutine_threadsafe(coro, loop)
+            self._pending_futures.add(future)
         try:
             return future.result(timeout=timeout)
         except TimeoutError:
             future.cancel()
             raise
+        finally:
+            self._pending_futures.discard(future)
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -878,8 +893,7 @@ class MCPManager:
                 # actual error (e.g. FileNotFoundError) rather than the wrapper.
                 cause: BaseException = exc
                 while (
-                    hasattr(cause, "__exceptions__")
-                    and cause.__exceptions__  # type: ignore[union-attr]
+                    hasattr(cause, "__exceptions__") and cause.__exceptions__  # type: ignore[union-attr]
                 ):
                     cause = cause.__exceptions__[0]  # type: ignore[union-attr]
 
@@ -1124,9 +1138,17 @@ class MCPManager:
         timeout = cfg.timeout if cfg else 30
 
         try:
-            return self._run(conn.call_tool(mcp_tool_name, arguments), timeout=timeout)
-        except TimeoutError:
-            return f"Error: MCP tool '{mcp_tool_name}' timed out after {timeout}s"
+            call_coro = conn.call_tool(mcp_tool_name, arguments)
+            try:
+                return self._run(call_coro, timeout=timeout)
+            except TimeoutError:
+                # _run() raised before consuming the coroutine — prevent
+                # "RuntimeWarning: coroutine was never awaited" at GC.
+                call_coro.close()
+                return f"Error: MCP tool '{mcp_tool_name}' timed out after {timeout}s"
+            except Exception:
+                call_coro.close()
+                raise
         except Exception as exc:
             exc_type = type(exc).__name__
             exc_msg = str(exc) or "(no details)"
@@ -1149,9 +1171,12 @@ class MCPManager:
                     # Refresh conn reference after reconnect.
                     new_conn = self._connections.get(server_name)
                     if new_conn is not None:
-                        return self._run(
-                            new_conn.call_tool(mcp_tool_name, arguments), timeout=timeout
-                        )
+                        retry_coro = new_conn.call_tool(mcp_tool_name, arguments)
+                        try:
+                            return self._run(retry_coro, timeout=timeout)
+                        except Exception:
+                            retry_coro.close()
+                            raise
                 except Exception as reconnect_exc:
                     log.error(
                         "MCP: auto-reconnect for server '%s' failed: %s",
@@ -1291,6 +1316,25 @@ class MCPManager:
                     log.warning("MCP: error closing connection '%s': %s", name, exc)
             self._connections.clear()
             self._tool_server_map.clear()
+
+            # Cancel and drain all in-flight _run() futures before stopping
+            # the loop.  Each future wraps a coroutine scheduled via
+            # run_coroutine_threadsafe; the asyncio Tasks they back were
+            # already cancelled above, but cancelling the concurrent
+            # Future ensures result() unblocks.  We drain with a short
+            # timeout so any surviving futures resolve before the loop
+            # stops, preventing "RuntimeWarning: coroutine was never
+            # awaited" at GC.
+            with self._loop_lock:
+                pending = self._pending_futures.copy()
+                self._pending_futures.clear()
+            for f in pending:
+                f.cancel()
+            for f in pending:
+                try:
+                    f.result(timeout=2)
+                except Exception:
+                    pass
 
             self._loop.call_soon_threadsafe(self._loop.stop)
 

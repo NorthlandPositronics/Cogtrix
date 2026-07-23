@@ -16,7 +16,6 @@ import warnings
 from pathlib import Path
 from typing import Any
 
-import src._bootstrap  # noqa: F401 — installs warning filters before langgraph loads
 import src.cli.commands as commands
 import src.ui.confirmation as confirmation
 from src._version import __copyright__, __version__  # noqa: F401

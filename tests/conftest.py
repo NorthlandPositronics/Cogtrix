@@ -16,18 +16,15 @@ os.environ.setdefault(
     "sqlite+aiosqlite:///:memory:",
 )
 
-# Install the runtime warning filters BEFORE any langchain/langgraph
-# import.  ``_bootstrap`` imports ``langchain_core`` and then installs
-# ``ignore`` filters for the upstream PendingDeprecationWarning emitted
-# by langgraph's ``Reviver()`` call.  pyproject.toml's
-# ``[tool.pytest.ini_options].filterwarnings`` only applies during test
-# execution — warnings raised at import/collection time bypass it, so
-# the runtime filter from ``_bootstrap`` is what actually suppresses
-# the langgraph warning here.
-import src._bootstrap  # noqa: F401, E402, I001 — must precede pytest imports
+# pytest-xdist (-n auto) creates multi-threaded worker processes.
+# test_python_exec.py uses multiprocessing.Process with the default
+# fork start method, but fork() is unsafe in a multi-threaded parent
+# (Python emits DeprecationWarning, and thread inheritance can cause
+# deadlocks).  Force spawn before any test imports multiprocessing.
+import multiprocessing
 
-# isort: split — keep ``_bootstrap`` import above ``pytest`` so warning
-# filters install before any LangChain/LangGraph import in test collection.
+multiprocessing.set_start_method("spawn", force=True)
+
 import pytest  # noqa: E402
 import pytest_asyncio  # noqa: E402
 from sqlalchemy.ext.asyncio import (  # noqa: E402

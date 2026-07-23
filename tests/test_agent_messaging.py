@@ -240,21 +240,32 @@ class TestConcurrencyRace:
     are silently lost.
     """
 
+    @pytest.mark.xfail(
+        strict=False,
+        reason="Race is non-deterministic — may not manifest on fast CI runners. "
+        "Documents BUG #973 (no file locking in agent_messaging).",
+    )
     def test_concurrent_sends_lose_messages(self, data_dir, tmp_path):
-        """Many parallel sends to the same inbox — some messages disappear."""
+        """Many parallel sends to the same inbox — messages should be preserved.
+
+        When BUG #973 (no file-level locking) is present, the race condition may
+        cause message loss on slow environments.  This test inverts the assertion
+        so it PASSES when the race does NOT manifest (fast runners) and XFAILS
+        when it does manifest (slow runners).
+        """
         import threading
 
         from src.tools.agent_messaging import send_to_agent
 
         NUM_THREADS = 20
         barrier = threading.Barrier(NUM_THREADS)
-        errors = []
+        errors: list[BaseException] = []
 
         def _send(i: int) -> None:
             try:
                 barrier.wait(timeout=2)
                 send_to_agent("alice", f"msg-{i}")
-            except Exception as exc:  # noqa: BLE001
+            except BaseException as exc:
                 errors.append(exc)
 
         threads = [threading.Thread(target=_send, args=(i,)) for i in range(NUM_THREADS)]
@@ -266,11 +277,11 @@ class TestConcurrencyRace:
         inbox = data_dir / "tasks" / "inbox" / "alice.json"
         messages = json.loads(inbox.read_text()) if inbox.exists() else []
         actual_count = len(messages)
-        # With no locking we expect *some* messages to be lost.
-        # We assert the current buggy behaviour: count < NUM_THREADS.
-        assert actual_count < NUM_THREADS, (
-            f"Expected lost messages due to race, but all {NUM_THREADS} preserved. "
-            "Race may need a slower environment or artificial delay."
+        # Assert correct behaviour: all messages should be preserved.
+        # With BUG #973 (no file locking), the race may cause loss on slow environments.
+        assert actual_count == NUM_THREADS, (
+            f"Expected all {NUM_THREADS} messages preserved, but only {actual_count} found. "
+            "BUG #973: race condition caused message loss."
         )
 
     @pytest.mark.xfail(

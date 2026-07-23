@@ -183,12 +183,19 @@ class CodeDevelopmentMemoryManager(BaseMemoryManager):
             )
             self._current_file = path
 
+    def _add_error_locked(self, error: str) -> None:
+        """Append an error to the recent-errors list.
+
+        CALLER MUST HOLD _mode_lock.
+        """
+        max_errors = self._mode_config["max_errors"]
+        self._recent_errors.append(error)
+        self._recent_errors = self._recent_errors[-max_errors:]
+
     def add_error(self, error: str) -> None:
         """Record an error."""
         with self._mode_lock:
-            max_errors = self._mode_config["max_errors"]
-            self._recent_errors.append(error)
-            self._recent_errors = self._recent_errors[-max_errors:]
+            self._add_error_locked(error)
 
     def record_change(self, description: str) -> None:
         """Record a file change."""
@@ -256,8 +263,13 @@ class CodeDevelopmentMemoryManager(BaseMemoryManager):
 
     def prepare_context(self, user_input: str) -> MemoryContext:
         """Prepare code-optimized context for LLM."""
-        # Record the moment the user sent this message
-        self._pending_user_ts = self._now_ts()
+        # Record the moment the user sent this message.
+        # Protected by _hybrid_lock so concurrent prepare_context() calls
+        # do not silently overwrite each other's timestamps before update()
+        # can consume them (issue #1344).
+        with self._hybrid_lock:
+            self._captured_user_ts = self._now_ts()
+            self._pending_user_ts = self._captured_user_ts
 
         # ── Mode-specific prefix (task, files, errors, changes) ──────────
         # Built before message selection so both paths return a consistent prefix.
@@ -325,13 +337,6 @@ class CodeDevelopmentMemoryManager(BaseMemoryManager):
                 prefix_parts.append(f"**Recent changes:**\n{changes_text}")
 
         context_prefix = "\n\n".join(prefix_parts) if prefix_parts else None
-
-        # ── Tiered context assembly ──────────────────────────────────────
-        with self._hybrid_lock:
-            tier_ready = self._tier_cache_ready
-            tier_cache = self._tier_cache
-            summary = self._summary or ""
-            summary_msg_idx = self._summary_msg_idx
 
         # ── Tiered context assembly ──────────────────────────────────────
         with self._hybrid_lock:
@@ -410,14 +415,18 @@ class CodeDevelopmentMemoryManager(BaseMemoryManager):
         agent_messages: list[Any] | None = None,
     ) -> None:
         """Update memory and extract code-related information."""
+        # Capture timestamp under _hybrid_lock (matches lock used in
+        # prepare_context to write it — issue #1344).
+        with self._hybrid_lock:
+            ts_to_apply = self._pending_user_ts
+            self._pending_user_ts = None
         with self._mode_lock:
             # --- Build the human message (always needed) ----------------
             if HumanMessage is not None:
                 human_msg: Any = HumanMessage(content=user_input)
             else:
                 human_msg = {"type": "human", "content": user_input}
-            self._set_msg_ts(human_msg, self._pending_user_ts)
-            self._pending_user_ts = None
+            self._set_msg_ts(human_msg, ts_to_apply)
 
             self._messages.append(human_msg)
 
@@ -436,22 +445,35 @@ class CodeDevelopmentMemoryManager(BaseMemoryManager):
                 self._set_msg_ts(ai_msg)
                 self._messages.append(ai_msg)
 
-        # Layer-1a: accumulate tokens since last summary update (protected by _hybrid_lock in base)
+            # Extract file references and errors while _mode_lock is held
+            if self._mode_config["track_files"]:
+                self._extract_files(user_input)
+                self._extract_files(ai_response)
+            if self._mode_config["track_errors"]:
+                self._extract_errors(user_input)
+
+            # Snapshot messages under lock so downstream scheduling
+            # sees a consistent view even if clear() or another update()
+            # mutates self._messages concurrently.
+            messages_snapshot = list(self._messages)
+
+        # Layer-1a: accumulate tokens since last summary update
         from src.memory.manager import _msg_tokens
 
-        self._tokens_since_summary += _msg_tokens(human_msg)
-        if agent_messages is not None:
-            self._tokens_since_summary += _msg_tokens(agent_messages[-1])
-        else:
-            self._tokens_since_summary += _msg_tokens(ai_msg)
-        self._check_summary_token_ttl()
+        with self._hybrid_lock:
+            self._tokens_since_summary += _msg_tokens(human_msg)
+            if agent_messages is not None:
+                self._tokens_since_summary += _msg_tokens(agent_messages[-1])
+            else:
+                self._tokens_since_summary += _msg_tokens(ai_msg)
+            self._check_summary_token_ttl_locked()
 
         # Incrementally summarize messages outside the sliding window
         window_size = self._mode_config["working_memory_size"]
-        self._schedule_slow_path(self._messages, window_size)
+        self._schedule_slow_path(messages_snapshot, window_size)
 
         # Schedule tier cache roll-forward only when history exceeds the window.
-        if len(self._messages) > window_size:
+        if len(messages_snapshot) > window_size:
             try:
                 self.schedule_tier_roll_forward(
                     max_context_tokens=getattr(self, "_max_context_tokens", 0) or 128_000,
@@ -459,15 +481,6 @@ class CodeDevelopmentMemoryManager(BaseMemoryManager):
                 )
             except Exception as exc:
                 log.debug("Tier roll-forward scheduling failed: %s", exc)
-
-        # Extract file references
-        if self._mode_config["track_files"]:
-            self._extract_files(user_input)
-            self._extract_files(ai_response)
-
-        # Extract errors
-        if self._mode_config["track_errors"]:
-            self._extract_errors(user_input)
 
     def get_system_prompt_additions(self) -> str | None:
         """Return code-mode system prompt additions."""
@@ -620,7 +633,10 @@ class CodeDevelopmentMemoryManager(BaseMemoryManager):
     # --- Private methods ---
 
     def _extract_files(self, text: str) -> None:
-        """Extract file paths mentioned in text."""
+        """Extract file paths mentioned in text.
+
+        CALLER MUST HOLD _mode_lock.
+        """
         max_files = self._mode_config["max_files"]
 
         for pattern in self.FILE_PATTERNS:
@@ -643,12 +659,15 @@ class CodeDevelopmentMemoryManager(BaseMemoryManager):
                     self._files[path].last_accessed = datetime.now(UTC)
 
     def _extract_errors(self, text: str) -> None:
-        """Extract error messages from text."""
+        """Extract error messages from text.
+
+        CALLER MUST HOLD _mode_lock.
+        """
         for pattern in self.ERROR_PATTERNS:
             matches = re.findall(pattern, text, re.MULTILINE)
             for match in matches:
                 error = match.strip()[:200]  # Limit length
                 if error and error not in self._recent_errors:
-                    self.add_error(error)
+                    self._add_error_locked(error)
 
     # _estimate_tokens() is inherited from BaseMemoryManager

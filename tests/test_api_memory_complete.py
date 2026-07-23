@@ -53,7 +53,9 @@ def app():
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
 
-    _asyncio.run(_create())
+    loop = _asyncio.new_event_loop()
+    _asyncio.set_event_loop(loop)
+    loop.run_until_complete(_create())
 
     with patch.dict(os.environ, {"COGTRIX_JWT_SECRET": _TEST_JWT_SECRET}):
         _app = create_app()
@@ -70,7 +72,8 @@ def app():
         _app.dependency_overrides[get_db] = _override
         yield _app
 
-    _asyncio.run(engine.dispose())
+    loop.run_until_complete(engine.dispose())
+    loop.close()
 
 
 @pytest.fixture()
@@ -125,6 +128,10 @@ def _make_live_session(mode="conversation", window_size=10, summary="test summar
     live.memory_manager = mm
     live.config = {"memory_mode": mode}
     live.token_counts = {"context_window": 8192, "input_tokens": 100, "output_tokens": 50}
+    # turn_lock must support async context manager protocol
+    live.turn_lock = MagicMock()
+    live.turn_lock.__aenter__ = AsyncMock(return_value=None)
+    live.turn_lock.__aexit__ = AsyncMock(return_value=None)
     return live
 
 
@@ -301,6 +308,14 @@ class TestClearMemory:
         assert "error" in body
         assert body["error"] is None
 
+    def test_clear_acquires_turn_lock(self, client, tokens, sid, app):
+        """clear_memory must acquire live_session.turn_lock before mutating state."""
+        live = _make_live_session()
+        _mock_registry(app, live)
+        client.delete(f"/api/v1/sessions/{sid}/memory", headers=_h(tokens["owner"]))
+        live.turn_lock.__aenter__.assert_awaited_once()
+        live.turn_lock.__aexit__.assert_awaited_once()
+
 
 # ---------------------------------------------------------------------------
 # PATCH /api/v1/sessions/{id}/memory — switch mode
@@ -410,3 +425,16 @@ class TestSwitchMemoryMode:
             json={"mode": "code"},
         )
         assert r.status_code == 401
+
+    def test_switch_acquires_turn_lock(self, client, tokens, sid, app):
+        """switch_memory_mode must acquire live_session.turn_lock before replacing memory_manager."""
+        live = _make_live_session(mode="conversation")
+        _mock_registry(app, live)
+        r = client.patch(
+            f"/api/v1/sessions/{sid}/memory",
+            headers=_h(tokens["owner"]),
+            json={"mode": "code"},
+        )
+        assert r.status_code == 200
+        live.turn_lock.__aenter__.assert_awaited_once()
+        live.turn_lock.__aexit__.assert_awaited_once()

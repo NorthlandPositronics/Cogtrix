@@ -154,22 +154,14 @@ class ConversationMemoryManager(BaseMemoryManager):
             pass
 
     def prepare_context(self, user_input: str) -> MemoryContext:
-        """
-        Prepare conversation context for LLM.
-
-        When the tier cache is warm, assembles context from pre-compressed
-        tiers (T3 summary → T2 → T1 → T0 verbatim) for accurate token
-        estimates.  Falls back to the plain sliding window when the cache
-        is cold.
-
-        Args:
-            user_input: Current user input (for future relevance filtering)
-
-        Returns:
-            MemoryContext with messages and metadata
-        """
-        # Record the moment the user sent this message
-        self._pending_user_ts = self._now_ts()
+        """Prepare conversation-optimized context for LLM."""
+        # Record the moment the user sent this message.
+        # Protected by _hybrid_lock so concurrent prepare_context() calls
+        # do not silently overwrite each other's timestamps before update()
+        # can consume them (issue #1344).
+        with self._hybrid_lock:
+            self._captured_user_ts = self._now_ts()
+            self._pending_user_ts = self._captured_user_ts
 
         # ── Mode-specific prefix (entities + hybrid recall) ──────────────
         # Computed regardless of the message-selection path so both the
@@ -272,66 +264,65 @@ class ConversationMemoryManager(BaseMemoryManager):
         ai_response: str,
         agent_messages: list[Any] | None = None,
     ) -> None:
-        """
-        Add new turn to conversation memory.
-
-        If *agent_messages* is provided the full tool-call chain is
-        stored (enabling the Ralph Loop — the agent can see its
-        previous tool usage on restart).  Otherwise a simple
-        Human / AI pair is stored.
-
-        Args:
-            user_input: User's input
-            ai_response: AI's response
-            agent_messages: Optional full chain from the agent run
-        """
-        # --- Build the human message (always needed) ----------------
-        if HumanMessage is not None:
-            human_msg: Any = HumanMessage(content=user_input)
-        else:
-            human_msg = {"type": "human", "content": user_input}
-        self._set_msg_ts(human_msg, self._pending_user_ts)
-        self._pending_user_ts = None
-
-        self._messages.append(human_msg)
-
-        # --- Append the agent's messages ---------------------------
-        if agent_messages is not None:
-            # agent_messages already contains the full chain
-            # (AI tool_calls, ToolMessages, final AI).
-            # Stamp the final AI message with the current time.
-            for m in agent_messages:
-                self._messages.append(m)
-            # Stamp only the *last* AI message (the final answer)
-            last = agent_messages[-1]
-            if hasattr(last, "content") or isinstance(last, dict):
-                self._set_msg_ts(last)
-        else:
-            # Legacy path: just a plain AI text response
-            if AIMessage is not None:
-                ai_msg: Any = AIMessage(content=ai_response)
+        """Update memory with conversation context."""
+        # Capture timestamp under _hybrid_lock (matches lock used in
+        # prepare_context to write it — issue #1344).
+        with self._hybrid_lock:
+            ts_to_apply = self._pending_user_ts
+            self._pending_user_ts = None
+        with self._mode_lock:
+            # --- Build the human message (always needed) ----------------
+            if HumanMessage is not None:
+                human_msg: Any = HumanMessage(content=user_input)
             else:
-                ai_msg = {"type": "ai", "content": ai_response}
-            self._set_msg_ts(ai_msg)
-            self._messages.append(ai_msg)
+                human_msg = {"type": "human", "content": user_input}
+            self._set_msg_ts(human_msg, ts_to_apply)
 
-        # Layer-1a: accumulate tokens since last summary update
+            self._messages.append(human_msg)
+
+            # --- Append the agent's messages ---------------------------
+            if agent_messages is not None:
+                # agent_messages already contains the full chain
+                # (AI tool_calls, ToolMessages, final AI).
+                # Stamp the final AI message with the current time.
+                for m in agent_messages:
+                    self._messages.append(m)
+                # Stamp only the *last* AI message (the final answer)
+                last = agent_messages[-1]
+                if hasattr(last, "content") or isinstance(last, dict):
+                    self._set_msg_ts(last)
+            else:
+                # Legacy path: just a plain AI text response
+                if AIMessage is not None:
+                    ai_msg: Any = AIMessage(content=ai_response)
+                else:
+                    ai_msg = {"type": "ai", "content": ai_response}
+                self._set_msg_ts(ai_msg)
+                self._messages.append(ai_msg)
+
+            # Snapshot messages under lock so downstream scheduling
+            # sees a consistent view even if clear() or another update()
+            # mutates self._messages concurrently.
+            messages_snapshot = list(self._messages)
+
+        # Layer-1a: accumulate tokens since last summary update (protected by _hybrid_lock in base)
         from src.memory.manager import _msg_tokens
 
-        self._tokens_since_summary += _msg_tokens(human_msg)
-        if agent_messages is not None:
-            self._tokens_since_summary += _msg_tokens(agent_messages[-1])
-        else:
-            self._tokens_since_summary += _msg_tokens(ai_msg)
-        self._check_summary_token_ttl()
+        with self._hybrid_lock:
+            self._tokens_since_summary += _msg_tokens(human_msg)
+            if agent_messages is not None:
+                self._tokens_since_summary += _msg_tokens(agent_messages[-1])
+            else:
+                self._tokens_since_summary += _msg_tokens(ai_msg)
+            self._check_summary_token_ttl_locked()
 
         # Incrementally summarize messages outside the sliding window
         window_size = self._mode_config["working_memory_size"]
-        self._schedule_slow_path(self._messages, window_size)
+        self._schedule_slow_path(messages_snapshot, window_size)
 
         # Schedule tier cache roll-forward only when history exceeds the window.
         # No-op for short sessions that still fit in the verbatim sliding window.
-        if len(self._messages) > window_size:
+        if len(messages_snapshot) > window_size:
             try:
                 self.schedule_tier_roll_forward(
                     max_context_tokens=getattr(self, "_max_context_tokens", 0) or 128_000,
@@ -373,22 +364,23 @@ class ConversationMemoryManager(BaseMemoryManager):
         everything from that index to the end. Returns the number of
         messages removed (0 if nothing to remove).
         """
-        if not self._messages:
-            return 0
-        # Find the last HumanMessage index
-        last_human_idx = None
-        for i in range(len(self._messages) - 1, -1, -1):
-            msg = self._messages[i]
-            is_human = (HumanMessage is not None and isinstance(msg, HumanMessage)) or (
-                isinstance(msg, dict) and msg.get("type") == "human"
-            )
-            if is_human:
-                last_human_idx = i
-                break
-        if last_human_idx is None:
-            return 0
-        removed = len(self._messages) - last_human_idx
-        self._messages = self._messages[:last_human_idx]
+        with self._mode_lock:
+            if not self._messages:
+                return 0
+            # Find the last HumanMessage index
+            last_human_idx = None
+            for i in range(len(self._messages) - 1, -1, -1):
+                msg = self._messages[i]
+                is_human = (HumanMessage is not None and isinstance(msg, HumanMessage)) or (
+                    isinstance(msg, dict) and msg.get("type") == "human"
+                )
+                if is_human:
+                    last_human_idx = i
+                    break
+            if last_human_idx is None:
+                return 0
+            removed = len(self._messages) - last_human_idx
+            self._messages = self._messages[:last_human_idx]
         self.save()
         return removed
 
@@ -412,16 +404,17 @@ class ConversationMemoryManager(BaseMemoryManager):
         """Serialize conversation state."""
         from src.memory.json_store import _message_to_dict
 
-        base = super().to_dict()
+        with self._mode_lock:
+            base = super().to_dict()
 
-        messages_data = [_message_to_dict(m) for m in self._messages]
+            messages_data = [_message_to_dict(m) for m in self._messages]
 
-        return {
-            **base,
-            "messages": messages_data,
-            "entities": self._entities,
-            "topics": self._topics,
-        }
+            return {
+                **base,
+                "messages": messages_data,
+                "entities": self._entities,
+                "topics": self._topics,
+            }
 
     def _mode_state_dict(self) -> dict[str, Any]:
         """Persist conversation-specific state without messages or hybrid data."""

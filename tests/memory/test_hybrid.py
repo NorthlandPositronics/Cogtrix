@@ -104,6 +104,40 @@ class TestGenerateSummary:
         result = generate_summary(mock_llm, msgs, existing_summary="existing")
         assert result == "existing"
 
+    def test_returns_existing_on_none_content(self):
+        """Regression guard: content=None must fall back to existing_summary.
+
+        Issue #1340 follow-up — the list-coercion fix must not break the
+        original None guard. ``getattr(response, 'content', ...) or ''``
+        ensures ``content=None`` becomes ``''`` and the empty-check fires.
+        """
+        mock_llm = MagicMock()
+        mock_llm.invoke.return_value = MagicMock(content=None)
+
+        msgs = [HumanMessage(content="Hello")]
+        result = generate_summary(mock_llm, msgs, existing_summary="existing")
+        assert result == "existing"
+
+    def test_handles_list_formatted_llm_response(self):
+        """Regression guard: multimodal providers return content as list[dict].
+
+        Issue #1340 — generate_summary crashed with AttributeError when
+        response.content was a list (e.g. Anthropic, Gemini). The bare
+        ``except Exception`` swallowed the error and returned the existing
+        summary, causing silent summary staleness.
+        """
+        mock_llm = MagicMock()
+        mock_llm.invoke.return_value = MagicMock(
+            content=[
+                {"type": "text", "text": "Summary part one."},
+                {"type": "text", "text": "Summary part two."},
+            ]
+        )
+
+        msgs = [HumanMessage(content="Hello")]
+        result = generate_summary(mock_llm, msgs)
+        assert result == "Summary part one. Summary part two."
+
     def test_generate_summary_returns_quickly_on_hung_llm(self, monkeypatch):
         """generate_summary must not block indefinitely when llm.invoke hangs.
 

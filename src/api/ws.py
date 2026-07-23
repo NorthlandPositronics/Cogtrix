@@ -16,8 +16,16 @@ The client sends ``ping`` every 30 s; the server responds with ``pong``.
 Dead connections are dropped after 90 s of silence.
 
 WebSocket authentication: the client must include the Bearer token in the
-``Authorization`` header (or as ``?token=<jwt>`` query parameter for
-environments that cannot set custom headers, e.g., browser WebSocket API).
+``Authorization`` header.  The session WebSocket (``/ws/v1/sessions/{id}``)
+does **not** support ``?token=`` — that support was removed in #1128 to
+prevent token exposure in server/proxy access logs.  The log stream WebSocket
+(``/ws/v1/logs``) still accepts ``?token=`` for admin auth.
+
+.. note::
+   The browser ``WebSocket`` API does not support custom headers.  Clients
+   in browser environments should either route through a reverse proxy that
+   injects the ``Authorization`` header from a cookie/query param, or use a
+   dedicated auth endpoint that sets an HttpOnly session cookie.
 """
 
 from __future__ import annotations

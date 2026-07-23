@@ -42,7 +42,6 @@ from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 
-import src._bootstrap  # noqa: F401 — installs warning filters before langgraph loads
 from src.api.rate_limit import configure_trusted_proxy_cidrs, limiter, reset_rate_limits
 from src.api.routes import (
     admin,

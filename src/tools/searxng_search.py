@@ -18,6 +18,8 @@ from typing import Any
 import httpx
 from pydantic import BaseModel, Field
 
+from src.tools.error_sanitizer import sanitize_search_error as _sanitize_search_error
+
 log = logging.getLogger("cogtrix")
 
 _searxng_config: dict[str, Any] = {}
@@ -85,9 +87,9 @@ def searxng_search(query: str, num_results: int = 5, language: str = "en") -> st
     except httpx.HTTPStatusError as e:
         return f"Error: SearXNG returned HTTP {e.response.status_code}"
     except httpx.RequestError as e:
-        return f"Error: Could not connect to SearXNG at {base_url}: {e}"
+        return f"Error: Could not connect to SearXNG at {base_url}: {_sanitize_search_error(e)}"
     except Exception as e:
-        return f"Error: {e}"
+        return f"Error: {_sanitize_search_error(e)}"
 
     results = data.get("results", [])[:num_results]
     if not results:

@@ -63,7 +63,9 @@ def app():
     )
     factory = async_sessionmaker(engine, expire_on_commit=False)
 
-    _asyncio.run(_create_tables(engine))
+    loop = _asyncio.new_event_loop()
+    _asyncio.set_event_loop(loop)
+    loop.run_until_complete(_create_tables(engine))
 
     with patch.dict(os.environ, {"COGTRIX_JWT_SECRET": _TEST_JWT_SECRET}):
         _app = create_app()
@@ -80,7 +82,8 @@ def app():
         _app.dependency_overrides[get_db] = _override
         yield _app
 
-    _asyncio.run(engine.dispose())
+    loop.run_until_complete(engine.dispose())
+    loop.close()
 
 
 async def _create_tables(engine):

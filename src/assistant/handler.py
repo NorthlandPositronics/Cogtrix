@@ -285,9 +285,17 @@ class MessageHandler:
 
         return self._guardrails.sanitize_output(text)
 
-    def _check_guardrails(self, msg: IncomingMessage, session: Any, channel: Channel) -> bool:
-        """Return True if input passes guardrails; on failure, send blocked response and return False."""
-        result = self._guardrails.check_input(msg.text, msg.chat_id)
+    def _check_guardrails(
+        self, msg: IncomingMessage, session: Any, channel: Channel, *, skip_trusted: bool = False
+    ) -> bool:
+        """Return True if input passes guardrails; on failure, send blocked response and return False.
+
+        Args:
+            skip_trusted: If True, bypass rate-limiting and blacklist checks (trusted operator).
+        """
+        result = self._guardrails.check_input(
+            msg.text, msg.chat_id, skip_trusted_checks=skip_trusted
+        )
         if not result.is_safe:
             session.guardrail_violations += 1
             log.warning(
@@ -500,7 +508,16 @@ class MessageHandler:
             response = self._prepare_outbound_text(response)
             if len(response) > self._max_response_length:
                 response = response[: self._max_response_length - 3] + "..."
-            result = channel.send(msg.chat_id, response)
+            try:
+                result = channel.send(msg.chat_id, response)
+            except Exception as exc:
+                log.warning(
+                    "Failed to send reply to %s via %s: %s",
+                    msg.chat_id,
+                    channel.name,
+                    exc,
+                )
+                return None
             if result.ok and result.message_id:
                 session.last_sent_message_id = result.message_id
             elif not result.ok:
@@ -518,7 +535,16 @@ class MessageHandler:
         fallback_text = self._prepare_outbound_text(edit_state.new_text)
         if len(fallback_text) > self._max_response_length:
             fallback_text = fallback_text[: self._max_response_length - 3] + "..."
-        result = channel.send(msg.chat_id, fallback_text)
+        try:
+            result = channel.send(msg.chat_id, fallback_text)
+        except Exception as exc:
+            log.warning(
+                "Failed to send fallback reply to %s via %s: %s",
+                msg.chat_id,
+                channel.name,
+                exc,
+            )
+            return None  # Don't record undelivered text in memory
         if result.ok and result.message_id:
             session.last_sent_message_id = result.message_id
         elif not result.ok:
@@ -828,6 +854,10 @@ class MessageHandler:
 
         with session.lock:
             session.last_activity = time.monotonic()
+            # Operator-originated messages skip rate-limit/blacklist (trusted) but
+            # still run injection detection and encoding checks (#1076).
+            if not self._check_guardrails(synthetic_msg, session, channel, skip_trusted=True):
+                return "[Operator instruction blocked — injection or encoding detected]", None
             context, combined_prefix = self._prepare_context(synthetic_msg, session)
 
             effective_prompt, user_input, history, wf_excluded, wf_approved = (

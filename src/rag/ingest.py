@@ -24,6 +24,8 @@ from src.utils.atomic_write import atomic_write_json
 _entity_index_lock = threading.Lock()
 _log = logging.getLogger("cogtrix.ingest")
 
+_INGEST_PREPARE_TIMEOUT = 60.0  # seconds; tests monkey-patch this down
+
 _STOP_WORDS: frozenset[str] = frozenset(
     {
         "the",
@@ -387,10 +389,14 @@ def ingest_many(
         future_to_path = {pool.submit(_prepare_ingest_file, Path(p), config): str(p) for p in paths}
         for future, path_str in future_to_path.items():
             try:
-                prepared = future.result(timeout=60)
+                prepared = future.result(timeout=_INGEST_PREPARE_TIMEOUT)
             except TimeoutError:
                 future.cancel()
-                _log.warning("Ingest file %s timed out after 60s — marking as failed", path_str)
+                _log.warning(
+                    "Ingest file %s timed out after %.1fs — marking as failed",
+                    path_str,
+                    _INGEST_PREPARE_TIMEOUT,
+                )
                 results[path_str] = False
                 continue
             except Exception:

@@ -65,9 +65,25 @@ class ClassifyInvoiceInput(BaseModel):
 
 
 def _classify_invoice_return(inp: BaseModel) -> dict[str, Any]:
+    # Stub must return the field the user-facing prompts ask about
+    # ("classify by amount tier"); otherwise a strict instruction-
+    # follower like llama3-70b-cerebras refuses to finalise without
+    # the tier and loops between classify_invoice + checkpoint until
+    # recursion_limit (~33% of runs).  Permissive models (Claude /
+    # GPT-4o / DeepSeek-V4-Flash / Kimi) hallucinate a tier from
+    # ``amount`` and pass either way, but the stub should not depend
+    # on that.
+    amount = getattr(inp, "amount", 0) or 0
+    if amount >= 50_000:
+        tier = "high"
+    elif amount >= 1_000:
+        tier = "medium"
+    else:
+        tier = "low"
     return {
         "status": "classified",
         "classification_id": _short_id("CLS"),
+        "tier": tier,
         **_echo_non_none(inp),
     }
 

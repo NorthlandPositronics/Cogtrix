@@ -31,6 +31,8 @@ from urllib.parse import urlparse
 
 from pydantic import BaseModel, Field
 
+from src.tools.error_sanitizer import sanitize_search_error as _sanitize_search_error
+
 # Try to import ddgs (formerly duckduckgo_search)
 try:
     from ddgs import DDGS
@@ -143,7 +145,7 @@ def search_web(query: str, num_results: int = 5, region: str = "wt-wt") -> str:
         Search results with titles, URLs, snippets, and domain metadata
     """
     if not DDGS_AVAILABLE:
-        return "Error: DuckDuckGo search not available. " "Run: uv add duckduckgo-search"
+        return "Error: DuckDuckGo search not available. Run: uv add duckduckgo-search"
 
     if not query.strip():
         return "Error: Empty search query"
@@ -180,7 +182,7 @@ def search_web(query: str, num_results: int = 5, region: str = "wt-wt") -> str:
         return "\n".join(output)
 
     except Exception as e:
-        return f"Error searching: {e}"
+        return f"Error searching: {_sanitize_search_error(e)}"
 
 
 def search_news(query: str, num_results: int = 5, timelimit: str | None = "w") -> str:
@@ -196,7 +198,7 @@ def search_news(query: str, num_results: int = 5, timelimit: str | None = "w") -
         News results with titles, URLs, dates, sources, and domain metadata
     """
     if not DDGS_AVAILABLE:
-        return "Error: DuckDuckGo search not available. " "Run: uv add duckduckgo-search"
+        return "Error: DuckDuckGo search not available. Run: uv add duckduckgo-search"
 
     if not query.strip():
         return "Error: Empty search query"
@@ -235,7 +237,7 @@ def search_news(query: str, num_results: int = 5, timelimit: str | None = "w") -
         return "\n".join(output)
 
     except Exception as e:
-        return f"Error searching news: {e}"
+        return f"Error searching news: {_sanitize_search_error(e)}"
 
 
 # Tool configurations for registry

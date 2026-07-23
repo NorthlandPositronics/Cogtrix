@@ -1690,6 +1690,114 @@ class TestDuplicateToolCallDetection:
         for msg in tool_msgs:
             assert "Duplicate" not in msg.content
 
+    def test_parallel_duplicate_tool_call_invoked_once(self):
+        """Two identical parallel tool calls must invoke the tool only once (BUG-1293)."""
+        call_1 = {"name": "echo_tool", "args": {"text": "hello"}, "id": "c1"}
+        call_2 = {"name": "echo_tool", "args": {"text": "hello"}, "id": "c2"}
+        ai_msg = AIMessage(content="", tool_calls=[call_1, call_2], id="m1")
+        final = AIMessage(content="done", id="m2")
+
+        mock_tool = MagicMock()
+        mock_tool.name = "echo_tool"
+        mock_tool.invoke.return_value = ToolMessage(
+            content="world", tool_call_id="c1", name="echo_tool"
+        )
+
+        mock_llm = _make_mock_llm([ai_msg, final])
+
+        graph = _build_agent_graph(
+            llm=mock_llm,
+            system_prompt="",
+            active_tools_list=[mock_tool],
+            available_tools={},
+            registry=_make_registry(),
+            approvals=set(),
+        )
+        result = graph.invoke({"messages": [HumanMessage(content="go")]})
+
+        tool_msgs = [m for m in result["messages"] if isinstance(m, ToolMessage)]
+        assert len(tool_msgs) == 2
+        assert mock_tool.invoke.call_count == 1  # BUG-1293 fix validation
+        # One result should be the cached duplicate
+        assert any("Duplicate call" in m.content for m in tool_msgs)
+        assert all("world" in m.content for m in tool_msgs)
+
+    def test_parallel_duplicate_tool_call_with_slow_invoke(self):
+        """Wide race window: slow tool still invoked only once (BUG-1293)."""
+        call_1 = {"name": "echo_tool", "args": {"text": "hello"}, "id": "c1"}
+        call_2 = {"name": "echo_tool", "args": {"text": "hello"}, "id": "c2"}
+        ai_msg = AIMessage(content="", tool_calls=[call_1, call_2], id="m1")
+        final = AIMessage(content="done", id="m2")
+
+        mock_tool = MagicMock()
+        mock_tool.name = "echo_tool"
+
+        def _slow_invoke(inp, *a, **kw):
+            time.sleep(0.05)  # widen the TOCTOU window
+            return ToolMessage(content="world", tool_call_id=inp["id"], name="echo_tool")
+
+        mock_tool.invoke.side_effect = _slow_invoke
+
+        mock_llm = _make_mock_llm([ai_msg, final])
+
+        graph = _build_agent_graph(
+            llm=mock_llm,
+            system_prompt="",
+            active_tools_list=[mock_tool],
+            available_tools={},
+            registry=_make_registry(),
+            approvals=set(),
+        )
+        result = graph.invoke({"messages": [HumanMessage(content="go")]})
+
+        tool_msgs = [m for m in result["messages"] if isinstance(m, ToolMessage)]
+        assert len(tool_msgs) == 2
+        assert mock_tool.invoke.call_count == 1  # BUG-1293 fix validation
+        assert any("Duplicate call" in m.content for m in tool_msgs)
+        assert all("world" in m.content for m in tool_msgs)
+
+    def test_parallel_duplicate_tool_call_exception_cleans_pending(self):
+        """If the first parallel call raises, the sentinel is removed so retries work."""
+        call_1 = {"name": "echo_tool", "args": {"text": "hello"}, "id": "c1"}
+        call_2 = {"name": "echo_tool", "args": {"text": "hello"}, "id": "c2"}
+        ai_msg = AIMessage(content="", tool_calls=[call_1, call_2], id="m1")
+        final = AIMessage(content="done", id="m2")
+
+        mock_tool = MagicMock()
+        mock_tool.name = "echo_tool"
+
+        _call_count = 0
+
+        def _flaky_invoke(inp, *a, **kw):
+            nonlocal _call_count
+            _call_count += 1
+            if _call_count == 1:
+                raise RuntimeError("first call fails")
+            return ToolMessage(content="world", tool_call_id=inp["id"], name="echo_tool")
+
+        mock_tool.invoke.side_effect = _flaky_invoke
+
+        mock_llm = _make_mock_llm([ai_msg, final])
+
+        graph = _build_agent_graph(
+            llm=mock_llm,
+            system_prompt="",
+            active_tools_list=[mock_tool],
+            available_tools={},
+            registry=_make_registry(),
+            approvals=set(),
+        )
+        result = graph.invoke({"messages": [HumanMessage(content="go")]})
+
+        tool_msgs = [m for m in result["messages"] if isinstance(m, ToolMessage)]
+        assert len(tool_msgs) == 2
+        # One call failed, the other succeeded; second should NOT be blocked by stale sentinel
+        assert mock_tool.invoke.call_count == 2
+        success_msgs = [m for m in tool_msgs if "world" in m.content]
+        assert len(success_msgs) == 1
+        error_msgs = [m for m in tool_msgs if "Error executing" in m.content]
+        assert len(error_msgs) == 1
+
 
 class TestIdenticalErrorStuckDetection:
     """Tests for identical-error stuck detection in process_tools."""
@@ -1861,6 +1969,109 @@ class TestExtendRunWiring:
         available["extend_run"].invoke({"mode": "continue"})
         assert state2.requested is True
         assert state1.requested is False
+
+
+# ---------------------------------------------------------------------------
+# TestResetForNewRun
+# ---------------------------------------------------------------------------
+
+
+class TestResetForNewRun:
+    """Regression tests for #1292 — _reset_for_new_run must zero every PerRunState field."""
+
+    def test_reset_for_new_run_zeros_all_per_run_state_fields(self):
+        """Dirties every field, calls _reset_for_new_run, and asserts all are reset."""
+        from dataclasses import fields
+
+        from src.orchestration.graph import PerRunState
+
+        mock_llm = _make_mock_llm([AIMessage(content="done", id="m1")])
+        graph = _build_agent_graph(
+            llm=mock_llm,
+            system_prompt="",
+            active_tools_list=[],
+            available_tools={},
+            registry=_make_registry(),
+            approvals=set(),
+        )
+
+        state = graph._per_run_state[0]
+
+        # Capture the pristine initial values before we dirt anything.
+        # tool_lookup / active_names / tool_catalog are rebuilt from
+        # active_tools_list, which may contain auto-injected tools (e.g.
+        # checkpoint), so we compare against the initial state rather than
+        # hard-coding empty collections.
+        initial_lookup = dict(state.tool_lookup)
+        initial_names = set(state.active_names)
+        initial_catalog = dict(state.tool_catalog)
+
+        # Dirt every scalar counter / flag.
+        state.phantom_count[0] = 99
+        state.fabrication_count[0] = 99
+        state.action_intent_count[0] = 99
+        state.incompleteness_nudge_given[0] = 99
+        state.expansion_count[0] = 99
+        state.auto_expansion_count[0] = 99
+        state.call_count[0] = 99
+        state.last_input_tokens[0] = 99
+        state.request_tools_noop_count[0] = 99
+        state.tool_version[0] = 42
+        state.last_tool_version[0] = 42
+        state.last_reflection_at[0] = 99
+        state.last_tool_health_check_at[0] = 99
+        state.stuck_threshold_calibrated[0] = True
+        state.stuck_no_checkpoint_threshold[0] = 99
+        state.consecutive_errors[0] = 99
+        state.force_thinking_break[0] = True
+        state.consecutive_identical_error_count[0] = 99
+        state.last_identical_error_signature[0] = ("a", "b")
+        state.last_checkpoint_count[0] = 99
+        state.rounds_since_checkpoint[0] = 99
+        state.calls_since_last_checkpoint[0] = 99
+
+        # Dirt every collection.
+        state.tool_call_history["key"] = "value"
+        state.tool_call_counts["key"] = 99
+        state.same_file_writes["file"] = 99
+        state.bound_cache["key"] = "value"
+        state.compression_cache["key"] = "value"
+        state.tool_lookup["key"] = "value"
+        state.active_names.add("key")
+        state.tool_catalog["key"] = "value"
+        state.available_tools_ref[0] = {"dirty": True}
+
+        graph._reset_for_new_run({}, OrderedDict(), {})
+
+        # Verify every field against its expected post-reset value.
+        for f in fields(PerRunState):
+            actual = getattr(state, f.name)
+            if f.name == "tool_version":
+                # Should be incremented, not zeroed.
+                assert actual[0] == 43, f"{f.name} should be incremented (got {actual[0]})"
+            elif f.name == "tool_lookup":
+                assert (
+                    actual == initial_lookup
+                ), f"{f.name} was not rebuilt correctly (got {actual!r})"
+            elif f.name == "active_names":
+                assert (
+                    actual == initial_names
+                ), f"{f.name} was not rebuilt correctly (got {actual!r})"
+            elif f.name == "tool_catalog":
+                assert (
+                    actual == initial_catalog
+                ), f"{f.name} was not rebuilt correctly (got {actual!r})"
+            elif f.name == "available_tools_ref":
+                assert actual == [{}], f"{f.name} should be [{{}}] (got {actual!r})"
+            elif f.name == "bound_cache":
+                assert (
+                    actual == OrderedDict()
+                ), f"{f.name} should be empty OrderedDict (got {actual!r})"
+            elif f.name == "compression_cache":
+                assert actual == {}, f"{f.name} should be empty dict (got {actual!r})"
+            else:
+                expected = getattr(PerRunState(), f.name)
+                assert actual == expected, f"{f.name} was not reset: {actual!r} != {expected!r}"
 
 
 # ---------------------------------------------------------------------------

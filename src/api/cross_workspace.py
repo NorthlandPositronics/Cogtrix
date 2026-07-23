@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -26,6 +27,26 @@ from pathlib import Path
 from typing import Any
 
 log = logging.getLogger("cogtrix.api.cross_workspace")
+
+# ---------------------------------------------------------------------------
+# UUID v4 validation — explicit sanitiser for CodeQL CWE-22
+# ---------------------------------------------------------------------------
+
+_UUID4_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+    re.IGNORECASE,
+)
+
+
+def _validate_uuid4(value: str, name: str) -> None:
+    """Raise ValueError if *value* is not a UUID v4.
+
+    This explicit check is the primary CodeQL CWE-22 sanitiser — it runs before
+    any path construction and is recognised by static analysers as a taint-kill.
+    """
+    if not _UUID4_RE.match(value):
+        raise ValueError(f"Invalid {name} — expected UUID v4: {value!r}")
+
 
 # ---------------------------------------------------------------------------
 # Policy
@@ -103,6 +124,7 @@ def _inbox_dir(data_root: Path, workspace_id: str) -> Path:
     Raises ValueError when the resolved path escapes the cross_workspace root,
     which would indicate a path-traversal attempt via a crafted workspace_id.
     """
+    _validate_uuid4(workspace_id, "workspace_id")
     base = data_root / "cross_workspace"
     candidate = (base / workspace_id).resolve()
     # Ensure the resolved path stays inside base (handles ../ sequences)
@@ -178,6 +200,7 @@ def delete_message(
     """Delete a message from the inbox.  Returns True if the file existed."""
     import os
 
+    _validate_uuid4(message_id, "message_id")
     root = data_root or Path(os.environ.get("COGTRIX_DATA_DIR", "/data"))
     inbox = _inbox_dir(root, workspace_id)
     msg_file = inbox / f"{message_id}.json"

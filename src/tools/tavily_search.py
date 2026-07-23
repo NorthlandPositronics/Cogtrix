@@ -36,6 +36,8 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from src.tools.error_sanitizer import sanitize_search_error as _sanitize_search_error
+
 log = logging.getLogger("cogtrix")
 
 # ── Optional import ──────────────────────────────────────────────────────
@@ -109,7 +111,7 @@ class TavilySearchInput(BaseModel):
     include_answer: bool = Field(
         default=True,
         description=(
-            "Include a short AI-generated answer summary " "synthesised from the search results"
+            "Include a short AI-generated answer summary synthesised from the search results"
         ),
     )
     topic: str = Field(
@@ -155,7 +157,7 @@ def tavily_search(
         Formatted search results with extracted content.
     """
     if not TAVILY_AVAILABLE:
-        return "Error: tavily-python is not installed. " "Run: uv add tavily-python"
+        return "Error: tavily-python is not installed. Run: uv add tavily-python"
 
     if not query.strip():
         return "Error: Empty search query"
@@ -178,9 +180,9 @@ def tavily_search(
             topic=topic,
         )
     except RuntimeError as e:
-        return f"Error: {e}"
+        return f"Error: {_sanitize_search_error(e, 'Tavily')}"
     except Exception as e:
-        return f"Error performing Tavily search: {e}"
+        return f"Error performing Tavily search: {_sanitize_search_error(e)}"
 
     # ── Format the response ──────────────────────────────────────
     output: list[str] = [f"Tavily search results for: {query}\n"]
@@ -232,7 +234,7 @@ def tavily_extract(urls: list[str]) -> str:
         Extracted text content from each URL.
     """
     if not TAVILY_AVAILABLE:
-        return "Error: tavily-python is not installed. " "Run: uv add tavily-python"
+        return "Error: tavily-python is not installed. Run: uv add tavily-python"
 
     if not urls:
         return "Error: No URLs provided"
@@ -244,9 +246,9 @@ def tavily_extract(urls: list[str]) -> str:
         client = _get_client()
         response = client.extract(urls=urls)
     except RuntimeError as e:
-        return f"Error: {e}"
+        return f"Error: {_sanitize_search_error(e, 'Tavily')}"
     except Exception as e:
-        return f"Error extracting content: {e}"
+        return f"Error extracting content: {_sanitize_search_error(e)}"
 
     # ── Format the response ──────────────────────────────────────
     output: list[str] = []

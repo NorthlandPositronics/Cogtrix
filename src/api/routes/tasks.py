@@ -16,7 +16,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import PlainTextResponse
 
 from src.api.auth import TokenData, get_current_user
-from src.api.org_context import OrgContext, get_org_context
+from src.api.org_context import OrgContext, assert_same_org, require_org_context
 from src.api.schemas.common import APIResponse
 from src.api.schemas.task import TaskCreateRequest, TaskOut
 
@@ -42,8 +42,8 @@ def _task_to_out(task: object) -> TaskOut:
     )
 
 
-def _assert_task_ownership(record: object, current_user: TokenData) -> None:
-    """Raise 403 FORBIDDEN if the task does not belong to the current user."""
+def _assert_task_ownership(record: object, current_user: TokenData, ctx: OrgContext) -> None:
+    """Raise 403 FORBIDDEN if the task does not belong to the current user or org."""
     task_user_id = getattr(record, "user_id", "")
     if task_user_id and task_user_id != current_user.user_id:
         raise HTTPException(
@@ -53,6 +53,7 @@ def _assert_task_ownership(record: object, current_user: TokenData) -> None:
                 "message": "You do not have permission to access this task.",
             },
         )
+    assert_same_org(ctx, getattr(record, "org_id", None))
 
 
 def _get_queue():
@@ -88,13 +89,14 @@ def _get_queue():
     responses={
         202: {"description": "Task accepted and queued."},
         401: {"description": "Not authenticated."},
+        403: {"description": "User not assigned to an organization (ORG_REQUIRED)."},
         503: {"description": "Task queue unavailable (TASK_QUEUE_UNAVAILABLE)."},
     },
 )
 async def create_task(
     body: TaskCreateRequest,
     current_user: TokenData = Depends(get_current_user),
-    ctx: OrgContext = Depends(get_org_context),
+    ctx: OrgContext = Depends(require_org_context),
 ) -> APIResponse[TaskOut]:
     """Submit a task to the background queue.
 
@@ -125,6 +127,7 @@ async def create_task(
     responses={
         200: {"description": "Task list returned."},
         401: {"description": "Not authenticated."},
+        403: {"description": "User not assigned to an organization (ORG_REQUIRED)."},
         503: {"description": "Task queue unavailable (TASK_QUEUE_UNAVAILABLE)."},
     },
 )
@@ -132,6 +135,7 @@ async def list_tasks(
     task_status: str | None = Query(default=None, alias="status", description="Filter by status"),
     limit: int = Query(default=50, ge=1, le=200),
     current_user: TokenData = Depends(get_current_user),
+    ctx: OrgContext = Depends(require_org_context),
 ) -> APIResponse[list[TaskOut]]:
     """List recent tasks.
 
@@ -153,7 +157,9 @@ async def list_tasks(
                     "message": f"Unknown status {task_status!r}. Valid values: {[s.value for s in TaskStatus]}",
                 },
             ) from exc
-    tasks = queue.list(status=status_filter, limit=limit, user_id=current_user.user_id)
+    tasks = queue.list(
+        status=status_filter, limit=limit, user_id=current_user.user_id, org_id=ctx.org_id
+    )
     return APIResponse(data=[_task_to_out(t) for t in tasks])
 
 
@@ -165,6 +171,9 @@ async def list_tasks(
     responses={
         200: {"description": "Task returned."},
         401: {"description": "Not authenticated."},
+        403: {
+            "description": "Access denied — wrong org or user (TASK_ACCESS_DENIED / CROSS_ORG_ACCESS)."
+        },
         404: {"description": "Task not found (TASK_NOT_FOUND)."},
         503: {"description": "Task queue unavailable (TASK_QUEUE_UNAVAILABLE)."},
     },
@@ -172,6 +181,7 @@ async def list_tasks(
 async def get_task(
     task_id: str,
     current_user: TokenData = Depends(get_current_user),
+    ctx: OrgContext = Depends(require_org_context),
 ) -> APIResponse[TaskOut]:
     """Return a single task by ID.
 
@@ -185,7 +195,7 @@ async def get_task(
             status_code=status.HTTP_404_NOT_FOUND,
             detail={"code": "TASK_NOT_FOUND", "message": "No task with that ID exists."},
         )
-    _assert_task_ownership(record, current_user)
+    _assert_task_ownership(record, current_user, ctx)
     return APIResponse(data=_task_to_out(record))
 
 
@@ -197,6 +207,9 @@ async def get_task(
     responses={
         200: {"description": "Task cancelled."},
         401: {"description": "Not authenticated."},
+        403: {
+            "description": "Access denied — wrong org or user (TASK_ACCESS_DENIED / CROSS_ORG_ACCESS)."
+        },
         404: {"description": "Task not found (TASK_NOT_FOUND)."},
         409: {"description": "Task is not in a cancellable state (TASK_NOT_CANCELLABLE)."},
         503: {"description": "Task queue unavailable (TASK_QUEUE_UNAVAILABLE)."},
@@ -205,6 +218,7 @@ async def get_task(
 async def cancel_task(
     task_id: str,
     current_user: TokenData = Depends(get_current_user),
+    ctx: OrgContext = Depends(require_org_context),
 ) -> APIResponse[None]:
     """Cancel a pending task.
 
@@ -219,7 +233,7 @@ async def cancel_task(
             status_code=status.HTTP_404_NOT_FOUND,
             detail={"code": "TASK_NOT_FOUND", "message": "No task with that ID exists."},
         )
-    _assert_task_ownership(record, current_user)
+    _assert_task_ownership(record, current_user, ctx)
     cancelled = queue.cancel(task_id)
     if not cancelled:
         raise HTTPException(
@@ -247,6 +261,7 @@ async def cancel_task(
 async def get_task_log(
     task_id: str,
     current_user: TokenData = Depends(get_current_user),
+    ctx: OrgContext = Depends(require_org_context),
 ) -> PlainTextResponse:
     """Return the plain-text log for a task.
 
@@ -262,7 +277,7 @@ async def get_task_log(
             status_code=status.HTTP_404_NOT_FOUND,
             detail={"code": "TASK_NOT_FOUND", "message": "No task with that ID exists."},
         )
-    _assert_task_ownership(record, current_user)
+    _assert_task_ownership(record, current_user, ctx)
     log_path = pathlib.Path(record.log_path).resolve()
     try:
         queue._log_dir.resolve()

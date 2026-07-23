@@ -39,35 +39,41 @@ class TestCogtrixPromptPrepTimeout:
 class TestServiceInitChannelsTimeout:
     """_init_channels must skip a hung channel init and not block."""
 
-    @pytest.mark.timeout(60)
+    @pytest.mark.timeout(10)
     def test_hung_channel_init_skipped(self):
         """If one channel init hangs, others still complete."""
+        from src.assistant import service as service_mod
         from src.assistant.service import AssistantService
 
         svc = AssistantService.__new__(AssistantService)
         stop_event = threading.Event()
 
-        with patch.object(
-            svc, "_init_whatsapp", side_effect=lambda *a, **k: stop_event.wait(timeout=60)
-        ):
-            with patch.object(svc, "_init_telegram", return_value=MagicMock(name="telegram")):
-                cfg2 = MagicMock()
-                cfg2.services = {"whatsapp": {}, "telegram": {}}
-                cfg2.get.return_value = {
-                    "channels": {
-                        "whatsapp": {"enabled": True},
-                        "telegram": {"enabled": True},
+        # Patch the production timeout down so we don't wait the real 30 s.
+        # The hung worker's inner wait must outlast the patched timeout but
+        # still be short enough that the test exits quickly if the production
+        # cancel path regresses.
+        with patch.object(service_mod, "_CHANNEL_INIT_TIMEOUT", 0.3):
+            with patch.object(
+                svc, "_init_whatsapp", side_effect=lambda *a, **k: stop_event.wait(timeout=3)
+            ):
+                with patch.object(svc, "_init_telegram", return_value=MagicMock(name="telegram")):
+                    cfg2 = MagicMock()
+                    cfg2.services = {"whatsapp": {}, "telegram": {}}
+                    cfg2.get.return_value = {
+                        "channels": {
+                            "whatsapp": {"enabled": True},
+                            "telegram": {"enabled": True},
+                        }
                     }
-                }
-                cfg2.data_dir = "/tmp"
-                t0 = time.monotonic()
-                channels = svc._discover_channels(cfg2)
-                elapsed = time.monotonic() - t0
-                # Must return within ~35s (30s timeout + margin), not hang forever
-                assert elapsed < 35, f"Blocked for {elapsed:.1f}s — pool __exit__ not fixed"
-                # Telegram should still be initialized
-                assert len(channels) == 1
-                assert channels[0] is not None
+                    cfg2.data_dir = "/tmp"
+                    t0 = time.monotonic()
+                    channels = svc._discover_channels(cfg2)
+                    elapsed = time.monotonic() - t0
+                    # Must return within ~1s (0.3s timeout + margin), not hang forever
+                    assert elapsed < 1.5, f"Blocked for {elapsed:.1f}s — pool __exit__ not fixed"
+                    # Telegram should still be initialized
+                    assert len(channels) == 1
+                    assert channels[0] is not None
 
         stop_event.set()
 
@@ -78,7 +84,7 @@ class TestServiceInitChannelsTimeout:
 class TestIngestFilesParallelTimeout:
     """_ingest_files_parallel must mark timed-out files as failed."""
 
-    @pytest.mark.timeout(120)
+    @pytest.mark.timeout(10)
     def test_hung_ingest_file_marked_failed(self, tmp_path: Path):
         """If _prepare_ingest_file hangs, the file is marked failed and loop continues."""
         from src.rag.ingest import ingest_many
@@ -96,16 +102,18 @@ class TestIngestFilesParallelTimeout:
         dummy_file = tmp_path / "test.txt"
         dummy_file.write_text("test content")
 
-        with patch(
-            "src.rag.ingest._prepare_ingest_file",
-            side_effect=lambda *a, **k: stop_event.wait(timeout=120),
-        ):
-            t0 = time.monotonic()
-            results = ingest_many([str(dummy_file)], config)
-            elapsed = time.monotonic() - t0
-            # Must return within ~65s (60s timeout + margin), not hang forever
-            assert elapsed < 65, f"Blocked for {elapsed:.1f}s — pool __exit__ not fixed"
-            assert results[str(dummy_file)] is False
+        # Patch the production timeout down so we don't wait the real 60 s.
+        with patch("src.rag.ingest._INGEST_PREPARE_TIMEOUT", 0.3):
+            with patch(
+                "src.rag.ingest._prepare_ingest_file",
+                side_effect=lambda *a, **k: stop_event.wait(timeout=3),
+            ):
+                t0 = time.monotonic()
+                results = ingest_many([str(dummy_file)], config)
+                elapsed = time.monotonic() - t0
+                # Must return within ~1s (0.3s timeout + margin), not hang forever
+                assert elapsed < 1.5, f"Blocked for {elapsed:.1f}s — pool __exit__ not fixed"
+                assert results[str(dummy_file)] is False
 
         stop_event.set()
 
@@ -116,8 +124,10 @@ class TestIngestFilesParallelTimeout:
 class TestWhatsAppPrefetchLidsTimeout:
     """_prefetch_lids must skip a hung LID resolution."""
 
+    @pytest.mark.timeout(10)
     def test_hung_lid_resolution_skipped(self):
         """If one _resolve_lid hangs, others still complete."""
+        from src.assistant.channels import whatsapp as whatsapp_mod
         from src.assistant.channels.whatsapp import WhatsAppChannel
 
         ch = WhatsAppChannel.__new__(WhatsAppChannel)
@@ -134,7 +144,7 @@ class TestWhatsAppPrefetchLidsTimeout:
             nonlocal call_count
             call_count += 1
             if number == "slow@lid":
-                stop_event.wait(timeout=60)
+                stop_event.wait(timeout=3)
             ch._lid_cache[number] = ("resolved", 9999999999)
 
         ch._resolve_lid = _slow_lid
@@ -144,12 +154,14 @@ class TestWhatsAppPrefetchLidsTimeout:
             MagicMock(from_number="fast@lid"),
         ]
 
-        t0 = time.monotonic()
-        ch._prefetch_lids(msgs)
-        elapsed = time.monotonic() - t0
-        # Must return within ~15s (10s timeout + margin), not hang forever
-        assert elapsed < 15, f"Blocked for {elapsed:.1f}s — pool __exit__ not fixed"
-        # Fast number should be resolved
-        assert "fast@lid" in ch._lid_cache
+        # Patch the production timeout down so we don't wait the real 10 s.
+        with patch.object(whatsapp_mod, "_LID_RESOLVE_TIMEOUT", 0.3):
+            t0 = time.monotonic()
+            ch._prefetch_lids(msgs)
+            elapsed = time.monotonic() - t0
+            # Must return within ~1s (0.3s timeout + margin), not hang forever
+            assert elapsed < 1.5, f"Blocked for {elapsed:.1f}s — pool __exit__ not fixed"
+            # Fast number should be resolved
+            assert "fast@lid" in ch._lid_cache
 
         stop_event.set()

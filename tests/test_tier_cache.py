@@ -872,6 +872,36 @@ class TestCompressToTier:
         assert llm.invoke.called
         assert result == "compressed result"
 
+    def test_compress_to_tier_hung_thread_returns_within_guard_timeout(self):
+        """A forever-hung LLM thread must not block the caller — __exit__ bug."""
+        import threading
+        import time
+        from unittest.mock import patch
+
+        from src.memory.tier_cache import compress_to_tier
+
+        event = threading.Event()
+
+        def _hang_forever(_prompt: str) -> object:
+            event.wait()  # blocks until event.set() — never happens
+            return MagicMock(content="compressed")
+
+        llm = MagicMock()
+        llm.invoke.side_effect = _hang_forever
+
+        content = "some long content " * 50
+        start = time.monotonic()
+        with patch("src.memory.tier_cache._COMPRESSION_TIMEOUT_SECONDS", 0.1):
+            result = compress_to_tier(content, "tool", 1, llm)
+        elapsed = time.monotonic() - start
+
+        # Must return within 1s even though the thread hangs forever;
+        # the old ``with ThreadPoolExecutor`` pattern would block on __exit__.
+        assert elapsed < 1.0, f"elapsed {elapsed:.2f}s — __exit__ blocked on hung thread"
+        assert isinstance(result, str)
+        assert len(result) > 0
+        assert result != "compressed"
+
 
 # ---------------------------------------------------------------------------
 # Phase 3: roll_forward()

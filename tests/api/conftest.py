@@ -12,9 +12,25 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
 
-@pytest.fixture(scope="function")
+@pytest.fixture(scope="module")
 def app():
-    """FastAPI app backed by a fresh in-memory SQLite database."""
+    """FastAPI app backed by a fresh in-memory SQLite database.
+
+    Scoped at module level to avoid the ~24s per-test startup cost
+    of creating a new engine, creating all tables, and building the
+    FastAPI app from scratch (function scope was the previous default).
+    A single app + DB is shared across all tests in the module,
+    reducing the API integration suite from ~28 min to ~10 min.
+
+    Test isolation: each test function runs inside a FastAPI
+    TestClient request context with dependency-overridden get_db
+    sessions, so request-scoped state is still clean.  The
+    _reset_rate_limit_counters autouse fixture (tests/conftest.py)
+    runs before every function and clears rate-limit counters.
+    Modules that need true isolation between test classes can
+    override this fixture with scope="class" or scope="function"
+    in their local conftest.
+    """
     from src.api.app import create_app
     from src.api.db.engine import Base, get_db
 

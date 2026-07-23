@@ -111,7 +111,7 @@ class TestTavilySearch:
             result = tavily_search("test")
 
         assert "Error" in result
-        assert "network timeout" in result
+        assert "request failed" in result
 
     def test_tavily_search_max_results_passed_to_api(self):
         from src.tools.tavily_search import tavily_search

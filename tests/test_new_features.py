@@ -772,8 +772,12 @@ class TestHandleOutbound:
         # Memory is still updated even on delivery failure
         mm.update.assert_called_once()
 
-    def test_handle_outbound_no_input_guardrails(self):
-        """Operator instructions bypass input guardrails (no _check_guardrails call)."""
+    def test_handle_outbound_injection_guardrails_enforced_with_trusted_bypass(self):
+        """Operator instructions trigger injection/encoding guardrails via skip_trusted_checks=True.
+
+        Rate-limit and blacklist are bypassed (trusted operator), but injection and encoding
+        detection still apply — this is the correct secure contract (issue #1076).
+        """
         handler, session, runner, mm = self._make_handler()
         channel = MagicMock()
         channel.name = "whatsapp"
@@ -788,9 +792,11 @@ class TestHandleOutbound:
             chat_id="+123@c.us",
         )
 
-        # _check_guardrails is not called — operator instructions are trusted
-        handler._guardrails.check_input.assert_not_called()
-        # But output guardrails are still applied
+        # _check_guardrails is called with skip_trusted_checks=True (trusted operator path)
+        handler._guardrails.check_input.assert_called_once()
+        call_kwargs = handler._guardrails.check_input.call_args.kwargs
+        assert call_kwargs.get("skip_trusted_checks") is True
+        # Output guardrails are still applied
         handler._guardrails.sanitize_output.assert_called_once()
 
 

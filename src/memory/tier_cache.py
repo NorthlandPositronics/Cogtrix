@@ -217,20 +217,23 @@ def compress_to_tier(
         # Wrap the LLM call in a temporary executor so we can enforce a timeout.
         # Python threads cannot be cancelled; shutdown(wait=False) lets the
         # hung thread die in the background without blocking the caller.
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            future = pool.submit(llm.invoke, prompt)
-            try:
-                response = future.result(timeout=_COMPRESSION_TIMEOUT_SECONDS)
-            except concurrent.futures.TimeoutError:
-                future.cancel()
-                pool.shutdown(wait=False)
-                log.warning(
-                    "compress_to_tier(%d): LLM call timed out after %ds — "
-                    "falling back to truncation",
-                    tier,
-                    _COMPRESSION_TIMEOUT_SECONDS,
-                )
-                raise
+        # NOTE: we use manual pool creation (not ``with``) because
+        # ThreadPoolExecutor.__exit__ calls shutdown(wait=True), which would
+        # block forever on a hung thread.
+        pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        future = pool.submit(llm.invoke, prompt)
+        try:
+            response = future.result(timeout=_COMPRESSION_TIMEOUT_SECONDS)
+        except concurrent.futures.TimeoutError:
+            future.cancel()
+            log.warning(
+                "compress_to_tier(%d): LLM call timed out after %ds — falling back to truncation",
+                tier,
+                _COMPRESSION_TIMEOUT_SECONDS,
+            )
+            raise
+        finally:
+            pool.shutdown(wait=False)
         raw = getattr(response, "content", str(response))
         if isinstance(raw, list):
             raw = " ".join(str(c.get("text", c) if isinstance(c, dict) else c) for c in raw)

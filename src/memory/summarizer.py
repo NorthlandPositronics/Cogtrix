@@ -132,7 +132,10 @@ def generate_summary(
                 return existing_summary
         finally:
             pool.shutdown(wait=False)
-        summary = (response.content or "").strip()
+        raw = getattr(response, "content", str(response)) or ""
+        if isinstance(raw, list):
+            raw = " ".join(str(c.get("text", c) if isinstance(c, dict) else c) for c in raw)
+        summary = str(raw).strip()
         if not summary:
             log.warning("Summarizer returned empty response")
             return existing_summary

@@ -11,6 +11,8 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
+from src.tools.error_sanitizer import sanitize_file_error as _sanitize_file_error
+
 # Application install directory — allows read access to project docs/source
 # even when the working directory is set elsewhere (e.g., Docker with -w /tmp).
 _APP_DIR: Path = Path(__file__).resolve().parent.parent.parent
@@ -368,9 +370,9 @@ def read_file(
     except PermissionError:
         return f"Error: Permission denied: {path}"
     except OSError as e:
-        return f"Error reading file: {e}"
+        return f"Error reading file: {_sanitize_file_error(e)}"
     except Exception as e:
-        return f"Error reading file: {e}"
+        return f"Error reading file: {_sanitize_file_error(e)}"
 
 
 def write_file(path: str, content: str, encoding: str = "utf-8") -> str:
@@ -417,7 +419,7 @@ def write_file(path: str, content: str, encoding: str = "utf-8") -> str:
     except PermissionError:
         return f"Error: Permission denied: {path}"
     except Exception as e:
-        return f"Error writing file: {e}"
+        return f"Error writing file: {_sanitize_file_error(e)}"
 
 
 def append_file(path: str, content: str, encoding: str = "utf-8") -> str:
@@ -463,7 +465,7 @@ def append_file(path: str, content: str, encoding: str = "utf-8") -> str:
     except PermissionError:
         return f"Error: Permission denied: {path}"
     except Exception as e:
-        return f"Error appending to file: {e}"
+        return f"Error appending to file: {_sanitize_file_error(e)}"
 
 
 def list_directory(
@@ -539,7 +541,7 @@ def list_directory(
     except PermissionError:
         return f"Error: Permission denied: {path}"
     except Exception as e:
-        return f"Error listing directory: {e}"
+        return f"Error listing directory: {_sanitize_file_error(e)}"
 
 
 class PatchFileInput(BaseModel):
@@ -589,6 +591,18 @@ def patch_file(path: str, old_str: str, new_str: str) -> str:
     if not resolved.is_file():
         return f"Error: Not a file: {path}"
 
+    try:
+        file_size = resolved.stat().st_size
+    except OSError as e:
+        return f"Error: Could not read file metadata: {_sanitize_file_error(e)}"
+
+    _MAX_READ_BYTES = 100 * 1024 * 1024  # 100 MB
+    if file_size > _MAX_READ_BYTES:
+        return (
+            f"Error: File too large ({file_size / (1024 * 1024):.1f} MB). "
+            f"Maximum readable size is {_MAX_READ_BYTES // (1024 * 1024)} MB."
+        )
+
     lock = _get_append_lock(str(resolved))
     with lock:
         try:
@@ -596,7 +610,7 @@ def patch_file(path: str, old_str: str, new_str: str) -> str:
         except PermissionError:
             return f"Error: Permission denied reading: {path}"
         except Exception as e:
-            return f"Error reading file: {e}"
+            return f"Error reading file: {_sanitize_file_error(e)}"
 
         count = content.count(old_str)
         if count == 0:
@@ -619,7 +633,7 @@ def patch_file(path: str, old_str: str, new_str: str) -> str:
         except PermissionError:
             return f"Error: Permission denied writing: {path}"
         except Exception as e:
-            return f"Error writing file: {e}"
+            return f"Error writing file: {_sanitize_file_error(e)}"
 
     old_lines = content.count("\n") + 1
     new_lines = new_content.count("\n") + 1
@@ -697,7 +711,7 @@ def file_info(path: str | dict) -> str:
     except PermissionError:
         return f"Error: Permission denied: {path}"
     except Exception as e:
-        return f"Error getting file info: {e}"
+        return f"Error getting file info: {_sanitize_file_error(e)}"
 
 
 # Tool configurations for registry

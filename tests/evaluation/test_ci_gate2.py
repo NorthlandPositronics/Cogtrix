@@ -185,9 +185,9 @@ def test_run_gate2_smoke_judge_cannot_rescue_partial_completion(monkeypatch) -> 
         emit=logs.append,
     )
 
-    assert exit_code == 1, (
-        "Partial completion must fail the gate even with a perfect judge score; " f"logs={logs}"
-    )
+    assert (
+        exit_code == 1
+    ), f"Partial completion must fail the gate even with a perfect judge score; logs={logs}"
     # The PARTIAL_COMPLETION diagnostic line must be emitted so CI logs are
     # actionable when the gate flips from previously-passing to failing.
     assert any(
@@ -249,9 +249,9 @@ def test_run_gate2_smoke_retries_on_empty_response_flake(monkeypatch) -> None:
         emit=logs.append,
     )
 
-    assert call_count["n"] == 2, (
-        f"Expected one retry after empty-response flake; got n={call_count['n']}. " f"Logs: {logs}"
-    )
+    assert (
+        call_count["n"] == 2
+    ), f"Expected one retry after empty-response flake; got n={call_count['n']}. Logs: {logs}"
     assert exit_code == 0, f"Empty-response flake should retry and pass; logs={logs}"
     assert any(
         "RETRY" in line and "empty_response" in line.lower() for line in logs
@@ -328,16 +328,25 @@ def test_run_gate2_smoke_falls_back_on_captured_auth_error(monkeypatch) -> None:
     """When ``run_scenario`` catches a 402/credits error and stuffs it into
     ``EvalResult.error``, ``_try_run_with_key`` must still recognize it and
     fall back to the next priority key — otherwise the entire scenario fails
-    on the first key when a later key would have worked."""
+    on the first key when a later key would have worked.
+
+    Native-key-first ordering interacts with this test: because the model
+    under test (gpt-4o) has ``env_key=OPENAI_API_KEY``, the OpenAI key is
+    tried before OpenRouter.  When OpenAI returns the captured 402, the
+    fallback path picks OpenRouter as the second key.  The fallback
+    *behaviour* the test pins is identical to before; only the key
+    ordering swaps.
+    """
     from tests.evaluation.runner import _KEY_PRIORITY
 
     for key in _KEY_PRIORITY:
         monkeypatch.delenv(key, raising=False)
-    monkeypatch.setenv("OPENROUTER_API_KEY", "or-broke-value")
-    monkeypatch.setenv("OPENAI_API_KEY", "openai-good-value")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "or-good-value")
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-broke-value")
 
-    # First call (OpenRouter) returns a 402-credits error in EvalResult.error.
-    # Second call (the next eligible key, OpenAI) returns a clean pass.
+    # First call (OpenAI, the model's native key) returns a 402-credits
+    # error in EvalResult.error.  Second call (OpenRouter, the fallback)
+    # returns a clean pass.
     call_count = {"n": 0}
 
     def fake_run_scenario(scenario, model, active_key=None):
@@ -359,7 +368,9 @@ def test_run_gate2_smoke_falls_back_on_captured_auth_error(monkeypatch) -> None:
         lambda scenario, result, judge_model="claude-sonnet-4-6": 1.0,
     )
 
-    # Use an OpenAI-keyed model so OPENAI_API_KEY is eligible as the second key.
+    # gpt-4o has env_key=OPENAI_API_KEY, so native-key-first routing tries
+    # OPENAI_API_KEY first.  OpenRouter is the fallback via its wildcard
+    # cover (the model has an openrouter_model_id).
     openai_model = ModelConfig(
         id="gpt-4o",
         provider="openai",
@@ -382,8 +393,8 @@ def test_run_gate2_smoke_falls_back_on_captured_auth_error(monkeypatch) -> None:
     ), f"Expected fallback to second key (n=2 calls), got n={call_count['n']}. Logs: {logs}"
     assert exit_code == 0, f"Fallback path should succeed; logs={logs}"
     assert any(
-        "KEY_FAIL" in line and "OPENROUTER_API_KEY" in line for line in logs
-    ), f"Expected KEY_FAIL log for OpenRouter; logs={logs}"
+        "KEY_FAIL" in line and "OPENAI_API_KEY" in line for line in logs
+    ), f"Expected KEY_FAIL log for native OPENAI_API_KEY; logs={logs}"
 
 
 def test_try_run_with_key_retries_on_transient_error(monkeypatch) -> None:
@@ -542,33 +553,34 @@ def test_gate2_job_does_not_self_cancel_workflow() -> None:
 
 
 def test_test_job_depends_on_gate2() -> None:
-    """The Python unit-test job must wait for Gate 2 to succeed.
+    """jobs.test no longer waits for gate2 — the trade-off has been re-evaluated.
 
-    Without this dependency, ``test`` runs in parallel with ``gate2``
-    and burns up to 15 min of CI minutes on every failed smoke run.
-    Making ``test`` depend on ``gate2`` causes test to be skipped
-    (never started) when Gate 2 fails — saving the wasted minutes
-    at the cost of ~5–6 min slower happy path.
+    **Original rationale (PR #1277):** Making ``test`` depend on ``gate2``
+    prevented wasted CI capacity on the 1-in-50 PRs where Gate 2 fails,
+    at a cost of ~5–6 min slower happy path.
 
-    A future edit that drops gate2 from test's needs (returning to
-    parallel execution) will fail this guard and prompt a re-eval.
+    **Current rationale (PR #1377):** Gate 2 failures are rare (~2 % of PRs).
+    The guaranteed 9-min tax on every successful run is more expensive
+    than the occasional 3-min unit-test burn on the failure path.
+    ``test-api`` still serialises on ``gate2``, protecting the expensive
+    28-min API suite.  ``test`` (now ~1 min with xdist) runs in parallel
+    with ``gate2`` so the critical path is: gate2 → test-api.
     """
     import yaml
 
     ci_yml = Path(__file__).parents[2] / ".github" / "workflows" / "ci.yml"
     workflow = yaml.safe_load(ci_yml.read_text())
 
-    test_job = workflow.get("jobs", {}).get("test")
-    assert test_job is not None, "ci.yml has no jobs.test — workflow refactor broke this test"
+    test_job = workflow.get("jobs", {}).get("unit-tests")
+    assert test_job is not None, "ci.yml has no jobs.unit-tests — workflow refactor broke this test"
 
     needs = test_job.get("needs", [])
-    # ``needs`` may be a single string or a list — normalise to list.
     if isinstance(needs, str):
         needs = [needs]
-    assert "gate2" in needs, (
-        f"jobs.test.needs is {needs!r} — gate2 must be in this list so "
-        "the unit suite is skipped when Gate 2 fails.  See PR #1277 / the "
-        "May 2026 silent merge for why parallel execution was abandoned."
+    assert "gate2" not in needs, (
+        f"jobs.unit-tests.needs is {needs!r} — unit-tests was intentionally decoupled from "
+        "gate2 in PR #1377.  See the re-evaluated trade-off comment above.  "
+        "If you are restoring this dependency, update this test to match."
     )
 
 
@@ -606,3 +618,251 @@ def test_run_gate2_smoke_default_emit_flushes_each_line() -> None:
     assert (
         default_emit is _flushing_print
     ), "run_gate2_smoke.emit default has drifted away from _flushing_print"
+
+
+# ── Key-routing: native API first, OpenRouter fallback ──────────────────────
+
+
+def test_candidate_keys_for_model_puts_native_first() -> None:
+    """A model's native env_key must be tried before OpenRouter.
+
+    Concrete case that motivated this routing: DeepSeek-V4-Flash uses
+    thinking mode and requires ``reasoning_content`` to be threaded
+    back on subsequent turns.  OpenRouter's pass-through does not
+    always preserve that field, so a multi-turn scenario gets a 400
+    from DeepSeek on turn 2.  Hitting the native DeepSeek API first
+    side-steps the regression and only falls back to OpenRouter if
+    DEEPSEEK_API_KEY is absent or rejected.
+    """
+    from tests.evaluation.ci_gate2 import _candidate_keys_for_model
+    from tests.evaluation.runner import ModelConfig
+
+    deepseek_model = ModelConfig(
+        id="deepseek-v4-flash",
+        provider="deepseek",
+        display_name="DeepSeek-V4-Flash",
+        tier="A",
+        smoke=True,
+        env_key="DEEPSEEK_API_KEY",
+        model_id="deepseek-chat",
+        openrouter_model_id="deepseek/deepseek-v4-flash",
+    )
+    full_keys = [
+        ("OPENROUTER_API_KEY", "or-x"),
+        ("CEREBRAS_API_KEY", "cb-x"),
+        ("DEEPSEEK_API_KEY", "ds-x"),
+        ("OPENAI_API_KEY", "oa-x"),
+        ("ANTHROPIC_API_KEY", "an-x"),
+    ]
+    ordered = _candidate_keys_for_model(full_keys, deepseek_model)
+    assert ordered[0][0] == "DEEPSEEK_API_KEY", (
+        "DeepSeek models must try DEEPSEEK_API_KEY before OpenRouter; "
+        f"got order {[k[0] for k in ordered]}"
+    )
+    # All other keys must still be present as fallbacks, in their original
+    # priority order (OpenRouter, Cerebras, OpenAI, Anthropic).
+    assert [k[0] for k in ordered[1:]] == [
+        "OPENROUTER_API_KEY",
+        "CEREBRAS_API_KEY",
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+    ]
+
+
+def test_is_model_unavailable_error_recognises_common_shapes() -> None:
+    """``_is_model_unavailable_error`` is the fall-back predicate that
+    rescues a Gate 2 cell when a provider has retired a model_id behind
+    our back (the Cerebras llama-3.3-70b → gpt-oss-120b transition in
+    May 2026 was the motivating case).
+
+    The check is keyword-based against ``str(exc).lower()``, so any
+    shape that includes one of the recognised phrases must trip.  This
+    test pins the keyword set so a future tightening (e.g. requiring
+    an HTTP status code in the string) cannot regress the predicate
+    silently.
+    """
+    from tests.evaluation.ci_gate2 import _is_model_unavailable_error
+
+    positives = [
+        "Error code: 400 - {'error': {'message': 'model not found', 'code': 'model_not_found'}}",
+        "Model llama-3.3-70b does not exist on this endpoint.",
+        "unknown model: gpt-oss-120b",
+        "model is not available in your region",
+        "no such model registered",
+    ]
+    for msg in positives:
+        assert _is_model_unavailable_error(Exception(msg)), msg
+
+    # Negatives — common errors that should NOT trip the predicate, so
+    # they continue to follow their normal handling paths
+    # (auth/quota / transient / strict-gate failure).
+    negatives = [
+        "401 Unauthorized",
+        "Connection reset by peer",
+        "Recursion limit of 25 reached",
+        "Scenario timed out after 90s",
+    ]
+    for msg in negatives:
+        assert not _is_model_unavailable_error(Exception(msg)), msg
+
+
+def test_candidate_keys_for_model_respects_prefer_openrouter_flag() -> None:
+    """When ``model.prefer_openrouter`` is True the native-key promotion
+    is skipped — OpenRouter (the first entry in the configured
+    ``_KEY_PRIORITY``) stays first.
+
+    Used as a per-model escape hatch.  Currently ``deepseek-v4-flash``
+    sets the flag while issue #1391 (reasoning_content threading) is
+    open: DeepSeek's native API 400s on every multi-turn scenario but
+    OpenRouter's pass-through lets some complete.  The flag exists
+    *exactly* to let one model fall through to OpenRouter without
+    forcing every other model back onto the pre-routing path.
+    """
+    from tests.evaluation.ci_gate2 import _candidate_keys_for_model
+    from tests.evaluation.runner import ModelConfig
+
+    deepseek_via_openrouter = ModelConfig(
+        id="deepseek-v4-flash",
+        provider="deepseek",
+        display_name="DeepSeek-V4-Flash",
+        tier="B",
+        smoke=True,
+        env_key="DEEPSEEK_API_KEY",
+        model_id="deepseek-v4-flash",
+        openrouter_model_id="deepseek/deepseek-v4-flash",
+        prefer_openrouter=True,  # the workaround for #1391
+    )
+    full_keys = [
+        ("OPENROUTER_API_KEY", "or-x"),
+        ("DEEPSEEK_API_KEY", "ds-x"),
+        ("OPENAI_API_KEY", "oa-x"),
+    ]
+    ordered = _candidate_keys_for_model(full_keys, deepseek_via_openrouter)
+    # The flag must keep the original priority order — OpenRouter first.
+    assert ordered == full_keys, (
+        "prefer_openrouter=True must short-circuit the native-promotion "
+        f"step; got {[k[0] for k in ordered]}, expected {[k[0] for k in full_keys]}"
+    )
+
+
+def test_candidate_keys_for_model_falls_back_when_native_absent() -> None:
+    """When the native key is not in the environment, ordering is unchanged.
+
+    Preserves the "one OpenRouter key gets everything to work" property
+    for solo developers who only set ``OPENROUTER_API_KEY`` locally.
+    """
+    from tests.evaluation.ci_gate2 import _candidate_keys_for_model
+    from tests.evaluation.runner import ModelConfig
+
+    deepseek_model = ModelConfig(
+        id="deepseek-v4-flash",
+        provider="deepseek",
+        display_name="DeepSeek-V4-Flash",
+        tier="A",
+        smoke=True,
+        env_key="DEEPSEEK_API_KEY",
+        model_id="deepseek-chat",
+        openrouter_model_id="deepseek/deepseek-v4-flash",
+    )
+    # No DEEPSEEK_API_KEY in the candidate set — OpenRouter must remain
+    # the first choice via the wildcard cover.
+    only_openrouter = [("OPENROUTER_API_KEY", "or-x")]
+    assert _candidate_keys_for_model(only_openrouter, deepseek_model) == only_openrouter
+
+
+# ── Workflow guard: api-tests must be in the CI Summary failure loop ─────────
+
+
+def test_ci_summary_gates_on_api_tests_result() -> None:
+    """The CI Summary required-checks loop must include ``api-tests``.
+
+    Without this, an api-tests failure leaves CI Summary green and a
+    PR can auto-merge with a broken API integration suite — the same
+    shape as the PR #1276 incident that brought ``gate2`` into the
+    loop.  Adding api-tests to the loop closes the symmetric hole.
+    """
+    ci_yml = Path(__file__).parents[2] / ".github" / "workflows" / "ci.yml"
+    text = ci_yml.read_text()
+
+    loop_start = text.find("for result in")
+    assert loop_start != -1, "CI Summary required-checks loop not found in ci.yml"
+    loop_end = text.find("done", loop_start)
+    assert loop_end != -1, "CI Summary loop has no terminator"
+    loop_body = text[loop_start:loop_end]
+    assert "needs.api-tests.result" in loop_body, (
+        "api-tests must be inside the CI Summary required-checks loop, not "
+        "just the summary table.  Without this, a cancelled or failed "
+        "api-tests shard lets the PR auto-merge — the same merge-block "
+        "hole that PR #1276 exploited for Gate 2."
+    )
+
+
+# ── Workflow guard: shard file lists must match the filesystem ──────────────
+
+
+def _extract_test_paths_from_job(ci_yml_text: str, job_name: str) -> set[str]:
+    """Return every ``tests/...py`` path mentioned in a job's run block.
+
+    Used by the shard-coverage guards to compare CI's static file lists
+    against what is actually present in the repository.  The shard
+    case blocks use plain ``tests/foo.py`` paths (no globs, no helpers)
+    so a regex sweep over the job's YAML slice is sufficient — no need
+    to parse the embedded shell.
+    """
+    import re
+
+    m = re.search(rf"^  {re.escape(job_name)}:\n", ci_yml_text, re.MULTILINE)
+    assert m, f"ci.yml has no jobs.{job_name}"
+    start = m.start()
+    rest = ci_yml_text[start + 1 :]
+    next_job = re.search(r"^  [a-z][a-z0-9_-]*:\n", rest, re.MULTILINE)
+    end = (start + 1 + next_job.start()) if next_job else len(ci_yml_text)
+    job_block = ci_yml_text[start:end]
+    return set(re.findall(r"(tests/[A-Za-z0-9_/]+\.py)", job_block))
+
+
+def test_api_tests_shard_files_exist() -> None:
+    """Every test file listed in an api-tests A-D shard must exist on disk.
+
+    With shard E added as a runtime-computed catch-all (find +
+    comm -23), the previous "every API test file on disk must be in
+    some shard" assertion is no longer needed — any file not in A-D
+    automatically lands in E.  The remaining guard is stale-entry
+    detection: a typo or rename that leaves a deleted file referenced
+    in A-D would cause pytest to error out at collection time on the
+    affected shard.  Catch that earlier with a clearer message.
+    """
+    repo = Path(__file__).parents[2]
+    ci_yml = repo / ".github" / "workflows" / "ci.yml"
+
+    referenced = _extract_test_paths_from_job(ci_yml.read_text(), "api-tests")
+    missing = sorted(p for p in referenced if not (repo / p).exists())
+    assert not missing, (
+        f"api-tests A-D case block references files that no longer exist: {missing}.  "
+        f"Remove them from .github/workflows/ci.yml (jobs.api-tests).  "
+        f"(Note: shard E would still pick up any on-disk api test file not in A-D — "
+        f"this guard only catches stale paths pointing to deleted files.)"
+    )
+
+
+def test_unit_tests_shard_files_exist() -> None:
+    """Every test file listed in a unit-tests A-D shard must exist on disk.
+
+    With shard E added as a runtime-computed catch-all (find +
+    comm -23), the previous "new files silently skipped" concern is
+    handled at CI time: anything not in A-D and not under
+    api/regression/test_api_* lands in shard E automatically.  This
+    guard catches the remaining failure mode — A-D listing a path
+    that no longer exists on disk, which would error out at pytest
+    collection time on the affected shard.
+    """
+    repo = Path(__file__).parents[2]
+    ci_yml = repo / ".github" / "workflows" / "ci.yml"
+
+    referenced = _extract_test_paths_from_job(ci_yml.read_text(), "unit-tests")
+    missing = sorted(p for p in referenced if not (repo / p).exists())
+    assert not missing, (
+        f"unit-tests case block references files that do not exist: {missing}.  "
+        f"Remove them from .github/workflows/ci.yml (jobs.unit-tests) or "
+        f"restore the missing test file."
+    )

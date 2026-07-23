@@ -144,11 +144,17 @@ class ReasoningMemoryManager(BaseMemoryManager):
     # --- Section freshness helpers (F5 prefix gating) ---
 
     def _touch_section(self, section: str) -> None:
-        """Record that *section* was modified on the current turn."""
+        """Record that *section* was modified on the current turn.
+
+        CALLER MUST HOLD _mode_lock.
+        """
         self._section_ts[section] = self._turn_count
 
     def _is_section_fresh(self, section: str) -> bool:
-        """Return True if *section* was modified within the staleness window."""
+        """Return True if *section* was modified within the staleness window.
+
+        CALLER MUST HOLD _mode_lock.
+        """
         ts = self._section_ts.get(section)
         if ts is None:
             return False
@@ -376,8 +382,13 @@ class ReasoningMemoryManager(BaseMemoryManager):
 
     def prepare_context(self, user_input: str) -> MemoryContext:
         """Prepare reasoning-focused context for LLM."""
-        # Record the moment the user sent this message
-        self._pending_user_ts = self._now_ts()
+        # Record the moment the user sent this message.
+        # Protected by _hybrid_lock so concurrent prepare_context() calls
+        # do not silently overwrite each other's timestamps before update()
+        # can consume them (issue #1344).
+        with self._hybrid_lock:
+            self._captured_user_ts = self._now_ts()
+            self._pending_user_ts = self._captured_user_ts
 
         # ── Mode-specific prefix (objective, goals, decisions …) ─────────
         # Computed before message selection so both the tier-cache and
@@ -565,6 +576,11 @@ class ReasoningMemoryManager(BaseMemoryManager):
         agent_messages: list[Any] | None = None,
     ) -> None:
         """Update memory with new turn (full chain if available)."""
+        # Capture timestamp under _hybrid_lock (matches lock used in
+        # prepare_context to write it — issue #1344).
+        with self._hybrid_lock:
+            ts_to_apply = self._pending_user_ts
+            self._pending_user_ts = None
         with self._mode_lock:
             self._turn_count += 1
             # --- Build the human message --------------------------------
@@ -572,8 +588,7 @@ class ReasoningMemoryManager(BaseMemoryManager):
                 human_msg: Any = HumanMessage(content=user_input)
             else:
                 human_msg = {"type": "human", "content": user_input}
-            self._set_msg_ts(human_msg, self._pending_user_ts)
-            self._pending_user_ts = None
+            self._set_msg_ts(human_msg, ts_to_apply)
 
             self._messages.append(human_msg)
 
@@ -592,15 +607,16 @@ class ReasoningMemoryManager(BaseMemoryManager):
                 self._set_msg_ts(ai_msg)
                 self._messages.append(ai_msg)
 
-        # Layer-1a: accumulate tokens since last summary update (protected by _hybrid_lock in base)
+        # Layer-1a: accumulate tokens since last summary update
         from src.memory.manager import _msg_tokens
 
-        self._tokens_since_summary += _msg_tokens(human_msg)
-        if agent_messages is not None:
-            self._tokens_since_summary += _msg_tokens(agent_messages[-1])
-        else:
-            self._tokens_since_summary += _msg_tokens(ai_msg)
-        self._check_summary_token_ttl()
+        with self._hybrid_lock:
+            self._tokens_since_summary += _msg_tokens(human_msg)
+            if agent_messages is not None:
+                self._tokens_since_summary += _msg_tokens(agent_messages[-1])
+            else:
+                self._tokens_since_summary += _msg_tokens(ai_msg)
+            self._check_summary_token_ttl_locked()
 
         # Incrementally summarize messages outside the sliding window
         window_size = self._mode_config["working_memory_size"]
@@ -631,9 +647,14 @@ class ReasoningMemoryManager(BaseMemoryManager):
         )
 
     def clear(self) -> None:
-        """Clear all reasoning memory."""
-        super().clear()
+        """Clear all reasoning memory.
+
+        Acquires _mode_lock before calling super().clear() (which acquires
+        _hybrid_lock), consistent with the standard lock nesting order used
+        throughout the memory subsystem (_mode_lock -> _hybrid_lock).
+        """
         with self._mode_lock:
+            super().clear()
             self._messages = []
             self._current_problem = None
             self._active_hypothesis = None
@@ -656,7 +677,8 @@ class ReasoningMemoryManager(BaseMemoryManager):
 
     def get_message_count(self) -> int:
         """Return total number of messages stored."""
-        return len(self._messages)
+        with self._mode_lock:
+            return len(self._messages)
 
     def get_stats(self) -> dict[str, Any]:
         """Return reasoning statistics."""

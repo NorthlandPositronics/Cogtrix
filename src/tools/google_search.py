@@ -40,6 +40,8 @@ from typing import Any
 import requests
 from pydantic import BaseModel, Field
 
+from src.tools.error_sanitizer import sanitize_search_error as _sanitize_search_error
+
 log = logging.getLogger("cogtrix")
 
 # -- Module-level configuration ------------------------------------------------
@@ -190,9 +192,9 @@ def google_search(
         detail = f": {body}" if body else ""
         return f"Error: Google Search API returned HTTP {status}{detail}"
     except requests.exceptions.RequestException as e:
-        return f"Error performing Google search: {e}"
+        return f"Error performing Google search: {_sanitize_search_error(e)}"
     except Exception as e:
-        return f"Error performing Google search: {e}"
+        return f"Error performing Google search: {_sanitize_search_error(e)}"
 
     # -- Format results --------------------------------------------------------
     output: list[str] = [f"Google search results for: {query}\n"]

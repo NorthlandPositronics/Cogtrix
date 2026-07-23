@@ -13,8 +13,11 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import threading
 import time
+import unicodedata
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -36,6 +39,125 @@ log = logging.getLogger("cogtrix")
 _DEFAULT_CHECK_INTERVAL: float = 60.0
 _DEFAULT_MAX_FOLLOW_UPS: int = 3
 _DEFAULT_FOLLOW_UP_INTERVAL_HOURS: float = 24.0
+
+# Homoglyph folding map (Cyrillic/Greek look-alikes → Latin).
+# Kept inline so the campaign module stays self-contained.
+_CONFUSABLE_MAP: dict[str, str] = {
+    # Cyrillic -> Latin
+    "\u0430": "a",
+    "\u0410": "A",  # а/А
+    "\u0441": "c",
+    "\u0421": "C",  # с/С
+    "\u0435": "e",
+    "\u0415": "E",  # е/Е
+    "\u043d": "h",
+    "\u041d": "H",  # н/Н
+    "\u0456": "i",
+    "\u0406": "I",  # і/І
+    "\u0458": "j",  # ј
+    "\u043e": "o",
+    "\u041e": "O",  # о/О
+    "\u0440": "p",
+    "\u0420": "P",  # р/Р
+    "\u0455": "s",  # ѕ
+    "\u0443": "y",  # у
+    "\u0445": "x",
+    "\u0425": "X",  # х/Х
+    "\u0412": "B",  # В
+    "\u041a": "K",  # К
+    "\u041c": "M",  # М
+    "\u0422": "T",  # Т
+    # Greek -> Latin
+    "\u03b1": "a",
+    "\u0391": "A",  # α/Α
+    "\u03b5": "e",
+    "\u0395": "E",  # ε/Ε
+    "\u03bf": "o",
+    "\u039f": "O",  # ο/Ο
+    "\u0392": "B",
+    "\u0397": "H",
+    "\u0399": "I",
+    "\u039a": "K",
+    "\u039c": "M",
+    "\u039d": "N",
+    "\u03a1": "P",
+    "\u03a4": "T",
+    "\u03a7": "X",
+    "\u03a5": "Y",
+    "\u0396": "Z",
+}
+
+_CONFUSABLE_TRANS: dict[int, str] = str.maketrans(_CONFUSABLE_MAP)
+
+
+# Regex patterns for prompt-injection strings that may appear in untrusted
+# campaign text.  Kept inline (not imported from guardrails) so the campaign
+# module stays self-contained and the pattern set can diverge without
+# side-effects on inbound guardrails.
+_CAMPAIGN_INJECTION_PATTERNS: list[re.Pattern[str]] = [
+    re.compile(p, re.IGNORECASE)
+    for p in [
+        r"ignore\s+(all\s+)?(previous|prior|above)\s+(instructions?|prompts?|rules?)",
+        r"(system\s+prompt|system\s+message)\s+is",
+        r"you\s+are\s+now\s+(a|an|the)\b",
+        r"disregard\s+(all\s+)?(previous|prior|your)\s+(instructions?|rules?|guidelines?)",
+        r"pretend\s+(you\s+are|to\s+be|you're)\b",
+        r"act\s+as\s+(if\s+)?(you\s+are|a|an)",
+        r"(new\s+)?instructions?:\s",
+        r"override\s+(previous|all|your)\b",
+        r"forget\s+(everything|all|previous|your)\b",
+        r"(drop|clear|reset|erase|wipe)\s+(all|everything|previous|prior|your|the)\b",
+        r"\bclear\s+(all|the|your|my|previous|prior|entire)\s+.{0,50}\b(context|history|memory|instructions?|rules?|prompts?)\b",
+        r"\b(drop|reset|erase|wipe)\s+.{0,100}\b(context|history|memory|instructions?|rules?|prompts?)\b",
+        r"now\s+you\s+are\s+(a|an|the|my)\b",
+        r"from\s+now\s+on\s+you\s+(are|will|should|must)\b",
+        r"stop\s+being\s+(a|an|the)\b",
+        r"\bDAN\b.{0,200}\bmode\b",
+        r"jailbreak",
+        r"do\s+anything\s+now",
+        r"\[system\]",
+        r"<\|?(system|im_start|im_end)\|?>",
+        r"```\s*(system|prompt)",
+    ]
+]
+
+
+def _sanitize_campaign_text(text: str) -> str:
+    """Strip prompt-injection patterns from campaign text before LLM submission.
+
+    This is a defense-in-depth measure for campaign ``goal`` and
+    ``instructions`` fields that originate from API input and are
+    interpolated verbatim into outbound LLM prompts.  The sanitizer:
+
+    0. Normalizes Unicode (NFKC) and folds Cyrillic/Greek homoglyphs to
+       Latin so that confusable characters cannot bypass pattern matching.
+    1. Removes known instruction-override phrases (same patterns used by
+       the inbound InputGuard, adapted for campaign text).
+    2. Escapes back-ticks, XML-like tags, brackets and newlines so the
+       injected text cannot break out of the framing delimiters.
+
+    The function is idempotent and preserves benign text.
+    """
+    if not text:
+        return text
+
+    # 0. Normalize Unicode and fold homoglyphs so that e.g. Cyrillic 'і'
+    #    is treated as Latin 'i' for pattern matching.
+    text = unicodedata.normalize("NFKC", text).translate(_CONFUSABLE_TRANS)
+
+    # 1. Strip injection patterns.
+    for pattern in _CAMPAIGN_INJECTION_PATTERNS:
+        text = pattern.sub("[REDACTED]", text)
+
+    # 2. Escape delimiter-breaking characters so the sanitized text
+    #    cannot close the framing block or inject new XML tags.
+    text = text.replace("`", "'")
+    text = text.replace("<", "⟨")
+    text = text.replace(">", "⟩")
+    text = text.replace("]", "⟩")
+    text = text.replace("\n", " ")
+
+    return text
 
 
 # ---------------------------------------------------------------------------
@@ -206,6 +328,7 @@ class CampaignManager:
         self._channels: dict[str, Any] = {}  # Set via set_channels()
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
+        self._executor: ThreadPoolExecutor | None = None
         self._load()
 
     # -- Dependency injection (break circular refs) -------------------------
@@ -296,10 +419,12 @@ class CampaignManager:
             campaign.status = "active"
             campaign.updated_at = time.time()
             targets = list(campaign.targets)
-            instructions = campaign.instructions
-            goal = campaign.goal
+            instructions = _sanitize_campaign_text(campaign.instructions)
+            goal = _sanitize_campaign_text(campaign.goal)
 
         results: dict[str, str] = {}
+        futures: list[tuple[str, Any]] = []  # (contact_name, future)
+
         for target in targets:
             if target.status not in ("pending",):
                 results[target.contact_name] = f"skipped ({target.status})"
@@ -319,26 +444,49 @@ class CampaignManager:
             with self._lock:
                 target.status = "active"
 
+            def _do_send(
+                _contact: str,
+                _channel: Any,
+                _chat_id: str,
+                _instructions: str,
+                _t: CampaignTarget,
+            ) -> tuple[str, str]:
+                try:
+                    framed = f"[Campaign outbound — goal: {goal}]\n{_instructions}"
+                    _response, msg_id = self._handler.handle_outbound(
+                        contact_name=_contact,
+                        instructions=framed,
+                        channel=_channel,
+                        chat_id=_chat_id,
+                    )
+                    with self._lock:
+                        _t.last_outbound_at = time.time()
+                    return (_contact, "sent" if msg_id else "send_failed")
+                except Exception as exc:
+                    log.warning("Failed to send outbound to %s: %s", _contact, exc)
+                    with self._lock:
+                        _t.status = "pending"
+                    return (_contact, f"error: {exc}")
+
+            if self._executor is not None:
+                fut = self._executor.submit(
+                    _do_send, target.contact_name, channel_obj, target.chat_id, instructions, target
+                )
+                futures.append((target.contact_name, fut))
+            else:
+                # Fallback: executor not started (campaign manager idle) — run synchronously
+                contact_name, status = _do_send(
+                    target.contact_name, channel_obj, target.chat_id, instructions, target
+                )
+                results[contact_name] = status
+
+        # Wait for all async sends to complete
+        for contact_name, fut in futures:
             try:
-                framed = f"[Campaign outbound — goal: {goal}]\n{instructions}"
-                _response, msg_id = self._handler.handle_outbound(
-                    contact_name=target.contact_name,
-                    instructions=framed,
-                    channel=channel_obj,
-                    chat_id=target.chat_id,
-                )
-                with self._lock:
-                    target.last_outbound_at = time.time()
-                results[target.contact_name] = "sent" if msg_id else "send_failed"
+                _, status = fut.result()
+                results[contact_name] = status
             except Exception as exc:
-                log.warning(
-                    "Failed to send outbound to %s: %s",
-                    target.contact_name,
-                    exc,
-                )
-                with self._lock:
-                    target.status = "pending"
-                results[target.contact_name] = f"error: {exc}"
+                results[contact_name] = f"error: {exc}"
 
         self.save()
         return results
@@ -434,6 +582,9 @@ class CampaignManager:
                     "CampaignManager.start() called before set_handler(); wire dependencies first"
                 )
             self._stop_event.clear()
+            self._executor = ThreadPoolExecutor(
+                thread_name_prefix="campaign-outbound",
+            )
             self._thread = threading.Thread(
                 target=self._follow_up_loop,
                 daemon=True,
@@ -448,6 +599,9 @@ class CampaignManager:
         if self._thread is not None:
             self._thread.join(timeout=10)
             self._thread = None
+        if self._executor is not None:
+            self._executor.shutdown(wait=True, cancel_futures=False)
+            self._executor = None
         log.info("CampaignManager stopped")
 
     def _follow_up_loop(self) -> None:
@@ -508,19 +662,46 @@ class CampaignManager:
                 self._send_follow_up(campaign, target)
 
     def _send_follow_up(self, campaign: Campaign, target: CampaignTarget) -> None:
-        """Send a follow-up message for a target that hasn't replied."""
+        """Send a follow-up message for a target that hasn't replied.
+
+        Submits work to the shared ThreadPoolExecutor so the follow-up dispatch
+        loop is not blocked by slow LLM calls. Matches the executor pattern used
+        by DeferralManager._reprocess_callback in service.py.
+        """
         channel_obj = self._channels.get(target.channel)
         if channel_obj is None or self._handler is None:
             return
 
         follow_up_num = target.follow_ups_sent + 1
+        safe_goal = _sanitize_campaign_text(campaign.goal)
+        safe_instructions = _sanitize_campaign_text(campaign.instructions)
         framed = (
-            f"[Campaign follow-up #{follow_up_num} — goal: {campaign.goal}]\n"
+            f"[Campaign follow-up #{follow_up_num} — goal: {safe_goal}]\n"
             f"The contact has not replied to your previous message. "
             f"Send an appropriate follow-up based on the conversation history "
-            f"and the original instructions: {campaign.instructions}"
+            f"and the original instructions: {safe_instructions}"
         )
+        if self._executor is not None:
+            self._executor.submit(
+                lambda c=campaign, t=target, ch=channel_obj, f=framed, n=follow_up_num: (
+                    self._do_follow_up(c, t, ch, f, n)
+                ),
+            )
+        else:
+            # Fallback: executor not started (e.g. test calling _process_follow_ups
+            # directly without start()) — run synchronously so existing callers are
+            # not broken.  Matches the fallback pattern used in launch().
+            self._do_follow_up(campaign, target, channel_obj, framed, follow_up_num)
 
+    def _do_follow_up(
+        self,
+        campaign: Campaign,
+        target: CampaignTarget,
+        channel_obj: Any,
+        framed: str,
+        follow_up_num: int,
+    ) -> None:
+        """Work function for executor — performs the actual handle_outbound call."""
         try:
             _resp, msg_id = self._handler.handle_outbound(
                 contact_name=target.contact_name,

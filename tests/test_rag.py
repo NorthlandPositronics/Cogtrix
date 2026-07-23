@@ -218,6 +218,15 @@ class TestSaveToKnowledgeBaseFaiss:
             patch("src.tools.rag.FAISS_AVAILABLE", True),
             patch("src.tools.rag._get_embeddings", return_value=MagicMock()),
             patch("src.tools.rag.FAISS") as mock_faiss_cls,
+            # save_faiss_store dives into the real faiss C extension via
+            # dependable_faiss_import() and calls write_index() on the
+            # store's index attribute.  When the store is a MagicMock, the
+            # MagicMock-typed argument sends faiss-cpu's SWIG layer into a
+            # CPU-bound loop with no I/O — the source of the shard-D 94%
+            # hang.  Skipping the persistence step here is consistent with
+            # the sibling tests (test_creates_new_index,
+            # test_appends_to_existing_index) which already patch it.
+            patch("src.tools.rag.save_faiss_store"),
         ):
             mock_faiss_cls.from_documents.side_effect = _capture_from_documents
 

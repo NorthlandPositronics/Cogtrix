@@ -42,6 +42,8 @@ from typing import Any
 import requests
 from pydantic import BaseModel, Field
 
+from src.tools.error_sanitizer import sanitize_search_error as _sanitize_search_error
+
 log = logging.getLogger("cogtrix")
 
 # -- Module-level configuration ------------------------------------------------
@@ -159,11 +161,11 @@ def brave_search(
         data = response.json()
     except requests.exceptions.HTTPError as e:
         status = getattr(e.response, "status_code", "unknown")
-        return f"Error: Brave Search API returned HTTP {status}: {e}"
+        return f"Error: Brave Search API returned HTTP {status}: {_sanitize_search_error(e)}"
     except requests.exceptions.RequestException as e:
-        return f"Error performing Brave search: {e}"
+        return f"Error performing Brave search: {_sanitize_search_error(e)}"
     except Exception as e:
-        return f"Error performing Brave search: {e}"
+        return f"Error performing Brave search: {_sanitize_search_error(e)}"
 
     # -- Format results --------------------------------------------------------
     output: list[str] = [f"Brave {search_type} search results for: {query}\n"]

@@ -24,6 +24,7 @@ except ImportError:
     requests = None  # type: ignore[assignment]
     REQUESTS_AVAILABLE = False
 
+from src.tools.error_sanitizer import sanitize_error as _sanitize_error
 
 OPENWEATHER_BASE_URL = "https://api.openweathermap.org/data/2.5/weather"
 
@@ -53,7 +54,7 @@ class WeatherQueryInput(BaseModel):
 
     location: str = Field(
         description=(
-            "The city or location to get weather for " "(e.g., 'New York', 'London', 'Tokyo, JP')"
+            "The city or location to get weather for (e.g., 'New York', 'London', 'Tokyo, JP')"
         )
     )
     units: str = Field(
@@ -166,9 +167,9 @@ def get_weather(location: str, units: str = "metric") -> str:
     except requests.exceptions.ConnectionError:
         return "Error: Could not connect to weather API"
     except requests.exceptions.RequestException as e:
-        return f"Error: Weather API request failed - {e}"
+        return f"Error: Weather API request failed: {_sanitize_error(e)}"
     except Exception as e:
-        return f"Error getting weather: {e}"
+        return f"Error getting weather: {_sanitize_error(e)}"
 
 
 # Tool metadata for registry

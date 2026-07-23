@@ -517,7 +517,7 @@ class DeferralManager:
             message_id=data.get("message_id", ""),
             sender_id=data.get("sender_id", ""),
             sender_name=data.get("sender_name"),
-            text=data.get("text", ""),
+            text=(data.get("text") or ""),
             timestamp=float(data.get("timestamp", 0.0)),
             metadata=data.get("metadata", {}),
             resolved_phone=data.get("resolved_phone"),

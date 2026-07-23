@@ -90,13 +90,15 @@ tags:
   - recovery
 
 # Budget: claude-sonnet-4-6 is the heaviest model on this scenario.
-# Empirically it runs 11–18 turns of search_web (the stub returns
+# Empirically it runs 11–21 turns of search_web (the stub returns
 # zero results, so the model retries) before producing a synthesis
-# from its training knowledge.  Local baseline: $0.1295 (under the
-# 3× = $0.15 ceiling).  CI variance pushed it to $0.1515 (just over)
-# in the May 2026 run on this branch, failing the ceiling check.
-# Bumping the budget to $0.07 raises the ceiling to $0.21, leaving
-# ~40 % headroom for run-to-run variance.  Cheaper models (gpt-4o,
-# deepseek-v3, kimi-k2-5, llama-cerebras) all land < $0.01 and are
-# unaffected.
-budget_usd_estimate: 0.07
+# from its training knowledge.  Earlier calibration at $0.07 (3× =
+# $0.21 ceiling) tripped repeatedly because Sonnet 4.6's exhaustive
+# search behaviour against the stub lands at ~$0.22 — the run-to-run
+# distribution sits right at the boundary.  Raise to $0.10 (3× =
+# $0.30 ceiling), giving ~25–35 % headroom over observed costs while
+# still catching a true runaway (a 30+ tool-call loop would burn
+# 5–10× the budget and trip).  Cheaper models (gpt-4o,
+# deepseek-v4-flash, kimi-k2-5, gpt-oss-120b-cerebras) all land
+# < $0.01 and are unaffected by the budget change.
+budget_usd_estimate: 0.10

@@ -28,6 +28,8 @@ from src.assistant.session import ChatSessionManager
 
 log = logging.getLogger("cogtrix")
 
+_CHANNEL_INIT_TIMEOUT = 30.0  # seconds; tests monkey-patch this down
+
 _ASSISTANT_SYSTEM_PROMPT = (
     "You are a helpful AI assistant responding via messaging.\n\n"
     "Be concise — messaging conversations favor shorter, focused replies.\n"
@@ -405,10 +407,14 @@ class AssistantService:
             for name in ("whatsapp", "telegram", "discord", "slack"):
                 if name in futures:
                     try:
-                        ch = futures[name].result(timeout=30)
+                        ch = futures[name].result(timeout=_CHANNEL_INIT_TIMEOUT)
                     except TimeoutError:
                         futures[name].cancel()
-                        log.warning("Channel init %s timed out after 30s — skipping", name)
+                        log.warning(
+                            "Channel init %s timed out after %.1fs — skipping",
+                            name,
+                            _CHANNEL_INIT_TIMEOUT,
+                        )
                         continue
                     if ch is not None:
                         channels.append(ch)

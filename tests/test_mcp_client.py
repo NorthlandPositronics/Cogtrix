@@ -782,8 +782,11 @@ class TestMCPManager:
         assert manager._loop is not None
         assert manager._thread is not None
         assert manager._thread.is_alive()
-        manager._loop.call_soon_threadsafe(manager._loop.stop)
-        manager._thread.join(timeout=2)
+        # close_all() cancels the heartbeat task before stopping the loop.
+        # A plain loop.stop() + thread.join() leaves _heartbeat_coro() pending,
+        # which surfaces at process exit as
+        # "Task was destroyed but it is pending!"
+        manager.close_all()
 
     def test_ensure_loop_idempotent(self):
         manager = MCPManager()
@@ -793,8 +796,7 @@ class TestMCPManager:
         manager._ensure_loop()
         assert manager._loop is loop1
         assert manager._thread is thread1
-        manager._loop.call_soon_threadsafe(manager._loop.stop)
-        manager._thread.join(timeout=2)
+        manager.close_all()
 
     def test_connect_all_builtin_collision_prefixed(self):
         manager = MCPManager()

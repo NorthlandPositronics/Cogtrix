@@ -55,6 +55,7 @@ from src.api.db import engine as _db
 from src.api.db.engine import get_db
 from src.api.db.models import Message
 from src.api.db.repositories.messages import MessageRepository
+from src.api.oidc import get_validator
 from src.api.plan_enforcement import maybe_require_api_call_capacity
 from src.api.schemas.common import APIResponse, CursorPage
 from src.api.schemas.message import ClearHistoryRequest, MessageOut, SendMessageRequest, SyncTurnOut
@@ -565,13 +566,11 @@ async def session_websocket(
                     if code == "TOKEN_EXPIRED":
                         raise
                     # UNAUTHORIZED: try OIDC fallback if configured.
-                    from src.api.oidc import get_validator
-
                     validator = get_validator()
                     if validator is None:
                         raise
                     try:
-                        oidc_claims = validator.validate(raw_token)
+                        oidc_claims = await asyncio.to_thread(validator.validate, raw_token)
                     except Exception:
                         raise local_exc from None
                     oidc_role = validator.map_role(oidc_claims)

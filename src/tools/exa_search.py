@@ -42,6 +42,8 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from src.tools.error_sanitizer import sanitize_error as _sanitize_error
+
 log = logging.getLogger("cogtrix")
 
 # -- Optional import -----------------------------------------------------------
@@ -153,7 +155,7 @@ def _exa_error(operation: str, exc: Exception) -> str:
             "Error: Exa API credits exhausted or payment required. "
             "Use search_web or search_news as a free fallback instead."
         )
-    return f"Error performing {operation}: {exc}"
+    return f"Error performing {operation}: {_sanitize_error(exc)}"
 
 
 # -- Tool functions ------------------------------------------------------------

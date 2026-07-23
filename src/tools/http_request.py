@@ -26,6 +26,8 @@ except ImportError:
     requests = None  # type: ignore[assignment]
     REQUESTS_AVAILABLE = False
 
+from src.tools.error_sanitizer import sanitize_error as _sanitize_error
+
 MAX_REDIRECTS = 5
 _MAX_TIMEOUT = 120  # seconds
 _MAX_RESPONSE_BYTES = 512_000  # 512 KB — more than enough for 10 K char truncation
@@ -139,7 +141,12 @@ def _is_blocked_ip(ip_str: str) -> bool:
     if ip in _CGNAT_NETWORK:
         return True
     return (
-        ip.is_loopback or ip.is_private or ip.is_link_local or ip.is_reserved or ip.is_unspecified
+        ip.is_loopback
+        or ip.is_private
+        or ip.is_link_local
+        or ip.is_reserved
+        or ip.is_unspecified
+        or ip.is_multicast
     )
 
 
@@ -482,18 +489,18 @@ def http_get(
         return "\n".join(result)
 
     except ValueError as e:
-        return f"Error: {e}"
+        return f"Error: {_sanitize_error(e)}"
     except requests.exceptions.Timeout:
         _record_failure(url)
         return f"Error: Request timed out after {timeout} seconds"
     except requests.exceptions.ConnectionError as e:
         _record_failure(url)
-        return f"Error: Connection failed - {e}"
+        return f"Error: {_sanitize_error(e)}"
     except requests.exceptions.RequestException as e:
-        return f"Error: Request failed - {e}"
+        return f"Error: {_sanitize_error(e)}"
     except Exception as e:  # noqa: BLE001
         log.debug("Unexpected error: %s", e, exc_info=True)
-        return f"Error ({type(e).__name__}): {e}"
+        return f"Error: {_sanitize_error(e)}"
 
 
 def http_post(
@@ -540,7 +547,7 @@ def http_post(
     try:
         json_data = json.loads(data)
     except json.JSONDecodeError as e:
-        return f"Error: Invalid request data JSON: {e}"
+        return f"Error: {_sanitize_error(e)}"
 
     # Set Content-Type if not provided
     if "Content-Type" not in parsed_headers and "content-type" not in parsed_headers:
@@ -592,18 +599,18 @@ def http_post(
         return "\n".join(result)
 
     except ValueError as e:
-        return f"Error: {e}"
+        return f"Error: {_sanitize_error(e)}"
     except requests.exceptions.Timeout:
         _record_failure(url)
         return f"Error: Request timed out after {timeout} seconds"
     except requests.exceptions.ConnectionError as e:
         _record_failure(url)
-        return f"Error: Connection failed - {e}"
+        return f"Error: {_sanitize_error(e)}"
     except requests.exceptions.RequestException as e:
-        return f"Error: Request failed - {e}"
+        return f"Error: {_sanitize_error(e)}"
     except Exception as e:  # noqa: BLE001
         log.debug("Unexpected error: %s", e, exc_info=True)
-        return f"Error ({type(e).__name__}): {e}"
+        return f"Error: {_sanitize_error(e)}"
 
 
 # Tool configurations for registry

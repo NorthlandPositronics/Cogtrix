@@ -123,7 +123,7 @@ class TestExaSearch:
             result = exa_search("test")
 
         assert "Error" in result
-        assert "network timeout" in result
+        assert "Operation failed" in result
 
     def test_exa_search_num_results_passed_to_api(self):
         from src.tools.exa_search import exa_search

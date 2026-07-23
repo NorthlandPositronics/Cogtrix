@@ -152,7 +152,8 @@ class TestSerpAPISearch:
             result = serpapi_search("test")
 
         assert "Error" in result
-        assert "network error" in result
+        assert "network error" not in result  # sanitized: no raw exception content
+        assert "request failed" in result.lower()  # sanitized message present
 
     def test_serpapi_search_num_results_clamped(self):
         from src.tools.serpapi_search import serpapi_search

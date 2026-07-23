@@ -114,63 +114,72 @@ class TestShellProcessGroupKill:
         """Verify that Popen is called with start_new_session=True."""
         with patch("src.tools.shell.subprocess.Popen") as mock_popen:
             mock_proc = MagicMock()
-            mock_proc.communicate.return_value = ("output", "")
             mock_proc.returncode = 0
             mock_popen.return_value = mock_proc
 
-            from src.tools.shell import execute_shell_command
+            with patch("src.tools.shell._communicate_with_cap", return_value=("output", "")):
+                from src.tools.shell import execute_shell_command
 
-            execute_shell_command("echo hello")
-            mock_popen.assert_called_once()
-            _, kwargs = mock_popen.call_args
-            assert kwargs.get("start_new_session") is True
+                execute_shell_command("echo hello")
+                mock_popen.assert_called_once()
+                _, kwargs = mock_popen.call_args
+                assert kwargs.get("start_new_session") is True
 
     def test_popen_shell_mode_uses_start_new_session(self):
         """Shell=True mode also uses start_new_session."""
         with patch("src.tools.shell.subprocess.Popen") as mock_popen:
             mock_proc = MagicMock()
-            mock_proc.communicate.return_value = ("output", "")
             mock_proc.returncode = 0
             mock_popen.return_value = mock_proc
 
-            from src.tools.shell import execute_shell_command
+            with patch("src.tools.shell._communicate_with_cap", return_value=("output", "")):
+                from src.tools.shell import execute_shell_command
 
-            execute_shell_command("echo hello | cat")  # pipe triggers shell=True
-            mock_popen.assert_called_once()
-            _, kwargs = mock_popen.call_args
-            assert kwargs.get("start_new_session") is True
-            assert kwargs.get("shell") is True
+                execute_shell_command("echo hello | cat")  # pipe triggers shell=True
+                mock_popen.assert_called_once()
+                _, kwargs = mock_popen.call_args
+                assert kwargs.get("start_new_session") is True
+                assert kwargs.get("shell") is True
 
     def test_timeout_calls_killpg(self):
         """On timeout, os.killpg should be called to kill the process group."""
         with patch("src.tools.shell.subprocess.Popen") as mock_popen:
             mock_proc = MagicMock()
             mock_proc.pid = 12345
-            mock_proc.communicate.side_effect = subprocess.TimeoutExpired("cmd", 1)
             mock_popen.return_value = mock_proc
 
-            with patch("src.tools.shell.os.killpg") as mock_killpg:
-                from src.tools.shell import execute_shell_command
+            with patch(
+                "src.tools.shell._communicate_with_cap",
+                side_effect=subprocess.TimeoutExpired("cmd", 1),
+            ):
+                with patch("src.tools.shell.os.killpg") as mock_killpg:
+                    from src.tools.shell import execute_shell_command
 
-                result = execute_shell_command("sleep 100", timeout=1)
-                mock_killpg.assert_called_once_with(12345, signal.SIGKILL)
-                mock_proc.wait.assert_called_once()
-                assert "timed out" in result
+                    result = execute_shell_command("sleep 100", timeout=1)
+                    # killpg is called once in execute_shell_command after catching
+                    # the re-raised TimeoutExpired.
+                    assert mock_killpg.call_count == 1
+                    mock_killpg.assert_called_with(12345, signal.SIGKILL)
+                    assert "timed out" in result
 
     def test_timeout_falls_back_to_kill_on_oserror(self):
         """If killpg raises OSError, fall back to proc.kill()."""
         with patch("src.tools.shell.subprocess.Popen") as mock_popen:
             mock_proc = MagicMock()
             mock_proc.pid = 12345
-            mock_proc.communicate.side_effect = subprocess.TimeoutExpired("cmd", 1)
             mock_popen.return_value = mock_proc
 
-            with patch("src.tools.shell.os.killpg", side_effect=OSError("no such process")):
-                from src.tools.shell import execute_shell_command
+            with patch(
+                "src.tools.shell._communicate_with_cap",
+                side_effect=subprocess.TimeoutExpired("cmd", 1),
+            ):
+                with patch("src.tools.shell.os.killpg", side_effect=OSError("no such process")):
+                    from src.tools.shell import execute_shell_command
 
-                result = execute_shell_command("sleep 100", timeout=1)
-                mock_proc.kill.assert_called_once()
-                assert "timed out" in result
+                    result = execute_shell_command("sleep 100", timeout=1)
+                    # killpg fails once, proc.kill is called as fallback.
+                    assert mock_proc.kill.call_count == 1
+                    assert "timed out" in result
 
 
 # ── BUG-180: delegate.py JSON fence stripping ────────────────────────────

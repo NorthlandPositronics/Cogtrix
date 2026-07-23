@@ -111,9 +111,19 @@ def build_handle_phantom_node(
 def build_handle_action_intent_node(
     action_intent_count: list[int],
     max_retries: int,
+    incompleteness_check: Callable[[str], bool] | None = None,
     logger: Callable[[], Any] = get_logger,
 ) -> Callable[[CogtrixState], dict]:
-    """Build the action-intent recovery node bound to the run-local retry counter."""
+    """Build the action-intent recovery node bound to the run-local retry counter.
+
+    Args:
+        action_intent_count: Mutable counter of how many times the node fired.
+        max_retries: Maximum number of standard nudges before synthesising.
+        incompleteness_check: Optional callable(str) -> bool that detects
+            incomplete multi-step language ('first', 'to start').  When provided
+            and the check passes, a more specific nudge is injected.
+        logger: Logger factory.
+    """
 
     def handle_action_intent(state: CogtrixState) -> dict:
         action_intent_count[0] += 1
@@ -152,6 +162,30 @@ def build_handle_action_intent_node(
                             f'request_tools(add=["{unloaded}"])'
                             "  — then call the tool again on the next turn. "
                             "Do not describe the action; emit the tool_call directly."
+                        )
+                    )
+                ]
+            }
+
+        # Incompleteness-specific nudge: when the model used sequential
+        # language ('first', 'to start') and stopped, tell it the task
+        # is not finished — more specific than the generic variant.
+        msgs = state.get("messages") or []
+        last = msgs[-1] if msgs else None
+        content = getattr(last, "content", "") if last is not None else ""
+        if (
+            incompleteness_check is not None
+            and isinstance(content, str)
+            and incompleteness_check(content)
+        ):
+            return {
+                "messages": [
+                    HumanMessage(
+                        content=(
+                            "You used language like 'first' or 'to start', "
+                            "which implies there are more steps to complete. "
+                            "The task is not finished — do not describe what "
+                            "comes next. Call the appropriate tool(s) NOW."
                         )
                     )
                 ]

@@ -49,6 +49,7 @@ _SCENARIOS_DIR = Path(__file__).parent / "scenarios"
 
 _KEY_PRIORITY = [
     "OPENROUTER_API_KEY",
+    "FIREWORKS_API_KEY",
     "CEREBRAS_API_KEY",
     "DEEPSEEK_API_KEY",
     "OPENAI_API_KEY",
@@ -62,6 +63,7 @@ _CEREBRAS_BASE_URL = "https://api.cerebras.ai/v1"
 # OPENROUTER_API_KEY can satisfy any model that has openrouter_model_id.
 _KEY_COVERS: dict[str, set[str]] = {
     "OPENROUTER_API_KEY": {"*"},  # wildcard — covers all models via routing
+    "FIREWORKS_API_KEY": {"FIREWORKS_API_KEY"},
     "CEREBRAS_API_KEY": {"CEREBRAS_API_KEY"},
     "DEEPSEEK_API_KEY": {"DEEPSEEK_API_KEY"},
     "OPENAI_API_KEY": {"OPENAI_API_KEY"},
@@ -123,6 +125,15 @@ class ModelConfig:
     # active.  Models without prices opt out of the ceiling.
     input_price_per_1m: float | None = None
     output_price_per_1m: float | None = None
+    # When True, ``_candidate_keys_for_model`` does NOT promote this
+    # model's native env_key ahead of OpenRouter — OpenRouter (or
+    # whichever key sits first in _KEY_PRIORITY) is tried first
+    # instead.  Used as a per-model escape hatch when the native
+    # provider has a known integration bug that OpenRouter happens to
+    # tolerate or work around.  Track each opt-out with a linked issue
+    # in the models.yaml comment so it can be flipped back off once
+    # the underlying bug is fixed.
+    prefer_openrouter: bool = False
 
 
 def load_model_registry(path: Path = _MODELS_YAML) -> list[ModelConfig]:
@@ -334,7 +345,14 @@ def _build_llm(
         return ChatGoogleGenerativeAI(model=model.model_id, google_api_key=api_key, **kwargs)
 
     if model.provider == "deepseek":
-        return ChatOpenAI(
+        # Use the factory so _DeepSeekChatModel (reasoning_content preservation)
+        # is selected automatically for api.deepseek.com. Direct ChatOpenAI
+        # instantiation bypasses the subclass and causes HTTP 400 on turn ≥ 2
+        # for thinking-mode models (deepseek-reasoner / deepseek-v4-flash).
+        from src.providers import create_chat_model
+
+        return create_chat_model(
+            "openai",
             model=model.model_id,
             api_key=api_key,
             base_url="https://api.deepseek.com/v1",

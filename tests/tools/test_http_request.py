@@ -127,6 +127,22 @@ class TestIsBlockedIp:
     def test_invalid_string_returns_false(self) -> None:
         assert _is_blocked_ip("not-an-ip") is False
 
+    def test_multicast_224_0_0_1(self) -> None:
+        """SSRF multicast block — 224.0.0.1 is a well-known group address."""
+        assert _is_blocked_ip("224.0.0.1") is True
+
+    def test_multicast_239_255_255_250(self) -> None:
+        """SSRF multicast block — 239.255.255.250 is SSDP/UPnP discovery."""
+        assert _is_blocked_ip("239.255.255.250") is True
+
+    def test_multicast_ff02_1(self) -> None:
+        """SSRF multicast block — ff02::1 is IPv6 link-local all-nodes."""
+        assert _is_blocked_ip("ff02::1") is True
+
+    def test_multicast_255_255_255_255_blocked(self) -> None:
+        """255.255.255.255 is limited broadcast, not multicast — still blocked."""
+        assert _is_blocked_ip("255.255.255.255") is True
+
 
 class TestValidateUrlSsrf:
     """Tests for SSRF-related URL validation in _validate_url()."""
@@ -213,6 +229,23 @@ class TestValidateUrlSsrf:
             ok, err, _ip = _validate_url("http://example.com/")
         assert ok is True
         assert err == ""
+
+    def test_multicast_ip_literal_224_blocked(self) -> None:
+        """SSRF multicast — 224.0.0.1 as a URL host must be blocked."""
+        ok, _err, _ip = _validate_url("http://224.0.0.1/")
+        assert ok is False
+
+    def test_multicast_ip_literal_239_blocked(self) -> None:
+        """SSRF multicast — 239.255.255.250 (SSDP) as a URL host must be blocked."""
+        ok, _err, _ip = _validate_url("http://239.255.255.250:1900/")
+        assert ok is False
+
+    def test_dns_resolves_to_multicast_ip_blocked(self) -> None:
+        """Hostname that DNS resolves to a multicast IP must be blocked."""
+        fake_addrinfo = [(socket.AF_INET, socket.SOCK_STREAM, 0, "", ("239.255.255.250", 0))]
+        with patch("src.tools.http_request.socket.getaddrinfo", return_value=fake_addrinfo):
+            ok, _err, _ip = _validate_url("http://ssdp-local.corp.example/")
+        assert ok is False
 
 
 class TestDnsPinning:
@@ -451,3 +484,150 @@ class TestHttpGetMaxChars:
 
         assert "hello world" in result
         assert "truncated" not in result
+
+
+class TestSanitizeError:
+    """Regression tests for exception sanitization — no library internals leaked to LLM."""
+
+    def test_connection_error_returns_clean_message(self) -> None:
+        """ConnectionError must not expose HTTPConnectionPool internals."""
+        from requests.exceptions import ConnectionError
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.reason = "OK"
+        mock_resp.encoding = "utf-8"
+        mock_resp.headers = {"Content-Type": "text/plain"}
+        mock_resp.url = "http://example.com"
+        mock_resp.close = MagicMock()
+
+        with (
+            patch("src.tools.http_request.REQUESTS_AVAILABLE", True),
+            patch("src.tools.http_request._validate_url", return_value=(True, "", "1.2.3.4")),
+            patch("src.tools.http_request._check_recent_failure", return_value=None),
+            patch(
+                "src.tools.http_request._follow_redirects",
+                side_effect=ConnectionError(
+                    "HTTPConnectionPool(host='192.168.1.1', port=8080): Max retries exceeded"
+                ),
+            ),
+            patch("src.tools.http_request._record_failure"),
+        ):
+            result = http_get("http://example.com")
+
+        assert result == "Error: Connection failed"
+        assert "HTTPConnectionPool" not in result
+        assert "192.168" not in result
+        assert "Max retries" not in result
+
+    def test_request_exception_returns_clean_message(self) -> None:
+        """RequestException must not expose library internals."""
+        from requests.exceptions import RequestException
+
+        with (
+            patch("src.tools.http_request.REQUESTS_AVAILABLE", True),
+            patch("src.tools.http_request._validate_url", return_value=(True, "", "1.2.3.4")),
+            patch("src.tools.http_request._check_recent_failure", return_value=None),
+            patch(
+                "src.tools.http_request._follow_redirects",
+                side_effect=RequestException(
+                    "requests.exceptions.ReadTimeout: HTTPConnectionPool(host='internal-srv')"
+                ),
+            ),
+            patch("src.tools.http_request._record_failure"),
+        ):
+            result = http_get("http://example.com")
+
+        assert result == "Error: Request failed"
+        assert "HTTPConnectionPool" not in result
+        assert "internal-srv" not in result
+        assert "ReadTimeout" not in result
+
+    def test_http_error_returns_status_code(self) -> None:
+        """HTTPError should surface the status code without library internals."""
+        from requests.exceptions import HTTPError
+
+        mock_response = MagicMock()
+        mock_response.status_code = 503
+
+        with (
+            patch("src.tools.http_request.REQUESTS_AVAILABLE", True),
+            patch("src.tools.http_request._validate_url", return_value=(True, "", "1.2.3.4")),
+            patch("src.tools.http_request._check_recent_failure", return_value=None),
+            patch(
+                "src.tools.http_request._follow_redirects",
+                side_effect=HTTPError(
+                    "503 Server Error: Backend unavailable", response=mock_response
+                ),
+            ),
+            patch("src.tools.http_request._record_failure"),
+        ):
+            result = http_get("http://example.com")
+
+        assert result == "Error: HTTP error 503"
+        assert "Backend unavailable" not in result
+        assert "503 Server Error" not in result
+
+    def test_unknown_exception_returns_fallback(self) -> None:
+        """Unexpected exceptions must not expose class name or message to LLM."""
+        with (
+            patch("src.tools.http_request.REQUESTS_AVAILABLE", True),
+            patch("src.tools.http_request._validate_url", return_value=(True, "", "1.2.3.4")),
+            patch("src.tools.http_request._check_recent_failure", return_value=None),
+            patch(
+                "src.tools.http_request._follow_redirects",
+                side_effect=RuntimeError("secret internal state leaked here"),
+            ),
+            patch("src.tools.http_request._record_failure"),
+        ):
+            result = http_get("http://example.com")
+
+        assert result == "Error: Operation failed"
+        assert "secret internal state" not in result
+        assert "RuntimeError" not in result
+
+    def test_http_post_connection_error_sanitized(self) -> None:
+        """http_post ConnectionError must not expose library internals."""
+        from requests.exceptions import ConnectionError
+
+        with (
+            patch("src.tools.http_request.REQUESTS_AVAILABLE", True),
+            patch("src.tools.http_request._validate_url", return_value=(True, "", "1.2.3.4")),
+            patch("src.tools.http_request._check_recent_failure", return_value=None),
+            patch("src.tools.http_request._parse_headers", return_value=({}, None)),
+            patch(
+                "src.tools.http_request._follow_redirects",
+                side_effect=ConnectionError("SSLError(SSLCertVerificationError) at 10.0.0.5"),
+            ),
+            patch("src.tools.http_request._record_failure"),
+        ):
+            result = http_post("http://example.com", '{"key": "value"}')
+
+        assert result == "Error: Connection failed"
+        assert "SSLError" not in result
+        assert "10.0.0.5" not in result
+        assert "SSLCertVerificationError" not in result
+
+    def test_http_post_request_exception_sanitized(self) -> None:
+        """http_post RequestException must not expose library internals."""
+        from requests.exceptions import RequestException
+
+        with (
+            patch("src.tools.http_request.REQUESTS_AVAILABLE", True),
+            patch("src.tools.http_request._validate_url", return_value=(True, "", "1.2.3.4")),
+            patch("src.tools.http_request._check_recent_failure", return_value=None),
+            patch("src.tools.http_request._parse_headers", return_value=({}, None)),
+            patch(
+                "src.tools.http_request._follow_redirects",
+                side_effect=RequestException(
+                    "urllib3.exceptions.NewConnectionError: '<ssl.SSLCertVerificationError>"
+                ),
+            ),
+            patch("src.tools.http_request._record_failure"),
+        ):
+            result = http_post("http://example.com", '{"key": "value"}')
+
+        assert result == "Error: Request failed"
+        assert "urllib3" not in result
+        assert "NewConnectionError" not in result
+        assert "SSLCertVerificationError" not in result

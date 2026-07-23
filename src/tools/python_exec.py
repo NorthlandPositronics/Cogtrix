@@ -460,6 +460,23 @@ def get_available_modules() -> dict[str, bool]:
     return _AVAILABLE_OPTIONAL.copy()
 
 
+def _build_description() -> str:
+    """Build tool description reflecting current _AVAILABLE_OPTIONAL state."""
+    _optional_available = [m for m, avail in _AVAILABLE_OPTIONAL.items() if avail]
+    _optional_str = f" Optional: {', '.join(_optional_available)}." if _optional_available else ""
+    return (
+        "Execute Python code in a restricted environment. "
+        "Variables persist between calls - build up computations step by step. "
+        "Commands: %vars (list variables), %clear (reset), %history (show history), "
+        "%modules (list available). "
+        "Last expression value is automatically returned. "
+        "Core modules: math, random, json, datetime, re, collections, itertools, "
+        "functools, statistics, csv, dataclasses, enum, uuid, time."
+        f"{_optional_str} "
+        "No file/network access."
+    )
+
+
 def configure_datascience_modules(enabled: bool) -> None:
     """Configure data science modules (numpy, pandas, scipy) for python_exec.
 
@@ -479,14 +496,16 @@ def configure_datascience_modules(enabled: bool) -> None:
     # Add only if enabled AND importable (retry import to handle modules installed after init)
     if enabled:
         for _mod_name in OPTIONAL_MODULES:
-            if _mod_name not in SAFE_MODULES:
-                try:
-                    __import__(_mod_name)
-                    SAFE_MODULES.add(_mod_name)
-                    _AVAILABLE_OPTIONAL[_mod_name] = True
-                except ImportError:
-                    _AVAILABLE_OPTIONAL[_mod_name] = False
-                    pass
+            try:
+                __import__(_mod_name)
+                SAFE_MODULES.add(_mod_name)
+                _AVAILABLE_OPTIONAL[_mod_name] = True
+            except ImportError:
+                _AVAILABLE_OPTIONAL[_mod_name] = False
+                pass
+
+    # Refresh TOOL_CONFIG description so the LLM sees the current module state
+    TOOL_CONFIG["description"] = _build_description()
 
 
 def _check_ast_security(tree: ast.AST) -> tuple[bool, str]:
@@ -1078,6 +1097,11 @@ def _execute_code_internal(
     try:
         transformed_code = _add_loop_limits(transformed_code)
     except Exception:
+        _logger.warning(
+            "Loop limiter AST transformation failed; rejecting code without "
+            "iteration limits. Subprocess timeout still applies.",
+            exc_info=True,
+        )
         return {
             "success": False,
             "error": "Code contains complex loop structures that could not be safely bounded",
@@ -1219,8 +1243,16 @@ def _worker_process(
     code: str,
     context_data: dict[str, Any],
     result_queue: mp.Queue,  # type: ignore[type-arg]
+    safe_modules: list[str] | None = None,
 ) -> None:
     """Worker process for code execution with timeout."""
+    # Propagate parent-process SAFE_MODULES so optional modules
+    # (e.g. numpy) enabled via configure_datascience_modules are
+    # respected even when multiprocessing uses spawn.
+    if safe_modules is not None:
+        global SAFE_MODULES
+        SAFE_MODULES = set(safe_modules)
+
     try:
         # Set recursion limit for this process
         import sys
@@ -1335,7 +1367,7 @@ def execute_python(
 
     process = mp.Process(
         target=_worker_process,
-        args=(code, context_data, result_queue),
+        args=(code, context_data, result_queue, sorted(SAFE_MODULES)),
     )
 
     try:
@@ -1441,24 +1473,10 @@ def execute_python(
                 process.kill()
 
 
-# Build dynamic description based on available modules
-_optional_available = [m for m, avail in _AVAILABLE_OPTIONAL.items() if avail]
-_optional_str = f" Optional: {', '.join(_optional_available)}." if _optional_available else ""
-
 # Tool metadata for registry
 TOOL_CONFIG = {
     "name": "execute_python",
-    "description": (
-        "Execute Python code in a restricted environment. "
-        "Variables persist between calls - build up computations step by step. "
-        "Commands: %vars (list variables), %clear (reset), %history (show history), "
-        "%modules (list available). "
-        "Last expression value is automatically returned. "
-        "Core modules: math, random, json, datetime, re, collections, itertools, "
-        "functools, statistics, csv, dataclasses, enum, uuid, time."
-        f"{_optional_str} "
-        "No file/network access."
-    ),
+    "description": _build_description(),
     "input_schema": PythonExecInput,
     "requires_confirmation": True,
 }
@@ -1474,6 +1492,7 @@ __all__ = [
     "clear_context",
     "clear_history",
     "get_available_modules",
+    "configure_datascience_modules",
     "ExecutionRecord",
     "SessionState",
 ]

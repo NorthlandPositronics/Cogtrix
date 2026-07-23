@@ -44,6 +44,8 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from src.tools.error_sanitizer import sanitize_search_error as _sanitize_search_error
+
 log = logging.getLogger("cogtrix")
 
 # -- Optional import -----------------------------------------------------------
@@ -100,9 +102,7 @@ class SerpAPISearchInput(BaseModel):
     )
     search_type: str = Field(
         default="",
-        description=(
-            "Type of search: '' (web), 'nws' (news), 'isch' (images), " "'shop' (shopping)"
-        ),
+        description=("Type of search: '' (web), 'nws' (news), 'isch' (images), 'shop' (shopping)"),
     )
     time_period: str = Field(
         default="",
@@ -141,7 +141,7 @@ def serpapi_search(
         Formatted search results.
     """
     if not SERPAPI_AVAILABLE:
-        return "Error: google-search-results is not installed. " "Run: uv add google-search-results"
+        return "Error: google-search-results is not installed. Run: uv add google-search-results"
 
     api_key = _get_api_key()
     if not api_key:
@@ -179,7 +179,7 @@ def serpapi_search(
         search = GoogleSearch(params)
         data = search.get_dict()
     except Exception as e:
-        return f"Error performing SerpAPI search: {e}"
+        return f"Error performing SerpAPI search: {_sanitize_search_error(e)}"
 
     if "error" in data:
         return f"Error from SerpAPI: {data['error']}"

@@ -708,7 +708,9 @@ def _app():
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
 
-    _asyncio.run(_create())
+    loop = _asyncio.new_event_loop()
+    _asyncio.set_event_loop(loop)
+    loop.run_until_complete(_create())
 
     old_validator = _oidc_mod._validator
     _oidc_mod._validator = None
@@ -728,7 +730,8 @@ def _app():
     yield the_app
 
     _oidc_mod._validator = old_validator
-    _asyncio.run(engine.dispose())
+    loop.run_until_complete(engine.dispose())
+    loop.close()
 
 
 @pytest.fixture()

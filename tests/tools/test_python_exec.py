@@ -274,6 +274,20 @@ class TestLoopLimiterRejectsOnFailure:
         assert result["success"] is False
         assert "could not be safely bounded" in result["error"]
 
+    def test_add_loop_limits_failure_logs_warning(self, monkeypatch, caplog):
+        """If _add_loop_limits raises, a warning must be logged."""
+
+        def _boom(_code):
+            raise RuntimeError("AST explosion")
+
+        monkeypatch.setattr("src.tools.python_exec._add_loop_limits", _boom)
+
+        with caplog.at_level("WARNING", logger="cogtrix.python_exec"):
+            _execute_code_internal("x = 1 + 1", {})
+
+        assert "Loop limiter AST transformation failed" in caplog.text
+        assert "AST explosion" in caplog.text
+
 
 class TestCodeSafetyChecks:
     def test_blocks_eval(self):
@@ -474,3 +488,80 @@ class TestDefaultSessionContextIsolation:
         reset_default_session()
         state_second = _get_session_state(None)
         assert state_first is not state_second
+
+
+class TestToolConfigDescription:
+    """Regression: TOOL_CONFIG description must stay in sync with module state."""
+
+    def test_configure_datascience_modules_updates_description(self, monkeypatch) -> None:
+        """configure_datascience_modules(True) must refresh TOOL_CONFIG['description']."""
+        import src.tools.python_exec as mod
+
+        # Capture the baseline description (may or may not mention optional modules)
+        baseline = mod.TOOL_CONFIG["description"]
+
+        # Enable datascience modules — only actually-importable ones are listed
+        mod.configure_datascience_modules(True)
+
+        updated = mod.TOOL_CONFIG["description"]
+        # numpy is available in the test environment; pandas/scipy may not be
+        assert "numpy" in updated
+
+        # Restore state
+        monkeypatch.setattr(mod, "_AVAILABLE_OPTIONAL", {})
+        mod.configure_datascience_modules(False)
+        restored = mod.TOOL_CONFIG["description"]
+        assert "numpy" not in restored
+        assert restored == baseline or "Optional:" not in restored
+
+    def test_build_description_reflects_current_state(self, monkeypatch) -> None:
+        """_build_description() must use the live _AVAILABLE_OPTIONAL dict."""
+        import src.tools.python_exec as mod
+
+        monkeypatch.setattr(mod, "_AVAILABLE_OPTIONAL", {"numpy": True})
+        desc = mod._build_description()
+        assert "Optional: numpy." in desc
+
+        monkeypatch.setattr(mod, "_AVAILABLE_OPTIONAL", {})
+        desc_empty = mod._build_description()
+        assert "Optional:" not in desc_empty
+
+
+class TestDatascienceModulesSecurity:
+    """Regression: COGTRIX_ENABLE_DATASCIENCE_MODULES config flag must gate
+    numpy/pandas/scipy access in the python_exec sandbox.
+    """
+
+    def test_numpy_blocked_when_flag_false(self) -> None:
+        """With enable_datascience_modules=False, numpy import must fail."""
+        import src.tools.python_exec as mod
+
+        mod.configure_datascience_modules(False)
+        result = execute_python("import numpy")
+        assert (
+            "error" in result.lower()
+            or "not allowed" in result.lower()
+            or "restricted" in result.lower()
+        )
+
+    def test_numpy_genfromtxt_blocked_when_flag_false(self) -> None:
+        """numpy.genfromtxt must return a security error when flag is False."""
+        import src.tools.python_exec as mod
+
+        mod.configure_datascience_modules(False)
+        result = execute_python('import numpy; numpy.genfromtxt("/etc/passwd")')
+        assert (
+            "error" in result.lower()
+            or "not allowed" in result.lower()
+            or "restricted" in result.lower()
+        )
+
+    def test_numpy_available_when_flag_true(self) -> None:
+        """With enable_datascience_modules=True, numpy must be importable."""
+        import src.tools.python_exec as mod
+
+        mod.configure_datascience_modules(True)
+        result = execute_python("import numpy as np; np.array([1, 2, 3]).tolist()")
+        assert "[1, 2, 3]" in result
+        # Restore safe state
+        mod.configure_datascience_modules(False)

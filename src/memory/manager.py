@@ -7,6 +7,52 @@ Includes hybrid memory support:
 - **Incremental summary**: older messages are summarised by the LLM
 - **Vector recall** (optional): evicted messages are embedded for
   semantic retrieval, improving long-term awareness
+
+Lock architecture
+-----------------
+The memory subsystem uses two locks with a strict acquisition hierarchy.
+All lock usage across the three mode subclasses (conversation, code, reasoning)
+and this base class must follow this contract.
+
+``_hybrid_lock`` (this class / manager.py)
+    Protects shared hybrid memory state: the message list (``_messages``),
+    rolling summary fields (``_summary``, ``_summary_msg_idx``,
+    ``_summary_last_updated_at``, ``_tokens_since_summary``), tier cache
+    (``_tier_cache``, ``_tier_cache_ready``), vector store, facts store, and
+    the background job future (``_bg_future``).
+
+``_mode_lock`` (each mode subclass / modes/*.py)
+    Protects mode-specific state. Each subclass (ConversationMemoryManager,
+    CodeMemoryManager, ReasoningMemoryManager) owns its own ``_mode_lock``
+    instance; there is no shared ``_mode_lock`` across modes.
+
+Acquisition order
+    Modes call ``super()`` methods (e.g. ``super().clear()``) from within a
+    ``with self._mode_lock:`` block. The base class then acquires
+    ``_hybrid_lock``, creating the nesting ``_mode_lock`` → ``_hybrid_lock``.
+    The single comment documenting this order lives in
+    ``modes/reasoning.py:643-645``.
+
+Lock nesting order:  _mode_lock  →  _hybrid_lock
+
+    Correct (outer → inner)::
+
+        with self._mode_lock:          # mode subclass
+            ...
+            super().clear()            # acquires _hybrid_lock inside
+
+    Incorrect (inner → outer)::
+
+        with self._hybrid_lock:        # base class
+            ...
+            self._mode_lock.acquire()  # would violate the hierarchy
+
+Invariant: never acquire ``_mode_lock`` while holding ``_hybrid_lock``.
+All base-class methods that need mode-specific data must be called by the
+caller (who holds ``_mode_lock``), not the other way around.
+
+All 37 ``with self._hybrid_lock:`` sites in this file and the ~62
+``with self._mode_lock:`` sites in the mode subclasses adhere to this order.
 """
 
 import atexit
@@ -140,6 +186,11 @@ class BaseMemoryManager(ABC):
         self._loaded = False
         # Set by prepare_context(); consumed by update() for the human message
         self._pending_user_ts: str | None = None
+        # Snapshot of the most recent _pending_user_ts value, set alongside
+        # _pending_user_ts in prepare_context() and never cleared. Used by
+        # concurrent regression tests to verify timestamps were captured
+        # before update() clears _pending_user_ts (issue #1344).
+        self._captured_user_ts: str | None = None
 
         # ── Hybrid memory state ──────────────────────────────────────
         self._llm: Any = None  # set via set_llm()
@@ -168,7 +219,7 @@ class BaseMemoryManager(ABC):
         self._lazy_emb_warned: bool = False  # One-shot: warning emitted on first failure only
 
         # ── Background slow-path threading ───────────────────────────
-        self._hybrid_lock = threading.Lock()
+        self._hybrid_lock = threading.RLock()
         self._bg_future: Future | None = None
         self._bg_submitted_at: float = 0.0  # monotonic timestamp of last submit
         self._slow_path_failures: int = 0
@@ -375,7 +426,8 @@ class BaseMemoryManager(ABC):
         Used by the TTL checks to defer reset while a BG is producing a fresh
         summary — see ``_check_summary_token_ttl`` for the race this guards.
         """
-        fut = self._bg_future
+        with self._hybrid_lock:
+            fut = self._bg_future
         return fut is not None and not fut.done()
 
     def _check_summary_ttl(self) -> None:
@@ -417,8 +469,11 @@ class BaseMemoryManager(ABC):
                     self.session_id,
                 )
 
-    def _check_summary_token_ttl(self) -> None:
-        """Reset the rolling summary when token churn exceeds threshold."""
+    def _check_summary_token_ttl_locked(self) -> None:
+        """Reset the rolling summary when token churn exceeds threshold.
+
+        CALLER MUST HOLD _hybrid_lock.
+        """
         mode_config = getattr(self, "_mode_config", None)
         if isinstance(mode_config, dict):
             max_tokens = mode_config.get("summary_max_uncovered_tokens")
@@ -427,10 +482,9 @@ class BaseMemoryManager(ABC):
         if max_tokens is None:
             return
 
-        with self._hybrid_lock:
-            tokens_since = self._tokens_since_summary
-            # Capture timestamp for TOCTOU guard — same pattern as _check_summary_ttl.
-            summary_updated_at = self._summary_last_updated_at
+        tokens_since = self._tokens_since_summary
+        # Capture timestamp for TOCTOU guard — same pattern as _check_summary_ttl.
+        summary_updated_at = self._summary_last_updated_at
 
         if tokens_since >= int(max_tokens):
             # If a background summarizer is running, defer reset. The TOCTOU
@@ -455,11 +509,18 @@ class BaseMemoryManager(ABC):
                 tokens_since,
                 max_tokens,
             )
-            if not self._reset_summary_state(expected_summary_last_updated_at=summary_updated_at):
+            if not self._reset_summary_state_locked(
+                expected_summary_last_updated_at=summary_updated_at
+            ):
                 log.debug(
                     "Rolling summary refreshed during token-TTL check for session %s; skipping reset",
                     self.session_id,
                 )
+
+    def _check_summary_token_ttl(self) -> None:
+        """Reset the rolling summary when token churn exceeds threshold."""
+        with self._hybrid_lock:
+            self._check_summary_token_ttl_locked()
 
     def _get_hybrid_snapshot(
         self, *, block: bool = True, timeout: float = 0.0
@@ -831,7 +892,8 @@ class BaseMemoryManager(ABC):
 
     def join_background(self, timeout: float = 60.0) -> None:
         """Block until any running background memory job completes."""
-        fut = self._bg_future
+        with self._hybrid_lock:
+            fut = self._bg_future
         if fut is not None and not fut.done():
             try:
                 fut.result(timeout=timeout)
@@ -1281,6 +1343,28 @@ class BaseMemoryManager(ABC):
         if self._vector_store is not None:
             self._vector_store.save()
 
+    def _reset_summary_state_locked(
+        self, expected_summary_last_updated_at: datetime | None = None
+    ) -> bool:
+        """Clear just the rolling summary and its persisted metadata.
+
+        CALLER MUST HOLD _hybrid_lock.
+
+        Returns True when the reset is applied. If an expected timestamp is
+        provided and the live summary was refreshed in the meantime, the reset
+        is skipped and False is returned.
+        """
+        if (
+            expected_summary_last_updated_at is not None
+            and self._summary_last_updated_at != expected_summary_last_updated_at
+        ):
+            return False
+        self._summary = None
+        self._summary_msg_idx = 0
+        self._summary_last_updated_at = None
+        self._tokens_since_summary = 0
+        return True
+
     def _reset_summary_state(
         self, expected_summary_last_updated_at: datetime | None = None
     ) -> bool:
@@ -1291,22 +1375,14 @@ class BaseMemoryManager(ABC):
         is skipped and False is returned.
         """
         with self._hybrid_lock:
-            if (
-                expected_summary_last_updated_at is not None
-                and self._summary_last_updated_at != expected_summary_last_updated_at
-            ):
-                return False
-            self._summary = None
-            self._summary_msg_idx = 0
-            self._summary_last_updated_at = None
-            self._tokens_since_summary = 0
+            result = self._reset_summary_state_locked(expected_summary_last_updated_at)
         try:
             meta_path = self._hybrid_meta_path()
             if meta_path.exists():
                 meta_path.unlink(missing_ok=True)
         except Exception:
             pass
-        return True
+        return result
 
     def reset_summary_state(self) -> None:
         """Reset rolling summary state without disturbing the message history."""
@@ -1393,6 +1469,10 @@ class BaseMemoryManager(ABC):
 
         Resets to initial state. Override to clear mode-specific data.
         Default is a no-op (subclasses should call super().clear()).
+
+        Locking: acquires ``_hybrid_lock``. When called from a mode subclass
+        (``with self._mode_lock: ... super().clear()``), the lock nesting
+        follows ``_mode_lock`` → ``_hybrid_lock`` (see module-level docstring).
         """
         self.join_background()
         self._reset_summary_state()

@@ -162,6 +162,12 @@ class TestPatchFile:
         assert "Patched dict_patch.txt" in result
         assert (tmp_cwd / "dict_patch.txt").read_text() == "after"
 
+    def test_large_file_rejected(self, tmp_cwd: Path) -> None:
+        large = tmp_cwd / "big.txt"
+        large.write_bytes(b"x" * (101 * 1024 * 1024))
+        result = patch_file("big.txt", "old", "new")
+        assert "too large" in result.lower()
+
 
 class TestListDirectory:
     """list_directory correctness — pre-checks on is_dir() are intentional, not TOCTOU."""

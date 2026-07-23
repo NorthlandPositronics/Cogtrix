@@ -554,3 +554,104 @@ class TestTimestamps:
             else context.messages[0]["content"]
         )
         assert "Q0" in first_content
+
+
+class TestConcurrentUpdateClearRegression:
+    """Regression tests for issue #1342.
+
+    update() must not access self._messages outside _mode_lock after
+    appending, or concurrent clear() / update() calls can see torn
+    state.
+    """
+
+    def test_concurrent_update_and_clear_no_race(self):
+        """10 threads × 100 iterations of update()+clear() — no exceptions."""
+
+
+class TestTokensSinceSummaryLockRegression:
+    """Regression tests for #1295: _tokens_since_summary race between update()
+    and background summarizer. Token counter increments must be serialized by
+    _hybrid_lock to prevent lost updates when reset_summary() races with update().
+    """
+
+    def test_tokens_increment_protected_by_hybrid_lock(self):
+        """update() must increment _tokens_since_summary under _hybrid_lock."""
+        manager = ConversationMemoryManager(MockStore(), "test")
+        manager.load()
+        initial = manager._tokens_since_summary
+        manager.update("What is 2+2?", "4")
+        assert manager._tokens_since_summary > initial
+
+    def test_reset_summary_state_zeros_counter(self):
+        """_reset_summary_state() must reset _tokens_since_summary to 0."""
+        manager = ConversationMemoryManager(MockStore(), "test")
+        manager.load()
+        manager.update("Q", "A")
+        assert manager._tokens_since_summary > 0
+        manager._reset_summary_state()
+        assert manager._tokens_since_summary == 0
+
+    def test_concurrent_updates_serialized_by_hybrid_lock(self):
+        """Two threads calling update() concurrently must not raise or corrupt counter."""
+        import threading
+
+        manager = ConversationMemoryManager(MockStore(), "test")
+        manager.load()
+        errors = []
+        barrier = threading.Barrier(2)
+
+        def updater():
+            try:
+                barrier.wait()
+                for _ in range(20):
+                    manager.update("Q", "A")
+            except Exception as exc:
+                errors.append(("updater", exc))
+
+        t1 = threading.Thread(target=updater)
+        t2 = threading.Thread(target=updater)
+        t1.start()
+        t2.start()
+        t1.join(timeout=20)
+        t2.join(timeout=20)
+        assert t1.is_alive() is False, "thread t1 did not finish"
+        assert t2.is_alive() is False, "thread t2 did not finish"
+        assert errors == [], f"Concurrent access raised: {errors}"
+
+    """Regression tests for issue #1342.
+
+    update() must not access self._messages outside _mode_lock after
+    appending, or concurrent clear() / update() calls can see torn
+    state.
+    """
+
+    def test_concurrent_update_and_clear_no_race(self):
+        """10 threads × 100 iterations of update()+clear() — no exceptions."""
+        import threading
+
+        manager = ConversationMemoryManager(MockStore(), "test")
+        manager.load()
+
+        errors: list[Exception] = []
+        barrier = threading.Barrier(10)
+
+        def worker():
+            try:
+                barrier.wait(timeout=5)
+                for i in range(100):
+                    manager.update(f"Q{i}", f"A{i}")
+                    if i % 10 == 0:
+                        manager.clear()
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=worker) for _ in range(10)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=30)
+
+        assert not errors, f"Exceptions during concurrent update/clear: {errors}"
+        # Message count must be even (human + ai per update) or zero
+        count = manager.get_message_count()
+        assert count % 2 == 0, f"Message count {count} is not even"

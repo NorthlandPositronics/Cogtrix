@@ -176,6 +176,7 @@ class TaskQueue:
         limit: int = 50,
         session_id: str | None = None,
         user_id: str | None = None,
+        org_id: str | None = None,
     ) -> list[TaskRecord]:
         with self._connect() as conn:
             where_parts: list[str] = []
@@ -189,6 +190,9 @@ class TaskQueue:
             if user_id is not None:
                 where_parts.append("user_id = ?")
                 params.append(user_id)
+            if org_id is not None:
+                where_parts.append("org_id = ?")
+                params.append(org_id)
             where = f" WHERE {' AND '.join(where_parts)}" if where_parts else ""
             params.append(limit)
             rows = conn.execute(
@@ -352,8 +356,9 @@ def list_tasks(
     status: TaskStatus | None = None,
     limit: int = 50,
     user_id: str | None = None,
+    org_id: str | None = None,
 ) -> list[TaskRecord]:
-    return get_task_queue().list(status=status, limit=limit, user_id=user_id)
+    return get_task_queue().list(status=status, limit=limit, user_id=user_id, org_id=org_id)
 
 
 def cancel_task(task_id: str) -> bool:

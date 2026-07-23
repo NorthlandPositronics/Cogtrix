@@ -450,22 +450,15 @@ def build_call_model_node(
             msgs.append(
                 HumanMessage(
                     content=(
-                        "[THINKING BREAK — most tools temporarily disabled]\n"
-                        "You have been repeating similar actions that keep failing. "
-                        "STOP and think carefully:\n\n"
-                        "1. Review your checkpoints — what has actually WORKED so far?\n"
-                        "2. What approaches have FAILED and WHY? List each failed category.\n"
-                        "3. Have you SEARCHED THE WEB? If not, after this analysis call "
-                        'request_tools(add=["search_web"]) then search.\n'
-                        "4. List exactly THREE categorically different strategies you "
-                        "haven't tried. 'Different category' means a completely different "
-                        "method — not the same method with a different URL or version.\n\n"
-                        "Write out your analysis and pick ONE of your three strategies. "
-                        "Do NOT guess URLs — search for real ones. "
-                        "request_tools is still available so you can load whatever you need; "
-                        "all other tools are restored on the next round.\n\n"
-                        "If you intend to call a tool, emit a structured tool_call — "
-                        "do NOT write the call as XML in your text response."
+                        "[THINKING BREAK — tools disabled this round]\n"
+                        "Recent attempts are not producing new information. "
+                        "Stop and produce the final answer for the user now, drawing on "
+                        "your own knowledge of the topic where the tools have come up "
+                        "empty.\n\n"
+                        "Write the answer directly — do not narrate your approach, do "
+                        "not enumerate what failed, do not list alternative methods. "
+                        "Just answer the question.\n\n"
+                        "Tools are restored on the next round if you still need them."
                     )
                 )
             )
