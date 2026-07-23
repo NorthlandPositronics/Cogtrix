@@ -313,7 +313,7 @@ class TestOptimizePrompt:
         """Prompts shorter than threshold are returned unchanged without LLM call."""
         mock_llm = MagicMock()
         result = optimize_prompt("What time is it?", mock_llm)
-        assert result == "What time is it?"
+        assert result.text == "What time is it?"
         mock_llm.invoke.assert_not_called()
 
     def test_long_prompt_triggers_llm(self):
@@ -325,7 +325,7 @@ class TestOptimizePrompt:
         mock_llm.invoke.return_value = mock_response
 
         result = optimize_prompt(long_prompt, mock_llm)
-        assert result == "Analyze the codebase: Phase 1 read docs, Phase 2 examine source."
+        assert result.text == "Analyze the codebase: Phase 1 read docs, Phase 2 examine source."
         mock_llm.invoke.assert_called_once()
 
     def test_llm_failure_returns_original(self):
@@ -335,7 +335,7 @@ class TestOptimizePrompt:
         mock_llm.invoke.side_effect = RuntimeError("LLM unavailable")
 
         result = optimize_prompt(long_prompt, mock_llm)
-        assert result == long_prompt
+        assert result.text == long_prompt
 
     def test_empty_response_returns_original(self):
         """If the LLM returns empty content, the original prompt is returned."""
@@ -346,7 +346,7 @@ class TestOptimizePrompt:
         mock_llm.invoke.return_value = mock_response
 
         result = optimize_prompt(long_prompt, mock_llm)
-        assert result == long_prompt
+        assert result.text == long_prompt
 
     def test_unchanged_prompt_returned(self):
         """If LLM returns the same text, it passes through cleanly."""
@@ -358,7 +358,7 @@ class TestOptimizePrompt:
 
         result = optimize_prompt(long_prompt, mock_llm)
         # .strip() in the implementation removes trailing whitespace
-        assert result == long_prompt.strip()
+        assert result.text == long_prompt.strip()
 
     def test_list_content_response(self):
         """Handle LLM responses where content is a list of dicts."""
@@ -371,7 +371,7 @@ class TestOptimizePrompt:
         mock_llm.invoke.return_value = mock_response
 
         result = optimize_prompt(long_prompt, mock_llm)
-        assert result == "Optimized: do analysis."
+        assert result.text == "Optimized: do analysis."
 
     def test_delimiter_injection_blocked_by_nonce(self):
         """The nonce-based delimiter prevents user content from injecting structural markers."""

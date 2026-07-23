@@ -198,7 +198,9 @@ class BaseMemoryManager(ABC):
         """
         self._llm = llm
 
-    def set_embeddings(self, embedding_fn: Any, embedding_model: str) -> None:
+    def set_embeddings(
+        self, embedding_fn: Any, embedding_model: str, vector_store_dir: str | None = None
+    ) -> None:
         """Attach an embedding function for vector recall.
 
         Creates (or reconfigures) a per-session ``SessionVectorStore``.
@@ -208,7 +210,10 @@ class BaseMemoryManager(ABC):
         from src.memory.recall import SessionVectorStore
 
         if self._vector_store is None:
-            self._vector_store = SessionVectorStore(self.session_id)
+            self._vector_store = SessionVectorStore(
+                self.session_id,
+                storage_dir=vector_store_dir or "data/vectordb/sessions",
+            )
         self._vector_store.configure(embedding_fn, embedding_model)
 
     def _hybrid_meta_path(self) -> Path:

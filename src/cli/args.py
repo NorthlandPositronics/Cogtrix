@@ -180,6 +180,12 @@ def parse_arguments():
         metavar="FILE",
         help="Path to config file (JSON or YAML)",
     )
+    core_group.add_argument(
+        "--data-dir",
+        type=str,
+        metavar="PATH",
+        help="Root directory for all data storage (default: data)",
+    )
 
     # ── Run modes ────────────────────────────────────────────────────
     mode_group = parser.add_argument_group("Run modes")

@@ -1,2 +1,2 @@
-__version__ = "0.1.7"  # x-release-please-version
+__version__ = "0.1.8"  # x-release-please-version
 __copyright__ = "© 2025–2026 Northland Positronics (FZE)"

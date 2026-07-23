@@ -12,6 +12,7 @@ import logging
 import threading
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 log = logging.getLogger("cogtrix")
@@ -100,7 +101,8 @@ class ChatSessionManager:
         )
         memory_cfg: dict[str, Any] = asst_cfg.get("memory", {})
 
-        store = JsonFileMemoryStore("data/history")
+        history_dir = str(Path(getattr(self._config, "data_dir", "data")) / "history")
+        store = JsonFileMemoryStore(history_dir)
         mm = MemoryFactory.create(
             mode="conversation",
             store=store,

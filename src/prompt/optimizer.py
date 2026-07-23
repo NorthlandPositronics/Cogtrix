@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import re
 import secrets
+from dataclasses import dataclass, field
 from typing import Any
 
 from src.logging_config import get_logger
@@ -27,8 +28,97 @@ _ACTION_VERB_SKIP = re.compile(
     re.IGNORECASE,
 )
 
+_MILESTONE_LINE = re.compile(r"^\d+[\.\)]\s+(\S.+)$")
 
-def optimize_prompt(user_input: str, llm: Any, *, force: bool = False) -> str:
+
+@dataclass
+class Milestone:
+    index: int  # 1-based
+    title: str
+
+
+@dataclass
+class PromptPlan:
+    text: str
+    milestones: list[Milestone] = field(default_factory=list)
+
+    def __str__(self) -> str:
+        return self.text
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, PromptPlan):
+            return self.text == other.text and self.milestones == other.milestones
+        return NotImplemented
+
+    def __hash__(self) -> int:
+        return hash(self.text)
+
+    @property
+    def has_milestones(self) -> bool:
+        return len(self.milestones) > 0
+
+
+_MILESTONE_APPENDIX = (
+    "\n\nIf you restructure the prompt, also generate a milestone plan (3-7 steps) "
+    "tracking major phases of the task.\n\n"
+    "Format:\n"
+    "---PROMPT---\n"
+    "<optimized prompt>\n"
+    "---MILESTONES---\n"
+    "1. <milestone title>\n"
+    "2. <milestone title>\n"
+    "...\n"
+    "---END---\n\n"
+    "If the prompt does NOT need restructuring, return it unchanged with NO "
+    "milestones section."
+)
+
+
+def _parse_plan_response(raw: str, original: str) -> PromptPlan:
+    """Parse a structured optimizer response into a PromptPlan.
+
+    When ``---MILESTONES---`` is absent the raw text is cleaned of any
+    ``---PROMPT---`` / ``---END---`` markers and returned with an empty
+    milestones list.  When the section is present, numbered lines are parsed
+    and at least 2 milestones are required; fewer milestones are discarded.
+    """
+    if "---MILESTONES---" not in raw:
+        cleaned = raw
+        for marker in ("---PROMPT---", "---END---"):
+            cleaned = cleaned.replace(marker, "")
+        cleaned = cleaned.strip()
+        return PromptPlan(text=cleaned or original)
+
+    parts = raw.split("---MILESTONES---", 1)
+    prompt_part = parts[0]
+    rest = parts[1]
+
+    prompt_text = prompt_part
+    for marker in ("---PROMPT---", "---END---"):
+        prompt_text = prompt_text.replace(marker, "")
+    prompt_text = prompt_text.strip() or original
+
+    milestone_block = rest.split("---END---")[0] if "---END---" in rest else rest
+    milestones: list[Milestone] = []
+    for line in milestone_block.splitlines():
+        line = line.strip()
+        m = _MILESTONE_LINE.match(line)
+        if m:
+            milestones.append(Milestone(index=len(milestones) + 1, title=m.group(1).strip()))
+
+    if len(milestones) < 2:
+        milestones = []
+
+    return PromptPlan(text=prompt_text, milestones=milestones)
+
+
+def optimize_prompt(
+    user_input: str,
+    llm: Any,
+    *,
+    force: bool = False,
+    plan_milestones: bool = False,
+) -> PromptPlan:
     """Optimize a user prompt for better agent execution.
 
     Uses a one-shot LLM call to evaluate whether the prompt needs
@@ -40,28 +130,34 @@ def optimize_prompt(user_input: str, llm: Any, *, force: bool = False) -> str:
         user_input: Raw user prompt text.
         llm: LLM instance to use for the optimization call.
         force: If True, bypass the length gate and always run the LLM call.
+        plan_milestones: If True, ask the LLM to also produce a milestone plan
+            when it restructures the prompt.  The result is parsed into
+            ``PromptPlan.milestones``; simple/unchanged prompts return an
+            empty milestones list.
 
     Returns:
-        The optimized prompt, or the original if no optimization was needed
-        or the call failed.
+        A ``PromptPlan`` whose ``text`` is the optimized prompt (or the
+        original if no optimization was needed or the call failed) and whose
+        ``milestones`` list is populated only when ``plan_milestones=True``
+        and the LLM produced a structured milestone section.
     """
     log = get_logger()
 
     if not force and len(user_input) < PROMPT_OPTIMIZER_MIN_LENGTH:
-        return user_input
+        return PromptPlan(text=user_input)
 
     if (
         not force
         and len(user_input) < _ACTION_VERB_SKIP_MAX_LENGTH
         and _ACTION_VERB_SKIP.search(user_input)
     ):
-        return user_input
+        return PromptPlan(text=user_input)
 
     try:
         nonce = secrets.token_hex(8)
         delimiter_start = f"__USER_INPUT_{nonce}_START__"
         delimiter_end = f"__USER_INPUT_{nonce}_END__"
-        optimizer_prompt = (
+        base_instructions = (
             "You are a prompt optimizer for an AI agent that has access to tools "
             "(file reading, web search, shell commands, code execution, etc.).\n\n"
             "Your job: evaluate the user request below. "
@@ -82,6 +178,7 @@ def optimize_prompt(user_input: str, llm: Any, *, force: bool = False) -> str:
             f"{user_input}\n"
             f"{delimiter_end}"
         )
+        optimizer_prompt = base_instructions + (_MILESTONE_APPENDIX if plan_milestones else "")
         response = llm.invoke(optimizer_prompt)
         content = getattr(response, "content", str(response))
         if isinstance(content, list):
@@ -90,21 +187,28 @@ def optimize_prompt(user_input: str, llm: Any, *, force: bool = False) -> str:
 
         if not optimized or len(optimized) < 10:
             log.debug("Prompt optimizer returned empty/short result, using original")
-            return user_input
+            return PromptPlan(text=user_input)
 
-        if optimized != user_input:
+        if plan_milestones:
+            plan = _parse_plan_response(optimized, user_input)
+        else:
+            plan = PromptPlan(text=optimized)
+
+        if plan.text != user_input:
             log.info(
                 "Prompt optimized: %d chars → %d chars",
                 len(user_input),
-                len(optimized),
+                len(plan.text),
             )
-            log.debug("Optimized prompt: %s", optimized[:500])
+            log.debug("Optimized prompt: %s", plan.text[:500])
             print("  [optimizer] Prompt restructured for clarity")
+            if plan.has_milestones:
+                print(f"  [optimizer] Task decomposed into {len(plan.milestones)} milestones")
         else:
             log.debug("Prompt optimizer: no changes needed")
 
-        return optimized
+        return plan
 
     except Exception as exc:
         log.warning("Prompt optimizer failed: %s", exc)
-        return user_input
+        return PromptPlan(text=user_input)

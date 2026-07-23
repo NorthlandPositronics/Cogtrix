@@ -11,6 +11,7 @@ import logging
 import signal
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from typing import Any
 
 from src.agent.core import AgentRunner
@@ -90,6 +91,12 @@ class AssistantService:
                 judge_llm = create_extraction_llm(judge_model, config)
             else:
                 judge_llm = llm
+        guardrail_cfg = asst_cfg.setdefault("guardrails", {})
+        if "violations_persist_path" not in guardrail_cfg:
+            top_data_dir = getattr(config, "data_dir", "data")
+            guardrail_cfg["violations_persist_path"] = str(
+                Path(top_data_dir) / "assistant" / "violations.json"
+            )
         guardrails = GuardrailPipeline(config=asst_cfg, llm=judge_llm)
 
         self._session_mgr = ChatSessionManager(

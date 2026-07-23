@@ -203,7 +203,7 @@ class RAGConfig:
     """Configuration for RAG document ingestion."""
 
     docs_dir: str = "docs"
-    vectordb_dir: str = "data/vectordb"
+    vectordb_dir: str = "vectordb"
     chunk_size: int = 2000
     chunk_overlap: int = 200
     model: str | None = None  # references a key in Config.models for embedding
@@ -224,6 +224,7 @@ class Config:
     provider: str = "ollama"
     model: str | None = None
     session: str = "default"
+    data_dir: str = "data"
 
     # Inference providers (LLM backends)
     # Populated from "providers" (preferred) or "inference" (alias)
@@ -336,6 +337,23 @@ class Config:
     def assistant_config(self) -> dict[str, Any]:
         """Return the full assistant service config dict (may be empty)."""
         return self.services.get("assistant", {})
+
+    def resolve_data_path(self, subpath: str) -> Path:
+        """Resolve a data subpath against ``data_dir``.
+
+        Absolute paths are returned as-is.  Relative paths starting with
+        the legacy ``data/`` prefix are normalized to avoid double-nesting
+        when ``data_dir`` is ``"data"`` (the default).
+        """
+        p = Path(subpath)
+        if p.is_absolute():
+            return p
+        data_prefix = self.data_dir.rstrip("/\\") + "/"
+        if subpath.startswith(data_prefix):
+            stripped = subpath[len(data_prefix) :]
+            if stripped:
+                return Path(self.data_dir) / stripped
+        return Path(self.data_dir) / subpath
 
     def get_provider_config(self, name: str | None = None) -> ProviderConfig:
         """Get configuration for a provider by name.
@@ -679,6 +697,8 @@ def _apply_config_file(config: Config, path: Path) -> None:
         config.model = data["model"]
     if "session" in data:
         config.session = data["session"]
+    if "data_dir" in data:
+        config.data_dir = str(data["data_dir"])
 
     # ── Providers ──────────────────────────────────────────────────
     # Preferred key: "providers"; alias: "inference"
@@ -1041,6 +1061,8 @@ def _apply_env_vars(config: Config) -> None:
         config.model = env_val
     if env_val := os.getenv("COGTRIX_SESSION"):
         config.session = env_val
+    if env_val := os.getenv("COGTRIX_DATA_DIR"):
+        config.data_dir = env_val
 
     # LLM provider API keys — via named providers
     if env_val := os.getenv("OPENAI_API_KEY"):
@@ -1128,6 +1150,8 @@ def _apply_cli_args(config: Config, args) -> None:
         config.model = args.model
     if hasattr(args, "session") and args.session:
         config.session = args.session
+    if hasattr(args, "data_dir") and args.data_dir:
+        config.data_dir = args.data_dir
     if hasattr(args, "memory_mode") and args.memory_mode:
         config.memory_mode = args.memory_mode
 

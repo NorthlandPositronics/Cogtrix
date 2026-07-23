@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.1.8](https://github.com/NorthlandPositronics/Cogtrix/compare/v0.1.7...v0.1.8) (2026-02-28)
+
+
+### Features
+
+* add top-level data_dir config option ([3cd3907](https://github.com/NorthlandPositronics/Cogtrix/commit/3cd3907d2427f13669d36e83d70d41b4b1be70c6))
+* add top-level data_dir config option for all data storage paths ([ae13eb3](https://github.com/NorthlandPositronics/Cogtrix/commit/ae13eb308438f09274f4152d42bcd2bc85ba681e))
+* **docker:** optimize Dockerfile with selective COPY and slim .dockerignore ([1c7311e](https://github.com/NorthlandPositronics/Cogtrix/commit/1c7311e81803409ef3586321d117f61bf2a6a420))
+* **milestone:** add spinner context prefix and report_progress tool ([957066a](https://github.com/NorthlandPositronics/Cogtrix/commit/957066a60fa1e372cc315c491660042d066428e7))
+* **milestone:** wire progress tracking into cogtrix.py (step 5) ([850bfb6](https://github.com/NorthlandPositronics/Cogtrix/commit/850bfb66dd8e3beaa50f3098db1d783c0c9ff6a5))
+* **optimizer:** add Milestone/PromptPlan types and plan_milestones param ([79707f6](https://github.com/NorthlandPositronics/Cogtrix/commit/79707f698810cad0f35ee63a9771b7db44fde437))
+
+
+### Bug Fixes
+
+* resolve Round 26 audit bugs and performance issues ([2f8f6af](https://github.com/NorthlandPositronics/Cogtrix/commit/2f8f6af200b419a89bcf163d6d5a8a84500e61c7))
+
+
+### Documentation
+
+* add Round 26 audit reports (bugs, performance, architecture) ([c2c8a67](https://github.com/NorthlandPositronics/Cogtrix/commit/c2c8a67ae433b10ce6f118e93d63b7936818938c))
+
 ## [0.1.7](https://github.com/NorthlandPositronics/Cogtrix/compare/v0.1.6...v0.1.7) (2026-02-28)
 
 

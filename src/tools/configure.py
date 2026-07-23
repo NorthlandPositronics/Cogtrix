@@ -9,7 +9,6 @@ from __future__ import annotations
 import importlib
 import sys
 from collections.abc import Callable
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from src.logging_config import get_logger
@@ -19,6 +18,30 @@ from src.tools.resolver import resolve_tool_name as _resolve_tool_name
 if TYPE_CHECKING:
     from src.config import Config
     from src.registry import ToolRegistry
+
+try:
+    from pydantic import BaseModel, Field
+
+    class RequestToolsInput(BaseModel):
+        """Input schema for managing the active tool set."""
+
+        add: list[str] = Field(
+            default_factory=list,
+            description=(
+                "Tool names to load from the available catalog. "
+                "They become available immediately."
+            ),
+        )
+        remove: list[str] = Field(
+            default_factory=list,
+            description=(
+                "Tool names to release from the active set. "
+                "They return to the catalog and can be re-added later."
+            ),
+        )
+
+except ImportError:
+    RequestToolsInput = None  # type: ignore[assignment,misc]
 
 
 TOOL_OUTPUT_CAP_RATIO = 0.10
@@ -331,7 +354,7 @@ def configure_rag_tool(config: Config) -> None:
             "embedding_model": emb_model,
             "base_url": emb_base_url,
             "api_key": emb_api_key,
-            "vectordb_dir": str(Path(config.rag.vectordb_dir) / "faiss_index"),
+            "vectordb_dir": str(config.resolve_data_path(config.rag.vectordb_dir) / "faiss_index"),
         }
         configure_rag(rag_config)
     except ImportError:
@@ -449,11 +472,12 @@ def create_request_tools_tool(
         protected_names: Tool names that cannot be released (mode
             presets + the meta-tool itself).
     """
-    from pydantic import BaseModel, Field
-
     try:
         from langchain_core.tools import StructuredTool
     except ImportError:
+        return None
+
+    if RequestToolsInput is None:
         return None
 
     _protected: set[str] = (protected_names or set()) | {"request_tools"}
@@ -472,24 +496,6 @@ def create_request_tools_tool(
         remove_catalog = "\n".join(f"  - {n}" for n in releasable)
     else:
         remove_catalog = "  (none — all active tools are core to this mode)"
-
-    class RequestToolsInput(BaseModel):
-        """Input schema for managing the active tool set."""
-
-        add: list[str] = Field(
-            default_factory=list,
-            description=(
-                "Tool names to load from the available catalog. "
-                "They become available immediately."
-            ),
-        )
-        remove: list[str] = Field(
-            default_factory=list,
-            description=(
-                "Tool names to release from the active set. "
-                "They return to the catalog and can be re-added later."
-            ),
-        )
 
     def request_tools(add: list[str] | None = None, remove: list[str] | None = None) -> str:
         """Add or remove tools from the active agent toolkit."""

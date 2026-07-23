@@ -80,7 +80,12 @@ class SharedKnowledgeStore:
         know_cfg: dict[str, Any] = asst_cfg.get("knowledge", {})
         self._max_facts: int = int(know_cfg.get("max_facts", 10000))
 
-        data_dir = Path(know_cfg.get("data_dir", "data")).resolve()
+        knowledge_data_dir = know_cfg.get("data_dir")
+        if knowledge_data_dir is not None:
+            data_dir = Path(knowledge_data_dir).resolve()
+        else:
+            top_level = getattr(config, "data_dir", "data")
+            data_dir = Path(top_level).resolve()
         self._facts_path: Path = data_dir / _DEFAULT_FACTS_SUBDIR
         self._faiss_index_dir: str = str(data_dir / _DEFAULT_FAISS_SUBDIR)
 

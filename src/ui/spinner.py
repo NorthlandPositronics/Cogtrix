@@ -148,10 +148,20 @@ class ActivityIndicator:
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
         self._escape_monitor: Any = None
+        self._context: str = ""
 
     def set_escape_monitor(self, monitor: Any) -> None:
         """Attach an ``EscapeMonitor`` whose lifecycle mirrors the spinner."""
         self._escape_monitor = monitor
+
+    def set_context(self, context: str) -> None:
+        """Set prefix shown before the fun message. Thread-safe."""
+        with self._lock:
+            self._context = context
+
+    def clear_context(self) -> None:
+        with self._lock:
+            self._context = ""
 
     def _next_message(self) -> str:
         """Return the next spinner message.
@@ -177,6 +187,7 @@ class ActivityIndicator:
             self._pause_count = 0
             self._msg_index = 0
             self._message = _SPINNER_MESSAGES[0]
+            self._context = ""
             self._thread = threading.Thread(target=self._animate, daemon=True)
         self._thread.start()
         if self._escape_monitor is not None:
@@ -238,14 +249,21 @@ class ActivityIndicator:
                         self._message = self._next_message()
                     char = _SPINNER_CHARS[idx % len(_SPINNER_CHARS)]
                     color = _SPINNER_GRADIENT[idx % grad_len]
+                    ctx = self._context
                     # Always use raw stdout — Rich console.print doesn't
                     # handle carriage-return rewriting correctly.
                     # \033[2K = erase entire line, \r = return to column 0
                     # \033[38;5;Nm = 256-color foreground
-                    frame = (
-                        f"\033[2K\r\033[1;38;5;{color}m{char}\033[0m"
-                        f" \033[2m{self._message}\033[0m"
-                    )
+                    if ctx:
+                        frame = (
+                            f"\033[2K\r\033[1;38;5;{color}m{char}\033[0m"
+                            f" \033[1m{ctx}\033[22m: \033[2m{self._message}\033[0m"
+                        )
+                    else:
+                        frame = (
+                            f"\033[2K\r\033[1;38;5;{color}m{char}\033[0m"
+                            f" \033[2m{self._message}\033[0m"
+                        )
                     idx += 1
                     frame_count += 1
             if frame is not None:

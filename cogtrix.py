@@ -17,6 +17,7 @@ from src._version import __copyright__, __version__  # noqa: F401
 from src.agent.core import (
     build_system_prompt,
     create_llm_from_provider_config,
+    format_milestone_instructions,
 )
 from src.agent.safety import UserCancelledRun
 from src.cli.args import color_enabled, parse_arguments
@@ -105,7 +106,7 @@ from src.orchestration.runner import (  # noqa: F401
 )
 from src.orchestration.session_orchestrator import SessionOrchestrator
 from src.orchestration.session_state import SessionState
-from src.prompt.optimizer import optimize_prompt
+from src.prompt.optimizer import PromptPlan, optimize_prompt
 from src.registry import ToolRegistry
 from src.tools.configure import (
     TOOL_OUTPUT_CAP_MIN_CHARS,
@@ -128,6 +129,12 @@ from src.tools.configure import (
     create_request_tools_tool,
     filter_unconfigured_tools,
     load_tools,
+)
+from src.tools.report_progress import (
+    create_report_progress_tool,
+)
+from src.tools.report_progress import (
+    set_progress_callback as set_milestone_callback,
 )
 from src.ui.spinner import _spinner
 
@@ -321,6 +328,7 @@ def _format_stats_line(elapsed: float, acc: _TokenAccumulator) -> str | None:
 
 
 _session = SessionState()
+_active_milestones: list = []
 
 
 class _RichConfirmationUI:
@@ -489,7 +497,8 @@ def _try_configure_embeddings(
         fn, tag = create_embeddings_from_config(
             emb_type, model=emb_model, base_url=emb_base_url, api_key=emb_api_key
         )
-        memory_manager.set_embeddings(fn, tag)
+        vector_dir = str(config.resolve_data_path("vectordb/sessions"))
+        memory_manager.set_embeddings(fn, tag, vector_store_dir=vector_dir)
         _log.debug("Memory vector recall: using %s", tag)
     except Exception as exc:
         _log.debug("Embedding provider '%s' unavailable: %s", emb_type, exc)
@@ -2388,7 +2397,10 @@ def run_ingest(args, config: Config) -> int:
 
     # Build ingest configuration from args and config
     docs_dir = Path(args.docs_dir if args.docs_dir else config.rag.docs_dir)
-    vectordb_dir = Path(args.vectordb_dir if args.vectordb_dir else config.rag.vectordb_dir)
+    raw_vdb = args.vectordb_dir if args.vectordb_dir else config.rag.vectordb_dir
+    vectordb_dir = (
+        Path(raw_vdb) if Path(raw_vdb).is_absolute() else config.resolve_data_path(raw_vdb)
+    )
 
     # Resolve embedding config from models registry
     # Priority: CLI args > env vars > rag.model > active provider fallback
@@ -2555,37 +2567,46 @@ def run_single_prompt(
         # Run prepare_context and optimize_prompt concurrently when optimizer is enabled.
         # The two operations are independent: the optimizer rewrites the prompt text
         # while prepare_context reads conversation history — no data dependency.
-        if config and config.prompt_optimizer:
-            import concurrent.futures as _cf
-
-            with _cf.ThreadPoolExecutor(max_workers=2, thread_name_prefix="prep") as _pool:
-                _ctx_future = _pool.submit(memory_manager.prepare_context, prompt_text)
-                _opt_future = _pool.submit(optimize_prompt, prompt_text, llm)
-                context = _ctx_future.result()
-                prompt_text = _opt_future.result()
-        else:
-            context = memory_manager.prepare_context(prompt_text)
-
-        if log:
-            log.debug(
-                f"Non-interactive prompt: {len(prompt_text)} chars, "
-                f"context: {context.context_messages_count} messages"
-            )
-
-        # Run agent
-        wants_deep = user_wants_deep_think(original_input)
-
-        agent_msgs: list = []
-
-        compression_llm = None
-        if config and config.context_compression_model:
-            compression_llm = create_compression_llm(config.context_compression_model, config)
-
-        _acc = _TokenAccumulator()
-        _agent_cbs = (callbacks or []) + [_acc]
+        _progress_tool: object = None
+        _run_sys_prompt = system_prompt
+        _al = active_tools_list if active_tools_list is not None else []
         _agent_t0 = _time_mod.monotonic()
         _spinner.start()
         try:
+            if config and config.prompt_optimizer:
+                import concurrent.futures as _cf
+
+                with _cf.ThreadPoolExecutor(max_workers=2, thread_name_prefix="prep") as _pool:
+                    _ctx_future = _pool.submit(memory_manager.prepare_context, prompt_text)
+                    _opt_future = _pool.submit(
+                        optimize_prompt, prompt_text, llm, plan_milestones=True
+                    )
+                    context = _ctx_future.result()
+                    plan = _opt_future.result()
+                prompt_text = plan.text
+                _progress_tool, _run_sys_prompt = _inject_milestones(
+                    plan, _al, _active_milestones, system_prompt or ""
+                )
+            else:
+                context = memory_manager.prepare_context(prompt_text)
+
+            if log:
+                log.debug(
+                    f"Non-interactive prompt: {len(prompt_text)} chars, "
+                    f"context: {context.context_messages_count} messages"
+                )
+
+            # Run agent
+            wants_deep = user_wants_deep_think(original_input)
+
+            agent_msgs: list = []
+
+            compression_llm = None
+            if config and config.context_compression_model:
+                compression_llm = create_compression_llm(config.context_compression_model, config)
+
+            _acc = _TokenAccumulator()
+            _agent_cbs = (callbacks or []) + [_acc]
             output = run_agent(
                 prompt_text,
                 context.messages,
@@ -2595,7 +2616,7 @@ def run_single_prompt(
                 callbacks=_agent_cbs,
                 result_messages=agent_msgs,
                 llm=llm,
-                system_prompt=system_prompt,
+                system_prompt=_run_sys_prompt,
                 available_tools=dict(available_tools) if available_tools else available_tools,
                 active_tools_list=active_tools_list,
                 max_context_tokens=max_context_tokens,
@@ -2615,6 +2636,7 @@ def run_single_prompt(
             )
         finally:
             _spinner.stop()
+            _cleanup_milestones(_progress_tool, _al, _active_milestones)
 
         # ── Enforce deep_think when the user requested it ────────
         # Force-call if: (a) agent skipped deep_think entirely, OR
@@ -2812,6 +2834,53 @@ def run_single_prompt(
         return 1
 
 
+def _milestone_progress(milestone_index: int, status: str) -> None:
+    milestones = list(_active_milestones)  # atomic snapshot
+    if not milestones:
+        return
+    total = len(milestones)
+    idx = max(1, min(milestone_index, total))
+    title = milestones[idx - 1].title
+    ctx = f"[{idx}/{total}] {title}"
+    if status:
+        ctx += f" \u2014 {status}"
+    _spinner.set_context(ctx)
+
+
+def _inject_milestones(
+    plan: PromptPlan,
+    tools_list: list,
+    milestones_store: list,
+    sys_prompt: str,
+) -> tuple[object, str]:
+    """Inject report_progress tool and augment system prompt when plan has milestones.
+
+    Returns (progress_tool, augmented_sys_prompt). When plan has no milestones,
+    returns (None, sys_prompt) unchanged.
+    """
+    if not plan.has_milestones:
+        return None, sys_prompt
+    tool = create_report_progress_tool(plan.milestones)  # can raise — do first
+    milestones_store[:] = plan.milestones  # only on success
+    tools_list.append(tool)
+    instr = format_milestone_instructions(plan.milestones)
+    augmented = sys_prompt + "\n\n" + instr
+    _spinner.set_context(f"[1/{len(plan.milestones)}] {plan.milestones[0].title}")
+    return tool, augmented
+
+
+def _cleanup_milestones(
+    progress_tool: object,
+    tools_list: list,
+    milestones_store: list,
+) -> None:
+    if progress_tool is None:
+        return
+    tools_list[:] = [t for t in tools_list if getattr(t, "name", "") != "report_progress"]
+    milestones_store.clear()
+    _spinner.clear_context()
+
+
 def main():
     """Main CLI loop."""
     # Parse command line arguments
@@ -2898,7 +2967,7 @@ def main():
             print(f"  Logging to: {log_file_display}{debug_str}")
 
     # Memory manager setup
-    memory_store = JsonFileMemoryStore()
+    memory_store = JsonFileMemoryStore(str(config.resolve_data_path("history")))
 
     # --no-confirm / -y: skip all tool safety confirmations
     _session.no_confirm = getattr(args, "no_confirm", False)
@@ -2979,6 +3048,8 @@ def main():
         set_progress_callback(_deep_think_progress)
     except ImportError:
         pass
+
+    set_milestone_callback(_milestone_progress)
 
     # ── Remove tools whose required API keys are missing ─────────
     total_registered = len(registry.list_tools())
@@ -3389,6 +3460,7 @@ def main():
                 continue
 
             already_optimized = False
+            _pending_plan: PromptPlan | None = None
 
             # ── Multi-line paste mode (triple-quote or /paste) ─────
             if user_input.startswith('"""'):
@@ -4069,7 +4141,10 @@ def main():
                     elif isinstance(result, str) and result.startswith("optimize:"):
                         # Force-optimize the prompt, then fall through to agent
                         user_input = result.split(":", 1)[1]
-                        user_input = optimize_prompt(user_input, llm, force=True)
+                        _pending_plan = optimize_prompt(
+                            user_input, llm, force=True, plan_milestones=True
+                        )
+                        user_input = _pending_plan.text
                         already_optimized = True
                     else:
                         continue
@@ -4103,6 +4178,10 @@ def main():
             # Set before try so KeyboardInterrupt handlers can use it.
             original_input = user_input
 
+            _progress_tool_interactive: object = None
+            _run_sys_prompt_interactive = system_prompt
+            _agent_t0 = _time_mod.monotonic()
+            _spinner.start()
             try:
                 # Run prepare_context and optimize_prompt concurrently when optimizer is enabled.
                 # The two operations are independent: the optimizer rewrites the prompt text
@@ -4112,10 +4191,22 @@ def main():
 
                     with _cf.ThreadPoolExecutor(max_workers=2, thread_name_prefix="prep") as _pool:
                         _ctx_future = _pool.submit(memory_manager.prepare_context, user_input)
-                        _opt_future = _pool.submit(optimize_prompt, user_input, llm)
+                        _opt_future = _pool.submit(
+                            optimize_prompt, user_input, llm, plan_milestones=True
+                        )
                         context = _ctx_future.result()
-                        user_input = _opt_future.result()
+                        plan = _opt_future.result()
+                    user_input = plan.text
                     already_optimized = True
+                    _progress_tool_interactive, _run_sys_prompt_interactive = _inject_milestones(
+                        plan, tools, _active_milestones, system_prompt
+                    )
+                elif _pending_plan is not None:
+                    context = memory_manager.prepare_context(user_input)
+                    _progress_tool_interactive, _run_sys_prompt_interactive = _inject_milestones(
+                        _pending_plan, tools, _active_milestones, system_prompt
+                    )
+                    _pending_plan = None
                 else:
                     context = memory_manager.prepare_context(user_input)
 
@@ -4132,38 +4223,34 @@ def main():
 
                 _acc = _TokenAccumulator()
                 _agent_cbs = (callbacks or []) + [_acc]
-                _agent_t0 = _time_mod.monotonic()
-                _spinner.start()
-                try:
-                    output = run_agent(
-                        user_input,
-                        context.messages,
-                        registry,
-                        approvals,
-                        context_prefix=context.context_prefix,
-                        callbacks=_agent_cbs,
-                        result_messages=agent_msgs,
-                        llm=llm,
-                        system_prompt=system_prompt,
-                        available_tools=(
-                            dict(available_tools)
-                            if (available_tools or TOOL_PRESETS.get(config.memory_mode))
-                            else None
-                        ),
-                        active_tools_list=tools,
-                        max_context_tokens=max_context_tokens,
-                        preset_tools=TOOL_PRESETS.get(config.memory_mode, set()),
-                        context_compression=config.context_compression,
-                        compression_min_age=config.context_compression_min_age,
-                        compression_min_chars=config.context_compression_min_chars,
-                        compression_llm=compression_llm,
-                        session_state=_session,
-                        confirmation_ui=_rich_ui,
-                        on_tool_expansion=_tool_expansion_ui,
-                        parallel_tool_execution=config.parallel_tool_execution,
-                    )
-                finally:
-                    _spinner.stop()
+                output = run_agent(
+                    user_input,
+                    context.messages,
+                    registry,
+                    approvals,
+                    context_prefix=context.context_prefix,
+                    callbacks=_agent_cbs,
+                    result_messages=agent_msgs,
+                    llm=llm,
+                    system_prompt=_run_sys_prompt_interactive,
+                    available_tools=(
+                        dict(available_tools)
+                        if (available_tools or TOOL_PRESETS.get(config.memory_mode))
+                        else None
+                    ),
+                    active_tools_list=tools,
+                    max_context_tokens=max_context_tokens,
+                    preset_tools=TOOL_PRESETS.get(config.memory_mode, set()),
+                    context_compression=config.context_compression,
+                    compression_min_age=config.context_compression_min_age,
+                    compression_min_chars=config.context_compression_min_chars,
+                    compression_llm=compression_llm,
+                    session_state=_session,
+                    confirmation_ui=_rich_ui,
+                    on_tool_expansion=_tool_expansion_ui,
+                    parallel_tool_execution=config.parallel_tool_execution,
+                )
+                _spinner.stop()
 
                 # ── Enforce deep_think when the user requested it ──
                 # Force-call if agent skipped it OR called with bad context.
@@ -4336,6 +4423,8 @@ def main():
                     log.warning("Skipping history save: empty or error response")
 
             except UserCancelledRun:
+                _spinner.stop()
+                _cleanup_milestones(_progress_tool_interactive, tools, _active_milestones)
                 if console:
                     console.print("[yellow]Workflow cancelled.[/yellow]")
                 else:
@@ -4345,6 +4434,7 @@ def main():
 
             except KeyboardInterrupt:
                 _spinner.stop()
+                _cleanup_milestones(_progress_tool_interactive, tools, _active_milestones)
                 if console:
                     console.print(
                         "\n[yellow]Interrupted.[/yellow]"
@@ -4356,6 +4446,8 @@ def main():
                 continue
 
             except Exception as e:
+                _spinner.stop()
+                _cleanup_milestones(_progress_tool_interactive, tools, _active_milestones)
                 log_error(e, context="Agent execution error", include_trace=True)
                 friendly = _friendly_error(e, provider=config.provider)
                 if console:
@@ -4367,6 +4459,9 @@ def main():
 
                     traceback.print_exc()
                 continue
+
+            else:
+                _cleanup_milestones(_progress_tool_interactive, tools, _active_milestones)
 
         except KeyboardInterrupt:
             # Ctrl+C at the prompt clears the line and returns to a fresh

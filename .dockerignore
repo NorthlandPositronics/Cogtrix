@@ -49,16 +49,25 @@ data/
 .DS_Store
 Thumbs.db
 
-# CI / docs not needed in image
+# CI / build files (not needed at runtime)
 .github
-docs
 tests
-*.md
-LICENSE
-NOTICE
 Dockerfile
 .dockerignore
 docker-compose.yml
 setup.cfg
 mypy_report
 htmlcov
+LICENSE
+NOTICE
+
+# Root-level markdown (dev-only)
+CLAUDE.md
+README.md
+CHANGELOG.md
+
+# Docs: keep user-facing docs/*.md, exclude audit/dev subdirs
+docs/adr
+docs/bugs
+docs/prompts
+docs/ux

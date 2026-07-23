@@ -2,7 +2,8 @@
 set -e
 
 # Ensure data directory exists and is writable
-mkdir -p /app/data/history /app/data/knowledge /app/data/vectordb
+DATA_DIR="${COGTRIX_DATA_DIR:-/app/data}"
+mkdir -p "$DATA_DIR/history" "$DATA_DIR/knowledge" "$DATA_DIR/vectordb"
 
 # If no config file exists and running interactively, suggest --setup
 if [ ! -f /app/.cogtrix.yaml ] && [ ! -f /app/.cogtrix.json ] && [ -t 0 ]; then
