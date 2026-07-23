@@ -175,7 +175,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
         log.warning("Could not initialize tool registry: %s", exc)
         app.state.tool_registry = None
 
-    # Configure RAG tool with embedding settings from config
+    # Configure tool modules that rely on provider/model settings from config.
     if cfg is not None:
         try:
             from src.tools.configure import configure_rag_tool
@@ -184,6 +184,22 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
             log.debug("RAG tool configured with embedding settings from config")
         except Exception as exc:
             log.warning("Could not configure RAG tool: %s", exc)
+
+        try:
+            from src.tools.configure import configure_delegate_tool
+
+            configure_delegate_tool(cfg)
+            log.debug("Delegate tool configured from config")
+        except Exception as exc:
+            log.warning("Could not configure delegate tool: %s", exc)
+
+        try:
+            from src.tools.configure import configure_deep_think_tool
+
+            configure_deep_think_tool(cfg)
+            log.debug("Deep-think tool configured from config")
+        except Exception as exc:
+            log.warning("Could not configure deep-think tool: %s", exc)
 
     # Initialize session registry (Phase 2)
     try:

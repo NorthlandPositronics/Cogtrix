@@ -953,3 +953,80 @@ class TestExtractFinalSolution:
 
         report = "## Final Solution — Best Approach (confidence: 9.0/10)\n\n" "The robust answer.\n"
         assert _extract_final_solution(report) == "The robust answer."
+
+
+# ===========================================================================
+# BUG-248 — tool_intensive classification must NOT skip force_deep_think in
+#            explicit think mode (API mode="think")
+# ===========================================================================
+
+
+class TestThinkPipelineToolIntensiveNotSkipped:
+    """Explicit think mode must always call force_deep_think regardless of task category."""
+
+    def test_tool_intensive_check_removed_from_run_think_pipeline(self) -> None:
+        """_run_think_pipeline must not return early for tool_intensive categories (BUG-248)."""
+        import inspect
+
+        from src.api import turn_runner as _mod
+
+        src = inspect.getsource(_mod._run_think_pipeline)
+        assert "task_cat.tool_intensive" not in src, (
+            "_run_think_pipeline must not branch on task_cat.tool_intensive — "
+            "explicit think mode must always proceed to force_deep_think (BUG-248)"
+        )
+
+    def test_skipping_log_message_absent_from_think_pipeline(self) -> None:
+        """The 'Skipping force deep_think' log must not appear in _run_think_pipeline (BUG-248)."""
+        import inspect
+
+        from src.api import turn_runner as _mod
+
+        src = inspect.getsource(_mod._run_think_pipeline)
+        assert (
+            "Skipping force deep_think" not in src
+        ), "_run_think_pipeline must not skip force_deep_think for any task category (BUG-248)"
+
+
+# ===========================================================================
+# BUG-249 / BUG-250 — research delegate tools injected per worker thread;
+#                      configure_delegate_tool called at API startup
+# ===========================================================================
+
+
+class TestThinkPipelineResearchDelegateSetup:
+    """Research delegate must have tools and LLM config available in API mode."""
+
+    def test_run_think_pipeline_injects_delegate_tools(self) -> None:
+        """_run_think_pipeline must call set_delegate_tools inside the worker thread (BUG-249)."""
+        import inspect
+
+        from src.api import turn_runner as _mod
+
+        src = inspect.getsource(_mod._run_think_pipeline)
+        assert (
+            "set_delegate_tools" in src
+        ), "_run_think_pipeline must inject delegate tools into the worker thread (BUG-249)"
+
+    def test_api_startup_configures_delegate_tool(self) -> None:
+        """API lifespan must call configure_delegate_tool to populate _delegate_config (BUG-250)."""
+        import inspect
+
+        from src.api import app as _mod
+
+        src = inspect.getsource(_mod.lifespan)
+        assert "configure_delegate_tool" in src, (
+            "API startup must call configure_delegate_tool to populate "
+            "_delegate_config.providers/models (BUG-250)"
+        )
+
+    def test_api_startup_configures_deep_think_tool(self) -> None:
+        """API lifespan must call configure_deep_think_tool for consistency (BUG-251)."""
+        import inspect
+
+        from src.api import app as _mod
+
+        src = inspect.getsource(_mod.lifespan)
+        assert (
+            "configure_deep_think_tool" in src
+        ), "API startup must call configure_deep_think_tool for consistency (BUG-251)"

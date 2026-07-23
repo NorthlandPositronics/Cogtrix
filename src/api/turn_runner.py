@@ -128,7 +128,10 @@ async def _run_think_pipeline(
 
     llm = getattr(run_config, "llm", None) if run_config else None
 
-    # Classify — skip force-think for tool-intensive tasks.
+    # Classify to log category and update agent_state.  Unlike the automatic
+    # deep_think trigger path in the CLI, explicit think mode (mode="think") must
+    # NEVER skip force_deep_think based on tool_intensive classification — the user
+    # explicitly requested deep reasoning regardless of task category (BUG-248).
     try:
         await _enqueue_agent_state(session, "analyzing")
         task_cat = await asyncio.to_thread(classify_think_task, user_input, llm) if llm else None
@@ -136,12 +139,8 @@ async def _run_think_pipeline(
         log.warning("classify_think_task failed: %s", exc)
         task_cat = None
 
-    if task_cat and task_cat.tool_intensive:
-        log.info(
-            "Skipping force deep_think: task classified as '%s' (tool-intensive)",
-            task_cat.name,
-        )
-        return response_text
+    if task_cat:
+        log.info("Think task classified as '%s'", task_cat.name)
 
     if session.cancel_event.is_set():
         raise asyncio.CancelledError("Cancel requested between pipeline phases")
@@ -156,6 +155,9 @@ async def _run_think_pipeline(
     tool_data = collect_tool_outputs(agent_msgs)
 
     # Optionally run research delegate when web tools were used.
+    # BUG-249/250: delegate tools are stored in threading.local and are never set
+    # in the API layer.  Capture the available tool set from run_config and inject
+    # it into the worker thread via set_delegate_tools before the delegate runs.
     research_output = ""
     rd_enabled = getattr(run_config, "research_delegate_enabled", True) if run_config else True
     if rd_enabled and agent_used_web_tools(agent_msgs):
@@ -168,15 +170,36 @@ async def _run_think_pipeline(
             rd_cap = (
                 getattr(run_config, "research_delegate_cap_ratio", 0.85) if run_config else 0.85
             )
+            _active = list(getattr(run_config, "active_tools_list", None) or [])
+            _avail = dict(getattr(run_config, "available_tools", None) or {})
+
+            def _run_research_with_tools(
+                urls: list,
+                task: str,
+                active: list = _active,
+                avail: dict = _avail,
+                max_context_tokens: int | None = max_ctx,
+                timeout: int = rd_timeout,
+                cap_ratio: float = rd_cap,
+            ) -> str:
+                """Inject delegate tools into this worker thread, then run the delegate."""
+                from src.tools.delegate import set_delegate_tools
+
+                set_delegate_tools(active, avail)
+                return run_research_delegate(
+                    urls,
+                    task,
+                    max_context_tokens=max_context_tokens,
+                    timeout=timeout,
+                    cap_ratio=cap_ratio,
+                )
+
             try:
                 await _enqueue_agent_state(session, "researching")
                 research_output = await asyncio.to_thread(
-                    run_research_delegate,
+                    _run_research_with_tools,
                     fetched_urls,
                     user_input,
-                    max_context_tokens=max_ctx,
-                    timeout=rd_timeout,
-                    cap_ratio=rd_cap,
                 )
             except Exception as exc:
                 log.warning("Research delegate failed: %s", exc)

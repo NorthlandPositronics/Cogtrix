@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.37](https://github.com/NorthlandPositronics/Cogtrix/compare/v0.1.36...v0.1.37) (2026-03-25)
+
+
+### Bug Fixes
+
+* **api:** BUG-248/249/250/251 — API think mode always runs force_deep_think; delegate tools wired in worker threads ([fcf5394](https://github.com/NorthlandPositronics/Cogtrix/commit/fcf539422cfc398e21bf7d313ba80c730f049dec))
+
 ## [0.1.36](https://github.com/NorthlandPositronics/Cogtrix/compare/v0.1.35...v0.1.36) (2026-03-25)
 
 
