@@ -108,8 +108,11 @@ class SlackChannel(Channel):
         self._joined_channels: list[str] = []
         self._seeded: bool = False
 
-        # user_id → display name (lazy-populated to avoid rate limits)
+        # user_id → display name (lazy-populated to avoid rate limits).
+        # Capped at 1024 entries with simple FIFO eviction to prevent
+        # unbounded growth in high-volume workspaces (BUG-FORGE-S3).
         self._user_cache: dict[str, str] = {}
+        self._USER_CACHE_MAX = 1024
 
         self._client: Any = WebClient(token=self._bot_token) if self._bot_token else None
 
@@ -177,6 +180,12 @@ class SlackChannel(Channel):
                 if not ts:
                     continue
                 new_last = ts
+
+                # Skip messages at or before the watermark — conversations_history
+                # with oldest=ts uses an inclusive lower bound, so the watermark
+                # message itself is re-fetched on every poll cycle (BUG-FORGE-S1).
+                if oldest and ts <= oldest:
+                    continue
 
                 # Skip bot-authored messages
                 if msg.get("bot_id") or msg.get("subtype") == "bot_message":
@@ -319,6 +328,12 @@ class SlackChannel(Channel):
             resp = self._client.users_info(user=user_id)
             profile = (resp.get("user") or {}).get("profile") or {}
             name: str = profile.get("display_name") or profile.get("real_name") or user_id
+            # Evict oldest entry if at capacity (simple FIFO)
+            if len(self._user_cache) >= self._USER_CACHE_MAX:
+                try:
+                    self._user_cache.pop(next(iter(self._user_cache)))
+                except StopIteration:
+                    pass
             self._user_cache[user_id] = name
             return name
         except Exception:

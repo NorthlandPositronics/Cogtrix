@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import threading
 import time
 import uuid
@@ -25,6 +26,30 @@ from pathlib import Path
 from src.utils.atomic_write import atomic_write_json
 
 log = logging.getLogger("cogtrix.tasks.goal_tracker")
+
+_SESSION_ID_MAX_LEN = 200
+
+
+def _sanitize_session_id(session_id: str) -> str:
+    """Sanitize a session ID for safe use as a filesystem path component.
+
+    Uses percent-encoding for non-safe characters to ensure bijectivity.
+    Mirrors the identical helper in src/memory/manager.py (BUG-FORGE-S2).
+    """
+    if not session_id:
+        return "default"
+    sanitized = re.sub(
+        r"[^a-zA-Z0-9._-]",
+        lambda m: f"%{ord(m.group()):02X}",
+        session_id,
+    )
+    sanitized = sanitized.replace("..", "%2E%2E")
+    if len(sanitized) > _SESSION_ID_MAX_LEN:
+        sanitized = sanitized[:_SESSION_ID_MAX_LEN]
+        sanitized = re.sub(r"%[0-9A-Fa-f]?$", "", sanitized)
+    if not sanitized:
+        return "default"
+    return sanitized
 
 
 # ── Enums & dataclasses ───────────────────────────────────────────────────────
@@ -54,7 +79,7 @@ class GoalStack:
     """Per-session ordered goal hierarchy with atomic JSON persistence."""
 
     def __init__(self, session_id: str, data_dir: str | Path) -> None:
-        self._session_id = session_id
+        self._session_id = _sanitize_session_id(session_id)
         self._data_dir = Path(data_dir)
         self._goals: dict[str, Goal] = {}
         # Insertion order for top-level goals only
@@ -178,7 +203,16 @@ class GoalStack:
 
     def save(self) -> None:
         """Atomically write goal state to {data_dir}/goals/{session_id}.json."""
-        path = self._data_dir / "goals" / f"{self._session_id}.json"
+        goals_dir = self._data_dir / "goals"
+        path = (goals_dir / f"{self._session_id}.json").resolve()
+        # Enforce containment — sanitized session_id should never escape data_dir,
+        # but verify explicitly (BUG-FORGE-S2).
+        try:
+            path.relative_to(goals_dir.resolve())
+        except ValueError:
+            log.error("Goal path %s escaped data_dir — refusing save", path)
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
         payload: dict = {
             "session_id": self._session_id,
             "order": self._order,
@@ -200,7 +234,13 @@ class GoalStack:
 
     def load(self) -> None:
         """Load goal state from disk; no-op if the file does not exist."""
-        path = self._data_dir / "goals" / f"{self._session_id}.json"
+        goals_dir = self._data_dir / "goals"
+        path = (goals_dir / f"{self._session_id}.json").resolve()
+        try:
+            path.relative_to(goals_dir.resolve())
+        except ValueError:
+            log.error("Goal path %s escaped data_dir — refusing load", path)
+            return
         if not path.exists():
             return
         try:

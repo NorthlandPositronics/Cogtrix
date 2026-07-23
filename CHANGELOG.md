@@ -1,53 +1,16 @@
 # Changelog
 
-## [0.2.1](https://github.com/NorthlandPositronics/Cogtrix/compare/v0.2.0...v0.2.1) (2026-04-03)
-
-
-### Bug Fixes
-
-* **ci:** increase test job timeout from 15 to 25 minutes ([1e68cd6](https://github.com/NorthlandPositronics/Cogtrix/commit/1e68cd63540d22df5dca889a9e86fa8ffe04bef2))
-* forge audit — LazyToolProxy isinstance guard, path traversal, assert patterns, thread safety ([ccd55cd](https://github.com/NorthlandPositronics/Cogtrix/commit/ccd55cde83acdefdb3bf7814f3239da2005a4ec6))
-* **intent:** execution phase false positive on 'addresses to report' ([563c8f2](https://github.com/NorthlandPositronics/Cogtrix/commit/563c8f28d7b646308e770004ed92bb8325bfa253))
-* **orchestration:** action-intent false positive on informational queries ([8ba350a](https://github.com/NorthlandPositronics/Cogtrix/commit/8ba350aaae3de98fad02cb8efdfa783926077882))
-* **prompt:** smarter research instructions — one search for simple lookups ([e8fba89](https://github.com/NorthlandPositronics/Cogtrix/commit/e8fba89705a2e018d89c354b8d31435d4ce64567))
-* resolve LazyToolProxy before adding to active tool list in graph ([1544032](https://github.com/NorthlandPositronics/Cogtrix/commit/1544032f80be850be3e49cb6c92900fe8a4f9dc8))
-* **tests:** resolve LazyToolProxy before passing to LangChain in live_llm tests ([3ff888f](https://github.com/NorthlandPositronics/Cogtrix/commit/3ff888f0bf0ee473ae61de9fc3fcd37cf4239be7))
-* tool budget hard stop now removes tool from active set + nudge on both paths ([b206fb9](https://github.com/NorthlandPositronics/Cogtrix/commit/b206fb9f68673781782a4e5423b9a19418591f98))
-* **ux:** extract token counts from Ollama response_metadata ([f50e95c](https://github.com/NorthlandPositronics/Cogtrix/commit/f50e95c33c0725a85914ac335a6e223fdb8c449e))
-* **ux:** UsageMetadata is a dict — use dict access not getattr ([d6ddc22](https://github.com/NorthlandPositronics/Cogtrix/commit/d6ddc22bae38a175a27616940dad63ae722fa867))
-
-
-### Performance Improvements
-
-* **memory:** lazy-init embedding provider on first use ([b75b6e8](https://github.com/NorthlandPositronics/Cogtrix/commit/b75b6e85806ea75b6c11e54497efad0911b7aea9))
-* per-tool call budget — soft nudge at 5, hard stop at 8 ([917830d](https://github.com/NorthlandPositronics/Cogtrix/commit/917830dc432433d7c0d193eedc2eca4ea2e31f9f))
-* **registry:** lazy-load tool modules to cut startup imports by ~38 modules ([ee481b8](https://github.com/NorthlandPositronics/Cogtrix/commit/ee481b8cd13b5f1e968a7d573eee1dad5279584b))
-* **registry:** smarter eager-import heuristic — skip modules without gated config ([cf4c444](https://github.com/NorthlandPositronics/Cogtrix/commit/cf4c44401fa0d3e7d477e6a25b7a9a987913e573))
-* **runner:** cache compiled agent graph across turns ([f39c13f](https://github.com/NorthlandPositronics/Cogtrix/commit/f39c13ff7392203bdd7ddc2ec4161e75b6304720))
-
-## [0.2.0](https://github.com/NorthlandPositronics/Cogtrix/compare/v0.1.39...v0.2.0) (2026-04-02)
+## [0.2.2](https://github.com/NorthlandPositronics/Cogtrix/compare/v0.2.1...v0.2.2) (2026-04-03)
 
 
 ### Features
 
-* v0.2.0 — cron tools, TCC, UX sprints, enterprise infra, task queue ([#201](https://github.com/NorthlandPositronics/Cogtrix/issues/201)) ([a8091e7](https://github.com/NorthlandPositronics/Cogtrix/commit/a8091e78816ecf02f8a231434cd7d19b757bfddb))
+* TTFT optimizations, tool budget, forge audits, Ollama token fix ([61a992c](https://github.com/NorthlandPositronics/Cogtrix/commit/61a992c0c666649cba8500c04551a2cf6e41f921))
 
 
 ### Bug Fixes
 
-* **api:** wizard step 0 always falls back to default question on LLM failure ([fcdddcb](https://github.com/NorthlandPositronics/Cogtrix/commit/fcdddcb8cc9b62d9b2c79cc8ef4a7c45bcfdbe83))
-* **assistant:** fix six bugs in simulate, guardrails, wizard, and context injection ([7db8309](https://github.com/NorthlandPositronics/Cogtrix/commit/7db830912782dc24ec2be917781a7e85896097e9))
-* **assistant:** fix six bugs in simulate, guardrails, wizard, and context injection ([b12f688](https://github.com/NorthlandPositronics/Cogtrix/commit/b12f6886c13fc14105db06a08e0a023fadec7873))
-* **assistant:** suppress_reply false-positive caused by datamark tokens ([a1127fb](https://github.com/NorthlandPositronics/Cogtrix/commit/a1127fbba0017fe646649d0d6065411c1428b9bf))
-* revert manifest to 0.1.39 so Release Please bumps to 0.2.0 ([7c6babf](https://github.com/NorthlandPositronics/Cogtrix/commit/7c6babfc91645334dd7f8b2046e280035aae9a00))
-* **security:** break CodeQL taint flows — helper function, regex sanitization, param rename ([84d8397](https://github.com/NorthlandPositronics/Cogtrix/commit/84d839735ddb15c1afd4574de986372110538749))
-* **security:** isolate API key hashing in separate module to break CodeQL taint ([1adf10a](https://github.com/NorthlandPositronics/Cogtrix/commit/1adf10abc06e1db335b038655c289d235398e855))
-* **security:** resolve 13 open CodeQL alerts ([f1a23a8](https://github.com/NorthlandPositronics/Cogtrix/commit/f1a23a854b218548ece9e814cb7665ee40cfbbb2))
-* **security:** resolve CodeQL findings — path sanitization, masking, test annotations ([c96b841](https://github.com/NorthlandPositronics/Cogtrix/commit/c96b8415b8a0eec2042eb28c2a56b361fa74c67c))
-* **security:** use HMAC-SHA256 for API key hashing — breaks CodeQL password taint ([c08685f](https://github.com/NorthlandPositronics/Cogtrix/commit/c08685fa0128410f6c92fb6be17abfdf899146be))
-* **tests:** replace deprecated asyncio.get_event_loop() with asyncio.run() ([c07c11f](https://github.com/NorthlandPositronics/Cogtrix/commit/c07c11f4532de29e42d8f3b9ae2995c6afe35aa3))
-* **tests:** resolve CodeQL URL substring sanitization warnings ([1116a07](https://github.com/NorthlandPositronics/Cogtrix/commit/1116a07844e44122e035cbafad81e6457d07a502))
-* **wizard:** fall back to default question when probe warned and first LLM call fails ([1e15753](https://github.com/NorthlandPositronics/Cogtrix/commit/1e157530a6798916c7b2e4c62ce161abe20dc0f4))
+* restore release-please manifest to 0.2.1 ([b0ba369](https://github.com/NorthlandPositronics/Cogtrix/commit/b0ba3694b67d2f217933c299816606dc1cd2453b))
 
 ## [0.2.0] — 2026-03-31
 

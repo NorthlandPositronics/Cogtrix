@@ -339,3 +339,41 @@ def test_get_goal_stack_loads_existing_data(tmp_path: Path) -> None:
     # get_goal_stack should load from disk the first time
     cached = get_goal_stack(sid, tmp_path)
     assert len(cached.list_all()) == 1
+
+
+# ── Path-traversal containment (BUG-FORGE-S2) ─────────────────────────────────
+
+
+def test_session_id_path_traversal_is_sanitized(tmp_path: Path) -> None:
+    """session_id containing path traversal sequences must be sanitized."""
+    stack = GoalStack(session_id="../evil", data_dir=tmp_path)
+    # _session_id must not contain ".."
+    assert ".." not in stack._session_id
+    # The stored path must stay inside data_dir/goals/
+    goals_dir = (tmp_path / "goals").resolve()
+    stack.push("test goal")
+    path = (tmp_path / "goals" / f"{stack._session_id}.json").resolve()
+    assert path.is_relative_to(goals_dir)
+
+
+def test_session_id_with_slashes_is_sanitized(tmp_path: Path) -> None:
+    """session_id containing slashes must have them encoded."""
+    stack = GoalStack(session_id="foo/bar", data_dir=tmp_path)
+    assert "/" not in stack._session_id
+    assert "%" in stack._session_id  # percent-encoded
+
+
+def test_empty_session_id_becomes_default(tmp_path: Path) -> None:
+    """An empty session_id must fall back to 'default'."""
+    stack = GoalStack(session_id="", data_dir=tmp_path)
+    assert stack._session_id == "default"
+
+
+def test_save_creates_parent_dir_if_missing(tmp_path: Path) -> None:
+    """save() must create {data_dir}/goals/ even if it doesn't exist yet (BUG-FORGE-S5)."""
+    goals_dir = tmp_path / "goals"
+    assert not goals_dir.exists()
+    stack = GoalStack(session_id="newdir", data_dir=tmp_path)
+    stack.push("First goal")  # triggers save()
+    assert goals_dir.exists()
+    assert (goals_dir / "newdir.json").exists()

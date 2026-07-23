@@ -457,3 +457,111 @@ class TestDeleteMessage:
         ch._client = None
 
         assert ch.delete_message("C001", "1234.5678") is False
+
+
+# ---------------------------------------------------------------------------
+# 15. Watermark replay prevention (BUG-FORGE-S1)
+# ---------------------------------------------------------------------------
+
+
+class TestWatermarkReplayPrevention:
+    def test_watermark_message_not_replayed_on_next_poll(self):
+        """Messages at or before the watermark ts must be skipped.
+
+        Slack conversations_history with oldest=ts uses an inclusive lower
+        bound — without the skip guard, the last-seen message is re-delivered
+        on every subsequent poll cycle (BUG-FORGE-S1).
+        """
+        ch = _make_channel()
+        watermark_ts = _ts(-5)
+        ch._joined_channels = ["C001"]
+        ch._seeded = True
+        ch._last_ts["C001"] = watermark_ts
+
+        # Slack returns the watermark message again (inclusive oldest boundary)
+        ch._client.conversations_history.return_value = {
+            "messages": [_user_msg("duplicate!", ts=watermark_ts)]
+        }
+
+        msgs = ch.poll()
+
+        assert msgs == [], "Watermark message must not be re-delivered"
+
+    def test_message_after_watermark_is_delivered(self):
+        """A message with ts strictly greater than the watermark is delivered."""
+        ch = _make_channel()
+        watermark_ts = _ts(-10)
+        new_ts = _ts(-5)
+        ch._joined_channels = ["C001"]
+        ch._seeded = True
+        ch._last_ts["C001"] = watermark_ts
+
+        ch._client.conversations_history.return_value = {
+            "messages": [
+                _user_msg("new message", ts=new_ts),
+                _user_msg("watermark message", ts=watermark_ts),
+            ]
+        }
+        ch._client.users_info.return_value = {"user": {"profile": {"display_name": ""}}}
+
+        msgs = ch.poll()
+
+        assert len(msgs) == 1
+        assert msgs[0].text == "new message"
+
+    def test_watermark_advances_after_successful_poll(self):
+        """After delivering new messages, the watermark is updated to the latest ts."""
+        ch = _make_channel()
+        watermark_ts = _ts(-20)
+        new_ts1 = _ts(-10)
+        new_ts2 = _ts(-5)
+        ch._joined_channels = ["C001"]
+        ch._seeded = True
+        ch._last_ts["C001"] = watermark_ts
+
+        # Newest-first order from Slack
+        ch._client.conversations_history.return_value = {
+            "messages": [
+                _user_msg("second", ts=new_ts2),
+                _user_msg("first", ts=new_ts1),
+                _user_msg("old", ts=watermark_ts),
+            ]
+        }
+        ch._client.users_info.return_value = {"user": {"profile": {"display_name": ""}}}
+
+        msgs = ch.poll()
+
+        assert len(msgs) == 2
+        assert ch._last_ts["C001"] == new_ts2
+
+
+# ---------------------------------------------------------------------------
+# 16. _user_cache eviction (BUG-FORGE-S3)
+# ---------------------------------------------------------------------------
+
+
+class TestUserCacheEviction:
+    def test_user_cache_does_not_exceed_max(self):
+        """The _user_cache must not grow beyond _USER_CACHE_MAX entries."""
+        ch = _make_channel()
+        ch._USER_CACHE_MAX = 5
+
+        def fake_users_info(user):
+            return {"user": {"profile": {"display_name": f"User {user}"}}}
+
+        ch._client.users_info.side_effect = fake_users_info
+
+        for i in range(10):
+            ch._resolve_user_name(f"U{i:04d}")
+
+        assert len(ch._user_cache) <= ch._USER_CACHE_MAX
+
+    def test_user_cache_serves_cached_names(self):
+        """Cached names are served without an API call."""
+        ch = _make_channel()
+        ch._user_cache["UCACHED"] = "Alice"
+
+        name = ch._resolve_user_name("UCACHED")
+
+        assert name == "Alice"
+        ch._client.users_info.assert_not_called()
