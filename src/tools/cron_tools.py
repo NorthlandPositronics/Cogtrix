@@ -31,6 +31,8 @@ from contextvars import ContextVar
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
+from src.tools.delegate import register_tool_categories
+
 if TYPE_CHECKING:
     from pydantic import BaseModel, Field
 else:
@@ -476,7 +478,7 @@ def _print_cron_output(job_name: str, prompt: str, response: str) -> None:
     """
     separator = "─" * 60
     log.info(
-        "\n%s\n" "[CRON] %s\n" "Prompt: %s\n" "%s\n" "%s\n" "%s\n",
+        "\n%s\n[CRON] %s\nPrompt: %s\n%s\n%s\n%s\n",
         separator,
         job_name,
         prompt,
@@ -632,6 +634,7 @@ TOOL_CONFIGS = [
         "input_schema": CronAddInput,
         "requires_confirmation": True,
         "function": cron_add,
+        "category": "scheduling",
     },
     {
         "name": "cron_list",
@@ -642,6 +645,7 @@ TOOL_CONFIGS = [
         "input_schema": CronListInput,
         "requires_confirmation": False,
         "function": cron_list,
+        "category": "readonly",
     },
     {
         "name": "cron_remove",
@@ -653,10 +657,20 @@ TOOL_CONFIGS = [
         "input_schema": CronRemoveInput,
         "requires_confirmation": True,
         "function": cron_remove,
+        "category": "scheduling",
     },
 ]
 
 TOOL_CONFIG = TOOL_CONFIGS[0]
+
+
+register_tool_categories(
+    {
+        "cron_add": "scheduling",
+        "cron_list": "readonly",
+        "cron_remove": "scheduling",
+    }
+)
 
 __all__ = [
     "CronJob",

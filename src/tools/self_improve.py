@@ -38,6 +38,7 @@ else:
 
 from src.logging_config import _scrub_secrets
 from src.providers import create_chat_model_from_configs
+from src.tools.delegate import register_tool_categories
 from src.tools.error_sanitizer import sanitize_error
 
 if TYPE_CHECKING:
@@ -514,8 +515,11 @@ TOOL_CONFIGS = [
         "input_schema": SelfImproveInput,
         "requires_confirmation": True,
         "function": self_improve,
+        "category": "mutation",
     },
 ]
+
+register_tool_categories({"self_improve": "mutation"})
 
 TOOL_CONFIG = TOOL_CONFIGS[0]
 

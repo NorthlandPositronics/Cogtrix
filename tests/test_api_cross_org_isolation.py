@@ -119,8 +119,31 @@ class TestOrgContextProperties:
         ctx = OrgContext(user_id="u1", role="admin", org_id="org-a")
         assert ctx.is_admin is True
 
+    def test_is_admin_true_for_superadmin_role(self):
+        """Issue #950: ``OrgContext.is_admin`` previously returned True
+        only for ``role == "admin"``, silently denying superadmin
+        users the org-context admin bypass even after PR #939 fixed
+        the same bug in ``TokenData.is_admin``.
+
+        ``OrgContext.is_admin`` is consumed at:
+          * ``org_context.py:151`` — admin_bypass branch.
+          * ``workspace_context.py:170`` — superadmin cross-org access.
+
+        A regression here would silently lock superadmins out of every
+        org-context-dependent admin path with no warning.
+        """
+        ctx = OrgContext(user_id="su", role="superadmin", org_id="org-a")
+        assert ctx.is_admin is True
+
     def test_is_admin_false_for_user_role(self):
         ctx = OrgContext(user_id="u1", role="user", org_id="org-a")
+        assert ctx.is_admin is False
+
+    def test_is_admin_false_for_unknown_role(self):
+        """Unknown / future roles must default to non-admin to fail
+        closed.  Pinning this guards against an accidental ``role
+        != 'user'`` shortcut creeping into the property."""
+        ctx = OrgContext(user_id="u1", role="readonly", org_id="org-a")
         assert ctx.is_admin is False
 
     def test_role_defaults_to_user(self):

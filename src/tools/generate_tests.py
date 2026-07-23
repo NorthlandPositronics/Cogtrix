@@ -32,6 +32,7 @@ else:
 from src.agent.safety import UserCancelledRun
 from src.logging_config import _scrub_secrets
 from src.providers import create_chat_model_from_configs
+from src.tools.delegate import register_tool_categories
 from src.tools.error_sanitizer import sanitize_error, sanitize_file_error
 
 if TYPE_CHECKING:
@@ -304,8 +305,11 @@ TOOL_CONFIGS = [
         "input_schema": GenerateTestsInput,
         "requires_confirmation": True,
         "function": generate_tests,
+        "category": "mutation",
     },
 ]
+
+register_tool_categories({"generate_tests": "mutation"})
 
 TOOL_CONFIG = TOOL_CONFIGS[0]
 

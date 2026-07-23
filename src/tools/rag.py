@@ -13,6 +13,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from src.api.rag_index import load_faiss_store_safe, save_faiss_store
+from src.tools.delegate import register_tool_categories
 
 # Try to import required modules
 try:
@@ -562,6 +563,7 @@ TOOL_CONFIGS = [
         "input_schema": KnowledgeQueryInput,
         "requires_confirmation": False,
         "function": query_knowledge_base,
+        "category": "readonly",
     },
     {
         "name": "save_to_knowledge_base",
@@ -574,12 +576,22 @@ TOOL_CONFIGS = [
         "input_schema": SaveToKnowledgeBaseInput,
         "requires_confirmation": False,
         "function": save_to_knowledge_base,
+        "category": "mutation",
     },
 ]
 
 # Backward-compatible alias — callers that import TOOL_CONFIG (e.g. configure.py)
 # still get the query tool config dict.
 TOOL_CONFIG = TOOL_CONFIGS[0]
+
+
+register_tool_categories(
+    {
+        "query_knowledge_base": "readonly",
+        "save_to_knowledge_base": "mutation",
+        "rag_ingest": "mutation",
+    }
+)
 
 __all__ = [
     "query_knowledge_base",

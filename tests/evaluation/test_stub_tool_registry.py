@@ -238,6 +238,8 @@ def _placeholder_for(field_info: Any) -> object:
             args = get_args(ann)
     if ann is float:
         return 1.0
+    if ann is bool:
+        return False
     if ann is int:
         return 1
     if getattr(ann, "__origin__", None) is list:

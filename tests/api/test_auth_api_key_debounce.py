@@ -49,6 +49,13 @@ def _make_repo_mock(key_id: str = "key-1"):
     return mock_repo
 
 
+def _make_user_repo_mock():
+    """Return a UserRepository AsyncMock with get_by_id configured."""
+    mock_repo = AsyncMock()
+    mock_repo.get_by_id = AsyncMock(return_value=_make_user())
+    return mock_repo
+
+
 class _MonoClock:
     """Callable that returns an increasing monotonic timestamp.
 
@@ -75,6 +82,7 @@ class TestApiKeyDebounceLock:
         """Two coroutines validating the same key inside the debounce window
         must result in exactly one DB write."""
         mock_repo = _make_repo_mock("key-1")
+        user_repo_mock = _make_user_repo_mock()
         mock_db = MagicMock()
         mock_db.commit = AsyncMock()
 
@@ -88,21 +96,26 @@ class TestApiKeyDebounceLock:
         mock_repo.update_last_used.side_effect = _slow_update
 
         async def _call():
-            with patch.object(auth, "_hash_api_key", return_value="hash"):
-                with patch(
-                    "src.api.db.repositories.api_keys.ApiKeyRepository",
-                    return_value=mock_repo,
-                ):
-                    with patch(
-                        "src.api.db.repositories.users.UserRepository",
-                        return_value=MagicMock(get_by_id=AsyncMock(return_value=_make_user())),
-                    ):
-                        return await auth.validate_api_key("ak-test", mock_db)
+            return await auth.validate_api_key("ak-test", mock_db)
 
-        # Patch time.monotonic so the debounce check sees a large delta even
-        # in CI containers where monotonic clock starts near zero.
-        with patch("time.monotonic", _MonoClock()):
-            # Fire both calls concurrently
+        # Patches must be hoisted outside ``asyncio.gather`` — ``unittest.mock.patch``
+        # snapshots the current module attribute on __enter__ and restores it on
+        # __exit__. When two coroutines enter the same patch concurrently, the
+        # second snapshots the first's mock as "original" and restores it on
+        # teardown, leaking an AsyncMock into the live module for every test that
+        # runs afterwards.
+        with (
+            patch.object(auth, "_hash_api_key", return_value="hash"),
+            patch(
+                "src.api.db.repositories.api_keys.ApiKeyRepository",
+                return_value=mock_repo,
+            ),
+            patch(
+                "src.api.db.repositories.users.UserRepository",
+                return_value=user_repo_mock,
+            ),
+            patch("time.monotonic", _MonoClock()),
+        ):
             await asyncio.gather(_call(), _call())
 
         # Only one DB write should have occurred
@@ -123,7 +136,7 @@ class TestApiKeyDebounceLock:
                 ):
                     with patch(
                         "src.api.db.repositories.users.UserRepository",
-                        return_value=MagicMock(get_by_id=AsyncMock(return_value=_make_user())),
+                        return_value=_make_user_repo_mock(),
                     ):
                         return await auth.validate_api_key("ak-test", mock_db)
 
@@ -163,7 +176,7 @@ class TestApiKeyLastUsedCleanup:
     async def test_cleanup_triggered_on_write(self):
         """Cleanup runs automatically when a write succeeds."""
         # Use a fixed large monotonic value so the debounce check passes
-        # even in CI containers where the clock starts near zero.
+        # even in CI containers where the monotonic clock starts near zero.
         with patch("time.monotonic", _MonoClock(start=1000.0)):
             auth._API_KEY_LAST_USED["old-key"] = 1000.0 - (auth._API_KEY_DEBOUNCE_SECONDS * 3)
 
@@ -178,7 +191,7 @@ class TestApiKeyLastUsedCleanup:
                 ):
                     with patch(
                         "src.api.db.repositories.users.UserRepository",
-                        return_value=MagicMock(get_by_id=AsyncMock(return_value=_make_user())),
+                        return_value=_make_user_repo_mock(),
                     ):
                         await auth.validate_api_key("ak-test", mock_db)
 

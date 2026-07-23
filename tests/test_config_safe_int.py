@@ -161,3 +161,67 @@ class TestApplyConfigFileNonNumeric:
         migrated = [m for m in config.models.values() if m.provider == "my_openai"]
         for m in migrated:
             assert m.max_tokens is None
+
+
+class TestShellCurlWgetAllowedDomainsConfig:
+    """Tests for shell.curl_wget_allowed_domains config parsing (issue #1632)."""
+
+    def _write_yaml(self, tmp_path: Path, content: str) -> Path:
+        cfg_file = tmp_path / ".cogtrix.yaml"
+        cfg_file.write_text(content)
+        return cfg_file
+
+    def test_shell_block_parses_curl_wget_allowed_domains(self, tmp_path):
+        cfg_file = self._write_yaml(
+            tmp_path,
+            "shell:\n  curl_wget_allowed_domains:\n    - github.com\n    - api.stripe.com\n",
+        )
+        config = Config()
+        _apply_config_file(config, cfg_file)
+        assert config.shell_curl_wget_allowed_domains == ["github.com", "api.stripe.com"]
+
+    def test_shell_block_single_string_domain(self, tmp_path):
+        cfg_file = self._write_yaml(
+            tmp_path,
+            "shell:\n  curl_wget_allowed_domains: github.com\n",
+        )
+        config = Config()
+        _apply_config_file(config, cfg_file)
+        assert config.shell_curl_wget_allowed_domains == ["github.com"]
+
+    def test_legacy_top_level_key_still_works(self, tmp_path):
+        cfg_file = self._write_yaml(
+            tmp_path,
+            "shell_curl_wget_allowed_domains:\n  - example.com\n",
+        )
+        config = Config()
+        _apply_config_file(config, cfg_file)
+        assert config.shell_curl_wget_allowed_domains == ["example.com"]
+
+    def test_shell_block_takes_precedence_over_legacy_top_level(self, tmp_path):
+        cfg_file = self._write_yaml(
+            tmp_path,
+            "shell:\n  curl_wget_allowed_domains:\n    - block.com\n"
+            "shell_curl_wget_allowed_domains:\n  - legacy.com\n",
+        )
+        config = Config()
+        _apply_config_file(config, cfg_file)
+        assert config.shell_curl_wget_allowed_domains == ["block.com"]
+
+    def test_invalid_type_in_shell_block_ignored(self, tmp_path):
+        cfg_file = self._write_yaml(
+            tmp_path,
+            "shell:\n  curl_wget_allowed_domains: 12345\n",
+        )
+        config = Config()
+        _apply_config_file(config, cfg_file)
+        assert config.shell_curl_wget_allowed_domains == []
+
+    def test_no_shell_block_leaves_default_empty(self, tmp_path):
+        cfg_file = self._write_yaml(
+            tmp_path,
+            "verbosity: 0\n",
+        )
+        config = Config()
+        _apply_config_file(config, cfg_file)
+        assert config.shell_curl_wget_allowed_domains == []

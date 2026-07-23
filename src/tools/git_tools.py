@@ -17,6 +17,8 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from src.tools.delegate import register_tool_categories
+
 # ---------------------------------------------------------------------------
 # Shared helpers
 # ---------------------------------------------------------------------------
@@ -222,6 +224,7 @@ TOOL_CONFIGS: list[dict[str, Any]] = [
         "input_schema": GitStatusInput,
         "requires_confirmation": False,
         "function": git_status,
+        "category": "readonly",
     },
     {
         "name": "git_diff",
@@ -232,6 +235,7 @@ TOOL_CONFIGS: list[dict[str, Any]] = [
         "input_schema": GitDiffInput,
         "requires_confirmation": False,
         "function": git_diff,
+        "category": "readonly",
     },
     {
         "name": "git_log",
@@ -242,6 +246,7 @@ TOOL_CONFIGS: list[dict[str, Any]] = [
         "input_schema": GitLogInput,
         "requires_confirmation": False,
         "function": git_log,
+        "category": "readonly",
     },
     {
         "name": "git_add",
@@ -252,6 +257,7 @@ TOOL_CONFIGS: list[dict[str, Any]] = [
         "input_schema": GitAddInput,
         "requires_confirmation": True,
         "function": git_add,
+        "category": "mutation",
     },
     {
         "name": "git_commit",
@@ -259,6 +265,7 @@ TOOL_CONFIGS: list[dict[str, Any]] = [
         "input_schema": GitCommitInput,
         "requires_confirmation": True,
         "function": git_commit,
+        "category": "mutation",
     },
     {
         "name": "git_create_branch",
@@ -269,6 +276,7 @@ TOOL_CONFIGS: list[dict[str, Any]] = [
         "input_schema": GitCreateBranchInput,
         "requires_confirmation": True,
         "function": git_create_branch,
+        "category": "mutation",
     },
     {
         "name": "git_checkout",
@@ -280,8 +288,21 @@ TOOL_CONFIGS: list[dict[str, Any]] = [
         "input_schema": GitCheckoutInput,
         "requires_confirmation": True,
         "function": git_checkout,
+        "category": "mutation",
     },
 ]
+
+register_tool_categories(
+    {
+        "git_status": "readonly",
+        "git_diff": "readonly",
+        "git_log": "readonly",
+        "git_add": "mutation",
+        "git_commit": "mutation",
+        "git_create_branch": "mutation",
+        "git_checkout": "mutation",
+    }
+)
 
 __all__ = [
     "git_status",

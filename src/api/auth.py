@@ -31,6 +31,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import threading
 import time
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -93,6 +94,63 @@ def verify_password(password: str, password_hash: str) -> bool:
     pw_bytes = password.encode("utf-8")[:72]
     hash_bytes = password_hash.encode("utf-8")
     return bcrypt.checkpw(pw_bytes, hash_bytes)
+
+
+# Cached dummy hash used by ``verify_password_constant_time`` to keep the
+# no-such-user branch at the same wall-clock cost as the real-user branch.
+# In production this is pre-computed by ``configure_dummy_password_hash()``
+# at API startup so the very first login request runs in equal time;
+# ``_dummy_hash_lock`` guards a lazy fallback for CLI / test contexts that
+# don't go through the startup hook.
+_DUMMY_PASSWORD_HASH: str | None = None
+_dummy_hash_lock = threading.Lock()
+
+
+def configure_dummy_password_hash() -> None:
+    """Eagerly compute the dummy bcrypt hash used by ``verify_password_constant_time``.
+
+    Called from API startup so the first login request after a fresh process
+    boot doesn't pay ~150 ms more than subsequent ones — that delta would
+    re-introduce the H3 timing oracle for the *first* no-such-user
+    attempt against every freshly-started worker. Idempotent.
+    """
+    global _DUMMY_PASSWORD_HASH
+    with _dummy_hash_lock:
+        if _DUMMY_PASSWORD_HASH is None:
+            _DUMMY_PASSWORD_HASH = hash_password("x")
+
+
+def verify_password_constant_time(password: str, password_hash: str | None) -> bool:
+    """Verify a password whose corresponding hash may be ``None``.
+
+    Forge audit H3 (2026-05-23): the login route returned within ~5 ms when
+    the username didn't exist and ~100 ms when it did, leaking which
+    usernames are valid via response timing. This helper always runs bcrypt
+    — against a precomputed dummy hash when the real hash is missing — so
+    the no-such-user and wrong-password code paths run for the same wall
+    time. The return value for ``password_hash is None`` is always
+    ``False``; callers should still propagate "invalid credentials" in
+    that case.
+    """
+    global _DUMMY_PASSWORD_HASH
+    # Fast path: dummy was eagerly computed at startup. The lock-free read
+    # is safe because string assignment is atomic in CPython and the dummy
+    # is set exactly once for the process lifetime.
+    dummy = _DUMMY_PASSWORD_HASH
+    if dummy is None:
+        # Lazy fallback (CLI / tests / processes that didn't run startup).
+        # Lock + double-check prevents two concurrent first-callers from
+        # each paying the bcrypt cost — without this, the FIRST request
+        # against the no-such-user path leaks ~2× timing (forge audit B5).
+        with _dummy_hash_lock:
+            if _DUMMY_PASSWORD_HASH is None:
+                _DUMMY_PASSWORD_HASH = hash_password("x")
+            dummy = _DUMMY_PASSWORD_HASH
+    if password_hash is None:
+        # Run bcrypt anyway to equalise timing; discard the boolean.
+        verify_password(password, dummy)
+        return False
+    return verify_password(password, password_hash)
 
 
 # ---------------------------------------------------------------------------
@@ -310,7 +368,12 @@ async def get_current_user(
         if not oidc_user_id:
             raise local_exc from None
         current = TokenData(user_id=oidc_user_id, role=oidc_role, raw_claims=oidc_claims)
-        await _reject_inactive_user(current.user_id, db)
+        # OIDC tokens come from an external IdP; the ``sub`` claim does
+        # not imply a local user row exists. Insist on it
+        # (forge audit H1, 2026-05-23). Native JWT/API-key paths above
+        # use the default tolerant behaviour because we issued those
+        # tokens ourselves and the user existed at issue time.
+        await _reject_inactive_user(current.user_id, db, require_exists=True)
         return current
 
     user_id: str = claims.get("sub", "")
@@ -352,6 +415,52 @@ async def get_current_user(
                     "message": "Impersonation session has expired; re-authenticate.",
                 },
             )
+
+        # Re-verify that the originating superadmin is still privileged and
+        # active (forge audit H2, 2026-05-23). Without this check, an
+        # impersonation token issued by ``superadmin-X`` remains valid for
+        # up to its full TTL even after ``superadmin-X`` is demoted,
+        # deactivated, or deleted. The impersonator could end up exercising
+        # superadmin-derived privileges on behalf of a user account whose
+        # impersonator no longer has the authority that justified the
+        # impersonation in the first place.
+        #
+        # Forge audit B7 (second-order to H2): the previous ``if
+        # impersonator_id:`` falsy-check let a token bearing
+        # ``"impersonated_by": ""`` (or ``0``, ``[]``, ``{}``) skip the
+        # re-verification entirely — JWT claims are signed but anyone with
+        # access to a buggy issuance path that wrote a falsy value would
+        # have escaped the H2 guard. Gate on claim *presence* and fail
+        # closed for malformed values.
+        if "impersonated_by" in claims:
+            impersonator_id = claims.get("impersonated_by")
+            if not isinstance(impersonator_id, str) or not impersonator_id:
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail={
+                        "code": "UNAUTHORIZED",
+                        "message": "Impersonation session originator claim is malformed.",
+                    },
+                )
+            from src.api.db.repositories.users import UserRepository
+
+            impersonator = await UserRepository(db).get_by_id(impersonator_id)
+            if (
+                impersonator is None
+                or not impersonator.is_active
+                or impersonator.role
+                not in (
+                    "admin",
+                    "superadmin",
+                )
+            ):
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail={
+                        "code": "UNAUTHORIZED",
+                        "message": "Impersonation session originator no longer authorised.",
+                    },
+                )
 
     current = TokenData(user_id=user_id, role=role, raw_claims=claims)
     await _reject_inactive_user(current.user_id, db)
@@ -474,13 +583,42 @@ async def get_current_user_optional(
     return await get_current_user(request, credentials, token, db)
 
 
-async def _reject_inactive_user(user_id: str, db: AsyncSession) -> None:
-    """Reject authentication for a user record that has been deactivated."""
+async def _reject_inactive_user(
+    user_id: str,
+    db: AsyncSession,
+    *,
+    require_exists: bool = False,
+) -> None:
+    """Reject authentication for a deactivated (and optionally missing) user.
+
+    Default behaviour: raises when the user row exists and is inactive;
+    silently passes when no row exists. That tolerance is intentional for
+    native JWT tokens — we issued them ourselves at ``/login`` / ``/refresh``
+    after verifying the user existed, and within the 1-hour TTL we accept
+    the tail risk of mid-token deletion.
+
+    ``require_exists=True`` (forge audit H1, 2026-05-23) is for the OIDC
+    fallback path: external IdPs can mint tokens for arbitrary ``sub``
+    claims with no corresponding local user, so the OIDC caller must
+    insist on a present row. JIT-provisioning endpoints in
+    ``src/api/jit/provisioning.py`` create the row first; subsequent
+    OIDC-authenticated requests then resolve normally.
+    """
     from src.api.db.repositories.users import UserRepository
 
     repo = UserRepository(db)
     user = await repo.get_by_id(user_id)
-    if user is not None and not user.is_active:
+    if user is None:
+        if require_exists:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail={
+                    "code": "UNAUTHORIZED",
+                    "message": "Missing or invalid bearer token.",
+                },
+            )
+        return
+    if not user.is_active:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail={"code": "UNAUTHORIZED", "message": "Missing or invalid bearer token."},
@@ -569,10 +707,11 @@ async def verify_session_owner(
     *,
     admin_bypass: bool = True,
 ) -> None:
-    """Ensure the current user owns the given session.
+    """Ensure the current user owns the given session and is a workspace member.
 
     Admins may access any session when *admin_bypass* is ``True`` (default).
-    Regular users may only access their own.
+    Regular users may only access their own sessions, and must still be a
+    member of the workspace the session belongs to (if any).
 
     Args:
         session_id: UUID v4 of the session to check.
@@ -582,7 +721,8 @@ async def verify_session_owner(
 
     Raises:
         HTTPException 404 SESSION_NOT_FOUND — session does not exist.
-        HTTPException 403 FORBIDDEN — session belongs to a different user.
+        HTTPException 403 FORBIDDEN — session belongs to a different user
+            or caller is no longer a workspace member.
     """
     if admin_bypass and current_user.is_admin:
         return
@@ -603,7 +743,7 @@ async def verify_session_owner(
             },
         )
 
-    if record.user_id != current_user.user_id:
+    if not (admin_bypass and current_user.is_admin) and record.user_id != current_user.user_id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail={
@@ -611,3 +751,18 @@ async def verify_session_owner(
                 "message": "Authenticated user lacks permission for this action.",
             },
         )
+
+    # Workspace isolation: non-admins must still be a member of the session's workspace.
+    if record.workspace_id is not None and not (admin_bypass and current_user.is_admin):
+        from src.api.db.repositories.workspaces import WorkspaceRepository
+
+        ws_repo = WorkspaceRepository(db)
+        membership = await ws_repo.get_membership(record.workspace_id, current_user.user_id)
+        if membership is None:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={
+                    "code": "NOT_A_MEMBER",
+                    "message": "You are not a member of this workspace.",
+                },
+            )

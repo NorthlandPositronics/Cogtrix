@@ -3,7 +3,7 @@ domain: regression
 title: Tool calls past per-tool budget must not leak phantom markup
 description: |
   Tier-2 Metric 11 (post-cutoff phantom count) in
-  docs/quality/METRICS.md was filed in response to session 8422dbbf
+  docs/optional/quality/METRICS.md was filed in response to session 8422dbbf
   (2026-04-28): when a tool exceeds its per-tool call budget, the
   agent receives "<tool> has been disabled after N calls" — at that
   point some models regress into emitting raw XML/JSON tool markup

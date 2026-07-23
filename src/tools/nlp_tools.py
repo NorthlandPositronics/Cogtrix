@@ -8,6 +8,7 @@ from collections import Counter
 
 from pydantic import BaseModel, Field
 
+from src.tools.delegate import register_tool_categories
 from src.tools.error_sanitizer import sanitize_error
 
 
@@ -496,6 +497,7 @@ TOOL_CONFIGS = [
         "input_schema": SentimentAnalysisInput,
         "requires_confirmation": False,
         "function": analyze_sentiment,
+        "category": "readonly",
     },
     {
         "name": "summarize_text",
@@ -507,6 +509,7 @@ TOOL_CONFIGS = [
         "input_schema": TextSummarizationInput,
         "requires_confirmation": False,
         "function": summarize_text,
+        "category": "readonly",
     },
     {
         "name": "extract_keywords",
@@ -517,11 +520,21 @@ TOOL_CONFIGS = [
         "input_schema": KeywordExtractionInput,
         "requires_confirmation": False,
         "function": extract_keywords,
+        "category": "readonly",
     },
 ]
 
 # Default single tool config (for backwards compatibility)
 TOOL_CONFIG = TOOL_CONFIGS[0]
+
+
+register_tool_categories(
+    {
+        "analyze_sentiment": "readonly",
+        "summarize_text": "readonly",
+        "extract_keywords": "readonly",
+    }
+)
 
 __all__ = [
     "analyze_sentiment",

@@ -361,22 +361,28 @@ class TestBug961ToolLookupRace:
         This verifies the correct singleton pattern that the _tool_budget_lock
         fix follows.  Without double-checked locking, two threads could create
         two executor pools, defeating the singleton guarantee.
-        """
-        import src.orchestration.graph as graph_mod
 
-        pool1 = graph_mod._get_tool_executor()
+        Patches the singleton in ``graph_runtime`` (where the function and
+        its ``global _TOOL_EXECUTOR`` live after the /forge A1.4 extraction
+        in #1752). Patching ``graph._TOOL_EXECUTOR`` would only mutate the
+        re-exported name in graph.py's module dict, not the actual global
+        the function reads from.
+        """
+        import src.orchestration.graph_runtime as graph_runtime
+
+        pool1 = graph_runtime._get_tool_executor()
 
         # Patch _TOOL_EXECUTOR to None to force re-creation through the lock.
         # Using patch.object avoids holding the real lock (which is
         # non-reentrant and would deadlock with _get_tool_executor's own
         # lock acquisition).
-        with patch.object(graph_mod, "_TOOL_EXECUTOR", None):
-            pool2 = graph_mod._get_tool_executor()
+        with patch.object(graph_runtime, "_TOOL_EXECUTOR", None):
+            pool2 = graph_runtime._get_tool_executor()
             assert pool2 is not None, "Must re-create executor when None"
             assert pool2 is not pool1, "Must create a fresh executor"
 
         # After the patch releases, the original singleton is restored.
-        pool3 = graph_mod._get_tool_executor()
+        pool3 = graph_runtime._get_tool_executor()
         assert pool3 is pool1, "Singleton executor must be the same object after restore"
 
 
@@ -895,6 +901,406 @@ class TestBug968And1072DelegateSandbox:
             set_delegate_tools([mock_tool])
         except Exception as exc:
             raise AssertionError(f"set_delegate_tools raised unexpected: {exc}") from exc
+
+
+# ───────────────────────────────────────────────────────────────────────────
+# #1524 — Tool classification system replaces fragile deny-list
+# ───────────────────────────────────────────────────────────────────────────
+
+
+class TestBug1524ToolClassification:
+    """#1524: Delegate sandbox must filter tools by classification category.
+
+    The tool classification system replaces the manually-maintained deny-list
+    (``_DELEGATE_EXCLUDED_TOOLS``) with a category-based filter.  Every tool
+    in ``TOOL_CONFIGS`` must carry a ``category`` field so that new tools are
+    automatically sandboxed without manual list synchronization.
+
+    Categories:
+    - readonly:   permitted for delegates (search, file read, calculator)
+    - mutation:   blocked (file writes, shell, code exec, git push)
+    - privacy:    blocked (email, calendar, personal data)
+    - recursive:  blocked (spawn_agent, delegate, deep_think)
+    - messaging:  blocked (Slack, Discord, Telegram, WhatsApp sends)
+    - scheduling: blocked (cron, scheduled tasks)
+    - confirmation: blocked (tools with requires_confirmation=True)
+    """
+
+    def test_excluded_categories_frozenset_defined(self):
+        """_DELEGATE_EXCLUDED_CATEGORIES must be a frozenset with all 6 categories."""
+        from src.tools.delegate import _DELEGATE_EXCLUDED_CATEGORIES
+
+        assert isinstance(
+            _DELEGATE_EXCLUDED_CATEGORIES, frozenset
+        ), "_DELEGATE_EXCLUDED_CATEGORIES must be a frozenset"
+        expected = {"mutation", "privacy", "recursive", "messaging", "scheduling", "confirmation"}
+        assert (
+            _DELEGATE_EXCLUDED_CATEGORIES == expected
+        ), f"_DELEGATE_EXCLUDED_CATEGORIES must be {expected}, got {_DELEGATE_EXCLUDED_CATEGORIES}"
+
+    def test_tool_categories_registry_populated(self):
+        """_TOOL_CATEGORIES must be populated by register_tool_categories() calls."""
+        from src.tools.delegate import _TOOL_CATEGORIES
+
+        assert (
+            len(_TOOL_CATEGORIES) > 0
+        ), "_TOOL_CATEGORIES must be populated by tool module registration calls"
+        # Verify known tools are registered
+        # Verify delegate tools (always loaded with delegate.py) are registered
+        assert (
+            "delegate_task" in _TOOL_CATEGORIES
+        ), "delegate_task must be registered for delegate sandbox filtering"
+        assert (
+            "delegate_parallel" in _TOOL_CATEGORIES
+        ), "delegate_parallel must be registered for delegate sandbox filtering"
+
+    def test_category_readonly_not_excluded(self):
+        """Tools with category='readonly' must NOT be excluded from delegates."""
+        from src.tools.delegate import _is_tool_excluded
+
+        class FakeReadonlyTool:
+            name = "fake_readonly_tool"
+            delegate_exclude_override = False
+
+        tool = FakeReadonlyTool()
+        # Manually register it as readonly for this test
+        from src.tools.delegate import _TOOL_CATEGORIES
+
+        _TOOL_CATEGORIES["fake_readonly_tool"] = "readonly"
+
+        try:
+            assert not _is_tool_excluded(
+                tool
+            ), "readonly tools must not be excluded from delegate sandbox"
+        finally:
+            del _TOOL_CATEGORIES["fake_readonly_tool"]
+
+    def test_category_mutation_excluded(self):
+        """Tools with category='mutation' must be excluded from delegates."""
+        from src.tools.delegate import _is_tool_excluded
+
+        class FakeMutationTool:
+            name = "fake_mutation_tool"
+            delegate_exclude_override = False
+
+        tool = FakeMutationTool()
+        from src.tools.delegate import _TOOL_CATEGORIES
+
+        _TOOL_CATEGORIES["fake_mutation_tool"] = "mutation"
+
+        try:
+            assert _is_tool_excluded(tool), "mutation tools must be excluded from delegate sandbox"
+        finally:
+            del _TOOL_CATEGORIES["fake_mutation_tool"]
+
+    def test_category_privacy_excluded(self):
+        """Tools with category='privacy' must be excluded from delegates."""
+        from src.tools.delegate import _is_tool_excluded
+
+        class FakePrivacyTool:
+            name = "fake_privacy_tool"
+            delegate_exclude_override = False
+
+        tool = FakePrivacyTool()
+        from src.tools.delegate import _TOOL_CATEGORIES
+
+        _TOOL_CATEGORIES["fake_privacy_tool"] = "privacy"
+
+        try:
+            assert _is_tool_excluded(tool), "privacy tools must be excluded from delegate sandbox"
+        finally:
+            del _TOOL_CATEGORIES["fake_privacy_tool"]
+
+    def test_category_recursive_excluded(self):
+        """Tools with category='recursive' must be excluded from delegates."""
+        from src.tools.delegate import _is_tool_excluded
+
+        class FakeRecursiveTool:
+            name = "fake_recursive_tool"
+            delegate_exclude_override = False
+
+        tool = FakeRecursiveTool()
+        from src.tools.delegate import _TOOL_CATEGORIES
+
+        _TOOL_CATEGORIES["fake_recursive_tool"] = "recursive"
+
+        try:
+            assert _is_tool_excluded(tool), "recursive tools must be excluded from delegate sandbox"
+        finally:
+            del _TOOL_CATEGORIES["fake_recursive_tool"]
+
+    def test_category_messaging_excluded(self):
+        """Tools with category='messaging' must be excluded from delegates."""
+        from src.tools.delegate import _is_tool_excluded
+
+        class FakeMessagingTool:
+            name = "fake_messaging_tool"
+            delegate_exclude_override = False
+
+        tool = FakeMessagingTool()
+        from src.tools.delegate import _TOOL_CATEGORIES
+
+        _TOOL_CATEGORIES["fake_messaging_tool"] = "messaging"
+
+        try:
+            assert _is_tool_excluded(tool), "messaging tools must be excluded from delegate sandbox"
+        finally:
+            del _TOOL_CATEGORIES["fake_messaging_tool"]
+
+    def test_category_scheduling_excluded(self):
+        """Tools with category='scheduling' must be excluded from delegates."""
+        from src.tools.delegate import _is_tool_excluded
+
+        class FakeSchedulingTool:
+            name = "fake_scheduling_tool"
+            delegate_exclude_override = False
+
+        tool = FakeSchedulingTool()
+        from src.tools.delegate import _TOOL_CATEGORIES
+
+        _TOOL_CATEGORIES["fake_scheduling_tool"] = "scheduling"
+
+        try:
+            assert _is_tool_excluded(
+                tool
+            ), "scheduling tools must be excluded from delegate sandbox"
+        finally:
+            del _TOOL_CATEGORIES["fake_scheduling_tool"]
+
+    def test_category_confirmation_excluded(self):
+        """Tools with category='confirmation' must be excluded from delegates."""
+        from src.tools.delegate import _is_tool_excluded
+
+        class FakeConfirmationTool:
+            name = "fake_confirmation_tool"
+            delegate_exclude_override = False
+
+        tool = FakeConfirmationTool()
+        from src.tools.delegate import _TOOL_CATEGORIES
+
+        _TOOL_CATEGORIES["fake_confirmation_tool"] = "confirmation"
+
+        try:
+            assert _is_tool_excluded(
+                tool
+            ), "confirmation tools must be excluded from delegate sandbox"
+        finally:
+            del _TOOL_CATEGORIES["fake_confirmation_tool"]
+
+    def test_delegate_exclude_override_allows_opt_out(self):
+        """Tools with delegate_exclude_override=True must NOT be excluded even if in excluded category."""
+        from src.tools.delegate import _is_tool_excluded
+
+        class FakeOverrideTool:
+            name = "fake_override_tool"
+            delegate_exclude_override = True
+
+        tool = FakeOverrideTool()
+        from src.tools.delegate import _TOOL_CATEGORIES
+
+        _TOOL_CATEGORIES["fake_override_tool"] = "mutation"
+
+        try:
+            assert not _is_tool_excluded(
+                tool
+            ), "delegate_exclude_override=True must allow opt-out from category-based exclusion"
+        finally:
+            del _TOOL_CATEGORIES["fake_override_tool"]
+
+    def test_legacy_name_based_exclusion_still_works(self):
+        """Tools in _DELEGATE_EXCLUDED_TOOLS must still be excluded (backward compat)."""
+        from src.tools.delegate import _DELEGATE_EXCLUDED_TOOLS, _is_tool_excluded
+
+        class FakeLegacyTool:
+            name = "execute_shell_command"
+            delegate_exclude_override = False
+
+        tool = FakeLegacyTool()
+        # execute_shell_command is in the legacy frozenset but may not be in
+        # _TOOL_CATEGORIES if shell.py is not yet imported.  The name-based
+        # exclusion must still catch it.
+        assert (
+            "execute_shell_command" in _DELEGATE_EXCLUDED_TOOLS
+        ), "execute_shell_command must be in _DELEGATE_EXCLUDED_TOOLS for this test"
+        assert _is_tool_excluded(
+            tool
+        ), "legacy name-based exclusion must still work for backward compatibility"
+
+    def test_set_delegate_tools_filters_by_category(self):
+        """set_delegate_tools must filter out tools in excluded categories."""
+        from unittest.mock import MagicMock
+
+        from src.tools.delegate import _TOOL_CATEGORIES, get_delegate_tools, set_delegate_tools
+
+        # Create mock tools in each category
+        readonly_tool = MagicMock()
+        readonly_tool.name = "test_readonly_tool"
+        readonly_tool.delegate_exclude_override = False
+
+        mutation_tool = MagicMock()
+        mutation_tool.name = "test_mutation_tool"
+        mutation_tool.delegate_exclude_override = False
+
+        _TOOL_CATEGORIES["test_readonly_tool"] = "readonly"
+        _TOOL_CATEGORIES["test_mutation_tool"] = "mutation"
+
+        try:
+            set_delegate_tools([readonly_tool, mutation_tool])
+            delegate_tools = get_delegate_tools()
+            tool_names = {t.name for t in delegate_tools}
+            assert "test_readonly_tool" in tool_names, "readonly tool must be in delegate tool set"
+            assert (
+                "test_mutation_tool" not in tool_names
+            ), "mutation tool must be filtered out of delegate tool set"
+        finally:
+            del _TOOL_CATEGORIES["test_readonly_tool"]
+            del _TOOL_CATEGORIES["test_mutation_tool"]
+
+    def test_all_tool_configs_have_category_field(self):
+        """Every entry in TOOL_CONFIGS must have a 'category' field.
+
+        This is the CI/lint guard for issue #1524 — any new tool added to
+        TOOL_CONFIGS without a 'category' field will cause this test to fail,
+        preventing the fragile deny-list synchronization problem from recurring.
+        """
+        import ast
+        import os
+
+        VALID_CATEGORIES = {
+            "readonly",
+            "mutation",
+            "privacy",
+            "recursive",
+            "messaging",
+            "scheduling",
+            "confirmation",
+        }
+
+        tool_dir = os.path.join(os.path.dirname(__file__), "..", "src", "tools")
+        failures = []
+
+        for filename in sorted(os.listdir(tool_dir)):
+            if not filename.endswith(".py") or filename.startswith("_"):
+                continue
+
+            filepath = os.path.join(tool_dir, filename)
+            try:
+                source = ast.parse(open(filepath).read())
+            except SyntaxError:
+                continue
+
+            for node in ast.walk(source):
+                if isinstance(node, ast.Assign):
+                    for target in node.targets:
+                        if isinstance(target, ast.Name) and target.id == "TOOL_CONFIGS":
+                            if not isinstance(node.value, (ast.List, ast.Dict)):
+                                continue
+
+                            entries = (
+                                node.value.elts
+                                if isinstance(node.value, ast.List)
+                                else [node.value]
+                            )
+                            for entry in entries:
+                                if not isinstance(entry, ast.Dict):
+                                    continue
+                                name = None
+                                category = None
+                                for kw in entry.keys:
+                                    if isinstance(kw, ast.Constant) and kw.value == "name":
+                                        idx = entry.keys.index(kw)
+                                        val = entry.values[idx]
+                                        if isinstance(val, ast.Constant):
+                                            name = val.value
+                                    if isinstance(kw, ast.Constant) and kw.value == "category":
+                                        idx = entry.keys.index(kw)
+                                        val = entry.values[idx]
+                                        if isinstance(val, ast.Constant):
+                                            category = val.value
+
+                                if name and category is None:
+                                    failures.append(
+                                        f"{filename}: '{name}' missing 'category' field"
+                                    )
+                                elif name and category not in VALID_CATEGORIES:
+                                    failures.append(
+                                        f"{filename}: '{name}' has invalid category '{category}' "
+                                        f"(must be one of {VALID_CATEGORIES})"
+                                    )
+
+        assert not failures, (
+            "The following TOOL_CONFIGS entries are missing a 'category' field or have an "
+            "invalid category:\n" + "\n".join(f"  - {f}" for f in failures)
+        )
+
+    def test_tool_categories_registry_complete(self):
+        """All registered tools must have a non-None category; registry must be substantially populated.
+
+        Addresses Caleb's architecture review condition 2 (PR #1650):
+        - Verifies no tool has ``None`` as its category value, which would indicate
+          a malformed registration (e.g., if a tool's ``register_tool_categories()``
+          call passed an empty dict).
+        - Verifies the registry count exceeds a minimum threshold (50) to catch
+          wholesale silent failures.  Before the Pattern B → A standardization,
+          14 modules used ``except ImportError: pass`` which silently skipped
+          registration if ``delegate.py`` was unavailable.  A regression of that
+          bug would leave the registry nearly empty and this test would fail.
+
+        The 50-entry threshold is intentionally conservative — it catches the
+        class of silent-failure bug without hardcoding a specific tool count
+        that could drift as the tool set grows.
+
+        Tool modules are imported explicitly here to ensure their
+        ``register_tool_categories()`` calls execute, even when the test
+        runner loads ``delegate.py`` first (which would otherwise queue
+        registrations until the flush at the bottom of delegate.py).
+        """
+        # Import all tool modules to trigger their register_tool_categories() calls.
+        # This ensures the registry is fully populated regardless of import order.
+        # noqa: F401 — imports are for side-effect (module load → category registration)
+        # noqa: I001 — block must stay as-is; isort would break side-effect grouping
+        import src.tools.agent_messaging  # noqa: F401, I001
+        import src.tools.agent_tools  # noqa: F401
+        import src.tools.calendar_tools  # noqa: F401
+        import src.tools.cron_tools  # noqa: F401
+        import src.tools.datetime_tool  # noqa: F401
+        import src.tools.email_tools  # noqa: F401
+        import src.tools.exa_search  # noqa: F401
+        import src.tools.file_ops  # noqa: F401
+        import src.tools.generate_tests  # noqa: F401
+        import src.tools.github_tools  # noqa: F401
+        import src.tools.goal_tools  # noqa: F401
+        import src.tools.git_tools  # noqa: F401
+        import src.tools.http_request  # noqa: F401
+        import src.tools.json_tool  # noqa: F401
+        import src.tools.nlp_tools  # noqa: F401
+        import src.tools.rag  # noqa: F401
+        import src.tools.searxng_search  # noqa: F401
+        import src.tools.self_improve  # noqa: F401
+        import src.tools.shell  # noqa: F401
+        import src.tools.slack_tools  # noqa: F401
+        import src.tools.tavily_search  # noqa: F401
+        import src.tools.text_tools  # noqa: F401
+        import src.tools.web_search  # noqa: F401
+        import src.tools.whatsapp  # noqa: F401
+        import src.tools.telegram  # noqa: F401
+
+        from src.tools.delegate import _TOOL_CATEGORIES
+
+        # Verify no tool has None as its category value (would indicate malformed registration)
+        null_categories = [name for name, cat in _TOOL_CATEGORIES.items() if cat is None]
+        assert not null_categories, (
+            f"The following tools have None as their category (malformed registration): "
+            f"{null_categories}"
+        )
+
+        # Verify the registry is substantially populated — catches wholesale silent failures
+        assert len(_TOOL_CATEGORIES) >= 50, (
+            f"_TOOL_CATEGORIES has only {len(_TOOL_CATEGORIES)} entries; "
+            f"expected at least 50. This indicates a wholesale registration failure "
+            f"(e.g., circular import regression causing all register_tool_categories() "
+            f"calls to fail)."
+        )
 
 
 # ───────────────────────────────────────────────────────────────────────────

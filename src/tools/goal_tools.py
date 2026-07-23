@@ -19,6 +19,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from src.tools.delegate import register_tool_categories
+
 if TYPE_CHECKING:
     from pydantic import BaseModel, Field
 else:
@@ -138,6 +140,7 @@ TOOL_CONFIGS = [
         "input_schema": SetGoalInput,
         "requires_confirmation": False,
         "function": set_goal,
+        "category": "mutation",
     },
     {
         "name": "add_subgoal",
@@ -148,6 +151,7 @@ TOOL_CONFIGS = [
         "input_schema": AddSubgoalInput,
         "requires_confirmation": False,
         "function": add_subgoal,
+        "category": "mutation",
     },
     {
         "name": "complete_goal",
@@ -155,6 +159,7 @@ TOOL_CONFIGS = [
         "input_schema": CompleteGoalInput,
         "requires_confirmation": False,
         "function": complete_goal,
+        "category": "mutation",
     },
     {
         "name": "abandon_goal",
@@ -162,6 +167,7 @@ TOOL_CONFIGS = [
         "input_schema": AbandonGoalInput,
         "requires_confirmation": False,
         "function": abandon_goal,
+        "category": "mutation",
     },
     {
         "name": "list_goals",
@@ -169,10 +175,22 @@ TOOL_CONFIGS = [
         "input_schema": ListGoalsInput,
         "requires_confirmation": False,
         "function": list_goals,
+        "category": "readonly",
     },
 ]
 
 TOOL_CONFIG = TOOL_CONFIGS[0]
+
+
+register_tool_categories(
+    {
+        "set_goal": "mutation",
+        "add_subgoal": "mutation",
+        "complete_goal": "mutation",
+        "abandon_goal": "mutation",
+        "list_goals": "readonly",
+    }
+)
 
 __all__ = [
     "TOOL_SETUP",

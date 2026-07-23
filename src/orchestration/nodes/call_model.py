@@ -18,19 +18,111 @@ from src.agent.core import CogtrixState
 from src.api.telemetry import start_span
 from src.logging_config import get_logger, is_trace
 from src.orchestration.compression import apply_message_compression
+
+# ``_TOPIC_SWITCH_NUDGE`` and ``_should_reset_summary_for_topic_switch``
+# are re-exported here purely for the test-patching contract: tests do
+# ``patch("src.orchestration.nodes.call_model._should_reset_summary_for_topic_switch",
+# ...)`` and the extracted ``pre_invoke_directives`` module resolves
+# these via attribute lookup on this module so the patches stick. Do not
+# remove without updating both the tests and the extracted module.
 from src.orchestration.graph import (
-    _TOPIC_SWITCH_NUDGE,
+    _TOPIC_SWITCH_NUDGE,  # noqa: F401 — re-exported for test patching
     _apply_context_budget_guard,
     _infer_llm_model_name,
     _infer_llm_provider_name,
     _is_context_overflow_error,
     _repair_tool_message_pairs,
-    _should_reset_summary_for_topic_switch,
+    _should_reset_summary_for_topic_switch,  # noqa: F401 — re-exported for test patching
 )
+from src.orchestration.nodes.pre_invoke_directives import (
+    apply_late_directives,
+    apply_pre_invoke_directives,
+)
+from src.orchestration.nodes.thinking_break_policy import maybe_apply_thinking_break
 from src.orchestration.reflection_delegate import (
     UNCERTAINTY_NOTE_PREFIX,
     extract_decision_justification,
 )
+from src.orchestration.search_quality import (
+    SearchQualityThresholds,
+    has_substantive_search_results,
+)
+
+# Bug K #1720 — CJK detection. Multilingual models (qwen3-coder
+# observed in cogtrix57.log lines 27652, 30376) occasionally sample a
+# CJK token where an English equivalent was expected ("立场" / "表态"
+# in place of "stance" / "statement"). The character ranges cover:
+#   U+4E00..U+9FFF — CJK Unified Ideographs (Chinese, Japanese kanji)
+#   U+3040..U+309F — Hiragana
+#   U+30A0..U+30FF — Katakana
+#   U+3400..U+4DBF — CJK Extension A
+# This is detection-only — we log a warning and do not strip / rewrite
+# content. Some legitimate responses contain CJK (the user explicitly
+# asks about Chinese terms, or a tool returned CJK content the agent
+# is quoting verbatim) and silent stripping would corrupt those.
+_CJK_RE = re.compile(r"[一-鿿぀-ゟ゠-ヿ㐀-䶿]")
+
+# Bug G #1713 follow-up — orchestrator-side strip filter for sycophantic
+# validation prefixes. The system-prompt rule in
+# ``src/agent/core.py:build_system_prompt`` is the primary defense, but
+# RLHF-tuned chat models (qwen3-coder observed in 2026-05-21 corpus
+# replay on E03) still emit "You're right - let me ..." prefixes even
+# when the rule explicitly forbids them. This filter strips the matched
+# prefix and capitalises the first remaining character so the response
+# reads naturally without the validation phrase. Logs a WARNING with
+# the matched prefix for ops visibility.
+#
+# The regex anchors on ``^\s*`` because the prefix MUST be at the very
+# start of the response — embedded "you're right" further in the text
+# (e.g. quoting the user, discussing rights, etc.) is legitimate. The
+# trailing class ``[\s\-—–,.!:;]+`` consumes the punctuation/separator
+# the model uses to glue the prefix to the actual content
+# ("You're right - let me", "You're right, let me", "You're right.
+# Let me", "I apologize — I'll").
+#
+# We deliberately do NOT consume an "I apologize for X" extension here.
+# Earlier prototype matched ``i apologize(?:\s+for[^.!?]{0,80})?`` which
+# greedily ate the next clause when the model wrote "I apologize for
+# the inconvenience but ..." — the strip would remove the entire
+# 80-char span and leave a malformed remainder that broke downstream
+# scoring on shard D × kimi-k2-5 (PR #1731 first iteration). The
+# conservative form below requires the verb-phrase prefix to be
+# immediately followed by a separator (whitespace + dash, comma,
+# period, etc.). Apology clauses with an inline "for X" clause stay
+# intact; only the bare-verb-then-separator pattern gets stripped.
+_SYCOPHANTIC_PREFIX_RE = re.compile(
+    r"^\s*(?:"
+    r"you're absolutely right"
+    r"|you are absolutely right"
+    r"|you're right"
+    r"|you are right"
+    r"|you're raising an important point"
+    r"|you're raising a (?:good|valid|fair) point"
+    r"|i sincerely apologize"
+    r"|i apologize"
+    r"|my apologies"
+    r")"
+    r"[\s\-—–,.!:;]+",
+    re.IGNORECASE,
+)
+
+
+def _strip_sycophantic_prefix(text: str) -> tuple[str, str | None]:
+    """Return ``(stripped_text, matched_prefix_or_None)``.
+
+    When the response starts with a sycophantic validation phrase, the
+    matched prefix is removed and the next character is capitalised so
+    the remaining text reads as a complete sentence. When no prefix
+    matches, returns the input unchanged with ``None``.
+    """
+    m = _SYCOPHANTIC_PREFIX_RE.match(text)
+    if not m:
+        return text, None
+    matched = m.group(0).strip()
+    remainder = text[m.end() :].lstrip()
+    if remainder and remainder[0].islower():
+        remainder = remainder[0].upper() + remainder[1:]
+    return remainder, matched
 
 
 @dataclass(slots=True)
@@ -82,6 +174,7 @@ class CallModelContext:
     maybe_compress: Callable[[list[Any]], list[Any]]
     invoke_with_timeout: Callable[[Any, list[Any], Any, int], Any]
     all_tool_results_substanceless: Callable[[list[Any]], bool]
+    search_quality_thresholds: Any | None = None
 
 
 # finish_reason values that definitively indicate the LLM was cut off by
@@ -135,6 +228,86 @@ def _normalise_query(query: str) -> frozenset[str]:
     return frozenset(w for w in words if w not in _SEARCH_STOPWORDS)
 
 
+# ── Arithmetic-intent detection (cogtrix47 Issue 4) ──────────────────
+#
+# When the user asks "how many X for $Y" or "convert N units of X",
+# and the message history contains numeric tool results (prices,
+# rates, quantities), the agent must attempt the calculation before
+# emitting a flat refusal. cogtrix47 had NZD→EUR rate + EUR prices
+# in hand but answered "I could not retrieve current data" instead
+# of bounding "approximately N units" with explicit caveats — that
+# is laziness dressed up as honesty.
+
+# Phrase signals that mark the user's prompt as an arithmetic-style
+# question (count / quantity / conversion / total). Each must be
+# tight enough that ordinary research prompts ("how does X work")
+# don't trip — anchor with word-boundary + the quantifying noun.
+_ARITHMETIC_INTENT_RE = re.compile(
+    r"(?i)"
+    r"\bhow\s+many\b"
+    r"|\bhow\s+much\b"
+    r"|\bhow\s+long\b"
+    r"|\b(?:can|could)\s+i\s+(?:afford|buy|get)\b"
+    r"|\bconvert(?:ed|ing)?\b"
+    r"|\bcalculate\b"
+    r"|\bwhat(?:'?s|\s+is)\s+the\s+(?:total|sum|cost|price|exchange|conversion)\b"
+    r"|\bin\s+(?:USD|EUR|GBP|NZD|AUD|CAD|JPY|CNY|INR|CHF)\b"
+)
+
+# Numeric / currency tokens that mark a ToolMessage as carrying
+# data worth computing on. The currency-prefix forms ($100, €50)
+# and bare ISO codes (USD, EUR, ...) cover the FX and pricing
+# shapes most likely to appear in search-fetched extracts.
+_NUMERIC_RESULT_RE = re.compile(
+    r"(?:"
+    r"[$€£¥₹]\s?\d"  # $100, € 50, £1.99
+    r"|\b\d+(?:[.,]\d+)?\s*(?:USD|EUR|GBP|NZD|AUD|CAD|JPY|CNY|INR|CHF)\b"
+    r"|\b(?:USD|EUR|GBP|NZD|AUD|CAD|JPY|CNY|INR|CHF)\s*\d"
+    # Percentage: no trailing \b — ``%`` is non-word and a following
+    # punctuation char (``.``, ``,``) is also non-word, so \b fails.
+    r"|\b\d+(?:[.,]\d+)?\s*(?:%|\bpercent\b)"
+    r")"
+)
+
+
+def _has_arithmetic_intent(messages: list[Any]) -> bool:
+    """Return True when the most recent user prompt looks like an
+    arithmetic / quantity / conversion question.
+
+    Scans only the last HumanMessage so a single arithmetic question
+    earlier in the session doesn't flag every subsequent prompt.
+    """
+    for msg in reversed(messages):
+        if isinstance(msg, HumanMessage):
+            content = msg.content if isinstance(msg.content, str) else ""
+            return bool(_ARITHMETIC_INTENT_RE.search(content))
+    return False
+
+
+def _has_numeric_tool_results(messages: list[Any]) -> bool:
+    """Return True when any tool message in the *current turn* carries
+    a currency / percentage / numeric data token.
+
+    Pairs with ``_has_arithmetic_intent`` to determine whether the
+    agent has the raw material to attempt a calculation. Current-turn
+    scoping mirrors ``_compute_search_effort`` (#1532).
+    """
+    last_human_idx = max(
+        (i for i, m in enumerate(messages) if isinstance(m, HumanMessage)),
+        default=-1,
+    )
+    scope = messages[last_human_idx + 1 :] if last_human_idx >= 0 else messages
+    for msg in scope:
+        if not hasattr(msg, "tool_call_id"):
+            continue
+        content = getattr(msg, "content", "") or ""
+        if not isinstance(content, str):
+            continue
+        if _NUMERIC_RESULT_RE.search(content):
+            return True
+    return False
+
+
 def _compute_search_effort(messages: list[Any]) -> tuple[int, bool]:
     """Count *distinct* search_web calls and detect http_get attempts.
 
@@ -165,7 +338,13 @@ def _compute_search_effort(messages: list[Any]) -> tuple[int, bool]:
         if tool_name == "http_get":
             http_get_attempted = True
             continue
-        if tool_name != "search_web":
+        # Accept both the legacy ``search_web`` tool name and the
+        # modern ``web_search`` tool that superseded it (PR-G /
+        # ADR-0056). Without ``web_search`` in this set, the
+        # cogtrix47 run's 7 web_search calls counted as zero effort
+        # and the stuck-detection branched into the non-search-loop
+        # refusal body.
+        if tool_name not in ("search_web", "web_search"):
             continue
 
         # Skip error / stub results that indicate the search never ran.
@@ -194,6 +373,23 @@ def _compute_search_effort(messages: list[Any]) -> tuple[int, bool]:
             search_count += 1
 
     return search_count, http_get_attempted
+
+
+def _has_substantive_search_results(
+    messages: list[Any],
+    thresholds: SearchQualityThresholds | None = None,
+) -> bool:
+    """Thin wrapper around ``has_substantive_search_results`` (#1593, Option B).
+
+    Delegates to the dedicated ``search_quality`` module, which fixes the
+    dead ``startswith("Error searching")`` check (actual error format is
+    ``"Tool failed: search_web - Error searching..."``) and adds
+    observability logging for false-negative detection.
+
+    The ``thresholds`` parameter is pulled from ``CallModelContext`` at
+    call time so the heuristic remains configurable via ``cogtrix.yaml``.
+    """
+    return has_substantive_search_results(messages, thresholds)
 
 
 def _guard_truncated_tool_calls(
@@ -329,7 +525,6 @@ def build_call_model_node(
         _context_max_tokens = context.context_max_tokens
         _model_max_tokens = context.model_max_tokens
         compression_llm = context.compression_llm
-        memory_manager = context.memory_manager
         _checkpoint_store = context.checkpoint_store
         _calls_since_last_checkpoint = context.calls_since_last_checkpoint
         _last_checkpoint_count = context.last_checkpoint_count
@@ -435,402 +630,54 @@ def build_call_model_node(
             model = _bound_cache[fingerprint]
         if is_trace():
             _graph_log.debug("⏱ call_model bind_tools: %.0fms", (time.monotonic() - _cm_t0) * 1000)
-        msgs = [
-            m
-            for m in repaired_state_messages
-            if not (
-                hasattr(m, "response_metadata")
-                and isinstance(m.response_metadata, dict)
-                and m.response_metadata.get("transient")
-            )
-        ]
+
+        # ── Phase 1 (P1 + P0) — pre-invoke directives ──────────────
+        # Builds ``msgs`` from ``repaired_state_messages`` via:
+        # transient filter → context cap → compress → topic-switch
+        # nudge → stuck-conclusion nudge → stuck-threshold calibration
+        # → checkpoint nudge → checkpoint summary → rounds-since-
+        # checkpoint accounting (sets / clears
+        # ``_force_thinking_break[0]`` for THIS round).
+        msgs = repaired_state_messages
+        msgs = apply_pre_invoke_directives(
+            context,
+            state_messages,
+            repaired_state_messages,
+            msgs,
+            _graph_log,
+        )
         _comp_llm = compression_llm or llm
-        if _context_max_messages > 0 or _context_max_tokens > 0:
-            msgs = _apply_context_message_cap(
-                msgs,
-                _context_max_messages,
-                _context_max_tokens,
-            )
-        msgs = _maybe_compress(msgs)
 
-        if (
-            _TOPIC_SWITCH_DETECTION_ENABLED
-            and memory_manager is not None
-            and _should_reset_summary_for_topic_switch(msgs)
-        ):
-            _reset_summary_state = getattr(memory_manager, "reset_summary_state", None)
-            if callable(_reset_summary_state):
-                _reset_summary_state()
-            else:
-                _legacy_reset_summary = getattr(memory_manager, "_reset_summary_state", None)
-                if callable(_legacy_reset_summary):
-                    _legacy_reset_summary()
-            msgs.append(SystemMessage(content=_TOPIC_SWITCH_NUDGE))
-            _graph_log.info("Topic switch detected — resetting summary state and nudging model")
+        # ── Phase 2 — thinking-break sub-invocation ────────────────
+        # Consumes ``_force_thinking_break[0]`` if set. Returns an
+        # early-exit dict when the sub-invocation fired (graph treats
+        # the round as terminal-ish); returns ``None`` when the flag
+        # was clear or when the low-effort search-loop suppression
+        # branch fell through (a STRATEGY NUDGE was appended to
+        # ``msgs`` and we continue to normal processing).
+        _tb_result = maybe_apply_thinking_break(
+            context,
+            state_messages,
+            repaired_state_messages,
+            msgs,
+            config,
+            _graph_log,
+        )
+        if _tb_result is not None:
+            return _tb_result
 
-        if not _STUCK_THRESHOLD_CALIBRATED[0] and call_count[0] == 1:
-            _STUCK_THRESHOLD_CALIBRATED[0] = True
-            from src.orchestration.intent import (
-                TaskComplexity as _TC,
-            )
-            from src.orchestration.intent import (
-                classify_task_complexity as _classify_tc,
-            )
-
-            _user_text = ""
-            for _m in msgs:
-                if hasattr(_m, "type") and _m.type == "human":
-                    _user_text = getattr(_m, "content", "")
-                    break
-            _tc = _classify_tc(_user_text)
-            if _tc == _TC.COMPLEX_ACTION:
-                _STUCK_NO_CHECKPOINT_THRESHOLD[0] = 35
-            elif _tc == _TC.COMPLEX_RESEARCH:
-                _STUCK_NO_CHECKPOINT_THRESHOLD[0] = 20
-            else:
-                _STUCK_NO_CHECKPOINT_THRESHOLD[0] = 20
-            _graph_log.debug(
-                "Stuck threshold calibrated to %d (complexity=%s)",
-                _STUCK_NO_CHECKPOINT_THRESHOLD[0],
-                _tc.name,
-            )
-
-        if _calls_since_last_checkpoint[0] >= _CHECKPOINT_NUDGE_INTERVAL and call_count[0] > 3:
-            _graph_log.info(
-                "Checkpoint nudge fired (calls_since=%d, round=%d)",
-                _calls_since_last_checkpoint[0],
-                call_count[0],
-            )
-            msgs.append(
-                SystemMessage(
-                    content=(
-                        "[Checkpoint reminder] You've made several actions without "
-                        "recording a checkpoint. Use the checkpoint tool now to record "
-                        "what you've accomplished or learned since your last checkpoint."
-                    )
-                )
-            )
-            _calls_since_last_checkpoint[0] = 0
-
-        if _checkpoint_store is not None and len(_checkpoint_store) > 0:
-            _ckpt_summary = _checkpoint_store.summary()
-            if _ckpt_summary:
-                msgs.append(HumanMessage(content=_ckpt_summary))
-
-        if _checkpoint_store is not None:
-            current_ckpt_count = len(_checkpoint_store)
-            if current_ckpt_count > _last_checkpoint_count[0]:
-                _last_checkpoint_count[0] = current_ckpt_count
-                _rounds_since_checkpoint[0] = 0
-                _calls_since_last_checkpoint[0] = 0
-            else:
-                _rounds_since_checkpoint[0] += 1
-                _threshold = _STUCK_NO_CHECKPOINT_THRESHOLD[0]
-                if _rounds_since_checkpoint[0] >= _threshold and call_count[0] > _threshold:
-                    _force_thinking_break[0] = True
-                    _rounds_since_checkpoint[0] = 0
-                    _graph_log.info(
-                        "No new checkpoints in %d rounds — forcing thinking break",
-                        _threshold,
-                    )
-
-        if _force_thinking_break[0]:
-            _force_thinking_break[0] = False
-            _consecutive_errors[0] = 0
-            _consecutive_identical_error_count[0] = 0
-            _last_identical_error_signature[0] = None
-            _graph_log.info(
-                "Stuck detected — forcing thinking break (only request_tools available)"
-            )
-            _has_checkpoints = _checkpoint_store is not None and len(_checkpoint_store) > 0
-
-            # Determine whether the stuck state is a search loop.  The effort gate
-            # only applies when the agent is looping on search_web; for non-search
-            # stuck tools (e.g. merge_pull_request, write_file) the original
-            # THINKING BREAK behaviour is preserved (#1520).
-            _recent_tool_names = [
-                getattr(m, "name", None)
-                for m in repaired_state_messages[-6:]
-                if hasattr(m, "tool_call_id")
-            ]
-            _stuck_tool_name = _recent_tool_names[-1] if _recent_tool_names else None
-            _is_search_loop = _stuck_tool_name == "search_web"
-
-            if _has_checkpoints:
-                _tb_body = (
-                    "[THINKING BREAK — tools disabled this round]\n"
-                    "Recent attempts are not producing new information. "
-                    "You have recorded checkpoints during this session. "
-                    "Synthesize a final answer from those checkpoints.\n\n"
-                    "Write the answer directly — do not narrate your approach, do "
-                    "not enumerate what failed, do not list alternative methods. "
-                    "Just answer the question.\n\n"
-                    "Tools are restored on the next round if you still need them."
-                )
-            elif _is_search_loop:
-                _search_count, _http_get_attempted = _compute_search_effort(msgs)
-                _effort_met = _search_count >= _MIN_SEARCH_EFFORT or _http_get_attempted
-                if _effort_met:
-                    _tb_body = (
-                        "[THINKING BREAK — tools disabled this round]\n"
-                        "Recent attempts have not produced useful data. "
-                        "No checkpoint information has been accumulated in this session.\n\n"
-                        "If the topic is one where you cannot reach a definitive answer "
-                        "without live data (current prices, stock levels, recent events, "
-                        "specific SKUs, FX rates), state plainly that you could not "
-                        "retrieve the data and suggest the user contact the source "
-                        "directly. Do NOT fabricate specific numbers, percentages, "
-                        "citations, URLs, or links from your training data — that is "
-                        "a worse failure than not answering.  If you mention a website "
-                        "or repository it must come from an actual tool result, not "
-                        "from what you would expect to see online.  A pointer to a "
-                        "non-existent URL is worse than no pointer at all.\n\n"
-                        "A short honest 'I could not retrieve current data on this topic' "
-                        "is far better than a confident fabrication.\n\n"
-                        "Tools are restored on the next round if you still need them."
-                    )
-                else:
-                    # Low effort — the agent has not earned the right to refuse.
-                    # Inject a strategy nudge and continue with tools enabled (#1520).
-                    _graph_log.info(
-                        "Thinking break suppressed — low effort (%d distinct searches, "
-                        "http_get=%s); injecting strategy nudge instead",
-                        _search_count,
-                        _http_get_attempted,
-                    )
-                    msgs.append(
-                        HumanMessage(
-                            content=(
-                                "[STRATEGY NUDGE] Your searches have not yet surfaced a "
-                                "definitive answer. Before giving up, try harder:\n"
-                                "  1. Change the search language if the topic is region-specific.\n"
-                                "  2. Drop overly-specific identifiers and search for broader categories.\n"
-                                "  3. Follow a promising URL from your search results with http_get.\n"
-                                "  4. Search for distributors or official contact pages instead of retailers.\n"
-                                "  5. Use the checkpoint tool to record any partial findings.\n\n"
-                                "Only refuse after you have tried at least one of these angles."
-                            )
-                        )
-                    )
-                    # Skip the forced text-only break so the model can act on the nudge.
-                    # Fall through to normal tool-enabled processing below.
-            else:
-                # Not a search loop — fire the normal refusal thinking break.
-                _tb_body = (
-                    "[THINKING BREAK — tools disabled this round]\n"
-                    "Recent attempts have not produced useful data. "
-                    "No checkpoint information has been accumulated in this session.\n\n"
-                    "If the topic is one where you cannot reach a definitive answer "
-                    "without live data (current prices, stock levels, recent events, "
-                    "specific SKUs, FX rates), state plainly that you could not "
-                    "retrieve the data and suggest the user contact the source "
-                    "directly. Do NOT fabricate specific numbers, percentages, "
-                    "citations, URLs, or links from your training data — that is a "
-                    "worse failure than not answering.  If you mention a website or "
-                    "repository it must come from an actual tool result, not from "
-                    "what you would expect to see online.  A pointer to a non-existent "
-                    "URL is worse than no pointer at all.\n\n"
-                    "A short honest 'I could not retrieve current data on this topic' "
-                    "is far better than a confident fabrication.\n\n"
-                    "Tools are restored on the next round if you still need them."
-                )
-            if _has_checkpoints or (_is_search_loop and _effort_met) or not _is_search_loop:
-                msgs.append(HumanMessage(content=_tb_body))
-                # Keep request_tools bound so the model can fix the underlying
-                # 'tool not loaded' problem during the thinking break itself.
-                # Stripping every tool forces the model into a text-only mode where
-                # qwen3-coder and similar models emit XML tool calls in content.
-                _request_tools_only = [
-                    t
-                    for t in (active_tools_list or [])
-                    if getattr(t, "name", "") == "request_tools"
-                ]
-                if _request_tools_only:
-                    think_model = llm.bind_tools(_request_tools_only)
-                else:
-                    think_model = llm
-                think_messages = [_sys_msg, *msgs] if _sys_msg is not None else list(msgs)
-                _cm_t1 = time.monotonic()
-                with start_span(
-                    "src.orchestration.graph",
-                    "llm.invoke",
-                    attributes={
-                        "llm.provider": _llm_provider,
-                        "llm.model": _llm_model,
-                    },
-                ) as _llm_span:
-                    try:
-                        response = _invoke_with_timeout(think_model, think_messages, config, 180)
-                    except RuntimeError as exc:
-                        _llm_span.record_exception(exc)
-                        _llm_span.set_status(Status(StatusCode.ERROR, str(exc)))
-                        _graph_log.warning("LLM timed out during thinking break")
-                        return {"messages": []}
-                    from src.orchestration.phases import normalize_native_tool_calls
-
-                    response = normalize_native_tool_calls(response)
-                    if is_trace():
-                        _graph_log.debug(
-                            "⏱ call_model thinking_break: %.0fms",
-                            (time.monotonic() - _cm_t1) * 1000,
-                        )
-                    _llm_span.set_attribute("llm.tokens_input", 0)
-                    _llm_span.set_attribute("llm.tokens_output", 0)
-                    _llm_span.set_attribute(
-                        "llm.duration_ms", int((time.monotonic() - _cm_t1) * 1000)
-                    )
-                    _llm_span.set_attribute("llm.status", "success")
-                    _llm_span.set_status(Status(StatusCode.OK))
-                return {"messages": [response]}
-
-        if (
-            _TOOL_HEALTH_CHECK_INTERVAL > 0
-            and call_count[0] > 1
-            and call_count[0] % _TOOL_HEALTH_CHECK_INTERVAL == 0
-            and call_count[0] != _last_tool_health_check_at[0]
-        ):
-            _last_tool_health_check_at[0] = call_count[0]
-            _active_tool_names = sorted(getattr(context, "active_names", set()))
-            if _active_tool_names:
-                _tool_verification_msg = (
-                    "[Tool-state verification] Confirm your current tool inventory. "
-                    "You currently have access to the following tools (enumerated from the "
-                    "system registry — do not rely on memory):\n"
-                    + "\n".join(f"  • {name}" for name in _active_tool_names)
-                    + "\n\nIf a task requires a tool not listed above, use request_tools() to load it."
-                )
-            else:
-                _tool_verification_msg = (
-                    "[Tool-state verification] You currently have NO tools loaded. "
-                    "Use request_tools() to load tools before attempting actions."
-                )
-            msgs.append(SystemMessage(content=_tool_verification_msg))
-            _graph_log.info(
-                "Tool-state verification injected at turn %d (interval=%d)",
-                call_count[0],
-                _TOOL_HEALTH_CHECK_INTERVAL,
-            )
-
-        if (
-            call_count[0] > 1
-            and call_count[0] % _REFLECTION_INTERVAL == 0
-            and call_count[0] != _last_reflection_at[0]
-        ):
-            _last_reflection_at[0] = call_count[0]
-            if _consecutive_errors[0] >= 2:
-                msgs.append(
-                    HumanMessage(
-                        content=(
-                            "[Debug cycle check] You've had recent errors. Before continuing:\n"
-                            "1. Read the EXACT error message from your last failed attempt.\n"
-                            "2. What SPECIFIC line or issue does it point to?\n"
-                            "3. Have you searched the web for that specific error or for a "
-                            "working reference implementation?\n"
-                            "4. Run ONLY the failing test case in isolation, not the full suite.\n"
-                            "5. Fix the ONE thing the error message identifies. Don't rewrite "
-                            "the whole file."
-                        )
-                    )
-                )
-            else:
-                msgs.append(
-                    HumanMessage(
-                        content=(
-                            "[Work cycle check] Before continuing:\n"
-                            "1. EVALUATE: What did your last actions achieve? "
-                            "Checkpoint any new findings.\n"
-                            "2. PLAN: What specific information do you still need? "
-                            "Write it out clearly.\n"
-                            "3. RESEARCH: Search for that specific information. After getting "
-                            "results, ask: do I have a SPECIFIC URL/command/answer, or just "
-                            "general info? If general → refine query and search again.\n"
-                            "4. ACT only when you have actionable specifics from research.\n"
-                            "Do NOT guess URLs or fill in details from memory — "
-                            "search until you have concrete answers."
-                        )
-                    )
-                )
-
-        _MAX_CONSECUTIVE_SAME_TOOL = 3
-        _recent_tool_names = [
-            getattr(m, "name", None)
-            for m in repaired_state_messages[-(_MAX_CONSECUTIVE_SAME_TOOL * 2) :]
-            if hasattr(m, "tool_call_id")
-        ]
-        if (
-            len(_recent_tool_names) >= _MAX_CONSECUTIVE_SAME_TOOL
-            and len(set(_recent_tool_names[-_MAX_CONSECUTIVE_SAME_TOOL:])) == 1
-        ):
-            _stuck_tool = _recent_tool_names[-1]
-            msgs.append(
-                SystemMessage(
-                    content=(
-                        f"You have called '{_stuck_tool}' {_MAX_CONSECUTIVE_SAME_TOOL} "
-                        f"times in a row without making progress. Stop calling "
-                        f"'{_stuck_tool}'. Choose ONE of:\n"
-                        f"  (a) Produce a final text response now, summarising what you "
-                        f"have already accomplished. Do not call any tools.\n"
-                        f"  (b) Call a categorically different tool that advances the "
-                        f"task — not the same tool with different arguments.\n"
-                        f"  (c) If you genuinely need to wait for a future event, call "
-                        f"cron_add to schedule it, then produce a final text response.\n"
-                        f"Do NOT call '{_stuck_tool}' again."
-                    )
-                )
-            )
-            # Escalate: arm a thinking break for the next round. If the model
-            # heeds the advisory above and produces text, the graph terminates
-            # before the flag is checked. If it ignores the advisory and calls
-            # any tool again, _force_thinking_break fires on the next call_model
-            # invocation, stripping tools and forcing a text-only response.
-            # Without this escalation, the duplicate-call cache returns
-            # success-shaped ToolMessages, _consecutive_errors never advances,
-            # and the loop runs to recursion_limit. Observed for Llama 3.3 70B
-            # on the Gate 2 finance_invoice_approval_workflow scenario.
-            #
-            # However: if every consecutive call returned a "not loaded" stub,
-            # the agent has not exhausted the tool — it is still discovering
-            # that the tool is not active. Arming the thinking break here
-            # punishes the correct recovery move (request_tools) and forces
-            # the model into fabrication mode. Skip arming when all recent
-            # tool calls were "not loaded" stubs (#1510).
-            _consecutive_tool_msgs = [
-                m
-                for m in repaired_state_messages[-(max(len(repaired_state_messages), 0)) :]
-                if hasattr(m, "tool_call_id")
-            ][-_MAX_CONSECUTIVE_SAME_TOOL:]
-            _all_stub_results = all(
-                getattr(m, "content", "") and ("not loaded" in getattr(m, "content", "").lower())
-                for m in _consecutive_tool_msgs
-            )
-            if not _all_stub_results:
-                _force_thinking_break[0] = True
-                _graph_log.warning(
-                    "Temporal polling loop detected — '%s' called %d+ consecutive times; "
-                    "injecting advisory + arming thinking break for next round",
-                    _stuck_tool,
-                    _MAX_CONSECUTIVE_SAME_TOOL,
-                )
-            else:
-                _graph_log.info(
-                    "Temporal polling loop detected — '%s' called %d+ times but all "
-                    "returned 'not loaded' stubs; advisory injected but thinking-break "
-                    "arm suppressed (agent may be recovering via request_tools)",
-                    _stuck_tool,
-                    _MAX_CONSECUTIVE_SAME_TOOL,
-                )
-
-        if _TOOL_QUALITY_GATE_ENABLED and _all_tool_results_substanceless(repaired_state_messages):
-            msgs.append(
-                SystemMessage(
-                    content=(
-                        "All tools returned no data this turn. Do not synthesise an answer "
-                        "from prior context or memory. Report honestly that the tools "
-                        "returned nothing and ask the user how to proceed."
-                    )
-                )
-            )
-            _graph_log.info("Tool output quality gate injected — all tools returned empty")
+        # ── Phase 3 (P2) — late directives ─────────────────────────
+        # Tool-state verification → reflection → polling-loop advisory
+        # → tool-output quality gate. The polling-loop branch may arm
+        # ``_force_thinking_break[0]`` for the NEXT call_model round
+        # (the current round's consumer above has already run).
+        msgs = apply_late_directives(
+            context,
+            state_messages,
+            repaired_state_messages,
+            msgs,
+            _graph_log,
+        )
 
         with start_span(
             "src.orchestration.graph",
@@ -976,6 +823,56 @@ def build_call_model_node(
                         )
             except Exception as _da_exc:  # noqa: BLE001 — DA is non-critical; never crash a turn
                 _graph_log.warning("decision_accountability parsing failed: %s", _da_exc)
+
+        # Bug K #1720 — CJK leakage detection. Multilingual LLMs
+        # (qwen3-coder in cogtrix57) occasionally sample a CJK token
+        # where an English one was expected. Detection-only: log a
+        # WARNING so ops can see the rate without altering the model
+        # output (legitimate quoted CJK content must survive).
+        _resp_content = getattr(response, "content", "")
+        _resp_text = ""
+        if isinstance(_resp_content, str):
+            _resp_text = _resp_content
+        elif isinstance(_resp_content, list):
+            _resp_text = " ".join(
+                str(c.get("text", c) if isinstance(c, dict) else c) for c in _resp_content
+            )
+        if _resp_text:
+            _cjk_matches = _CJK_RE.findall(_resp_text)
+            if _cjk_matches:
+                _graph_log.warning(
+                    "Non-Latin (CJK) characters in assistant response (%d found); "
+                    "possible multilingual-model leakage (Bug K #1720). Sample: %r",
+                    len(_cjk_matches),
+                    _cjk_matches[:5],
+                )
+
+        # Bug G #1713 follow-up — detect sycophantic validation prefix.
+        # The system-prompt rule forbids "You're absolutely right" /
+        # "I apologize" prefixes on unchanged answers, but the 2026-05-21
+        # corpus replay (E03 captured intra-turn LLM_GENERATION) showed
+        # qwen3-coder still emits "You're right - let me ..." after an
+        # orchestrator nudge. Detection-only here: log a WARNING so ops
+        # can see the bypass rate without modifying the response.
+        #
+        # We deliberately do NOT strip the prefix at this layer. An
+        # earlier prototype (PR #1731 first/second iterations) stripped
+        # the matched span and rebuilt the response via
+        # ``response.model_copy``. That broke Gate 2 shard D × kimi-k2-5
+        # and shard B × kimi-k2-5 because the strip altered intra-turn
+        # responses kimi later referenced (the post-strip remainder no
+        # longer carried context that downstream scoring depended on).
+        # The prompt rule remains the primary defense; detection-only
+        # surfaces the rate so the impact can be quantified.
+        if isinstance(_resp_content, str) and _resp_content:
+            _, _matched_prefix = _strip_sycophantic_prefix(_resp_content)
+            if _matched_prefix is not None:
+                _graph_log.warning(
+                    "Sycophantic prefix detected in response: %r (Bug G #1713). "
+                    "Prompt rule was bypassed by the model; logging only — no "
+                    "content modification.",
+                    _matched_prefix,
+                )
 
         return {"messages": [*repair_removals, response]}
 

@@ -1,0 +1,37 @@
+# OSV-scanner config — per-advisory ignore list with justifications.
+#
+# Read by `osv-scanner --lockfile=uv.lock` (auto-discovered at the
+# working directory root, no `--config=` flag required).
+#
+# Each ignored advisory MUST carry:
+#   * a written reason that names WHY the match is wrong or stale,
+#   * an `ignoreUntil` date so the ignore re-surfaces for review
+#     rather than silently growing stale.
+#
+# When updating: keep entries grouped by package; sort by advisory ID
+# within each group; quote the OSV text or upstream link that proves
+# the false positive.
+#
+# Last reviewed: 2026-05-22
+# Next review due: see ignoreUntil per entry (≤6 months out by policy).
+
+# As of 2026-05-22 there are no active ignores — every previously-
+# documented advisory was flagged by ``osv-scanner --lockfile=uv.lock``
+# as an "unused ignore", meaning the affected ecosystem ↔ version cross-
+# match is no longer present in the current lock. The historical
+# rationale is preserved in git (commit history before this commit);
+# if any of those advisories re-surface, restore the relevant block
+# from there with a refreshed ``ignoreUntil`` window.
+#
+# Removed in this commit (recorded for the next reviewer):
+#   - PYSEC-2024-278 — langchain-community SSRF (fix shipped in 0.0.27,
+#     we are on 0.4.1; advisory's affected-range data no longer
+#     matches our pin).
+#   - PYSEC-2025-144 / PYSEC-2025-145 / PYSEC-2025-146 / PYSEC-2025-147
+#     / PYSEC-2026-101 / PYSEC-2026-102 — Go server CVEs cross-listed
+#     onto the PyPI ``ollama`` client. OSV ecosystem-confusion; the
+#     mismatched cross-listing has since been resolved upstream so the
+#     scanner no longer flags them against the PyPI package.
+#   - PYSEC-2025-183 — pyjwt "weak encryption" DISPUTED by upstream
+#     maintainer. Advisory withdrawn / no longer indexed against our
+#     pyjwt pin.

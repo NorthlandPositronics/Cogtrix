@@ -1,6 +1,6 @@
 # Cogtrix Tools Reference
 
-Complete documentation of all 68 built-in tools (plus dynamic MCP-sourced tools). You don't need to memorize these — the agent picks the right tool automatically based on your request. This page is a reference for when you want to know exactly what's available, what parameters a tool accepts, or how to configure optional providers.
+Complete documentation of all 67 built-in tools (plus dynamic MCP-sourced tools). You don't need to memorize these — the agent picks the right tool automatically based on your request. This page is a reference for when you want to know exactly what's available, what parameters a tool accepts, or how to configure optional providers.
 
 **Quick orientation:**
 
@@ -46,7 +46,7 @@ Complete documentation of all 68 built-in tools (plus dynamic MCP-sourced tools)
 
 | Category | Confirmation | Examples |
 |----------|--------------|----------|
-| **Safe** | No | `read_file`, `calculate`, `search_web` |
+| **Safe** | No | `read_file`, `calculate`, `web_search` |
 | **Sensitive** | Yes | `execute_shell_command`, `write_file`, `execute_python` |
 
 ### Confirmation Responses
@@ -134,7 +134,7 @@ Execute Python code in a restricted environment with persistent state.
 
 **Optional Modules (if installed):**
 
-`numpy`, `pandas`, `scipy` — Automatically available if installed on the system.
+`numpy` ships in the `cogtrix[science]` extra. `pandas` and `scipy` are not installed by any Cogtrix extra, but if they are present in the active Python environment (e.g., a user-provided venv or a downstream image) they are accessible inside the sandbox.
 
 **Security Limits:**
 
@@ -712,189 +712,65 @@ Convert JSON to human-readable text.
 
 ## Search
 
-Cogtrix includes search tools across 7 providers (DuckDuckGo, Tavily, Exa, Brave, Google, SerpAPI, SearXNG). All API-key-gated tools (search, weather,
-WhatsApp) are automatically hidden from the agent when not configured — they simply don't appear in
-the tool list. DuckDuckGo is always available (no API key, provides both `search_web` and
-`search_news`). Other providers are automatically enabled when their API key is configured, and
-hidden from the agent otherwise.
+Cogtrix exposes a single canonical research tool: **`web_search`**. It runs a multi-provider
+fan-out (DuckDuckGo always; Tavily / Exa / Brave / Google / SerpAPI / SearXNG when their API
+keys are configured), fetches top results, extracts page content with `trafilatura`, and
+returns a structured Markdown picture — sources with `①②③…` citation indices, optional
+synthesis section, disagreements between sources called out explicitly, and a coverage
+block reporting per-provider + per-fetch outcomes.
 
-### search_web
+Architecture and design rationale: ADR-0056 (held in the private documentation submodule).
 
-Search the web using DuckDuckGo (no API key needed).
+### web_search
 
-**Parameters:**
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `query` | string | Yes | Search query |
-| `num_results` | int | No | Maximum results (default: 5) |
-| `region` | string | No | Region for results (default: `"wt-wt"` worldwide). Examples: `"us-en"`, `"uk-en"` |
-
-**Returns:** List of results with title, URL, and snippet
-
----
-
-### search_news
-
-Search recent news using DuckDuckGo.
-
-**Parameters:**
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `query` | string | Yes | Search query |
-| `num_results` | int | No | Maximum results (default: 5) |
-| `timelimit` | string | No | Time filter (default: `"w"` for past week). Values: `"d"` (day), `"w"` (week), `"m"` (month) |
-
-**Returns:** List of news articles with title, URL, date, and source
-
----
-
-### tavily_search
-
-AI-optimised web search that crawls pages and extracts their full text content.
-
-**Requires:** `TAVILY_API_KEY` environment variable or `services.tavily.api_key` in config. Also requires `tavily-python` package.
+Universal web research tool — multi-provider fan-out, fetch, extract, format.
 
 **Parameters:**
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `query` | string | Yes | — | Search query |
-| `search_depth` | string | No | `"advanced"` | `"basic"` (fast, snippets) or `"advanced"` (deep crawl, full content) |
-| `max_results` | int | No | `5` | Number of results (1-10) |
-| `include_answer` | bool | No | `true` | Include AI-generated answer summary |
-| `topic` | string | No | `"general"` | `"general"` or `"news"` |
+| `query` | string | Yes | — | The research query |
+| `depth` | int | No | `3` | Top-K sources to fetch + extract (1–10). Higher = more breadth, longer wall time. The historical lxml GIL bottleneck that motivated lowering the default from `6` was removed in PR #1716 — extraction now runs in a `ProcessPoolExecutor` so pages are parsed in true parallel; the in-process `_LXML_LOCK` is retained as an unused export for back-compat with callers that still imported it. Default of `3` is now a latency choice, not a serialisation workaround. Set `depth` explicitly (5–10) for deep research. |
+| `region` | string | No | `"wt-wt"` | Region hint for providers that accept one (e.g. DDG). |
+| `compact` | bool | No | `false` | When `true`, drop per-source extracts and the Additional Sources tail (~5 KB vs ~18 KB output). |
 
-**Returns:** AI summary + results with title, URL, relevance score, and extracted page content
+**Returns:** Markdown blob with sections (in order):
 
----
+- `# Research: <query>` header.
+- `## Key findings` — synthesised cross-source facts with `[①②③…]` citations. Stage 5 synthesis runs in-tool by default; the section is omitted only when synthesis is explicitly disabled or its deadline (10 s) expires.
+- `## Disagreements` — emitted when sources state directly contradictory facts.
+- `## Gaps` — aspects of the query the search couldn't answer.
+- `## Sources` — flat index of cited URLs with domain class + recency tag.
+- Per-source extract bodies (non-compact mode).
+- `## Additional sources` — snippet-only tail of URLs that survived dedup but didn't make top-K (non-compact mode).
+- `## Coverage` — operator-facing summary: providers responded, raw vs distinct count, fetch outcomes, synthesis model + elapsed, total wall time.
 
-### tavily_extract
+**Failure modes:** The full reliability table is in ADR-0056. Key categories: `validation-failed`,
+`blocked-robots`, `cross-domain-redirect`, `ssl-error`, `rate-limited`, `http-status`,
+`timeout`. Every failure produces partial-but-useful output; the hard outer deadline is
+25 s (raised from 15 s in PR #1687).
 
-Extract clean text content from specific URLs using Tavily. Handles JavaScript-rendered pages.
+**SSRF safety:** Every fetch (including the robots.txt probe and every redirect hop) is
+DNS-pinned to the IP that `_validate_url` resolved up front — the connect target cannot
+diverge from the validated address. See `src/tools/_http_fetch.py` for the mechanism.
 
-**Requires:** Same as `tavily_search`.
+### Retired legacy tools
 
-**Parameters:**
+The following tools were removed from the agent catalogue when `web_search` shipped. The
+underlying functions remain importable from their respective modules for power users and
+internal use; the agent simply no longer sees them as discoverable tools:
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `urls` | array | Yes | List of URLs to extract content from (max 20) |
+- `search_web` (DuckDuckGo, see `src/tools/web_search.py`; `search_news` is also importable but is not part of the agent catalogue)
+- `tavily_search` (`src/tools/tavily_search.py`)
+- `brave_search` (`src/tools/brave_search.py`)
+- `google_search` (`src/tools/google_search.py`)
+- `exa_search` (`src/tools/exa_search.py`)
+- `serpapi_search` (`src/tools/serpapi_search.py`)
+- `searxng_search` (`src/tools/searxng_search.py`)
 
-**Returns:** Extracted text content per URL
-
----
-
-### exa_search
-
-AI-native semantic web search using neural embeddings. Understands the *meaning* of queries, not just keywords.
-
-**Requires:** `EXA_API_KEY` environment variable or `services.exa.api_key` in config. Also requires `exa-py` package.
-
-**Parameters:**
-
-| Parameter | Type | Required | Default | Description |
-|-----------|------|----------|---------|-------------|
-| `query` | string | Yes | — | Natural-language search query |
-| `num_results` | int | No | `5` | Number of results (1-10) |
-| `include_text` | bool | No | `true` | Include extracted page text |
-| `search_type` | string | No | `"auto"` | `"auto"`, `"neural"` (semantic), `"fast"` (low-latency), `"deep"` (thorough), or `"instant"` (cached) |
-
-**Returns:** Results with title, URL, relevance score, and extracted page text
-
----
-
-### exa_find_similar
-
-Find web pages similar to a given URL using Exa's neural embeddings.
-
-**Requires:** Same as `exa_search`.
-
-**Parameters:**
-
-| Parameter | Type | Required | Default | Description |
-|-----------|------|----------|---------|-------------|
-| `url` | string | Yes | — | URL of the reference page |
-| `num_results` | int | No | `5` | Number of similar results (1-10) |
-| `include_text` | bool | No | `true` | Include extracted page text |
-
-**Returns:** List of similar pages with content
-
----
-
-### exa_get_contents
-
-Extract clean text content from web pages using Exa.
-
-**Requires:** Same as `exa_search`.
-
-**Parameters:**
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `urls` | array | Yes | List of URLs to extract content from |
-
-**Returns:** Extracted text content per URL (truncated at 8,000 chars each)
-
----
-
-### brave_search
-
-Search the web using Brave Search — a privacy-focused search engine with its own independent index.
-
-**Requires:** `BRAVE_API_KEY` environment variable or `services.brave.api_key` in config. No extra package needed.
-
-**Parameters:**
-
-| Parameter | Type | Required | Default | Description |
-|-----------|------|----------|---------|-------------|
-| `query` | string | Yes | — | Search query |
-| `count` | int | No | `5` | Number of results (1-20) |
-| `search_type` | string | No | `"web"` | `"web"` or `"news"` |
-| `freshness` | string | No | `""` | Time filter: `"pd"` (day), `"pw"` (week), `"pm"` (month), `"py"` (year) |
-
-**Returns:** Results with titles, URLs, descriptions, age, extra snippets, FAQ answers, and infoboxes
-
----
-
-### google_search
-
-Search using the official Google Custom Search JSON API — real Google Search results.
-
-**Requires:** `GOOGLE_API_KEY` and `GOOGLE_CSE_ID` environment variables (or `services.google.api_key` / `services.google.cse_id` in config). No extra package needed. Free tier: 100 queries/day.
-
-**Parameters:**
-
-| Parameter | Type | Required | Default | Description |
-|-----------|------|----------|---------|-------------|
-| `query` | string | Yes | — | Search query |
-| `num_results` | int | No | `10` | Number of results (1-10) |
-| `date_restrict` | string | No | `""` | Date filter: `"d7"` (7 days), `"w2"` (2 weeks), `"m1"` (month), `"y1"` (year) |
-| `language` | string | No | `""` | Language restriction (e.g., `"lang_en"`, `"lang_de"`) |
-| `safe_search` | string | No | `"off"` | `"off"` or `"active"` |
-
-**Returns:** Organic results with titles, URLs, snippets, spelling suggestions, published dates, and meta descriptions
-
----
-
-### serpapi_search
-
-Search using SerpAPI — structured proxy for Google and Bing with the richest structured output.
-
-**Requires:** `SERPAPI_API_KEY` environment variable or `services.serpapi.api_key` in config. Also requires `google-search-results` package.
-
-**Parameters:**
-
-| Parameter | Type | Required | Default | Description |
-|-----------|------|----------|---------|-------------|
-| `query` | string | Yes | — | Search query |
-| `engine` | string | No | `"google"` | `"google"` or `"bing"` |
-| `num_results` | int | No | `10` | Number of results (1-20) |
-| `search_type` | string | No | `""` | `""` (web), `"nws"` (news), `"isch"` (images), `"shop"` (shopping) |
-| `time_period` | string | No | `""` | `"qdr:d"` (day), `"qdr:w"` (week), `"qdr:m"` (month), `"qdr:y"` (year) |
-
-**Returns:** Answer boxes, knowledge graph, People Also Ask, rich snippets, and organic results
+`tavily_extract`, `exa_find_similar`, and `exa_get_contents` remain in the catalogue —
+they cover use cases (URL-targeted extraction, semantic similarity) that `web_search`
+does not subsume.
 
 ---
 

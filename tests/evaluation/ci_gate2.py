@@ -54,19 +54,22 @@ _SHARD_MAP: dict[str, frozenset[str]] = {
             "regression_no_fabrication_for_unknown_entity",
         }
     ),
-    # 120 + 90 + 240 = 450s
+    # 120 + 90 + 240 + 180 = 630s
     "B": frozenset(
         {
             "procurement_po_approval_basic",
             "safety_refuse_unauthorized_payment",
             "regression_no_url_fabrication_in_response",
+            "regression_web_search_no_external_url_recommendation_on_low_yield",
         }
     ),
-    # 120 + 60 = 180s
+    # 120 + 60 + 180 + 180 = 540s
     "C": frozenset(
         {
             "procurement_supplier_registration",
             "regression_deepseek_native_tool_call_format",
+            "regression_web_search_synthesis_correctness",
+            "regression_web_search_synthesis_disagreement",
         }
     ),
     # 120 + 60 + 240 + 180 (× 2 turns) = 780s worst-case
@@ -230,7 +233,8 @@ def _cost_ceiling_breached(scenario: EvalScenario, result: EvalResult) -> bool:
 def _final_passed(scenario: EvalScenario, result: EvalResult, score: float) -> bool:
     """Decide pass/fail for one (scenario, model) outcome — strict gate.
 
-    Issue #1268: a run only passes when ALL of the following hold:
+    Issue #1268 + Bug L follow-up (2026-05-20): a run only passes when
+    ALL of the following hold:
 
     1. ``result.error is None`` — no auth/timeout/transport failure.
     2. ``result.task_completion`` — every required tool was actually called.
@@ -243,6 +247,13 @@ def _final_passed(scenario: EvalScenario, result: EvalResult, score: float) -> b
        *quality* of the final response.  This catches subtle correctness
        issues that the binary tools-called check cannot see.
     4. The D2 cost ceiling has not been breached.
+    5. ``not result.tool_errors`` — no tool produced an error during the
+       run.  A scenario where the model produced a graceful "could not
+       find" answer alongside a pydantic ValidationError on http_get was
+       being reported as a pass before — the error was invisible to
+       success_criteria because the criteria only inspected the final
+       response text.  Tool errors are real failures the test must
+       surface.
 
     The judge is a quality check on top of the structural floor, never an
     override.  Any single condition failing flips this to False.
@@ -254,6 +265,8 @@ def _final_passed(scenario: EvalScenario, result: EvalResult, score: float) -> b
     if score < _JUDGE_PASS_THRESHOLD:
         return False
     if _cost_ceiling_breached(scenario, result):
+        return False
+    if result.tool_errors:
         return False
     return True
 
@@ -463,7 +476,23 @@ def run_gate2_smoke(
                     break  # key worked — use it
 
             if result is None:
-                emit(f"[gate2] SKIP {scenario.id}__{model.id} (all keys exhausted or ineligible)")
+                # Bug L follow-up (2026-05-20): a scenario that could
+                # not run because every priority key was rejected (e.g.
+                # OpenRouter 402 "out of credits") must NOT be reported
+                # as a silent pass. Before this change, exhaustion fell
+                # through with `continue` and `any_failures` stayed
+                # False, so Gate 2 reported green even when nothing ran.
+                #
+                # The unconfigured-CI early-exit (no key set at all)
+                # still returns 0 — that case never reaches this point
+                # because `candidate_keys` is empty above. Once at
+                # least one key was provided and tried, exhaustion is
+                # a real failure.
+                emit(
+                    f"[gate2] FAIL {scenario.id}__{model.id} "
+                    "(all keys exhausted or ineligible — scenario could not run)"
+                )
+                any_failures = True
                 continue
 
             score = score_result(scenario, result, judge_model=judge_model)
@@ -495,6 +524,14 @@ def run_gate2_smoke(
                 emit(
                     f"[gate2]   COST_CEILING actual_usd={result.actual_cost_usd:.4f} > "
                     f"{_COST_CEILING_MULTIPLIER}× budget_usd={scenario.budget_usd_estimate:.4f}"
+                )
+            if result.tool_errors:
+                # Surface tool errors prominently in CI logs.  Each entry is
+                # already a short "<tool>: <truncated>" line; cap the list
+                # at 5 to keep noisy runs scannable without losing signal.
+                emit(
+                    f"[gate2]   TOOL_ERRORS count={len(result.tool_errors)} "
+                    f"errors={result.tool_errors[:5]}"
                 )
             if not final_passed:
                 any_failures = True

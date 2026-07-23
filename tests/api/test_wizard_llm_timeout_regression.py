@@ -103,18 +103,26 @@ def test_pool_shutdown_called_on_success() -> None:
     mock_executor.shutdown.assert_called_once_with(wait=False, cancel_futures=True)
 
 
-def test_returns_empty_on_llm_exception() -> None:
-    """Non-timeout exception: ``_wizard_invoke_llm`` returns ``''`` (unchanged behavior)."""
-    from src.api.routes.config import _wizard_invoke_llm
+def test_returns_empty_on_llm_exception_and_logs_warning() -> None:
+    """Non-timeout exception: ``_wizard_invoke_llm`` returns ``''`` and logs a warning with exception details."""
+    from src.api.routes.config import _wizard_invoke_llm, log
 
-    with patch("src.api.routes.config.ThreadPoolExecutor") as MockPool:
+    exc = RuntimeError("boom")
+    with (
+        patch.object(log, "warning") as mock_warning,
+        patch("src.api.routes.config.ThreadPoolExecutor") as MockPool,
+    ):
         mock_executor = MagicMock()
         MockPool.return_value.__enter__.return_value = mock_executor
-        mock_executor.submit.return_value.result.side_effect = RuntimeError("boom")
+        mock_executor.submit.return_value.result.side_effect = exc
 
         result = _wizard_invoke_llm(MagicMock(), [])
 
     assert result == ""
+    mock_warning.assert_called_once()
+    assert "raised exception: %s" in mock_warning.call_args[0][0]
+    assert mock_warning.call_args[0][1] is exc
+    assert mock_warning.call_args[1].get("exc_info") is True
 
 
 # ---------------------------------------------------------------------------

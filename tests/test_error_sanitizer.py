@@ -150,14 +150,98 @@ class TestSanitizeFileError:
 
 class TestSanitizeSearchError:
     def test_wraps_generic_result_as_search_request_failed(self) -> None:
+        """Unknown exceptions get the generic-fallback message with class name appended (#1586)."""
         exc = RuntimeError("something broke")
         result = sanitize_search_error(exc)
-        assert result == "Search request failed"
+        assert result == "Search request failed (RuntimeError)"
 
     def test_custom_context_in_message(self) -> None:
+        """The context arg identifies the search provider — closes #1586's opacity."""
         exc = RuntimeError("something broke")
         result = sanitize_search_error(exc, context="WebSearch")
-        assert result == "WebSearch request failed"
+        assert result == "WebSearch request failed (RuntimeError)"
+
+    def test_preserves_specific_categories(self) -> None:
+        """Known-category mappings from the generic sanitizer are not appended with class names
+        — they already carry semantic meaning (e.g. "Request timed out")."""
+        import requests.exceptions
+
+        exc = requests.exceptions.Timeout("timeout details")
+        result = sanitize_search_error(exc, context="Tavily")
+        assert result == "Request timed out"  # No class-name suffix; already specific
+
+
+class TestSanitizeSearchErrorDDGS:
+    """DDGS / duckduckgo_search library-specific exception mappings (#1586).
+
+    The DDGS library is the most common search backend (default tool,
+    no API key required).  Its exception hierarchy isn't covered by the
+    generic ``sanitize_error``; without these mappings, every DDGS
+    failure falls through to the generic ``"Search request failed"``
+    fallback — the exact opacity that prompted #1586.
+    """
+
+    def _make_named_exception(self, class_name: str, message: str = "") -> Exception:
+        """Construct an exception with a given class name without depending on the
+        actual DDGS library being installed (the test machine may not have ddgs).
+        Using ``type()`` dynamically produces an exception whose ``__name__``
+        matches what DDGS would raise."""
+        dynamic_cls = type(class_name, (Exception,), {})
+        return dynamic_cls(message)
+
+    def test_ratelimit_exception_mapped_to_rate_limited(self) -> None:
+        exc = self._make_named_exception("RatelimitException", "Rate limit exceeded")
+        result = sanitize_search_error(exc, context="DuckDuckGo")
+        assert result == "DuckDuckGo rate-limited (HTTP 429)"
+
+    def test_timeout_exception_mapped_to_timed_out(self) -> None:
+        """DDGS uses ``TimeoutException``, distinct from built-in ``TimeoutError``."""
+        exc = self._make_named_exception("TimeoutException", "request timed out")
+        result = sanitize_search_error(exc, context="DuckDuckGo")
+        assert result == "DuckDuckGo request timed out"
+
+    def test_ddg_search_exception_rate_limited_classification(self) -> None:
+        """The DDGS umbrella exception wraps multiple causes — keyword-classify cautiously."""
+        exc = self._make_named_exception(
+            "DuckDuckGoSearchException", "rate limit reached, please retry"
+        )
+        result = sanitize_search_error(exc, context="DuckDuckGo")
+        assert result == "DuckDuckGo rate-limited"
+
+    def test_ddg_search_exception_blocked_classification(self) -> None:
+        """HTML 'blocked' / 'captcha' pages map to bot-detection."""
+        exc = self._make_named_exception(
+            "DuckDuckGoSearchException", "blocked due to unusual activity"
+        )
+        result = sanitize_search_error(exc, context="DuckDuckGo")
+        assert result == "DuckDuckGo blocked by source (likely bot detection)"
+
+    def test_ddg_search_exception_timeout_classification(self) -> None:
+        exc = self._make_named_exception("DuckDuckGoSearchException", "request timeout occurred")
+        result = sanitize_search_error(exc, context="DuckDuckGo")
+        assert result == "DuckDuckGo request timed out"
+
+    def test_ddg_search_exception_unclassified_includes_class_name(self) -> None:
+        """When the keyword check doesn't fire, fall back to a generic client-error
+        message that still includes the class name for debugging."""
+        exc = self._make_named_exception("DuckDuckGoSearchException", "something weird happened")
+        result = sanitize_search_error(exc, context="DuckDuckGo")
+        assert result == "DuckDuckGo client error (DuckDuckGoSearchException)"
+
+    def test_ddg_exception_message_html_not_echoed_verbatim(self) -> None:
+        """DDGS sometimes wraps HTML snippets in the exception message when the
+        source returns a 'blocked' page.  The categorical mapping must not echo
+        that HTML verbatim — the operator should get a classification instead."""
+        html_blob = (
+            "<html><head><title>Just a moment...</title></head>"
+            "<body>captcha required to continue</body></html>"
+        )
+        exc = self._make_named_exception("DuckDuckGoSearchException", html_blob)
+        result = sanitize_search_error(exc, context="DuckDuckGo")
+        # Must classify, must not contain raw HTML
+        assert "<html>" not in result
+        assert "<body>" not in result
+        assert result == "DuckDuckGo blocked by source (likely bot detection)"
 
 
 # ── _google_http_category ──────────────────────────────────────────────────────

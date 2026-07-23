@@ -200,7 +200,7 @@ Fast inference with open-source models.
 
 2. Configure (`.cogtrix.yaml`) with the key in the `api_key` field:
 
-   > **Note:** Cogtrix does not read `GROQ_API_KEY` from the environment. The key must be set in the config file's `api_key` field (or provided via `--setup`). Only `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `XAI_API_KEY`, and `DEEPSEEK_API_KEY` are read automatically.
+   > **Note:** Groq's API key can be set via `GROQ_API_KEY` in the environment (which is read automatically), or via the config file's `api_key` field (or `--setup`). All OpenAI-compatible providers also support their respective env vars: `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `XAI_API_KEY`, and `DEEPSEEK_API_KEY`.
    ```yaml
    providers:
      groq:

@@ -6,7 +6,7 @@ description: |
   agent made 33 consecutive successful get_current_datetime calls,
   passing every Gate 1 metric while producing nothing useful for the
   user.  This is the literal motivating example cited in
-  docs/quality/QUALITY_PIPELINE.md §51 — yet until now no Gate 2
+  docs/optional/quality/QUALITY_PIPELINE.md §51 — yet until now no Gate 2
   scenario actually exercised it.
 
   The task is naturally completable in one tool call: the agent calls

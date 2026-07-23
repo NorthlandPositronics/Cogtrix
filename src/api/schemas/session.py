@@ -152,6 +152,10 @@ class SessionOut(BaseModel):
         default=None,
         description="UTC timestamp when the session was archived (null if active).",
     )
+    workspace_id: str | None = Field(
+        default=None,
+        description="UUID of the workspace this session belongs to (null for personal sessions).",
+    )
 
     _ensure_utc = field_validator("created_at", "updated_at", "archived_at", mode="before")(
         ensure_utc
@@ -197,6 +201,11 @@ class SessionCreateRequest(BaseModel):
             "Does not require the tool to be in initial_tools."
         ),
         examples=[["git_add", "git_commit"]],
+    )
+    workspace_id: str | None = Field(
+        default=None,
+        description="UUID of the workspace to create this session in. "
+        "If provided, the caller must be a member of the workspace.",
     )
 
 

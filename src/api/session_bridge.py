@@ -149,6 +149,11 @@ async def warm_session(record: ApiSessionRecord, app_state: Any) -> ApiSession:
             if llm is not None:
                 memory_manager.set_llm(llm)
 
+        # The web_search stage-5 synthesiser LLM is scoped inside
+        # ``run_agent`` itself — see src/orchestration/runner.py. We
+        # don't wire it here because the session can outlive a single
+        # agent turn while the ContextVar should be re-set per turn.
+
         # 6. Parse token counts
         try:
             token_counts = json.loads(record.token_counts_json) if record.token_counts_json else {}

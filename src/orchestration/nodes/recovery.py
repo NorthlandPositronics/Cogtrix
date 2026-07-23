@@ -204,3 +204,186 @@ def build_handle_action_intent_node(
         }
 
     return handle_action_intent
+
+
+def build_handle_unverified_claim_node(
+    unverified_claim_count: list[int],
+    max_retries: int,
+    logger: Callable[[], Any] = get_logger,
+) -> Callable[[CogtrixState], dict]:
+    """Build the unverified-claim recovery node bound to a run-local counter.
+
+    Fires when the model produced a final response containing a
+    categorical claim about external state (today's date, latest
+    version, file content, etc.) without first calling the matching
+    verification tool. The recovery node deletes the unverified
+    response and injects a nudge that explains *which* claim was
+    caught and *which* tool to call to verify.
+
+    After ``max_retries`` attempts the agent's answer ships as-is —
+    we'd rather show a potentially-stale answer than spin forever.
+
+    Args:
+        unverified_claim_count: Mutable counter of how many times
+            the node fired this run.
+        max_retries: Maximum revision attempts before accepting the
+            response. Default 2 (one revision attempt — anything more
+            and the model is probably refusing to use the tool).
+        logger: Logger factory.
+    """
+    from src.orchestration.verification import (
+        VerificationRule,
+        collect_tool_names_this_turn,
+        detect_unverified_claim,
+    )
+
+    def handle_unverified_claim(state: CogtrixState) -> dict:
+        unverified_claim_count[0] += 1
+        log = logger()
+        msgs = state.get("messages") or []
+        last = msgs[-1] if msgs else None
+        last_content = getattr(last, "content", "") if last is not None else ""
+
+        if not isinstance(last_content, str):
+            # Defensive: if the content shape is unexpected, just let
+            # the response through rather than risk a loop.
+            return {"messages": []}
+
+        # Recompute which rule matched (the routing function will have
+        # done this already, but a second call is cheap and gives us
+        # the rule object for the nudge text).
+        turn_start = _find_current_turn_start(msgs)
+        tools_called = collect_tool_names_this_turn(msgs, turn_start)
+        rule: VerificationRule | None = detect_unverified_claim(last_content, tools_called)
+
+        if rule is None:
+            # Re-detection failed — possibly the response was already
+            # revised by a concurrent path. Skip the nudge.
+            return {"messages": []}
+
+        log.warning(
+            "Unverified-claim detected (rule=%s, attempt %d/%d). Injecting nudge.",
+            rule.name,
+            unverified_claim_count[0],
+            max_retries,
+        )
+
+        if unverified_claim_count[0] > max_retries:
+            log.info(
+                "Unverified-claim retries exhausted (rule=%s) — accepting the "
+                "agent's response as-is. The user may receive an unverified answer.",
+                rule.name,
+            )
+            return {"messages": []}
+
+        # Remove the unverified response so it doesn't accumulate in
+        # context, and inject the nudge for the next call_model pass.
+        removal: list[Any] = []
+        if last is not None and getattr(last, "id", None):
+            removal.append(RemoveMessage(id=last.id))
+        return {"messages": [*removal, HumanMessage(content=rule.nudge_template)]}
+
+    return handle_unverified_claim
+
+
+def build_handle_unverified_entity_node(
+    unverified_entity_count: list[int],
+    max_retries: int,
+    logger: Callable[[], Any] = get_logger,
+) -> Callable[[CogtrixState], dict]:
+    """Build the unverified-entity recovery node bound to a run-local counter.
+
+    cogtrix47 (Issues 5+6): when the model produced a final response
+    that repeats high-specificity identifiers from the user's prompt
+    (SKUs, store names, multi-word product names) WITHOUT any tool
+    result confirming the entity exists, the response is operating
+    on an unverified premise. This node deletes the response and
+    injects a nudge listing the unverified entities + three explicit
+    revision options (cite evidence, hedge, substitute the verified
+    alternative).
+
+    Args:
+        unverified_entity_count: Mutable counter of how many times the
+            node fired this run.
+        max_retries: Maximum revision attempts before accepting the
+            response. Default 1 — one revision attempt is enough; if
+            the model still repeats unverified entities after the
+            nudge it's actively ignoring the guard, not just bad
+            luck.
+        logger: Logger factory.
+    """
+    from src.orchestration.verification import (
+        collect_tool_message_contents,
+        detect_unverified_entities,
+        format_unverified_entity_nudge,
+    )
+
+    def handle_unverified_entity(state: CogtrixState) -> dict:
+        from langchain_core.messages import HumanMessage as _HM
+
+        unverified_entity_count[0] += 1
+        log = logger()
+        msgs = state.get("messages") or []
+        last = msgs[-1] if msgs else None
+        last_content = getattr(last, "content", "") if last is not None else ""
+
+        if not isinstance(last_content, str):
+            return {"messages": []}
+
+        turn_start = _find_current_turn_start(msgs)
+        # Resolve the actual user prompt — the HumanMessage at turn_start.
+        user_prompt = ""
+        if turn_start < len(msgs) and isinstance(msgs[turn_start], _HM):
+            up = msgs[turn_start].content
+            if isinstance(up, str):
+                user_prompt = up
+        tool_contents = collect_tool_message_contents(msgs, turn_start)
+
+        entities = detect_unverified_entities(last_content, user_prompt, tool_contents)
+
+        if not entities:
+            # Re-detection failed — possibly the response was already
+            # revised by a concurrent path. Skip the nudge.
+            return {"messages": []}
+
+        log.warning(
+            "Unverified-entity detected (entities=%s, attempt %d/%d). Injecting nudge.",
+            entities,
+            unverified_entity_count[0],
+            max_retries,
+        )
+
+        if unverified_entity_count[0] > max_retries:
+            log.info(
+                "Unverified-entity retries exhausted (entities=%s) — accepting the "
+                "agent's response as-is rather than spinning further.",
+                entities,
+            )
+            return {"messages": []}
+
+        removal: list[Any] = []
+        if last is not None and getattr(last, "id", None):
+            removal.append(RemoveMessage(id=last.id))
+        return {
+            "messages": [
+                *removal,
+                HumanMessage(content=format_unverified_entity_nudge(entities)),
+            ]
+        }
+
+    return handle_unverified_entity
+
+
+def _find_current_turn_start(messages: list[Any]) -> int:
+    """Return the index of the most recent HumanMessage in *messages*.
+
+    The "current turn" is the slice from that HumanMessage forward.
+    Tool calls before that index belong to prior turns and don't
+    count toward the current turn's verification budget.
+    """
+    from langchain_core.messages import HumanMessage as _HM
+
+    for i in range(len(messages) - 1, -1, -1):
+        if isinstance(messages[i], _HM):
+            return i
+    return 0

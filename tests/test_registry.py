@@ -170,3 +170,108 @@ class TestFallbackDiscovery:
         assert len(results) == 1
         _, config = results[0]
         assert config["description"] == "First paragraph."
+
+
+# ── Discovery hygiene (cogtrix52 startup-noise) ──────────────────────────────
+
+
+class TestDiscoverToolModulesHygiene:
+    """cogtrix52.log surfaced ~20 startup WARNINGs of the form
+    ``Module src.tools._foo: no tools resolved from TOOL_CONFIG/TOOL_CONFIGS``.
+
+    Two separate sources of that noise:
+
+    1. ``_``-prefixed PRIVATE helpers (``_ddg``, ``_http_safety``,
+       ``_native_safety``, …) — Python convention says these aren't
+       tools; the discovery should skip them entirely so no log
+       fires at any level.
+    2. Public infra modules (``checkpoint``, ``configure``,
+       ``error_sanitizer``, …) that legitimately have no
+       TOOL_CONFIG/CONFIGS — those should log at DEBUG, not WARNING,
+       because the absence is intentional.
+    """
+
+    def _make_registry_with_dir(self, tools_dir, files: dict[str, str]):
+        """Materialise ``files`` (name → contents) under ``tools_dir`` and
+        return a ToolRegistry pointed at it."""
+        from src.registry import ToolRegistry
+
+        for name, content in files.items():
+            (tools_dir / name).write_text(content)
+        return ToolRegistry(tools_directory=str(tools_dir))
+
+    def test_private_modules_skipped_in_discovery(self, tmp_path):
+        """``_helper.py`` must not appear in the discovered-module list —
+        no scan, no log, no warning."""
+        reg = self._make_registry_with_dir(
+            tmp_path,
+            {
+                "real_tool.py": "TOOL_CONFIG = {}\n",
+                "_helper.py": "# private helper\n",
+                "_another_private.py": "x = 1\n",
+                "__init__.py": "",
+            },
+        )
+        discovered = reg.scan_tools()
+        assert "real_tool" in discovered
+        assert "_helper" not in discovered
+        assert "_another_private" not in discovered
+
+    def test_dunder_init_still_skipped(self, tmp_path):
+        """Belt-and-braces: ``__init__.py`` keeps being skipped even
+        after the leading-underscore filter is added."""
+        reg = self._make_registry_with_dir(
+            tmp_path,
+            {
+                "real_tool.py": "TOOL_CONFIG = {}\n",
+                "__init__.py": "TOOL_CONFIG = {'name': 'should not load'}\n",
+            },
+        )
+        assert reg.scan_tools() == ["real_tool"]
+
+    def test_no_tools_resolved_logs_at_debug_not_warning(self, caplog):
+        """A module with no TOOL_CONFIG/CONFIGS and no fallback-discoverable
+        function ends up with ``results == []``. The log line must fire at
+        DEBUG, not WARNING — the absence is intentional for infra modules
+        like ``checkpoint`` / ``configure`` that legitimately don't expose
+        agent tools."""
+        import logging
+
+        from src.registry import ToolRegistry
+
+        # Module with nothing tool-shaped — no TOOL_CONFIG, no *Input class,
+        # no function pairings.
+        mod = types.ModuleType("fake_infra_module")
+
+        def _internal_helper():  # type: ignore[return]
+            """Internal helper, not an agent tool."""
+
+        mod._internal_helper = _internal_helper  # type: ignore[attr-defined]
+
+        registry = ToolRegistry.__new__(ToolRegistry)
+        registry.tools = {}
+        registry.tool_metadata = {}
+
+        with caplog.at_level(logging.DEBUG, logger="cogtrix"):
+            results = registry.extract_tool_functions(mod)
+
+        assert results == []
+        # Must appear at DEBUG level.
+        debug_matches = [
+            r
+            for r in caplog.records
+            if r.levelno == logging.DEBUG and "no tools resolved" in r.getMessage()
+        ]
+        warning_matches = [
+            r
+            for r in caplog.records
+            if r.levelno == logging.WARNING and "no tools resolved" in r.getMessage()
+        ]
+        assert len(debug_matches) == 1, (
+            "expected exactly one DEBUG 'no tools resolved' line, got "
+            f"{len(debug_matches)} debug + {len(warning_matches)} warning"
+        )
+        assert warning_matches == [], (
+            "no-tools-resolved must NOT fire at WARNING — the absence is "
+            "intentional for infra modules and just produces startup noise"
+        )

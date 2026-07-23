@@ -163,10 +163,68 @@ def sanitize_file_error(exc: BaseException) -> str:
 
 
 def sanitize_search_error(exc: BaseException, context: str = "Search") -> str:
-    """Sanitize search API exceptions. Returns a safe search-specific message."""
+    """Sanitize search API exceptions. Returns a safe search-specific message.
+
+    Improves diagnostic detail (closes #1586) by:
+
+    * Mapping DDGS / duckduckgo_search library exceptions
+      (``RatelimitException``, ``DuckDuckGoSearchException``,
+      ``TimeoutException``) onto specific categorical messages.  Without
+      this mapping every DDG failure fell through to the generic
+      "Search request failed" placeholder, which gave the operator no
+      handle to diagnose whether it was a rate-limit, a captcha block,
+      or a connection error.
+    * Appending the exception class name when the generic-fallback path
+      fires.  Class names are abstract type identifiers — they do not
+      leak secrets, file paths, IPs, or library internals — but they
+      give the operator one concrete piece of debugging signal when
+      the categorical mapping doesn't recognise the failure.
+
+    Args:
+        exc: The caught exception.
+        context: A short string identifying the search provider
+            (e.g. ``"DuckDuckGo"``, ``"Tavily"``).  Used as a prefix
+            in the returned message so operators can identify *which*
+            provider failed.
+
+    Returns:
+        A safe categorical error message identifying the provider, the
+        failure class, and (where available) a short categorical hint
+        such as "rate-limited" or "bot-detection".
+    """
+    # ── DDGS / duckduckgo_search library-specific exceptions ─────────────
+    #
+    # The DDGS library raises its own exception hierarchy that the
+    # generic ``sanitize_error`` doesn't know about.  Without this
+    # specialised branch, every DDGS failure falls through to the
+    # generic fallback and emerges as "Search request failed" — the
+    # opacity that prompted #1586.
+    exc_class = type(exc).__name__
+    if exc_class == "RatelimitException":
+        return f"{context} rate-limited (HTTP 429)"
+    if exc_class == "TimeoutException":
+        # DDGS uses this name; differs from built-in ``TimeoutError``
+        return f"{context} request timed out"
+    if exc_class == "DuckDuckGoSearchException":
+        # Multiple root causes are wrapped in this single class.
+        # Inspect the message body cautiously — it can contain HTML
+        # snippets when DDG returns a "blocked" page, so we look for
+        # category keywords rather than echoing the full string.
+        msg = str(exc).lower()
+        if "rate" in msg or "limit" in msg or "429" in msg:
+            return f"{context} rate-limited"
+        if "blocked" in msg or "captcha" in msg or "anomaly" in msg:
+            return f"{context} blocked by source (likely bot detection)"
+        if "timeout" in msg:
+            return f"{context} request timed out"
+        return f"{context} client error ({exc_class})"
+
     result = sanitize_error(exc)
     if result in ("Operation failed",):
-        return f"{context} request failed"
+        # Generic fallback fired — the sanitizer didn't recognise the
+        # exception.  Append the class name so the operator gets one
+        # diagnostic handle without us leaking message content.
+        return f"{context} request failed ({exc_class})"
     return result
 
 

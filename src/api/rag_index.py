@@ -93,34 +93,15 @@ def load_faiss_store(persist_dir: Path, embeddings: Any) -> FAISS | None:
 
 
 def load_faiss_store_safe(persist_dir: Path, embeddings: Any) -> FAISS | None:
-    """Load a FAISS store, migrating legacy pickle-format stores on read.
+    """Load a FAISS store from safe raw-FAISS + JSON format.
 
-    Tries the safe raw-FAISS path first.  When *persist_dir* contains a
-    legacy ``index.pkl`` (from ``FAISS.load_local / save_local``) but no
-    ``metadata.json`` sidecar, the store is loaded via pickle *one last
-    time* and immediately migrated to the safe raw format.
+    Uses ``load_faiss_store`` (raw faiss.read_index + JSON metadata — no pickle).
+    Returns None when no usable safe-format index is found or load fails.
 
-    Returns None when no usable index is found or the load fails.
+    The legacy ``index.pkl`` pickle format is no longer supported. If only a
+    ``.pkl`` file exists (no ``index.faiss`` + ``metadata.json``), the index is
+    treated as absent and None is returned. This eliminates the RCE risk from
+    ``FAISS.load_local(allow_dangerous_deserialization=True)`` in the legacy
+    migration path (issue #930).
     """
-    # 1) Try the safe (raw FAISS + JSON) path first.
-    store = load_faiss_store(persist_dir, embeddings)
-    if store is not None:
-        return store
-
-    # 2) Legacy pickle-format store: migrate it to the safe format.
-    pkl_path = persist_dir / _LEGACY_PICKLE_FILENAME
-    if not pkl_path.exists():
-        return None
-
-    try:
-        store = FAISS.load_local(
-            str(persist_dir),
-            embeddings,
-            allow_dangerous_deserialization=True,
-        )
-        save_faiss_store(store, persist_dir)
-        log.info("Migrated FAISS index from pickle to safe format: %s", persist_dir)
-        return store
-    except Exception as exc:  # noqa: BLE001
-        log.warning("Failed to migrate legacy FAISS store from %s: %s", persist_dir, exc)
-        return None
+    return load_faiss_store(persist_dir, embeddings)

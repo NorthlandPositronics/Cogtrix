@@ -40,6 +40,7 @@ from typing import Any
 import requests
 from pydantic import BaseModel, Field
 
+from src.tools._web_search_aggregator import ProviderResult
 from src.tools.error_sanitizer import sanitize_search_error as _sanitize_search_error
 
 log = logging.getLogger("cogtrix")
@@ -259,46 +260,89 @@ def google_search(
     return "\n".join(output)
 
 
-# -- Tool registration --------------------------------------------------------
+async def _search_async(
+    query: str, num_results: int = 5, region: str | None = None
+) -> list[ProviderResult]:
+    """Async Google CSE search returning ProviderResult list (ADR-0056 PR-B).
 
-TOOL_CONFIG = {
-    "name": "google_search",
-    "description": (
-        "Search the web using the official Google Custom Search API. "
-        "This is real Google Search - results come directly from Google's "
-        "index with the same quality and freshness as google.com.\n"
-        "\n"
-        "Supports:\n"
-        "- Full Google web search with up to 10 results per query\n"
-        "- Date filtering: 'd7' (7 days), 'w2' (2 weeks), 'm1' (month), "
-        "'y1' (year)\n"
-        "- Language restriction (e.g. 'lang_en', 'lang_de')\n"
-        "- Safe search toggle\n"
-        "\n"
-        "Rich data returned (when available):\n"
-        "- Organic results with titles, URLs, and snippets\n"
-        "- Spelling suggestions\n"
-        "- Published dates and meta descriptions from page metadata\n"
-        "- Total result count and search time\n"
-        "\n"
-        "USE THIS TOOL WHEN:\n"
-        "- You need the highest-quality, most comprehensive web results\n"
-        "- You want results from Google's index specifically\n"
-        "- You need date-filtered search (e.g. recent results only)\n"
-        "- Other search tools return insufficient or irrelevant results\n"
-        "\n"
-        "Requires a Google API key and a Programmable Search Engine ID. "
-        "Free tier: 100 queries/day."
-    ),
-    "input_schema": GoogleSearchInput,
-    "function": google_search,
-    "requires_confirmation": False,
-}
+    Wraps the sync ``requests.get`` against the Custom Search JSON API.
+    Best-effort date extraction from pagemap metatags
+    (``article:published_time`` / ``datePublished`` / ``date``).
+    Raises on missing API key / CSE ID / HTTP errors.
+    """
+    import asyncio
+
+    del region  # Google CSE uses 'lr' (language), not region — out of scope here
+
+    api_key = _get_api_key()
+    cse_id = _get_cse_id()
+    if not api_key:
+        raise RuntimeError("Google API key not configured")
+    if not cse_id:
+        raise RuntimeError("Google Custom Search Engine ID not configured")
+    if not query.strip():
+        return []
+
+    num_results = max(1, min(num_results, 10))
+
+    def _sync_call() -> dict[str, Any]:
+        response = requests.get(
+            GOOGLE_CSE_API,
+            params={
+                "key": api_key,
+                "cx": cse_id,
+                "q": query,
+                "num": num_results,
+                "safe": "off",
+            },
+            timeout=30,
+        )
+        response.raise_for_status()
+        return response.json()
+
+    data = await asyncio.to_thread(_sync_call)
+    items = data.get("items", []) or []
+
+    results: list[ProviderResult] = []
+    for item in items:
+        link = item.get("link") or ""
+        if not link:
+            continue
+        pagemap = item.get("pagemap", {}) or {}
+        metatags = pagemap.get("metatags", []) or []
+        meta = metatags[0] if metatags else {}
+        published = (
+            meta.get("article:published_time")
+            or meta.get("datePublished")
+            or meta.get("date")
+            or None
+        )
+        results.append(
+            ProviderResult(
+                provider="google",
+                url=link,
+                title=item.get("title") or "",
+                snippet=" ".join((item.get("snippet") or "").split()),
+                # The date may include time component; keep first 10 chars
+                # (YYYY-MM-DD) when present.
+                published_date=published[:10] if isinstance(published, str) and published else None,
+            )
+        )
+    return results
+
+
+# -- Tool registration --------------------------------------------------------
+#
+# PR-G removed google_search from the agent catalogue. The sync
+# function and async _search_async stay in this module so web_search
+# can reach Google via _resolve_providers().
+TOOL_CONFIGS: list[dict[str, Any]] = []
+
 
 __all__ = [
     "google_search",
     "configure_google_search",
     "is_configured",
     "GoogleSearchInput",
-    "TOOL_CONFIG",
+    "TOOL_CONFIGS",
 ]

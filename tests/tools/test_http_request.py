@@ -218,14 +218,14 @@ class TestValidateUrlSsrf:
     def test_dns_resolves_to_private_ip_blocked(self) -> None:
         """Hostname that DNS resolves to a private IP must be blocked."""
         fake_addrinfo = [(socket.AF_INET, socket.SOCK_STREAM, 0, "", ("10.0.0.1", 0))]
-        with patch("src.tools.http_request.socket.getaddrinfo", return_value=fake_addrinfo):
+        with patch("src.tools._http_safety.socket.getaddrinfo", return_value=fake_addrinfo):
             ok, _err, _ip = _validate_url("http://internal.corp.example/")
         assert ok is False
 
     def test_dns_resolves_to_public_ip_allowed(self) -> None:
         """Hostname that DNS resolves to a public IP must be allowed."""
         fake_addrinfo = [(socket.AF_INET, socket.SOCK_STREAM, 0, "", ("93.184.216.34", 0))]
-        with patch("src.tools.http_request.socket.getaddrinfo", return_value=fake_addrinfo):
+        with patch("src.tools._http_safety.socket.getaddrinfo", return_value=fake_addrinfo):
             ok, err, _ip = _validate_url("http://example.com/")
         assert ok is True
         assert err == ""
@@ -243,7 +243,7 @@ class TestValidateUrlSsrf:
     def test_dns_resolves_to_multicast_ip_blocked(self) -> None:
         """Hostname that DNS resolves to a multicast IP must be blocked."""
         fake_addrinfo = [(socket.AF_INET, socket.SOCK_STREAM, 0, "", ("239.255.255.250", 0))]
-        with patch("src.tools.http_request.socket.getaddrinfo", return_value=fake_addrinfo):
+        with patch("src.tools._http_safety.socket.getaddrinfo", return_value=fake_addrinfo):
             ok, _err, _ip = _validate_url("http://ssdp-local.corp.example/")
         assert ok is False
 
@@ -254,7 +254,7 @@ class TestDnsPinning:
     def test_validate_url_returns_resolved_ip(self) -> None:
         """_validate_url returns the first public IP as the third element."""
         fake_addrinfo = [(socket.AF_INET, socket.SOCK_STREAM, 0, "", ("93.184.216.34", 0))]
-        with patch("src.tools.http_request.socket.getaddrinfo", return_value=fake_addrinfo):
+        with patch("src.tools._http_safety.socket.getaddrinfo", return_value=fake_addrinfo):
             ok, err, ip = _validate_url("https://example.com/")
         assert ok is True
         assert err == ""
@@ -263,7 +263,7 @@ class TestDnsPinning:
     def test_validate_url_rejects_on_dns_failure(self) -> None:
         """_validate_url rejects URLs when DNS resolution fails (SEC-002)."""
         with patch(
-            "src.tools.http_request.socket.getaddrinfo",
+            "src.tools._http_safety.socket.getaddrinfo",
             side_effect=socket.gaierror("DNS failure"),
         ):
             ok, err, ip = _validate_url("https://example.com/")

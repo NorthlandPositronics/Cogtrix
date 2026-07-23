@@ -12,6 +12,8 @@ import pytest
 
 from src.mcp_client import (
     _STARTUP_MAX_RETRIES,
+    DOC_ONLY_MCP_FIELDS,
+    KNOWN_MCP_FIELDS,
     MCPConnection,
     MCPManager,
     MCPServerConfig,
@@ -1667,6 +1669,330 @@ class TestMCPStartupRetry:
         assert conn is None
         assert len(attempts) == 1, "ValueError must not be retried"
 
+    # ── ExceptionGroup unwrap — cogtrix50 regression ──────────────────────────
+    #
+    # The MCP transports (sse_client via anyio TaskGroup, stdio_client similarly)
+    # wrap their underlying errors in BaseExceptionGroup. The handler's job is
+    # to walk down to the deepest real cause so the WARNING log surfaces a
+    # readable error class and the fail-fast classification can match against
+    # specific inner exception types (FileNotFoundError, PermissionError, ...).
+    #
+    # A prior bug used ``__exceptions__`` for the unwrap — that attribute
+    # doesn't exist on BaseExceptionGroup; the real one is ``.exceptions``.
+    # The loop never iterated, so the "cause" stayed the group wrapper.
+    # Result: every log line read ``ExceptionGroup: unhandled errors in a
+    # TaskGroup`` instead of e.g. ``ConnectError: [Errno -2] Name or service
+    # not known``, and fail-fast was dead code.
+
+    def test_exception_group_unwrapped_to_inner_cause_in_log(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """When connect() raises a BaseExceptionGroup, the WARNING must name
+        the inner exception's class, not the ``ExceptionGroup`` wrapper."""
+        import logging
+
+        manager = MCPManager()
+        cfg = MCPServerConfig(name="srv", command="cmd")
+
+        async def group_wrapped_connect(_self: MCPConnection) -> None:
+            # Shape produced by anyio.TaskGroup when a child task raises:
+            #   BaseExceptionGroup("unhandled errors in a TaskGroup", [<real>])
+            inner = ConnectionRefusedError("connection refused on probe")
+            raise BaseExceptionGroup("unhandled errors in a TaskGroup", [inner])
+
+        async def noop_close(_self: MCPConnection) -> None:
+            pass
+
+        with patch("src.mcp_client._STARTUP_RETRY_DELAYS", (0.0, 0.0)):
+            with patch.object(MCPConnection, "connect", group_wrapped_connect):
+                with patch.object(MCPConnection, "close", noop_close):
+                    with patch("src.mcp_client.MCP_AVAILABLE", True):
+                        manager._ensure_loop()
+                        with caplog.at_level(logging.WARNING, logger="cogtrix"):
+                            future = asyncio.run_coroutine_threadsafe(
+                                manager._connect_one_async(cfg),
+                                manager._loop,  # type: ignore[arg-type]
+                            )
+                            name, conn = future.result(timeout=10)
+
+        manager.close_all()
+        assert conn is None
+        # The WARNING must read "ConnectionRefusedError: ..." not
+        # "ExceptionGroup: unhandled errors in a TaskGroup".
+        warning_text = caplog.text
+        assert "ConnectionRefusedError" in warning_text, (
+            "expected unwrapped cause class name in the warning; got:\n" + warning_text
+        )
+        assert "connection refused on probe" in warning_text, (
+            "expected the inner exception's message in the warning; got:\n" + warning_text
+        )
+        assert "unhandled errors in a TaskGroup" not in warning_text, (
+            "ExceptionGroup wrapper text leaked into the warning — the "
+            "unwrap loop didn't iterate. Was the .exceptions attribute "
+            "renamed to __exceptions__ again?"
+        )
+
+    def test_exception_group_unwrapped_handles_nested_groups(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Nested BaseExceptionGroup wrappers (group-of-group-of-real) must
+        also walk to the deepest non-group exception."""
+        import logging
+
+        manager = MCPManager()
+        cfg = MCPServerConfig(name="srv", command="cmd")
+
+        async def nested_group_connect(_self: MCPConnection) -> None:
+            inner = ConnectionRefusedError("buried two levels deep")
+            mid = BaseExceptionGroup("inner group", [inner])
+            raise BaseExceptionGroup("outer group", [mid])
+
+        async def noop_close(_self: MCPConnection) -> None:
+            pass
+
+        with patch("src.mcp_client._STARTUP_RETRY_DELAYS", (0.0, 0.0)):
+            with patch.object(MCPConnection, "connect", nested_group_connect):
+                with patch.object(MCPConnection, "close", noop_close):
+                    with patch("src.mcp_client.MCP_AVAILABLE", True):
+                        manager._ensure_loop()
+                        with caplog.at_level(logging.WARNING, logger="cogtrix"):
+                            future = asyncio.run_coroutine_threadsafe(
+                                manager._connect_one_async(cfg),
+                                manager._loop,  # type: ignore[arg-type]
+                            )
+                            future.result(timeout=10)
+
+        manager.close_all()
+        assert "ConnectionRefusedError" in caplog.text
+        assert "buried two levels deep" in caplog.text
+
+    def test_fail_fast_triggers_on_group_wrapped_dns_nxdomain(self) -> None:
+        """``[Errno -2] Name or service not known`` is EAI_NONAME — a
+        deterministic DNS failure. No retry will help. Must fail-fast
+        on the first attempt (cogtrix52 reproducer: ``mcp-github``
+        hostname unresolvable from the cogtrix container)."""
+
+        # ConnectError-shaped exception we can recognise without importing
+        # httpx into the test — production code matches on the class name
+        # for the same cross-version-safe reason.
+        class ConnectError(Exception):
+            pass
+
+        manager = MCPManager()
+        cfg = MCPServerConfig(name="srv", url="http://unresolvable-host:8001/sse")
+        attempts: list[int] = []
+
+        async def group_wrapped_nxdomain(_self: MCPConnection) -> None:
+            attempts.append(1)
+            inner = ConnectError("[Errno -2] Name or service not known")
+            raise BaseExceptionGroup("unhandled errors in a TaskGroup", [inner])
+
+        async def noop_close(_self: MCPConnection) -> None:
+            pass
+
+        with patch("src.mcp_client._STARTUP_RETRY_DELAYS", (0.0, 0.0, 0.0)):
+            with patch.object(MCPConnection, "connect", group_wrapped_nxdomain):
+                with patch.object(MCPConnection, "close", noop_close):
+                    with patch("src.mcp_client.MCP_AVAILABLE", True):
+                        manager._ensure_loop()
+                        future = asyncio.run_coroutine_threadsafe(
+                            manager._connect_one_async(cfg),
+                            manager._loop,  # type: ignore[arg-type]
+                        )
+                        future.result(timeout=10)
+
+        manager.close_all()
+        assert len(attempts) == 1, f"NXDOMAIN must fail-fast, not retry. attempts={len(attempts)}"
+
+    def test_fail_fast_triggers_on_socket_gaierror(self) -> None:
+        """``socket.gaierror`` from a stdlib path (rather than wrapped in
+        an httpx ConnectError) must also fail-fast — it's the canonical
+        DNS-failure class."""
+        import socket
+
+        manager = MCPManager()
+        cfg = MCPServerConfig(name="srv", url="http://nope/sse")
+        attempts: list[int] = []
+
+        async def gaierror_connect(_self: MCPConnection) -> None:
+            attempts.append(1)
+            raise BaseExceptionGroup(
+                "task group", [socket.gaierror(-2, "Name or service not known")]
+            )
+
+        async def noop_close(_self: MCPConnection) -> None:
+            pass
+
+        with patch("src.mcp_client._STARTUP_RETRY_DELAYS", (0.0, 0.0, 0.0)):
+            with patch.object(MCPConnection, "connect", gaierror_connect):
+                with patch.object(MCPConnection, "close", noop_close):
+                    with patch("src.mcp_client.MCP_AVAILABLE", True):
+                        manager._ensure_loop()
+                        future = asyncio.run_coroutine_threadsafe(
+                            manager._connect_one_async(cfg),
+                            manager._loop,  # type: ignore[arg-type]
+                        )
+                        future.result(timeout=10)
+
+        manager.close_all()
+        assert len(attempts) == 1, f"socket.gaierror must fail-fast. attempts={len(attempts)}"
+
+    def test_connect_error_with_other_errno_still_retries(self) -> None:
+        """ConnectError WITHOUT ``[Errno -2]`` (e.g. ECONNREFUSED — port
+        not listening yet) is potentially transient. The retry policy
+        must NOT suck this into the fail-fast path."""
+
+        class ConnectError(Exception):
+            pass
+
+        manager = MCPManager()
+        cfg = MCPServerConfig(name="srv", url="http://localhost:8001/sse")
+        attempts: list[int] = []
+
+        async def transient_connect(_self: MCPConnection) -> None:
+            attempts.append(1)
+            inner = ConnectError("[Errno 111] Connection refused")
+            raise BaseExceptionGroup("task group", [inner])
+
+        async def noop_close(_self: MCPConnection) -> None:
+            pass
+
+        with patch("src.mcp_client._STARTUP_RETRY_DELAYS", (0.0, 0.0, 0.0)):
+            with patch.object(MCPConnection, "connect", transient_connect):
+                with patch.object(MCPConnection, "close", noop_close):
+                    with patch("src.mcp_client.MCP_AVAILABLE", True):
+                        manager._ensure_loop()
+                        future = asyncio.run_coroutine_threadsafe(
+                            manager._connect_one_async(cfg),
+                            manager._loop,  # type: ignore[arg-type]
+                        )
+                        future.result(timeout=10)
+
+        manager.close_all()
+        assert len(attempts) == _STARTUP_MAX_RETRIES + 1, (
+            "Transient ConnectError (ECONNREFUSED) must use the full retry "
+            f"budget. attempts={len(attempts)}"
+        )
+
+    def test_known_network_errors_skip_traceback_dump(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """For known network-error classes the WARNING already names the
+        cause — the multi-frame DEBUG traceback is library plumbing,
+        ~125 lines per failure, zero Cogtrix-side signal. Must NOT
+        emit the ``full traceback for server`` debug line."""
+        import logging
+
+        manager = MCPManager()
+        cfg = MCPServerConfig(name="srv", url="http://localhost:8001/sse")
+
+        async def refused(_self: MCPConnection) -> None:
+            raise BaseExceptionGroup("task group", [ConnectionRefusedError("connection refused")])
+
+        async def noop_close(_self: MCPConnection) -> None:
+            pass
+
+        with patch("src.mcp_client._STARTUP_RETRY_DELAYS", (0.0, 0.0, 0.0)):
+            with patch.object(MCPConnection, "connect", refused):
+                with patch.object(MCPConnection, "close", noop_close):
+                    with patch("src.mcp_client.MCP_AVAILABLE", True):
+                        manager._ensure_loop()
+                        with caplog.at_level(logging.DEBUG, logger="cogtrix"):
+                            future = asyncio.run_coroutine_threadsafe(
+                                manager._connect_one_async(cfg),
+                                manager._loop,  # type: ignore[arg-type]
+                            )
+                            future.result(timeout=10)
+
+        manager.close_all()
+        traceback_lines = [
+            r for r in caplog.records if "full traceback for server" in r.getMessage()
+        ]
+        assert traceback_lines == [], (
+            "ConnectionRefusedError is a known network-error class — the "
+            "multi-frame DEBUG traceback must be suppressed. Found "
+            f"{len(traceback_lines)} traceback line(s)."
+        )
+
+    def test_unexpected_exception_class_still_dumps_traceback(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """For exception classes the WARNING does NOT already name in a
+        meaningful way (a novel RuntimeError, KeyError, etc.) the
+        forensic traceback must STILL fire — that's where the value is."""
+        import logging
+
+        manager = MCPManager()
+        cfg = MCPServerConfig(name="srv", command="cmd")
+
+        async def novel_failure(_self: MCPConnection) -> None:
+            raise BaseExceptionGroup(
+                "task group", [RuntimeError("something we did not anticipate")]
+            )
+
+        async def noop_close(_self: MCPConnection) -> None:
+            pass
+
+        with patch("src.mcp_client._STARTUP_RETRY_DELAYS", (0.0, 0.0, 0.0)):
+            with patch.object(MCPConnection, "connect", novel_failure):
+                with patch.object(MCPConnection, "close", noop_close):
+                    with patch("src.mcp_client.MCP_AVAILABLE", True):
+                        manager._ensure_loop()
+                        with caplog.at_level(logging.DEBUG, logger="cogtrix"):
+                            future = asyncio.run_coroutine_threadsafe(
+                                manager._connect_one_async(cfg),
+                                manager._loop,  # type: ignore[arg-type]
+                            )
+                            future.result(timeout=10)
+
+        manager.close_all()
+        traceback_lines = [
+            r for r in caplog.records if "full traceback for server" in r.getMessage()
+        ]
+        assert len(traceback_lines) >= 1, (
+            "RuntimeError is NOT a known network-error class — the "
+            "traceback must still fire for novel failures."
+        )
+
+    def test_fail_fast_triggers_on_group_wrapped_file_not_found(self) -> None:
+        """``FileNotFoundError`` wrapped in a BaseExceptionGroup (the shape
+        produced when ``stdio_client`` can't spawn the command) MUST trigger
+        the fail-fast path — no retries, single warning. Before the unwrap
+        fix this isinstance check was dead code: ``cause`` was the
+        ExceptionGroup wrapper, never the inner FileNotFoundError."""
+        manager = MCPManager()
+        cfg = MCPServerConfig(name="srv", command="this-binary-does-not-exist")
+        attempts: list[int] = []
+
+        async def group_wrapped_missing_exec(_self: MCPConnection) -> None:
+            attempts.append(1)
+            # Shape produced by stdio_client when the executable is missing.
+            inner = FileNotFoundError(
+                "[Errno 2] No such file or directory: 'this-binary-does-not-exist'"
+            )
+            raise BaseExceptionGroup("unhandled errors in a TaskGroup", [inner])
+
+        async def noop_close(_self: MCPConnection) -> None:
+            pass
+
+        with patch("src.mcp_client._STARTUP_RETRY_DELAYS", (0.0, 0.0, 0.0)):
+            with patch.object(MCPConnection, "connect", group_wrapped_missing_exec):
+                with patch.object(MCPConnection, "close", noop_close):
+                    with patch("src.mcp_client.MCP_AVAILABLE", True):
+                        manager._ensure_loop()
+                        future = asyncio.run_coroutine_threadsafe(
+                            manager._connect_one_async(cfg),
+                            manager._loop,  # type: ignore[arg-type]
+                        )
+                        name, conn = future.result(timeout=10)
+
+        manager.close_all()
+        assert conn is None
+        # Fail-fast: exactly one attempt, no retries.
+        assert (
+            len(attempts) == 1
+        ), f"FileNotFoundError must fail-fast, not retry. attempts={len(attempts)}"
+
     def test_connect_all_retries_failed_server_transparently(self) -> None:
         """connect_all() succeeds for a server that needs one retry."""
         manager = MCPManager()
@@ -1750,6 +2076,105 @@ class TestMCPReconnectRace:
         assert "srv" in manager._reconnect_locks, "Lock must exist after first reconnect"
 
 
+class TestMCPReconnectTimeout:
+    """Regression tests for #576 — _reconnect_server_async must not hang indefinitely."""
+
+    @pytest.mark.timeout(60)
+    def test_reconnect_async_times_out_on_hanging_connect(self) -> None:
+        """If connect() hangs, _reconnect_server_async must raise TimeoutError within 30s."""
+        manager = MCPManager()
+        cfg = MCPServerConfig(name="srv", command="cmd")
+        call_count = 0
+
+        async def stateful_connect(self_conn: MCPConnection) -> None:
+            nonlocal call_count
+            call_count += 1
+            if call_count > 1:
+                await asyncio.sleep(60)
+            self_conn._tools = []
+
+        with patch("src.mcp_client.MCP_AVAILABLE", True):
+            with patch.object(MCPConnection, "connect", stateful_connect):
+                manager.connect_all([cfg])
+                manager._ensure_loop()
+
+                future = asyncio.run_coroutine_threadsafe(
+                    manager._reconnect_server_async("srv"),
+                    manager._loop,  # type: ignore[arg-type]
+                )
+                with pytest.raises(TimeoutError):
+                    future.result(timeout=35)
+
+        manager.close_all()
+        assert "srv" not in manager._connections
+
+    @pytest.mark.timeout(60)
+    def test_reconnect_async_closes_partial_connection_on_timeout(self) -> None:
+        """A timed-out connect() must not leak partial MCPConnection state."""
+        manager = MCPManager()
+        cfg = MCPServerConfig(name="srv", command="cmd")
+        call_count = 0
+        closed_connections: list[MCPConnection] = []
+
+        async def stateful_connect(self_conn: MCPConnection) -> None:
+            nonlocal call_count
+            call_count += 1
+            if call_count > 1:
+                await asyncio.sleep(60)
+            self_conn._tools = []
+
+        original_close = MCPConnection.close
+
+        async def tracking_close(self_conn: MCPConnection) -> None:
+            closed_connections.append(self_conn)
+            await original_close(self_conn)
+
+        with patch("src.mcp_client.MCP_AVAILABLE", True):
+            with patch.object(MCPConnection, "connect", stateful_connect):
+                with patch.object(MCPConnection, "close", tracking_close):
+                    manager.connect_all([cfg])
+                    manager._ensure_loop()
+
+                    future = asyncio.run_coroutine_threadsafe(
+                        manager._reconnect_server_async("srv"),
+                        manager._loop,  # type: ignore[arg-type]
+                    )
+                    with pytest.raises(TimeoutError):
+                        future.result(timeout=35)
+
+        manager.close_all()
+        # The new (failed) connection should have been closed.
+        assert len(closed_connections) >= 1
+
+    def test_reconnect_async_survives_three_cycles(self) -> None:
+        """Three forced disconnect/reconnect cycles must complete without leaking state."""
+        manager = MCPManager()
+        cfg = MCPServerConfig(name="srv", command="cmd")
+        connect_calls = 0
+
+        async def flaky_connect(self_conn: MCPConnection) -> None:
+            nonlocal connect_calls
+            connect_calls += 1
+            mock_tool = _make_mock_tool(f"tool_{connect_calls}")
+            self_conn._tools = [mock_tool]
+
+        with patch("src.mcp_client.MCP_AVAILABLE", True):
+            with patch.object(MCPConnection, "connect", flaky_connect):
+                manager.connect_all([cfg])
+                manager._ensure_loop()
+
+                for _ in range(3):
+                    future = asyncio.run_coroutine_threadsafe(
+                        manager._reconnect_server_async("srv"),
+                        manager._loop,  # type: ignore[arg-type]
+                    )
+                    future.result(timeout=35)
+
+        manager.close_all()
+        assert connect_calls == 4  # 1 initial + 3 reconnects
+        assert "srv" not in manager._connections
+
+
 class TestMCPShutdownRace:
     """Regression tests for #425 — _ensure_loop() must not spawn a zombie loop after close_all()."""
 
@@ -1790,3 +2215,108 @@ class TestMCPShutdownRace:
         result = manager.call_tool("srv", "some_tool", {})
         assert result.startswith("Error:")
         assert manager._loop is None, "No new loop must be spawned after close_all()"
+
+
+# ── Config field allowlists (cogtrix52 allowed_directories regression) ───────
+
+
+class TestMCPConfigFieldAllowlists:
+    """cogtrix52 surfaced ``MCP server 'filesystem': ignoring unknown
+    config keys: allowed_directories`` because the user's YAML carries
+    ``allowed_directories`` as a docker-compose cross-reference, but
+    Cogtrix had no slot for the field in either the dataclass or the
+    loader's allowlist.
+
+    The fix is a two-set design:
+
+    * ``KNOWN_MCP_FIELDS`` — fields forwarded to ``MCPServerConfig``.
+    * ``DOC_ONLY_MCP_FIELDS`` — fields the user keeps for human
+      reference; Cogtrix accepts (no warning) but doesn't forward.
+
+    These tests pin both lists' shape so an accidental drop or
+    rename surfaces here, not as a startup-noise regression in
+    production.
+    """
+
+    def test_known_fields_match_dataclass_kwargs(self) -> None:
+        """Every name in ``KNOWN_MCP_FIELDS`` must correspond to a
+        constructor parameter on ``MCPServerConfig`` (except ``name``,
+        which the loader passes positionally). A mismatch causes
+        ``TypeError: unexpected keyword argument`` at config load."""
+        import inspect
+
+        ctor_params = set(inspect.signature(MCPServerConfig).parameters.keys())
+        # ``name`` is positional, supplied by the loader, not from the
+        # per-server YAML dict. The known-fields list is what the
+        # loader can safely splat as **kwargs.
+        missing = KNOWN_MCP_FIELDS - ctor_params
+        assert missing == set(), (
+            f"KNOWN_MCP_FIELDS contains keys MCPServerConfig doesn't accept: " f"{missing}"
+        )
+
+    def test_known_and_doc_only_are_disjoint(self) -> None:
+        """A field is either forwarded (KNOWN) or doc-only (DOC_ONLY) —
+        never both. A duplicate would mean the field is being passed
+        to ``MCPServerConfig`` AND classified as doc-only, which is
+        contradictory."""
+        overlap = KNOWN_MCP_FIELDS & DOC_ONLY_MCP_FIELDS
+        assert overlap == set(), f"Fields appear in BOTH KNOWN and DOC_ONLY: {overlap}"
+
+    def test_allowed_directories_is_doc_only(self) -> None:
+        """Pin cogtrix52's specific regression — ``allowed_directories``
+        must be in DOC_ONLY so the loader accepts it silently."""
+        assert "allowed_directories" in DOC_ONLY_MCP_FIELDS
+        assert "allowed_directories" not in KNOWN_MCP_FIELDS
+
+    def test_doc_only_field_does_not_trigger_warning(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A user YAML carrying a DOC_ONLY field must not produce the
+        ``ignoring unknown config keys`` warning that cogtrix52 showed."""
+
+        # Reproduce the loader's filter logic against the published
+        # constants (the same logic lives in cogtrix.py and
+        # src/api/app.py; this exercises the contract both sites
+        # depend on).
+        srv_cfg = {
+            "url": "http://mcp-filesystem:8002/sse",
+            "allow_insecure": True,
+            "requires_confirmation": False,
+            "allowed_directories": ["/workspace", "/data"],
+        }
+        recognised = KNOWN_MCP_FIELDS | DOC_ONLY_MCP_FIELDS
+        unknown = set(srv_cfg) - recognised
+        assert unknown == set(), (
+            f"User config with documented DOC_ONLY field still reports " f"unknown keys: {unknown}"
+        )
+
+    def test_genuine_typo_still_surfaces_as_unknown(self) -> None:
+        """A field that is neither KNOWN nor DOC_ONLY (e.g. a misspelling
+        of ``timeout``) must still appear in the ``unknown`` set so the
+        loader can warn the operator."""
+        srv_cfg = {
+            "url": "http://example/sse",
+            "timeut": 60,  # operator typo
+        }
+        recognised = KNOWN_MCP_FIELDS | DOC_ONLY_MCP_FIELDS
+        unknown = set(srv_cfg) - recognised
+        assert unknown == {"timeut"}, (
+            "the allowlist must not be so wide that genuine typos pass "
+            f"through silently. unknown={unknown}"
+        )
+
+    def test_doc_only_field_not_passed_to_dataclass(self) -> None:
+        """Even though the loader accepts DOC_ONLY fields without warning,
+        they must NOT reach ``MCPServerConfig(**filtered)`` — the
+        dataclass would raise ``TypeError`` on the unexpected keyword."""
+        srv_cfg = {
+            "url": "http://example/sse",
+            "allowed_directories": ["/workspace"],
+        }
+        # Loader filters using KNOWN only.
+        filtered = {k: v for k, v in srv_cfg.items() if k in KNOWN_MCP_FIELDS}
+        # Constructor accepts the filtered dict without error.
+        cfg = MCPServerConfig(name="srv", **filtered)
+        assert cfg.url == "http://example/sse"
+        # And ``allowed_directories`` is dropped (no attribute slot).
+        assert not hasattr(cfg, "allowed_directories")

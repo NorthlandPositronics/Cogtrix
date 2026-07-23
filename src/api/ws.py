@@ -434,12 +434,27 @@ class ConnectionManager:
             current_buf.append((seq, datetime.now(UTC).timestamp(), json_str))
             self._prune_buffer(current_buf)
 
-        # Network I/O always outside the lock.
-        if ws is not None:
+        # Forge audit H6 (2026-05-23): re-fetch the connection under a brief
+        # lock to detect a concurrent reconnect that may have replaced the
+        # WebSocket between Phase 1 and now. Sending to the stale ``ws`` would
+        # silently fail on a closed socket AND the new connection wouldn't see
+        # the message unless the client reconnected with ``?last_seq=`` to
+        # trigger ``replay_missed``. Skipping the stale-send is safer — the
+        # message is already in the replay buffer (Phase 2) so the new
+        # connection can pick it up via ``replay_missed``.
+        async with self._lock:
+            current_ws = self._connections.get(session_id)
+        if current_ws is not None and current_ws is ws:
             try:
-                await ws.send_text(json_str)
+                await current_ws.send_text(json_str)
             except Exception as exc:
                 log.debug("WebSocket send failed for session %s: %s", session_id, exc)
+        elif current_ws is not None and current_ws is not ws:
+            log.debug(
+                "WebSocket for session %s was replaced between phases; "
+                "skipping stale-ws send (msg is in replay buffer)",
+                session_id,
+            )
 
     async def replay_missed(self, session_id: str, last_seq: int) -> None:
         """Replay buffered messages with seq > last_seq to the current connection.

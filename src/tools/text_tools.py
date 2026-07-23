@@ -6,6 +6,7 @@ import re
 
 from pydantic import BaseModel, Field
 
+from src.tools.delegate import register_tool_categories
 from src.tools.error_sanitizer import sanitize_error, sanitize_shell_error
 
 
@@ -349,6 +350,7 @@ TOOL_CONFIGS = [
         "input_schema": WordCountInput,
         "requires_confirmation": False,
         "function": word_count,
+        "category": "readonly",
     },
     {
         "name": "find_replace",
@@ -358,6 +360,7 @@ TOOL_CONFIGS = [
         "input_schema": FindReplaceInput,
         "requires_confirmation": False,
         "function": find_replace,
+        "category": "readonly",
     },
     {
         "name": "extract_urls",
@@ -365,6 +368,7 @@ TOOL_CONFIGS = [
         "input_schema": ExtractUrlsInput,
         "requires_confirmation": False,
         "function": extract_urls,
+        "category": "readonly",
     },
     {
         "name": "extract_emails",
@@ -372,6 +376,7 @@ TOOL_CONFIGS = [
         "input_schema": ExtractEmailsInput,
         "requires_confirmation": False,
         "function": extract_emails,
+        "category": "readonly",
     },
     {
         "name": "text_compare",
@@ -379,6 +384,7 @@ TOOL_CONFIGS = [
         "input_schema": TextCompareInput,
         "requires_confirmation": False,
         "function": text_compare,
+        "category": "readonly",
     },
     {
         "name": "split_text",
@@ -386,6 +392,7 @@ TOOL_CONFIGS = [
         "input_schema": SplitTextInput,
         "requires_confirmation": False,
         "function": split_text,
+        "category": "readonly",
     },
     {
         "name": "trim_text",
@@ -393,11 +400,25 @@ TOOL_CONFIGS = [
         "input_schema": TrimTextInput,
         "requires_confirmation": False,
         "function": trim_text,
+        "category": "readonly",
     },
 ]
 
 # Default single tool config (for backwards compatibility)
 TOOL_CONFIG = TOOL_CONFIGS[0]
+
+
+register_tool_categories(
+    {
+        "word_count": "readonly",
+        "find_replace": "readonly",
+        "extract_urls": "readonly",
+        "extract_emails": "readonly",
+        "text_compare": "readonly",
+        "split_text": "readonly",
+        "trim_text": "readonly",
+    }
+)
 
 __all__ = [
     "word_count",

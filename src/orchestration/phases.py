@@ -52,7 +52,11 @@ WEB_TOOL_NAMES = frozenset(
         "exa_search",
         "exa_find_similar",
         "exa_get_contents",
+        # ADR-0056 PR-G renamed search_web → web_search. Both kept here
+        # so any future re-introduction of the legacy tool still scopes
+        # as a web tool.
         "search_web",
+        "web_search",
         "http_get",
         "tavily_search",
         "brave_search",
@@ -610,10 +614,11 @@ def extract_fetched_urls(messages: list) -> list[str]:
                     if url:
                         urls.append(url)
 
-        # Also harvest URLs from exa_search/search_web result text (lines starting with "   URL: ")
+        # Also harvest URLs from exa_search / search_web / web_search
+        # result text (lines starting with "   URL: ").
         if ToolMessage is not None and isinstance(msg, ToolMessage):
             name = getattr(msg, "name", "")
-            if name in ("exa_search", "exa_find_similar", "search_web"):
+            if name in ("exa_search", "exa_find_similar", "search_web", "web_search"):
                 content = getattr(msg, "content", "")
                 if isinstance(content, str):
                     for line in content.splitlines():

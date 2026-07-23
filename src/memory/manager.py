@@ -208,6 +208,12 @@ class BaseMemoryManager(ABC):
         self._summary_dirty: bool = False
         self._facts_store: Any = None
 
+        # ── Domain-shift tracking (for rolling summary reset) ───────────
+        # Consecutive turns classified as a different domain from current mode.
+        self._consecutive_domain_shifts: int = 0
+        # The mode name this session started with (set once, used as stable reference).
+        self._initial_mode: str = "conversation"
+
         # Lazy embedding config — populated by set_embedding_config(); the
         # provider is instantiated on first actual use to avoid blocking startup.
         self._lazy_emb_type: str | None = None
@@ -521,6 +527,88 @@ class BaseMemoryManager(ABC):
         """Reset the rolling summary when token churn exceeds threshold."""
         with self._hybrid_lock:
             self._check_summary_token_ttl_locked()
+
+    def _get_domain_shift_threshold(self) -> int:
+        """Return the consecutive-shift threshold for summary reset.
+
+        Configured via ``COGTRIX_DOMAIN_SHIFT_THRESHOLD`` env var.
+        Defaults to 3 — a conservative value requiring clear domain
+        consensus before resetting the rolling summary.
+        """
+        raw = os.environ.get("COGTRIX_DOMAIN_SHIFT_THRESHOLD", "")
+        if raw:
+            try:
+                val = int(raw)
+                if val > 0:
+                    return val
+            except ValueError:
+                pass
+        return 3
+
+    def _check_domain_shift(self, recent_prompts: list[str]) -> None:
+        """Detect domain shift and reset rolling summary when threshold is met.
+
+        Uses ``should_switch_mode()`` from the mode selector to classify
+        recent user prompts. When the detected domain differs from the
+        initial mode for ``threshold`` consecutive turns, the rolling
+        summary is reset (after distilling facts for preservation).
+
+        The reset trigger is logged at INFO level so operators can observe
+        when and why summaries are cleared. The threshold is configurable
+        via ``COGTRIX_DOMAIN_SHIFT_THRESHOLD`` env var.
+
+        Args:
+            recent_prompts: The last N user prompts to classify. Must
+                contain at least 2 entries for any switch to be suggested.
+        """
+        from src.memory.mode_selector import should_switch_mode
+
+        if not recent_prompts:
+            return
+
+        threshold = self._get_domain_shift_threshold()
+        suggested = should_switch_mode(self._initial_mode, recent_prompts)
+
+        if suggested is None or suggested == self._initial_mode:
+            # No domain switch detected — reset counter.
+            self._consecutive_domain_shifts = 0
+        else:
+            self._consecutive_domain_shifts += 1
+            if self._consecutive_domain_shifts == threshold:
+                log.info(
+                    "Domain shift detected: %s consecutive turns classified as "
+                    "'%s' (threshold %d) — resetting rolling summary for session %s",
+                    self._consecutive_domain_shifts,
+                    suggested,
+                    threshold,
+                    self.session_id,
+                )
+                self.reset_summary()
+
+    @staticmethod
+    def _extract_recent_user_prompts(messages: list[Any], *, limit: int = 3) -> list[str]:
+        """Extract recent user prompt texts from a message list.
+
+        Args:
+            messages: Full message history (newest last).
+            limit: Maximum number of user prompts to return (newest first).
+
+        Returns:
+            List of user prompt strings, newest first, up to ``limit``.
+        """
+        prompts: list[str] = []
+        for msg in reversed(messages):
+            if HumanMessage is not None and isinstance(msg, HumanMessage):
+                content = getattr(msg, "content", "")
+                if content:
+                    prompts.append(str(content))
+            elif isinstance(msg, dict) and msg.get("type") in ("human", "HumanMessage"):
+                content = msg.get("content", "")
+                if content:
+                    prompts.append(str(content))
+            if len(prompts) >= limit:
+                break
+        return list(reversed(prompts))
 
     def _get_hybrid_snapshot(
         self, *, block: bool = True, timeout: float = 0.0

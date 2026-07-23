@@ -1,6 +1,6 @@
 """12 quality metric functions — each takes a HarnessResult and returns a number.
 
-All metrics correspond exactly to the definitions in docs/quality/METRICS.md.
+All metrics correspond exactly to the definitions in docs/optional/quality/METRICS.md.
 """
 
 from __future__ import annotations

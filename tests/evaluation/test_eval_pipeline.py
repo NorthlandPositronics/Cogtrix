@@ -71,15 +71,75 @@ def _make_mock_model_config(model_id: str = "mock-model") -> ModelConfig:
     )
 
 
+_STUB_TYPE_DEFAULTS: dict[type, Any] = {
+    str: "stub",
+    int: 1,
+    float: 1.0,
+    bool: True,
+    list: [],
+    dict: {},
+}
+
+
+def _stub_args_for_tool(tool_name: str) -> dict[str, Any]:
+    """Return minimum schema-valid args for a stub tool.
+
+    Bug L follow-up (2026-05-20): the mock LLM used to emit
+    ``{"query": ""}`` for every tool call regardless of the tool's
+    actual schema. Each stub tool declares ``extra="forbid"`` so the
+    bogus arg raised a pydantic ValidationError. The runner used to
+    swallow that error because success_criteria only inspected the
+    final response text — now tool errors fail the scenario, so the
+    mock must produce schema-valid args.
+    """
+    from tests.evaluation.stub_tool_registry import STUB_TOOL_REGISTRY
+
+    spec = STUB_TOOL_REGISTRY.get(tool_name)
+    if spec is None:
+        return {}
+
+    schema = spec.input_schema
+    args: dict[str, Any] = {}
+    for field_name, field_info in schema.model_fields.items():
+        if not field_info.is_required():
+            continue
+        annotation = field_info.annotation
+        # Unwrap Optional[T] / T | None when present (only ever str|None
+        # in the stub registry, but defensive for future schema growth).
+        import types as _types
+        import typing as _typing
+
+        if (
+            isinstance(annotation, _types.UnionType)
+            or _typing.get_origin(annotation) is _typing.Union
+        ):
+            type_args = [a for a in _typing.get_args(annotation) if a is not type(None)]
+            if len(type_args) == 1:
+                annotation = type_args[0]
+        if isinstance(annotation, type):
+            args[field_name] = _STUB_TYPE_DEFAULTS.get(annotation, "stub")
+        else:
+            args[field_name] = "stub"
+    return args
+
+
 def _responses_for_scenario(scenario: Any) -> list[AIMessage]:
-    """Build mock LLM responses that call all required tools then reply."""
+    """Build mock LLM responses that call all required tools then reply.
+
+    Each tool call carries schema-valid args derived from the stub
+    tool registry — see ``_stub_args_for_tool``. The previous
+    ``{"query": ""}`` shape only worked because the runner used to
+    ignore pydantic ValidationErrors emitted by stub tools.
+    """
     tool_names = scenario.tools_required
     responses: list[AIMessage] = []
     for tname in tool_names:
         responses.append(
             AIMessage(
                 content="",
-                tool_calls=[{"name": tname, "args": {"query": ""}, "id": f"call_{tname}"}],
+                tool_calls=[
+                    {"name": tname, "args": _stub_args_for_tool(tname), "id": f"call_{tname}"}
+                ],
             )
         )
     # Final text must contain every "contains:" success-criterion keyword
@@ -114,6 +174,9 @@ def test_all_scenarios_loaded() -> None:
         "regression_no_fabrication_for_unknown_entity",
         "regression_persist_before_refusing",
         "regression_no_url_fabrication_in_response",
+        "regression_web_search_no_external_url_recommendation_on_low_yield",
+        "regression_web_search_synthesis_correctness",
+        "regression_web_search_synthesis_disagreement",
         "safety_refuse_unauthorized_payment",
     }
 

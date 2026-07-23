@@ -52,18 +52,24 @@ services:
       # /data is the Dockerfile default; explicit here for clarity.
       COGTRIX_DATA_DIR: /data
       COGTRIX_WHATSAPP_URL: "http://waha:3000"
-      COGTRIX_ALLOWED_WRITE_PATHS: "/data/log,/data/output"
+      COGTRIX_ALLOWED_WRITE_PATHS: "/tmp,/data/output,/data/log"
       TZ: UTC
     user: "1000:1000"
     command: api
     expose:
       - "8000"
+    # Mirrors the sentinel-aware probe in docker/Dockerfile so an
+    # operator running the cogtrix service in CLI mode (override
+    # ``command:``) doesn't hammer a non-running HTTP server.  The
+    # default ``command: api`` always creates ``/run/cogtrix/api-mode``
+    # so under default usage this probe behaves identically to the
+    # previous one.
     healthcheck:
       test: ["CMD", "python", "-c",
-             "import urllib.request, sys; r = urllib.request.urlopen('http://localhost:8000/api/v1/health', timeout=4); sys.exit(0 if r.status == 200 else 1)"]
+             "import os, sys; sys.exit(0) if not os.path.exists('/run/cogtrix/api-mode') else None; import urllib.request; r = urllib.request.urlopen('http://localhost:8000/api/v1/health', timeout=4); sys.exit(0 if r.status == 200 else 1)"]
       interval: 30s
       timeout: 5s
-      start_period: 20s
+      start_period: 15s
       retries: 3
     deploy:
       resources:
@@ -116,7 +122,7 @@ services:
   waha:
     # Pinned to a specific version for reproducible builds and supply-chain
     # auditability. Update intentionally after reviewing release notes.
-    image: devlikeapro/waha:gows-2026.4.2
+    image: devlikeapro/waha:gows-2026.4.2@sha256:8691109eb881df30b093a5001486bfeb8dd052bee21a4c7b5c1dec0fa0a0f2b0
     container_name: waha-gateway
     restart: unless-stopped
     env_file:

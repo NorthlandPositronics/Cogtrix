@@ -31,6 +31,8 @@ from src.agent.core import CogtrixState
 from src.orchestration.nodes.call_model import (
     CallModelContext,
     _compute_search_effort,
+    _has_arithmetic_intent,
+    _has_numeric_tool_results,
     build_call_model_node,
 )
 
@@ -266,6 +268,492 @@ class TestCallModelTopicSwitchDetection:
 # ─────────────────────────────────────────────────────────────────────────────
 # Tool-quality gate tests
 # ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestCallModelStuckConclusionDetection:
+    """Bug G #1713 — stuck-conclusion nudge.
+
+    When the last two assistant final responses (from prior user turns)
+    are >= 90% similar, call_model must inject a HumanMessage before the
+    LLM invocation telling the model it's been repeating itself and to
+    either acknowledge no new evidence or pursue a different angle.
+    Pairs with the system-prompt rule that bans "You're absolutely right"
+    prefixes on unchanged answers.
+    """
+
+    def test_byte_identical_prior_finals_inject_nudge(self):
+        """The cogtrix56 reproducer: turn-3 and turn-4 final assistant
+        messages are byte-identical (sycophantic apology then SAME
+        content). On the start of turn 5 the nudge must fire."""
+        captured_msgs: list = []
+
+        def capture_invoke(llm_obj, msgs, config, timeout):
+            captured_msgs.extend(msgs)
+            return AIMessage(content="ok")
+
+        repeated_text = (
+            "Based on verified information from ScienceSoft's official "
+            "website and executive LinkedIn profiles, there is no "
+            "evidence that Alex Ranasheuski, Boris Shiklo, or Tim "
+            "Grigoriev have Ukrainian citizenship, reside in Ukraine, "
+            "are part of the Ukrainian diaspora, or participate in any "
+            "Ukraine-related support activities."
+        )
+
+        node = _make_node(
+            maybe_compress=lambda msgs: msgs,
+            invoke_with_timeout=capture_invoke,
+            call_count=[0],  # increments to 1 inside call_model
+        )
+        # Conversation shape: two prior turns each with a final AIMessage
+        # carrying the same text, plus a fresh user message starting
+        # turn 5.
+        state = _make_state(
+            [
+                HumanMessage(content="who are their management team"),
+                AIMessage(content=repeated_text),
+                HumanMessage(content="dig deeper — Alex Ranasheuski"),
+                AIMessage(content=repeated_text),
+                HumanMessage(content="you have repeated the same message"),
+            ]
+        )
+
+        node(state, {})
+
+        # The nudge must be present in the LLM input.
+        nudge = next(
+            (
+                m
+                for m in captured_msgs
+                if isinstance(m, HumanMessage) and "Stuck-conclusion check" in m.content
+            ),
+            None,
+        )
+        assert nudge is not None, (
+            "Stuck-conclusion nudge must fire when the prior 2 assistant "
+            "final responses are byte-identical (Bug G #1713 cogtrix56 "
+            "reproducer)"
+        )
+        # The nudge must explicitly forbid the sycophantic prefix path so
+        # the model has a terminal directive, not a vague hint.
+        assert "absolutely right" in nudge.content.lower()
+        assert "conclusion is unchanged" in nudge.content.lower()
+
+    def test_dissimilar_prior_finals_do_not_trigger_nudge(self):
+        """Negative control: when the prior two assistant responses are
+        substantively different, the nudge must NOT fire — otherwise
+        every multi-turn session pays the nudge tax."""
+        captured_msgs: list = []
+
+        def capture_invoke(llm_obj, msgs, config, timeout):
+            captured_msgs.extend(msgs)
+            return AIMessage(content="ok")
+
+        node = _make_node(
+            maybe_compress=lambda msgs: msgs,
+            invoke_with_timeout=capture_invoke,
+            call_count=[0],  # increments to 1 inside call_model
+        )
+        state = _make_state(
+            [
+                HumanMessage(content="who is the CEO"),
+                AIMessage(
+                    content="The CEO is Alex Ranasheuski, based on the company's "
+                    "official site. He took the role in 2018 after the prior CEO "
+                    "stepped down."
+                ),
+                HumanMessage(content="tell me about the CTO"),
+                AIMessage(
+                    content="Boris Shiklo is the CTO. His LinkedIn profile shows "
+                    "20 years of engineering management experience and a focus on "
+                    "enterprise software architecture."
+                ),
+                HumanMessage(content="what about Tim Grigoriev"),
+            ]
+        )
+
+        node(state, {})
+
+        nudge = next(
+            (
+                m
+                for m in captured_msgs
+                if isinstance(m, HumanMessage) and "Stuck-conclusion check" in m.content
+            ),
+            None,
+        )
+        assert nudge is None, (
+            "Stuck-conclusion nudge must NOT fire when the prior 2 "
+            "assistant final responses are substantively different — "
+            "otherwise the nudge tax hits every normal multi-turn "
+            "session"
+        )
+
+    def test_nudge_only_fires_at_start_of_new_turn(self):
+        """The nudge is keyed on call_count == 1 — within-turn rounds
+        (call_count > 1) must NOT pay the similarity check, because
+        the prior 2 AIMessages will both be from the current turn
+        (which can legitimately repeat tool-call shapes) and not from
+        prior user turns."""
+        captured_msgs: list = []
+
+        def capture_invoke(llm_obj, msgs, config, timeout):
+            captured_msgs.extend(msgs)
+            return AIMessage(content="ok")
+
+        repeated_text = "Same content twice"
+        node = _make_node(
+            maybe_compress=lambda msgs: msgs,
+            invoke_with_timeout=capture_invoke,
+            call_count=[5],  # not first round of turn
+        )
+        state = _make_state(
+            [
+                HumanMessage(content="q1"),
+                AIMessage(content=repeated_text),
+                AIMessage(content=repeated_text),
+                HumanMessage(content="q2"),
+            ]
+        )
+
+        node(state, {})
+
+        nudge = next(
+            (
+                m
+                for m in captured_msgs
+                if isinstance(m, HumanMessage) and "Stuck-conclusion check" in m.content
+            ),
+            None,
+        )
+        assert nudge is None, (
+            "Stuck-conclusion nudge must not fire at call_count > 1 "
+            "(within-turn rounds) — only at the start of a fresh "
+            "user turn"
+        )
+
+
+class TestCallModelCJKLeakDetection:
+    """Bug K #1720 — CJK character leakage detection.
+
+    Multilingual LLMs (qwen3-coder observed in cogtrix57.log lines
+    27652, 30376) occasionally sample a CJK token where an English
+    equivalent was expected ("立场" / "表态" in place of "stance" /
+    "statement"). The detector is intentionally LOG-ONLY: legitimate
+    quoted CJK content (e.g., the user asked about Chinese terms)
+    must survive the round, and silent stripping would corrupt
+    legitimate output. The fix surfaces the rate so ops can decide
+    whether the leakage is worth a follow-up mitigation.
+    """
+
+    def test_cjk_in_response_logs_warning(self):
+        """The cogtrix57 reproducer: response contains 立场 (stance)
+        mixed into English prose. call_model must log a WARNING
+        identifying the CJK characters."""
+        import logging
+
+        captured_warnings: list[str] = []
+
+        class _CaptureHandler(logging.Handler):
+            def emit(self, record):
+                if record.levelno >= logging.WARNING:
+                    captured_warnings.append(record.getMessage())
+
+        handler = _CaptureHandler()
+        logger = logging.getLogger("cogtrix")
+        logger.addHandler(handler)
+        try:
+            node = _make_node(
+                maybe_compress=lambda msgs: msgs,
+                invoke_with_timeout=lambda llm, msgs, config, timeout: AIMessage(
+                    content=(
+                        "Its wording and title indicate it represents official "
+                        "company立场 on the matter."
+                    )
+                ),
+            )
+            state = _make_state([HumanMessage(content="what is their position?")])
+            node(state, {})
+        finally:
+            logger.removeHandler(handler)
+
+        cjk_warnings = [w for w in captured_warnings if "Non-Latin (CJK)" in w]
+        assert cjk_warnings, (
+            "CJK leak detection must log a WARNING when the assistant "
+            "response contains CJK characters (Bug K #1720 cogtrix57 "
+            "reproducer)"
+        )
+        # The warning must include the actual leaked characters so ops
+        # can correlate to a specific scenario. The sample list quotes
+        # each char individually (e.g. ['立', '场']), so check for
+        # presence of each char rather than the joined string.
+        assert "立" in cjk_warnings[0] and "场" in cjk_warnings[0], (
+            "WARNING must include the actual leaked CJK characters so "
+            f"ops can identify the leak pattern; got: {cjk_warnings[0]!r}"
+        )
+
+    def test_multiple_cjk_runs_logged_with_count(self):
+        """Both 立场 and 表态 appear (cogtrix57 line 30376 + 27652).
+        The warning must report the total count, not just the first
+        match, so ops can see the magnitude of the leak."""
+        import logging
+
+        captured_warnings: list[str] = []
+
+        class _CaptureHandler(logging.Handler):
+            def emit(self, record):
+                if record.levelno >= logging.WARNING:
+                    captured_warnings.append(record.getMessage())
+
+        handler = _CaptureHandler()
+        logger = logging.getLogger("cogtrix")
+        logger.addHandler(handler)
+        try:
+            node = _make_node(
+                maybe_compress=lambda msgs: msgs,
+                invoke_with_timeout=lambda llm, msgs, config, timeout: AIMessage(
+                    content=(
+                        "This early condemnation demonstrates genuine 立场 rather "
+                        "than opportunistic post-invasion 表态."
+                    )
+                ),
+            )
+            node(_make_state([HumanMessage(content="explain")]), {})
+        finally:
+            logger.removeHandler(handler)
+
+        cjk_warnings = [w for w in captured_warnings if "Non-Latin (CJK)" in w]
+        assert cjk_warnings
+        # "立场" = 2 chars, "表态" = 2 chars → 4 total
+        assert "4" in cjk_warnings[0], (
+            "WARNING must report the total CJK character count "
+            f"(expected 4, got message: {cjk_warnings[0]!r})"
+        )
+
+    def test_pure_english_response_logs_no_warning(self):
+        """Negative control. A pure-English response must NOT trigger
+        the CJK warning — otherwise every turn logs a false positive."""
+        import logging
+
+        captured_warnings: list[str] = []
+
+        class _CaptureHandler(logging.Handler):
+            def emit(self, record):
+                if record.levelno >= logging.WARNING:
+                    captured_warnings.append(record.getMessage())
+
+        handler = _CaptureHandler()
+        logger = logging.getLogger("cogtrix")
+        logger.addHandler(handler)
+        try:
+            node = _make_node(
+                maybe_compress=lambda msgs: msgs,
+                invoke_with_timeout=lambda llm, msgs, config, timeout: AIMessage(
+                    content="The company's official position is clearly stated."
+                ),
+            )
+            node(_make_state([HumanMessage(content="explain")]), {})
+        finally:
+            logger.removeHandler(handler)
+
+        cjk_warnings = [w for w in captured_warnings if "Non-Latin (CJK)" in w]
+        assert (
+            not cjk_warnings
+        ), f"Pure-English response must not log CJK warnings: {cjk_warnings!r}"
+
+    def test_cjk_detection_does_not_modify_response(self):
+        """The fix is detection-only — the response content must be
+        passed through unchanged. Legitimate quoted CJK content
+        (e.g., the user asked about Chinese terms) must survive."""
+        original_content = "The Chinese term 立场 means 'stance' or 'position'."
+        node = _make_node(
+            maybe_compress=lambda msgs: msgs,
+            invoke_with_timeout=lambda llm, msgs, config, timeout: AIMessage(
+                content=original_content
+            ),
+        )
+        result = node(_make_state([HumanMessage(content="what does 立场 mean?")]), {})
+
+        # Find the AIMessage in the result (skip RemoveMessage entries
+        # that the repair path may emit).
+        ai_msgs = [m for m in result["messages"] if isinstance(m, AIMessage)]
+        assert ai_msgs
+        assert ai_msgs[-1].content == original_content, (
+            "CJK detection must NOT modify the response content — "
+            "silent stripping would corrupt legitimate quoted CJK "
+            "(the user asked about a Chinese term)"
+        )
+
+
+class TestCallModelSycophanticPrefixDetection:
+    """Bug G #1713 follow-up — orchestrator-side detection (log-only)
+    of sycophantic validation prefixes.
+
+    The system-prompt rule forbids ``"You're absolutely right" /
+    "I apologize" / "You're right"`` prefixes on unchanged answers, but
+    the 2026-05-21 corpus replay on E03 (USD/EUR tip/tax) showed
+    qwen3-coder still emits ``"You're right - let me call
+    `get_current_datetime` ..."`` despite the rule. The orchestrator
+    layer logs a WARNING when the prefix appears so ops can see the
+    bypass rate, but does NOT modify the response — earlier strip
+    prototypes (PR #1731 iterations 1 and 2) broke Gate 2 shard D ×
+    kimi-k2-5 and shard B × kimi-k2-5 because intra-turn responses
+    kimi later referenced lost context. Mirrors Bug K's detection-only
+    pattern from PR #1729.
+    """
+
+    @staticmethod
+    def _capture_warnings():
+        """Attach a handler to the cogtrix logger and return
+        ``(captured_warnings_list, remove_handler_callable)``."""
+        import logging
+
+        captured: list[str] = []
+
+        class _Capture(logging.Handler):
+            def emit(self, record):
+                if record.levelno >= logging.WARNING:
+                    captured.append(record.getMessage())
+
+        handler = _Capture()
+        logger = logging.getLogger("cogtrix")
+        logger.addHandler(handler)
+        return captured, lambda: logger.removeHandler(handler)
+
+    def test_youre_right_prefix_logs_warning(self):
+        captured, remove = self._capture_warnings()
+        try:
+            node = _make_node(
+                maybe_compress=lambda msgs: msgs,
+                invoke_with_timeout=lambda llm, msgs, config, timeout: AIMessage(
+                    content=(
+                        "You're right - let me call `get_current_datetime` to verify "
+                        "today's date and ensure my calculations use the correct "
+                        "exchange rate."
+                    )
+                ),
+            )
+            result = node(_make_state([HumanMessage(content="convert 100 USD")]), {})
+        finally:
+            remove()
+        ai = [m for m in result["messages"] if isinstance(m, AIMessage)][-1]
+        # Content is preserved verbatim — no modification.
+        assert ai.content.startswith("You're right"), (
+            "Detection-only: response content must NOT be modified. " f"Got: {ai.content[:80]!r}"
+        )
+        # But a WARNING fired so ops can see the rate.
+        sycophantic = [w for w in captured if "Sycophantic prefix detected" in w]
+        assert sycophantic, (
+            "Sycophantic prefix detector must log a WARNING when the "
+            "prefix appears (Bug G #1713)"
+        )
+        assert "You're right" in sycophantic[0] or "you're right" in sycophantic[0].lower()
+
+    def test_youre_absolutely_right_logs_warning(self):
+        captured, remove = self._capture_warnings()
+        try:
+            node = _make_node(
+                maybe_compress=lambda msgs: msgs,
+                invoke_with_timeout=lambda llm, msgs, config, timeout: AIMessage(
+                    content="You're absolutely right - the answer is 118."
+                ),
+            )
+            node(_make_state([HumanMessage(content="check it")]), {})
+        finally:
+            remove()
+        assert any("Sycophantic prefix detected" in w for w in captured)
+
+    def test_apology_prefix_logs_warning(self):
+        captured, remove = self._capture_warnings()
+        try:
+            node = _make_node(
+                maybe_compress=lambda msgs: msgs,
+                invoke_with_timeout=lambda llm, msgs, config, timeout: AIMessage(
+                    content="I apologize. The correct answer is 42."
+                ),
+            )
+            node(_make_state([HumanMessage(content="q")]), {})
+        finally:
+            remove()
+        assert any("Sycophantic prefix detected" in w for w in captured)
+
+    def test_raising_important_point_logs_warning(self):
+        captured, remove = self._capture_warnings()
+        try:
+            node = _make_node(
+                maybe_compress=lambda msgs: msgs,
+                invoke_with_timeout=lambda llm, msgs, config, timeout: AIMessage(
+                    content="You're raising an important point — the answer is actually 7, not 5."
+                ),
+            )
+            node(_make_state([HumanMessage(content="q")]), {})
+        finally:
+            remove()
+        assert any("Sycophantic prefix detected" in w for w in captured)
+
+    def test_response_content_passes_through_unchanged(self):
+        """The detector MUST NOT modify the response — earlier strip
+        prototypes broke Gate 2 kimi-k2-5 scenarios by altering
+        intra-turn responses the model later referenced. Pin
+        passthrough on a response that WOULD have triggered the strip
+        in the old design."""
+        original = AIMessage(
+            content="You're right - let me look that up.",
+            tool_calls=[{"name": "web_search", "args": {"query": "x"}, "id": "tc1"}],
+            response_metadata={"finish_reason": "tool_calls"},
+            id="ai-msg-original",
+        )
+        node = _make_node(
+            maybe_compress=lambda msgs: msgs,
+            invoke_with_timeout=lambda llm, msgs, config, timeout: original,
+        )
+        result = node(_make_state([HumanMessage(content="q")]), {})
+        ai = [m for m in result["messages"] if isinstance(m, AIMessage)][-1]
+        # Content unchanged — load-bearing for kimi-k2-5 multi-turn.
+        assert ai.content == original.content
+        # Tool calls + metadata + id all preserved.
+        assert ai.tool_calls and ai.tool_calls[0]["id"] == "tc1"
+        assert ai.response_metadata.get("finish_reason") == "tool_calls"
+        assert ai.id == "ai-msg-original"
+
+    def test_no_warning_when_prefix_not_at_start(self):
+        """Embedded "you're right" further in the text (quoting the
+        user, discussing the right answer, etc.) must NOT trigger the
+        warning — only the validation-phrase-at-start pattern."""
+        captured, remove = self._capture_warnings()
+        try:
+            content = (
+                "The user is asking about rights. You're right that this is a "
+                "complex topic, but I'll focus on the specific case."
+            )
+            node = _make_node(
+                maybe_compress=lambda msgs: msgs,
+                invoke_with_timeout=lambda llm, msgs, config, timeout: AIMessage(content=content),
+            )
+            node(_make_state([HumanMessage(content="q")]), {})
+        finally:
+            remove()
+        sycophantic = [w for w in captured if "Sycophantic prefix detected" in w]
+        assert not sycophantic, (
+            f"Embedded 'you're right' (not at start) must not trigger "
+            f"the warning. Got: {sycophantic!r}"
+        )
+
+    def test_no_warning_on_genuine_substantive_response(self):
+        """Negative control: a response that doesn't start with a
+        validation phrase must not log the warning."""
+        captured, remove = self._capture_warnings()
+        try:
+            content = "The answer is 42. I computed 6 × 7 = 42 using the calculate tool."
+            node = _make_node(
+                maybe_compress=lambda msgs: msgs,
+                invoke_with_timeout=lambda llm, msgs, config, timeout: AIMessage(content=content),
+            )
+            node(_make_state([HumanMessage(content="q")]), {})
+        finally:
+            remove()
+        sycophantic = [w for w in captured if "Sycophantic prefix detected" in w]
+        assert not sycophantic
 
 
 class TestCallModelToolQualityGate:
@@ -882,6 +1370,189 @@ class TestCallModelStuckDetection:
         assert len(tb_msgs) == 1, f"Expected thinking break; got {tb_msgs}"
         assert "do not fabricate" in tb_msgs[0].content.lower()
 
+    def test_thinking_break_fires_synthesise_message_when_results_substantive(self):
+        """When effort is met AND prior searches returned substantive results
+        (≥2 URL: lines per result, long content), the thinking-break message
+        must steer the agent toward synthesising — NOT toward refusing.
+
+        Closes #1585: cogtrix29 emitted a one-line refusal despite having
+        5 successful searches with real product names in its message history.
+        The discriminator added here is the substantive-results check.
+        """
+        captured_msgs: list = []
+
+        def capture_invoke(llm_obj, msgs, config, timeout):
+            captured_msgs.extend(msgs)
+            return AIMessage(content="synthesised answer")
+
+        llm = MagicMock()
+        llm.bind_tools.return_value = llm
+
+        force_thinking_break: list[bool] = [True]
+        node = _make_node(
+            llm=llm,
+            active_tools_list=[MagicMock(name="request_tools")],
+            force_thinking_break=force_thinking_break,
+            checkpoint_store=None,
+            invoke_with_timeout=capture_invoke,
+        )
+
+        # 3 distinct search_web calls, each returning a payload that mirrors
+        # the live DDG / Tavily output format (2 URL: lines + 300+ chars).
+        def _payload(seed: str) -> str:
+            snippet = (
+                "A representative snippet that exists for this fixture so the payload "
+                "easily clears the 300-character substantiveness threshold the helper "
+                "uses to distinguish real results from sponsored-slot near-empty payloads."
+            )
+            return (
+                f"Search results for: {seed}\n\n"
+                f"1. Result {seed}-A\n"
+                f"   URL: https://example-A.test/{seed}\n"
+                f"   Domain: example-A.test\n"
+                f"   {snippet}\n\n"
+                f"2. Result {seed}-B\n"
+                f"   URL: https://example-B.test/{seed}\n"
+                f"   Domain: example-B.test\n"
+                f"   {snippet}\n"
+            )
+
+        state = _make_state(
+            [
+                HumanMessage(content="hello"),
+                AIMessage(
+                    content="r1",
+                    tool_calls=[
+                        {"name": "search_web", "args": {"query": "alpha tools"}, "id": "tc1"}
+                    ],
+                ),
+                ToolMessage(content=_payload("alpha"), tool_call_id="tc1", name="search_web"),
+                AIMessage(
+                    content="r2",
+                    tool_calls=[
+                        {"name": "search_web", "args": {"query": "beta tools"}, "id": "tc2"}
+                    ],
+                ),
+                ToolMessage(content=_payload("beta"), tool_call_id="tc2", name="search_web"),
+                AIMessage(
+                    content="r3",
+                    tool_calls=[
+                        {"name": "search_web", "args": {"query": "gamma tools"}, "id": "tc3"}
+                    ],
+                ),
+                ToolMessage(content=_payload("gamma"), tool_call_id="tc3", name="search_web"),
+            ]
+        )
+
+        node(state, {})
+
+        # The thinking-break message should be the synthesise-not-refuse variant.
+        tb_msgs = [
+            m
+            for m in captured_msgs
+            if isinstance(m, HumanMessage) and "THINKING BREAK" in m.content
+        ]
+        assert len(tb_msgs) == 1, f"Expected thinking break; got {tb_msgs}"
+        body = tb_msgs[0].content.lower()
+        # MUST steer toward synthesis
+        assert "synthesise" in body or "synthesize" in body, (
+            "Substantive-results branch must instruct the model to synthesise: "
+            f"got:\n{tb_msgs[0].content}"
+        )
+        # MUST explicitly call out the lazy-refusal anti-pattern
+        assert "could not retrieve" in body, (
+            "Substantive-results branch must call out the 'I could not retrieve' "
+            "lazy-refusal anti-pattern by name: "
+            f"got:\n{tb_msgs[0].content}"
+        )
+        # MUST still forbid fabrication beyond actual search results
+        assert "fabricate" in body, (
+            "Substantive-results branch must still forbid fabrication: "
+            f"got:\n{tb_msgs[0].content}"
+        )
+
+    def test_thinking_break_refusal_message_unchanged_when_results_empty(self):
+        """When effort is met but search results were empty (or all errors),
+        the message must keep the existing refuse-is-OK framing — this is the
+        legitimate-refusal path from #1520.  Without this branch the agent
+        would be unable to refuse even when there's nothing to synthesise.
+        """
+        captured_msgs: list = []
+
+        def capture_invoke(llm_obj, msgs, config, timeout):
+            captured_msgs.extend(msgs)
+            return AIMessage(content="honest refusal")
+
+        llm = MagicMock()
+        llm.bind_tools.return_value = llm
+
+        force_thinking_break: list[bool] = [True]
+        node = _make_node(
+            llm=llm,
+            active_tools_list=[MagicMock(name="request_tools")],
+            force_thinking_break=force_thinking_break,
+            checkpoint_store=None,
+            invoke_with_timeout=capture_invoke,
+        )
+
+        # 3 distinct search_web calls, all returning "No results found"
+        state = _make_state(
+            [
+                HumanMessage(content="hello"),
+                AIMessage(
+                    content="r1",
+                    tool_calls=[
+                        {"name": "search_web", "args": {"query": "alpha tools"}, "id": "tc1"}
+                    ],
+                ),
+                ToolMessage(
+                    content="No results found for: alpha tools",
+                    tool_call_id="tc1",
+                    name="search_web",
+                ),
+                AIMessage(
+                    content="r2",
+                    tool_calls=[
+                        {"name": "search_web", "args": {"query": "beta tools"}, "id": "tc2"}
+                    ],
+                ),
+                ToolMessage(
+                    content="No results found for: beta tools",
+                    tool_call_id="tc2",
+                    name="search_web",
+                ),
+                AIMessage(
+                    content="r3",
+                    tool_calls=[
+                        {"name": "search_web", "args": {"query": "gamma tools"}, "id": "tc3"}
+                    ],
+                ),
+                ToolMessage(
+                    content="No results found for: gamma tools",
+                    tool_call_id="tc3",
+                    name="search_web",
+                ),
+            ]
+        )
+
+        node(state, {})
+
+        tb_msgs = [
+            m
+            for m in captured_msgs
+            if isinstance(m, HumanMessage) and "THINKING BREAK" in m.content
+        ]
+        assert len(tb_msgs) == 1, f"Expected thinking break; got {tb_msgs}"
+        body = tb_msgs[0].content.lower()
+        # Empty-results branch must NOT instruct synthesis — there's nothing to synthesise.
+        assert "synthesise" not in body and "synthesize" not in body, (
+            "Empty-results branch must not instruct synthesis (#1520 path): "
+            f"got:\n{tb_msgs[0].content}"
+        )
+        # Empty-results branch must keep the refusal-is-OK framing.
+        assert "could not retrieve" in body
+        assert "do not fabricate" in body
+
     def test_thinking_break_fires_when_http_get_attempted_and_no_checkpoints(self):
         """When http_get has been attempted (even with few searches), the agent
         has earned the right to refuse — the thinking break should fire normally."""
@@ -1100,6 +1771,156 @@ class TestCallModelStuckDetection:
             len(tb_msgs) == 0
         ), "Thinking break must be suppressed when near-duplicate searches don't pass the gate."
 
+    # ── Bug #1717 regression — stale armed flag cleared by new checkpoint ──
+
+    def test_new_checkpoint_clears_armed_thinking_break(self):
+        """Regression test for Bug #1717.
+
+        Sequence (from cogtrix57.log around line 30356):
+          Round N-1: Temporal polling loop detected — arms thinking break
+                     for the NEXT round.
+          Round N:   Agent heeds the advisory, emits a substantive
+                     579-token answer AND calls ``checkpoint``.
+          Round N+1: call_model runs, sees the checkpoint count
+                     incremented, but DOES NOT clear the armed flag.
+                     Thinking break fires, tools stripped, agent
+                     forced into a degraded 131-token re-summary.
+
+        The fix clears ``_force_thinking_break`` when a new checkpoint
+        is detected, because a fresh checkpoint is direct evidence the
+        agent has made progress and the "stuck" arm is stale.
+        """
+        captured_msgs: list = []
+
+        def capture_invoke(llm_obj, msgs, config, timeout):
+            captured_msgs.extend(msgs)
+            return AIMessage(content="ok")
+
+        llm = MagicMock()
+        llm.bind_tools.return_value = llm
+
+        # Minimal CheckpointStore stub: len() returns a count we control.
+        class _StubCheckpointStore:
+            def __init__(self, count: int) -> None:
+                self._count = count
+
+            def __len__(self) -> int:
+                return self._count
+
+            def summary(self) -> str:
+                return ""
+
+        # Setup: arm the flag (as if previous round triggered polling-loop),
+        # ``_last_checkpoint_count`` is 0 (no checkpoints recorded yet at
+        # the time the flag was armed), and ``checkpoint_store`` now has
+        # 1 checkpoint (recorded in the round between arm and consume).
+        force_thinking_break: list[bool] = [True]
+        last_checkpoint_count: list[int] = [0]
+        rounds_since_checkpoint: list[int] = [5]
+        calls_since_last_checkpoint: list[int] = [3]
+
+        node = _make_node(
+            llm=llm,
+            active_tools_list=[],
+            checkpoint_store=_StubCheckpointStore(count=1),
+            force_thinking_break=force_thinking_break,
+            last_checkpoint_count=last_checkpoint_count,
+            rounds_since_checkpoint=rounds_since_checkpoint,
+            calls_since_last_checkpoint=calls_since_last_checkpoint,
+            call_count=[10],  # established session, not first round
+            maybe_compress=lambda msgs: msgs,
+            invoke_with_timeout=capture_invoke,
+        )
+        state = _make_state([HumanMessage(content="follow-up")])
+
+        node(state, {})
+
+        # Primary assertion — the flag must be cleared by the
+        # new-checkpoint detection before the thinking-break consumer
+        # block at the same call's later point.
+        assert force_thinking_break[0] is False, (
+            "A new checkpoint since the flag was armed should disarm "
+            "_force_thinking_break — the agent has demonstrably made "
+            "progress and a thinking break would degrade its substantive "
+            "response into a re-summary (Bug #1717)."
+        )
+
+        # Secondary assertion — the LLM input must NOT contain a
+        # THINKING BREAK message (which the consume path would append
+        # if the flag were still True).
+        thinking_break_msgs = [
+            m for m in captured_msgs if "THINKING BREAK" in getattr(m, "content", "")
+        ]
+        assert thinking_break_msgs == [], (
+            "No THINKING BREAK message should be injected when the agent "
+            "has just recorded a new checkpoint."
+        )
+
+        # Sanity — the new-checkpoint reset path also resets the rolling
+        # counters. If a future refactor moves the disarm without also
+        # moving the counter reset, this asserts they stay coupled.
+        assert last_checkpoint_count[0] == 1
+        assert rounds_since_checkpoint[0] == 0
+        assert calls_since_last_checkpoint[0] == 0
+
+    def test_armed_flag_still_fires_when_no_new_checkpoint(self):
+        """Negative control for Bug #1717 fix.
+
+        The disarm path must ONLY fire when a checkpoint was actually
+        recorded since the flag was armed. If the flag is armed AND no
+        new checkpoint, the thinking break should still fire — that's
+        the original intent of the polling-loop arm.
+        """
+        captured_msgs: list = []
+
+        def capture_invoke(llm_obj, msgs, config, timeout):
+            captured_msgs.extend(msgs)
+            return AIMessage(content="ok")
+
+        llm = MagicMock()
+        llm.bind_tools.return_value = llm
+
+        class _StubCheckpointStore:
+            def __init__(self, count: int) -> None:
+                self._count = count
+
+            def __len__(self) -> int:
+                return self._count
+
+            def summary(self) -> str:
+                return ""
+
+        force_thinking_break: list[bool] = [True]
+        # last_checkpoint_count == current count → no progress since arm
+        node = _make_node(
+            llm=llm,
+            active_tools_list=[],
+            checkpoint_store=_StubCheckpointStore(count=2),
+            force_thinking_break=force_thinking_break,
+            last_checkpoint_count=[2],  # already counted both checkpoints
+            rounds_since_checkpoint=[5],
+            calls_since_last_checkpoint=[3],
+            call_count=[10],
+            maybe_compress=lambda msgs: msgs,
+            invoke_with_timeout=capture_invoke,
+        )
+        state = _make_state([HumanMessage(content="follow-up")])
+
+        node(state, {})
+
+        # Flag should have been consumed (set to False by the consumer
+        # block at line ~646), AND the THINKING BREAK message should
+        # have been injected.
+        assert force_thinking_break[0] is False, (
+            "Flag is consumed by the thinking-break path on the round "
+            "after arming (existing semantics)."
+        )
+        assert any("THINKING BREAK" in getattr(m, "content", "") for m in captured_msgs), (
+            "When no new checkpoint has been recorded since the flag "
+            "was armed, the thinking break MUST still fire — that's "
+            "the existing polling-loop escalation."
+        )
+
 
 class TestSearchEffortHelper:
     """Tests for the _compute_search_effort helper."""
@@ -1296,6 +2117,237 @@ class TestSearchEffortHelper:
             ToolMessage(content="r3", tool_call_id="t3", name="search_web"),
         ]
         assert _compute_search_effort(msgs) == (1, False)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# _has_substantive_search_results — #1585 discriminator
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestHasSubstantiveSearchResults:
+    """Tests for the _has_substantive_search_results helper (#1585).
+
+    This helper distinguishes "effort spent + results came back rich"
+    from "effort spent + results were empty / errors / blocked pages".
+    The thinking-break dispatch branches on it: the former gets a
+    synthesise-don't-refuse message, the latter gets the existing
+    honest-refusal-is-OK message.
+
+    See the cogtrix28 (success) vs cogtrix29 (refusal) trace pair for
+    the empirical motivation.
+    """
+
+    def _ddg_payload(self, n_results: int) -> str:
+        """Build a synthetic search_web ToolMessage payload that mirrors the
+        live DDG / Tavily / Brave / Exa output format (URL: + Domain: + snippet
+        lines per result)."""
+        lines = [f"Search results for: synthetic query {n_results} results", ""]
+        for i in range(1, n_results + 1):
+            lines.extend(
+                [
+                    f"{i}. Synthetic Product {i}",
+                    f"   URL: https://example-{i}.test/landing",
+                    f"   Domain: example-{i}.test",
+                    f"   A short snippet describing synthetic product {i} for the test fixture.",
+                    "",
+                ]
+            )
+        return "\n".join(lines)
+
+    def test_empty_messages(self):
+        from src.orchestration.nodes.call_model import _has_substantive_search_results
+
+        assert _has_substantive_search_results([]) is False
+
+    def test_single_url_is_not_substantive(self):
+        """A single URL: line could be a sponsored slot; require ≥ 2 URL: lines."""
+        from src.orchestration.nodes.call_model import _has_substantive_search_results
+
+        msgs = [
+            AIMessage(
+                content="",
+                tool_calls=[{"name": "search_web", "args": {"query": "x"}, "id": "t1"}],
+            ),
+            ToolMessage(
+                content=self._ddg_payload(1),  # one URL line
+                tool_call_id="t1",
+                name="search_web",
+            ),
+        ]
+        assert _has_substantive_search_results(msgs) is False
+
+    def test_two_url_results_are_substantive(self):
+        from src.orchestration.nodes.call_model import _has_substantive_search_results
+
+        msgs = [
+            AIMessage(
+                content="",
+                tool_calls=[{"name": "search_web", "args": {"query": "x"}, "id": "t1"}],
+            ),
+            ToolMessage(
+                content=self._ddg_payload(2),
+                tool_call_id="t1",
+                name="search_web",
+            ),
+        ]
+        assert _has_substantive_search_results(msgs) is True
+
+    def test_five_url_results_are_substantive(self):
+        """Typical DDG response with 5 results — most common substantive case."""
+        from src.orchestration.nodes.call_model import _has_substantive_search_results
+
+        msgs = [
+            AIMessage(
+                content="",
+                tool_calls=[{"name": "search_web", "args": {"query": "x"}, "id": "t1"}],
+            ),
+            ToolMessage(
+                content=self._ddg_payload(5),
+                tool_call_id="t1",
+                name="search_web",
+            ),
+        ]
+        assert _has_substantive_search_results(msgs) is True
+
+    def test_error_results_are_not_substantive(self):
+        """Error-wrapper messages must not count, even if they happen to contain 'URL:' text."""
+        from src.orchestration.nodes.call_model import _has_substantive_search_results
+
+        msgs = [
+            AIMessage(
+                content="",
+                tool_calls=[{"name": "search_web", "args": {"query": "x"}, "id": "t1"}],
+            ),
+            ToolMessage(
+                content=(
+                    "Error searching: DuckDuckGo rate-limited (HTTP 429). "
+                    "Try again. Documentation URL: https://example.test/help"
+                ),
+                tool_call_id="t1",
+                name="search_web",
+            ),
+        ]
+        assert _has_substantive_search_results(msgs) is False
+
+    def test_no_results_placeholder_is_not_substantive(self):
+        from src.orchestration.nodes.call_model import _has_substantive_search_results
+
+        msgs = [
+            AIMessage(
+                content="",
+                tool_calls=[{"name": "search_web", "args": {"query": "x"}, "id": "t1"}],
+            ),
+            ToolMessage(
+                content="No results found for: x",
+                tool_call_id="t1",
+                name="search_web",
+            ),
+        ]
+        assert _has_substantive_search_results(msgs) is False
+
+    def test_not_loaded_stub_is_not_substantive(self):
+        """The 'tool not loaded' placeholder must not count."""
+        from src.orchestration.nodes.call_model import _has_substantive_search_results
+
+        msgs = [
+            AIMessage(
+                content="",
+                tool_calls=[{"name": "search_web", "args": {"query": "x"}, "id": "t1"}],
+            ),
+            ToolMessage(
+                content=(
+                    "Tool 'search_web' is in the catalog but not loaded. "
+                    "To load it now, issue a structured tool call ..."
+                ),
+                tool_call_id="t1",
+                name="search_web",
+            ),
+        ]
+        assert _has_substantive_search_results(msgs) is False
+
+    def test_short_content_is_not_substantive(self):
+        """Even with ≥ 2 URL: lines, very short content (< 300 chars) is not enough."""
+        from src.orchestration.nodes.call_model import _has_substantive_search_results
+
+        short_payload = "Search results for: q\n\n1. A\n   URL: u1\n\n2. B\n   URL: u2\n"
+        assert len(short_payload) < 300
+        msgs = [
+            AIMessage(
+                content="",
+                tool_calls=[{"name": "search_web", "args": {"query": "x"}, "id": "t1"}],
+            ),
+            ToolMessage(
+                content=short_payload,
+                tool_call_id="t1",
+                name="search_web",
+            ),
+        ]
+        assert _has_substantive_search_results(msgs) is False
+
+    def test_scoped_to_current_turn_only(self):
+        """Substantive results from a PRIOR turn must not count for the current turn.
+
+        Same scope rule as _compute_search_effort — prevents prior-turn search
+        success from short-circuiting the rich-yield branch on a fresh question
+        where the new turn's searches actually returned empty.
+        """
+        from src.orchestration.nodes.call_model import _has_substantive_search_results
+
+        msgs = [
+            HumanMessage(content="first question"),
+            AIMessage(
+                content="",
+                tool_calls=[{"name": "search_web", "args": {"query": "x"}, "id": "t1"}],
+            ),
+            ToolMessage(
+                content=self._ddg_payload(5),  # rich PRIOR-turn results
+                tool_call_id="t1",
+                name="search_web",
+            ),
+            HumanMessage(content="second question"),  # fresh turn starts here
+            AIMessage(
+                content="",
+                tool_calls=[{"name": "search_web", "args": {"query": "y"}, "id": "t2"}],
+            ),
+            ToolMessage(
+                content="No results found for: y",  # empty current-turn results
+                tool_call_id="t2",
+                name="search_web",
+            ),
+        ]
+        # Current-turn results were empty — substantive flag must be False.
+        assert _has_substantive_search_results(msgs) is False
+
+    def test_mixed_current_turn_results_substantive_wins(self):
+        """If any of the current turn's searches returned rich results, the
+        flag should be True — even if other searches in the same turn failed
+        (e.g. 4 successful + 1 infra error, as in the cogtrix29 trace)."""
+        from src.orchestration.nodes.call_model import _has_substantive_search_results
+
+        msgs = [
+            HumanMessage(content="question"),
+            AIMessage(
+                content="",
+                tool_calls=[{"name": "search_web", "args": {"query": "a"}, "id": "t1"}],
+            ),
+            ToolMessage(
+                content=self._ddg_payload(5),  # successful
+                tool_call_id="t1",
+                name="search_web",
+            ),
+            AIMessage(
+                content="",
+                tool_calls=[{"name": "search_web", "args": {"query": "b"}, "id": "t2"}],
+            ),
+            ToolMessage(
+                content="Error searching: DuckDuckGo rate-limited (HTTP 429)",
+                tool_call_id="t2",
+                name="search_web",
+            ),
+        ]
+        # One rich + one error → still substantive (per the cogtrix29 trace
+        # pattern that motivated this fix).
+        assert _has_substantive_search_results(msgs) is True
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2027,3 +3079,156 @@ class TestGuardTruncatedToolCalls:
             "the configured cap should take precedence over the heuristic"
         )
         self.log.warning.assert_not_called()
+
+
+# ── cogtrix47 Issue 4 — arithmetic-intent + numeric-data helpers ──────
+
+
+class TestArithmeticIntentDetection:
+    """``_has_arithmetic_intent`` scans the latest user prompt for
+    quantity / conversion / total phrasing. Without this signal the
+    thinking-break synthesise branch can't tell the model that a
+    "could not retrieve" refusal is wrong when the user has asked
+    a math question and the tool results contain the numbers.
+    """
+
+    def test_how_many_for_money(self) -> None:
+        # The cogtrix47 reproducer.
+        prompt = (
+            "I'll be in Vienna today and need to buy as many items as possible "
+            "for $100 NZD. How many can I buy?"
+        )
+        assert _has_arithmetic_intent([HumanMessage(content=prompt)])
+
+    def test_how_much_does_x_cost(self) -> None:
+        assert _has_arithmetic_intent([HumanMessage(content="How much does the X cost?")])
+
+    def test_convert_nzd_to_eur(self) -> None:
+        assert _has_arithmetic_intent(
+            [HumanMessage(content="Convert 100 NZD to EUR for me, please.")]
+        )
+
+    def test_what_is_the_total(self) -> None:
+        assert _has_arithmetic_intent([HumanMessage(content="What is the total cost for 5 items?")])
+
+    def test_in_eur(self) -> None:
+        assert _has_arithmetic_intent(
+            [HumanMessage(content="Quote the Vienna prices in EUR, please.")]
+        )
+
+    def test_can_i_afford(self) -> None:
+        assert _has_arithmetic_intent(
+            [HumanMessage(content="Can I afford a full case at $50 each?")]
+        )
+
+    def test_negative_research_question(self) -> None:
+        # "How does X work" is research, not arithmetic — must not fire.
+        assert not _has_arithmetic_intent(
+            [HumanMessage(content="How does the Soudal Fix All Silirub product work?")]
+        )
+
+    def test_negative_no_human_message(self) -> None:
+        assert not _has_arithmetic_intent([SystemMessage(content="hi"), AIMessage(content="hi")])
+
+    def test_uses_only_last_human_message(self) -> None:
+        # An arithmetic prompt 3 turns ago must NOT light up a fresh
+        # non-arithmetic research turn.
+        msgs = [
+            HumanMessage(content="How many widgets for $100?"),
+            AIMessage(content="..."),
+            HumanMessage(content="Explain how widget production works."),
+        ]
+        assert not _has_arithmetic_intent(msgs)
+
+
+class TestNumericToolResultsDetection:
+    """``_has_numeric_tool_results`` looks for currency / percentage
+    tokens in ToolMessages from the current turn. Pairs with the
+    arithmetic-intent detector to decide whether the agent has the
+    raw material to attempt a calculation."""
+
+    def _turn(self, *tool_contents: str) -> list:
+        msgs: list = [HumanMessage(content="How many can I buy for $100?")]
+        msgs.append(
+            AIMessage(
+                content="",
+                tool_calls=[{"name": "web_search", "args": {"query": "x"}, "id": "c1"}],
+            )
+        )
+        for i, c in enumerate(tool_contents):
+            msgs.append(ToolMessage(content=c, tool_call_id=f"c{i + 1}", name="web_search"))
+        return msgs
+
+    def test_currency_prefix_token(self) -> None:
+        assert _has_numeric_tool_results(self._turn("Hornbach sells the tube for €7.49 each."))
+
+    def test_iso_code_suffix(self) -> None:
+        assert _has_numeric_tool_results(self._turn("Spot rate is 100 USD per unit today."))
+
+    def test_iso_code_prefix(self) -> None:
+        assert _has_numeric_tool_results(self._turn("Price: USD 12.99 wholesale."))
+
+    def test_percentage(self) -> None:
+        assert _has_numeric_tool_results(self._turn("VAT applies at 20%."))
+
+    def test_no_numeric_data(self) -> None:
+        assert not _has_numeric_tool_results(self._turn("No relevant pricing information found."))
+
+    def test_ignores_prior_turn_tool_results(self) -> None:
+        # A previous turn's tool result containing money MUST NOT
+        # satisfy the check for the current turn — arithmetic-fitness
+        # is per-turn (mirrors _compute_search_effort scoping).
+        msgs = [
+            HumanMessage(content="Previous question"),
+            AIMessage(
+                content="",
+                tool_calls=[{"name": "web_search", "args": {"query": "p"}, "id": "c0"}],
+            ),
+            ToolMessage(content="€50 each", tool_call_id="c0", name="web_search"),
+            HumanMessage(content="How many can I buy for $100?"),
+            AIMessage(
+                content="",
+                tool_calls=[{"name": "web_search", "args": {"query": "q"}, "id": "c1"}],
+            ),
+            ToolMessage(content="No relevant pricing.", tool_call_id="c1", name="web_search"),
+        ]
+        assert not _has_numeric_tool_results(msgs)
+
+
+class TestSearchLoopRecognisesWebSearch:
+    """PR-G renamed the legacy ``search_web`` tool to ``web_search``.
+    The effort gate and stuck-detection branch must accept the
+    modern name; cogtrix47 had 7 ``web_search`` calls counted as
+    zero effort because the check was still hard-coded to the old
+    name.
+    """
+
+    def test_compute_search_effort_counts_web_search(self) -> None:
+        msgs = [
+            HumanMessage(content="research X"),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {"name": "web_search", "args": {"query": "q1"}, "id": "c1"},
+                    {"name": "web_search", "args": {"query": "q2 distinct"}, "id": "c2"},
+                ],
+            ),
+            ToolMessage(content="result 1", tool_call_id="c1", name="web_search"),
+            ToolMessage(content="result 2", tool_call_id="c2", name="web_search"),
+        ]
+        count, http_get = _compute_search_effort(msgs)
+        assert count == 2
+        assert http_get is False
+
+    def test_compute_search_effort_still_counts_legacy_search_web(self) -> None:
+        # Back-compat: a session with the old tool name still counts.
+        msgs = [
+            HumanMessage(content="research X"),
+            AIMessage(
+                content="",
+                tool_calls=[{"name": "search_web", "args": {"query": "q1"}, "id": "c1"}],
+            ),
+            ToolMessage(content="result 1", tool_call_id="c1", name="search_web"),
+        ]
+        count, _ = _compute_search_effort(msgs)
+        assert count == 1

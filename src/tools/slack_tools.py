@@ -7,6 +7,13 @@ Tools:
 Configuration (services.slack in .cogtrix.yaml):
     bot_token:  "xoxb-..."   # Slack Bot User OAuth Token (required)
 
+Environment overrides (highest priority):
+    COGTRIX_SLACK_BOT_TOKEN    Slack Bot User OAuth Token; overrides
+                               ``services.slack.bot_token`` from the config
+                               file.  An empty-string value is ignored so
+                               ``export COGTRIX_SLACK_BOT_TOKEN=`` does not
+                               accidentally clear the config-file value.
+
 This tool exists because the MCP ``slack_post_message`` tool passes raw text
 through Slack's mrkdwn parser, which does **not** support markdown tables or
 ``**bold**`` (double-asterisk) syntax.  The wrapper converts tables to code
@@ -16,10 +23,13 @@ blocks and ``**text**`` to ``*text*`` before posting with ``mrkdwn=True``.
 from __future__ import annotations
 
 import logging
+import os
 import re
 from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, Field
+
+from src.tools.delegate import register_tool_categories
 
 if TYPE_CHECKING:
     from src.config import Config
@@ -48,14 +58,28 @@ _slack_config: dict[str, Any] = {}
 
 
 def configure_slack_tools(slack: dict[str, Any]) -> None:
-    """Set runtime configuration from the services.slack dict."""
+    """Set runtime configuration from the services.slack dict.
+
+    Mirrors the WhatsApp / Telegram precedence: the
+    ``COGTRIX_SLACK_BOT_TOKEN`` environment variable, when set to a
+    non-empty value, overrides the ``bot_token`` from the config file
+    (issue #913).  An empty-string env var is treated as unset so it
+    cannot accidentally clear a valid config-file token.
+    """
     global _client, _slack_config
     _slack_config = {**slack}
+
+    # Env-var override (highest priority).  Empty strings are ignored
+    # so ``export COGTRIX_SLACK_BOT_TOKEN=`` does not silently disable
+    # a working config-file token.
+    env_token = os.environ.get("COGTRIX_SLACK_BOT_TOKEN", "").strip()
+    if env_token:
+        _slack_config["bot_token"] = env_token
 
     if not _HAS_SLACK:
         return
 
-    token = slack.get("bot_token", "")
+    token = _slack_config.get("bot_token", "")
     if token:
         _client = WebClient(token=token)  # type: ignore[operator]
     else:
@@ -242,5 +266,9 @@ TOOL_CONFIGS = [
             "Requires services.slack.bot_token in .cogtrix.yaml."
         ),
         "input": SlackPostMessageInput,
+        "category": "messaging",
     }
 ]
+
+
+register_tool_categories({"cogtrix_slack_post_message": "messaging"})

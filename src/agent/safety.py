@@ -300,12 +300,31 @@ def create_safe_tool_wrapper(
                             pass
                         else:
                             if ui is None:
+                                # No UI means we can never get confirmation,
+                                # so subsequent calls would deny again. Pin
+                                # the denial in session_state so the next
+                                # invocation short-circuits at line 297's
+                                # ``is_denied`` check and never re-enters
+                                # this branch. The returned tool message is
+                                # explicit: "do not retry, respond inline"
+                                # — without that nudge the model loops on
+                                # write_file (bug #1704: 7+ identical calls
+                                # observed against B01 before stuck-detect
+                                # broke the loop).
                                 log.warning(
                                     "Tool '%s' requires confirmation but no UI is available"
-                                    " — denying silently",
+                                    " — denying and disabling for this session",
                                     tool_name,
                                 )
-                                return "User denied execution"
+                                ss.deny_tool(tool_name)
+                                return (
+                                    f"User denied execution: tool '{tool_name}' requires "
+                                    "confirmation, but no confirmation UI is available in "
+                                    "this session. The tool is now disabled for the remainder "
+                                    "of the session — do not retry it. Respond inline with the "
+                                    "content the user needs, or use a tool that does not "
+                                    "require confirmation."
+                                )
 
                             if kwargs:
                                 tool_input = kwargs

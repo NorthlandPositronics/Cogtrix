@@ -25,6 +25,7 @@ import subprocess
 from pathlib import PurePosixPath
 from typing import TYPE_CHECKING
 
+from src.tools.delegate import register_tool_categories
 from src.tools.error_sanitizer import sanitize_error, sanitize_file_error
 
 if TYPE_CHECKING:
@@ -401,6 +402,7 @@ TOOL_CONFIGS = [
         "input_schema": GhCreateIssueInput,
         "requires_confirmation": True,
         "function": gh_create_issue,
+        "category": "mutation",
     },
     {
         "name": "gh_comment_issue",
@@ -411,6 +413,7 @@ TOOL_CONFIGS = [
         "input_schema": GhCommentIssueInput,
         "requires_confirmation": True,
         "function": gh_comment_issue,
+        "category": "mutation",
     },
     {
         "name": "gh_list_prs",
@@ -422,6 +425,7 @@ TOOL_CONFIGS = [
         "input_schema": GhListPrsInput,
         "requires_confirmation": False,
         "function": gh_list_prs,
+        "category": "readonly",
     },
     {
         "name": "gh_get_file",
@@ -433,10 +437,21 @@ TOOL_CONFIGS = [
         "input_schema": GhGetFileInput,
         "requires_confirmation": False,
         "function": gh_get_file,
+        "category": "readonly",
     },
 ]
 
 TOOL_CONFIG = TOOL_CONFIGS[0]
+
+
+register_tool_categories(
+    {
+        "gh_create_issue": "mutation",
+        "gh_comment_issue": "mutation",
+        "gh_list_prs": "readonly",
+        "gh_get_file": "readonly",
+    }
+)
 
 __all__ = [
     "TOOL_SETUP",

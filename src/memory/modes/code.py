@@ -225,6 +225,7 @@ class CodeDevelopmentMemoryManager(BaseMemoryManager):
         self._load_tier_cache()
         self._load_mode_meta()
         self._clamp_summary_idx()
+        self._initial_mode = self.mode_name
         self._loaded = True
 
     def _restore_mode_state(self, data: dict) -> None:
@@ -482,6 +483,12 @@ class CodeDevelopmentMemoryManager(BaseMemoryManager):
                 )
             except Exception as exc:
                 log.debug("Tier roll-forward scheduling failed: %s", exc)
+
+        # ── Domain-shift detection ─────────────────────────────────────
+        # Check if recent conversation patterns indicate a topic-domain shift
+        # that warrants resetting the rolling summary. Called outside all locks.
+        prompts = self._extract_recent_user_prompts(self._messages, limit=3)
+        self._check_domain_shift(prompts)
 
     def get_system_prompt_additions(self) -> str | None:
         """Return code-mode system prompt additions."""

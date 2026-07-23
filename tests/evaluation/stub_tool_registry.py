@@ -264,6 +264,163 @@ def _route_for_approval_return(inp: BaseModel) -> dict[str, Any]:
     }
 
 
+# ── web_search ────────────────────────────────────────────────────────────────
+
+
+class WebSearchInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    query: str
+    depth: int | None = None
+    region: str | None = None
+    compact: bool | None = None
+    notes: str | None = None
+
+
+_WEB_SEARCH_CANNED_PAYLOADS: dict[str, dict[str, Any]] = {
+    # Multi-source agreement — synthesis-correctness scenario.
+    "synthesis_correctness": {
+        "key_findings": [
+            {
+                "topic": "Release",
+                "statement": "Cogforge ML Toolkit 4.2 launched on 2026-04-12.",
+                "cited": ["A", "B"],
+            },
+            {
+                "topic": "Notable changes",
+                "statement": "Adds GPU memory checkpointing for models above 30B parameters.",
+                "cited": ["A", "C"],
+            },
+            {
+                "topic": "Notable changes",
+                "statement": "Drops support for Python 3.10 — minimum is now 3.11.",
+                "cited": ["B", "C"],
+            },
+        ],
+        "disagreements": [],
+        "gaps": [
+            "Throughput benchmarks for the new memory-checkpointing path.",
+        ],
+        "sources": [
+            {
+                "id": "A",
+                "url": "https://cogforge.example.org/blog/4-2-release-notes",
+                "title": "Cogforge ML Toolkit 4.2 release notes",
+                "domain_class": "official-docs",
+            },
+            {
+                "id": "B",
+                "url": "https://research-news.example.com/cogforge-4-2-announce",
+                "title": "Cogforge ships 4.2 with bigger-model support",
+                "domain_class": "news",
+            },
+            {
+                "id": "C",
+                "url": "https://devjournal.example.net/cogforge-4-2-quick-look",
+                "title": "First look at Cogforge ML 4.2",
+                "domain_class": "blog",
+            },
+        ],
+    },
+    # Sources contradict — disagreement scenario.
+    "synthesis_disagreement": {
+        "key_findings": [
+            {
+                "topic": "Project status",
+                "statement": "Argonaut Routing is an open-source mesh networking project.",
+                "cited": ["A", "B"],
+            },
+        ],
+        "disagreements": [
+            {
+                "issue": "Release date of version 2.0",
+                "positions": [
+                    {"source": "A", "claim": "Released 2026-03-04 per the official notes."},
+                    {
+                        "source": "B",
+                        "claim": "Released 2026-04-19 per the maintainer's announcement.",
+                    },
+                ],
+            },
+            {
+                "issue": "License",
+                "positions": [
+                    {"source": "A", "claim": "Apache-2.0."},
+                    {"source": "C", "claim": "MIT."},
+                ],
+            },
+        ],
+        "gaps": [],
+        "sources": [
+            {
+                "id": "A",
+                "url": "https://argonaut-routing.example.org/release-notes",
+                "title": "Argonaut Routing — release notes",
+                "domain_class": "official-docs",
+            },
+            {
+                "id": "B",
+                "url": "https://news.example.com/argonaut-2-0-launches",
+                "title": "Argonaut 2.0 launches with new features",
+                "domain_class": "news",
+            },
+            {
+                "id": "C",
+                "url": "https://wiki.example.org/wiki/Argonaut_Routing",
+                "title": "Argonaut Routing — Wiki",
+                "domain_class": "wiki-community",
+            },
+        ],
+    },
+}
+
+
+def _web_search_return(inp: BaseModel) -> dict[str, Any]:
+    """Stub return for the ``web_search`` tool.
+
+    Picks a canned payload based on substrings in the query so the two
+    Gate 2 scenarios (correctness vs disagreement) get the right
+    multi-source content without sharing query strings. Falls back to
+    an "empty results" shape for any other query — this mirrors the
+    sync ``search_web`` stub's behaviour and supports the
+    no-fabrication regression scenarios.
+    """
+    payload: dict[str, Any] = inp.model_dump()
+    query = (payload.get("query") or "").lower()
+
+    if "cogforge" in query or "ml toolkit 4.2" in query:
+        canned = _WEB_SEARCH_CANNED_PAYLOADS["synthesis_correctness"]
+    elif "argonaut" in query:
+        canned = _WEB_SEARCH_CANNED_PAYLOADS["synthesis_disagreement"]
+    else:
+        canned = None
+
+    out: dict[str, Any] = {
+        "status": "ok",
+        "query": payload.get("query"),
+    }
+    if canned is None:
+        out["key_findings"] = []
+        out["disagreements"] = []
+        out["gaps"] = ["No results matched the query."]
+        out["sources"] = []
+    else:
+        out["key_findings"] = canned["key_findings"]
+        out["disagreements"] = canned["disagreements"]
+        out["gaps"] = canned["gaps"]
+        out["sources"] = canned["sources"]
+
+    if payload.get("depth") is not None:
+        out["depth"] = payload["depth"]
+    if payload.get("region") is not None:
+        out["region"] = payload["region"]
+    if payload.get("compact") is not None:
+        out["compact"] = payload["compact"]
+    if payload.get("notes") is not None:
+        out["notes"] = payload["notes"]
+    return out
+
+
 # ── search_web ────────────────────────────────────────────────────────────────
 
 
@@ -429,6 +586,16 @@ STUB_TOOL_REGISTRY: dict[str, StubToolSpec] = {
         description=("Search the public web for a query and return matching results."),
         input_schema=SearchWebInput,
         return_template=_search_web_return,
+    ),
+    "web_search": StubToolSpec(
+        name="web_search",
+        description=(
+            "Universal web research tool: searches multiple providers in parallel, "
+            "fetches top results, extracts page content, and returns a structured "
+            "view with key_findings, disagreements, gaps, and sources."
+        ),
+        input_schema=WebSearchInput,
+        return_template=_web_search_return,
     ),
     "validate_supplier_data": StubToolSpec(
         name="validate_supplier_data",

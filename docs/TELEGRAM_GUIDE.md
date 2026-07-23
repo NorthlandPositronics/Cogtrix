@@ -321,7 +321,7 @@ You: Search for top 5 tech news today, summarize each in one sentence, and send 
 ```
 
 Cogtrix will:
-1. Use `search_web` or `search_news` to find articles
+1. Use `web_search` to find articles
 2. Summarize them
 3. Use `telegram_send` to deliver the briefing
 

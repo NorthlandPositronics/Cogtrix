@@ -44,6 +44,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from src.tools._web_search_aggregator import ProviderResult
 from src.tools.error_sanitizer import sanitize_search_error as _sanitize_search_error
 
 log = logging.getLogger("cogtrix")
@@ -265,44 +266,74 @@ def serpapi_search(
     return "\n".join(output)
 
 
-# -- Tool registration --------------------------------------------------------
+async def _search_async(
+    query: str, num_results: int = 5, region: str | None = None
+) -> list[ProviderResult]:
+    """Async SerpAPI search returning ProviderResult list (ADR-0056 PR-B).
 
-TOOL_CONFIG = {
-    "name": "serpapi_search",
-    "description": (
-        "Search the web using SerpAPI, a structured proxy for Google and "
-        "Bing. SerpAPI executes real search engine queries and returns "
-        "clean, parsed JSON — the richest structured output of all "
-        "search tools.\n"
-        "\n"
-        "Supports:\n"
-        "- Google and Bing search engines\n"
-        "- Web, news, images, and shopping search types\n"
-        "- Time filtering: 'qdr:d' (day), 'qdr:w' (week), "
-        "'qdr:m' (month), 'qdr:y' (year)\n"
-        "\n"
-        "Rich structured data returned (when available):\n"
-        "- Answer boxes (direct answers to questions)\n"
-        "- Knowledge graph (entity info, descriptions)\n"
-        "- People Also Ask (related questions with answers)\n"
-        "- Rich snippets (ratings, dates, metadata)\n"
-        "- Organic results with titles, URLs, and snippets\n"
-        "\n"
-        "USE THIS TOOL WHEN:\n"
-        "- You need Google-quality search results\n"
-        "- You want structured data (knowledge graph, answer boxes)\n"
-        "- Other search tools return insufficient or irrelevant results\n"
-        "- You need to search Google News, Images, or Shopping specifically"
-    ),
-    "input_schema": SerpAPISearchInput,
-    "function": serpapi_search,
-    "requires_confirmation": False,
-}
+    Wraps the sync ``GoogleSearch(params).get_dict()`` call in
+    ``asyncio.to_thread``. Raises on missing API key / API errors.
+    ``region`` is accepted for cross-provider symmetry; SerpAPI uses
+    ``gl`` (geo-location) for region targeting which we don't surface
+    here — the v1 fan-out passes a uniform query, not per-provider
+    locale params.
+    """
+    import asyncio
+
+    del region
+
+    if not SERPAPI_AVAILABLE:
+        raise RuntimeError("SerpAPI SDK not installed")
+    api_key = _get_api_key()
+    if not api_key:
+        raise RuntimeError("SerpAPI key not configured")
+    if not query.strip():
+        return []
+
+    num_results = max(1, min(num_results, 20))
+
+    def _sync_call() -> dict[str, Any]:
+        return GoogleSearch(
+            {
+                "q": query,
+                "engine": "google",
+                "num": num_results,
+                "api_key": api_key,
+            }
+        ).get_dict()
+
+    data = await asyncio.to_thread(_sync_call)
+    if "error" in data:
+        raise RuntimeError(f"SerpAPI error: {data['error']}")
+
+    organic = data.get("organic_results", []) or []
+    return [
+        ProviderResult(
+            provider="serpapi",
+            url=r.get("link") or "",
+            title=r.get("title") or "",
+            snippet=r.get("snippet") or "",
+            # SerpAPI's "date" is a free-form string ("3 hours ago",
+            # "Mar 15, 2026"); leaving unparsed for v1.
+            published_date=None,
+        )
+        for r in organic[:num_results]
+        if r.get("link")
+    ]
+
+
+# -- Tool registration --------------------------------------------------------
+#
+# PR-G removed serpapi_search from the agent catalogue. The sync
+# function and async _search_async stay in this module so web_search
+# can reach SerpAPI via _resolve_providers().
+TOOL_CONFIGS: list[dict[str, Any]] = []
+
 
 __all__ = [
     "serpapi_search",
     "configure_serpapi",
     "is_configured",
     "SerpAPISearchInput",
-    "TOOL_CONFIG",
+    "TOOL_CONFIGS",
 ]

@@ -256,3 +256,53 @@ class TestToolConfigs:
 
     def test_tool_config_is_first_entry(self) -> None:
         assert dt_module.TOOL_CONFIG is dt_module.TOOL_CONFIGS[0]
+
+
+# ── Bug #1706 regression — discourage casual "now" misuse ──────────────
+
+
+class TestGetCurrentDatetimeGuidance:
+    """The docstring is the model-visible tool description. After
+    Bug #1706 we tighten it so the model stops calling the tool on
+    casual "now" markers (e.g. "Do it now please") and on requests
+    for today's UTC date (which is already injected into the
+    HumanMessage prefix). The behavioural fix lives in the
+    docstring; these tests pin its contents so a future edit can't
+    silently re-loosen it.
+    """
+
+    def test_docstring_lists_when_to_use(self) -> None:
+        doc = dt_module.get_current_datetime.__doc__ or ""
+        assert (
+            "WHEN TO USE" in doc.upper()
+        ), "docstring should explicitly enumerate when the tool is appropriate"
+
+    def test_docstring_lists_when_not_to_use(self) -> None:
+        doc = dt_module.get_current_datetime.__doc__ or ""
+        assert "WHEN NOT TO USE" in doc.upper(), (
+            "docstring should explicitly enumerate when the tool is NOT "
+            "appropriate (the Bug #1706 fix surface)"
+        )
+
+    def test_docstring_warns_against_casual_now(self) -> None:
+        doc = dt_module.get_current_datetime.__doc__ or ""
+        # The F01 reproducer was "Do it now please." — the tool was
+        # called interpreting "now" as a time question. Docstring must
+        # explicitly warn that a casual "now" is not a time request.
+        lower = doc.lower()
+        assert "now" in lower and (
+            "tonal modifier" in lower
+            or "impatience" in lower
+            or "not a time question" in lower
+            or 'casual "now"' in lower
+        ), "docstring should call out casual 'now' as a misuse trigger"
+
+    def test_docstring_notes_redundancy_with_injected_timestamp(self) -> None:
+        doc = dt_module.get_current_datetime.__doc__ or ""
+        lower = doc.lower()
+        # The orchestration already injects current UTC into the
+        # HumanMessage prefix. Docstring should reference that so the
+        # model doesn't redundantly fetch it.
+        assert (
+            "humanmessage" in lower or "system prompt" in lower or "already in" in lower
+        ), "docstring should explain that current UTC is already in context"

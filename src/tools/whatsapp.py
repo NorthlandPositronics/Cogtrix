@@ -55,6 +55,7 @@ from pydantic import BaseModel, Field
 
 from src.logging_config import get_logger
 from src.tools._whatsapp_client import REQUESTS_AVAILABLE, WahaClient
+from src.tools.delegate import register_tool_categories
 
 log = get_logger()
 
@@ -297,9 +298,7 @@ class WhatsAppSendImageInput(BaseModel):
     """Input schema for sending a WhatsApp image."""
 
     to: str = Field(
-        description=(
-            "Recipient — a phone number in international format " "or a phonebook nickname."
-        )
+        description=("Recipient — a phone number in international format or a phonebook nickname.")
     )
     image_url: str = Field(description="Public URL of the image to send (JPEG preferred).")
     caption: str | None = Field(
@@ -539,6 +538,7 @@ def _build_tool_configs() -> list[dict[str, Any]]:
                 "input_schema": WhatsAppSendInput,
                 "requires_confirmation": _cfg.require_confirmation,
                 "function": whatsapp_send,
+                "category": "messaging",
             }
         )
         configs.append(
@@ -554,6 +554,7 @@ def _build_tool_configs() -> list[dict[str, Any]]:
                 "input_schema": WhatsAppSendImageInput,
                 "requires_confirmation": _cfg.require_confirmation,
                 "function": whatsapp_send_image,
+                "category": "messaging",
             }
         )
 
@@ -572,6 +573,7 @@ def _build_tool_configs() -> list[dict[str, Any]]:
                 "input_schema": WhatsAppCheckInput,
                 "requires_confirmation": False,
                 "function": whatsapp_check,
+                "category": "privacy",
             }
         )
 
@@ -586,8 +588,16 @@ def _build_tool_configs() -> list[dict[str, Any]]:
             "input_schema": WhatsAppContactsInput,
             "requires_confirmation": False,
             "function": whatsapp_contacts,
+            "category": "readonly",
         }
     )
+
+    _categories: dict[str, str] = {}
+    for cfg in configs:
+        name = cfg["name"]
+        cat = cfg.get("category", "readonly")
+        _categories[name] = cat
+    register_tool_categories(_categories)
 
     return configs
 

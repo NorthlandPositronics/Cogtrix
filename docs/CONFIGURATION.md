@@ -429,18 +429,20 @@ task_ownership_classifier:
 
 ### Pre-Action Confirmation
 
-When enabled, the agent will be instructed to request confirmation before irreversible operations (delete, install, deploy to production, drop tables, overwrite data). This is a planned feature — the configuration field is accepted and stored, but the constraint injection is not yet active in this release. Setting `enabled: true` has no effect on current behavior.
+When enabled, the agent is instructed to request explicit confirmation before any irreversible operation (delete, uninstall, deploy to production, drop table/database, overwrite data, format/wipe storage). Before executing such a tool, the agent states exactly what it is about to do and asks "Shall I proceed?" — it waits for explicit consent before continuing.
 
-For the functional pre-execution safety gate available now, see [Task Ownership Classifier](#task-ownership-classifier) above — it constrains the agent to explain rather than act when it detects informational or advisory intent, and prompts for clarification on ambiguous requests.
+Consent is recognized when the user's reply contains execution keywords: `go ahead`, `yes do it`, `proceed`, `confirmed`, `yes install it`, etc. Without such confirmation, the agent does not call the tool.
+
+For the pre-execution safety gate available independently of this setting, see [Task Ownership Classifier](#task-ownership-classifier) above — it constrains the agent to explain rather than act when it detects informational or advisory intent, and prompts for clarification on ambiguous requests.
 
 ```yaml
 pre_action_confirmation:
-  enabled: false   # currently a no-op; constraint injection is planned
+  enabled: false   # set to true to require confirmation before irreversible operations
 ```
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `enabled` | bool | `false` | Reserved for future use. No behavior change in current version. |
+| `enabled` | bool | `false` | When `true`, the agent requires explicit confirmation before irreversible operations. The confirmation prompt is injected into the system prompt at session start. |
 
 ### Prompt Optimizer
 
@@ -681,7 +683,7 @@ Released tools return to the catalog and can be re-requested later.
 
 #### What the agent sees
 
-The `request_tools` tool description includes a one-line summary of every available tool, so the agent can choose intelligently. For example, if you ask a date question it will request `get_current_datetime`; if you ask to search the web it will request `search_web`.
+The `request_tools` tool description includes a one-line summary of every available tool, so the agent can choose intelligently. For example, if you ask a date question it will request `get_current_datetime`; if you ask to search the web it will request `web_search`.
 
 #### Fuzzy name matching
 
@@ -694,7 +696,7 @@ Use the `--tools` CLI flag to bypass the on-demand system and load specific tool
 ```bash
 python cogtrix.py --tools none                    # No tools (pure LLM chat)
 python cogtrix.py --tools minimal                 # Basic set only
-python cogtrix.py --tools "search_web,calculate"  # Specific tools
+python cogtrix.py --tools "web_search,calculate"  # Specific tools
 ```
 
 When `--tools` is used, all specified tools are active immediately (no on-demand pool).
@@ -741,21 +743,32 @@ Tools that require an API key are **automatically hidden** from the agent when t
 
 #### Search Providers
 
-Cogtrix includes seven search providers. DuckDuckGo is always available with no setup. The other six (Tavily, Exa, Brave, Google, SerpAPI, SearXNG) require an API key and some require an additional Python package.
+Cogtrix exposes a single research tool to the agent — **`web_search`** — that fans
+out to up to seven backend providers in parallel, fetches the top-K results,
+extracts page content, synthesises a topic-organised answer, and returns a
+structured Markdown report. The per-provider modules (`tavily_search`,
+`brave_search`, etc.) are not agent-facing tools; they are wired into the
+`web_search` pipeline at run time when their credentials are present.
+ADR-0056 (private documentation submodule) captures the full pipeline design;
+[TOOLS_REFERENCE.md](TOOLS_REFERENCE.md) documents the `web_search` tool schema.
 
-| Provider | Tools | Package | API Key | Free Tier |
-|----------|-------|---------|---------|-----------|
-| DuckDuckGo | `search_web`, `search_news` | Included (`ddgs`) | None | Unlimited |
-| Tavily | `tavily_search`, `tavily_extract` | `tavily-python` | `TAVILY_API_KEY` | 1 000/month |
-| Exa | `exa_search`, `exa_find_similar`, `exa_get_contents` | `exa-py` | `EXA_API_KEY` | 1 000/month |
-| Brave | `brave_search` | Included (`requests`) | `BRAVE_API_KEY` | 2 000/month |
-| Google | `google_search` | Included (`requests`) | `GOOGLE_API_KEY` + `GOOGLE_CSE_ID` | 100/day |
-| SerpAPI | `serpapi_search` | `google-search-results` | `SERPAPI_API_KEY` | 100/month |
-| SearXNG | `searxng_search` | Included (`requests`) | `SEARXNG_URL` | Self-hosted |
+DuckDuckGo is always available with no setup. The other six (Tavily, Exa, Brave, Google, SerpAPI, SearXNG) require an API key and some require an additional Python package.
+
+| Provider | Auto-included by `web_search` when | Package | API Key | Free Tier |
+|----------|-----------------------------------|---------|---------|-----------|
+| DuckDuckGo | Always (no setup) | Included (`ddgs`) | None | Unlimited |
+| Tavily | `TAVILY_API_KEY` set | `tavily-python` | `TAVILY_API_KEY` | 1 000/month |
+| Exa | `EXA_API_KEY` set | `exa-py` | `EXA_API_KEY` | 1 000/month |
+| Brave | `BRAVE_API_KEY` set | Included (`requests`) | `BRAVE_API_KEY` | 2 000/month |
+| Google | `GOOGLE_API_KEY` + `GOOGLE_CSE_ID` set | Included (`requests`) | `GOOGLE_API_KEY` + `GOOGLE_CSE_ID` | 100/day |
+| SerpAPI | `SERPAPI_API_KEY` set | `google-search-results` | `SERPAPI_API_KEY` | 100/month |
+| SearXNG | `SEARXNG_URL` set | Included (`requests`) | `SEARXNG_URL` | Self-hosted |
+
+The agent only ever calls `web_search`. The pipeline picks the configured backends per-call; missing keys mean the backend is silently skipped (no errors). Tavily also exposes a separate `tavily_extract` agent tool for one-URL deep extraction outside the search pipeline.
 
 **Configuring SearXNG:**
 
-[SearXNG](https://docs.searxng.org/) is a self-hosted meta-search engine. To enable it, set `SEARXNG_URL` to your instance URL:
+[SearXNG](https://docs.searxng.org/) is a self-hosted meta-search engine. To enable it as a `web_search` backend, set `SEARXNG_URL` to your instance URL:
 
 ```bash
 export SEARXNG_URL=http://localhost:8888
@@ -769,7 +782,7 @@ services:
     url: http://localhost:8888
 ```
 
-The `searxng_search` tool becomes available automatically once the URL is configured.
+SearXNG joins the `web_search` fan-out automatically once the URL is configured.
 
 **Installing optional search packages:**
 
@@ -1112,7 +1125,7 @@ auto_detect:
 3. **Auto-detect** — if any workflow has `auto_detect.enabled: true`, incoming messages are scored against keywords and regex patterns; the highest-scoring workflow above `min_confidence` is assigned and persisted as a binding
 4. **No match** — global `system_prompt` and default tool policy apply
 
-**API management:** 11 CRUD endpoints at `/api/v1/assistant/workflows/` — create, list, get, update, delete workflows; upload and manage per-workflow documents; bind and unbind chats. See the [API Reference](api/openapi.yaml) for details.
+**API management:** 11 CRUD endpoints at `/api/v1/assistant/workflows/` — create, list, get, update, delete workflows; upload and manage per-workflow documents; bind and unbind chats. See the [API Reference](API/OPENAPI.yaml) for details.
 
 **Per-workflow knowledge base:** when `knowledge_base: true`, upload documents to `data/workflows/<id>/docs/` via the API. A FAISS index is built at `data/workflows/<id>/vectordb/faiss_index/` and searched alongside the global index when the `query_knowledge_base` tool runs for a chat bound to that workflow.
 
@@ -1254,7 +1267,7 @@ Violations are counted toward auto-blacklisting. Tune `min_score` downward to ca
 
 - **Injection scan** — checks all string arguments of any tool for prompt injection patterns.
 - **Path blocking** — for file tools (`read_file`, `write_file`, etc.), rejects arguments that reference sensitive paths such as `/etc/`, `/proc/`, `.env` files, and private key files. Add custom prefixes via `sensitive_paths`.
-- **Exfiltration detection** — for web tools (`search_web`, `http_request`, etc.), detects API keys, SSH keys, and SSNs embedded in URL or query arguments.
+- **Exfiltration detection** — for web tools (`web_search`, `http_request`, etc.), detects API keys, SSH keys, and SSNs embedded in URL or query arguments.
 
 **Auto-blacklist:**
 
@@ -1297,6 +1310,7 @@ to avoid adding 500ms–2s to every request.
 | `OPENAI_API_KEY` | OpenAI API key | `sk-...` |
 | `ANTHROPIC_API_KEY` | Anthropic API key | `sk-ant-...` |
 | `GEMINI_API_KEY` | Google Gemini API key | `AIza...` |
+| `GROQ_API_KEY` | Groq API key | `gsk-...` |
 | `XAI_API_KEY` | xAI (Grok) API key | `xai-...` |
 | `DEEPSEEK_API_KEY` | DeepSeek API key | `sk-...` |
 | `OLLAMA_BASE_URL` | Ollama server URL (legacy, full URL) | `http://192.168.1.100:11434` |
@@ -1314,7 +1328,7 @@ to avoid adding 500ms–2s to every request.
 | `COGTRIX_WHATSAPP_API_KEY` | Waha API key | `yoursecretkey` |
 | `COGTRIX_WHATSAPP_SESSION` | Waha session name | `default` |
 | `COGTRIX_TELEGRAM_TOKEN` | Telegram bot token | `123456:ABC-DEF...` |
-| `COGTRIX_SLACK_BOT_TOKEN` | Slack bot token for `cogtrix_slack_post_message` tool | `xoxb-...` |
+| `COGTRIX_SLACK_BOT_TOKEN` | Slack bot token for `cogtrix_slack_post_message` tool. Overrides `services.slack.bot_token` from the config file when set to a non-empty value. | `xoxb-...` |
 | `COGTRIX_JWT_SECRET` | JWT signing secret for API mode (min 32 chars, required) | `your-secret-key-at-least-32-chars` |
 | `COGTRIX_DB_URL` | Database URL for API mode (default: SQLite `aiosqlite`) | `postgresql+asyncpg://user:pass@host/db` |
 | `COGTRIX_CORS_ORIGINS` | Comma-separated CORS allowed origins for API mode | `http://localhost:5173,https://app.example.com` |
@@ -1368,11 +1382,47 @@ python cogtrix.py [OPTIONS]
 | `--output FILE` | `-o` | Save responses to file. Non-interactive: single write. Interactive: append each exchange as Markdown. |
 | `--debug` | | Enable debug mode (auto-enables `--log` and `--verbose`) |
 | `--verbose` | `-v` | Log full LLM interactions: tokens, thinking, tool calls |
+| `--verbosity N` | | Verbosity level: `0`=normal, `1`=debug, `2`=verbose, `3`=trace |
 | `--log [FILE]` | | Enable logging to file (default: `cogtrix.log`) |
+| `--silent` | `-S` | Silent scripting mode: no spinner/ANSI, plain stdout, tool confirmations auto-denied. Use `-y` to auto-approve instead. |
+| `--quick` | `-Q` | Skip optimizer, memory, and compression (fast one-off queries) |
+| `--auto-route` | `-R` | Route simple queries to a fast model (requires `auto_route_fast_model` in config) |
+| `--git-native` | `-G` | Auto stage and commit after each file write (requires a git repository) |
+| `--no-banner` | | Suppress the startup banner |
+| `--pipe` | `-I` | Read prompt from stdin, run once, exit. Suppresses the banner when stdout is not a tty. |
+| `--profile NAME` | `-P` | Apply a named config profile (defined in the config file) |
 | `--tools LIST` | | Comma-separated tools to load (default: all) |
 | `--activate-tools LIST` | | Comma-separated tools to pin as active on startup |
+| `--allow-write-path DIR` | | Allow file writes to DIR (repeatable; multiple paths allowed) |
+| `--allow-read-path DIR` | | Allow file reads from DIR (repeatable; multiple paths allowed) |
 | `--assistant` | | Run as a headless WhatsApp/Telegram messaging daemon |
 | `--check-config` | | Validate configuration and exit |
+| `--version` | | Show version and exit |
+| `--install-completion [SHELL]` | | Print shell completion script (bash/zsh). Source it to enable tab-completion. Use `auto` to auto-detect. |
+
+### Run Modes
+
+Control how Cogtrix executes and handles output:
+
+```bash
+python cogtrix.py --silent "Process this task"     # Scripting: no spinner, auto-deny confirmations
+echo "Task description" | python cogtrix.py --pipe # Stdin: read prompt, run once, exit
+python cogtrix.py --quick "Quick one-off query"    # Fast: skip optimizer, memory, compression
+python cogtrix.py --auto-route                     # Route simple queries to fast model
+python cogtrix.py --git-native --prompt "..."      # Auto-stage and commit after file writes
+python cogtrix.py --no-banner --prompt "..."       # Suppress startup banner
+python cogtrix.py --profile myprofile --prompt "..." # Apply named config profile
+```
+
+| Option | Short | Description |
+|--------|-------|-------------|
+| `--silent` | `-S` | Silent scripting mode: no spinner/ANSI, tool confirmations auto-denied. Use `-y` to auto-approve instead. |
+| `--pipe` | `-I` | Read prompt from stdin, run once, exit. Suppresses the startup banner when stdout is not a tty. |
+| `--quick` | `-Q` | Skip optimizer, memory, and compression for fast one-off queries |
+| `--auto-route` | `-R` | Route simple queries to a fast model (requires `auto_route_fast_model` in config) |
+| `--git-native` | `-G` | Auto stage and commit after each file write (requires a git repository) |
+| `--no-banner` | | Suppress the startup banner |
+| `--profile NAME` | `-P` | Apply a named config profile (defined in the config file) |
 
 ### Non-interactive Mode
 
@@ -1389,10 +1439,24 @@ python cogtrix.py --prompt "Generate JSON" --no-stream -o data.json
 |--------|-------|-------------|
 | `--prompt TEXT` | | Send a single prompt and exit |
 | `--prompt-file FILE` | | Read prompt from file and exit |
-| `--system-prompt FILE` | | Override the default system prompt with inline text |
-| `--system-prompt-file FILE` | | Override the default system prompt by loading text from FILE |
 | `--output FILE` | `-o` | Write response to file |
 | `--no-stream` | | Disable streaming output |
+
+### Assistant Mode
+
+Run Cogtrix as a headless WhatsApp/Telegram messaging daemon:
+
+```bash
+python cogtrix.py --assistant --log --debug
+python cogtrix.py --assistant --system-prompt "You are a helpdesk bot for Acme Corp."
+python cogtrix.py --assistant --system-prompt-file ./prompts/helpdesk.txt
+```
+
+| Option | Description |
+|--------|-------------|
+| `--assistant` | Run as a headless WhatsApp/Telegram messaging daemon |
+| `--system-prompt TEXT` | Override the default system prompt with inline text |
+| `--system-prompt-file FILE` | Override the default system prompt by loading text from FILE |
 
 ### Tool Filtering
 
@@ -1401,8 +1465,10 @@ Control which tools are loaded at startup:
 ```bash
 python cogtrix.py --tools none                    # No tools (pure LLM chat)
 python cogtrix.py --tools minimal                 # Basic set (file ops + calculate)
-python cogtrix.py --tools "search_web,calculate"  # Specific tools only
+python cogtrix.py --tools "web_search,calculate"  # Specific tools only
 ```
+
+Path allowlisting restricts which directories a tool can read from or write to. Use `--allow-write-path DIR` and `--allow-read-path DIR` (both repeatable) to open specific directories. See [Allowed Write Paths](#allowed-write-paths) and [Allowed Read Paths](#allowed-read-paths) for full detail.
 
 ### Pinning Tools at Startup
 
@@ -1470,6 +1536,30 @@ simplifies first-run setup:
 docker run -it -v ~/.cogtrix.yaml:/app/.cogtrix.yaml ghcr.io/northlandpositronics/cogtrix:latest
 # → wizard starts automatically, writes config to the mounted path
 ```
+
+### Shell Completion
+
+Enable tab completion for bash or zsh:
+
+```bash
+# Auto-detect your shell
+python cogtrix.py --install-completion
+
+# Explicit bash
+python cogtrix.py --install-completion bash
+
+# Explicit zsh
+python cogtrix.py --install-completion zsh
+```
+
+The command prints a script to stdout. Source it in your shell profile to activate completion:
+
+```bash
+# Add to ~/.bashrc or ~/.zshrc
+eval "$(python cogtrix.py --install-completion)"
+```
+
+Completion works for options, subcommands, model aliases, and session IDs.
 
 ---
 

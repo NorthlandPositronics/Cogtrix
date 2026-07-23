@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cogtrix"
-version = "0.2.10"
-description = "Modular AI assistant with 68 built-in tools, multi-provider LLM support, and hybrid memory"
+version = "0.2.11"
+description = "Modular AI assistant with 67 built-in tools, multi-provider LLM support, and hybrid memory"
 readme = "README.md"
 requires-python = "~=3.13.0"
 
@@ -43,7 +43,10 @@ dependencies = [
     # Tools Dependencies
     "python-dateutil~=2.9.0",   # datetime_tool.py
     "pytz~=2026.2",             # datetime_tool.py (calendar-versioned)
-    "ddgs~=9.14.1",             # web_search.py
+    "curl_cffi~=0.15.0",        # _ddg.py — browser-fingerprint-impersonating libcurl binding (Bug D phase 2; replaced ddgs/primp)
+    "trafilatura~=2.0",          # web_search.py — HTML→Markdown extraction (ADR-0056)
+    "tldextract~=5.1.0",         # web_search.py — registered-domain extraction (ADR-0056)
+    "cachetools~=5.5.0",         # web_search.py — TTL cache for query results (ADR-0056)
     "croniter~=6.0",             # cron_tools.py
     "pluggy~=1.6",               # src/plugins/ — tool plugin system
     "prompt-toolkit>=3.0",       # pinned prompt input session
@@ -57,7 +60,6 @@ dependencies = [
 rag = [
     "faiss-cpu~=1.13.0",
     "pypdf>=6.10.2",
-    "python-docx~=1.2.0",
 ]
 search = [
     "tavily-python~=0.7.24",
@@ -96,7 +98,6 @@ dev = [
 ]
 science = [
     "numpy~=2.4.4",
-    "scipy~=1.17.1",
 ]
 discord = [
     "discord.py>=2.3",

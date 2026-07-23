@@ -36,6 +36,8 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from src.tools._web_search_aggregator import ProviderResult
+from src.tools.delegate import register_tool_categories
 from src.tools.error_sanitizer import sanitize_search_error as _sanitize_search_error
 
 log = logging.getLogger("cogtrix")
@@ -219,6 +221,53 @@ def tavily_search(
     return "\n".join(output)
 
 
+async def _search_async(
+    query: str, num_results: int = 5, region: str | None = None
+) -> list[ProviderResult]:
+    """Async Tavily search returning ProviderResult list (ADR-0056 PR-B).
+
+    Wraps the sync TavilyClient.search() in asyncio.to_thread. Raises
+    on missing config / API errors; returns ``[]`` on empty query.
+    ``region`` is accepted for signature uniformity with other
+    providers and ignored — Tavily does not expose a region parameter.
+    """
+    import asyncio
+
+    del region  # unused; kept for cross-provider signature symmetry
+
+    if not TAVILY_AVAILABLE:
+        raise RuntimeError("Tavily SDK not installed")
+    if not query.strip():
+        return []
+
+    num_results = max(1, min(num_results, 10))
+
+    def _sync_call() -> dict[str, Any]:
+        client = _get_client()  # raises RuntimeError on missing key
+        return client.search(
+            query=query,
+            search_depth="advanced",
+            max_results=num_results,
+            include_answer=False,
+            include_raw_content=False,
+            topic="general",
+        )
+
+    response = await asyncio.to_thread(_sync_call)
+    raw_results = response.get("results", []) or []
+    return [
+        ProviderResult(
+            provider="tavily",
+            url=r.get("url") or "",
+            title=r.get("title") or "",
+            snippet=r.get("content") or "",
+            published_date=None,
+        )
+        for r in raw_results
+        if r.get("url")
+    ]
+
+
 def tavily_extract(urls: list[str]) -> str:
     """
     Extract clean text content from one or more web pages using Tavily.
@@ -285,40 +334,10 @@ def tavily_extract(urls: list[str]) -> str:
 # ── Tool registration ───────────────────────────────────────────────────
 
 TOOL_CONFIGS = [
-    {
-        "name": "tavily_search",
-        "description": (
-            "Search the web using Tavily, an AI-optimised search engine "
-            "designed for AI agents. Unlike basic search engines, Tavily "
-            "crawls pages and extracts their full text content, and can "
-            "provide an AI-generated answer summary synthesised from the "
-            "results.\n"
-            "\n"
-            "Two search depths are available:\n"
-            "- 'basic'    — fast, returns snippets (similar to DuckDuckGo)\n"
-            "- 'advanced' — deep crawl, returns extracted page text "
-            "(default, recommended for factual research)\n"
-            "\n"
-            "PREFER THIS TOOL over search_web when:\n"
-            "- You need accurate, detailed factual information\n"
-            "- You need to verify specific claims or numbers\n"
-            "- Search snippets alone are too short or ambiguous\n"
-            "- The query requires understanding full page content\n"
-            "\n"
-            "Use search_web (DuckDuckGo) as a fallback when Tavily is "
-            "unavailable or for quick, low-stakes lookups.\n"
-            "\n"
-            "Output includes: AI summary (optional), title, URL, relevance "
-            "score, and extracted page content per result.\n"
-            "\n"
-            "If results for one query are insufficient, issue a follow-up "
-            "search with a different angle or more specific terms before "
-            "drawing conclusions."
-        ),
-        "input_schema": TavilySearchInput,
-        "function": tavily_search,
-        "requires_confirmation": False,
-    },
+    # tavily_search removed from the agent catalogue in PR-G —
+    # web_search subsumes it. The sync `tavily_search` function and
+    # the internal `_search_async` stay in this module for use by
+    # web_search._resolve_providers().
     {
         "name": "tavily_extract",
         "description": (
@@ -339,10 +358,14 @@ TOOL_CONFIGS = [
         "input_schema": TavilyExtractInput,
         "function": tavily_extract,
         "requires_confirmation": False,
+        "category": "readonly",
     },
 ]
 
 TOOL_CONFIG = TOOL_CONFIGS[0]
+
+
+register_tool_categories({"tavily_search": "readonly", "tavily_extract": "readonly"})
 
 __all__ = [
     "tavily_search",

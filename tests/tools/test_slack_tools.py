@@ -129,3 +129,110 @@ class TestSlackPostMessageInput:
     def test_missing_text_raises(self) -> None:
         with pytest.raises(ValueError):  # pydantic.ValidationError
             st.SlackPostMessageInput(channel_id="C0AVAHW6HJS")
+
+
+class TestSlackBotTokenEnvVar:
+    """Issue #913: ``COGTRIX_SLACK_BOT_TOKEN`` was documented in
+    ``CONFIGURATION.md`` but no code read it.  Users who followed the
+    docs hit a silent failure: the env var was ignored, the bot token
+    stayed empty, and Slack tools were absent from the registry with
+    no warning logged.
+
+    The fix mirrors the WhatsApp / Telegram pattern: env var is the
+    highest-priority override on top of the config-file value.  These
+    tests pin both branches.
+    """
+
+    def _isolate_module_state(self):
+        """Snapshot and restore module-level state for clean test isolation."""
+        return (st._client, dict(st._slack_config), st._HAS_SLACK)
+
+    def _restore(self, snapshot) -> None:
+        st._client, slack_cfg, has = snapshot
+        st._slack_config = dict(slack_cfg)
+        st._HAS_SLACK = has
+
+    def _force_slack_available(self, monkeypatch) -> None:
+        """Force the slack-sdk-available branch with a stub WebClient
+        so the tests run even when slack-sdk isn't installed in the
+        dev environment.
+        """
+        st._HAS_SLACK = True
+        st._client = None
+        monkeypatch.setattr(st, "WebClient", lambda token: object())
+
+    def test_env_var_token_used_when_config_token_absent(self, monkeypatch) -> None:
+        """An empty config + ``COGTRIX_SLACK_BOT_TOKEN`` env var must
+        propagate the env-var token into ``_slack_config`` so
+        ``is_configured()`` reports True.  This is the docs-promised
+        behaviour that previously did nothing.
+        """
+        snap = self._isolate_module_state()
+        try:
+            self._force_slack_available(monkeypatch)
+            monkeypatch.setenv("COGTRIX_SLACK_BOT_TOKEN", "xoxb-from-env-913")
+
+            # Empty config dict — relying entirely on the env var.
+            st.configure_slack_tools({})
+
+            assert (
+                st._slack_config.get("bot_token") == "xoxb-from-env-913"
+            ), "env-var token must be propagated into _slack_config (issue #913)"
+            assert st.is_configured() is True, (
+                "COGTRIX_SLACK_BOT_TOKEN env var was set but is_configured() "
+                "still reports False — the docs-promised env var fallback "
+                "is missing"
+            )
+        finally:
+            self._restore(snap)
+            monkeypatch.delenv("COGTRIX_SLACK_BOT_TOKEN", raising=False)
+
+    def test_env_var_overrides_config_token(self, monkeypatch) -> None:
+        """When BOTH the config file AND the env var supply a token,
+        env var wins — matches WhatsApp / Telegram precedence and the
+        usual "env var = highest priority" convention.
+        """
+        snap = self._isolate_module_state()
+        try:
+            self._force_slack_available(monkeypatch)
+            monkeypatch.setenv("COGTRIX_SLACK_BOT_TOKEN", "xoxb-env-wins")
+
+            st.configure_slack_tools({"bot_token": "xoxb-config-loses"})
+
+            assert st._slack_config.get("bot_token") == "xoxb-env-wins"
+        finally:
+            self._restore(snap)
+            monkeypatch.delenv("COGTRIX_SLACK_BOT_TOKEN", raising=False)
+
+    def test_no_env_var_keeps_config_token(self, monkeypatch) -> None:
+        """When the env var is not set, the config-file token is kept
+        verbatim — unchanged behaviour for users who never used the
+        env var.
+        """
+        snap = self._isolate_module_state()
+        try:
+            self._force_slack_available(monkeypatch)
+            monkeypatch.delenv("COGTRIX_SLACK_BOT_TOKEN", raising=False)
+
+            st.configure_slack_tools({"bot_token": "xoxb-config-only"})
+
+            assert st._slack_config.get("bot_token") == "xoxb-config-only"
+        finally:
+            self._restore(snap)
+
+    def test_empty_env_var_does_not_override(self, monkeypatch) -> None:
+        """An empty-string env var (e.g. ``export COGTRIX_SLACK_BOT_TOKEN=``)
+        must NOT clobber a real token from the config file.  Treating
+        empty string as "unset" prevents accidental misconfiguration.
+        """
+        snap = self._isolate_module_state()
+        try:
+            self._force_slack_available(monkeypatch)
+            monkeypatch.setenv("COGTRIX_SLACK_BOT_TOKEN", "")
+
+            st.configure_slack_tools({"bot_token": "xoxb-config-real"})
+
+            assert st._slack_config.get("bot_token") == "xoxb-config-real"
+        finally:
+            self._restore(snap)
+            monkeypatch.delenv("COGTRIX_SLACK_BOT_TOKEN", raising=False)

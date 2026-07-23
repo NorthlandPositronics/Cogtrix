@@ -108,6 +108,74 @@ class TestCreateSafeToolWrapper:
         result = wrapped.invoke({})
         assert "denied" in result.lower() or "denied" in str(result).lower()
 
+    # ── Bug #1704 regressions: tool-spam blocking after no-UI denial ──
+
+    def test_no_ui_denial_disables_tool_for_session(self):
+        """After the first no-UI silent denial, the tool must be added
+        to session_state.denials so subsequent invocations short-circuit
+        instead of looping. Bug #1704: write_file got called 7+ times
+        on B01 because the deny path didn't pin the denial."""
+        tool = self._make_tool(name="write_file")
+        reg = self._make_registry(confirms=True)
+        ss = SessionState()
+        assert not ss.is_denied("write_file"), "pre-condition"
+
+        wrapped = create_safe_tool_wrapper(
+            tool, "write_file", reg, set(), session_state=ss, ui=None
+        )
+        wrapped.invoke({})
+
+        # First denial must have pinned the deny.
+        assert ss.is_denied("write_file"), (
+            "expected the first no-UI silent denial to mark the tool as denied "
+            "for the session — without that, the agent loops on retries"
+        )
+
+    def test_no_ui_denial_returns_explicit_do_not_retry_message(self):
+        """The returned tool result must explicitly tell the model not
+        to retry and to respond inline. Without that nudge the model
+        keeps trying with different args/paths."""
+        tool = self._make_tool(name="write_file")
+        reg = self._make_registry(confirms=True)
+        ss = SessionState()
+        wrapped = create_safe_tool_wrapper(
+            tool, "write_file", reg, set(), session_state=ss, ui=None
+        )
+        result = wrapped.invoke({})
+        text = result if isinstance(result, str) else str(result)
+        lower = text.lower()
+        # Strong stop signal — at least one of "do not retry" / "disabled"
+        # / "respond inline" must appear.
+        assert any(
+            phrase in lower for phrase in ("do not retry", "disabled for", "respond inline")
+        ), f"weak no-UI denial message: {text!r}"
+
+    def test_second_invocation_short_circuits_after_first_denial(self):
+        """Once a tool is in session_state.denials (by the first call),
+        the second invocation returns the "User denied execution" path
+        without re-entering the confirmation branch."""
+        tool_func_calls = []
+
+        def fake_func(*args, **kwargs):
+            tool_func_calls.append((args, kwargs))
+            return "executed"
+
+        tool = self._make_tool(name="write_file")
+        tool.func = fake_func
+        reg = self._make_registry(confirms=True)
+        ss = SessionState()
+        wrapped = create_safe_tool_wrapper(
+            tool, "write_file", reg, set(), session_state=ss, ui=None
+        )
+
+        # First call — gets pinned-denied.
+        wrapped.invoke({})
+        # Second call — must NOT invoke the underlying func because the
+        # tool is now in the denials set.
+        result2 = wrapped.invoke({})
+        assert "denied" in str(result2).lower()
+        assert tool_func_calls == [], "underlying tool func was invoked despite the prior denial"
+
     def test_approved_tool_executes(self):
         """When tool is in approvals, it executes regardless of ui."""
         tool = self._make_tool()

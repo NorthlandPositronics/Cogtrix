@@ -61,6 +61,55 @@ except ImportError:  # pragma: no cover
     _PYDANTIC_AVAILABLE = False
 
 
+# ── Config field allowlists (shared with config loaders) ─────────────────────
+
+# Fields forwarded to ``MCPServerConfig`` as constructor kwargs. Loaders
+# filter the user's per-server YAML dict against this set so unknown
+# fields don't reach the dataclass constructor (which would raise
+# ``TypeError`` on unexpected keywords).
+KNOWN_MCP_FIELDS: frozenset[str] = frozenset(
+    {
+        # Stdio transport
+        "command",
+        "args",
+        "env",
+        # SSE transport
+        "url",
+        "headers",
+        # Cogtrix-side semantics
+        "requires_confirmation",
+        "timeout",
+        "pin",
+        "allow_insecure",
+    }
+)
+
+# Fields the user legitimately keeps in their per-server YAML for human
+# reference (linking the cogtrix config to an external server's own
+# settings — typically docker-compose volume roots or out-of-band
+# auth metadata) but that Cogtrix does NOT consume. Loaders accept
+# these without warning AND without forwarding them to MCPServerConfig.
+#
+# cogtrix52 surfaced ``allowed_directories``: the user pasted a comment
+# in their YAML explaining 'these must match the roots passed to
+# server-filesystem in docker-compose.yml' and Cogtrix faithfully
+# emitted ``MCP server 'filesystem': ignoring unknown config keys:
+# allowed_directories`` on every startup. The field is doc-only —
+# it lives in YAML for human cross-reference, nothing programmatic
+# reads it. Acknowledging that explicitly here is cleaner than
+# either rejecting it (false positive) or forwarding it (no slot in
+# MCPServerConfig).
+#
+# When extending: each entry MUST have a written reason in the
+# comment above it. If a field starts being consumed by Cogtrix,
+# move it to ``KNOWN_MCP_FIELDS`` and wire it through MCPServerConfig.
+DOC_ONLY_MCP_FIELDS: frozenset[str] = frozenset(
+    {
+        "allowed_directories",
+    }
+)
+
+
 # ── Config dataclass ─────────────────────────────────────────────────────────
 
 
@@ -786,7 +835,16 @@ class MCPManager:
                 except Exception as exc:
                     log.debug("MCP: error closing stale connection for '%s': %s", server_name, exc)
             new_conn = MCPConnection(cfg)
-            await new_conn.connect()
+            try:
+                await asyncio.wait_for(new_conn.connect(), timeout=30)
+            except Exception:
+                # Clean up partial connection so exit stacks and file
+                # descriptors are not leaked if connect() fails mid-way.
+                try:
+                    await new_conn.close()
+                except Exception:
+                    pass
+                raise
             self._connections[server_name] = new_conn
             log.info(
                 "MCP: auto-reconnected server '%s' (%d tools)", server_name, len(new_conn.tools)
@@ -889,14 +947,20 @@ class MCPManager:
                     log.info("MCP: connected to server '%s' after %d retries", cfg.name, attempt)
                 return cfg.name, conn
             except Exception as exc:
-                # ExceptionGroup (TaskGroup) hides the real cause in __exceptions__.
+                # ExceptionGroup (TaskGroup) hides the real cause in ``.exceptions``.
                 # Walk down to the deepest non-group exception so the log shows the
-                # actual error (e.g. FileNotFoundError) rather than the wrapper.
+                # actual error (e.g. ``ConnectError`` / ``FileNotFoundError``)
+                # rather than the wrapper. The attribute is ``exceptions`` (a
+                # tuple) per the BaseExceptionGroup spec — earlier code used
+                # ``__exceptions__`` which doesn't exist; the loop never
+                # iterated and the cause stayed the wrapper, so every log
+                # line showed "ExceptionGroup: unhandled errors in a
+                # TaskGroup" instead of the real reason, and the fail-fast
+                # ``isinstance(cause, FileNotFoundError | PermissionError)``
+                # check below was effectively dead code.
                 cause: BaseException = exc
-                while (
-                    hasattr(cause, "__exceptions__") and cause.__exceptions__  # type: ignore[union-attr]
-                ):
-                    cause = cause.__exceptions__[0]  # type: ignore[union-attr]
+                while isinstance(cause, BaseExceptionGroup) and cause.exceptions:
+                    cause = cause.exceptions[0]
 
                 # Explicitly close the failed connection within this task so
                 # anyio cancel scopes are exited in the correct task context (#403).
@@ -905,11 +969,48 @@ class MCPManager:
                 except Exception as close_exc:
                     log.debug("MCP: cleanup after failed connect for '%s': %s", cfg.name, close_exc)
 
-                # Classify fail-fast causes: missing executable, bad config —
-                # retrying won't help and we shouldn't keep banging on it.
-                fail_fast = isinstance(exc, ValueError) or isinstance(
-                    cause, FileNotFoundError | PermissionError
+                # Classify fail-fast causes: missing executable, bad config,
+                # permanent DNS NXDOMAIN — retrying won't help and we
+                # shouldn't keep banging on it.
+                #
+                # ``socket.gaierror`` covers DNS failures from stdlib paths;
+                # ``httpx``/``httpcore`` ConnectError instances with
+                # ``[Errno -2] Name or service not known`` carry the same
+                # signal at the HTTP layer (cogtrix52: ``mcp-github`` /
+                # ``mcp-filesystem`` / ``mcp-slack`` not resolvable from
+                # the cogtrix container, three retries do nothing useful).
+                import socket as _socket
+
+                fail_fast = (
+                    isinstance(exc, ValueError)
+                    or isinstance(cause, FileNotFoundError | PermissionError)
+                    or isinstance(cause, _socket.gaierror)
+                    or (
+                        # ConnectError that wraps an NXDOMAIN-class lookup
+                        # failure — match on the message because httpx wraps
+                        # gaierror in its own ConnectError subclass.
+                        type(cause).__name__ == "ConnectError"
+                        and "[Errno -2]" in str(cause)
+                    )
                 )
+
+                # Network-error classes the WARNING line above (or below)
+                # already names in full. Suppressing the multi-frame
+                # traceback dump for these saves ~125 lines of library
+                # plumbing per failure — every frame is httpx → httpcore →
+                # anyio → mcp.sse, no Cogtrix code, zero additional
+                # diagnostic value. The full traceback STILL fires for
+                # unexpected exception classes so genuinely-novel
+                # failures keep their forensic trail.
+                _network_error_classes = (
+                    "ConnectError",
+                    "ConnectionRefusedError",
+                    "ConnectionResetError",
+                    "TimeoutError",
+                    "gaierror",
+                    "EOFError",
+                )
+                _is_known_network_error = type(cause).__name__ in _network_error_classes
 
                 if fail_fast:
                     log.warning(
@@ -918,12 +1019,12 @@ class MCPManager:
                         type(cause).__name__,
                         cause,
                     )
-                    # Stash the traceback at debug level for forensic use.
-                    log.debug(
-                        "MCP: full traceback for server '%s' connect failure",
-                        cfg.name,
-                        exc_info=(type(exc), exc, exc.__traceback__),
-                    )
+                    if not _is_known_network_error:
+                        log.debug(
+                            "MCP: full traceback for server '%s' connect failure",
+                            cfg.name,
+                            exc_info=(type(exc), exc, exc.__traceback__),
+                        )
                     break
 
                 if attempt < _STARTUP_MAX_RETRIES:
@@ -940,7 +1041,12 @@ class MCPManager:
                     )
                     await asyncio.sleep(delay)
                 else:
-                    # On final failure: one-line warning, traceback at debug.
+                    # On final failure: one-line warning. Skip the
+                    # multi-frame traceback for known network error classes
+                    # (same rationale as the fail_fast branch above:
+                    # ~125 lines of library plumbing per failure, zero
+                    # Cogtrix-side signal). Unexpected exception classes
+                    # still get the full traceback.
                     log.warning(
                         "MCP: server '%s' unavailable after %d attempts: %s: %s",
                         cfg.name,
@@ -948,11 +1054,12 @@ class MCPManager:
                         type(cause).__name__,
                         cause,
                     )
-                    log.debug(
-                        "MCP: full traceback for server '%s' final failure",
-                        cfg.name,
-                        exc_info=(type(exc), exc, exc.__traceback__),
-                    )
+                    if not _is_known_network_error:
+                        log.debug(
+                            "MCP: full traceback for server '%s' final failure",
+                            cfg.name,
+                            exc_info=(type(exc), exc, exc.__traceback__),
+                        )
 
         return cfg.name, None
 
@@ -1531,9 +1638,11 @@ class MCPManager:
 
 
 __all__ = [
-    "MCP_AVAILABLE",
-    "MCPServerConfig",
+    "DOC_ONLY_MCP_FIELDS",
+    "KNOWN_MCP_FIELDS",
     "MCPConnection",
     "MCPManager",
+    "MCPServerConfig",
+    "MCP_AVAILABLE",
     "json_schema_to_pydantic",
 ]

@@ -30,6 +30,7 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, Field
 
+from src.tools.delegate import register_tool_categories
 from src.tools.error_sanitizer import sanitize_google_api_error
 
 if TYPE_CHECKING:
@@ -343,6 +344,7 @@ TOOL_CONFIGS = [
         "input_schema": CalendarListEventsInput,
         "requires_confirmation": False,
         "function": calendar_list_events,
+        "category": "readonly",
     },
     {
         "name": "calendar_create_event",
@@ -353,6 +355,7 @@ TOOL_CONFIGS = [
         "input_schema": CalendarCreateEventInput,
         "requires_confirmation": True,
         "function": calendar_create_event,
+        "category": "scheduling",
     },
     {
         "name": "calendar_search_events",
@@ -363,10 +366,20 @@ TOOL_CONFIGS = [
         "input_schema": CalendarSearchEventsInput,
         "requires_confirmation": False,
         "function": calendar_search_events,
+        "category": "readonly",
     },
 ]
 
 TOOL_CONFIG = TOOL_CONFIGS[0]
+
+
+register_tool_categories(
+    {
+        "calendar_list_events": "readonly",
+        "calendar_create_event": "scheduling",
+        "calendar_search_events": "readonly",
+    }
+)
 
 __all__ = [
     "TOOL_SETUP",

@@ -23,6 +23,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from src.tools.delegate import register_tool_categories
+
 # Best-effort file locking for concurrent inbox access.
 # fcntl is POSIX-only; on Windows we fall back to a threading lock (which at
 # least guards the in-process case).
@@ -294,6 +296,7 @@ TOOL_CONFIGS = [
         "input_schema": SendToAgentInput,
         "requires_confirmation": False,
         "function": send_to_agent,
+        "category": "messaging",
     },
     {
         "name": "read_agent_inbox",
@@ -305,10 +308,14 @@ TOOL_CONFIGS = [
         "input_schema": ReadAgentInboxInput,
         "requires_confirmation": False,
         "function": read_agent_inbox,
+        "category": "privacy",
     },
 ]
 
 TOOL_CONFIG = TOOL_CONFIGS[0]
+
+
+register_tool_categories({"send_to_agent": "messaging", "read_agent_inbox": "privacy"})
 
 __all__ = [
     "TOOL_SETUP",

@@ -224,9 +224,18 @@ class ToolRegistry:
             log.warning("Tools directory %s does not exist", self.tools_directory)
             return discovered_modules
 
-        # Scan for Python files (excluding __init__.py)
+        # Scan for Python files. Skip:
+        #   __init__.py            — package metadata, not a tool
+        #   _*.py                  — private helpers by Python convention
+        #                             (e.g. _ddg, _http_safety, _native_safety
+        #                             are infra modules used BY tools, never
+        #                             exposed AS tools). Scanning them
+        #                             produced a WARNING per module at
+        #                             every startup — pure noise.
         for file_path in sorted(self.tools_directory.glob("*.py")):
             if file_path.name == "__init__.py":
+                continue
+            if file_path.name.startswith("_"):
                 continue
 
             module_name = file_path.stem
@@ -318,10 +327,21 @@ class ToolRegistry:
                     f"TOOL_CONFIG specifies function '{func_name}' " "but it's not found in module"
                 )
 
-        # Fallback: Look for functions with matching Pydantic schemas
+        # Fallback: Look for functions with matching Pydantic schemas.
+        #
+        # ``checkpoint``, ``configure``, ``error_sanitizer``, ``extend_run``,
+        # ``report_progress``, ``resolver``, ``semantic_tool_index`` etc.
+        # legitimately live under ``src/tools/`` but expose no agent tools —
+        # they're internal infrastructure (or compose tools into the
+        # registry programmatically). The fallback-discovery path is the
+        # safety net for modules that DO expose tools but use a different
+        # declaration shape; a module with neither TOOL_CONFIG/CONFIGS nor
+        # a discoverable schema-paired function is intentionally empty.
+        # Log at DEBUG so operators can see the trail when they need it
+        # without spamming every startup with a wall of WARNINGs.
         if not results:
             log = get_logger()
-            log.warning(
+            log.debug(
                 "Module %s: no tools resolved from TOOL_CONFIG/TOOL_CONFIGS — using fallback discovery",
                 module.__name__,
             )

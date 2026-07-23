@@ -8,6 +8,8 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from src.tools.delegate import register_tool_categories
+
 
 class ParseJsonInput(BaseModel):
     """Input schema for parsing JSON."""
@@ -329,6 +331,7 @@ TOOL_CONFIGS = [
         "input_schema": ParseJsonInput,
         "requires_confirmation": False,
         "function": parse_json,
+        "category": "readonly",
     },
     {
         "name": "format_json",
@@ -336,6 +339,7 @@ TOOL_CONFIGS = [
         "input_schema": FormatJsonInput,
         "requires_confirmation": False,
         "function": format_json,
+        "category": "readonly",
     },
     {
         "name": "query_json",
@@ -343,15 +347,17 @@ TOOL_CONFIGS = [
         "input_schema": QueryJsonInput,
         "requires_confirmation": False,
         "function": query_json,
+        "category": "readonly",
     },
     {
         "name": "extract_json",
         "description": (
-            "Extract JSON from text that may contain other content " "(like markdown or prose)."
+            "Extract JSON from text that may contain other content (like markdown or prose)."
         ),
         "input_schema": ExtractJsonInput,
         "requires_confirmation": False,
         "function": extract_json,
+        "category": "readonly",
     },
     {
         "name": "json_to_text",
@@ -359,11 +365,23 @@ TOOL_CONFIGS = [
         "input_schema": JsonToTextInput,
         "requires_confirmation": False,
         "function": json_to_text,
+        "category": "readonly",
     },
 ]
 
 # Default single tool config (for backwards compatibility)
 TOOL_CONFIG = TOOL_CONFIGS[0]
+
+
+register_tool_categories(
+    {
+        "parse_json": "readonly",
+        "format_json": "readonly",
+        "query_json": "readonly",
+        "extract_json": "readonly",
+        "json_to_text": "readonly",
+    }
+)
 
 __all__ = [
     "parse_json",

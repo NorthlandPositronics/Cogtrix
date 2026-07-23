@@ -228,10 +228,15 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
 
     # Validate and snapshot JWT secret for auth helpers.
     jwt_secret = os.environ.get("COGTRIX_JWT_SECRET", "")
-    from src.api.auth import configure_jwt_secret
+    from src.api.auth import configure_dummy_password_hash, configure_jwt_secret
 
     configure_jwt_secret(jwt_secret)
     log.info("JWT secret validated")
+
+    # Pre-compute the constant-time dummy bcrypt hash so the first
+    # no-such-user login after a fresh boot doesn't leak ~150 ms of timing
+    # signal (forge audit B5, second-order to H3).
+    configure_dummy_password_hash()
 
     try:
         configure_trusted_proxy_cidrs(os.environ.get("COGTRIX_TRUSTED_PROXY_CIDRS"))
@@ -364,20 +369,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
 
             if MCP_AVAILABLE:
                 mcp_manager = MCPManager()
-                _KNOWN_MCP_FIELDS = {
-                    "command",
-                    "args",
-                    "env",
-                    "url",
-                    "headers",
-                    "requires_confirmation",
-                    "timeout",
-                    "pin",
-                    "allow_insecure",
-                }
+                # Shared with cogtrix.py — see ``src/mcp_client.py`` for the
+                # KNOWN vs DOC_ONLY split rationale.
+                from src.mcp_client import KNOWN_MCP_FIELDS
+
                 mcp_configs = []
                 for _name, _srv_cfg in cfg.mcp_servers.items():
-                    _filtered = {k: v for k, v in _srv_cfg.items() if k in _KNOWN_MCP_FIELDS}
+                    _filtered = {k: v for k, v in _srv_cfg.items() if k in KNOWN_MCP_FIELDS}
                     mcp_configs.append(MCPServerConfig(name=_name, **_filtered))
 
                 _mcp_pin_map = {c.name: c.pin for c in mcp_configs}

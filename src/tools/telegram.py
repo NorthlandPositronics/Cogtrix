@@ -45,6 +45,7 @@ from pydantic import BaseModel, Field
 
 from src.logging_config import get_logger
 from src.tools._telegram_client import REQUESTS_AVAILABLE, TelegramBotClient
+from src.tools.delegate import register_tool_categories
 
 log = get_logger()
 
@@ -478,6 +479,7 @@ def _build_tool_configs() -> list[dict[str, Any]]:
                 "input_schema": TelegramSendInput,
                 "requires_confirmation": _cfg.require_confirmation,
                 "function": telegram_send,
+                "category": "messaging",
             }
         )
         configs.append(
@@ -493,6 +495,7 @@ def _build_tool_configs() -> list[dict[str, Any]]:
                 "input_schema": TelegramSendPhotoInput,
                 "requires_confirmation": _cfg.require_confirmation,
                 "function": telegram_send_photo,
+                "category": "messaging",
             }
         )
 
@@ -510,6 +513,7 @@ def _build_tool_configs() -> list[dict[str, Any]]:
                 "input_schema": TelegramCheckInput,
                 "requires_confirmation": False,
                 "function": telegram_check,
+                "category": "privacy",
             }
         )
 
@@ -525,8 +529,16 @@ def _build_tool_configs() -> list[dict[str, Any]]:
                 "input_schema": TelegramContactsInput,
                 "requires_confirmation": False,
                 "function": telegram_contacts,
+                "category": "readonly",
             }
         )
+
+    _categories: dict[str, str] = {}
+    for cfg in configs:
+        name = cfg["name"]
+        cat = cfg.get("category", "readonly")
+        _categories[name] = cat
+    register_tool_categories(_categories)
 
     return configs
 

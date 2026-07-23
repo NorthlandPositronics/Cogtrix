@@ -42,6 +42,8 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from src.tools._web_search_aggregator import ProviderResult
+from src.tools.delegate import register_tool_categories
 from src.tools.error_sanitizer import sanitize_error as _sanitize_error
 
 log = logging.getLogger("cogtrix")
@@ -311,6 +313,51 @@ def exa_get_contents(urls: list[str]) -> str:
 # -- Helpers -------------------------------------------------------------------
 
 
+async def _search_async(
+    query: str, num_results: int = 5, region: str | None = None
+) -> list[ProviderResult]:
+    """Async Exa search returning ProviderResult list (ADR-0056 PR-B).
+
+    Wraps the sync ``Exa.search()`` call in ``asyncio.to_thread``.
+    Raises on missing config / API errors. ``region`` is accepted for
+    cross-provider symmetry and ignored (Exa is semantic-search and
+    doesn't expose a region knob).
+    """
+    import asyncio
+
+    del region
+
+    if not EXA_AVAILABLE:
+        raise RuntimeError("Exa SDK not installed")
+    if not query.strip():
+        return []
+
+    num_results = max(1, min(num_results, 10))
+
+    def _sync_call() -> Any:
+        client = _get_client()  # raises RuntimeError on missing key
+        return client.search(
+            query=query,
+            num_results=num_results,
+            type="auto",
+            contents={"text": True},
+        )
+
+    response = await asyncio.to_thread(_sync_call)
+    result_list = getattr(response, "results", []) or []
+    return [
+        ProviderResult(
+            provider="exa",
+            url=getattr(r, "url", "") or "",
+            title=getattr(r, "title", "") or "",
+            snippet=getattr(r, "text", "") or "",
+            published_date=None,
+        )
+        for r in result_list
+        if getattr(r, "url", None)
+    ]
+
+
 def _format_search_results(query_desc: str, results: Any) -> str:
     """Format Exa search results into a readable string."""
     output: list[str] = [f"Exa search results for: {query_desc}\n"]
@@ -343,17 +390,10 @@ def _format_search_results(query_desc: str, results: Any) -> str:
 # -- Tool registration --------------------------------------------------------
 
 TOOL_CONFIGS = [
-    {
-        "name": "exa_search",
-        "description": (
-            "Semantic web search using Exa's neural embeddings. "
-            "Use search_type='neural' for conceptual queries, 'deep' for thorough results. "
-            "Set include_text=True to get extracted page content."
-        ),
-        "input_schema": ExaSearchInput,
-        "function": exa_search,
-        "requires_confirmation": False,
-    },
+    # exa_search removed from the agent catalogue in PR-G —
+    # web_search subsumes it. The sync `exa_search` function and the
+    # internal `_search_async` stay in this module for use by
+    # web_search._resolve_providers().
     {
         "name": "exa_find_similar",
         "description": (
@@ -363,6 +403,7 @@ TOOL_CONFIGS = [
         "input_schema": ExaFindSimilarInput,
         "function": exa_find_similar,
         "requires_confirmation": False,
+        "category": "readonly",
     },
     {
         "name": "exa_get_contents",
@@ -373,10 +414,20 @@ TOOL_CONFIGS = [
         "input_schema": ExaGetContentsInput,
         "function": exa_get_contents,
         "requires_confirmation": False,
+        "category": "readonly",
     },
 ]
 
 TOOL_CONFIG = TOOL_CONFIGS[0]
+
+
+register_tool_categories(
+    {
+        "exa_search": "readonly",
+        "exa_find_similar": "readonly",
+        "exa_get_contents": "readonly",
+    }
+)
 
 __all__ = [
     "exa_search",

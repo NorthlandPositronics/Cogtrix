@@ -20,14 +20,45 @@ log = logging.getLogger("cogtrix")
 try:
     from slack_sdk import WebClient  # type: ignore[import-untyped,import-not-found]
     from slack_sdk.errors import SlackApiError  # type: ignore[import-untyped,import-not-found]
+    from slack_sdk.http_retry import RetryHandler  # type: ignore[import-untyped,import-not-found]
+    from slack_sdk.http_retry.builtin_handlers import (  # type: ignore[import-untyped,import-not-found]
+        RateLimitErrorRetryHandler,
+    )
 
     _HAS_SLACK = True
 except ImportError:
     WebClient = None  # type: ignore[assignment,misc]
     SlackApiError = Exception  # type: ignore[assignment,misc]
+    RetryHandler = None  # type: ignore[assignment,misc]
+    RateLimitErrorRetryHandler = None  # type: ignore[assignment,misc]
     _HAS_SLACK = False
 
 _VALID_FILTER_MODES = frozenset({"none", "allow", "ignore", "blacklist"})
+
+
+# ── Rate-limit helpers ─────────────────────────────────────────────────────────
+
+
+def _parse_slack_retry_after(exc: Exception) -> float | None:
+    """Extract retry delay (seconds) from a SlackApiError with a 429 response.
+
+    Checks the ``Retry-After`` HTTP header on the underlying urllib3 response.
+    Returns None if the error is not a 429 or the header is absent.
+    """
+    if not hasattr(exc, "response"):
+        return None
+    resp = getattr(exc, "response", None)
+    if resp is None:
+        return None
+    # urllib3.HTTPResponse — headers are accessed via .headers dict
+    headers = getattr(resp, "headers", {})
+    retry_after = headers.get("Retry-After")
+    if retry_after is not None:
+        try:
+            return float(retry_after)
+        except ValueError:
+            pass
+    return None
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -128,7 +159,18 @@ class SlackChannel(Channel):
         self._client: Any = None
         if self._bot_token:
             assert WebClient is not None
-            self._client = WebClient(token=self._bot_token)
+            # Only configure SDK-level retry when the handler class is available.
+            # RateLimitErrorRetryHandler is None when slack-sdk is absent (soft dep),
+            # and the conditional import in the module ensures a crash won't occur
+            # in CI or production deployments that omit the SDK.
+            if RateLimitErrorRetryHandler is not None:
+                retry_handlers = [RateLimitErrorRetryHandler(max_retry_count=3)]
+            else:
+                retry_handlers = []
+            self._client = WebClient(
+                token=self._bot_token,
+                retry_handlers=retry_handlers,
+            )
 
         if self._filter_mode != "none":
             log.info(
@@ -175,12 +217,38 @@ class SlackChannel(Channel):
                 continue
 
             oldest = self._last_ts.get(ch_id)
+            raw: list[dict[str, Any]] = []
             try:
                 kwargs: dict[str, Any] = {"channel": ch_id, "limit": 100}
                 if oldest:
                     kwargs["oldest"] = oldest
                 resp = self._client.conversations_history(**kwargs)
-                raw: list[dict[str, Any]] = resp.get("messages", [])
+                raw = resp.get("messages", [])
+            except SlackApiError as exc:
+                retry_after = _parse_slack_retry_after(exc)
+                if retry_after is not None:
+                    log.info(
+                        "Slack: HTTP 429 on channel %s — waiting %.1fs before retry",
+                        ch_id,
+                        retry_after,
+                    )
+                    time.sleep(retry_after)
+                    try:
+                        kwargs: dict[str, Any] = {"channel": ch_id, "limit": 100}
+                        if oldest:
+                            kwargs["oldest"] = oldest
+                        resp = self._client.conversations_history(**kwargs)
+                        raw = resp.get("messages", [])
+                    except Exception as exc2:
+                        log.warning(
+                            "Slack: failed to fetch messages from %s after 429 retry: %s",
+                            ch_id,
+                            exc2,
+                        )
+                        continue
+                else:
+                    log.warning("Slack: failed to fetch messages from %s: %s", ch_id, exc)
+                    continue
             except Exception as exc:
                 log.warning("Slack: failed to fetch messages from %s: %s", ch_id, exc)
                 continue
@@ -268,6 +336,25 @@ class SlackChannel(Channel):
             resp = self._client.chat_postMessage(channel=chat_id, text=text, mrkdwn=True)
             message_id: str | None = resp.get("ts") or None
             return SendResult(ok=True, message_id=message_id)
+        except SlackApiError as exc:
+            retry_after = _parse_slack_retry_after(exc)
+            if retry_after is not None:
+                log.info(
+                    "Slack: HTTP 429 on send to %s — waiting %.1fs before retry",
+                    chat_id,
+                    retry_after,
+                )
+                time.sleep(retry_after)
+                try:
+                    resp = self._client.chat_postMessage(channel=chat_id, text=text, mrkdwn=True)
+                    message_id = resp.get("ts") or None
+                    return SendResult(ok=True, message_id=message_id)
+                except Exception as exc2:
+                    log.error("Slack: send failed to %s after 429 retry: %s", chat_id, exc2)
+                    return SendResult(ok=False, error=str(exc2))
+            else:
+                log.error("Slack: send failed to %s: %s", chat_id, exc)
+                return SendResult(ok=False, error=str(exc))
         except Exception as exc:
             log.error("Slack: send failed to %s: %s", chat_id, exc)
             return SendResult(ok=False, error=str(exc))

@@ -75,20 +75,74 @@ def _is_trusted_proxy(remote_addr: str, networks: tuple[Any, ...]) -> bool:
     return any(address in network for network in networks)
 
 
+def _is_valid_ip(value: str) -> bool:
+    """Return True iff ``value`` parses as a valid IPv4 or IPv6 address."""
+    try:
+        ipaddress.ip_address(value)
+    except ValueError:
+        return False
+    return True
+
+
 def _client_key(request: Request) -> str:
-    """Return the client IP key for rate limiting, honouring trusted proxy headers."""
+    """Return the client IP key for rate limiting, honouring trusted proxy headers.
+
+    Walks the ``X-Forwarded-For`` chain RIGHT-TO-LEFT starting at the socket
+    peer (forge audit C6, 2026-05-23). The previous implementation took
+    ``forwarded_for.split(",", 1)[0]`` — the LEFTMOST entry — which is
+    client-supplied and trivially spoofable. With trusted proxies
+    configured, an attacker sending ``X-Forwarded-For: 1.2.3.4, <real>``
+    would get rate-limited as ``1.2.3.4`` (a value they pick fresh on every
+    request), defeating per-IP limits entirely.
+
+    Correct algorithm (matches nginx ``real_ip_from`` + ``real_ip_header``):
+
+    1. Effective chain from us back to the originator is
+       ``[socket_peer, *reversed(XFF)]``.
+    2. Walk that chain left-to-right (= right-to-left from XFF's
+       perspective); skip each entry that's a trusted proxy.
+    3. Return the first untrusted hop — that's the real client.
+    4. If every hop is trusted (chain is exhausted), fall back to the
+       leftmost XFF entry (best-effort) or the socket peer.
+    """
     remote_addr = get_remote_address(request)
 
     with _lock:
         networks = _trusted_proxy_networks
 
-    if networks and _is_trusted_proxy(remote_addr, networks):
-        forwarded_for = request.headers.get("x-forwarded-for", "")
-        if forwarded_for:
-            client_addr = forwarded_for.split(",", 1)[0].strip()
-            if client_addr:
-                return client_addr
+    if not networks:
+        return remote_addr
 
+    forwarded_for = request.headers.get("x-forwarded-for", "")
+    xff_entries = [e.strip() for e in forwarded_for.split(",") if e.strip()]
+
+    # The TCP peer (``remote_addr``) is the last hop into us — i.e. the
+    # rightmost entry of the full client→...→us chain. XFF lists the hops
+    # BEFORE the socket peer, in original order. Reverse XFF and prepend the
+    # socket peer to get the chain ordered from "closest to us" outward.
+    chain: list[str] = [remote_addr, *reversed(xff_entries)]
+
+    for hop in chain:
+        # Reject malformed values outright (forge audit B6, second-order
+        # to C6). ``_is_trusted_proxy`` returns False for un-parseable
+        # strings, which previously meant garbage XFF entries like
+        # ``"junk-AAA, junk-BBB, ..."`` were each accepted as a fresh
+        # rate-limit bucket — letting an attacker pick unlimited unique
+        # keys per request and defeat per-IP limits entirely.
+        if not _is_valid_ip(hop):
+            continue
+        if not _is_trusted_proxy(hop, networks):
+            return hop
+
+    # Every hop was either trusted or malformed — chain exhausted without
+    # finding a real client. Fall back to the leftmost VALID XFF entry if
+    # one exists (the client's own claim — untrusted but our best signal),
+    # else the socket peer. ``remote_addr`` from ``get_remote_address`` is
+    # the parsed socket peer and is itself a valid IP (or ``"unknown"`` —
+    # treated as a fixed single bucket, which is the safe failure mode).
+    for entry in xff_entries:
+        if _is_valid_ip(entry):
+            return entry
     return remote_addr
 
 
@@ -130,7 +184,18 @@ def per_route_rate_limit(max_calls: int, window_seconds: int = 60):
         if _per_route_disabled:
             return
         client_key = _client_key(request)
-        key = (client_key, request.url.path)
+        # Key on the route TEMPLATE (e.g. ``/sessions/{session_id}``), not
+        # the MATERIALISED path (forge audit H5, 2026-05-23). With the
+        # previous ``request.url.path`` keying, each distinct session_id
+        # was a separate sliding-window bucket — meaning a client could
+        # hit ``/sessions/abc`` once, ``/sessions/xyz`` once, ... and
+        # never trip the per-route cap. The route object exposes the
+        # ``path`` attribute (the template); fall back to the raw URL
+        # path only if no route was matched (e.g. the dependency runs
+        # before routing for some startlette setups).
+        route = request.scope.get("route")
+        route_key = getattr(route, "path", None) or request.url.path
+        key = (client_key, route_key)
         now = datetime.now(UTC)
         cutoff = now - timedelta(seconds=window_seconds)
         with _counters_lock:

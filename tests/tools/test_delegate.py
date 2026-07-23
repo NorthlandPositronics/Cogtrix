@@ -7,8 +7,25 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from src.agent.safety import UserCancelledRun  # noqa: E402
+
+# Import tool modules to trigger their category registrations.
+# Categories are registered at module load time via register_tool_categories()
+# so that set_delegate_tools() can filter by category.
+from src.tools import (
+    agent_messaging,  # noqa: E402,F401
+    agent_tools,  # noqa: E402,F401
+    calendar_tools,  # noqa: E402,F401
+    cron_tools,  # noqa: E402,F401
+    email_tools,  # noqa: E402,F401
+    file_ops,  # noqa: E402,F401
+    git_tools,  # noqa: E402,F401
+    http_request,  # noqa: E402,F401
+    shell,  # noqa: E402,F401
+    slack_tools,  # noqa: E402,F401
+)
 from src.tools.delegate import (
     _MAX_CIRCUIT_BREAKERS,
+    _TOOL_CATEGORIES,
     TOOL_CONFIGS,
     DelegateInput,
     DelegateParallelInput,
@@ -25,6 +42,7 @@ from src.tools.delegate import (
     delegate_parallel,
     delegate_task,
     get_model_status,
+    register_tool_categories,
     reset_model_status,
     set_delegate_tools,
 )
@@ -990,15 +1008,15 @@ class TestSetDelegateTools:
         """Sandbox applies to available_tools as well as active tools."""
         active = MagicMock()
         active.name = "read_file"
-        shell = MagicMock()
-        shell.name = "execute_shell_command"
+        shell_tool = MagicMock()
+        shell_tool.name = "execute_shell_command"
         write = MagicMock()
         write.name = "write_file"
 
         set_delegate_tools(
             [active],
             available_tools={
-                "execute_shell_command": shell,
+                "execute_shell_command": shell_tool,
                 "write_file": write,
             },
         )
@@ -1044,6 +1062,177 @@ class TestSetDelegateTools:
             "calculate",
             "get_current_datetime",
         }
+
+
+class TestCategoryBasedExclusion:
+    """Tests for category-based tool exclusion in the delegate sandbox.
+
+    Verifies that tools are excluded based on their category (readonly,
+    mutation, privacy, recursive, messaging, scheduling, confirmation)
+    as defined in _DELEGATE_EXCLUDED_CATEGORIES.
+    """
+
+    def setup_method(self):
+        """Register test tool categories before each test."""
+        # Register test-only tools. Real tools (spawn_agent, execute_shell_command,
+        # whatsapp_send, read_email, cron_add) are registered by the module imports
+        # at the top of this file and must NOT be removed in teardown.
+        register_tool_categories(
+            {
+                "delegate_task": "recursive",
+                "test_tool_override": "mutation",
+            }
+        )
+
+    def teardown_method(self):
+        """Clear delegate tools and test-specific category registrations."""
+        set_delegate_tools([])
+        # Only remove test-specific entries; leave real module registrations intact.
+        _TOOL_CATEGORIES.pop("test_tool_override", None)
+        _TOOL_CATEGORIES.pop("delegate_task", None)
+
+    def test_readonly_category_not_excluded(self):
+        """Tools with readonly category are available to delegates."""
+        tool = MagicMock()
+        tool.name = "read_file"
+        set_delegate_tools([tool])
+        import src.tools.delegate as mod
+
+        names = [t.name for t in mod._delegate_tools]
+        assert "read_file" in names
+
+    def test_mutation_category_excluded(self):
+        """Tools with mutation category are excluded from delegates."""
+        tool = MagicMock()
+        tool.name = "execute_shell_command"
+        set_delegate_tools([tool])
+        import src.tools.delegate as mod
+
+        names = [t.name for t in mod._delegate_tools]
+        assert "execute_shell_command" not in names
+
+    def test_recursive_category_excluded(self):
+        """Tools with recursive category are excluded from delegates."""
+        tool = MagicMock()
+        tool.name = "delegate_task"
+        set_delegate_tools([tool])
+        import src.tools.delegate as mod
+
+        names = [t.name for t in mod._delegate_tools]
+        assert "delegate_task" not in names
+
+    def test_spawn_agent_recursive_excluded(self):
+        """spawn_agent (recursive) is excluded from delegates."""
+        tool = MagicMock()
+        tool.name = "spawn_agent"
+        set_delegate_tools([tool])
+        import src.tools.delegate as mod
+
+        names = [t.name for t in mod._delegate_tools]
+        assert "spawn_agent" not in names
+
+    def test_messaging_category_excluded(self):
+        """Tools with messaging category are excluded from delegates."""
+        tool = MagicMock()
+        tool.name = "whatsapp_send"
+        set_delegate_tools([tool])
+        import src.tools.delegate as mod
+
+        names = [t.name for t in mod._delegate_tools]
+        assert "whatsapp_send" not in names
+
+    def test_privacy_category_excluded(self):
+        """Tools with privacy category are excluded from delegates."""
+        tool = MagicMock()
+        tool.name = "read_email"
+        set_delegate_tools([tool])
+        import src.tools.delegate as mod
+
+        names = [t.name for t in mod._delegate_tools]
+        assert "read_email" not in names
+
+    def test_scheduling_category_excluded(self):
+        """Tools with scheduling category are excluded from delegates."""
+        tool = MagicMock()
+        tool.name = "cron_add"
+        set_delegate_tools([tool])
+        import src.tools.delegate as mod
+
+        names = [t.name for t in mod._delegate_tools]
+        assert "cron_add" not in names
+
+    def test_override_allows_mutation_tool(self):
+        """A mutation tool with delegate_exclude_override=True is NOT excluded."""
+        tool = MagicMock()
+        tool.name = "test_tool_override"
+        tool.delegate_exclude_override = True
+        set_delegate_tools([tool])
+        import src.tools.delegate as mod
+
+        names = [t.name for t in mod._delegate_tools]
+        assert "test_tool_override" in names
+
+    def test_no_override_mutation_still_excluded(self):
+        """A mutation tool without override is still excluded."""
+        tool = MagicMock()
+        tool.name = "test_tool_override"
+        # delegate_exclude_override not set (False by default)
+        set_delegate_tools([tool])
+        import src.tools.delegate as mod
+
+        names = [t.name for t in mod._delegate_tools]
+        assert "test_tool_override" not in names
+
+    def test_backward_compat_name_exclusion_still_works(self):
+        """Legacy name-based exclusion still works for tools not in _TOOL_CATEGORIES."""
+        # deep_think is in _DELEGATE_EXCLUDED_TOOLS but may not have a category registration
+        tool = MagicMock()
+        tool.name = "deep_think"
+        set_delegate_tools([tool])
+        import src.tools.delegate as mod
+
+        names = [t.name for t in mod._delegate_tools]
+        assert "deep_think" not in names
+
+    def test_mixed_safe_and_excluded_tools(self):
+        """A mix of safe and excluded tools — only safe ones pass through."""
+        tools = [
+            self._make_tool("read_file", "readonly"),
+            self._make_tool("execute_shell_command", "mutation"),
+            self._make_tool("web_search", "readonly"),
+            self._make_tool("whatsapp_send", "messaging"),
+        ]
+        set_delegate_tools(tools)
+        import src.tools.delegate as mod
+
+        names = [t.name for t in mod._delegate_tools]
+        assert "read_file" in names
+        assert "web_search" in names
+        assert "execute_shell_command" not in names
+        assert "whatsapp_send" not in names
+
+    def test_category_not_registered_defaults_to_name_check(self):
+        """Tools without a registered category fall back to name-based check only."""
+        # A tool that is NOT in _DELEGATE_EXCLUDED_TOOLS and has no registered category
+        # should pass through (not excluded)
+        tool = MagicMock()
+        tool.name = "calculate"  # Not in exclude list, no category registered
+        set_delegate_tools([tool])
+        import src.tools.delegate as mod
+
+        names = [t.name for t in mod._delegate_tools]
+        assert "calculate" in names
+
+    def _make_tool(self, name: str, category: str) -> MagicMock:
+        """Helper to create a mock tool with a name.
+
+        Category is expected to be registered by the real module import
+        (e.g. file_ops, shell, web_search, whatsapp). No redundant
+        registration here — real module imports handle it.
+        """
+        tool = MagicMock()
+        tool.name = name
+        return tool
 
 
 class TestExtractContent:

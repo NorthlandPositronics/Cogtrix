@@ -191,6 +191,11 @@ def optimize_prompt(
         return PromptPlan(text=user_input)
 
     try:
+        # Validate llm before any call path — fail fast rather than raise from
+        # inside the ThreadPoolExecutor context where stack traces are noisy.
+        if not hasattr(llm, "invoke") or not callable(llm.invoke):
+            raise TypeError(f"llm must have a callable .invoke() method; got {type(llm).__name__}")
+
         nonce = secrets.token_hex(8)
         delimiter_start = f"__USER_INPUT_{nonce}_START__"
         delimiter_end = f"__USER_INPUT_{nonce}_END__"
@@ -237,9 +242,23 @@ def optimize_prompt(
                 future.cancel()
                 pool.shutdown(wait=False)
                 return PromptPlan(text=user_input)
-        content = getattr(response, "content", str(response))
-        if isinstance(content, list):
-            content = " ".join(str(c.get("text", c) if isinstance(c, dict) else c) for c in content)
+        raw_content = getattr(response, "content", None)
+        if raw_content is None:
+            content = str(response)
+        elif isinstance(raw_content, str):
+            content = raw_content
+        elif isinstance(raw_content, list):
+            parts = []
+            for c in raw_content:
+                if isinstance(c, dict):
+                    text = c.get("text")
+                    if text is not None:
+                        parts.append(str(text))
+                else:
+                    parts.append(str(c))
+            content = " ".join(parts) if parts else str(response)
+        else:
+            content = str(raw_content)
         optimized = str(content).strip()
 
         if not optimized or len(optimized) < 10:

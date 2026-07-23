@@ -527,14 +527,28 @@ try:
         - Thinking/reasoning content from models that support it
         """
 
-        def __init__(self, verbose: bool = True):
+        def __init__(self, verbose: bool = True, orphan_threshold_s: float = 180.0):
             """
             Initialize the handler.
 
             Args:
                 verbose: If True, log full content. If False, truncate.
+                orphan_threshold_s: Elapsed time (seconds) past which a
+                    completing LLM call is treated as ORPHANED — i.e.
+                    the caller already timed out and abandoned the
+                    future. ``_invoke_with_timeout`` cancels the future
+                    at the timeout boundary, but ``Future.cancel()``
+                    only stops a PENDING task: an already-running HTTP
+                    request continues until the server responds. When
+                    it finally does, the result is unused (the caller
+                    has long since started a retry) but the callback
+                    chain still fires. Surfacing these as
+                    ``ORPHAN_LLM_COMPLETE`` distinguishes them from
+                    real completions in the log. Default (180s) matches
+                    the orchestration's per-call LLM timeout floor.
             """
             self.verbose = verbose
+            self.orphan_threshold_s = orphan_threshold_s
             self._current_tokens: list[str] = []
             self._token_count = 0
             self._start_time: float = 0.0
@@ -644,13 +658,35 @@ try:
 
         def on_llm_end(self, response: LLMResult, **kwargs: Any) -> None:
             """Called when LLM finishes processing."""
-            # Log total time
+            # Log total time. When the elapsed time exceeds
+            # ``orphan_threshold_s``, the underlying HTTP request
+            # almost certainly outlived its caller's timeout — log
+            # as ORPHAN_LLM_COMPLETE so operators can tell stale
+            # traffic from real completions. Both lines emit so
+            # observability pipelines that filter on LLM_COMPLETE
+            # still see the event, but the ORPHAN line raises the
+            # severity to WARNING so it surfaces in monitoring.
             if self._start_time > 0:
                 total_time = _time_module.time() - self._start_time
-                self._log(
-                    "info",
-                    f"LLM_COMPLETE: {self._token_count} tokens in {total_time:.2f}s",
-                )
+                is_orphan = total_time >= self.orphan_threshold_s
+                if is_orphan:
+                    self._log(
+                        "warning",
+                        f"ORPHAN_LLM_COMPLETE: {self._token_count} tokens in "
+                        f"{total_time:.2f}s (exceeded orphan threshold of "
+                        f"{self.orphan_threshold_s:.0f}s — caller almost "
+                        "certainly already timed out and abandoned this "
+                        "future; the response will be discarded). "
+                        "Cancellation is best-effort: Future.cancel() does "
+                        "not interrupt an in-flight HTTP request. The "
+                        "fix requires switching the LLM invocation to an "
+                        "async-cancellable client.",
+                    )
+                else:
+                    self._log(
+                        "info",
+                        f"LLM_COMPLETE: {self._token_count} tokens in {total_time:.2f}s",
+                    )
             # Log final streamed content if we collected tokens
             if self._current_tokens:
                 full_response = "".join(self._current_tokens)

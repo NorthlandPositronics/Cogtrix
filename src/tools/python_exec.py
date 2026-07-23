@@ -444,7 +444,7 @@ SAFE_MODULES = {
     "heapq",
     "array",
     "cmath",
-    "time",  # Limited functionality (sleep, time)
+    "time",  # Sandboxed shim — sleep capped at _TIME_SLEEP_CAP_SECONDS (issue #926)
 }
 
 # Optional data science modules (C-extensions that bypass AST sandbox)
@@ -841,13 +841,23 @@ def _transform_for_last_expr(code: str) -> tuple[str, bool]:
 
 
 def _restricted_import(name: str, *args: Any, **kwargs: Any) -> Any:
-    """Restricted import function that only allows safe modules."""
+    """Restricted import function that only allows safe modules.
+
+    Returns the safe-time shim for ``import time`` (issue #926) so the
+    capped-sleep wrapper applies regardless of how user code obtains
+    the module (preloaded global vs explicit ``import``).
+    """
     module_name = name.split(".")[0]
     if module_name not in SAFE_MODULES:
         raise ImportError(
             f"Import of '{name}' is not allowed in restricted mode. "
             f"Allowed modules: {', '.join(sorted(SAFE_MODULES))}"
         )
+    if module_name == "time":
+        # Reuse the same shim instance the preloaded globals see so
+        # ``time is __import__("time")`` holds — important for users
+        # that compare module identity.
+        return _PRELOADED_MODULES.get("time", _make_safe_time_module())
     import builtins
 
     return builtins.__import__(name, *args, **kwargs)
@@ -987,6 +997,71 @@ def _handle_special_command(
     return None
 
 
+_TIME_SLEEP_CAP_SECONDS = 5.0
+
+
+def _capped_sleep(seconds: float) -> None:
+    """Cap sandboxed ``time.sleep`` at :data:`_TIME_SLEEP_CAP_SECONDS`.
+
+    Issue #926: the unrestricted ``time.sleep`` could occupy a worker
+    slot for the full execution timeout (up to 60s) without doing any
+    useful work, draining the multiprocessing pool in concurrent
+    sessions.  Capping at 5s preserves legitimate short-sleep use
+    cases (testing rate limits, simple animations) while preventing
+    a single sandboxed call from monopolising a worker.
+    """
+    import time as _real_time
+
+    try:
+        seconds_f = float(seconds)
+    except (TypeError, ValueError):
+        raise TypeError(
+            f"sleep() argument must be a number, got {type(seconds).__name__}"
+        ) from None
+    if seconds_f < 0:
+        raise ValueError("sleep length must be non-negative")
+    _real_time.sleep(min(seconds_f, _TIME_SLEEP_CAP_SECONDS))
+
+
+def _make_safe_time_module() -> Any:
+    """Build a sandbox-safe shim of the ``time`` module (issue #926).
+
+    Mirrors the commonly-used time-reading functions verbatim and
+    replaces ``sleep`` with :func:`_capped_sleep`.  Returned as a
+    ``types.SimpleNamespace`` so attribute access (``time.time()``,
+    ``time.sleep(0.1)``) works exactly as users expect.
+    """
+    import time as _real_time
+    import types as _types
+
+    safe_attrs = (
+        "time",
+        "time_ns",
+        "monotonic",
+        "monotonic_ns",
+        "perf_counter",
+        "perf_counter_ns",
+        "process_time",
+        "process_time_ns",
+        "ctime",
+        "gmtime",
+        "localtime",
+        "strftime",
+        "strptime",
+        "mktime",
+        "altzone",
+        "daylight",
+        "timezone",
+        "tzname",
+        "struct_time",
+    )
+    shim_attrs: dict[str, Any] = {"sleep": _capped_sleep}
+    for attr in safe_attrs:
+        if hasattr(_real_time, attr):
+            shim_attrs[attr] = getattr(_real_time, attr)
+    return _types.SimpleNamespace(**shim_attrs)
+
+
 def _preload_safe_modules() -> dict[str, Any]:
     """Pre-import safe modules for use in restricted environment."""
     preloaded = {}
@@ -995,6 +1070,11 @@ def _preload_safe_modules() -> dict[str, Any]:
             preloaded[module_name] = __import__(module_name)
         except ImportError:
             pass  # Module not available
+    # Issue #926: replace the real ``time`` module with the capped-sleep
+    # shim so neither ``import time`` nor preloaded ``time.sleep`` can
+    # occupy a worker slot for the full execution timeout.
+    if "time" in preloaded:
+        preloaded["time"] = _make_safe_time_module()
     return preloaded
 
 

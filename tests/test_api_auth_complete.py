@@ -354,7 +354,7 @@ class TestRefresh:
         expired_record.expires_at = datetime.now(UTC) - timedelta(days=1)
 
         with patch(
-            "src.api.db.repositories.tokens.RefreshTokenRepository.get_by_hash",
+            "src.api.db.repositories.tokens.RefreshTokenRepository.rotate_and_get",
             new_callable=AsyncMock,
             return_value=expired_record,
         ):
@@ -378,13 +378,9 @@ class TestRefresh:
 
         with (
             patch(
-                "src.api.db.repositories.tokens.RefreshTokenRepository.get_by_hash",
+                "src.api.db.repositories.tokens.RefreshTokenRepository.rotate_and_get",
                 new_callable=AsyncMock,
                 return_value=valid_record,
-            ),
-            patch(
-                "src.api.db.repositories.tokens.RefreshTokenRepository.revoke",
-                new_callable=AsyncMock,
             ),
             patch(
                 "src.api.db.repositories.users.UserRepository.get_by_id",

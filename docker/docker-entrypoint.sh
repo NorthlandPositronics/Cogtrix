@@ -15,7 +15,8 @@ mkdir -p \
     "$DATA_DIR/assistant" \
     "$DATA_DIR/workflows" \
     "$DATA_DIR/output" \
-    "$DATA_DIR/log"
+    "$DATA_DIR/log" \
+    "$DATA_DIR/documents"
 
 # ── API server mode ──────────────────────────────────────────
 # Invoked as:
@@ -56,21 +57,31 @@ fi
 
 # Check all paths the Python config resolver searches (src/config.py:find_config_file).
 # Missing any of these would wrongly trigger the setup wizard even when a config exists.
+# XDG config files match what ``src/config.py:find_config_file`` searches
+# for: ``cogtrix.json``/``cogtrix.yml``/``cogtrix.yaml`` with no leading
+# dot.  An earlier version of this script used ``.cogtrix.yaml`` here,
+# which silently disagreed with the Python resolver — anyone mounting an
+# XDG-style config got dropped into the setup wizard instead.
 _cogtrix_has_config() {
     [ -f "/app/.cogtrix.yaml" ] || [ -f "/app/.cogtrix.yml" ] || [ -f "/app/.cogtrix.json" ] || \
     [ -f "${HOME}/.cogtrix.yaml" ] || [ -f "${HOME}/.cogtrix.yml" ] || [ -f "${HOME}/.cogtrix.json" ] || \
-    [ -f "${XDG_CONFIG_HOME:-${HOME}/.config}/cogtrix/.cogtrix.yaml" ] || \
-    [ -f "${XDG_CONFIG_HOME:-${HOME}/.config}/cogtrix/.cogtrix.yml" ] || \
+    [ -f "${XDG_CONFIG_HOME:-${HOME}/.config}/cogtrix/cogtrix.yaml" ] || \
+    [ -f "${XDG_CONFIG_HOME:-${HOME}/.config}/cogtrix/cogtrix.yml" ] || \
+    [ -f "${XDG_CONFIG_HOME:-${HOME}/.config}/cogtrix/cogtrix.json" ] || \
     [ -n "${COGTRIX_CONFIG_FILE:-}" ]
 }
+# ``${VAR:-}`` is required everywhere below because the script runs under
+# ``set -euo pipefail``; a bare ``[ -z "$OPENAI_API_KEY" ]`` against an
+# unset variable would abort the script with "unbound variable" and the
+# user would never reach the wizard.
 if [ $# -eq 0 ] && ! _cogtrix_has_config && [ -t 0 ]; then
-    if [ -z "$OPENAI_API_KEY" ] && \
-       [ -z "$ANTHROPIC_API_KEY" ] && \
-       [ -z "$GEMINI_API_KEY" ] && \
-       [ -z "$XAI_API_KEY" ] && \
-       [ -z "$DEEPSEEK_API_KEY" ] && \
-       [ -z "$COGTRIX_OLLAMA" ] && \
-       [ -z "$OLLAMA_BASE_URL" ]; then
+    if [ -z "${OPENAI_API_KEY:-}" ] && \
+       [ -z "${ANTHROPIC_API_KEY:-}" ] && \
+       [ -z "${GEMINI_API_KEY:-}" ] && \
+       [ -z "${XAI_API_KEY:-}" ] && \
+       [ -z "${DEEPSEEK_API_KEY:-}" ] && \
+       [ -z "${COGTRIX_OLLAMA:-}" ] && \
+       [ -z "${OLLAMA_BASE_URL:-}" ]; then
         exec python cogtrix.py --setup
     fi
 fi

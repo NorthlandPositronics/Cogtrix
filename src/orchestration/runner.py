@@ -58,9 +58,19 @@ _pending_background_compression_jobs: list[
 _MAX_GRAPH_CACHE_SIZE = 4
 _persistent_graph_cache: OrderedDict = OrderedDict()  # key → compiled graph
 
+# Simple-task preload set. Intentionally excludes "search_web" since
+# PR-G (ADR-0056) retired the legacy in-process DDG tool from the
+# agent catalogue — `web_search` (subprocess-isolated) supersedes it.
+# Listing "search_web" here is a footgun: if anything ever re-registers
+# the legacy name, this preload would auto-load the in-process variant
+# and re-introduce the Bug D / cogtrix46 heap-corruption crash (curl_cffi
+# loaded into a process that also has httpx). The modern `web_search`
+# tool intentionally lives outside this preload — it is loaded lazily
+# via `request_tools` for complex tasks (see the COMPLEX_ACTION /
+# COMPLEX_RESEARCH branch below) so its subprocess overhead is paid
+# only when actually needed.
 _SIMPLE_PRELOAD_TOOLS: tuple[str, ...] = (
     "calculate",
-    "search_web",
     "read_file",
     "get_current_datetime",
 )
@@ -883,6 +893,15 @@ def run_agent(
         Agent response as string
     """
     from src.orchestration.phases import is_step_limit_apology, recover_from_step_limit
+    from src.tools.web_search import set_synthesis_llm
+
+    # Scope the stage-5 synthesiser LLM to this run. The API path
+    # reaches run_agent through ``asyncio.to_thread``, which gives us
+    # a copied ContextVar context per call → multi-tenant isolation.
+    # The CLI/assistant call run_agent sequentially per session on
+    # the same thread → the overwrite-on-entry is correct because
+    # runs don't overlap. Single-tenant is the degenerate case.
+    set_synthesis_llm(config.llm, getattr(config, "compression_llm", None))
 
     _base_system_prompt = config.system_prompt
     _run_system_prompt = _base_system_prompt
@@ -908,29 +927,33 @@ def run_agent(
         if _complexity == TaskComplexity.SIMPLE:
             _auto_load_simple_tools(config)
 
-        # Auto-load search_web for complex tasks so the agent has web
-        # search available from the first round without needing to call
-        # request_tools.  Addresses RBA (Research-Before-Action) gap where
-        # agents skip loading search when they're confident in training data.
+        # Auto-load `web_search` for complex tasks so the agent has web
+        # research available from the first round without needing to call
+        # `request_tools`. Addresses the RBA (Research-Before-Action) gap
+        # where agents skip loading search when they're confident in
+        # training data. The modern `web_search` tool is subprocess-
+        # isolated for the DDG provider (Bug D); the legacy `search_web`
+        # tool name was retired by PR-G and must not be auto-loaded —
+        # see the comment on `_SIMPLE_PRELOAD_TOOLS` above.
         elif _complexity in (TaskComplexity.COMPLEX_ACTION, TaskComplexity.COMPLEX_RESEARCH):
             _avail = config.available_tools
             _active = config.active_tools_list
-            if _avail and _active is not None and "search_web" in _avail:
+            if _avail and _active is not None and "web_search" in _avail:
                 _active_names_set = {getattr(t, "name", "") for t in _active}
-                if "search_web" not in _active_names_set:
-                    _search_tool = _avail.pop("search_web")
+                if "web_search" not in _active_names_set:
+                    _search_tool = _avail.pop("web_search")
                     # Resolve LazyToolProxy before adding to active tools —
                     # bind_tools() requires real StructuredTool objects.
                     if hasattr(_search_tool, "_resolve"):
                         try:
                             _search_tool = _search_tool._resolve()
                         except Exception as exc:
-                            get_logger().warning("Failed to resolve search_web tool: %s", exc)
-                            _avail["search_web"] = _search_tool
+                            get_logger().warning("Failed to resolve web_search tool: %s", exc)
+                            _avail["web_search"] = _search_tool
                             _search_tool = None
                     if _search_tool is not None:
                         _active.append(_search_tool)
-                        get_logger().info("Auto-loaded search_web for complex task")
+                        get_logger().info("Auto-loaded web_search for complex task")
 
     # ── Task ownership classification ──────────────────────────────────────
     if getattr(config, "task_ownership_classifier_enabled", True):

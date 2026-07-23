@@ -4,11 +4,9 @@ POST requests require user confirmation for safety.
 """
 
 import html as _html_mod
-import ipaddress
 import json
 import logging
 import re
-import socket
 import threading
 import time
 from contextlib import contextmanager, nullcontext
@@ -26,34 +24,35 @@ except ImportError:
     requests = None  # type: ignore[assignment]
     REQUESTS_AVAILABLE = False
 
-from src.tools.error_sanitizer import sanitize_error as _sanitize_error
-
-MAX_REDIRECTS = 5
-_MAX_TIMEOUT = 120  # seconds
-_MAX_RESPONSE_BYTES = 512_000  # 512 KB — more than enough for 10 K char truncation
-
-# RFC 6598 Shared Address Space (CGNAT) — not classified as private by ipaddress module
-_CGNAT_NETWORK = ipaddress.ip_network("100.64.0.0/10")
-
-_BLOCKED_HEADERS: frozenset[str] = frozenset(
-    {
-        "host",
-        "x-forwarded-host",
-        "x-forwarded-for",
-        "x-real-ip",
-        "x-forwarded-proto",
-        "x-forwarded-server",
-    }
+# Re-exports below preserve the historical public surface of this
+# module — tests/tools/test_http_request.py imports several of these
+# names directly from here. The single source of truth lives in
+# src/tools/_http_safety.py. # noqa: F401 markers keep ruff from
+# pruning these "unused" imports.
+from src.tools._http_safety import (  # noqa: F401
+    _BLOCKED_HEADERS,
+    _CGNAT_NETWORK,
+    _MAX_RESPONSE_BYTES,
+    _MAX_TIMEOUT,
+    MAX_REDIRECTS,
+    _is_blocked_ip,
+    _parse_headers,
+    _validate_url,
 )
+from src.tools.delegate import register_tool_categories
+from src.tools.error_sanitizer import sanitize_error as _sanitize_error
 
 
 class HttpGetInput(BaseModel):
     """Input schema for HTTP GET requests."""
 
     url: str = Field(description="The URL to request")
-    headers: str | None = Field(
+    headers: dict[str, str] | None = Field(
         default=None,
-        description='Optional headers as JSON string (e.g., \'{"Authorization": "Bearer token"}\')',
+        description=(
+            'Optional HTTP headers as an object, e.g. {"Authorization": "Bearer token"}. '
+            "Legacy: a JSON-encoded string is also accepted."
+        ),
     )
     timeout: int = Field(default=30, description="Request timeout in seconds")
     max_chars: int = Field(
@@ -70,9 +69,12 @@ class HttpPostInput(BaseModel):
 
     url: str = Field(description="The URL to request")
     data: str = Field(description='Request body as JSON string (e.g., \'{"key": "value"}\')')
-    headers: str | None = Field(
+    headers: dict[str, str] | None = Field(
         default=None,
-        description="Optional headers as JSON string",
+        description=(
+            'Optional HTTP headers as an object, e.g. {"Authorization": "Bearer token"}. '
+            "Legacy: a JSON-encoded string is also accepted."
+        ),
     )
     timeout: int = Field(default=30, description="Request timeout in seconds")
 
@@ -128,109 +130,12 @@ def _pin_dns(hostname: str, ip: str):  # type: ignore[no-untyped-def]
         pin_map.pop(hostname, None)
 
 
-def _is_blocked_ip(ip_str: str) -> bool:
-    """Return True if ip_str represents a non-public IP address."""
-    try:
-        ip = ipaddress.ip_address(ip_str)
-    except ValueError:
-        return False
-    # Unwrap IPv6-mapped IPv4 addresses (e.g. ::ffff:127.0.0.1) so that all
-    # IPv4-space checks (CGNAT, loopback, private, …) apply correctly.
-    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
-        ip = ip.ipv4_mapped
-    if ip in _CGNAT_NETWORK:
-        return True
-    return (
-        ip.is_loopback
-        or ip.is_private
-        or ip.is_link_local
-        or ip.is_reserved
-        or ip.is_unspecified
-        or ip.is_multicast
-    )
-
-
-def _validate_url(url: str) -> tuple[bool, str, str | None]:
-    """Validate URL for safety. Returns (is_valid, error, resolved_ip)."""
-    try:
-        parsed = urlparse(url)
-
-        # Must have scheme and netloc
-        if not parsed.scheme or not parsed.netloc:
-            return False, "Invalid URL format", None
-
-        # Only allow http and https
-        if parsed.scheme not in ("http", "https"):
-            return False, f"Unsupported scheme: {parsed.scheme}", None
-
-        hostname = parsed.hostname or ""
-        if not hostname:
-            return False, "Invalid URL format", None
-
-        # Defense-in-depth: block well-known internal hostnames by name
-        blocked_hosts = {
-            "localhost",
-            "metadata.google.internal",
-            "instance-data",
-            "169.254.169.254",
-        }  # nosec B104
-        if hostname.lower() in blocked_hosts:
-            return False, "Requests to localhost or internal hosts are not allowed", None
-
-        # If the hostname is a raw IP literal (including decimal/hex/octal forms),
-        # ipaddress.ip_address() will parse it directly — catches 2130706433,
-        # 0x7f000001, 0177.0.0.1, 127.0.0.2, ::1, etc.
-        try:
-            if _is_blocked_ip(hostname):
-                return (
-                    False,
-                    "Requests to localhost or private/reserved IP ranges are not allowed",
-                    None,
-                )
-        except Exception as exc:
-            log.warning("IP validation failed for %s: %s — blocking request", hostname, exc)
-            return (False, f"IP validation error: {exc}", None)
-
-        # Resolve hostname via DNS and check every returned address
-        resolved_ip: str | None = None
-        try:
-            addrinfo = socket.getaddrinfo(hostname, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
-            for _family, _type, _proto, _canonname, sockaddr in addrinfo:
-                ip_str = str(sockaddr[0])
-                if _is_blocked_ip(ip_str):
-                    return (
-                        False,
-                        "Requests to localhost or private/reserved IP ranges are not allowed",
-                        None,
-                    )
-                if resolved_ip is None:
-                    resolved_ip = ip_str
-        except socket.gaierror:
-            return False, "DNS resolution failed for hostname", None
-
-        return True, "", resolved_ip
-    except Exception as e:
-        return False, f"URL validation error: {e}", None
-
-
-def _parse_headers(headers_str: str | None) -> tuple[dict, str | None]:
-    """Parse headers JSON string."""
-    if not headers_str:
-        return {}, None
-
-    try:
-        headers = json.loads(headers_str)
-        if not isinstance(headers, dict):
-            return {}, "Headers must be a JSON object"
-        sanitized: dict[str, str] = {}
-        for k, v in headers.items():
-            safe_key = str(k).replace("\r", "").replace("\n", "")
-            safe_value = str(v).replace("\r", "").replace("\n", "")
-            if safe_key.lower() not in _BLOCKED_HEADERS:
-                sanitized[safe_key] = safe_value
-        return sanitized, None
-    except json.JSONDecodeError as e:
-        return {}, f"Invalid headers JSON: {e}"
+# NOTE: ``_is_blocked_ip``, ``_validate_url``, ``_parse_headers``, plus the
+# constants ``_BLOCKED_HEADERS`` / ``_CGNAT_NETWORK`` / ``_MAX_TIMEOUT`` /
+# ``_MAX_RESPONSE_BYTES`` / ``MAX_REDIRECTS`` are re-exported from
+# ``src/tools/_http_safety.py``. See the import block at the top of this
+# file. The single source of truth lives in that module so the async
+# ``_http_fetch`` primitive (ADR-0056 stage 3) shares it.
 
 
 # ── Recent failure tracker ──────────────────────────────────────────
@@ -410,14 +315,19 @@ def _extract_text_from_html(html: str) -> str:
 
 
 def http_get(
-    url: str, headers: str | None = None, timeout: int = 30, max_chars: int = 10_000
+    url: str,
+    headers: dict[str, str] | str | None = None,
+    timeout: int = 30,
+    max_chars: int = 10_000,
 ) -> str:
     """
     Make an HTTP GET request.
 
     Args:
         url: The URL to request
-        headers: Optional headers as JSON string
+        headers: Optional HTTP headers as a dict (preferred) or a
+            JSON-encoded string (legacy shape kept for backward
+            compatibility with older tool-call envelopes).
         timeout: Request timeout in seconds
 
     Returns:
@@ -506,7 +416,7 @@ def http_get(
 def http_post(
     url: str,
     data: str,
-    headers: str | None = None,
+    headers: dict[str, str] | str | None = None,
     timeout: int = 30,
 ) -> str:
     """
@@ -516,7 +426,8 @@ def http_post(
     Args:
         url: The URL to request
         data: Request body as JSON string
-        headers: Optional headers as JSON string
+        headers: Optional HTTP headers as a dict (preferred) or a
+            JSON-encoded string (legacy shape).
         timeout: Request timeout in seconds
 
     Returns:
@@ -628,6 +539,7 @@ TOOL_CONFIGS = [
         "input_schema": HttpGetInput,
         "requires_confirmation": False,
         "function": http_get,
+        "category": "readonly",
     },
     {
         "name": "http_post",
@@ -638,8 +550,11 @@ TOOL_CONFIGS = [
         "input_schema": HttpPostInput,
         "requires_confirmation": True,  # Requires confirmation for safety
         "function": http_post,
+        "category": "mutation",
     },
 ]
+
+register_tool_categories({"http_get": "readonly", "http_post": "mutation"})
 
 # Default single tool config (for backwards compatibility)
 TOOL_CONFIG = TOOL_CONFIGS[0]

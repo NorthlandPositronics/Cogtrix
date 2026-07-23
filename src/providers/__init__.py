@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import importlib
 import logging
+import re
 import threading
 import time
 from typing import TYPE_CHECKING, Any
@@ -99,6 +100,51 @@ def _redact_url(url: str | None) -> str:
     # Rebuild URL
     scheme = parsed.scheme or "http"
     return f"{scheme}://{netloc}{path}?{query}" if query else f"{scheme}://{netloc}{path}"
+
+
+def _sanitize_auth_error_message(message: str) -> str:
+    """Strip potential API key fragments from an authentication error message.
+
+    Replaces known key patterns (OpenAI ``sk-*``, Anthropic ``sk-ant-*``,
+    Google ``AIza*``, etc.) with ``[redacted]`` to prevent credential
+    material from leaking into user-facing output or application logs.
+
+    Args:
+        message: The raw error message from the provider SDK.
+
+    Returns:
+        A sanitized message with key fragments replaced.
+    """
+    # Common API key prefixes and patterns that may appear in SDK errors.
+    # Keep provider-specific prefixes before generic fallbacks to avoid
+    # partial-substring leakage.
+    #
+    # Each specific prefix uses a negative lookbehind so that fragments like
+    # "task-skills-dev" are not falsely redacted.
+    patterns = [
+        # OpenAI-style keys (also covers DeepSeek, which uses sk- prefix)
+        r"(?<![a-zA-Z0-9])sk-[a-zA-Z0-9_-]+",
+        # Anthropic-style keys
+        r"(?<![a-zA-Z0-9])sk-ant-[a-zA-Z0-9_-]+",
+        # Google / Gemini API keys
+        r"(?<![a-zA-Z0-9])AIza[a-zA-Z0-9_-]+",
+        # xAI (Grok) API keys
+        r"(?<![a-zA-Z0-9])xai-[a-zA-Z0-9_-]+",
+        # Groq API keys
+        r"(?<![a-zA-Z0-9])gsk_[a-zA-Z0-9_-]+",
+        # HuggingFace API keys
+        r"(?<![a-zA-Z0-9])hf_[a-zA-Z0-9_-]+",
+        # Generic "API key: <value>" fragments
+        r"(?i)api\s*key[:\s]+[a-zA-Z0-9_-]+",
+        # Generic "key: <value>" fragments in auth contexts
+        r"(?i)(?:invalid\s+|incorrect\s+)?(?:api\s*key|x-api-key|authorization)\s*[:\s]+[a-zA-Z0-9_-]+",
+    ]
+
+    sanitized = message
+    for pattern in patterns:
+        sanitized = re.sub(pattern, "[redacted]", sanitized)
+
+    return sanitized
 
 
 # ── Exception types for provider errors ──────────────────────────────
@@ -296,8 +342,9 @@ class RetryableChatModel:
 
                 # Check if this is an auth error - fail immediately
                 if self._is_auth_error(exc):
+                    safe_message = _sanitize_auth_error_message(str(exc))
                     raise ProviderAuthError(
-                        f"Authentication failed: {exc}",
+                        f"Authentication failed: {safe_message}",
                         provider=getattr(self._model, "provider_name", None),
                     ) from exc
 

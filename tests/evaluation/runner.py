@@ -20,6 +20,8 @@ from __future__ import annotations
 
 import json
 import os
+import random
+import secrets
 import time
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeoutError
@@ -323,6 +325,202 @@ def load_all_scenarios(domain: str | None = None) -> list[EvalScenario]:
     return scenarios
 
 
+# ── Canary substitution (Option A) ────────────────────────────────────────────
+
+
+_CANARY_PREFIXES: tuple[str, ...] = (
+    "Astro",
+    "Nova",
+    "Orbit",
+    "Pulse",
+    "Vertex",
+    "Prism",
+    "Flux",
+    "Helix",
+    "Nexus",
+    "Cipher",
+    "Drift",
+    "Echo",
+    "Lumen",
+    "Mirage",
+    "Quark",
+    "Sol",
+    "Terra",
+    "Vortex",
+    "Zen",
+    "Arc",
+    "Bolt",
+    "Crest",
+    "Dusk",
+    "Ember",
+    "Frost",
+    "Gale",
+    "Haven",
+    "Iris",
+    "Jade",
+    "Keystone",
+)
+
+_CANARY_SUFFIXES: tuple[str, ...] = (
+    "Flow",
+    "Core",
+    "Grid",
+    "Link",
+    "Mesh",
+    "Node",
+    "Path",
+    "Ring",
+    "Spark",
+    "Stream",
+    "Sync",
+    "Wave",
+    "Base",
+    "Box",
+    "Bridge",
+    "Cast",
+    "Drive",
+    "Forge",
+    "Hub",
+    "Kit",
+    "Lab",
+    "Net",
+    "Port",
+    "Scope",
+    "Shift",
+    "Stack",
+    "Studio",
+    "Vault",
+    "View",
+    "Wire",
+    "Works",
+    "Zone",
+)
+
+_CANARY_CATEGORIES: tuple[str, ...] = (
+    "Framework",
+    "Platform",
+    "Toolkit",
+    "Engine",
+    "Runtime",
+    "Library",
+    "SDK",
+    "IDE",
+    "Suite",
+    "System",
+    "Service",
+    "Agent",
+    "Daemon",
+    "Module",
+    "Component",
+    "Interface",
+    "Gateway",
+    "Router",
+    "Proxy",
+)
+
+
+def _generate_canary_name() -> str:
+    """Generate a fresh fictional product name unlikely to exist in any corpus.
+
+    Uses a phonotactically-plausible compound name with a random hex suffix
+    to ensure near-zero collision probability with real-world products or
+    previously-generated canaries.  The result looks like a real tech product
+    (e.g. ``NovaForge-a3b2-Toolkit``) so the agent treats it naturally in
+    prompts, but the random suffix guarantees it has never appeared in training
+    data.
+    """
+    prefix = random.choice(_CANARY_PREFIXES)
+    suffix = random.choice(_CANARY_SUFFIXES)
+    token = secrets.token_hex(2)  # 4 hex chars — 65k uniqueness space
+    category = random.choice(_CANARY_CATEGORIES)
+    return f"{prefix}{suffix}-{token}-{category}"
+
+
+def _substitute_canary(scenario: EvalScenario) -> EvalScenario:
+    """Replace canary placeholders with freshly-generated names.
+
+    Supported placeholders:
+
+    * ``{canary_name}`` / ``{canary_name_N}`` — the generated product
+      name (original case).  A distinct name is generated for each
+      unique placeholder suffix so multi-turn scenarios can use
+      unrelated fictional products.
+    * ``{canary_name_lower}`` / ``{canary_name_N_lower}`` — lowercase,
+      hyphen-stripped version for URL assertions
+      (e.g. ``github.com/{canary_name_lower}``).
+
+    When no placeholder is present the scenario is returned unchanged.
+    """
+    import re
+
+    scenario_text = str(scenario.__dict__)
+    placeholders = set(re.findall(r"\{canary_name(?:_\d+)?(?:_lower)?\}", scenario_text))
+    if not placeholders:
+        return scenario
+
+    # Generate one unique name per distinct placeholder suffix.
+    # {canary_name} and {canary_name_lower} share the same root name.
+    # {canary_name_2} and {canary_name_2_lower} share a second name, etc.
+    canary_map: dict[str, str] = {}
+    seen_roots: set[str] = set()
+    for ph in placeholders:
+        # Extract root: "canary_name" or "canary_name_2"
+        root_match = re.match(r"\{(canary_name(?:_\d+)?)", ph)
+        if root_match is None:
+            continue
+        root = root_match.group(1)
+        if root not in seen_roots:
+            seen_roots.add(root)
+            canary_map[root] = _generate_canary_name()
+
+    def _replace(text: str) -> str:
+        for ph in placeholders:
+            root_match = re.match(r"\{(canary_name(?:_\d+)?)", ph)
+            if root_match is None:
+                continue
+            root = root_match.group(1)
+            canary = canary_map[root]
+            if ph.endswith("_lower}"):
+                value = canary.lower().replace("-", "")
+            else:
+                value = canary
+            text = text.replace(ph, value)
+        return text
+
+    new_turns = [
+        Turn(
+            user_prompt=_replace(turn.user_prompt),
+            success_criteria=[_replace(c) for c in turn.success_criteria],
+            judge_weight=turn.judge_weight,
+        )
+        for turn in scenario.turns
+    ]
+
+    new_scenario = EvalScenario(
+        id=scenario.id,
+        domain=scenario.domain,
+        title=_replace(scenario.title),
+        description=_replace(scenario.description),
+        system_prompt=_replace(scenario.system_prompt),
+        tools_required=list(scenario.tools_required),
+        expected_outcome=_replace(scenario.expected_outcome),
+        success_criteria=[_replace(c) for c in scenario.success_criteria],
+        max_turns=scenario.max_turns,
+        timeout_seconds=scenario.timeout_seconds,
+        tags=list(scenario.tags),
+        budget_usd_estimate=scenario.budget_usd_estimate,
+        tool_descriptions={k: _replace(v) for k, v in scenario.tool_descriptions.items()},
+        tools_available=list(scenario.tools_available),
+        turns=new_turns,
+    )
+
+    # Preserve legacy single-turn fields when they were populated
+    if scenario.user_prompt:
+        new_scenario.user_prompt = _replace(scenario.user_prompt)
+
+    return new_scenario
+
+
 # ── Result dataclass ──────────────────────────────────────────────────────────
 
 
@@ -368,6 +566,15 @@ class EvalResult:
     completion_tokens: int = 0
     actual_cost_usd: float = 0.0
 
+    # Tool-call errors observed during the run.  Each entry is one short
+    # "<tool_name>: <truncated error text>" line.  ANY entry forces
+    # ``passed=False`` — see Bug L follow-up (2026-05-20): tool errors
+    # used to be invisible to scenario scoring because success criteria
+    # only inspected the final response. A scenario where the model
+    # produced an honest "could not find" answer alongside a pydantic
+    # ValidationError on http_get was being reported as a pass.
+    tool_errors: list[str] = field(default_factory=list)
+
     # Per-turn outputs.  Populated by ``run_scenario`` (one entry per
     # turn in ``scenario.turns``).  Empty when the result is constructed
     # programmatically without going through the runner — the judge
@@ -392,6 +599,7 @@ class EvalResult:
             "prompt_tokens": self.prompt_tokens,
             "completion_tokens": self.completion_tokens,
             "actual_cost_usd": round(self.actual_cost_usd, 6),
+            "tool_errors": list(self.tool_errors),
             "turn_results": [
                 {
                     "final_response": tr.final_response[:500],
@@ -522,6 +730,10 @@ def run_scenario(
     from src.orchestration.graph import build_agent_graph
 
     start = time.monotonic()
+
+    # Option A: generate a fresh canary name at runtime and substitute
+    # placeholders so the scenario is resilient to corpus poisoning.
+    scenario = _substitute_canary(scenario)
 
     # Build a minimal tool registry for the scenario.
     # Real MCP tools can be injected here when available; for the CI smoke
@@ -682,11 +894,20 @@ def run_scenario(
     selection_rate = len(called_set & required) / len(required) * 100 if required else 100.0
     task_completion = selection_rate >= 100.0
 
+    # Bug L follow-up (2026-05-20): tool errors during the run MUST fail
+    # the scenario, even when the success criteria only inspect the final
+    # response text. Previously a scenario where http_get raised a pydantic
+    # ValidationError and the model fell back to an honest "could not find"
+    # answer was reported as a pass because the response criteria still
+    # matched. This silently masked real tool-shape bugs.
+    tool_errors_observed = _collect_tool_errors(messages)
+
     # Scenario passes iff (a) every required tool was called somewhere in
     # the session AND (b) every per-turn success_criteria block passed
-    # against its own message slice.
+    # against its own message slice AND (c) no tool produced an error.
     all_turns_passed = not any(per_turn_failed)
-    passed = task_completion and all_turns_passed
+    no_tool_errors = not tool_errors_observed
+    passed = task_completion and all_turns_passed and no_tool_errors
 
     prompt_tokens, completion_tokens = _sum_token_usage(messages)
     actual_cost = _estimate_cost_usd(model, prompt_tokens, completion_tokens)
@@ -706,8 +927,79 @@ def run_scenario(
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
         actual_cost_usd=actual_cost,
+        tool_errors=tool_errors_observed,
         turn_results=per_turn_results,
     )
+
+
+_TOOL_ERROR_MARKERS: tuple[str, ...] = (
+    # The orchestration graph wraps any tool-raised exception with this
+    # prefix (see src/orchestration/graph.py: _invoke_one — "Error
+    # executing {tool}: {exc}"). Pydantic ValidationErrors, network
+    # exceptions, and uncaught provider errors all surface this way.
+    "error executing ",
+    # Many tools handle errors gracefully and return a plain-text message
+    # starting with "Error:" instead of raising. Both http_get and
+    # http_post emit "Error: <sanitised exc>" on timeout / connection /
+    # validation failures. These are real tool failures from the
+    # scenario's perspective even though no exception propagated.
+    "error:",
+)
+
+# Substring patterns inside ToolMessage content that signal a real tool
+# error even when the leading "Error:" prefix is not the first token —
+# e.g. wrapped cached results "[Duplicate call — returning cached result. Do NOT
+# repeat this call.]\n\nError: ...".
+_TOOL_ERROR_CONTAINS: tuple[str, ...] = (
+    "\nerror executing ",
+    "\nerror: ",
+    "validation error",
+    "is no longer active",
+)
+
+
+def _collect_tool_errors(messages: list[Any]) -> list[str]:
+    """Return one short ``<tool>: <truncated error text>`` per failed tool call.
+
+    Bug L follow-up: tool-call errors during a scenario run must fail the
+    test, otherwise the scenario can ship as a pass when the model
+    happens to produce a graceful-looking answer despite a broken tool
+    invocation.
+
+    Detection is conservative: a ToolMessage counts as a failure only
+    when its content contains an unambiguous error marker (see
+    ``_TOOL_ERROR_MARKERS`` / ``_TOOL_ERROR_CONTAINS``). Normal tool
+    results that legitimately mention the word "error" (e.g. a search
+    result page title) do not match because the markers anchor on the
+    start of the line.
+    """
+    from langchain_core.messages import ToolMessage
+
+    errors: list[str] = []
+    for msg in messages:
+        if not isinstance(msg, ToolMessage):
+            continue
+        content = msg.content
+        if not isinstance(content, str):
+            # Multi-part content shapes (rare) — flatten conservatively.
+            try:
+                content = " ".join(
+                    str(p.get("text", "")) if isinstance(p, dict) else str(p) for p in content
+                )
+            except (TypeError, AttributeError):
+                content = str(content)
+        if not content:
+            continue
+        lowered = content.lower().lstrip()
+        is_error = any(lowered.startswith(marker) for marker in _TOOL_ERROR_MARKERS) or any(
+            marker in lowered for marker in _TOOL_ERROR_CONTAINS
+        )
+        if not is_error:
+            continue
+        tool_name = getattr(msg, "name", None) or "<unknown>"
+        snippet = content.strip().splitlines()[0][:200]
+        errors.append(f"{tool_name}: {snippet}")
+    return errors
 
 
 def _normalize_decimals(text: str) -> str:

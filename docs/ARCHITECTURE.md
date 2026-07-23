@@ -64,7 +64,7 @@ Cogtrix is a modular LangChain-based AI agent built with a layered architecture:
 ┌───────────────┴───────────────┐ ┌───────────────┴───────────────┐
 │        Memory System          │ │        Tool Modules           │
 │       (src/memory/)           │ │       (src/tools/)            │
-│  • Mode managers              │ │  • 68 built-in tools          │
+│  • Mode managers              │ │  • 67 built-in tools          │
 │  • Context preparation        │ │  • Auto-discovery             │
 │  • JSON persistence           │ │  • Pydantic schemas           │
 └───────────────────────────────┘ └───────────────────────────────┘
@@ -111,7 +111,12 @@ src/
 ├── orchestration/
 │   ├── run_config.py      # AgentRunConfig dataclass (29 fields: LLM, tools, compression, ownership classifier, decision accountability)
 │   ├── runner.py          # run_agent() entry point, response extraction, ToolCallLogger
-│   ├── graph.py           # LangGraph StateGraph: call_model, process_tools, handle_phantom
+│   ├── graph.py           # LangGraph StateGraph assembly + per-run state; runtime helpers live in extracted modules below
+│   ├── graph_runtime.py   # Process-wide tool executor pool, _TOOL_EXECUTOR_LOCK, deduped tool invocation primitives (A1.4)
+│   ├── message_repair.py  # Orphaned ToolMessage repair + tool-call ↔ result pair invariants (A1.1)
+│   ├── response_detectors.py  # Heuristics: hallucinated completion, tool-use response shape, phantom detection (A1.2)
+│   ├── tool_arg_correction.py # Tool-argument normalisation + schema-driven coercion at the dispatch boundary (A1.3)
+│   ├── topic_switch.py    # Cross-turn topic-switch detection used by call_model for memory-mode transitions (A1.4)
 │   ├── nodes/             # Graph node implementations
 │   │   ├── call_model.py  # LLM invocation node (binds tools, prepends system message)
 │   │   ├── process_tools.py  # Tool execution + on-demand tool expansion
@@ -266,7 +271,7 @@ src/
 │   ├── deep_think.py      # Tree-of-Thought reasoning
 │   ├── delegate.py        # Task delegation (2 tools)
 │   ├── email_tools.py     # Email via SMTP/IMAP (gated)
-│   ├── exa_search.py      # Exa semantic search (3 tools)
+│   ├── exa_search.py      # Exa semantic search (2 tools: exa_find_similar, exa_get_contents)
 │   ├── extend_run.py      # Extend agent recursion limit mid-run
 │   ├── file_ops.py        # File operations (6 tools, incl. patch_file)
 │   ├── generate_tests.py  # Auto test generation (gated)
@@ -285,10 +290,10 @@ src/
 │   ├── serpapi_search.py  # SerpAPI (Google/Bing structured)
 │   ├── shell.py           # Shell commands
 │   ├── slack_tools.py     # Slack messaging (1 tool: cogtrix_slack_post_message)
-│   ├── tavily_search.py   # Tavily AI search (2 tools)
+│   ├── tavily_search.py   # Tavily extraction (1 tool: tavily_extract)
 │   ├── text_tools.py      # Text processing
 │   ├── weather.py         # Weather information
-│   ├── web_search.py      # DuckDuckGo search (2 tools: search_web, search_news)
+│   ├── web_search.py      # Universal web research (1 agent tool: web_search; search_web and search_news remain importable for power users)
 │   ├── whatsapp.py        # WhatsApp messaging (4 tools)
 │   ├── _whatsapp_client.py # Waha HTTP client
 │   ├── telegram.py        # Telegram messaging (4 tools)
@@ -524,9 +529,22 @@ before proceeding.
 
 `format_agent_error()` categorizes `NotFoundError`, `AuthenticationError`, `RateLimitError`, `APIConnectionError`, `Timeout`, `BadRequestError`, `InternalServerError`, and `ServiceUnavailableError`, plus Ollama-specific connection and model-not-found errors. SDK internals (request/response bodies, headers) are stripped from messages before display.
 
-#### 3c. Agent Graph (`src/orchestration/graph.py`)
+#### 3c. Agent Graph and Runtime Modules (`src/orchestration/graph.py` + siblings)
 
-`build_agent_graph()` constructs a custom LangGraph `StateGraph` with three nodes and conditional routing.
+`build_agent_graph()` (in `graph.py`) constructs a custom LangGraph `StateGraph` with three nodes and conditional routing.
+Runtime logic that used to live as private helpers inside `graph.py` was extracted into focused sibling modules in May 2026 (A1.1–A1.4);
+`graph.py` itself now owns graph assembly, per-run state, and the node-routing surface.
+Anything an extension would override or replace lives in one of the modules below:
+
+| Module | Owns |
+|--------|------|
+| `graph_runtime.py` | Process-wide `_TOOL_EXECUTOR`, `_TOOL_EXECUTOR_LOCK`, deduped tool-invocation primitives |
+| `message_repair.py` | `_repair_tool_message_pairs` and friends — keep `tool_call` ↔ `ToolMessage` invariants intact across compression / recovery |
+| `response_detectors.py` | `_is_hallucinated_completion`, tool-use response classifiers, phantom detection |
+| `tool_arg_correction.py` | Schema-driven tool-argument normalisation invoked at the dispatch boundary |
+| `topic_switch.py` | Cross-turn topic-switch detection used by `call_model` to drive memory-mode transitions |
+
+Tests that previously patched a helper as `src.orchestration.graph.<helper>` must now patch it where it lives (e.g. `src.orchestration.graph_runtime._TOOL_EXECUTOR`); back-compat re-exports from `graph.py` are kept for historic call sites but are not the canonical paths.
 
 **Graph Structure:**
 
@@ -705,7 +723,7 @@ class SessionOrchestrator:
 
 ### 4. Agent Core (`src/agent/core.py`)
 
-Defines the state schema, system prompt builder, and LLM factory. The actual graph is built in `src/orchestration/graph.py`.
+Defines the state schema, system prompt builder, and LLM factory. The actual graph is built in `src/orchestration/graph.py`; runtime helpers live in `graph_runtime.py`, response classification in `response_detectors.py`, message repair in `message_repair.py`, tool-argument coercion in `tool_arg_correction.py`, and topic-switch detection in `topic_switch.py`.
 
 **Key Exports:**
 
@@ -806,7 +824,7 @@ Resolution order:
 3. Fuzzy match (Jaccard token overlap + substring/prefix bonuses) → `("name", "available"|"active")`
 4. No match → `(None, "none")`
 
-The fuzzy threshold is `FUZZY_MATCH_THRESHOLD = 0.65` (raised from 0.40 to prevent false positives such as `read_file`↔`write_file`). Token overlap uses underscore-split normalization. Substring containment and token-prefix hits add score bonuses (prefix bonus: +0.35) so abbreviated names (e.g., `search` → `search_web`, `shell_exec` → `shell_execute`) resolve correctly.
+The fuzzy threshold is `FUZZY_MATCH_THRESHOLD = 0.65` (raised from 0.40 to prevent false positives such as `read_file`↔`write_file`). Token overlap uses underscore-split normalization. Substring containment and token-prefix hits add score bonuses (prefix bonus: +0.35) so abbreviated names (e.g., `search` → `web_search`, `shell_exec` → `shell_execute`) resolve correctly.
 
 ### 7. Tool Registry (`src/registry.py`)
 
@@ -1224,7 +1242,7 @@ Thread-safe via `threading.RLock`. `MessageHandler` accepts `workflow_registry` 
 
 ### 13. API Layer (`src/api/`)
 
-A FastAPI application that exposes Cogtrix capabilities over HTTP and WebSocket. It is the backend for the React web frontend and supports programmatic access via API keys. For the full endpoint reference and WebSocket protocol, see [docs/api/](api/).
+A FastAPI application that exposes Cogtrix capabilities over HTTP and WebSocket. It is the backend for the React web frontend and supports programmatic access via API keys. For the full endpoint reference and WebSocket protocol, see [docs/API/](API/).
 
 **Application factory:** `app.py` exports `create_app()`, which mounts all routers under `/api/v1` (REST) and `/ws/v1` (WebSocket), configures CORS, and registers a lifespan context manager that initialises the database, tool registry, and session registry on startup and flushes them on shutdown.
 
@@ -1540,7 +1558,7 @@ memory_manager.save()
 
 | Category | Tools | Confirmation |
 |----------|-------|--------------|
-| Read-only | `read_file`, `list_directory`, `search_web`, `git_status`, `git_diff`, `git_log` | No |
+| Read-only | `read_file`, `list_directory`, `web_search`, `git_status`, `git_diff`, `git_log` | No |
 | Sensitive | `execute_shell_command`, `write_file`, `patch_file`, `append_file`, `execute_python`, `git_add`, `git_commit`, `git_create_branch`, `git_checkout` | Yes |
 | External | `http_post` | Yes |
 
@@ -1622,11 +1640,12 @@ Dependencies are managed via `pyproject.toml` (with `uv`) and exported to `requi
 
 | Package | Purpose |
 |---------|---------|
-| `ddgs` | DuckDuckGo search |
+| `curl_cffi` | DuckDuckGo search (browser-fingerprint-impersonating libcurl binding; replaced `ddgs`/`primp`) |
+| `trafilatura` | HTML → Markdown extraction inside `web_search` (ADR-0056) |
+| `tldextract` | Registered-domain extraction for `web_search` ranking + redirect checks |
+| `cachetools` | TTL cache for `web_search` per-query results |
 | `faiss-cpu` | Vector store (optional, `cogtrix[rag]`) |
 | `pypdf` | PDF loading (optional, `cogtrix[rag]`) |
-| `python-docx` | DOCX file support (optional, `cogtrix[rag]`) |
-| `tiktoken` | Token counting |
 
 ### CLI
 

@@ -1461,7 +1461,8 @@ def _wizard_invoke_llm(llm: Any, messages: list[Any]) -> str:
         except FuturesTimeoutError:
             log.warning("Wizard LLM invoke timed out after %ds", _WIZARD_LLM_TIMEOUT_SECONDS)
             return ""
-        except Exception:
+        except Exception as exc:
+            log.warning("Wizard LLM invoke raised exception: %s", exc, exc_info=True)
             return ""
         finally:
             pool.shutdown(wait=False, cancel_futures=True)

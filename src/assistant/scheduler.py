@@ -611,6 +611,9 @@ class MessageScheduler:
         dispatch_interval: float = 30.0,
     ) -> None:
         self._channels = channels
+        assert isinstance(
+            persist_path, Path
+        ), f"persist_path must be a Path, got {type(persist_path).__name__}"
         self._persist_path = persist_path
         self._quiet_cfg: dict[str, Any] = quiet_hours_cfg or {}
         self._dispatch_interval = dispatch_interval
@@ -812,8 +815,6 @@ class MessageScheduler:
 
     def save(self) -> None:
         """Persist the queue to disk atomically."""
-        if self._persist_path is None:
-            return
         with self._save_lock:
             with self._lock:
                 snapshot = {mid: m.to_dict() for mid, m in self._queue.items()}

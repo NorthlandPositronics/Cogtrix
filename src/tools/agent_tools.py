@@ -20,6 +20,8 @@ import time
 from datetime import datetime
 from typing import TYPE_CHECKING
 
+from src.tools.delegate import register_tool_categories
+
 if TYPE_CHECKING:
     from pydantic import BaseModel, Field
 else:
@@ -105,9 +107,7 @@ def spawn_agent(agent_name: str, task: str, background: bool = False) -> str:
     if _reg.get(agent_name) is None:
         known = [a.name for a in _reg.list_agents()]
         if known:
-            return (
-                f"Unknown agent '{agent_name}'. " f"Available agents: {', '.join(sorted(known))}."
-            )
+            return f"Unknown agent '{agent_name}'. Available agents: {', '.join(sorted(known))}."
         return f"Unknown agent '{agent_name}'. No agents are currently registered."
 
     if background:
@@ -278,6 +278,7 @@ TOOL_CONFIGS = [
         "input_schema": SpawnAgentInput,
         "requires_confirmation": True,
         "function": spawn_agent,
+        "category": "recursive",
     },
     {
         "name": "get_task_status",
@@ -288,6 +289,7 @@ TOOL_CONFIGS = [
         "input_schema": GetTaskStatusInput,
         "requires_confirmation": False,
         "function": get_task_status,
+        "category": "readonly",
     },
     {
         "name": "get_task_result",
@@ -298,6 +300,7 @@ TOOL_CONFIGS = [
         "input_schema": GetTaskResultInput,
         "requires_confirmation": False,
         "function": get_task_result,
+        "category": "readonly",
     },
     {
         "name": "list_tasks",
@@ -309,6 +312,7 @@ TOOL_CONFIGS = [
         "input_schema": ListTasksInput,
         "requires_confirmation": False,
         "function": list_tasks,
+        "category": "readonly",
     },
     {
         "name": "cancel_task",
@@ -319,10 +323,22 @@ TOOL_CONFIGS = [
         "input_schema": CancelTaskInput,
         "requires_confirmation": True,
         "function": cancel_task,
+        "category": "readonly",
     },
 ]
 
 TOOL_CONFIG = TOOL_CONFIGS[0]
+
+
+register_tool_categories(
+    {
+        "spawn_agent": "recursive",
+        "get_task_status": "readonly",
+        "get_task_result": "readonly",
+        "list_tasks": "readonly",
+        "cancel_task": "readonly",
+    }
+)
 
 __all__ = [
     "spawn_agent",

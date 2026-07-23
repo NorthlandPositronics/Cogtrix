@@ -6,7 +6,7 @@
 You> Find the five most-cited deep-learning papers from arXiv in 2025,
      summarize each in two sentences, and save the list to papers.md.
 
-Cogtrix> search_web("most cited arxiv deep learning papers 2025")
+Cogtrix> web_search("most cited arxiv deep learning papers 2025")
          http_get("https://arxiv.org/abs/2501.…")
          http_get("https://arxiv.org/abs/2502.…")
          http_get("https://arxiv.org/abs/2503.…")
@@ -28,7 +28,7 @@ ollama pull qwen3:8b            # any GGUF model works
 uv run python cogtrix.py
 ```
 
-That's the whole install. No accounts, no keys, no SaaS. Cogtrix finds Ollama on `localhost:11434` by itself and loads 68 tools into the agent's toolbox.
+That's the whole install. No accounts, no keys, no SaaS. Cogtrix finds Ollama on `localhost:11434` by itself and loads 67 tools into the agent's toolbox.
 
 Prefer cloud LLMs? `export OPENAI_API_KEY="sk-..." && uv run python cogtrix.py -m gpt-4.1`. Or any of Anthropic, Google, DeepSeek, Groq, Together, vLLM, xAI — anything that speaks the OpenAI API.
 
@@ -74,7 +74,7 @@ Cogtrix spawns three sub-agents in parallel — optionally on three different mo
 |---|---|
 | **Local-first** | Default backend is Ollama. Works offline, no telemetry, no rate limits. |
 | **Multi-provider** | Ollama, OpenAI, Anthropic, Gemini, DeepSeek, plus any OpenAI-compatible endpoint. Switch with `/model`. |
-| **68 built-in tools** | Files, Git, GitHub, shell, Python, HTTP, search (7 providers), text/NLP, math, scheduling, RAG, messaging — full list in [Tools Reference](docs/TOOLS_REFERENCE.md). |
+| **67 built-in tools** | Files, Git, GitHub, shell, Python, HTTP, search (7 providers), text/NLP, math, scheduling, RAG, messaging — full list in [Tools Reference](docs/TOOLS_REFERENCE.md). |
 | **Three memory modes** | `conversation` for chat, `code` for programming (tracks files + errors), `reasoning` for planning (tracks goals + decisions). All modes do hybrid memory — rolling summary plus semantic recall. |
 | **Tool safety** | Sensitive tools (shell, write, patch) ask for confirmation. `-y` to auto-approve in trusted contexts. |
 | **MCP support** | Connect to any Model Context Protocol server — Anthropic's MCP ecosystem works out of the box. |
@@ -144,7 +144,7 @@ Arrow keys, Home/End, and history all work via `readline`.
 
 | Category | Examples |
 |---|---|
-| **Search** | `search_web`, `search_news`, plus auto-enabled Tavily / Exa / Brave / Google / SerpAPI / SearXNG when keys are configured |
+| **Search** | `web_search` (multi-provider fan-out + extract + structured output, citations included). Single canonical research tool; legacy `search_web` / `tavily_search` / `brave_search` / `google_search` / `exa_search` / `serpapi_search` / `searxng_search` are no longer in the agent catalogue, but the underlying functions remain importable for power users. |
 | **Files** | `read_file`, `write_file`, `patch_file`, `append_file`, `list_directory`, `file_info` |
 | **Git** | `git_status`, `git_diff`, `git_log`, `git_add`, `git_commit`, `git_create_branch`, `git_checkout` |
 | **GitHub** | `gh_create_issue`, `gh_comment_issue`, `gh_list_prs`, `gh_get_file` |
@@ -212,7 +212,7 @@ python -m src.api
 
 Interactive docs at `http://localhost:8000/api/v1/docs` (Swagger) and `/api/v1/redoc`.
 
-**Auth**: JWT bearer tokens (`Authorization: Bearer <token>`). First registered user gets the `admin` role automatically. API keys (prefix `cgx_live_`) can be created and managed via `/api/v1/auth/api-keys`; key-based request auth is not yet wired in — use JWTs for protected endpoints.
+**Auth**: JWT bearer tokens (`Authorization: Bearer <token>`). First registered user gets the `admin` role automatically. API keys (prefix `cgx_live_`) can be created and managed via `/api/v1/auth/api-keys` and are accepted in the same `Authorization: Bearer` header — the request-auth dependency dispatches on prefix.
 
 **WebSockets**: The session stream (`/ws/v1/sessions/{id}`) requires the JWT in the `Authorization` header; the `?token=<jwt>` query-parameter fallback was removed for security (#1128). The admin log stream (`/ws/v1/logs`) still accepts `?token=<jwt>` for clients that can't set custom WS headers.
 
@@ -252,7 +252,7 @@ Route map by group:
 | `ws://host/ws/v1/sessions/{id}` | WS | Streaming agent turns, tool confirmation, token events |
 | `ws://host/ws/v1/logs` | WS | Live log stream (admin only) |
 
-Full reference: **[API Reference](docs/api/openapi.yaml)** · **[Client Contract](docs/api/client-contract.md)** · **[WebSocket Protocol](docs/api/websocket-protocol.md)**.
+Full reference: **[API Reference](docs/API/OPENAPI.yaml)** · **[Client Contract](docs/API/CLIENT_CONTRACT.md)** · **[WebSocket Protocol](docs/API/WEBSOCKET_PROTOCOL.md)**.
 
 ---
 
@@ -295,16 +295,16 @@ Detailed debugging: run with `--debug` (logs every LLM call, tool input/output, 
 | [Configuration](docs/CONFIGURATION.md) | Every option, environment variable, search-provider key |
 | [Providers](docs/PROVIDERS.md) | Step-by-step for Ollama, OpenAI, Anthropic, Google, DeepSeek, xAI, Groq, Together, vLLM |
 | [Memory Modes](docs/MEMORY_MODES.md) | Conversation, code, reasoning + hybrid memory internals |
-| [Tools Reference](docs/TOOLS_REFERENCE.md) | All 68 tools, parameters, examples |
+| [Tools Reference](docs/TOOLS_REFERENCE.md) | All 67 tools, parameters, examples |
 | [WhatsApp Guide](docs/WHATSAPP_GUIDE.md) | Run Cogtrix as a WhatsApp assistant |
 | [Telegram Guide](docs/TELEGRAM_GUIDE.md) | Run Cogtrix as a Telegram bot |
 | [Deep Think](docs/DEEPTHINK.md) | Tree-of-Thought engine internals |
 | [RAG Guide](docs/RAG_GUIDE.md) | Build a knowledge base from your documents |
 | [Architecture](docs/ARCHITECTURE.md) | System design, data flow, components |
 | [Development](docs/DEVELOPMENT.md) | Add tools, memory modes, slash commands; testing |
-| [API Reference](docs/api/openapi.yaml) | OpenAPI 3.1 schema |
-| [Client Contract](docs/api/client-contract.md) | TypeScript API types |
-| [WebSocket Protocol](docs/api/websocket-protocol.md) | Streaming session protocol |
+| [API Reference](docs/API/OPENAPI.yaml) | OpenAPI 3.1 schema (also available as [JSON](docs/API/OPENAPI.json)) |
+| [Client Contract](docs/API/CLIENT_CONTRACT.md) | TypeScript API types |
+| [WebSocket Protocol](docs/API/WEBSOCKET_PROTOCOL.md) | Streaming session protocol |
 
 ---
 

@@ -111,6 +111,7 @@ def _record_to_out(record: ApiSessionRecord, live_session: Any = None) -> Sessio
         created_at=_ensure_tz(record.created_at),
         updated_at=_ensure_tz(record.updated_at),
         archived_at=_ensure_tz(record.archived_at) if record.archived_at else None,
+        workspace_id=record.workspace_id,
     )
 
 
@@ -135,10 +136,11 @@ async def _check_session_access(
     *,
     admin_bypass: bool = True,
 ) -> ApiSessionRecord:
-    """Fetch session and enforce ownership; returns the record on success.
+    """Fetch session and enforce ownership + workspace membership; returns the record on success.
 
     Admins may access any session when *admin_bypass* is ``True`` (default).
-    Regular users may only access their own.
+    Regular users may only access their own sessions, and must still be a
+    member of the workspace the session belongs to (if any).
 
     Args:
         session_id: UUID v4 of the session to check.
@@ -148,7 +150,8 @@ async def _check_session_access(
 
     Raises:
         HTTPException 404 SESSION_NOT_FOUND — session does not exist.
-        HTTPException 403 FORBIDDEN — session belongs to a different user.
+        HTTPException 403 FORBIDDEN — session belongs to a different user
+            or caller is no longer a workspace member.
     """
     from sqlalchemy import select as _select
 
@@ -172,6 +175,21 @@ async def _check_session_access(
                 "message": "Authenticated user lacks permission for this action.",
             },
         )
+
+    # Workspace isolation: non-admins must still be a member of the session's workspace.
+    if record.workspace_id is not None and not (admin_bypass and current_user.is_admin):
+        from src.api.db.repositories.workspaces import WorkspaceRepository
+
+        ws_repo = WorkspaceRepository(db)
+        membership = await ws_repo.get_membership(record.workspace_id, current_user.user_id)
+        if membership is None:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={
+                    "code": "NOT_A_MEMBER",
+                    "message": "You are not a member of this workspace.",
+                },
+            )
 
     return record
 
@@ -236,10 +254,33 @@ async def create_session(
     config_dict = body.config.model_dump(exclude_none=True)
     config_json = json.dumps(config_dict)
 
+    # If a workspace is requested, verify membership before creating the session.
+    if body.workspace_id is not None:
+        from src.api.db.repositories.workspaces import WorkspaceRepository
+
+        ws_repo = WorkspaceRepository(db)
+        ws = await ws_repo.get_by_id(body.workspace_id)
+        if ws is None or not ws.is_active:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={"code": "NOT_FOUND", "message": "Workspace not found."},
+            )
+        if not current_user.is_admin:
+            membership = await ws_repo.get_membership(body.workspace_id, current_user.user_id)
+            if membership is None:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail={
+                        "code": "NOT_A_MEMBER",
+                        "message": "You are not a member of this workspace.",
+                    },
+                )
+
     record = await repo.create(
         user_id=current_user.user_id,
         name=body.name,
         config_json=config_json,
+        workspace_id=body.workspace_id,
     )
     await db.commit()
     await db.refresh(record)

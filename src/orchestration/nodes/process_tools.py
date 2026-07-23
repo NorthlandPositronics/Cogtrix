@@ -23,6 +23,93 @@ from src.tools.configure import (
 from src.tools.resolver import resolve_tool_name as _resolve_tool_name
 
 
+def _activate_available_tool(
+    name: str,
+    *,
+    _available_tools_ref: list[dict],
+    _tool_lookup: dict[str, Any],
+    _active_names: set[str],
+    active_tools_list: list[Any],
+    tool_catalog: dict[str, str],
+    session_state: SessionState,
+    registry: Any,
+    approvals: set[str],
+    confirmation_ui: Any,
+    git_native: bool,
+    tool_trust: dict[str, str] | None,
+    output_cap: int,
+    _tool_budget_lock: Any,
+) -> bool:
+    """Move *name* from ``available_tools`` into the active set.
+
+    Mirrors the activation block inside the ``request_tools(add=[...])``
+    handler in ``process_tools`` so call sites that need to load a tool
+    without going through the full request_tools envelope (e.g. the
+    parallel-call burst auto-loader) follow the same lifecycle:
+    LazyToolProxy resolution, output-cap apply, safety-wrap, lock-held
+    activation, ``session_state.loaded_tools`` update.
+
+    Returns
+    -------
+    bool
+        ``True`` when the tool was activated. ``False`` when *name*
+        was not present in ``_available_tools_ref[0]`` or the lazy
+        resolver returned ``None`` (caller treats that as "skip and
+        keep going").
+    """
+    if name not in _available_tools_ref[0]:
+        return False
+    if name in _active_names:
+        # Already loaded — caller's caller fed us a stale list. Treat
+        # as success: the tool IS in the active set, which is what the
+        # caller wanted.
+        return True
+    tool_obj = _available_tools_ref[0].pop(name)
+    tool_catalog.pop(name, None)
+    if isinstance(tool_obj, _LazyToolProxy):
+        tool_obj = tool_obj._resolve()
+        if tool_obj is None:
+            return False
+    apply_output_cap(tool_obj, output_cap)
+    if registry is not None and registry.requires_confirmation(name):
+        if session_state.no_confirm:
+            approvals.add(name)
+        tool_obj = _safe_wrap(
+            tool_obj,
+            name,
+            registry,
+            approvals,
+            session_state=session_state,
+            ui=confirmation_ui,
+            git_native=git_native,
+            tool_trust=tool_trust,
+        )
+    with _tool_budget_lock:
+        active_tools_list.append(tool_obj)
+        _active_names.add(name)
+        _tool_lookup[name] = tool_obj
+    session_state.loaded_tools.add(name)
+    return True
+
+
+#: Tools whose unbounded consecutive repetition wastes budget without
+#: making progress. The dispatcher hard-caps consecutive emissions of
+#: these tools (Bug F #1712).
+ACTION_TIER_TOOLS: frozenset[str] = frozenset({"web_search", "http_get"})
+
+#: Maximum consecutive emissions of the SAME action-tier tool across
+#: rounds within a single agent turn. Calls beyond this count return a
+#: cap-hit ToolMessage instead of executing. Issue #1712 allows
+#: "probably 3-5"; 5 leaves room for a real model (kimi-k2-5 on
+#: Gate 2 shard B) to emit a 3-parallel batch plus a refined-retry
+#: pair before the cap fires — without that headroom, low-yield
+#: web_search scenarios trip the cap on the first refined retry and
+#: the cap-hit message ends up steering the model into URL
+#: fabrication rather than the honest "could not" reply the
+#: regression scenarios require.
+MAX_CONSECUTIVE_ACTION_CALLS = 5
+
+
 @dataclass(slots=True)
 class ProcessToolsContext:
     _invoke_one: Callable[[dict, Any], Any]
@@ -62,6 +149,9 @@ class ProcessToolsContext:
     _get_tool_executor: Callable[[], concurrent.futures.ThreadPoolExecutor]
     _detect_tool_request: Callable[[list, int], Any]
     _safe_tool_name: Callable[[str], str]
+    _tool_budget_lock: Any
+    _action_tier_consecutive_calls: dict[str, int]
+    _last_action_tier_tool: list[str | None]
 
 
 def build_process_tools_node(
@@ -103,6 +193,9 @@ def build_process_tools_node(
     _get_tool_executor: Callable[[], concurrent.futures.ThreadPoolExecutor],
     _detect_tool_request: Callable[[list, int], Any],
     _safe_tool_name: Callable[[str], str],
+    _tool_budget_lock: Any,
+    _action_tier_consecutive_calls: dict[str, int],
+    _last_action_tier_tool: list[str | None],
     tool_trust: dict[str, str] | None = None,
 ) -> Callable[[CogtrixState, RunnableConfig], dict]:
     """Build the process_tools node bound to the run-local mutable state."""
@@ -123,6 +216,64 @@ def build_process_tools_node(
         tools_released: list[str] = []
         guidance_lines: list[str] = []
         saw_request_tools = False
+
+        # ── Action-tier consecutive-call cap (Bug F #1712) ─────────
+        # The polling-loop detector in call_model emits a text advisory
+        # and arms a thinking break, but both are non-binding: the LLM
+        # can — and does, observed on web_search — emit another batch
+        # of identical calls in the very next round.  Apply a hard cap
+        # here so the 4th+ consecutive emission of the same action-tier
+        # tool returns a cap-hit ToolMessage instead of executing.
+        # Counting is per-emission (parallel-batched calls each consume
+        # one slot) and persists across rounds within the same agent
+        # turn; PerRunState._reset_for_new_run clears the counters
+        # between turns.
+        capped_call_ids: set[str] = set()
+        for _call in last.tool_calls:
+            _tname = _call.get("name", "")
+            if _tname in ACTION_TIER_TOOLS:
+                if _last_action_tier_tool[0] == _tname:
+                    _action_tier_consecutive_calls[_tname] = (
+                        _action_tier_consecutive_calls.get(_tname, 0) + 1
+                    )
+                else:
+                    _action_tier_consecutive_calls.clear()
+                    _action_tier_consecutive_calls[_tname] = 1
+                    _last_action_tier_tool[0] = _tname
+                _cur_count = _action_tier_consecutive_calls[_tname]
+                if _cur_count > MAX_CONSECUTIVE_ACTION_CALLS:
+                    _call_id = _call.get("id") or ""
+                    if _call_id:
+                        capped_call_ids.add(_call_id)
+                    result_msgs.append(
+                        ToolMessage(
+                            content=(
+                                f"You have called '{_tname}' {_cur_count} times in "
+                                "succession this turn. Further "
+                                f"'{_tname}' calls are blocked for the remainder of "
+                                "this turn. Choose ONE: "
+                                "(a) If the results already gathered are sufficient, "
+                                "produce a final text answer now. "
+                                "(b) If the results are NOT sufficient, state "
+                                "honestly that you could not find the information — "
+                                "do NOT invent URLs, vendors, numbers, or sources "
+                                "that were not returned by an actual tool call. "
+                                "(c) Call a categorically different tool that "
+                                "advances the task."
+                            ),
+                            tool_call_id=_call_id,
+                            name=_tname,
+                        )
+                    )
+                    _graph_log.warning(
+                        "Action-tier cap hit: '%s' emitted %d times consecutively — "
+                        "blocking this call (Bug F #1712)",
+                        _tname,
+                        _cur_count,
+                    )
+            else:
+                _action_tier_consecutive_calls.clear()
+                _last_action_tier_tool[0] = None
 
         def _record_identical_error(call: dict, tool_msg: ToolMessage) -> None:
             content = tool_msg.content if isinstance(tool_msg.content, str) else ""
@@ -165,19 +316,80 @@ def build_process_tools_node(
                     signature,
                 )
 
+        # ── Auto-load burst: collapse the parallel-handshake waste ──
+        #
+        # The cogtrix47 run surfaced this pattern: the model emits N
+        # parallel calls to the same tool (web_search ×3) BEFORE
+        # request_tools has loaded it. With the default behaviour each
+        # parallel call returned a "Tool X is in the catalog but not
+        # loaded" stub, the model then sent request_tools(add=[X]) on
+        # the next turn, and re-emitted the same N calls — paying 2N
+        # tool slots instead of N+1.
+        #
+        # When ≥2 calls in a single AIMessage target the same
+        # in-catalog-but-unloaded tool, the model has clearly committed
+        # to that tool: it isn't speculating. Auto-load the tool here
+        # so the parallel calls execute against the loaded copy in this
+        # same dispatch. Single calls still hit the explicit-handshake
+        # path — the catalog-discovery intent (see the comment at the
+        # "Do NOT auto-load" block below) only applies when the model
+        # might be guessing, and repeated calls aren't a guess.
+        # Calls cap-blocked by the action-tier guard above must not feed
+        # any of the downstream dispatch paths — auto-load burst counts,
+        # classification, parallel execution.  Build the live list once.
+        _live_tool_calls = [c for c in last.tool_calls if c.get("id") not in capped_call_ids]
+
+        if parallel_tool_execution and len(_live_tool_calls) > 1 and _available_tools_ref[0]:
+            _burst_count: dict[str, int] = {}
+            for _bc in _live_tool_calls:
+                _bn = _bc["name"]
+                if _bn == "request_tools":
+                    continue
+                if _bn in tool_lookup_ref:
+                    continue
+                if _bn in _available_tools_ref[0]:
+                    _burst_count[_bn] = _burst_count.get(_bn, 0) + 1
+            for _bname, _bcount in _burst_count.items():
+                if _bcount < 2:
+                    continue
+                if not _activate_available_tool(
+                    _bname,
+                    _available_tools_ref=_available_tools_ref,
+                    _tool_lookup=tool_lookup_ref,
+                    _active_names=active_names_ref,
+                    active_tools_list=active_tools_list,
+                    tool_catalog=tool_catalog,
+                    session_state=session_state,
+                    registry=registry,
+                    approvals=approvals,
+                    confirmation_ui=confirmation_ui,
+                    git_native=git_native,
+                    tool_trust=tool_trust,
+                    output_cap=output_cap,
+                    _tool_budget_lock=_tool_budget_lock,
+                ):
+                    continue
+                tools_activated.append(_bname)
+                _graph_log.info(
+                    "Auto-loaded '%s' on parallel-call burst (%d calls this turn) — "
+                    "skipping the request_tools handshake",
+                    _bname,
+                    _bcount,
+                )
+
         # ── Classification pass ──────────────────────────────────
-        if parallel_tool_execution and len(last.tool_calls) > 1:
+        if parallel_tool_execution and len(_live_tool_calls) > 1:
             snapshot_names = set(tool_lookup_ref.keys())
             serial_first: list = []
             parallel_calls: list = []
-            for call in last.tool_calls:
+            for call in _live_tool_calls:
                 name = call["name"]
                 if name == "request_tools" or name not in snapshot_names:
                     serial_first.append(call)
                 else:
                     parallel_calls.append(call)
         else:
-            serial_first = list(last.tool_calls)
+            serial_first = list(_live_tool_calls)
             parallel_calls = []
 
         # ── Serial-first execution (expansion, request_tools) ────
@@ -455,31 +667,23 @@ def build_process_tools_node(
                         and rname not in tools_activated
                         and rname not in _existing_active  # guard: never create duplicates
                     ):
-                        tool_obj = _available_tools_ref[0].pop(rname)
-                        tool_catalog.pop(rname, None)
-                        if isinstance(tool_obj, _LazyToolProxy):
-                            tool_obj = tool_obj._resolve()
-                            if tool_obj is None:
-                                continue
-                        apply_output_cap(tool_obj, output_cap)
-                        if registry is not None and registry.requires_confirmation(rname):
-                            if session_state.no_confirm:
-                                approvals.add(rname)
-                            tool_obj = _safe_wrap(
-                                tool_obj,
-                                rname,
-                                registry,
-                                approvals,
-                                session_state=session_state,
-                                ui=confirmation_ui,
-                                git_native=git_native,
-                                tool_trust=tool_trust,
-                            )
-                        active_tools_list.append(tool_obj)
-                        active_names_ref.add(rname)
-                        tool_lookup_ref[rname] = tool_obj
-                        tools_activated.append(rname)
-                        session_state.loaded_tools.add(rname)
+                        if _activate_available_tool(
+                            rname,
+                            _available_tools_ref=_available_tools_ref,
+                            _tool_lookup=tool_lookup_ref,
+                            _active_names=active_names_ref,
+                            active_tools_list=active_tools_list,
+                            tool_catalog=tool_catalog,
+                            session_state=session_state,
+                            registry=registry,
+                            approvals=approvals,
+                            confirmation_ui=confirmation_ui,
+                            git_native=git_native,
+                            tool_trust=tool_trust,
+                            output_cap=output_cap,
+                            _tool_budget_lock=_tool_budget_lock,
+                        ):
+                            tools_activated.append(rname)
 
                 for rname in mgmt_req.remove:
                     # Fuzzy-resolve against active pool only (not available)
@@ -507,15 +711,17 @@ def build_process_tools_node(
                             None,
                         )
                         if idx is not None:
-                            popped = active_tools_list.pop(idx)
-                            active_names_ref.discard(rname)
+                            with _tool_budget_lock:
+                                popped = active_tools_list.pop(idx)
+                                active_names_ref.discard(rname)
                             original = session_state.all_tool_originals.get(rname, popped)
                             _available_tools_ref[0][rname] = original
                             tool_catalog.update(build_tool_catalog({rname: original}))
                             tools_released.append(rname)
                             session_state.loaded_tools.discard(rname)
-                            if rname in tool_lookup_ref:
-                                del tool_lookup_ref[rname]
+                            with _tool_budget_lock:
+                                if rname in tool_lookup_ref:
+                                    del tool_lookup_ref[rname]
                     else:
                         guidance_lines.append(
                             f"'{_safe_tool_name(rname)}' is not in the active set."
@@ -543,10 +749,11 @@ def build_process_tools_node(
             expansion_count[0] += 1
             _tool_version[0] += 1
 
-            active_tools_list[:] = [
-                t for t in active_tools_list if getattr(t, "name", "") != "request_tools"
-            ]
-            _tool_lookup.pop("request_tools", None)
+            with _tool_budget_lock:
+                active_tools_list[:] = [
+                    t for t in active_tools_list if getattr(t, "name", "") != "request_tools"
+                ]
+                _tool_lookup.pop("request_tools", None)
             releasable = active_names_ref - protected - {"request_tools"}
             if _available_tools_ref[0] or releasable:
                 rt = create_request_tools_tool(
@@ -557,8 +764,9 @@ def build_process_tools_node(
                     denials=session_state.get_denials_snapshot(),
                 )
                 if rt:
-                    active_tools_list.append(rt)
-                    _tool_lookup["request_tools"] = rt
+                    with _tool_budget_lock:
+                        active_tools_list.append(rt)
+                        _tool_lookup["request_tools"] = rt
 
             configure_delegate_tools(active_tools_list, _available_tools_ref[0])
 

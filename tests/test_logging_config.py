@@ -340,3 +340,122 @@ class TestStructuredJsonLogging:
         assert get_request_id() == req_id
         clear_request_id()
         assert get_request_id() == "-"
+
+
+@pytest.mark.skipif(
+    LLMObservabilityHandler is None,
+    reason="langchain_core not installed",
+)
+class TestLLMObservabilityOrphanDetection:
+    """cogtrix47 Case D: when an LLM call exceeds its caller's
+    timeout, ``_invoke_with_timeout`` calls ``Future.cancel()`` and
+    moves on. Cancel is best-effort — the underlying HTTP request
+    keeps running and eventually fires ``on_llm_end``. Without the
+    orphan classification the log shows a normal ``LLM_COMPLETE``
+    277s after start, polluting observability with what looks like
+    a successful (but actually discarded) call. The handler now
+    distinguishes the two cases by elapsed time.
+    """
+
+    def _make_handler(self, orphan_threshold_s: float = 180.0) -> "LLMObservabilityHandler":
+
+        handler = LLMObservabilityHandler(verbose=True, orphan_threshold_s=orphan_threshold_s)
+        handler._logged_messages: list[tuple[str, str]] = []  # type: ignore[attr-defined]
+
+        def _capture_log(level: str, message: str) -> None:
+            handler._logged_messages.append((level, message))  # type: ignore[attr-defined]
+
+        handler._log = _capture_log  # type: ignore[method-assign]
+        return handler
+
+    def _empty_result(self):
+        from langchain_core.outputs import LLMResult
+
+        return LLMResult(generations=[])
+
+    def test_normal_completion_logs_llm_complete(self) -> None:
+        # A completion arriving inside the threshold logs the normal
+        # info-level LLM_COMPLETE.
+        import time
+
+        handler = self._make_handler(orphan_threshold_s=180.0)
+        handler._start_time = time.time() - 5.0  # 5s elapsed
+        handler.on_llm_end(self._empty_result())
+
+        infos = [m for lvl, m in handler._logged_messages if lvl == "info"]
+        warnings = [m for lvl, m in handler._logged_messages if lvl == "warning"]
+        assert any("LLM_COMPLETE" in m and "ORPHAN" not in m for m in infos)
+        assert not any("ORPHAN_LLM_COMPLETE" in m for m in warnings)
+
+    def test_orphan_completion_logs_orphan_warning(self) -> None:
+        # A completion arriving past the threshold logs
+        # ORPHAN_LLM_COMPLETE at WARNING level and does NOT emit the
+        # normal LLM_COMPLETE.
+        import time
+
+        handler = self._make_handler(orphan_threshold_s=180.0)
+        handler._start_time = time.time() - 277.0  # 277s elapsed (cogtrix47)
+        handler.on_llm_end(self._empty_result())
+
+        infos = [m for lvl, m in handler._logged_messages if lvl == "info"]
+        warnings = [m for lvl, m in handler._logged_messages if lvl == "warning"]
+        # The normal LLM_COMPLETE line is suppressed for orphans —
+        # observability pipelines see exactly one orphan event,
+        # not a stale "successful" completion line.
+        assert not any("LLM_COMPLETE" in m and "ORPHAN" not in m for m in infos)
+        assert any("ORPHAN_LLM_COMPLETE" in m for m in warnings)
+
+    def test_orphan_message_carries_elapsed_and_threshold(self) -> None:
+        import time
+
+        handler = self._make_handler(orphan_threshold_s=180.0)
+        handler._start_time = time.time() - 277.0
+        handler.on_llm_end(self._empty_result())
+
+        orphan_line = next(m for lvl, m in handler._logged_messages if lvl == "warning")
+        # Both the elapsed and threshold values must appear so an
+        # operator can read the line in isolation.
+        assert "277" in orphan_line
+        assert "180" in orphan_line
+        # And the explanation pointing to the underlying cause.
+        assert "Future.cancel" in orphan_line
+        assert "discarded" in orphan_line
+
+    def test_threshold_boundary_at_exact_threshold_is_orphan(self) -> None:
+        # The ``>=`` comparison means elapsed == threshold counts as
+        # orphan. Operators reading "270s ≥ 180s" expect this.
+        import time
+
+        handler = self._make_handler(orphan_threshold_s=180.0)
+        handler._start_time = time.time() - 180.0
+        handler.on_llm_end(self._empty_result())
+
+        warnings = [m for lvl, m in handler._logged_messages if lvl == "warning"]
+        assert any("ORPHAN_LLM_COMPLETE" in m for m in warnings)
+
+    def test_no_start_time_no_completion_log(self) -> None:
+        # When _start_time is 0 (handler never saw on_llm_start),
+        # neither line fires — there's nothing meaningful to log.
+        handler = self._make_handler()
+        handler._start_time = 0.0
+        handler.on_llm_end(self._empty_result())
+
+        completion_lines = [
+            m
+            for _, m in handler._logged_messages
+            if "LLM_COMPLETE" in m or "ORPHAN_LLM_COMPLETE" in m
+        ]
+        assert completion_lines == []
+
+    def test_custom_threshold_honoured(self) -> None:
+        # Operators can tune the threshold to match their LLM timeout
+        # config. Test with a non-default value.
+        import time
+
+        handler = self._make_handler(orphan_threshold_s=60.0)
+        handler._start_time = time.time() - 90.0  # 90s elapsed, below default 180
+        handler.on_llm_end(self._empty_result())
+
+        warnings = [m for lvl, m in handler._logged_messages if lvl == "warning"]
+        # 90s ≥ 60s custom threshold → orphan.
+        assert any("ORPHAN_LLM_COMPLETE" in m for m in warnings)

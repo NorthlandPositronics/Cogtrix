@@ -213,6 +213,304 @@ class TestBuildSystemPrompt:
         result = build_system_prompt(models={})
         assert "Available Models" not in result
 
+    def test_current_date_injected_into_system_prompt(self):
+        # Regression: issue #886 — models with pre-current-year training cutoffs
+        # discard valid search results as "fictional" when the system prompt
+        # lacks an explicit date anchor. build_system_prompt() must prepend
+        # the current UTC date so the model knows what "today" is before
+        # reasoning begins.
+        result = build_system_prompt()
+        assert "Today's date is" in result
+        # Date must be in the format "Month DD, YYYY (UTC)"
+        import re
+
+        date_pattern = r"Today's date is [A-Z][a-z]+ \d{1,2}, \d{4} \(UTC\)"
+        assert re.search(
+            date_pattern, result
+        ), f"Date prefix not found or malformed. Got: {result[:120]!r}"
+        # Date must appear at the very start of the prompt
+        assert result.startswith(
+            "Today's date is"
+        ), f"Date must be the first thing in the prompt. Got start: {result[:80]!r}"
+
+    def test_current_date_injected_with_custom_base_prompt(self):
+        # Date injection must work even when a custom base_prompt is provided.
+        result = build_system_prompt(base_prompt="Do something useful.")
+        assert "Today's date is" in result
+        # Custom base must appear after the date prefix
+        assert "Do something useful." in result
+        assert result.index("Do something useful.") > result.index("Today's date is")
+
+    def test_current_date_injected_with_all_additions(self):
+        # Date injection must not be disrupted by mode_additions, tool_instructions,
+        # milestone_instructions, decision_accountability_prompt, or
+        # pre_action_confirmation_prompt.
+        result = build_system_prompt(
+            base_prompt="Base.",
+            mode_additions="Mode.",
+            tool_instructions="Tools.",
+            milestone_instructions="Milestones.",
+            decision_accountability_prompt="Accountability.",
+            pre_action_confirmation_prompt="PAC.",
+        )
+        assert "Today's date is" in result
+        # All additions must still be present
+        for addition in [
+            "Base.",
+            "Mode.",
+            "Tools.",
+            "Milestones.",
+            "Accountability.",
+            "PAC.",
+        ]:
+            assert addition in result
+
+    def test_default_prompt_forbids_speculation_on_empty_prompt(self):
+        # Bug L #1735 regression — when the user's message provides no
+        # actionable task ("Do it now please.", "Help me", "Proceed"),
+        # the agent must ask one clarifying question rather than firing
+        # speculative tool calls (request_tools / list_goals /
+        # list_tasks / read_agent_inbox). The 2026-05-22 round-5
+        # corpus replay F01 reproducer showed the agent fired 9 tool
+        # calls before producing a paragraph; the expected_shape was
+        # ``clarifying-question``.
+        #
+        # The existing Clarification Policy block only triggers on
+        # "irreversible AND ambiguous" — "Do it now" is neither
+        # irreversible nor scope-ambiguous-in-the-named-sense, so
+        # the model skipped that rule and explored. The new clause
+        # covers the zero-task-stated case explicitly.
+        result = build_system_prompt()
+        lower = result.lower()
+
+        # The rule must name the "no actionable task" case so the
+        # model recognises empty / filler prompts.
+        assert "no actionable task" in lower, (
+            "Empty-prompt rule missing from default system prompt — "
+            "F01-style 'Do it now please.' prompts will trigger "
+            "speculative tool calls (Bug L #1735)"
+        )
+
+        # The concrete failure phrases the reproducer showed must be
+        # named so the model can pattern-match.
+        assert '"do it now' in lower or "'do it now" in lower, (
+            "Default prompt must include 'Do it now' as a concrete "
+            "example so the model recognises filler prompts"
+        )
+
+        # The directive must explicitly forbid speculative
+        # tool-listing — that's the exact behaviour the F01 trace
+        # showed (request_tools + list_goals + list_tasks +
+        # read_agent_inbox before any user task is identified).
+        assert "do not speculate" in lower or "do not call any tools" in lower, (
+            "Default prompt must forbid speculative tool calls on " "empty / filler prompts"
+        )
+
+        # And it must explicitly mandate the clarifying-question
+        # shape so the expected_shape: clarifying-question check
+        # passes downstream.
+        assert "clarifying question" in lower
+
+    def test_default_prompt_forbids_sycophantic_prefix_on_unchanged_answer(self):
+        # Bug G #1713 regression — when the user contradicts the agent
+        # or provides new context, the agent must not preface a repeated
+        # answer with "You're absolutely right" / "I apologize" /
+        # "You're raising an important point". cogtrix56 turns 3-5
+        # showed three consecutive turns starting with such phrases,
+        # each followed by byte-identical (or near-identical) content
+        # to the prior turn — the apology gave the illusion of update
+        # without any actual update, amplifying the user's trust loss
+        # when they noticed. The fix is a system-prompt rule that
+        # forbids the validation prefix unless the answer was
+        # substantively revised AND explicitly demands an
+        # "unchanged" disclosure when the conclusion didn't move.
+        result = build_system_prompt()
+        lower = result.lower()
+
+        # The forbidden phrases must be named so the model treats them
+        # as filtered output. Without enumeration the rule is too vague
+        # and the RLHF-agreeable bias wins.
+        assert "you're absolutely right" in lower, (
+            "Default prompt must explicitly name 'You're absolutely right' "
+            "as a forbidden prefix — vague 'avoid sycophancy' guidance "
+            "fails to counter the RLHF bias"
+        )
+        assert "i apologize" in lower
+        # "You're raising an important point" was the turn-4 cogtrix56
+        # opener — must also be banned.
+        assert "raising an important point" in lower or "you're right" in lower, (
+            "Default prompt must also forbid 'You're raising an important "
+            "point' / 'You're right' family phrases"
+        )
+
+        # The rule must allow the apology prefix ONLY when the answer
+        # is actually being revised — without that exception clause,
+        # the agent can't apologise for a real mistake.
+        assert "substantively revise" in lower or "substantively revised" in lower, (
+            "Rule must explicitly say the prefix is allowed when "
+            "substantively revising — otherwise genuine error correction "
+            "is suppressed"
+        )
+
+        # And when the conclusion is unchanged, the model must say so
+        # explicitly with the phrase "conclusion is unchanged". Pinning
+        # this exact phrase makes the orchestrator-side stuck-conclusion
+        # nudge (call_model.py) line up with the prompt rule.
+        assert "conclusion is unchanged" in lower, (
+            "Default prompt must require the explicit "
+            "'conclusion is unchanged' phrasing when no revision occurs — "
+            "this is the load-bearing escape hatch the model uses to "
+            "remain honest when it can't change its answer"
+        )
+
+    def test_default_prompt_directs_http_get_for_user_provided_urls(self):
+        # Bug I #1718 regression — when the user explicitly provides a URL
+        # ("check this page: https://...") the agent must prefer http_get
+        # over web_search with a `site:` query. The orchestrator can't
+        # rewrite tool calls after the fact; the model has to choose right
+        # the first time, so this guidance must be in the default system
+        # prompt. cogtrix57 turn-5 reproducer: agent emitted 5+ web_search
+        # calls with `site:scnsoft.com/management-team ...` instead of one
+        # http_get on the exact URL the user supplied, wasting search
+        # budget and missing the page content entirely.
+        result = build_system_prompt()
+        # The guidance must name http_get as the FIRST action for
+        # user-supplied URLs and call out the discovery-vs-retrieval split.
+        lower = result.lower()
+        assert "user explicitly provides a url" in lower or (
+            "user provides a url" in lower and "explicitly" in lower
+        ), "URL-handling rule missing from default system prompt"
+        # Must explicitly tell the agent to use http_get first.
+        assert "http_get" in result, "Default prompt must mention http_get for URL retrieval"
+        # Must explicitly contrast with web_search to avoid the
+        # site:-query bias the cogtrix57 reproducer pinned.
+        assert "web_search" in result.lower()
+        # Pin the specific guidance phrase so a future copy-edit can't
+        # silently weaken the rule.
+        assert "discovery" in result.lower() and "retrieval" in result.lower(), (
+            "Default prompt must explain the discovery (web_search) vs "
+            "retrieval (http_get) distinction"
+        )
+
+    def test_default_prompt_directs_http_get_for_snippet_only_results(self):
+        # Bug M #1738 regression — when web_search returns sources but
+        # the fetcher couldn't extract page content (snippet-only
+        # status), the agent must try ``http_get`` on the surfaced
+        # URL(s) before refusing. cogtrix63 turn 11081 reproducer:
+        # agent searched for AAPL stock price, web_search returned
+        # marketwatch.com / nasdaq.com / investing.com URLs all
+        # marked ``snippet-only`` (fetcher blocked by 403/timeout),
+        # agent flat-refused without trying ``http_get`` directly.
+        # ``http_get`` uses a different fetch path (different timeout,
+        # different headers) and often succeeds where the search
+        # fan-out fetcher did not.
+        result = build_system_prompt()
+        lower = result.lower()
+
+        # The rule must name the "snippet-only status" case so the
+        # model recognises the signal vs treating it as a verdict.
+        assert "snippet-only" in lower, (
+            "Snippet-only fallback rule missing from default system "
+            "prompt — agents will refuse when web_search returns "
+            "snippet-only sources instead of trying http_get on the "
+            "surfaced URLs (Bug M #1738)"
+        )
+
+        # Must explicitly direct http_get as the fallback.
+        assert "http_get" in result and (
+            "before refusing" in lower or "before you refuse" in lower
+        ), (
+            "Rule must explicitly say to try http_get BEFORE refusing "
+            "when snippet-only results appear"
+        )
+
+        # Must frame snippet-only as a SIGNAL not a VERDICT — without
+        # that framing the model takes the easy "refuse" path.
+        assert (
+            "signal, not a verdict" in lower
+            or "signal not a verdict" in lower
+            or ("signal" in lower and "verdict" in lower)
+        ), (
+            "Rule must frame snippet-only as a signal (not a final "
+            "verdict) so the model attempts the http_get fallback "
+            "instead of refusing"
+        )
+
+    def test_default_prompt_directs_http_get_for_named_services(self):
+        # Bug J #1719 regression — when the user names a specific service
+        # ("use the Wayback Machine", "check the GitHub releases"), the
+        # agent must reach for ``http_get`` against the canonical URL of
+        # that service, not ``web_search`` *about* the service.
+        # cogtrix57 turn-8 reproducer: user said "use the wayback machine
+        # to see how the website looked in mid-2022"; agent did 4
+        # web_searches with queries like "scnsoft.com wayback machine
+        # archive 2022", concluded "I could not retrieve archived
+        # snapshots" — never actually queried web.archive.org.
+        result = build_system_prompt()
+        lower = result.lower()
+
+        # The rule must name the "user names a specific service" case
+        # distinctly from the URL-handling case (Bug I), so a future
+        # refactor can't conflate them and silently drop one.
+        assert "user names a specific service" in lower or (
+            "names a specific service" in lower and "user" in lower
+        ), "Named-service rule missing from default system prompt"
+
+        # The Wayback Machine is the canonical reproducer — must be
+        # named so the model has a concrete anchor for the pattern.
+        assert "wayback machine" in lower
+
+        # The contrast that anchors the rule:  http_get against the
+        # service vs. web_search *about* the service. Both terms must
+        # appear so a future copy-edit can't silently weaken the rule.
+        assert "http_get" in result
+        assert "web_search" in lower
+
+        # GitHub releases is the second concrete example the issue
+        # called out — its inclusion proves the pattern generalises
+        # beyond Wayback Machine. We only require the named example,
+        # not a literal URL template (small models echoed literal
+        # template URLs verbatim into refusal responses, which tripped
+        # other scenarios' `response_not_contains: github.com/` checks
+        # — see #1727 Gate 2 shard D × gpt-oss-20b-fireworks failure).
+        assert "github" in lower and "release" in lower, (
+            "Default prompt must include the GitHub releases example "
+            "so the named-service pattern generalises beyond Wayback "
+            "Machine"
+        )
+
+        # Must explicitly tell the agent NOT to downgrade to web_search
+        # ABOUT the service when the API call fails — that's the
+        # exact false-negative the cogtrix57 reproducer surfaced.
+        assert (
+            "do not downgrade" in lower
+            or "do not" in lower
+            and ("web_search about" in lower or "web_search *about*" in lower)
+        ), (
+            "Default prompt must tell the agent not to fall back to "
+            "web_search about the service on http_get failure — "
+            "that's how the cogtrix57 false-negative happened"
+        )
+
+        # Hard guard: literal URL templates must NOT appear in the
+        # prompt. gpt-oss-20b on Gate 2 shard D's persist_before_refusing
+        # scenario echoed `api.github.com/repos/<owner>/<repo>/releases`
+        # verbatim into a "could not find Captain Claw" refusal response,
+        # tripping the `response_not_contains: github.com/` check. The
+        # rule's value is the http_get-vs-web_search distinction, NOT
+        # the URL spelling — the model already knows the URL surfaces.
+        assert "api.github.com/repos/" not in result, (
+            "Literal api.github.com/repos/ URL template must not appear "
+            "in the prompt — small models leak it verbatim into refusal "
+            "responses and trip downstream `response_not_contains: "
+            "github.com/` checks (#1727 Gate 2 shard D × gpt-oss-20b)"
+        )
+        # Also forbid literal angle-bracket placeholders that small
+        # models can copy literally into tool-call URLs.
+        assert "<owner>" not in result and "<repo>" not in result
+        assert "<YYYYMMDD>" not in result
+        assert "<url>" not in result
+
 
 # ---------------------------------------------------------------------------
 # _estimate_msg_tokens

@@ -61,7 +61,7 @@ def test_run_scenario_timeout_does_not_hang_at_exit(monkeypatch) -> None:
 
     def _watchdog(*_args: object) -> None:
         raise AssertionError(
-            "run_scenario did not return within 5s — ThreadPoolExecutor " "hang has regressed"
+            "run_scenario did not return within 5s — ThreadPoolExecutor hang has regressed"
         )
 
     old = signal.signal(signal.SIGALRM, _watchdog)
@@ -75,3 +75,38 @@ def test_run_scenario_timeout_does_not_hang_at_exit(monkeypatch) -> None:
     assert not result.passed
     assert result.error is not None
     assert "timed out" in result.error.lower()
+
+
+def test_build_llm_deepseek_returns_deepseek_model(monkeypatch) -> None:
+    """Regression: deepseek must use _DeepSeekChatModel, not raw ChatOpenAI.
+
+    Issue #1391: tests/evaluation/runner.py's _build_llm() was instantiating
+    ChatOpenAI directly for the deepseek branch, dropping reasoning_content
+    on turn >= 2 (DeepSeek API 400). The production fix (routing through
+    create_chat_model()) is already on next from PR #1396. This test pins
+    the behavioural contract so a future revert will fail loudly.
+    """
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key-for-regression-check")
+    from src.providers.openai import _DeepSeekChatModel
+    from tests.evaluation.runner import ModelConfig, _build_llm
+
+    model = ModelConfig(
+        id="deepseek-v4-flash",
+        provider="deepseek",
+        display_name="DeepSeek V4 Flash",
+        tier="B",
+        smoke=False,
+        env_key="DEEPSEEK_API_KEY",
+        model_id="deepseek-v4-flash",
+    )
+    llm = _build_llm(model)
+
+    # Unwrap RetryableChatModel wrapper (transparent for .invoke()) to reach
+    # the concrete model.  _DeepSeekChatModel overrides _get_request_payload
+    # to re-inject reasoning_content across multi-turn calls; raw ChatOpenAI
+    # does not have this method, so a revert to direct instantiation will fail.
+    inner = getattr(llm, "_model", llm)
+    assert isinstance(inner, _DeepSeekChatModel), (
+        f"deepseek provider must return _DeepSeekChatModel (got {type(inner).__name__}). "
+        "See issue #1391 — raw ChatOpenAI drops reasoning_content on multi-turn calls."
+    )

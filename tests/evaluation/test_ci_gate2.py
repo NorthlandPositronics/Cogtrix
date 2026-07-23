@@ -866,3 +866,106 @@ def test_unit_tests_shard_files_exist() -> None:
         f"Remove them from .github/workflows/ci.yml (jobs.unit-tests) or "
         f"restore the missing test file."
     )
+
+
+# ── Bug L follow-up (2026-05-20): tool errors and SKIP must fail ──────────
+
+
+def test_final_passed_vetoes_when_tool_errors_present(monkeypatch) -> None:
+    """A run with passing structural + judge metrics must still fail when
+    ``tool_errors`` is non-empty.
+
+    Motivating case: gpt-oss-20b emitted ``http_get`` with dict-shaped
+    headers, the schema raised a pydantic ValidationError, and the
+    model fell back to an honest "could not find" answer that satisfied
+    the success_criteria. Before this veto Gate 2 reported pass=True
+    despite the tool failure.
+    """
+    from tests.evaluation.ci_gate2 import _final_passed
+
+    scenario = _scenario()
+    result_with_errors = EvalResult(
+        scenario_id=scenario.id,
+        model_id="mock",
+        model_display_name="Mock",
+        passed=True,
+        tool_calls_made=["create_po"],
+        tool_calls_required=["create_po"],
+        turns_used=2,
+        elapsed_seconds=0.1,
+        final_response="PO created.",
+        task_completion=True,
+        tool_selection_rate=100.0,
+        tool_errors=["http_get: Error executing http_get: 1 validation error"],
+    )
+
+    assert _final_passed(scenario, result_with_errors, score=1.0) is False
+
+
+def test_final_passed_passes_when_no_tool_errors() -> None:
+    """Sanity baseline: with structural+judge metrics passing and no
+    tool errors, the gate returns True."""
+    from tests.evaluation.ci_gate2 import _final_passed
+
+    scenario = _scenario()
+    result_clean = _result(passed=True, task_completion=True)
+    assert result_clean.tool_errors == []
+    assert _final_passed(scenario, result_clean, score=1.0) is True
+
+
+def test_run_gate2_smoke_fails_when_keys_exhausted(monkeypatch) -> None:
+    """An exhausted-keys SKIP must surface as a failure.
+
+    Before this fix, when every priority key returned 402 or was
+    ineligible the scenario fell through with `continue` and the gate
+    returned 0 (success). A real-world OpenRouter credit drain on
+    kimi-k2-5 reached exactly that state.
+    """
+    from tests.evaluation.runner import _KEY_PRIORITY
+
+    for key in _KEY_PRIORITY:
+        monkeypatch.delenv(key, raising=False)
+    # Provide a key so the early "no key configured" return-0 path
+    # is not taken — this is the case where credits got drained mid-run.
+    monkeypatch.setenv("OPENROUTER_API_KEY", "or-test-value")
+
+    # Simulate _try_run_with_key returning None (every key rejected).
+    monkeypatch.setattr(
+        "tests.evaluation.ci_gate2._try_run_with_key",
+        lambda scenario, model, key, emit, max_retries=1: None,
+    )
+
+    logs: list[str] = []
+    exit_code = run_gate2_smoke(
+        scenarios=[_scenario()],
+        models=[_model()],
+        emit=logs.append,
+    )
+
+    assert exit_code == 1, f"Exhausted keys must fail Gate 2; logs={logs}"
+    fail_lines = [line for line in logs if line.startswith("[gate2] FAIL")]
+    assert fail_lines, (
+        "Expected an explicit FAIL line for the exhausted scenario in logs; " f"got logs={logs}"
+    )
+    assert "all keys exhausted" in fail_lines[0]
+
+
+def test_run_gate2_smoke_no_keys_set_still_returns_zero(monkeypatch) -> None:
+    """Sanity baseline: a CI environment with no priority keys at all
+    must still return 0 (advisory skip) — this is the legitimate
+    unconfigured-CI exit, not a credit-drain.
+    """
+    from tests.evaluation.runner import _KEY_PRIORITY
+
+    for key in _KEY_PRIORITY:
+        monkeypatch.delenv(key, raising=False)
+
+    logs: list[str] = []
+    exit_code = run_gate2_smoke(
+        scenarios=[_scenario()],
+        models=[_model()],
+        emit=logs.append,
+    )
+
+    assert exit_code == 0
+    assert any("no API key set" in line for line in logs)

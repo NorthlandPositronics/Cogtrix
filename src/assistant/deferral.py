@@ -277,6 +277,9 @@ class DeferralManager:
         check_interval: float = _DEFAULT_CHECK_INTERVAL,
         stale_threshold: float = _DEFAULT_STALE_THRESHOLD,
     ) -> None:
+        assert isinstance(
+            persist_path, Path
+        ), f"persist_path must be a Path, got {type(persist_path).__name__}"
         self._persist_path = persist_path
         self._reprocess_callback = reprocess_callback
         self._channels = channels
@@ -463,8 +466,6 @@ class DeferralManager:
 
     def save(self) -> None:
         """Persist all records to disk atomically."""
-        if self._persist_path is None:
-            return
         with self._lock:
             snapshot = {key: rec.to_dict() for key, rec in self._records.items()}
         self._atomic_write(snapshot)
@@ -476,8 +477,6 @@ class DeferralManager:
         and then save() is called, which would acquire the lock again and potentially
         overwrite those changes made by another thread in between.
         """
-        if self._persist_path is None:
-            return
         snapshot = {key: rec.to_dict() for key, rec in self._records.items()}
         self._atomic_write(snapshot)
 

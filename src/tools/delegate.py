@@ -15,7 +15,6 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from src.agent.safety import UserCancelledRun
 from src.logging_config import get_logger, log_delegation
 from src.tools.error_sanitizer import sanitize_error
 
@@ -50,6 +49,58 @@ _delegate_config: dict[str, Any] = {
 # as full ReAct agents with tool access instead of plain LLM calls.
 # Stored per-thread so concurrent assistant-mode sessions don't overwrite each other.
 _delegate_tools_tls: threading.local = threading.local()
+
+# Registry: tool name -> category.  Populated by register_tool_categories()
+# called from each tool module's TOOL_CONFIGS block during registry load.
+_TOOL_CATEGORIES: dict[str, str] = {}
+
+# Pending registrations from tool modules imported before delegate.py finished loading.
+_PENDING_CATEGORY_REGISTRATIONS: list[dict[str, str]] = []
+
+
+# Categories excluded from the delegate tool set.
+# A tool is excluded if its category is in this set AND it has no
+# delegate_exclude_override: True in its config.
+_DELEGATE_EXCLUDED_CATEGORIES = frozenset(
+    {"mutation", "privacy", "recursive", "messaging", "scheduling", "confirmation"}
+)
+
+
+def register_tool_categories(categories: dict[str, str]) -> None:
+    """Register tool -> category mappings for delegate sandbox filtering.
+
+    Called by tool modules during registry load so that set_delegate_tools()
+    can filter by category rather than by name.
+
+    This function is safe to call from tool modules that are imported before
+    or after delegate.py finishes loading. Registrations are queued if
+    delegate.py is not yet ready and flushed once it is.
+
+    Parameters
+    ----------
+    categories:
+        Mapping of tool name -> category string.
+        Valid categories: readonly, mutation, privacy, recursive,
+        messaging, scheduling, confirmation.
+    """
+    # Check if delegate.py is fully loaded by verifying a key function is defined.
+    # If not (e.g., tool module imported during delegate.py initialization), queue
+    # the registration to be flushed once delegate.py is ready.
+    if "_is_tool_excluded" not in globals():
+        _PENDING_CATEGORY_REGISTRATIONS.append(categories)
+        return
+    _TOOL_CATEGORIES.update(categories)
+
+
+def _flush_pending_category_registrations() -> None:
+    """Apply any queued category registrations from tool modules.
+
+    Called at the end of delegate.py module load to flush registrations
+    that arrived before delegate.py finished initializing.
+    """
+    while _PENDING_CATEGORY_REGISTRATIONS:
+        pending = _PENDING_CATEGORY_REGISTRATIONS.pop(0)
+        _TOOL_CATEGORIES.update(pending)
 
 
 def get_delegate_tools() -> list[Any]:
@@ -113,6 +164,34 @@ _DELEGATE_EXCLUDED_TOOLS = frozenset(
 )
 
 
+def _is_tool_excluded(tool: Any) -> bool:
+    """Return True if the tool should be excluded from the delegate sandbox.
+
+    A tool is excluded if:
+    1. Its name is in the legacy name-based exclude list (backward compat), OR
+    2. Its category is in _DELEGATE_EXCLUDED_CATEGORIES
+       UNLESS the tool config has delegate_exclude_override: True.
+
+    The override allows specific tools to opt out of category-based exclusion
+    for edge cases (e.g., a readonly tool that happens to share a category
+    with something we want to exclude).
+    """
+    name = getattr(tool, "name", "")
+    # Legacy name-based exclusion (backward compat with existing deny-list)
+    if name in _DELEGATE_EXCLUDED_TOOLS:
+        return True
+    # Category-based exclusion
+    category = _TOOL_CATEGORIES.get(name)
+    if category is not None and category in _DELEGATE_EXCLUDED_CATEGORIES:
+        # Check override: delegate_exclude_override on the tool instance.
+        # Use is not True so that MagicMock (which returns a truthy mock for any
+        # attribute access) is treated as "no override" rather than "override=True".
+        override = getattr(tool, "delegate_exclude_override", None)
+        if override is not True:
+            return True
+    return False
+
+
 def set_delegate_tools(
     active_tools: list[Any],
     available_tools: dict[str, Any] | None = None,
@@ -128,6 +207,10 @@ def set_delegate_tools(
     Delegation tools and ``deep_think`` are also excluded to prevent
     recursion.
 
+    Filtering is done by category (readonly, mutation, privacy, recursive,
+    messaging, scheduling, confirmation) plus a legacy name-based fallback
+    for backward compatibility with the existing deny-list.
+
     Parameters
     ----------
     active_tools:
@@ -141,13 +224,13 @@ def set_delegate_tools(
 
     for t in active_tools:
         name = getattr(t, "name", "")
-        if name not in _DELEGATE_EXCLUDED_TOOLS and name not in seen:
+        if not _is_tool_excluded(t) and name not in seen:
             merged.append(t)
             seen.add(name)
 
     if available_tools:
         for name, t in available_tools.items():
-            if name not in _DELEGATE_EXCLUDED_TOOLS and name not in seen:
+            if not _is_tool_excluded(t) and name not in seen:
                 merged.append(t)
                 seen.add(name)
 
@@ -753,6 +836,8 @@ def run_delegate_agent(
     """
     log = get_logger()
 
+    from src.agent.safety import UserCancelledRun
+
     use_tools = tools_override if tools_override is not None else get_delegate_tools()
 
     try:
@@ -850,6 +935,8 @@ def _execute_single_task(
     log = get_logger()
     start_time = time.time()
 
+    from src.agent.safety import UserCancelledRun
+
     target_model = f"{provider}/{model}"
     log.debug("Delegation starting: %s", target_model)
     log.debug("Task: %s%s", task[:100], "..." if len(task) > 100 else "")
@@ -894,7 +981,26 @@ def _execute_single_task(
             else:
                 log.debug("Invoking delegate LLM (agent fallback): %s", target_model)
             messages = _build_prompt(task, context, response_format, json_schema)
-            result = llm.invoke(messages)
+            # Wrap bare llm.invoke() with ThreadPoolExecutor timeout — a hung
+            # model would otherwise block the caller indefinitely.
+            # NOTE: Do NOT use ``with ThreadPoolExecutor(...) as pool:`` because
+            # __exit__ calls shutdown(wait=True) which blocks on the hung thread.
+            # Manual management with finally: pool.shutdown(wait=False) is
+            # required.  Matches compression.py, phases.py, and graph.py.
+            _timeout = _delegate_config.get("default_timeout", 60)
+            executor = ThreadPoolExecutor(max_workers=1)
+            try:
+                future = executor.submit(llm.invoke, messages)
+                try:
+                    result = future.result(timeout=_timeout)
+                except FuturesTimeoutError:
+                    log.warning(
+                        "delegate: llm.invoke() timed out after %ds — propagating to outer handler",
+                        _timeout,
+                    )
+                    raise
+            finally:
+                executor.shutdown(wait=False)
             response_text = _extract_content(result)
 
         # Validate JSON if requested
@@ -1126,6 +1232,8 @@ def delegate_parallel(
 
     if not tasks:
         return "**No tasks provided.**"
+
+    from src.agent.safety import UserCancelledRun
 
     # Validate context for LLM-only tasks and allowed_models up front
     for i, task_def in enumerate(tasks):
@@ -1374,6 +1482,7 @@ TOOL_CONFIGS = [
         "input_schema": DelegateInput,
         "function": delegate_task,
         "requires_confirmation": False,
+        "category": "recursive",
     },
     {
         "name": "delegate_parallel",
@@ -1398,8 +1507,16 @@ TOOL_CONFIGS = [
         "input_schema": DelegateParallelInput,
         "function": delegate_parallel,
         "requires_confirmation": False,
+        "category": "recursive",
     },
 ]
+
+# Register tool categories for delegate sandbox filtering
+register_tool_categories({"delegate_task": "recursive", "delegate_parallel": "recursive"})
+
+# Flush any pending registrations from tool modules imported before
+# delegate.py finished loading (e.g., if agent.safety triggered early imports).
+_flush_pending_category_registrations()
 
 __all__ = [
     "delegate_task",

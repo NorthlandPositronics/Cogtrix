@@ -18,6 +18,7 @@ from typing import Any
 import httpx
 from pydantic import BaseModel, Field
 
+from src.tools._web_search_aggregator import ProviderResult
 from src.tools.error_sanitizer import sanitize_search_error as _sanitize_search_error
 
 log = logging.getLogger("cogtrix")
@@ -112,27 +113,61 @@ def searxng_search(query: str, num_results: int = 5, language: str = "en") -> st
     return "\n".join(output)
 
 
-TOOL_CONFIGS = [
-    {
-        "name": "searxng_search",
-        "description": (
-            "Search the web using a self-hosted SearXNG instance. "
-            "Privacy-respecting metasearch across 70+ engines. "
-            "Only available when SEARXNG_URL is configured."
-        ),
-        "input_schema": SearXNGSearchInput,
-        "function": searxng_search,
-        "requires_confirmation": False,
-    }
-]
+async def _search_async(
+    query: str, num_results: int = 5, region: str | None = None
+) -> list[ProviderResult]:
+    """Async SearXNG search returning ProviderResult list (ADR-0056 PR-B).
 
-TOOL_CONFIG = TOOL_CONFIGS[0]
+    Uses ``httpx.AsyncClient`` natively rather than wrapping the sync
+    client — SearXNG is plain JSON over HTTP and the async path is
+    trivial. Raises on missing URL config / HTTP errors. ``region`` is
+    accepted for cross-provider symmetry and ignored; SearXNG's
+    ``language`` parameter (which IS a locale code) defaults to "en".
+    """
+    del region
+
+    base_url = _get_url()
+    if not base_url:
+        raise RuntimeError("SearXNG URL not configured")
+    if not query.strip():
+        return []
+
+    num_results = max(1, min(num_results, 10))
+    base_url = base_url.rstrip("/")
+
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        resp = await client.get(
+            f"{base_url}/search",
+            params={"q": query, "format": "json", "language": "en"},
+            headers={"Accept": "application/json"},
+        )
+        resp.raise_for_status()
+        data = resp.json()
+
+    results = data.get("results", []) or []
+    return [
+        ProviderResult(
+            provider="searxng",
+            url=r.get("url") or "",
+            title=r.get("title") or "",
+            snippet=r.get("content") or "",
+            published_date=None,
+        )
+        for r in results[:num_results]
+        if r.get("url")
+    ]
+
+
+# PR-G removed searxng_search from the agent catalogue. The sync
+# function and async _search_async stay in this module so web_search
+# can reach SearXNG via _resolve_providers().
+TOOL_CONFIGS: list[dict[str, Any]] = []
+
 
 __all__ = [
     "searxng_search",
     "configure_searxng",
     "is_configured",
     "SearXNGSearchInput",
-    "TOOL_CONFIG",
     "TOOL_CONFIGS",
 ]

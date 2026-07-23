@@ -42,6 +42,7 @@ from typing import Any
 import requests
 from pydantic import BaseModel, Field
 
+from src.tools._web_search_aggregator import ProviderResult
 from src.tools.error_sanitizer import sanitize_search_error as _sanitize_search_error
 
 log = logging.getLogger("cogtrix")
@@ -239,39 +240,71 @@ def brave_search(
     return "\n".join(output)
 
 
-# -- Tool registration --------------------------------------------------------
+async def _search_async(
+    query: str, num_results: int = 5, region: str | None = None
+) -> list[ProviderResult]:
+    """Async Brave search returning ProviderResult list (ADR-0056 PR-B).
 
-TOOL_CONFIG = {
-    "name": "brave_search",
-    "description": (
-        "Search the web using Brave Search, a privacy-focused search engine "
-        "with its own independent index (not a Google/Bing reskin). Brave "
-        "does not track users or queries.\n"
-        "\n"
-        "Supports:\n"
-        "- Web search (general queries) and news search\n"
-        "- Time filtering: 'pd' (past day), 'pw' (past week), "
-        "'pm' (past month), 'py' (past year)\n"
-        "- Rich extras: FAQ answers, infoboxes, deep-result snippets\n"
-        "\n"
-        "USE THIS TOOL WHEN:\n"
-        "- You want results from an independent index (not Google/Bing)\n"
-        "- Privacy matters and you want a tracker-free search\n"
-        "- You need recent news with time filtering\n"
-        "- Other search tools are unavailable or returning poor results\n"
-        "\n"
-        "Output includes: title, URL, description, age, extra snippets, "
-        "plus FAQ answers and infobox data when the API provides them."
-    ),
-    "input_schema": BraveSearchInput,
-    "function": brave_search,
-    "requires_confirmation": False,
-}
+    Wraps the sync ``requests.get`` call in ``asyncio.to_thread``.
+    Raises on missing API key / HTTP errors so the stage-1 aggregator
+    can catch and sanitise. ``region`` is accepted for cross-provider
+    symmetry and ignored (Brave uses request-level locale, not a
+    region code).
+    """
+    import asyncio
+
+    del region
+
+    api_key = _get_api_key()
+    if not api_key:
+        raise RuntimeError("Brave API key not configured")
+    if not query.strip():
+        return []
+
+    num_results = max(1, min(num_results, 20))
+
+    def _sync_call() -> dict[str, Any]:
+        response = requests.get(
+            f"{BRAVE_API_BASE}/web/search",
+            headers={
+                "Accept": "application/json",
+                "Accept-Encoding": "gzip",
+                "X-Subscription-Token": api_key,
+            },
+            params={"q": query, "count": num_results},
+            timeout=30,
+        )
+        response.raise_for_status()
+        return response.json()
+
+    data = await asyncio.to_thread(_sync_call)
+    raw_results = data.get("web", {}).get("results", []) or []
+    return [
+        ProviderResult(
+            provider="brave",
+            url=r.get("url") or "",
+            title=r.get("title") or "",
+            snippet=r.get("description") or "",
+            # Brave's "age" is a non-ISO relative string ("3 days ago" etc.);
+            # leave as None for v1 — normalising deferred per ADR-0056.
+            published_date=None,
+        )
+        for r in raw_results
+        if r.get("url")
+    ]
+
+
+# -- Tool registration --------------------------------------------------------
+#
+# PR-G removed brave_search from the agent catalogue. The sync function
+# and the async _search_async stay in this module so web_search can
+# reach Brave via _resolve_providers().
+TOOL_CONFIGS: list[dict[str, Any]] = []
 
 __all__ = [
     "brave_search",
     "configure_brave",
     "is_configured",
     "BraveSearchInput",
-    "TOOL_CONFIG",
+    "TOOL_CONFIGS",
 ]

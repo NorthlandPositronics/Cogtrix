@@ -300,6 +300,11 @@ class Config:
     # File operations — extra directories allowed for read operations
     allowed_read_paths: list[str] = field(default_factory=list)
 
+    # Shell tool — allowed domains for curl/wget URL targets.
+    # When non-empty, curl and wget invocations must target these domains only.
+    # Mitigates data exfiltration via URL param injection (issue #1604).
+    shell_curl_wget_allowed_domains: list[str] = field(default_factory=list)
+
     # Plugin tools — extra directories to scan for file-drop tool modules
     tool_dirs: list[str] = field(default_factory=list)
 
@@ -316,6 +321,12 @@ class Config:
     """Maximum retained message count before oldest-end truncation. 0 = disabled."""
     context_max_tokens: int = 40_000
     """Maximum retained context token budget for oldest-end truncation. 0 = disabled."""
+
+    # Search quality heuristic — substantive results discriminator (#1593, Option B)
+    search_quality_min_url_count: int = 2
+    """Minimum ``"URL: "`` lines in a search Web ToolMessage for it to be considered substantive."""
+    search_quality_min_chars: int = 300
+    """Minimum character length for a search Web ToolMessage to be considered substantive."""
 
     # Tiered Context Cache (TCC) — pre-compressed tier snapshots for accurate
     # context size tracking and O(1) context assembly.
@@ -1255,6 +1266,46 @@ def _apply_config_file(config: Config, path: Path) -> None:
             config.allowed_read_paths = [str(p) for p in val]
         else:
             _log.warning("allowed_read_paths must be a string or list, ignoring")
+    # ── Shell curl/wget allowed domains ──────────────────────────
+    # Preferred location: under the ``shell`` block (``shell.curl_wget_allowed_domains``).
+    # Legacy top-level key ``shell_curl_wget_allowed_domains`` is still accepted
+    # for backward compatibility but triggers a deprecation warning.
+    _shell_block = data.get("shell")
+    _shell_block_domains = None
+    if isinstance(_shell_block, dict):
+        _shell_block_domains = _shell_block.get("curl_wget_allowed_domains")
+
+    _legacy_domains = data.get("shell_curl_wget_allowed_domains")
+
+    def _parse_domains(val: Any, key_name: str) -> list[str] | None:
+        if isinstance(val, str):
+            return [val]
+        elif isinstance(val, list):
+            return [str(d) for d in val]
+        else:
+            _log.warning("%s must be a string or list, ignoring", key_name)
+            return None
+
+    if _shell_block_domains is not None and _legacy_domains is not None:
+        _log.warning(
+            "Config has both 'shell.curl_wget_allowed_domains' and "
+            "top-level 'shell_curl_wget_allowed_domains'; "
+            "using 'shell.curl_wget_allowed_domains'"
+        )
+
+    if _shell_block_domains is not None:
+        parsed = _parse_domains(_shell_block_domains, "shell.curl_wget_allowed_domains")
+        if parsed is not None:
+            config.shell_curl_wget_allowed_domains = parsed
+    elif _legacy_domains is not None:
+        parsed = _parse_domains(_legacy_domains, "shell_curl_wget_allowed_domains")
+        if parsed is not None:
+            config.shell_curl_wget_allowed_domains = parsed
+            _log.warning(
+                "Top-level 'shell_curl_wget_allowed_domains' is deprecated; "
+                "move it under 'shell:' as 'curl_wget_allowed_domains'"
+            )
+
     # ── Plugin tool directories ───────────────────────────────────
     if "tool_dirs" in data:
         val = data["tool_dirs"]
@@ -1328,6 +1379,28 @@ def _apply_config_file(config: Config, path: Path) -> None:
                 )
         else:
             config.context_compression = bool(cc)
+
+    # ── Search quality heuristic thresholds (#1593, Option B) ────
+    if "search_quality" in data and isinstance(data["search_quality"], dict):
+        sq = data["search_quality"]
+        if "min_url_count" in sq:
+            val = _safe_int(sq["min_url_count"], "search_quality.min_url_count")
+            if val is not None and val >= 1:
+                config.search_quality_min_url_count = val
+            else:
+                _log.warning(
+                    "search_quality.min_url_count must be >= 1, using default %d",
+                    config.search_quality_min_url_count,
+                )
+        if "min_chars" in sq:
+            val = _safe_int(sq["min_chars"], "search_quality.min_chars")
+            if val is not None and val >= 0:
+                config.search_quality_min_chars = val
+            else:
+                _log.warning(
+                    "search_quality.min_chars must be >= 0, using default %d",
+                    config.search_quality_min_chars,
+                )
 
     # ── Context message cap ──────────────────────────────────────
     if "context_max_messages" in data:
@@ -1816,6 +1889,8 @@ def _apply_env_vars(config: Config) -> None:
         _set_provider_key(config, "anthropic", env_val)
     if env_val := os.getenv("GEMINI_API_KEY"):
         _set_provider_key(config, "google", env_val)
+    if env_val := os.getenv("GROQ_API_KEY"):
+        _set_provider_key(config, "groq", env_val)
     if env_val := os.getenv("XAI_API_KEY"):
         _set_provider_key(config, "xai", env_val)
     if env_val := os.getenv("DEEPSEEK_API_KEY"):

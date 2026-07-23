@@ -3404,27 +3404,26 @@ def main():
     _MCP_TOOLS_READY_EVENT = None
     if MCP_AVAILABLE and config.mcp_servers and tool_filter != "none":
         _mcp_manager = MCPManager()
-        _KNOWN_MCP_FIELDS = {
-            "command",
-            "args",
-            "env",
-            "url",
-            "headers",
-            "requires_confirmation",
-            "timeout",
-            "pin",
-            "allow_insecure",
-        }
+        # ``KNOWN`` = fields forwarded to MCPServerConfig as kwargs.
+        # ``DOC_ONLY`` = fields the user keeps in their YAML for human
+        # reference (typically to link this config to a docker-compose
+        # YAML or external server's own settings) but that Cogtrix does
+        # not consume programmatically. Accepting them silently avoids
+        # false-positive "ignoring unknown config keys" warnings while
+        # still surfacing genuine typos.
+        from src.mcp_client import DOC_ONLY_MCP_FIELDS, KNOWN_MCP_FIELDS
+
+        _RECOGNISED_MCP_FIELDS = KNOWN_MCP_FIELDS | DOC_ONLY_MCP_FIELDS
         _mcp_configs = []
         for _mcp_name, _srv_cfg in config.mcp_servers.items():
-            _unknown = set(_srv_cfg) - _KNOWN_MCP_FIELDS
+            _unknown = set(_srv_cfg) - _RECOGNISED_MCP_FIELDS
             if _unknown:
                 log.warning(
                     "MCP server '%s': ignoring unknown config keys: %s",
                     _mcp_name,
                     ", ".join(sorted(_unknown)),
                 )
-            _filtered = {k: v for k, v in _srv_cfg.items() if k in _KNOWN_MCP_FIELDS}
+            _filtered = {k: v for k, v in _srv_cfg.items() if k in KNOWN_MCP_FIELDS}
             _mcp_configs.append(MCPServerConfig(name=_mcp_name, **_filtered))
         # Build a map of server_name -> pin so we can tag each tool's metadata.
         _mcp_pin_map = {cfg.name: cfg.pin for cfg in _mcp_configs}

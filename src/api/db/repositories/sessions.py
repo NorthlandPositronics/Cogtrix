@@ -23,12 +23,14 @@ class SessionRepository:
         user_id: str,
         name: str,
         config_json: str = "{}",
+        workspace_id: str | None = None,
     ) -> ApiSessionRecord:
         """Insert a new session row and return it."""
         record = ApiSessionRecord(
             user_id=user_id,
             name=name,
             config_json=config_json,
+            workspace_id=workspace_id,
             token_counts_json=json.dumps(
                 {"input_tokens": 0, "output_tokens": 0, "context_window": 0}
             ),

@@ -184,6 +184,9 @@ class ChatSessionManager:
         mm.load()
         mm.set_llm(self._llm)
 
+        # The web_search stage-5 synthesiser LLM is scoped per agent
+        # turn inside ``run_agent`` — see src/orchestration/runner.py.
+
         return ChatSession(
             session_key=msg.session_key,
             channel=msg.channel,

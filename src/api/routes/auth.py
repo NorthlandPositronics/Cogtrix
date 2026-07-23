@@ -14,6 +14,7 @@ Endpoints:
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import secrets
 import uuid
@@ -30,7 +31,7 @@ from src.api.auth import (
     create_access_token,
     get_current_user,
     hash_password,
-    verify_password,
+    verify_password_constant_time,
 )
 from src.api.db import get_db
 from src.api.db.repositories.api_keys import ApiKeyRepository
@@ -202,10 +203,23 @@ async def login(
         detail={"code": "UNAUTHORIZED", "message": "Invalid username or password."},
     )
 
-    if user is None or not user.is_active:
-        raise _invalid
-
-    if not verify_password(body.password, user.password_hash):
+    # Always run bcrypt — against a dummy hash when the user record is
+    # missing or inactive — so the no-such-user and wrong-password code
+    # paths run for the same wall time (forge audit H3, 2026-05-23). Pre-
+    # H3: ~5 ms for unknown user vs ~100 ms for known user, an easy
+    # username-enumeration oracle.
+    #
+    # ``await asyncio.to_thread(...)`` offload (forge audit B2, 2026-05-23):
+    # bcrypt cost=12 is ~95 ms of synchronous CPU. Without this offload, a
+    # /login flood would block the event loop and starve every other request
+    # on the worker — turning the H3 constant-time fix into a self-inflicted
+    # DoS surface. Now the CPU work runs on a thread; the event loop stays
+    # responsive.
+    candidate_hash = user.password_hash if (user is not None and user.is_active) else None
+    password_ok = await asyncio.to_thread(
+        verify_password_constant_time, body.password, candidate_hash
+    )
+    if user is None or not user.is_active or not password_ok:
         raise _invalid
 
     token_pair = await _create_token_pair(user.id, user.role, db)
@@ -242,9 +256,12 @@ async def refresh(
     """
     token_repo = RefreshTokenRepository(db)
     token_hash = hashlib.sha256(body.refresh_token.encode()).hexdigest()
-    token_record = await token_repo.get_by_hash(token_hash)
 
-    if token_record is None or token_record.revoked:
+    # Atomic check-and-revoke: eliminates the TOCTOU window where two concurrent
+    # refresh requests with the same token could both pass the revoked check.
+    # See: https://github.com/NorthlandPositronics/Cogtrix/issues/952
+    token_record = await token_repo.rotate_and_get(token_hash)
+    if token_record is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail={"code": "UNAUTHORIZED", "message": "Missing or invalid bearer token."},
@@ -262,9 +279,6 @@ async def refresh(
                 "message": "The JWT has expired; refresh the token and retry.",
             },
         )
-
-    # Revoke old token
-    await token_repo.revoke(token_record.id)
 
     # Get user for role
     user_repo = UserRepository(db)
@@ -338,7 +352,15 @@ async def logout_all(
     """Revoke all refresh tokens for the current user after password confirmation."""
     user_repo = UserRepository(db)
     user = await user_repo.get_by_id(current_user.user_id)
-    if user is None or not verify_password(body.password, user.password_hash):
+    # Constant-time check covers the (rare) race where the user record is
+    # deleted between the get_current_user dependency and this lookup.
+    # ``asyncio.to_thread`` offload (forge audit B2, 2026-05-23) keeps the
+    # ~95 ms bcrypt cost off the event loop.
+    candidate_hash = user.password_hash if user is not None else None
+    password_ok = await asyncio.to_thread(
+        verify_password_constant_time, body.password, candidate_hash
+    )
+    if not password_ok:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail={"code": "UNAUTHORIZED", "message": "Invalid username or password."},

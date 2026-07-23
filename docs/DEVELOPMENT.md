@@ -99,7 +99,7 @@ The tool is automatically discovered:
 
 ```bash
 uv run python cogtrix.py
-# ✓ Loaded 68 tool(s):
+# ✓ Loaded 67 tool(s):
 #   - my_tool
 ```
 
@@ -630,7 +630,12 @@ cogtrix/
 │   │   └── safety.py         # Tool confirmation wrapper
 │   │
 │   ├── orchestration/
-│   │   ├── graph.py              # LangGraph StateGraph builder, tool expansion
+│   │   ├── graph.py              # LangGraph StateGraph assembly + per-run state
+│   │   ├── graph_runtime.py      # process-wide tool executor pool, deduped invocation (A1.4)
+│   │   ├── message_repair.py     # tool_call ↔ ToolMessage invariant repair (A1.1)
+│   │   ├── response_detectors.py # hallucinated / tool-use / phantom response heuristics (A1.2)
+│   │   ├── tool_arg_correction.py # schema-driven argument normalisation (A1.3)
+│   │   ├── topic_switch.py       # cross-turn topic-switch detection (A1.4)
 │   │   ├── runner.py             # run_agent() entry point
 │   │   ├── phases.py             # post-agent pipeline stages
 │   │   ├── compression.py        # context compression
@@ -697,7 +702,7 @@ cogtrix/
 │       ├── deep_think.py     # Tree-of-Thought reasoning
 │       ├── delegate.py       # Task delegation (2 tools)
 │       ├── email_tools.py    # Email via SMTP/IMAP (gated)
-│       ├── exa_search.py     # Exa semantic search (3 tools)
+│       ├── exa_search.py     # Exa semantic search (2 tools: exa_find_similar, exa_get_contents)
 │       ├── extend_run.py     # Extend agent recursion limit mid-run
 │       ├── file_ops.py       # File operations (6 tools, incl. patch_file)
 │       ├── generate_tests.py # Auto test generation (gated)
@@ -715,10 +720,10 @@ cogtrix/
 │       ├── semantic_tool_index.py # Semantic tool description index
 │       ├── serpapi_search.py # SerpAPI (Google/Bing)
 │       ├── shell.py          # Shell commands
-│       ├── tavily_search.py  # Tavily AI search (2 tools)
+│       ├── tavily_search.py  # Tavily extraction (1 tool: tavily_extract)
 │       ├── text_tools.py     # Text processing
 │       ├── weather.py        # Weather information
-│       ├── web_search.py     # DuckDuckGo search (search_web + search_news)
+│       ├── web_search.py     # Universal web research (web_search; search_web + search_news are importable but not agent-visible)
 │       ├── whatsapp.py       # WhatsApp messaging
 │       ├── _whatsapp_client.py # Waha HTTP client
 │       ├── telegram.py       # Telegram messaging

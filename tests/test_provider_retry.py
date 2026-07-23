@@ -679,3 +679,128 @@ class TestRedactUrl:
         assert self._call("https://api.example.com/path?Secret=topsecret") == (
             "https://api.example.com/path?Secret=[redacted]"
         )
+
+
+class TestSanitizeAuthErrorMessage:
+    """Regression tests for _sanitize_auth_error_message (issue #1105)."""
+
+    def _call(self, message: str) -> str:
+        from src.providers import _sanitize_auth_error_message
+
+        return _sanitize_auth_error_message(message)
+
+    def test_redacts_openai_sk_key(self):
+        """OpenAI-style sk- prefix is redacted."""
+        raw = "Authentication failed: Incorrect API key: sk-test123abc"
+        result = self._call(raw)
+        assert "sk-test123abc" not in result
+        assert "[redacted]" in result
+
+    def test_redacts_anthropic_sk_ant_key(self):
+        """Anthropic-style sk-ant- prefix is redacted."""
+        raw = "Auth error: sk-ant-api03-test-key-xyz"
+        result = self._call(raw)
+        assert "sk-ant-api03-test-key-xyz" not in result
+        assert "[redacted]" in result
+
+    def test_redacts_google_aiza_key(self):
+        """Google-style AIza prefix is redacted."""
+        raw = "Authentication failed: Invalid API key AIzaSyA12345"
+        result = self._call(raw)
+        assert "AIzaSyA12345" not in result
+        assert "[redacted]" in result
+
+    def test_leaves_safe_messages_intact(self):
+        """Messages without key patterns are unchanged."""
+        safe = "Authentication failed: Invalid credentials"
+        assert self._call(safe) == safe
+
+    def test_redacts_multiple_keys_in_one_message(self):
+        """Multiple key fragments are all redacted."""
+        raw = "Keys sk-aaa and AIzaBBB found"
+        result = self._call(raw)
+        assert "sk-aaa" not in result
+        assert "AIzaBBB" not in result
+        assert result.count("[redacted]") == 2
+
+    def test_idempotent_on_already_sanitized_message(self):
+        """Re-sanitizing an already-redacted message is a no-op."""
+        once = self._call("Auth failed: sk-secret123")
+        twice = self._call(once)
+        assert once == twice
+        assert "[redacted]" in twice
+
+    def test_no_false_positive_on_substring_skills(self):
+        """Substrings like 'task-skills-dev' must not be redacted."""
+        safe = "Deploy task-skills-dev to staging"
+        result = self._call(safe)
+        assert result == safe
+        assert "[redacted]" not in result
+
+    def test_redacts_xai_key(self):
+        """xAI-style xai- prefix is redacted."""
+        raw = "Auth error: xai-secret-token-abc"
+        result = self._call(raw)
+        assert "xai-secret-token-abc" not in result
+        assert "[redacted]" in result
+
+    def test_redacts_groq_key(self):
+        """Groq-style gsk_ prefix is redacted."""
+        raw = "Invalid API key: gsk_test_12345"
+        result = self._call(raw)
+        assert "gsk_test_12345" not in result
+        assert "[redacted]" in result
+
+    def test_redacts_huggingface_key(self):
+        """HuggingFace-style hf_ prefix is redacted."""
+        raw = "Auth failed: hf_abcdef123456"
+        result = self._call(raw)
+        assert "hf_abcdef123456" not in result
+        assert "[redacted]" in result
+
+
+class TestRetryableChatModelAuthErrorSanitization:
+    """Regression tests for auth-error key sanitization in RetryableChatModel (issue #1105)."""
+
+    def test_auth_error_sanitizes_sk_key(self):
+        """ProviderAuthError message does not contain sk- key fragments."""
+        mock_model = MockLangChainModel()
+        auth_error = Exception("Authentication failed: Incorrect API key: sk-secret123")
+
+        mock_model.invoke = MagicMock(side_effect=auth_error)
+
+        wrapper = RetryableChatModel(mock_model, max_retries=3)
+        with pytest.raises(ProviderAuthError) as exc_info:
+            wrapper.invoke("test input")
+
+        assert "sk-secret123" not in str(exc_info.value)
+        assert "[redacted]" in str(exc_info.value)
+        assert "Authentication failed" in str(exc_info.value)
+
+    def test_auth_error_sanitizes_google_key(self):
+        """ProviderAuthError message does not contain AIza key fragments."""
+        mock_model = MockLangChainModel()
+        auth_error = Exception("Authentication failed: Invalid API key: AIzaSyA12345")
+
+        mock_model.invoke = MagicMock(side_effect=auth_error)
+
+        wrapper = RetryableChatModel(mock_model, max_retries=3)
+        with pytest.raises(ProviderAuthError) as exc_info:
+            wrapper.invoke("test input")
+
+        assert "AIzaSyA12345" not in str(exc_info.value)
+        assert "[redacted]" in str(exc_info.value)
+
+    def test_auth_error_without_key_unchanged(self):
+        """Safe auth error messages are preserved."""
+        mock_model = MockLangChainModel()
+        auth_error = Exception("Authentication failed: Invalid credentials")
+
+        mock_model.invoke = MagicMock(side_effect=auth_error)
+
+        wrapper = RetryableChatModel(mock_model, max_retries=3)
+        with pytest.raises(ProviderAuthError) as exc_info:
+            wrapper.invoke("test input")
+
+        assert "Invalid credentials" in str(exc_info.value)
+        assert "[redacted]" not in str(exc_info.value)

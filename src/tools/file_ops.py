@@ -11,6 +11,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
+from src.tools.delegate import register_tool_categories
 from src.tools.error_sanitizer import sanitize_file_error as _sanitize_file_error
 
 # Application install directory — allows read access to project docs/source
@@ -680,6 +681,7 @@ TOOL_CONFIGS = [
         "input_schema": ReadFileInput,
         "requires_confirmation": False,
         "function": read_file,
+        "category": "readonly",
     },
     {
         "name": "write_file",
@@ -690,6 +692,7 @@ TOOL_CONFIGS = [
         "input_schema": WriteFileInput,
         "requires_confirmation": True,  # Requires confirmation for safety
         "function": write_file,
+        "category": "mutation",
     },
     {
         "name": "patch_file",
@@ -702,6 +705,7 @@ TOOL_CONFIGS = [
         "input_schema": PatchFileInput,
         "requires_confirmation": True,
         "function": patch_file,
+        "category": "mutation",
     },
     {
         "name": "append_file",
@@ -711,6 +715,7 @@ TOOL_CONFIGS = [
         "input_schema": AppendFileInput,
         "requires_confirmation": True,  # Requires confirmation for safety
         "function": append_file,
+        "category": "mutation",
     },
     {
         "name": "list_directory",
@@ -720,6 +725,7 @@ TOOL_CONFIGS = [
         "input_schema": ListDirectoryInput,
         "requires_confirmation": False,
         "function": list_directory,
+        "category": "readonly",
     },
     {
         "name": "file_info",
@@ -729,8 +735,20 @@ TOOL_CONFIGS = [
         "input_schema": FileInfoInput,
         "requires_confirmation": False,
         "function": file_info,
+        "category": "readonly",
     },
 ]
+
+register_tool_categories(
+    {
+        "read_file": "readonly",
+        "write_file": "mutation",
+        "patch_file": "mutation",
+        "append_file": "mutation",
+        "list_directory": "readonly",
+        "file_info": "readonly",
+    }
+)
 
 # Default single tool config (for backwards compatibility)
 TOOL_CONFIG = TOOL_CONFIGS[0]

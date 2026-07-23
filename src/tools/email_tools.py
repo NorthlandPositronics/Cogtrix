@@ -31,6 +31,7 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from typing import TYPE_CHECKING, Any
 
+from src.tools.delegate import register_tool_categories
 from src.tools.error_sanitizer import sanitize_error
 
 if TYPE_CHECKING:
@@ -494,6 +495,7 @@ TOOL_CONFIGS = [
         "input_schema": ReadEmailInput,
         "function": read_email,
         "requires_confirmation": False,
+        "category": "privacy",
     },
     {
         "name": "send_email",
@@ -509,6 +511,7 @@ TOOL_CONFIGS = [
         "input_schema": SendEmailInput,
         "function": send_email,
         "requires_confirmation": True,
+        "category": "messaging",
     },
     {
         "name": "search_email",
@@ -531,8 +534,13 @@ TOOL_CONFIGS = [
         "input_schema": SearchEmailInput,
         "function": search_email,
         "requires_confirmation": False,
+        "category": "privacy",
     },
 ]
+
+register_tool_categories(
+    {"read_email": "privacy", "send_email": "messaging", "search_email": "privacy"}
+)
 
 TOOL_CONFIG = TOOL_CONFIGS[0]
 

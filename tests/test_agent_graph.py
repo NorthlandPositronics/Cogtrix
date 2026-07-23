@@ -259,7 +259,13 @@ class TestBuildAgentGraph:
         assert mock_llm.invoke.call_count == 2
 
     def test_markdown_phantom_report_triggers_retry(self):
-        """Fabricated structured markdown report (no tool calls) triggers phantom recovery (#170)."""
+        """Fabricated structured markdown report (no tool calls) triggers phantom recovery (#170).
+
+        The fabricated content includes ``- Retrieved last 8 messages`` —
+        a bullet-point past-tense claim of action — which satisfies the
+        ``_FAKE_TOOL_OUTPUT_SIGNAL_RE`` requirement added for Bug K.
+        Without that signal the detector now correctly returns False
+        (see ``test_structured_educational_answer_not_classified_as_phantom``)."""
         fabricated_report = AIMessage(
             content=(
                 "### 1. Slack Check — #cogtrix-project-discussions\n"
@@ -289,6 +295,167 @@ class TestBuildAgentGraph:
         ai_messages = [m for m in messages if isinstance(m, AIMessage) and m.content]
         assert any("Recovered after retry" in m.content for m in ai_messages)
         assert mock_llm.invoke.call_count == 2
+
+    def test_structured_educational_answer_not_classified_as_phantom(self):
+        """Bug K regression bed — cogtrix45.log turn 3.
+
+        A legitimate explanatory answer about long-horizon agent memory
+        contained markdown tables (comparing techniques) and numbered
+        section headers (``#### 1. Progressive Summarization``,
+        ``#### 2. Tool-Aware State Management`` …). The pre-fix
+        detector flagged it as a fabricated tool report and triggered
+        three rounds of phantom recovery, after which the LLM
+        topic-drifted to the previous turn's question.
+
+        The fixed detector requires a claim-of-action signal alongside
+        the structural markers. The educational content has tables and
+        numbered headers but no "Retrieved …" / "I retrieved" /
+        "Sources:" / "according to my search" / "results show" — it
+        describes techniques, it doesn't claim retrieval. The graph
+        must route this straight to END, not handle_phantom."""
+        # Verbatim shape of the cogtrix45 turn-3 response — pruned for
+        # test length but preserving every signal the detector inspects.
+        educational_answer = AIMessage(
+            content=(
+                "You're asking about long-context management for complex "
+                "agent tasks.\n\n"
+                "### Core Principles\n\n"
+                "| Goal | Technique | Why it works |\n"
+                "|------|-----------|--------------|\n"
+                "| Prevent context bloat | Summarization + archival | "
+                "Reduces token count while preserving structure |\n"
+                "| Avoid degradation | Stateless subagents | "
+                "Restarts with fresh context, no drift |\n\n"
+                "### Practical Techniques\n\n"
+                "#### 1. Progressive Summarization (Hybrid Compression)\n"
+                "After each 5-7 turns, run a structured summary call.\n\n"
+                "#### 2. Tool-Aware State Management\n"
+                "Store only actionable state in external key-value store.\n\n"
+                "#### 3. Hierarchical Sub-agents\n"
+                "Break the task into phases. Each phase runs with a "
+                "fresh context window.\n\n"
+                "#### 4. Context Sliding Window with Retriever\n"
+                "Maintain a sliding window of last K tokens. Before each "
+                "turn, retrieve top-3 relevant chunks.\n\n"
+                "### Anti-Patterns to Avoid\n\n"
+                "| Pattern | Why it fails |\n"
+                "|---------|--------------|\n"
+                "| Never summarizing | Linear token growth |\n"
+                "| Summarizing too early | Loss of causal trace |\n"
+            ),
+            id="ed1",
+        )
+        # Single LLM response — if the educational answer were
+        # misclassified, the graph would issue a retry and we would
+        # need a second mock response. invoke_count == 1 proves the
+        # detector did NOT fire.
+        mock_llm = _make_mock_llm([educational_answer])
+
+        graph = _build_agent_graph(
+            llm=mock_llm,
+            system_prompt="",
+            active_tools_list=[],
+            available_tools={},
+            registry=_make_registry(),
+            approvals=set(),
+        )
+        result = graph.invoke(
+            {
+                "messages": [
+                    HumanMessage(
+                        content=(
+                            "How do you handle memory when an agent needs to "
+                            "perform a complex 45-minute task without blowing "
+                            "out its maximum context window or degrading in "
+                            "reasoning?"
+                        )
+                    )
+                ]
+            }
+        )
+
+        # Educational answer flowed straight through — exactly one
+        # LLM invocation, no phantom-recovery retry loop.
+        assert mock_llm.invoke.call_count == 1, (
+            f"educational answer was misclassified as phantom — "
+            f"LLM was called {mock_llm.invoke.call_count} times (expected 1)"
+        )
+        ai_messages = [m for m in result["messages"] if isinstance(m, AIMessage) and m.content]
+        assert any("Progressive Summarization" in m.content for m in ai_messages)
+
+    def test_phantom_detector_unit_signals(self):
+        """Unit-level coverage of ``_looks_like_markdown_phantom_report``.
+
+        Pins the three-part contract: table + numbered headers + a
+        claim-of-action signal. Each of the canonical claim-of-action
+        patterns is exercised against a structural baseline."""
+        from src.orchestration.graph import _looks_like_markdown_phantom_report
+
+        # Structural shell: table + numbered header, no claim-of-action.
+        # Pre-fix this returned True; post-fix it must return False.
+        structural_only = AIMessage(
+            content=(
+                "### Techniques\n"
+                "| Goal | Tool |\n|------|------|\n| Speed | Cache |\n\n"
+                "#### 1. Step one\n"
+                "Do something.\n\n"
+                "#### 2. Step two\n"
+                "Do another thing.\n"
+            ),
+            id="x1",
+        )
+        assert _looks_like_markdown_phantom_report(structural_only) is False
+
+        # Add a "Retrieved last 8 messages" bullet — flips to True.
+        with_bullet_claim = AIMessage(
+            content=structural_only.content + "\n- Retrieved last 8 messages. No new mentions.\n",
+            id="x2",
+        )
+        assert _looks_like_markdown_phantom_report(with_bullet_claim) is True
+
+        # First-person past-tense action — flips to True.
+        with_first_person = AIMessage(
+            content=structural_only.content + "\nI retrieved the 8 most recent records.\n",
+            id="x3",
+        )
+        assert _looks_like_markdown_phantom_report(with_first_person) is True
+
+        # Report-style section header — flips to True.
+        with_sources_header = AIMessage(
+            content=structural_only.content + "\nSources:\n",
+            id="x4",
+        )
+        assert _looks_like_markdown_phantom_report(with_sources_header) is True
+
+        # "According to my search" — flips to True.
+        with_according_to = AIMessage(
+            content=structural_only.content + "\nAccording to my search, the answer is X.\n",
+            id="x5",
+        )
+        assert _looks_like_markdown_phantom_report(with_according_to) is True
+
+        # "results show" — flips to True.
+        with_results_show = AIMessage(
+            content=structural_only.content + "\nThe search results show that X.\n",
+            id="x6",
+        )
+        assert _looks_like_markdown_phantom_report(with_results_show) is True
+
+        # Negative: technique-description with "retrieve" as imperative
+        # verb (not first-person past). Must remain False.
+        with_technique_retrieve = AIMessage(
+            content=structural_only.content
+            + "\nBefore each turn, retrieve top-3 relevant chunks.\n",
+            id="x7",
+        )
+        assert _looks_like_markdown_phantom_report(with_technique_retrieve) is False
+
+        # Negative: reflective "I use" — not in the past-tense verb list.
+        with_reflective_iuse = AIMessage(
+            content=structural_only.content + "\nHere are the strategies I use daily.\n",
+            id="x8",
+        )
+        assert _looks_like_markdown_phantom_report(with_reflective_iuse) is False
 
     def test_success_claim_after_all_tool_errors_triggers_fabrication_retry(self):
         """When all tool results are errors, fabrication-specific retry nudge is injected (#544)."""
@@ -760,13 +927,18 @@ class TestRunAgent:
         classify_mock.assert_not_called()
 
     def test_simple_tasks_preload_common_tools(self):
-        """Simple tasks should skip the request_tools bootstrap for common tools."""
+        """Simple tasks should skip the request_tools bootstrap for common tools.
+
+        ``search_web`` is intentionally NOT in the preload set since
+        PR-G retired the legacy in-process DDG tool — see the comment
+        on _SIMPLE_PRELOAD_TOOLS for the Bug D / cogtrix46 rationale.
+        """
         from src.orchestration.runner import _auto_load_simple_tools
 
         available_tools = {}
         for name in (
             "calculate",
-            "search_web",
+            "search_web",  # legacy name; must NOT be auto-loaded
             "read_file",
             "get_current_datetime",
             "other_tool",
@@ -784,14 +956,19 @@ class TestRunAgent:
 
         _auto_load_simple_tools(config)
 
+        # search_web is deliberately excluded — it must remain in
+        # available_tools, not active_tools_list.
         assert [tool.name for tool in config.active_tools_list] == [
             "calculate",
-            "search_web",
             "read_file",
             "get_current_datetime",
         ]
         assert "other_tool" in config.available_tools
-        for name in ("calculate", "search_web", "read_file", "get_current_datetime"):
+        assert "search_web" in config.available_tools, (
+            "search_web must remain in available_tools — auto-loading the "
+            "legacy in-process tool re-introduces the Bug D heap corruption"
+        )
+        for name in ("calculate", "read_file", "get_current_datetime"):
             assert name not in config.available_tools
 
     def test_reasoning_mode_preloads_cron_tools(self):
@@ -1536,6 +1713,58 @@ class TestCorrectToolArgs:
         tool.args_schema = _BrokenSchema()
         with pytest.raises(RuntimeError, match="surprise"):
             _correct_tool_args(tool, {"cmd": "ls"})
+
+    # ── Bug #1723 Gate 2 regression — checkpoint(finding=...) synonyms ──
+
+    def test_well_known_remap_reason_to_finding(self):
+        """kimi-k2-5 on regression_multi_turn_effort_gate_no_carryover
+        emitted ``checkpoint(reason='...')`` instead of ``finding='...'``.
+        SequenceMatcher ratio ``reason``↔``finding`` is ~0.15, far below
+        the 0.75 fuzzy threshold — so without explicit remap entries the
+        call hard-fails at pydantic validation and the Gate 2 scenario
+        is marked failed (runner.py:910 — any tool error fails the
+        run).
+        """
+        from src.tools.checkpoint import CheckpointInput
+
+        tool = MagicMock()
+        tool.args_schema = CheckpointInput
+        result = _correct_tool_args(tool, {"reason": "Both names were not found"})
+        assert result == {"finding": "Both names were not found"}, (
+            f"expected 'reason' to remap to 'finding' for the checkpoint tool; " f"got {result!r}"
+        )
+
+    def test_well_known_remap_finding_synonyms(self):
+        """Other plausible synonyms for the checkpoint ``finding`` field
+        — observed in qwen/kimi/llama generations — must also remap."""
+        from src.tools.checkpoint import CheckpointInput
+
+        synonyms = [
+            "note",
+            "observation",
+            "discovery",
+            "result",
+            "conclusion",
+            "summary",
+            "outcome",
+        ]
+        tool = MagicMock()
+        tool.args_schema = CheckpointInput
+        for syn in synonyms:
+            result = _correct_tool_args(tool, {syn: f"value from {syn}"})
+            assert result == {
+                "finding": f"value from {syn}"
+            }, f"expected '{syn}' to remap to 'finding' for checkpoint; got {result!r}"
+
+    def test_finding_passthrough_when_correct(self):
+        """Regression guard — the correct field name MUST pass through
+        unchanged. A regression here would silently strip valid args."""
+        from src.tools.checkpoint import CheckpointInput
+
+        tool = MagicMock()
+        tool.args_schema = CheckpointInput
+        result = _correct_tool_args(tool, {"finding": "Tool X confirmed working"})
+        assert result == {"finding": "Tool X confirmed working"}
 
 
 # ---------------------------------------------------------------------------

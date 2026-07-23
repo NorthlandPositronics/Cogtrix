@@ -207,21 +207,26 @@ async def log_stream_websocket(
         if auth_header.startswith("Bearer "):
             raw_token = auth_header[7:]
 
-    await websocket.accept()
-
+    # Forge audit H4 (2026-05-23): validate the token BEFORE accepting the
+    # WebSocket handshake. The previous order (accept → validate → close)
+    # let unauthenticated clients establish real WS state — TLS handshake,
+    # ASGI scope, event-loop task — at zero auth cost. With a per-IP WS
+    # connection cap not in place yet, that was a cheap DoS vector. Now
+    # an invalid token is refused at the HTTP-upgrade layer; only valid
+    # admin-or-superadmin sessions get past ``accept()``.
     if raw_token is None:
         await websocket.close(code=4001)
         return
-
     try:
         claims = _decode_jwt(raw_token)
     except Exception:
         await websocket.close(code=4001)
         return
-
     if claims.get("role") not in ("admin", "superadmin"):
         await websocket.close(code=4003)
         return
+
+    await websocket.accept()
 
     # Determine numeric log level
     numeric_level = getattr(logging, level.upper(), logging.INFO)

@@ -43,6 +43,26 @@ class RefreshTokenRepository:
         )
         return result.scalar_one_or_none()
 
+    async def rotate_and_get(self, token_hash: str) -> RefreshToken | None:
+        """Atomically check-and-revoke a refresh token.
+
+        Uses a conditional UPDATE to avoid the TOCTOU window in the refresh rotation
+        flow: UPDATE ... WHERE token_hash=? AND revoked=False RETURNING *.
+        Exactly one concurrent request will match and get the token record; any
+        others will get None (token already revoked by the winner).
+
+        Returns:
+            RefreshToken — the token was found and is now marked revoked.
+            None — token not found OR was already revoked (caller should reject).
+        """
+        result = await self._db.execute(
+            update(RefreshToken)
+            .where(RefreshToken.token_hash == token_hash, RefreshToken.revoked.is_(False))
+            .values(revoked=True)
+            .returning(RefreshToken)
+        )
+        return result.scalar_one_or_none()
+
     async def revoke(self, token_id: str) -> None:
         """Mark a single refresh token as revoked."""
         await self._db.execute(

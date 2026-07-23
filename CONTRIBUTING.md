@@ -19,6 +19,14 @@ See the [LICENSE](LICENSE) file for full terms.
 3. **Run the test suite** to make sure everything works: `uv run pytest tests/ -v`.
 4. **Read the docs** — [Architecture](docs/ARCHITECTURE.md) for system design, [Development](docs/DEVELOPMENT.md) for practical extension guides.
 
+> **Optional submodule** — `docs/optional/` is a git submodule pointing at the
+> private `NorthlandPositronics/cogtrix-docs` repository. It is **not required**
+> to build, test, or run Cogtrix. Authorised contributors with access to that
+> repository can fetch its contents with `git submodule update --init docs/optional`
+> (or by cloning the parent repo with `--recurse-submodules`). Public
+> contributors and CI runners without access can ignore it; the directory will
+> appear empty and no build steps depend on it.
+
 ## How to Contribute
 
 ### Reporting Bugs
@@ -87,12 +95,13 @@ If your PR modifies `tests/evaluation/runner.py`,
 `tests/evaluation/stub_tool_registry.py`,
 `tests/evaluation/ci_gate2.py`, `tests/evaluation/models.yaml`, or any
 file under `tests/evaluation/scenarios/`, please follow the
-strict-schema canary policy: see
-[docs/testing/eval-canary.md](docs/testing/eval-canary.md).
-In short — run the two canary models (`deepseek-v3` + `kimi-k2-5`)
-against the smoke matrix locally and paste the summary into the PR
-body.  It's a 3-minute, $0.05 check that catches the
-description-only-stubs class of regression before Gate 2 has to.
+strict-schema canary policy. The detailed policy doc lives in the
+private documentation submodule at `docs/optional/testing/eval-canary.md`
+(authorised contributors only). In short — run the two canary models
+(`deepseek-v3` + `kimi-k2-5`) against the smoke matrix locally and paste
+the summary into the PR body.  It's a 3-minute, $0.05 check that
+catches the description-only-stubs class of regression before Gate 2
+has to.
 
 ## Code of Conduct
 

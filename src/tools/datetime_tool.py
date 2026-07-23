@@ -7,6 +7,8 @@ from datetime import UTC, datetime
 
 from pydantic import BaseModel, Field
 
+from src.tools.delegate import register_tool_categories
+
 # Try to import zoneinfo (Python 3.9+) or fall back to pytz
 try:
     from zoneinfo import ZoneInfo
@@ -98,6 +100,24 @@ def _get_timezone(tz_name: str):
 def get_current_datetime(timezone: str = "UTC", output_format: str = "%Y-%m-%d %H:%M:%S %Z") -> str:
     """
     Get the current date and time in the specified timezone.
+
+    WHEN TO USE THIS TOOL:
+      - The user asks for current time in a NON-UTC timezone (e.g.,
+        "what time is it in Tokyo?", "current time in London").
+      - You need to do arithmetic on the current absolute time
+        (e.g., "what's the time 90 minutes from now?").
+      - The user asks the day-of-week / month / year of "today" in
+        a specific locale and that locale crosses a DST boundary.
+
+    WHEN NOT TO USE THIS TOOL:
+      - The user's message contains a casual "now" or "right now" as
+        a tonal modifier (e.g., "Do it now please", "ping me now").
+        These are not time questions — they're impatience markers.
+      - The user just asks for today's date in UTC. The current UTC
+        date+time is ALREADY in your context: the system prompt and
+        every HumanMessage are prefixed with [YYYY-MM-DD HH:MM:SS UTC].
+        Calling this tool would return the same value you were
+        already given — pure friction.
 
     Args:
         timezone: Timezone name (e.g., 'UTC', 'US/Eastern', 'Europe/London')
@@ -247,6 +267,7 @@ TOOL_CONFIGS = [
         "input_schema": GetDateTimeInput,
         "requires_confirmation": False,
         "function": get_current_datetime,
+        "category": "readonly",
     },
     {
         "name": "convert_timezone",
@@ -257,6 +278,7 @@ TOOL_CONFIGS = [
         "input_schema": ConvertTimezoneInput,
         "requires_confirmation": False,
         "function": convert_timezone,
+        "category": "readonly",
     },
     {
         "name": "parse_date",
@@ -266,11 +288,21 @@ TOOL_CONFIGS = [
         "input_schema": ParseDateInput,
         "requires_confirmation": False,
         "function": parse_date,
+        "category": "readonly",
     },
 ]
 
 # Default single tool config (for backwards compatibility)
 TOOL_CONFIG = TOOL_CONFIGS[0]
+
+
+register_tool_categories(
+    {
+        "get_current_datetime": "readonly",
+        "convert_timezone": "readonly",
+        "parse_date": "readonly",
+    }
+)
 
 __all__ = [
     "get_current_datetime",

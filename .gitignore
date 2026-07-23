@@ -74,8 +74,8 @@ Thumbs.db
 .coverage
 
 # ── Audit & analysis artifacts ───────────────────────────────────
-docs/bugs/
-docs/ux/
+# (docs/bugs/ and docs/ux/ moved to the private cogtrix-docs submodule
+#  at docs/optional/ — no longer present at the top of the docs tree)
 tests/quality/results/
 MagicMock/
 mypy_report/

@@ -1,5 +1,28 @@
 # Changelog
 
+> **Note (2026-05-24): Git history rewrite.** On 2026-05-24 the `main` and `next` branches were replaced with a single squashed snapshot of the then-current tree. The rewrite was needed to remove internal documentation — Architecture Decision Records, bug-investigation notes, internal roadmaps, security-audit material, team-process docs, and a private API test specification — from public git
+> history. Those files had been moved out of the public working tree in PRs #1757 / #1758 and now live in the private `NorthlandPositronics/cogtrix-docs` submodule at `docs/optional/`, but they remained reachable via `git log -p` / `git show` against any commit prior to the cleanup. The squash to an orphan root commit makes them unreachable from any public ref.
+>
+> **Impact on this changelog:** entries below describe the features and fixes that actually shipped and remain accurate as a release record. The commit SHAs they reference, however, no longer resolve on `origin/main` or `origin/next` — those commits still exist as unreachable objects until git's garbage collection runs but are no longer in any branch's history.
+>
+> **Action for contributors with a local clone:**
+>
+> ```bash
+> git fetch origin --prune
+> git checkout main && git reset --hard origin/main
+> git checkout next && git reset --hard origin/next
+> git submodule update --init --recursive
+> ```
+>
+> Any in-flight feature branch will need to be rebased onto (or cherry-picked into) the new orphan root before it can be merged.
+
+## [0.2.11](https://github.com/NorthlandPositronics/Cogtrix/compare/v0.2.10...v0.2.11) (2026-05-24)
+
+### Documentation
+
+- **changelog:** add note explaining the 2026-05-24 git history rewrite ([ceff1a3](https://github.com/NorthlandPositronics/Cogtrix/commit/ceff1a333cece39fc1c790dc70d4809758d61d9a))
+- **changelog:** add note explaining the 2026-05-24 git history rewrite ([648075b](https://github.com/NorthlandPositronics/Cogtrix/commit/648075b0f82e4ad22a011e0297d11798ef61100c))
+
 ## [0.2.10](https://github.com/NorthlandPositronics/Cogtrix/compare/v0.2.9...v0.2.10) (2026-05-18)
 
 ### Features

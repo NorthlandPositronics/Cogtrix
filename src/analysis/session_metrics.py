@@ -1,7 +1,7 @@
 """Session metrics computation from Cogtrix log files.
 
 Reads a Cogtrix ``.log`` file and computes the 10 behavioral effectiveness
-metrics defined in ``docs/testing/agent-effectiveness-metrics.md``.
+metrics defined in ``docs/optional/testing/agent-effectiveness-metrics.md``.
 
 Metrics that require manual classification return ``None`` with a descriptive
 note so callers can distinguish "not yet implemented" from "computation error".
@@ -367,7 +367,7 @@ def compute_session_metrics(log_path: str) -> dict[str, Any]:
     if crs is not None:
         available["crs"] = crs
 
-    # Weights (same as docs/testing/agent-effectiveness-metrics.md)
+    # Weights (same as docs/optional/testing/agent-effectiveness-metrics.md)
     weights = {
         "tce": 0.15,
         "cd": 0.10,

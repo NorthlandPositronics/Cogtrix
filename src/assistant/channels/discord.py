@@ -17,6 +17,27 @@ from src.assistant.channel import Channel, IncomingMessage, SendResult, parse_du
 
 log = logging.getLogger("cogtrix")
 
+
+# ── Rate-limit exception ───────────────────────────────────────────────────────
+
+
+class RateLimitError(Exception):
+    """Raised when Discord returns HTTP 429 (Too Many Requests).
+
+    Attributes:
+        retry_after: Seconds to wait before retrying (from Retry-After header,
+            X-RateLimit-Reset-After header, or a default minimum of 1s).
+        route: The Discord API route that triggered the limit, for logging.
+    """
+
+    def __init__(self, retry_after: float, route: str = "") -> None:
+        self.retry_after = max(retry_after, 1.0)
+        self.route = route
+        super().__init__(
+            f"Discord rate limit hit{route and f' on {route}'}: retry after {self.retry_after:.1f}s"
+        )
+
+
 try:
     import discord  # type: ignore[import-untyped,import-not-found]  # noqa: F401
 
@@ -98,21 +119,55 @@ class _DiscordRestClient:
             "Content-Type": "application/json",
         }
 
+    def _parse_retry_after(self, resp: Any, route: str) -> float:
+        """Extract retry delay from a 429 response's headers.
+
+        Checks ``Retry-After`` first (seconds), then
+        ``X-RateLimit-Reset-After`` (milliseconds), falling back to a
+        default of 5 seconds.
+        """
+        retry_after = resp.headers.get("Retry-After")
+        if retry_after is not None:
+            try:
+                return float(retry_after)
+            except ValueError:
+                pass
+        reset_after = resp.headers.get("X-RateLimit-Reset-After")
+        if reset_after is not None:
+            try:
+                return float(reset_after) / 1000.0  # ms → seconds
+            except ValueError:
+                pass
+        log.debug("Discord: no Retry-After header on 429 from %s — using default 5s", route)
+        return 5.0
+
+    def _handle_rate_limit(self, resp: Any, route: str) -> None:
+        """Raise RateLimitError after logging 429 details."""
+        retry_after = self._parse_retry_after(resp, route)
+        log.warning("Discord: HTTP 429 on %s — backing off %.1fs", route, retry_after)
+        raise RateLimitError(retry_after, route=route)
+
     def _get(self, path: str, **params: Any) -> Any:
         url = f"{_DISCORD_API_BASE}{path}"
         resp = _requests.get(url, headers=self._headers, params=params or None, timeout=10)
+        if resp.status_code == 429:
+            self._handle_rate_limit(resp, path)
         resp.raise_for_status()
         return resp.json()
 
     def _post(self, path: str, body: dict[str, Any]) -> Any:
         url = f"{_DISCORD_API_BASE}{path}"
         resp = _requests.post(url, headers=self._headers, json=body, timeout=10)
+        if resp.status_code == 429:
+            self._handle_rate_limit(resp, path)
         resp.raise_for_status()
         return resp.json()
 
     def _patch(self, path: str, body: dict[str, Any]) -> Any:
         url = f"{_DISCORD_API_BASE}{path}"
         resp = _requests.patch(url, headers=self._headers, json=body, timeout=10)
+        if resp.status_code == 429:
+            self._handle_rate_limit(resp, path)
         resp.raise_for_status()
         return resp.json()
 
@@ -232,8 +287,25 @@ class DiscordChannel(Channel):
         result: list[IncomingMessage] = []
         for ch_id in list(self._channel_guilds):
             after = self._last_seen.get(ch_id)
+            raw: list[dict[str, Any]] = []
             try:
                 raw = self._client.get_messages(ch_id, after=after)
+            except RateLimitError as exc:
+                log.info(
+                    "Discord: rate-limit on channel %s — waiting %.1fs before retry",
+                    ch_id,
+                    exc.retry_after,
+                )
+                time.sleep(exc.retry_after)
+                try:
+                    raw = self._client.get_messages(ch_id, after=after)
+                except Exception as exc2:
+                    log.warning(
+                        "Discord: failed to fetch messages from %s after rate-limit retry: %s",
+                        ch_id,
+                        exc2,
+                    )
+                    continue
             except Exception as exc:
                 log.warning("Discord: failed to fetch messages from %s: %s", ch_id, exc)
                 continue
@@ -314,6 +386,21 @@ class DiscordChannel(Channel):
             try:
                 resp = self._client.send_message(chat_id, chunk)
                 last_message_id = str(resp.get("id", "")) or None
+            except RateLimitError as exc:
+                log.info(
+                    "Discord: rate-limit on send to %s — waiting %.1fs before retry",
+                    chat_id,
+                    exc.retry_after,
+                )
+                time.sleep(exc.retry_after)
+                try:
+                    resp = self._client.send_message(chat_id, chunk)
+                    last_message_id = str(resp.get("id", "")) or None
+                except Exception as exc2:
+                    log.error(
+                        "Discord: send failed to %s after rate-limit retry: %s", chat_id, exc2
+                    )
+                    return SendResult(ok=False, error=str(exc2))
             except Exception as exc:
                 log.error("Discord: send failed to %s: %s", chat_id, exc)
                 return SendResult(ok=False, error=str(exc))
