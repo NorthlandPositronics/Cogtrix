@@ -28,6 +28,7 @@ class ChatSession:
     memory_manager: Any
     last_activity: float = field(default_factory=time.monotonic)
     lock: threading.Lock = field(default_factory=threading.Lock)
+    guardrail_violations: int = 0
 
 
 class ChatSessionManager:
@@ -75,14 +76,24 @@ class ChatSessionManager:
                 evicted = self.evict_idle()
                 if evicted == 0 and self._sessions:
                     oldest_key = min(self._sessions, key=lambda k: self._sessions[k].last_activity)
-                    try:
-                        self._sessions[oldest_key].memory_manager.save()
-                    except Exception as exc:
-                        log.warning(
-                            "Failed to save session %s before eviction: %s", oldest_key, exc
+                    oldest = self._sessions[oldest_key]
+                    if oldest.lock.acquire(blocking=False):
+                        try:
+                            oldest.memory_manager.save()
+                        except Exception as exc:
+                            log.warning(
+                                "Failed to save session %s before eviction: %s",
+                                oldest_key,
+                                exc,
+                            )
+                        finally:
+                            oldest.lock.release()
+                        del self._sessions[oldest_key]
+                        log.warning("Session cap reached; evicted oldest session %s", oldest_key)
+                    else:
+                        log.debug(
+                            "Skipping eviction of busy session %s; allowing over cap", oldest_key
                         )
-                    del self._sessions[oldest_key]
-                    log.warning("Session cap reached; evicted oldest session %s", oldest_key)
 
             session = self._create_session(msg)
             self._sessions[key] = session
@@ -120,7 +131,12 @@ class ChatSessionManager:
         )
 
     def evict_idle(self) -> int:
-        """Save and remove sessions idle longer than *idle_timeout*. Returns count evicted."""
+        """Save and remove sessions idle longer than *idle_timeout*. Returns count evicted.
+
+        Acquires each session's lock (non-blocking) before saving to avoid
+        racing with an active message handler.  Busy sessions are skipped and
+        will be retried on the next eviction pass.
+        """
         with self._lock:
             now = time.monotonic()
             to_evict = [
@@ -128,21 +144,39 @@ class ChatSessionManager:
                 for key, session in self._sessions.items()
                 if (now - session.last_activity) > self._idle_timeout
             ]
+            evicted = 0
             for key in to_evict:
+                session = self._sessions[key]
+                if not session.lock.acquire(blocking=False):
+                    log.debug("Skipping eviction of busy session %s", key)
+                    continue
                 try:
-                    self._sessions[key].memory_manager.save()
+                    session.memory_manager.save()
                 except Exception as exc:
                     log.warning("Failed to save session %s on eviction: %s", key, exc)
+                finally:
+                    session.lock.release()
                 del self._sessions[key]
+                evicted += 1
                 log.info("Evicted idle session %s", key)
-            return len(to_evict)
+            return evicted
 
     def save_all(self) -> None:
-        """Persist all active sessions (called on graceful shutdown)."""
+        """Persist all active sessions (called on graceful shutdown).
+
+        Acquires each session lock with a timeout to avoid hanging if a
+        handler is stuck.
+        """
         with self._lock:
             for key, session in self._sessions.items():
+                acquired = session.lock.acquire(timeout=10.0)
+                if not acquired:
+                    log.warning("Failed to acquire lock for session %s on shutdown; skipping", key)
+                    continue
                 try:
                     session.memory_manager.save()
                     log.debug("Saved session %s", key)
                 except Exception as exc:
                     log.warning("Failed to save session %s: %s", key, exc)
+                finally:
+                    session.lock.release()

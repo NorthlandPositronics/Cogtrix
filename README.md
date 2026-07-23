@@ -244,7 +244,7 @@ Full parameter reference: **[Tools Reference](docs/TOOLS_REFERENCE.md)**
 |------|----------|----------------|
 | `conversation` (default) | General chat, Q&A, research | 25 messages |
 | `code` | Programming, debugging | 30 messages + file/error tracking |
-| `reasoning` | Planning, architecture decisions | 30 messages + goal/decision tracking |
+| `reasoning` | Planning, architecture decisions | 40 messages + goal/decision tracking |
 
 All modes include **hybrid memory**: older messages are automatically compressed into a rolling summary, and (when an embedding provider is available) stored for semantic recall — so the agent retains awareness of the full conversation even after messages leave the sliding window. Token-aware trimming ensures the context always fits the model's context window.
 

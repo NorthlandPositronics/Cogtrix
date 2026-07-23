@@ -33,6 +33,7 @@ def _make_session(context_prefix: str | None = None) -> MagicMock:
     session.lock = MagicMock()
     session.lock.__enter__ = MagicMock(return_value=None)
     session.lock.__exit__ = MagicMock(return_value=False)
+    session.guardrail_violations = 0
     session.memory_manager.prepare_context.return_value = MemoryContext(
         messages=[],
         context_prefix=context_prefix,
@@ -83,17 +84,17 @@ class TestToolExclusion:
         excluded_tool = MagicMock()
         excluded_tool.name = "whatsapp_send"
         safe_tool = MagicMock()
-        safe_tool.name = "read_file"
+        safe_tool.name = "web_search"
 
         handler, _ = _make_handler(
             available_tools={
                 "whatsapp_send": excluded_tool,
-                "read_file": safe_tool,
+                "web_search": safe_tool,
             }
         )
 
         assert "whatsapp_send" not in handler._available_tools
-        assert "read_file" in handler._available_tools
+        assert "web_search" in handler._available_tools
 
     def test_all_default_excluded_tools_filtered(self):
         """All tools in _DEFAULT_EXCLUDED are removed."""
@@ -155,6 +156,11 @@ class TestToolExclusion:
     def test_write_and_shell_tools_excluded(self):
         """execute_shell_command, write_file, append_file, execute_python are excluded by default."""
         for name in ("execute_shell_command", "execute_python", "write_file", "append_file"):
+            assert name in _DEFAULT_EXCLUDED
+
+    def test_read_and_filesystem_tools_excluded(self):
+        """read_file, list_directory, file_info, read_pdf are excluded by default."""
+        for name in ("read_file", "list_directory", "file_info", "read_pdf"):
             assert name in _DEFAULT_EXCLUDED
 
 

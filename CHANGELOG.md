@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.1.10](https://github.com/NorthlandPositronics/Cogtrix/compare/v0.1.9...v0.1.10) (2026-03-02)
+
+
+### Features
+
+* **assistant:** add per-contact system prompts ([6c9d1c7](https://github.com/NorthlandPositronics/Cogtrix/commit/6c9d1c79bfcd0854fda434d5771b071a1db5989b))
+
+
+### Bug Fixes
+
+* **assistant:** contact prompt replaces system prompt, fix save_all/cleanup bugs, update docs ([6f68eb5](https://github.com/NorthlandPositronics/Cogtrix/commit/6f68eb59c84b58a914c8788d6bcd34f1a4928682))
+* **assistant:** dynamic scheduler dispatch, crash-safe knowledge save, fix ViolationTracker._save lock ([992b6d8](https://github.com/NorthlandPositronics/Cogtrix/commit/992b6d8c365e837f266137c7074c01d9e432eb6a))
+* **assistant:** fix [@lid](https://github.com/lid) contact prompt matching, persist stale expiry, respect excluded_tools ([791e703](https://github.com/NorthlandPositronics/Cogtrix/commit/791e7031f3c4e82116cb8a265aa1ed1421d7afae))
+* **assistant:** fix four datamarking and PII bugs in handler.py ([8f1d259](https://github.com/NorthlandPositronics/Cogtrix/commit/8f1d25949a56ed7fd3e077182910bb03d27ec1e0))
+* **assistant:** fix Telegram update replay, contact prompt spoofing, and rate limiter bypass ([b4bcb77](https://github.com/NorthlandPositronics/Cogtrix/commit/b4bcb77048be476535ece49002d582da99d9ada9))
+* **assistant:** multi-round audit bug fixes and optimizations ([66bf868](https://github.com/NorthlandPositronics/Cogtrix/commit/66bf86816406ec6e5696792ee4ffd01136c09131))
+* **assistant:** resolve remaining audit bugs and add scheduled reply prompt ([dab52e0](https://github.com/NorthlandPositronics/Cogtrix/commit/dab52e0c9da587fc2e193fb403fec6f34b0f7cae))
+* correct documentation inaccuracies across config, README, and docs ([8bbb241](https://github.com/NorthlandPositronics/Cogtrix/commit/8bbb241a3af18af57cc2565723e766aedbf304f2))
+* **scheduler:** recover in-flight messages on restart and add architectural review ([940cfb1](https://github.com/NorthlandPositronics/Cogtrix/commit/940cfb1d28fbec652ae3069c1177a7ca89504a74))
+* **whatsapp:** add session start, LID resolution, and chats overview to client ([c54e8d6](https://github.com/NorthlandPositronics/Cogtrix/commit/c54e8d6d6f3b4480095657627fd419173d3da304))
+* **whatsapp:** fix poll() chatId bug and add [@lid](https://github.com/lid) sender support ([a390e1c](https://github.com/NorthlandPositronics/Cogtrix/commit/a390e1cd5da01c54e8aecd8da61aa4b086b91b78))
+
+
+### Documentation
+
+* document contact_prompts, schedule_reply, and response_timing in CONFIGURATION.md ([a24e762](https://github.com/NorthlandPositronics/Cogtrix/commit/a24e7622987d49c82b9d9b6725e22817f863cd79))
+* document datamarking defense and scheduler recovery ([bca6437](https://github.com/NorthlandPositronics/Cogtrix/commit/bca6437594f3215f5ca5d86da83fe7d25344eff8))
+
 ## [0.1.9](https://github.com/NorthlandPositronics/Cogtrix/compare/v0.1.8...v0.1.9) (2026-03-01)
 
 

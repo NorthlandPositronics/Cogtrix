@@ -9,6 +9,7 @@ exposing per-chat history.
 from __future__ import annotations
 
 import hashlib
+import heapq
 import json
 import logging
 import os
@@ -155,6 +156,7 @@ class SharedKnowledgeStore:
                 log.debug("Knowledge store: added %d new fact(s)", len(added))
         if added:
             self._index_facts(added)
+            self.save()
 
     def recall(self, query: str, k: int = 5) -> str | None:
         """Retrieve relevant facts as a formatted string for context injection.
@@ -286,8 +288,8 @@ class SharedKnowledgeStore:
             if overlap > 0:
                 scored.append((overlap, fact))
 
-        scored.sort(key=lambda x: x[0], reverse=True)
-        return [f for _, f in scored[:k]]
+        top = heapq.nlargest(k, scored, key=lambda x: x[0])
+        return [f for _, f in top]
 
     # ------------------------------------------------------------------
     # FAISS index

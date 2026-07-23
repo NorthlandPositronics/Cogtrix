@@ -1,0 +1,661 @@
+"""Unit tests for src/assistant/scheduler.py and scheduler integration in handler."""
+
+from __future__ import annotations
+
+import json
+import time
+from collections.abc import Callable
+from pathlib import Path
+from typing import Any
+from unittest.mock import MagicMock, patch
+
+from src.assistant.scheduler import (
+    MessageScheduler,
+    QuietHoursPolicy,
+    ScheduledMessage,
+    ScheduleReplyState,
+    _is_in_quiet_window,
+    _next_quiet_end,
+    create_schedule_reply_tool,
+)
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _make_scheduler(tmp_path: Path, quiet_cfg: dict | None = None) -> MessageScheduler:
+    """Return a MessageScheduler backed by tmp_path with no channels."""
+    return MessageScheduler(
+        channels={},
+        persist_path=tmp_path / "schedule.json",
+        quiet_hours_cfg=quiet_cfg,
+    )
+
+
+def _make_channel_scheduler(
+    tmp_path: Path, channel: MagicMock, name: str = "telegram"
+) -> MessageScheduler:
+    return MessageScheduler(
+        channels={name: channel},
+        persist_path=tmp_path / "schedule.json",
+    )
+
+
+# ---------------------------------------------------------------------------
+# TestScheduledMessage
+# ---------------------------------------------------------------------------
+
+
+class TestScheduledMessage:
+    """ScheduledMessage dataclass creation and round-trip serialization."""
+
+    def test_defaults(self):
+        now = time.time()
+        msg = ScheduledMessage(
+            id="abc",
+            channel="telegram",
+            chat_id="42",
+            text="hello",
+            send_at=now + 60,
+            created_at=now,
+        )
+        assert msg.status == "pending"
+        assert msg.attempts == 0
+        assert msg.max_attempts == 3
+
+    def test_to_dict_round_trip(self):
+        now = time.time()
+        msg = ScheduledMessage(
+            id="xyz",
+            channel="whatsapp",
+            chat_id="99",
+            text="hi",
+            send_at=now + 120,
+            created_at=now,
+            status="sent",
+            attempts=1,
+        )
+        d = msg.to_dict()
+        restored = ScheduledMessage.from_dict(d)
+        assert restored.id == msg.id
+        assert restored.channel == msg.channel
+        assert restored.chat_id == msg.chat_id
+        assert restored.text == msg.text
+        assert restored.send_at == msg.send_at
+        assert restored.created_at == msg.created_at
+        assert restored.status == msg.status
+        assert restored.attempts == msg.attempts
+        assert restored.max_attempts == msg.max_attempts
+
+
+# ---------------------------------------------------------------------------
+# TestScheduleReplyState
+# ---------------------------------------------------------------------------
+
+
+class TestScheduleReplyState:
+    """ScheduleReplyState initial state."""
+
+    def test_initial_values(self):
+        state = ScheduleReplyState()
+        assert state.was_called is False
+        assert state.scheduled_text == ""
+        assert state.delay_minutes == 0
+
+
+# ---------------------------------------------------------------------------
+# TestCreateScheduleReplyTool
+# ---------------------------------------------------------------------------
+
+
+class TestCreateScheduleReplyTool:
+    """Tool factory and closure behavior."""
+
+    def test_tool_name(self):
+        state = ScheduleReplyState()
+        tool = create_schedule_reply_tool(state)
+        assert tool.name == "schedule_reply"
+
+    def test_calling_tool_sets_state(self):
+        state = ScheduleReplyState()
+        tool = create_schedule_reply_tool(state)
+        result = tool.invoke({"text": "See you soon!", "delay_minutes": 60})
+        assert state.was_called is True
+        assert state.scheduled_text == "See you soon!"
+        assert state.delay_minutes == 60
+        assert "60" in result
+
+    def test_tool_closure_isolated_per_state(self):
+        state_a = ScheduleReplyState()
+        state_b = ScheduleReplyState()
+        tool_a = create_schedule_reply_tool(state_a)
+        _tool_b = create_schedule_reply_tool(state_b)
+        tool_a.invoke({"text": "reply A", "delay_minutes": 30})
+        assert state_a.was_called is True
+        assert state_b.was_called is False
+
+    def test_tool_does_not_queue_directly(self):
+        """Tool only sets state — does not interact with any scheduler."""
+        state = ScheduleReplyState()
+        tool = create_schedule_reply_tool(state)
+        # No scheduler involved; simply ensure no exception and state is set.
+        tool.invoke({"text": "Later", "delay_minutes": 120})
+        assert state.was_called is True
+
+
+# ---------------------------------------------------------------------------
+# TestMessageSchedulerSchedule
+# ---------------------------------------------------------------------------
+
+
+class TestMessageSchedulerSchedule:
+    """MessageScheduler.schedule() and cancel_pending()."""
+
+    def test_schedule_returns_string_id(self, tmp_path):
+        sched = _make_scheduler(tmp_path)
+        mid = sched.schedule("telegram", "42", "hello", time.time() + 600)
+        assert isinstance(mid, str)
+        assert len(mid) > 0
+
+    def test_schedule_adds_to_queue(self, tmp_path):
+        sched = _make_scheduler(tmp_path)
+        mid = sched.schedule("telegram", "42", "hello", time.time() + 600)
+        assert mid in sched._queue
+        msg = sched._queue[mid]
+        assert msg.channel == "telegram"
+        assert msg.chat_id == "42"
+        assert msg.text == "hello"
+        assert msg.status == "pending"
+
+    def test_cancel_pending_returns_count(self, tmp_path):
+        sched = _make_scheduler(tmp_path)
+        sched.schedule("telegram", "42", "a", time.time() + 600)
+        sched.schedule("telegram", "42", "b", time.time() + 1200)
+        cancelled = sched.cancel_pending("telegram", "42")
+        assert cancelled == 2
+
+    def test_cancel_pending_marks_status(self, tmp_path):
+        sched = _make_scheduler(tmp_path)
+        mid = sched.schedule("telegram", "42", "hello", time.time() + 600)
+        sched.cancel_pending("telegram", "42")
+        assert sched._queue[mid].status == "cancelled"
+
+    def test_cancel_pending_only_affects_target_chat(self, tmp_path):
+        sched = _make_scheduler(tmp_path)
+        mid_a = sched.schedule("telegram", "42", "for 42", time.time() + 600)
+        mid_b = sched.schedule("telegram", "99", "for 99", time.time() + 600)
+        sched.cancel_pending("telegram", "42")
+        assert sched._queue[mid_a].status == "cancelled"
+        assert sched._queue[mid_b].status == "pending"
+
+    def test_cancel_pending_zero_when_none(self, tmp_path):
+        sched = _make_scheduler(tmp_path)
+        assert sched.cancel_pending("telegram", "42") == 0
+
+    def test_cancel_does_not_affect_sent(self, tmp_path):
+        sched = _make_scheduler(tmp_path)
+        mid = sched.schedule("telegram", "42", "hello", time.time() + 600)
+        sched._queue[mid].status = "sent"
+        cancelled = sched.cancel_pending("telegram", "42")
+        assert cancelled == 0
+        assert sched._queue[mid].status == "sent"
+
+    def test_cancel_pending_cancels_sending(self, tmp_path):
+        """cancel_pending() also cancels messages in 'sending' state."""
+        sched = _make_scheduler(tmp_path)
+        mid = sched.schedule("telegram", "42", "in flight", time.time() + 600)
+        sched._queue[mid].status = "sending"
+        cancelled = sched.cancel_pending("telegram", "42")
+        assert cancelled == 1
+        assert sched._queue[mid].status == "cancelled"
+
+    def test_send_message_respects_external_cancel(self, tmp_path):
+        """_send_message does not mark 'sent' if message was cancelled during send."""
+        channel = MagicMock()
+
+        sched = _make_channel_scheduler(tmp_path, channel)
+        mid = sched.schedule("telegram", "42", "race me", time.time() - 10)
+
+        def _cancel_during_send(_chat_id, _text):
+            # Simulate cancel_pending() racing with channel.send()
+            sched._queue[mid].status = "cancelled"
+            return True  # send physically succeeded
+
+        channel.send.side_effect = _cancel_during_send
+        sched._dispatch_due()
+        # Even though channel.send() returned True, status should remain "cancelled"
+        assert sched._queue[mid].status == "cancelled"
+
+
+# ---------------------------------------------------------------------------
+# TestMessageSchedulerPersistence
+# ---------------------------------------------------------------------------
+
+
+class TestMessageSchedulerPersistence:
+    """Save/load round-trip."""
+
+    def test_save_creates_file(self, tmp_path):
+        sched = _make_scheduler(tmp_path)
+        sched.schedule("telegram", "42", "hi", time.time() + 600)
+        sched.save()
+        persist_file = tmp_path / "schedule.json"
+        assert persist_file.exists()
+
+    def test_load_restores_queue(self, tmp_path):
+        sched = _make_scheduler(tmp_path)
+        mid = sched.schedule("telegram", "42", "hi", time.time() + 600)
+        sched.save()
+
+        sched2 = _make_scheduler(tmp_path)
+        assert mid in sched2._queue
+        assert sched2._queue[mid].text == "hi"
+
+    def test_save_does_not_raise_on_write_failure(self, tmp_path):
+        """_atomic_write swallows IOErrors — save() never propagates exceptions."""
+        sched = _make_scheduler(tmp_path)
+        # Patch mkstemp so every write attempt fails.
+        with patch("src.assistant.scheduler.tempfile.mkstemp", side_effect=OSError("disk full")):
+            # Must not raise even though the underlying write fails.
+            sched._atomic_write({"test": "data"})
+
+    def test_load_skips_malformed_entry(self, tmp_path):
+        persist_file = tmp_path / "schedule.json"
+        persist_file.write_text(
+            json.dumps({"bad-id": {"id": "bad-id", "broken": True}}), encoding="utf-8"
+        )
+        sched = _make_scheduler(tmp_path)
+        assert "bad-id" not in sched._queue
+
+
+# ---------------------------------------------------------------------------
+# TestStaleExpiration
+# ---------------------------------------------------------------------------
+
+
+class TestStaleExpiration:
+    """Messages overdue by > 2 h are expired on load."""
+
+    def test_stale_message_expired_on_load(self, tmp_path):
+        sched = _make_scheduler(tmp_path)
+        # Place a message with send_at far in the past (3 hours ago).
+        past = time.time() - 3 * 3600
+        mid = sched.schedule("telegram", "42", "old msg", past)
+        sched.save()
+
+        sched2 = _make_scheduler(tmp_path)
+        assert sched2._queue[mid].status == "expired"
+
+    def test_recent_pending_not_expired(self, tmp_path):
+        sched = _make_scheduler(tmp_path)
+        future = time.time() + 600
+        mid = sched.schedule("telegram", "42", "fresh", future)
+        sched.save()
+
+        sched2 = _make_scheduler(tmp_path)
+        assert sched2._queue[mid].status == "pending"
+
+
+# ---------------------------------------------------------------------------
+# TestQuietHours
+# ---------------------------------------------------------------------------
+
+
+class TestQuietHours:
+    """Quiet hours enforcement helpers."""
+
+    def test_is_in_quiet_window_wraps_midnight(self):
+        # 23:00–08:00 window; hour=02 should be in window.
+        policy = QuietHoursPolicy(start_hour=23, end_hour=8, timezone="UTC")
+        # 2025-01-01 02:00 UTC = 1735696800
+        import datetime
+
+        dt = datetime.datetime(2025, 1, 1, 2, 0, 0, tzinfo=datetime.UTC)
+        assert _is_in_quiet_window(policy, dt.timestamp()) is True
+
+    def test_is_in_quiet_window_outside(self):
+        policy = QuietHoursPolicy(start_hour=23, end_hour=8, timezone="UTC")
+        import datetime
+
+        dt = datetime.datetime(2025, 1, 1, 12, 0, 0, tzinfo=datetime.UTC)
+        assert _is_in_quiet_window(policy, dt.timestamp()) is False
+
+    def test_next_quiet_end_returns_future_timestamp(self):
+        policy = QuietHoursPolicy(start_hour=23, end_hour=8, timezone="UTC")
+        import datetime
+
+        # During quiet window at 02:00; end should be 08:00 same day.
+        dt = datetime.datetime(2025, 1, 1, 2, 0, 0, tzinfo=datetime.UTC)
+        end = _next_quiet_end(policy, dt.timestamp())
+        end_dt = datetime.datetime.fromtimestamp(end, tz=datetime.UTC)
+        assert end_dt.hour == 8
+        assert end_dt.date() == datetime.date(2025, 1, 1)
+
+    def test_scheduler_defers_during_quiet_hours(self, tmp_path):
+        """_dispatch_due defers messages that fall in quiet window."""
+        channel = MagicMock()
+        channel.send.return_value = True
+
+        import datetime
+
+        # Force current time to 02:00 UTC so quiet window is active.
+        frozen_now = datetime.datetime(2025, 1, 1, 2, 0, 0, tzinfo=datetime.UTC)
+        frozen_ts = frozen_now.timestamp()
+
+        quiet_cfg = {"_default": {"quiet_hours": [23, 8], "timezone": "UTC"}}
+        sched = MessageScheduler(
+            channels={"telegram": channel},
+            persist_path=tmp_path / "schedule.json",
+            quiet_hours_cfg=quiet_cfg,
+        )
+        # Schedule a message due now.
+        mid = sched.schedule("telegram", "42", "deferred msg", frozen_ts - 10)
+
+        with patch("src.assistant.scheduler.time") as mock_time:
+            mock_time.time.return_value = frozen_ts
+            sched._dispatch_due()
+
+        # Message should not have been sent; status still pending.
+        channel.send.assert_not_called()
+        assert sched._queue[mid].status == "pending"
+        # send_at should have been pushed forward to 08:00.
+        assert sched._queue[mid].send_at > frozen_ts
+
+
+# ---------------------------------------------------------------------------
+# TestDispatchSend
+# ---------------------------------------------------------------------------
+
+
+class TestDispatchSend:
+    """MessageScheduler._dispatch_due() send path."""
+
+    def test_sends_due_message(self, tmp_path):
+        channel = MagicMock()
+        channel.send.return_value = True
+        sched = _make_channel_scheduler(tmp_path, channel)
+
+        mid = sched.schedule("telegram", "42", "hi", time.time() - 10)
+        sched._dispatch_due()
+
+        channel.send.assert_called_once_with("42", "hi")
+        assert sched._queue[mid].status == "sent"
+
+    def test_failed_send_retries(self, tmp_path):
+        channel = MagicMock()
+        channel.send.return_value = False
+        sched = _make_channel_scheduler(tmp_path, channel)
+
+        mid = sched.schedule("telegram", "42", "retry me", time.time() - 10)
+        sched._dispatch_due()
+
+        assert sched._queue[mid].status == "pending"
+        assert sched._queue[mid].attempts == 1
+        # send_at advanced by backoff.
+        assert sched._queue[mid].send_at > time.time()
+
+    def test_exhausted_attempts_marked_failed(self, tmp_path):
+        channel = MagicMock()
+        channel.send.return_value = False
+        sched = _make_channel_scheduler(tmp_path, channel)
+
+        mid = sched.schedule("telegram", "42", "fail me", time.time() - 10)
+        sched._queue[mid].attempts = 2  # already at max-1
+        sched._queue[mid].max_attempts = 3
+        sched._dispatch_due()
+
+        assert sched._queue[mid].status == "failed"
+
+    def test_unknown_channel_marks_failed(self, tmp_path):
+        sched = _make_scheduler(tmp_path)  # no channels
+        mid = sched.schedule("telegram", "42", "no channel", time.time() - 10)
+        sched._dispatch_due()
+        assert sched._queue[mid].status == "failed"
+
+    def test_future_message_not_dispatched(self, tmp_path):
+        channel = MagicMock()
+        sched = _make_channel_scheduler(tmp_path, channel)
+
+        sched.schedule("telegram", "42", "future", time.time() + 9999)
+        sched._dispatch_due()
+
+        channel.send.assert_not_called()
+
+    def test_cancelled_message_not_dispatched(self, tmp_path):
+        channel = MagicMock()
+        sched = _make_channel_scheduler(tmp_path, channel)
+
+        mid = sched.schedule("telegram", "42", "cancel me", time.time() - 10)
+        sched._queue[mid].status = "cancelled"
+        sched._dispatch_due()
+
+        channel.send.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# TestCleanup
+# ---------------------------------------------------------------------------
+
+
+class TestCleanup:
+    """MessageScheduler._cleanup_old() removes old terminal messages."""
+
+    def test_old_sent_removed(self, tmp_path):
+        sched = _make_scheduler(tmp_path)
+        mid = sched.schedule("telegram", "42", "done", time.time() - 10)
+        sched._queue[mid].status = "sent"
+        sched._queue[mid].created_at = time.time() - 25 * 3600  # > 24h old
+        sched._cleanup_old()
+        assert mid not in sched._queue
+
+    def test_recent_sent_kept(self, tmp_path):
+        sched = _make_scheduler(tmp_path)
+        mid = sched.schedule("telegram", "42", "recent", time.time() - 10)
+        sched._queue[mid].status = "sent"
+        sched._cleanup_old()
+        assert mid in sched._queue
+
+    def test_pending_never_cleaned(self, tmp_path):
+        sched = _make_scheduler(tmp_path)
+        mid = sched.schedule("telegram", "42", "pending", time.time() - 10)
+        sched._queue[mid].created_at = time.time() - 48 * 3600
+        sched._cleanup_old()
+        assert mid in sched._queue
+
+
+# ---------------------------------------------------------------------------
+# TestHandlerIntegration
+# ---------------------------------------------------------------------------
+
+
+class TestHandlerIntegration:
+    """Integration between MessageHandler and MessageScheduler."""
+
+    def _make_handler(
+        self,
+        tmp_path: Path,
+        scheduler: MessageScheduler | None = None,
+        agent_runner: Callable[..., Any] | None = None,
+    ):
+        from src.assistant.handler import MessageHandler
+        from src.memory.context import MemoryContext
+
+        if agent_runner is None:
+            agent_runner = MagicMock(return_value="plain reply")
+
+        session = MagicMock()
+        session.session_key = "telegram::42"
+        session.lock = MagicMock()
+        session.lock.__enter__ = MagicMock(return_value=None)
+        session.lock.__exit__ = MagicMock(return_value=False)
+        session.guardrail_violations = 0
+        session.memory_manager.prepare_context.return_value = MemoryContext(
+            messages=[], context_prefix=None
+        )
+
+        session_mgr = MagicMock()
+        session_mgr.get_or_create.return_value = session
+
+        handler = MessageHandler(
+            session_mgr=session_mgr,
+            config={},
+            llm=MagicMock(),
+            system_prompt="sys",
+            registry=MagicMock(),
+            approvals=set(),
+            available_tools={},
+            active_tools=[],
+            agent_runner=agent_runner,
+            scheduler=scheduler,
+        )
+        return handler, session
+
+    def _make_msg(self):
+        from src.assistant.channel import IncomingMessage
+
+        return IncomingMessage(
+            channel="telegram",
+            chat_id="42",
+            message_id="m1",
+            sender_id="u1",
+            sender_name="Alice",
+            text="Hello",
+            timestamp=time.time(),
+        )
+
+    def test_immediate_delivery_when_no_scheduler(self, tmp_path):
+        """Without a scheduler, reply is sent immediately."""
+        channel = MagicMock()
+        channel.send.return_value = True
+
+        handler, _ = self._make_handler(tmp_path, scheduler=None)
+        handler.handle(self._make_msg(), channel)
+
+        channel.send.assert_called_once()
+
+    def test_immediate_delivery_when_agent_does_not_call_schedule_reply(self, tmp_path):
+        """Scheduler present but agent does not call schedule_reply → immediate send."""
+        channel = MagicMock()
+        channel.send.return_value = True
+
+        sched = _make_scheduler(tmp_path)
+        runner = MagicMock(return_value="immediate answer")
+        handler, _ = self._make_handler(tmp_path, scheduler=sched, agent_runner=runner)
+        handler.handle(self._make_msg(), channel)
+
+        channel.send.assert_called_once_with("42", "immediate answer")
+
+    def test_scheduled_delivery_when_agent_calls_schedule_reply(self, tmp_path):
+        """When agent calls schedule_reply, response is queued and NOT sent immediately."""
+        channel = MagicMock()
+        channel.send.return_value = True
+
+        sched = _make_scheduler(tmp_path)
+
+        def _runner_that_schedules(**kwargs):
+            # Find the schedule_reply tool in active_tools_list and invoke it.
+            tools = kwargs.get("active_tools_list", [])
+            for t in tools:
+                if getattr(t, "name", None) == "schedule_reply":
+                    t.invoke({"text": "Scheduled reply!", "delay_minutes": 60})
+                    break
+            return "Scheduled reply!"
+
+        handler, _ = self._make_handler(
+            tmp_path, scheduler=sched, agent_runner=_runner_that_schedules
+        )
+        handler.handle(self._make_msg(), channel)
+
+        # Immediate send should NOT have been called.
+        channel.send.assert_not_called()
+        # One message in the queue.
+        assert len(sched._queue) == 1
+        queued = next(iter(sched._queue.values()))
+        assert queued.text == "Scheduled reply!"
+        assert queued.status == "pending"
+
+    def test_cancel_on_new_message(self, tmp_path):
+        """Incoming message cancels pending replies before running agent."""
+        channel = MagicMock()
+        channel.send.return_value = True
+
+        sched = _make_scheduler(tmp_path)
+        # Pre-populate a pending message.
+        mid = sched.schedule("telegram", "42", "old reply", time.time() + 3600)
+
+        handler, _ = self._make_handler(tmp_path, scheduler=sched)
+        handler.handle(self._make_msg(), channel)
+
+        assert sched._queue[mid].status == "cancelled"
+
+    def test_memory_updated_with_scheduled_text(self, tmp_path):
+        """Memory is updated with the scheduled text (not an empty string)."""
+        channel = MagicMock()
+        sched = _make_scheduler(tmp_path)
+
+        def _runner_schedules(**kwargs):
+            tools = kwargs.get("active_tools_list", [])
+            for t in tools:
+                if getattr(t, "name", None) == "schedule_reply":
+                    t.invoke({"text": "Delayed hello", "delay_minutes": 30})
+                    break
+            return "Delayed hello"
+
+        handler, session = self._make_handler(
+            tmp_path, scheduler=sched, agent_runner=_runner_schedules
+        )
+        handler.handle(self._make_msg(), channel)
+
+        session.memory_manager.update.assert_called_once_with("Hello", "Delayed hello")
+
+    def test_schedule_reply_tool_injected_into_active_tools(self, tmp_path):
+        """schedule_reply tool is present in active_tools_list when scheduler is set."""
+        sched = _make_scheduler(tmp_path)
+
+        captured_tools: list = []
+
+        def _capture_runner(**kwargs):
+            captured_tools.extend(kwargs.get("active_tools_list", []))
+            return "ok"
+
+        channel = MagicMock()
+        handler, _ = self._make_handler(tmp_path, scheduler=sched, agent_runner=_capture_runner)
+        handler.handle(self._make_msg(), channel)
+
+        tool_names = [getattr(t, "name", None) for t in captured_tools]
+        assert "schedule_reply" in tool_names
+
+    def test_no_schedule_reply_tool_without_scheduler(self, tmp_path):
+        """schedule_reply is NOT injected when scheduler is None."""
+        captured_tools: list = []
+
+        def _capture_runner(**kwargs):
+            captured_tools.extend(kwargs.get("active_tools_list", []))
+            return "ok"
+
+        channel = MagicMock()
+        handler, _ = self._make_handler(tmp_path, scheduler=None, agent_runner=_capture_runner)
+        handler.handle(self._make_msg(), channel)
+
+        tool_names = [getattr(t, "name", None) for t in captured_tools]
+        assert "schedule_reply" not in tool_names
+
+
+# ---------------------------------------------------------------------------
+# TestDynamicDispatch
+# ---------------------------------------------------------------------------
+
+
+class TestDynamicDispatch:
+    """_next_wake_interval adapts sleep duration to pending queue state."""
+
+    def test_next_wake_interval_adapts_to_queue(self, tmp_path):
+        """_next_wake_interval returns time until next pending message, clamped."""
+        sched = _make_scheduler(tmp_path)
+        # No pending messages — returns default interval
+        assert sched._next_wake_interval() == sched._dispatch_interval
+        # Schedule a message due in 5 seconds
+        sched.schedule("telegram", "42", "soon", time.time() + 5)
+        interval = sched._next_wake_interval()
+        assert 1.0 <= interval <= 6.0  # should be ~5s, clamped to min 1s

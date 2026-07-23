@@ -12,6 +12,9 @@ This page covers every way to configure Cogtrix — from the simplest environmen
   - [MCP Servers](#mcp-servers)
   - [Tool Loading](#tool-loading)
   - [Assistant Mode](#assistant-mode)
+  - [Contact Prompts](#contact-prompts)
+  - [Scheduled Reply Delivery](#scheduled-reply-delivery)
+  - [Response Timing / Quiet Hours](#response-timing--quiet-hours)
   - [Assistant Guardrails](#assistant-guardrails)
 - [Environment Variables](#environment-variables)
 - [Command Line Arguments](#command-line-arguments)
@@ -461,21 +464,14 @@ MCP tools are registered into the on-demand pool and loaded by the agent via `re
 
 Use `/mcp` to list connected servers and their tools. Use `/mcp restart [name]` to reconnect.
 
-#### Docker Compose (SSE via supergateway)
+#### Docker (SSE via supergateway)
 
 When running Cogtrix in Docker, stdio MCP servers can't be spawned directly because each service runs in its own container. Use [supergateway](https://github.com/supercorp-ai/supergateway) to bridge stdio servers to SSE:
 
 ```yaml
-# docker-compose.yml (excerpt)
-mcp-filesystem:
-  image: supercorp/supergateway
-  command: >
-    --stdio "npx -y @modelcontextprotocol/server-filesystem /data"
-    --port 8000
-  volumes:
-    - mcp-workspace:/data
-  expose:
-    - "8000"
+# Example: run supergateway as a separate container
+# docker run -d --name mcp-filesystem -v mcp-data:/data supercorp/supergateway \
+#   --stdio "npx -y @modelcontextprotocol/server-filesystem /data" --port 8000
 ```
 
 Then configure Cogtrix to connect via SSE:
@@ -487,8 +483,6 @@ mcp_servers:
     url: http://mcp-filesystem:8000/sse
     requires_confirmation: false
 ```
-
-The shared `mcp-workspace` volume is mounted at `/data` in the MCP server and at `/app/mcp-data` in the Cogtrix container, giving both services read/write access to the same files. See the included `docker-compose.yml` for the full working setup.
 
 ### Tool Loading
 
@@ -627,6 +621,10 @@ services:
     phonebook:
       alice: "+14155551234"
       bob: "+442071234567"
+    contact_prompts:
+      alice: |
+        You are replying to Alice on behalf of the user.
+        Be friendly and casual.
     rate_limit: 30
     max_message_length: 4096
 ```
@@ -642,6 +640,7 @@ services:
 | `filter_mode` | string | `"none"` | `"none"`, `"whitelist"`, or `"blacklist"` |
 | `contacts` | array | `[]` | E.164 phone numbers for the filter list |
 | `phonebook` | object | `{}` | Nickname → phone number map |
+| `contact_prompts` | object | `{}` | Per-contact system prompts (see [Contact Prompts](#contact-prompts)) |
 | `rate_limit` | int | `30` | Max outbound messages per hour (0 = unlimited) |
 | `max_message_length` | int | `4096` | Truncate outgoing messages to this length |
 
@@ -665,6 +664,10 @@ services:
     phonebook:
       alice: "123456789"
       team: "-1001234567890"
+    contact_prompts:
+      alice: |
+        You are replying to Alice on behalf of the user.
+        Be friendly and casual.
     rate_limit: 30
     max_message_length: 4096
 ```
@@ -678,6 +681,7 @@ services:
 | `filter_mode` | string | `"none"` | `"none"`, `"whitelist"`, or `"blacklist"` |
 | `contacts` | array | `[]` | Chat IDs or @usernames for the filter list |
 | `phonebook` | object | `{}` | Nickname → chat ID map |
+| `contact_prompts` | object | `{}` | Per-contact system prompts (see [Contact Prompts](#contact-prompts)) |
 | `rate_limit` | int | `30` | Max outbound messages per hour (0 = unlimited) |
 | `max_message_length` | int | `4096` | Truncate outgoing messages to this length |
 
@@ -728,6 +732,7 @@ services:
       recall_k: 5              # facts retrieved per query
       max_facts: 10000
     guardrails:
+      datamarking: true                # Microsoft Spotlighting prompt injection defense
       enabled: true                    # master kill switch
       max_input_length: 4000           # chars
       unicode_checks: true             # invisible/RTL character detection
@@ -772,6 +777,7 @@ services:
 | `knowledge.recall_k` | int | `5` | Number of facts recalled per query |
 | `knowledge.max_facts` | int | `10000` | Maximum stored facts |
 | `knowledge.data_dir` | string | `"data"` | Base directory for knowledge persistence (facts.json, FAISS index) |
+| `guardrails.datamarking` | bool | `true` | Enable Microsoft Spotlighting (datamarking) — interleaves a random token at word boundaries in user messages so the LLM treats them as data, not instructions |
 | `guardrails.enabled` | bool | `true` | Master kill switch for all guardrails |
 | `guardrails.max_input_length` | int | `4000` | Maximum input length in characters |
 | `guardrails.unicode_checks` | bool | `true` | Detect invisible/RTL Unicode steganography |
@@ -807,6 +813,67 @@ services:
 9. SIGINT/SIGTERM triggers graceful shutdown: all sessions saved, knowledge store persisted.
 
 **Prerequisites:** WhatsApp requires a running Waha container. Telegram requires a bot token. Both must be configured in their respective `services.whatsapp` / `services.telegram` sections.
+
+### Contact Prompts
+
+`contact_prompts` lets operators assign a per-contact system prompt that **replaces** the default assistant system prompt entirely for that contact. Configure it inside the channel config (`services.whatsapp` or `services.telegram`), keyed by the same names used in `phonebook`.
+
+```yaml
+services:
+  whatsapp:
+    phonebook:
+      alice: "+1234567890"
+    contact_prompts:
+      alice: |
+        You are replying to Alice on behalf of the user.
+        Be friendly and casual. Use the schedule_reply tool
+        to delay responses by 1-3 hours.
+      # Or reference a file:
+      # alice: /path/to/alice_prompt.txt
+```
+
+**Matching:** the handler looks up the incoming message's phone number / chat ID in `phonebook` to find a contact name, then checks `contact_prompts` for that name. If no match is found, or the resolved prompt is empty, the default assistant system prompt is used unchanged.
+
+**File paths:** a value that starts with `/` or `~` is treated as a file path and its contents are loaded at message-handling time. All other values are used as inline prompt text.
+
+### Scheduled Reply Delivery
+
+The `schedule_reply` tool allows the agent to queue a reply for deferred delivery instead of sending it immediately. It is injected automatically when assistant mode is active and channels are configured — no extra config is required to enable it.
+
+The agent decides when to use it based on instructions in its system prompt (or a `contact_prompts` entry). Call it with the full reply text and a delay in minutes.
+
+**Behavior:**
+
+- Queued messages are persisted to `data/assistant/schedule.json` and survive restarts.
+- Delivery is retried up to 3 times on failure, with backoffs of 30 s, 2 min, and 10 min.
+- Messages that are still pending more than 2 hours past their scheduled time are marked `expired`.
+- Terminal-state messages (sent, cancelled, failed, expired) are cleaned up after 24 hours.
+- When a new message arrives from the same chat, any pending scheduled reply for that chat is cancelled automatically.
+
+### Response Timing / Quiet Hours
+
+`response_timing` under `services.assistant` defers scheduled replies that would be delivered during a contact's quiet hours. Entries are keyed by contact name; `_default` applies to any contact without a specific entry.
+
+```yaml
+services:
+  assistant:
+    response_timing:
+      _default:
+        timezone: "UTC"
+        quiet_hours: [23, 8]   # 11 pm to 8 am
+      alice:
+        timezone: "America/New_York"
+        quiet_hours: [22, 7]   # 10 pm to 7 am EST
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `timezone` | string | IANA timezone name (e.g. `"Asia/Dubai"`, `"America/New_York"`). Defaults to `"UTC"` if omitted or invalid. |
+| `quiet_hours` | `[start, end]` | Two-element list of hours (0–23). The quiet window runs from `start` up to (but not including) `end`. Wraps midnight when `start > end` (e.g. `[23, 8]` covers 11 pm–8 am). `start` and `end` must differ. |
+
+When a scheduled reply's delivery time falls inside the quiet window, the scheduler defers it to the moment the window ends (`end_hour:00` in the contact's timezone).
+
+Quiet hours only affect the `MessageScheduler` — they do not block immediate (non-scheduled) replies.
 
 ### Assistant Guardrails
 

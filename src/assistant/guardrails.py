@@ -36,6 +36,11 @@ _INJECTION_PATTERNS: list[re.Pattern[str]] = [
         r"(new\s+)?instructions?:\s",
         r"override\s+(previous|all|your)\b",
         r"forget\s+(everything|all|previous|your)\b",
+        r"(drop|clear|reset|erase|wipe)\s+(all|everything|previous|prior|your|the)\b",
+        r"(drop|clear|reset|erase|wipe)\s+.*\b(context|history|memory|instructions?|rules?|prompts?)\b",
+        r"now\s+you\s+are\s+(a|an|the|my)\b",
+        r"from\s+now\s+on\s+you\s+(are|will|should|must)\b",
+        r"stop\s+being\s+(a|an|the)\b",
         r"\bDAN\b.*\bmode\b",
         r"jailbreak",
         r"do\s+anything\s+now",
@@ -456,9 +461,8 @@ class ChatRateLimiter:
 
             window = self._windows.get(chat_id)
             if window is None:
-                self._windows[chat_id] = _ChatWindow()
-                self._windows[chat_id].timestamps.append(time.monotonic())
-                return GuardrailResult(is_safe=True)
+                window = _ChatWindow()
+                self._windows[chat_id] = window
 
             now = time.monotonic()
 
@@ -543,7 +547,7 @@ class ViolationTracker:
                 cid: [ts - _MONO_OFFSET for ts in timestamps]
                 for cid, timestamps in self._violations.items()
             }
-            self._save_snapshot(snapshot)
+        self._save_snapshot(snapshot)
 
     def _cleanup_stale(self) -> None:
         now = time.monotonic()
@@ -579,7 +583,7 @@ class ViolationTracker:
                 cid: [ts - _MONO_OFFSET for ts in timestamps]
                 for cid, timestamps in self._violations.items()
             }
-            self._save_snapshot(snapshot)
+        self._save_snapshot(snapshot)
 
     def save(self) -> None:
         self._save()

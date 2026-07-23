@@ -51,7 +51,14 @@ class TelegramChannel(Channel):
         self._phonebook: dict[str, str] = config.get("phonebook", {})
         self._long_poll_timeout = long_poll_timeout
         self._last_update_id: int = 0
-        self._client = TelegramBotClient(token=self._bot_token or "") if self._bot_token else None
+        self._client = (
+            TelegramBotClient(
+                token=self._bot_token or "",
+                timeout=long_poll_timeout + 10,
+            )
+            if self._bot_token
+            else None
+        )
 
     @property
     def name(self) -> str:
@@ -68,16 +75,17 @@ class TelegramChannel(Channel):
         )
 
         result: list[IncomingMessage] = []
+        batch_max_id = self._last_update_id
         for msg in raw_messages:
+            if msg.update_id > batch_max_id:
+                batch_max_id = msg.update_id
+
             if not _check_receive_contact(
                 msg.chat_id, self._filter_mode, self._contacts, self._phonebook
             ):
                 continue
             if not msg.text.strip():
                 continue
-
-            if msg.update_id > self._last_update_id:
-                self._last_update_id = msg.update_id
 
             sender_name = msg.from_first_name or msg.from_username
             result.append(
@@ -92,6 +100,7 @@ class TelegramChannel(Channel):
                 )
             )
 
+        self._last_update_id = batch_max_id
         return result
 
     def send(self, chat_id: str, text: str) -> bool:

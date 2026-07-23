@@ -54,7 +54,6 @@ Thumbs.db
 tests
 Dockerfile
 .dockerignore
-docker-compose.yml
 setup.cfg
 mypy_report
 htmlcov

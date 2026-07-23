@@ -335,17 +335,18 @@ class TestWhatsAppCheck:
     @patch("src.tools.whatsapp.REQUESTS_AVAILABLE", True)
     @patch("src.tools.whatsapp._get_client")
     def test_check_returns_messages(self, mock_get_client):
-        from src.tools._whatsapp_client import Message
+        from src.tools._whatsapp_client import ChatOverview, Message
         from src.tools.whatsapp import whatsapp_check
 
+        msg = Message(
+            id="msg1",
+            timestamp=1700000000,
+            from_number="14155551234@c.us",
+            body="Hi there!",
+        )
         mock_client = MagicMock()
-        mock_client.get_messages.return_value = [
-            Message(
-                id="msg1",
-                timestamp=1700000000,
-                from_number="14155551234@c.us",
-                body="Hi there!",
-            ),
+        mock_client.get_chats_overview.return_value = [
+            ChatOverview(id="14155551234@c.us", name="Alice", last_message=msg),
         ]
         mock_get_client.return_value = mock_client
 
@@ -359,7 +360,7 @@ class TestWhatsAppCheck:
         from src.tools.whatsapp import whatsapp_check
 
         mock_client = MagicMock()
-        mock_client.get_messages.return_value = []
+        mock_client.get_chats_overview.return_value = []
         mock_get_client.return_value = mock_client
 
         result = whatsapp_check()
@@ -368,25 +369,31 @@ class TestWhatsAppCheck:
     @patch("src.tools.whatsapp.REQUESTS_AVAILABLE", True)
     @patch("src.tools.whatsapp._get_client")
     def test_check_filters_by_contact(self, mock_get_client):
-        from src.tools._whatsapp_client import Message
+        from src.tools._whatsapp_client import ChatOverview, Message
         from src.tools.whatsapp import _cfg, whatsapp_check
 
         _cfg.filter_mode = "whitelist"
         _cfg.contacts = ["+14155551234"]
 
         mock_client = MagicMock()
-        mock_client.get_messages.return_value = [
-            Message(
-                id="msg1",
-                timestamp=1700000000,
-                from_number="14155551234@c.us",
-                body="Allowed",
+        mock_client.get_chats_overview.return_value = [
+            ChatOverview(
+                id="14155551234@c.us",
+                last_message=Message(
+                    id="msg1",
+                    timestamp=1700000000,
+                    from_number="14155551234@c.us",
+                    body="Allowed",
+                ),
             ),
-            Message(
-                id="msg2",
-                timestamp=1700000001,
-                from_number="99999999999@c.us",
-                body="Filtered out",
+            ChatOverview(
+                id="99999999999@c.us",
+                last_message=Message(
+                    id="msg2",
+                    timestamp=1700000001,
+                    from_number="99999999999@c.us",
+                    body="Filtered out",
+                ),
             ),
         ]
         mock_get_client.return_value = mock_client
@@ -399,26 +406,32 @@ class TestWhatsAppCheck:
     @patch("src.tools.whatsapp._get_client")
     def test_check_preserves_outgoing_messages_with_whitelist(self, mock_get_client):
         """Outgoing messages (from_me=True) must not be dropped by the contact filter."""
-        from src.tools._whatsapp_client import Message
+        from src.tools._whatsapp_client import ChatOverview, Message
         from src.tools.whatsapp import _cfg, whatsapp_check
 
         _cfg.filter_mode = "whitelist"
         _cfg.contacts = ["+14155551234"]
 
         mock_client = MagicMock()
-        mock_client.get_messages.return_value = [
-            Message(
-                id="msg_out",
-                timestamp=1700000000,
-                from_number="my_own_number@c.us",
-                body="Outgoing reply",
-                from_me=True,
+        mock_client.get_chats_overview.return_value = [
+            ChatOverview(
+                id="my_own_number@c.us",
+                last_message=Message(
+                    id="msg_out",
+                    timestamp=1700000000,
+                    from_number="my_own_number@c.us",
+                    body="Outgoing reply",
+                    from_me=True,
+                ),
             ),
-            Message(
-                id="msg_in",
-                timestamp=1700000001,
-                from_number="14155551234@c.us",
-                body="Incoming allowed",
+            ChatOverview(
+                id="14155551234@c.us",
+                last_message=Message(
+                    id="msg_in",
+                    timestamp=1700000001,
+                    from_number="14155551234@c.us",
+                    body="Incoming allowed",
+                ),
             ),
         ]
         mock_get_client.return_value = mock_client

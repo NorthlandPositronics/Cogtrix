@@ -135,6 +135,7 @@ class JsonFileMemoryStore(BaseMemoryStore):
     def __init__(self, base_dir: str = "data/history"):
         self.base_path = Path(base_dir)
         self._save_disabled = False
+        self._consecutive_save_failures = 0
         try:
             self.base_path.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
@@ -188,6 +189,7 @@ class JsonFileMemoryStore(BaseMemoryStore):
                 with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
                     json.dump(serializable, f, ensure_ascii=False, indent=2)
                 os.replace(tmp_path, path)
+                self._consecutive_save_failures = 0
             except Exception:
                 try:
                     os.unlink(tmp_path)
@@ -195,5 +197,18 @@ class JsonFileMemoryStore(BaseMemoryStore):
                     pass
                 raise
         except Exception as exc:
-            self._save_disabled = True
-            log.warning("Cannot save history to %s: %s. History will not be saved.", path, exc)
+            self._consecutive_save_failures += 1
+            if self._consecutive_save_failures >= 3:
+                self._save_disabled = True
+                log.warning(
+                    "Cannot save history to %s: %s. Disabling saves after 3 consecutive failures.",
+                    path,
+                    exc,
+                )
+            else:
+                log.warning(
+                    "History save failed for %s (attempt %d/3): %s",
+                    path,
+                    self._consecutive_save_failures,
+                    exc,
+                )

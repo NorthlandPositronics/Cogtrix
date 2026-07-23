@@ -72,6 +72,13 @@ data/
 Thumbs.db
 .coverage
 
+# ── Audit & analysis artifacts ───────────────────────────────────
+docs/bugs/
+docs/ux/
+MagicMock/
+mypy_report/
+settings/
+
 # ── AI coding agents ──────────────────────────────────────────────
 # Anthropic Claude Code
 CLAUDE.md

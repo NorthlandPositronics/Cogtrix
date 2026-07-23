@@ -15,9 +15,11 @@ Architecture::
     └──────────┘  json  │  contents      │  emb   └──────────────┘
                         └─────────────────┘
 
-    search_type="auto"     → Exa picks neural or keyword automatically
+    search_type="auto"     → Exa picks the best strategy automatically
     search_type="neural"   → semantic/meaning-based ranking
-    search_type="keyword"  → traditional keyword matching
+    search_type="fast"     → quick, lower-latency search
+    search_type="deep"     → thorough, higher-quality search
+    search_type="instant"  → fastest, cached results
 
 Three tools are exposed:
     exa_search       - Semantic web search with optional content extraction.
@@ -108,8 +110,8 @@ class ExaSearchInput(BaseModel):
     search_type: str = Field(
         default="auto",
         description=(
-            "Search type: 'auto' (let Exa decide), 'neural' (semantic/meaning-based), "
-            "or 'keyword' (traditional keyword matching)"
+            "Search type: 'auto' (let Exa decide), 'neural' (semantic), "
+            "'fast' (quick), 'deep' (thorough), or 'instant' (cached)"
         ),
     )
 
@@ -156,7 +158,7 @@ def exa_search(
         query: Natural-language search query.
         num_results: Number of results (1-10).
         include_text: Whether to include page text.
-        search_type: 'auto', 'neural', or 'keyword'.
+        search_type: 'auto', 'neural', 'fast', 'deep', or 'instant'.
 
     Returns:
         Formatted search results with content.
@@ -168,7 +170,8 @@ def exa_search(
         return "Error: Empty search query"
 
     num_results = max(1, min(num_results, 10))
-    if search_type not in ("auto", "neural", "keyword"):
+    _valid_types = ("auto", "neural", "fast", "deep", "instant")
+    if search_type not in _valid_types:
         search_type = "auto"
 
     try:
@@ -324,7 +327,7 @@ TOOL_CONFIGS = [
         "name": "exa_search",
         "description": (
             "Semantic web search using Exa's neural embeddings. "
-            "Use search_type='neural' for conceptual queries, 'keyword' for exact matches. "
+            "Use search_type='neural' for conceptual queries, 'deep' for thorough results. "
             "Set include_text=True to get extracted page content."
         ),
         "input_schema": ExaSearchInput,

@@ -1152,7 +1152,7 @@ def _apply_env_vars(config: Config) -> None:
     tg_token = os.environ.get("COGTRIX_TELEGRAM_TOKEN")
     if tg_token:
         tg = config.services.setdefault("telegram", {})
-        tg["token"] = tg_token
+        tg["bot_token"] = tg_token
 
     # Allowed write paths
     if env_val := os.getenv("COGTRIX_ALLOWED_WRITE_PATHS"):

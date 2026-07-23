@@ -343,20 +343,15 @@ You: Send the analysis to bob on Telegram
 
 ## Using Docker Compose
 
-The project's `docker-compose.yml` includes a Telegram token placeholder. To enable Telegram in a Docker deployment:
+> **Note:** A production-ready `docker-compose.yml` is not yet included in the
+> repository. The section below describes the intended setup for when it ships.
 
-1. Uncomment the `COGTRIX_TELEGRAM_TOKEN` line in `docker-compose.yml`:
+To enable Telegram in a Docker deployment, set the `COGTRIX_TELEGRAM_TOKEN`
+environment variable on the Cogtrix container:
 
 ```yaml
 environment:
   COGTRIX_TELEGRAM_TOKEN: "7123456789:AAHb2Txq-..."
-```
-
-2. Start the stack:
-
-```bash
-docker compose up -d
-docker compose exec cogtrix python cogtrix.py
 ```
 
 You can combine Telegram and WhatsApp in the same deployment -- both sets of tools will be available simultaneously.
@@ -460,4 +455,4 @@ You can use **both simultaneously** -- configure both `services.whatsapp` and `s
 - [Configuration Reference -- Telegram](CONFIGURATION.md#telegram-messaging) -- Full option table
 - [Tools Reference -- Telegram](TOOLS_REFERENCE.md#telegram-messaging) -- Tool parameters
 - [WhatsApp Guide](WHATSAPP_GUIDE.md) -- Set up WhatsApp alongside Telegram
-- [docker-compose.yml](../docker-compose.yml) -- Docker Compose with Telegram support
+- [Dockerfile](../Dockerfile) -- Docker image build

@@ -6,7 +6,7 @@
 |-------|-------------|
 | [Configuration](CONFIGURATION.md) | Config file format, all settings, environment variables |
 | [Providers](PROVIDERS.md) | LLM provider setup (OpenAI, Ollama, Anthropic, Google, xAI) |
-| [Tools Reference](TOOLS_REFERENCE.md) | All 51 built-in tools with parameters and examples |
+| [Tools Reference](TOOLS_REFERENCE.md) | All built-in tools with parameters and examples |
 | [Memory Modes](MEMORY_MODES.md) | Conversation, code, and reasoning memory modes |
 | [Deep Think](DEEPTHINK.md) | Tree-of-Thought reasoning, think categories, research pipeline |
 | [RAG Guide](RAG_GUIDE.md) | Document ingestion, embeddings, retrieval-augmented generation |
@@ -58,50 +58,4 @@
 
 | Document | Description |
 |----------|-------------|
-| [Input Prompt UX](ux/input-prompt.md) | UX spec for interactive input prompt |
 | [AI Interaction Audit v3](prompts/ai-interaction-audit-v3.md) | Round 3 prompt and interaction audit (final) |
-
-## Bug Reports
-
-Chronological sweep reports produced by the `bug_hunter` agent. Each report covers a targeted scope; fix-verification reports confirm that findings from the previous round were resolved.
-
-| Report | Date | Scope |
-|--------|------|-------|
-| [Full Sweep](bugs/2026-02-25-full-sweep.md) | 2026-02-25 | Round 1: cogtrix.py, all src/ modules |
-| [Post-Refactor Sweep](bugs/2026-02-25-post-refactor-sweep.md) | 2026-02-25 | Round 1: post-refactor verification |
-| [Fix Verification](bugs/2026-02-25-fix-verification.md) | 2026-02-25 | Round 1: fix verification + new findings |
-| [Uncovered Modules](bugs/2026-02-25-uncovered-modules-sweep.md) | 2026-02-25 | Round 2: memory, MCP, intent, tools |
-| [Round 3 Sweep](bugs/2026-02-26-round3-sweep.md) | 2026-02-26 | Round 3: providers, config, SSRF, threading |
-| [Round 3 Verification](bugs/2026-02-26-fix-verification.md) | 2026-02-26 | Round 3: fix verification |
-| [Round 4 Sweep](bugs/2026-02-26-round4-sweep.md) | 2026-02-26 | Round 4: P2 sprint changes |
-| [Round 4 P2 Sprint](bugs/2026-02-26-round4-p2-sprint-sweep.md) | 2026-02-26 | Round 4: P2 fix sprint results |
-| [Round 4 Re-Audit](bugs/2026-02-26-round4-phase6-reaudit.md) | 2026-02-26 | Round 4: phase 6 re-audit |
-| [Round 5 Sweep](bugs/2026-02-26-round5-sweep.md) | 2026-02-26 | Round 5: P1 sprint — executor misuse, HTTP buffering, slash command fallthrough |
-| [Exhaustive Sweep](bugs/2026-02-26-exhaustive-sweep.md) | 2026-02-26 | Round 6: full codebase audit of orchestration and runner |
-| [P1 Sprint Re-Audit](bugs/2026-02-26-p1-sprint-reaudit.md) | 2026-02-26 | Round 6: targeted re-audit of P1 sprint changed files |
-| [Arch Review: Escape Monitor](bugs/2026-02-27-arch-review-escape-monitor.md) | 2026-02-27 | Architectural review of escape_monitor, spinner, confirmation UI |
-| [Escape Monitor Sweep](bugs/2026-02-27-escape-monitor-sweep.md) | 2026-02-27 | Round 7: escape monitor, spinner integration, Ctrl+C / prefill flow |
-| [Exhaustive Sweep](bugs/2026-02-27-exhaustive-sweep.md) | 2026-02-27 | Round 8: full sweep — escape_monitor, spinner, config, providers |
-| [Performance Audit](bugs/2026-02-27-performance-audit.md) | 2026-02-27 | Round 8: TTFT, token budget, hot path, per-cycle overhead |
-| [Round 10 Deep Dive](bugs/2026-02-27-round10-deep-dive.md) | 2026-02-27 | Round 10: escape_monitor, input, spinner, REPL, orchestration |
-| [Round 12](bugs/2026-02-27-round-12.md) | 2026-02-27 | Round 12: post-sprint sweep — REPL loop, orchestration layer |
-| [Round 13](bugs/2026-02-27-round-13.md) | 2026-02-27 | Round 13: round 12 fix verification, slash commands, tool management |
-| [Round 14](bugs/2026-02-27-round-14.md) | 2026-02-27 | Round 14: round 13 critical-fix verification |
-| [Round 15](bugs/2026-02-27-round-15.md) | 2026-02-27 | Round 15: final verification and sweep |
-| [Round 16](bugs/2026-02-27-round-16.md) | 2026-02-27 | Round 16: exhaustive post-sprint sweep |
-| [Round 16 Architecture Review](bugs/2026-02-27-arch-round16-final.md) | 2026-02-27 | Round 16: final architecture review |
-| [Round 16 Performance Audit](bugs/2026-02-27-round16-performance-audit.md) | 2026-02-27 | Round 16: TTFT, token budget, hot path, per-cycle overhead |
-| [Round 17](bugs/2026-02-27-round-17.md) | 2026-02-27 | Round 17: post-sprint sweep |
-| [Round 17 Architecture Review](bugs/2026-02-27-arch-round17-final.md) | 2026-02-27 | Round 17: final architecture review |
-| [Round 17 Performance Audit](bugs/2026-02-27-round17-performance-audit.md) | 2026-02-27 | Round 17: PERF-203/204 verification + residual findings |
-| [Round 18](bugs/2026-02-28-round-18.md) | 2026-02-28 | Round 18: brief findings |
-| [Round 18 Full](bugs/2026-02-28-round18-sweep.md) | 2026-02-28 | Round 18: full audit |
-| [Round 19](bugs/2026-02-28-round-19.md) | 2026-02-28 | Round 19: sweep |
-| [Round 20](bugs/2026-02-28-round-20.md) | 2026-02-28 | Round 20: findings |
-| [Round 21](bugs/2026-02-28-round-21.md) | 2026-02-28 | Round 21: comprehensive audit |
-| [Round 22](bugs/2026-02-28-round-22.md) | 2026-02-28 | Round 22: holistic optimization audit |
-| [Round 23](bugs/2026-02-28-round-23.md) | 2026-02-28 | Round 23: holistic optimization audit |
-| [Round 27](bugs/2026-02-28-round-27.md) | 2026-02-28 | Round 27: holistic optimization audit |
-| [Round 27 Architecture Review](bugs/2026-02-28-arch-round27-review.md) | 2026-02-28 | Round 27: architecture review |
-| [Performance Audit: TTFT](bugs/2026-02-28-performance-audit-ttft.md) | 2026-02-28 | Round 27: TTFT performance audit |
-| [Exhaustive Sweep](bugs/2026-03-01-exhaustive-sweep.md) | 2026-03-01 | Round 28: exhaustive sweep — thread safety, compression, arg correction |

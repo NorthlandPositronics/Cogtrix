@@ -120,22 +120,22 @@ You: Send alice "Hello from Cogtrix!"
 
 ---
 
-## Using Docker Compose (Recommended)
+## Using Docker Compose
 
-For a production-like setup, use Docker Compose to run both Cogtrix and Waha together. A ready-to-use `docker-compose.yml` is included in the repository root.
+> **Note:** A production-ready `docker-compose.yml` is not yet included in the
+> repository. The section below describes the intended setup for when it ships.
+
+For a production-like deployment, use Docker Compose to run both Cogtrix and
+Waha together. You will need a `docker-compose.yml` that defines:
+
+- **Waha** (`devlikeapro/waha`) on port 3000 (dashboard for QR code scanning)
+- **Cogtrix** with `COGTRIX_WHATSAPP_URL=http://waha:3000`
+- Volumes for session history and Waha session data
 
 ```bash
 docker compose up -d
 docker compose exec cogtrix python cogtrix.py
 ```
-
-This gives you:
-
-- **Waha** on port 3000 (dashboard for QR code scanning)
-- **Cogtrix** with WhatsApp pre-configured, session history persisted across restarts
-- **Ollama** connectivity (via host network or explicit URL)
-
-See the [docker-compose.yml](../docker-compose.yml) file for the full configuration and environment variable options.
 
 ### First-time setup with Docker Compose
 
@@ -143,10 +143,6 @@ See the [docker-compose.yml](../docker-compose.yml) file for the full configurat
 2. Open `http://localhost:3000` -- scan QR code with your phone
 3. `docker compose exec cogtrix python cogtrix.py` -- start chatting
 4. `You: Check my WhatsApp messages` -- verify it works
-
-### Persisting Waha sessions
-
-The `docker-compose.yml` mounts a volume for Waha's session data. This means you only need to scan the QR code once -- it survives container restarts.
 
 ---
 
@@ -327,4 +323,4 @@ curl http://localhost:3000    # Is it reachable?
 
 - [Configuration Reference -- WhatsApp](CONFIGURATION.md#whatsapp-messaging) -- Full option table
 - [Tools Reference -- WhatsApp](TOOLS_REFERENCE.md#whatsapp-messaging) -- Tool parameters
-- [docker-compose.yml](../docker-compose.yml) -- Ready-to-use Docker Compose setup
+- [Dockerfile](../Dockerfile) -- Docker image build

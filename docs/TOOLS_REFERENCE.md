@@ -24,6 +24,7 @@ Complete documentation of all 51 built-in tools. You don't need to memorize thes
 - [NLP Tools](#nlp-tools)
 - [WhatsApp Messaging](#whatsapp-messaging)
 - [Telegram Messaging](#telegram-messaging)
+- [Scheduling](#scheduling)
 - [Knowledge Base](#knowledge-base)
 - [Delegation](#delegation)
 - [Deep Reasoning](#deep-reasoning)
@@ -69,7 +70,7 @@ Execute shell commands with timeout protection.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `command` | string | Yes | Shell command to execute |
+| `cmd` | string | Yes | Shell command to execute |
 | `working_directory` | string | No | Working directory (default: current) |
 | `timeout` | int | No | Timeout in seconds (default: 30) |
 
@@ -217,6 +218,7 @@ Read contents of a file.
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `path` | string | Yes | File path to read |
+| `encoding` | string | No | File encoding (default: "utf-8") |
 | `start_line` | int | No | Line number to start reading from (0-based) |
 | `max_lines` | int | No | Maximum number of lines to read from start_line |
 
@@ -239,6 +241,7 @@ Write content to a file (creates if not exists).
 |-----------|------|----------|-------------|
 | `path` | string | Yes | File path to write (must be within working directory) |
 | `content` | string | Yes | Content to write |
+| `encoding` | string | No | File encoding (default: "utf-8") |
 
 ---
 
@@ -254,6 +257,7 @@ Append content to an existing file.
 |-----------|------|----------|-------------|
 | `path` | string | Yes | File path to append to |
 | `content` | string | Yes | Content to append |
+| `encoding` | string | No | File encoding (default: "utf-8") |
 
 ---
 
@@ -266,6 +270,7 @@ List contents of a directory.
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `path` | string | Yes | Directory path |
+| `pattern` | string | No | Glob pattern to filter files (default: "*") |
 | `show_hidden` | bool | No | Include hidden files (default: false) |
 
 **Returns:** List of files/directories with sizes
@@ -345,6 +350,7 @@ Convert datetime between timezones.
 | `datetime_str` | string | Yes | Datetime to convert |
 | `from_timezone` | string | Yes | Source timezone |
 | `to_timezone` | string | Yes | Target timezone |
+| `output_format` | string | No | Output format (strftime format string, default: "%Y-%m-%d %H:%M:%S %Z") |
 
 ---
 
@@ -357,7 +363,7 @@ Parse date strings in various formats.
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `date_str` | string | Yes | Date string to parse |
-| `output_format` | string | No | Output format (strftime format string) |
+| `output_format` | string | No | Output format (strftime format string, default: "%Y-%m-%d %H:%M:%S") |
 
 **Supported Formats:**
 - `2024-12-25`
@@ -1025,6 +1031,36 @@ Phonebook nicknames are resolved to chat IDs automatically and are case-insensit
 ### Rate Limiting
 
 Outbound messages are rate-limited to prevent abuse. Default: 30 messages/hour (configurable, 0 = unlimited). The limit uses an in-memory sliding window that resets on process restart.
+
+---
+
+## Scheduling
+
+### schedule_reply
+
+Schedule a reply for delayed delivery instead of sending immediately.
+
+**Availability:** Only available in assistant mode (`--assistant`). Injected per-call by `MessageHandler` when a `MessageScheduler` is configured.
+
+**When Used:** The agent calls this tool when the system prompt includes timing or scheduling instructions (e.g., "reply in 3 hours", "respond after the meeting"). The agent's response is NOT sent immediately — it is queued and delivered by a background thread.
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `text` | string | Yes | The reply message to send later |
+| `delay_minutes` | int | Yes | Minutes to wait before sending (1–1440) |
+
+**Notes:**
+
+- Message text is sanitized through output guardrails before being queued
+- Delivery retries up to 3 times with exponential backoff (30 s → 120 s → 600 s) on send failure
+- A new incoming message from the same chat cancels any pending scheduled replies for that chat
+- Quiet hours are enforced at dispatch time — delivery defers to the end of the quiet window rather than being dropped
+- Queue is persisted to `data/assistant/schedule.json` and survives restarts
+- Configurable via `services.assistant.response_timing` (quiet hours, per-contact overrides)
+
+**Returns:** Confirmation string telling the agent not to repeat the message.
 
 ---
 

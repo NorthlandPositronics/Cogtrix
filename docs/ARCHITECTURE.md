@@ -442,7 +442,7 @@ Summarizes old, large `ToolMessage` objects before each LLM call to reduce token
 |----------|-------|---------|
 | `COMPRESSION_MIN_AGE_CYCLES` | 6 | Minimum `call_model` cycles before a message is eligible |
 | `COMPRESSION_MIN_CHARS` | 2000 | Minimum message length to qualify for compression |
-| `_COMPRESSION_THRESHOLD_RATIO` | 0.72 | Total message size / context window before compression runs |
+| `_COMPRESSION_THRESHOLD_RATIO` | 0.50 | Total message size / context window before compression runs |
 
 **Key Exports:**
 

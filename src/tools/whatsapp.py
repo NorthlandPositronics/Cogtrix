@@ -211,8 +211,7 @@ def _check_contact(number_or_nick: str) -> tuple[bool, str]:
 
     number = _normalize_number(number_or_nick)
 
-    # Normalize the configured contacts for comparison
-    normalized_contacts = {_normalize_number(c) for c in _cfg.contacts}
+    normalized_contacts = {_normalize_number(_resolve_contact(c)) for c in _cfg.contacts}
 
     if _cfg.filter_mode == "whitelist":
         if number in normalized_contacts:
@@ -227,6 +226,11 @@ def _check_contact(number_or_nick: str) -> tuple[bool, str]:
     return True, ""
 
 
+def _resolve_contact(name_or_number: str) -> str:
+    """Resolve a phonebook name to its number, or return the value unchanged."""
+    return _cfg.phonebook.get(name_or_number, name_or_number)
+
+
 def _check_receive_contact(from_field: str) -> bool:
     """Check whether an inbound message passes the contact filter."""
     if _cfg.filter_mode == "none":
@@ -234,7 +238,7 @@ def _check_receive_contact(from_field: str) -> bool:
     number = from_field.replace("@c.us", "").replace("@s.whatsapp.net", "")
     if number.isdigit():
         number = f"+{number}"
-    normalized_contacts = {_normalize_number(c) for c in _cfg.contacts}
+    normalized_contacts = {_normalize_number(_resolve_contact(c)) for c in _cfg.contacts}
     if _cfg.filter_mode == "whitelist":
         return number in normalized_contacts
     if _cfg.filter_mode == "blacklist":
@@ -416,7 +420,13 @@ def whatsapp_check(
     chat_id = _to_chat_id(contact) if contact else None
 
     client = _get_client()
-    messages = client.get_messages(chat_id=chat_id, limit=limit)
+
+    if chat_id:
+        messages = client.get_messages(chat_id=chat_id, limit=limit)
+    else:
+        # Waha requires chatId for /api/messages — use chats overview instead
+        chats = client.get_chats_overview(limit=limit)
+        messages = [c.last_message for c in chats if c.last_message is not None]
 
     if not messages:
         target = f" from {contact}" if contact else ""

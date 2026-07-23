@@ -60,6 +60,15 @@ class SessionInfo:
     me: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass
+class ChatOverview:
+    """Summary of a chat from the chats overview endpoint."""
+
+    id: str
+    name: str | None = None
+    last_message: Message | None = None
+
+
 # ---------------------------------------------------------------------------
 # Client
 # ---------------------------------------------------------------------------
@@ -114,6 +123,41 @@ class WahaClient:
             status=data.get("status", "UNKNOWN"),
             me=data.get("me") or {},
         )
+
+    def start_session(self) -> bool:
+        """Start the Waha session via ``POST /api/sessions/{name}/start``.
+
+        Returns ``True`` if the session was started (or was already running).
+        """
+        try:
+            resp = requests.post(
+                self._url(f"/api/sessions/{self.session}/start"),
+                json={},
+                headers=self._headers(),
+                timeout=self.timeout,
+            )
+            return resp.status_code < 400
+        except Exception:
+            return False
+
+    def resolve_lid(self, lid: str) -> str | None:
+        """Resolve a ``@lid`` identifier to a phone number via the Lids API.
+
+        Returns the phone number in ``@c.us`` format, or ``None`` if the LID
+        cannot be resolved (not in contacts or not a group admin).
+        """
+        try:
+            resp = requests.get(
+                self._url(f"/api/{self.session}/lids/{lid}"),
+                headers=self._headers(),
+                timeout=self.timeout,
+            )
+            if resp.status_code >= 400:
+                return None
+            data = resp.json()
+            return data.get("pn") or None
+        except Exception:
+            return None
 
     # -- send --------------------------------------------------------------
 
@@ -272,6 +316,44 @@ class WahaClient:
                 )
             )
         return messages
+
+    def get_chats_overview(self, limit: int = 50) -> list[ChatOverview]:
+        """Fetch chat summaries via ``GET /api/{session}/chats/overview``."""
+        try:
+            resp = requests.get(
+                self._url(f"/api/{self.session}/chats/overview"),
+                params={"limit": limit, "offset": 0},
+                headers=self._headers(),
+                timeout=self.timeout,
+            )
+            resp.raise_for_status()
+            raw_chats: list[dict[str, Any]] = resp.json()
+        except Exception:
+            return []
+
+        result: list[ChatOverview] = []
+        for chat in raw_chats:
+            last_msg_raw = chat.get("lastMessage")
+            last_msg: Message | None = None
+            if last_msg_raw:
+                last_msg = Message(
+                    id=last_msg_raw.get("id", ""),
+                    timestamp=last_msg_raw.get("timestamp", 0),
+                    from_number=last_msg_raw.get("from", ""),
+                    to=last_msg_raw.get("to"),
+                    body=last_msg_raw.get("body", ""),
+                    from_me=last_msg_raw.get("fromMe", False),
+                    has_media=last_msg_raw.get("hasMedia", False),
+                    media_url=(last_msg_raw.get("media") or {}).get("url"),
+                )
+            result.append(
+                ChatOverview(
+                    id=chat.get("id", ""),
+                    name=chat.get("name"),
+                    last_message=last_msg,
+                )
+            )
+        return result
 
     # -- health check ------------------------------------------------------
 
