@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.38](https://github.com/NorthlandPositronics/Cogtrix/compare/v0.1.37...v0.1.38) (2026-03-26)
+
+
+### Bug Fixes
+
+* **api:** BUG-252/253 — deep think mode answer disappears ([#103](https://github.com/NorthlandPositronics/Cogtrix/issues/103)) ([f4803aa](https://github.com/NorthlandPositronics/Cogtrix/commit/f4803aaf08c1f1c1ed4b2faf9bec5cd9e1b9350c))
+
 ## [0.1.37](https://github.com/NorthlandPositronics/Cogtrix/compare/v0.1.36...v0.1.37) (2026-03-25)
 
 

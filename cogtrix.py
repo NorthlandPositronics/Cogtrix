@@ -4123,9 +4123,7 @@ def main():
                                     f"[dim](strategy: {think_cat.name})[/dim]…"
                                 )
                             else:
-                                print(
-                                    f"Stage 1/2: Gathering data (strategy: {think_cat.name})…"
-                                )
+                                print(f"Stage 1/2: Gathering data (strategy: {think_cat.name})…")
 
                             gather_prompt = think_cat.gather_template.replace(
                                 "{today}", _today

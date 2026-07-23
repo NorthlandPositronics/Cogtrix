@@ -126,6 +126,7 @@ def _config_to_out(cfg: Any, raw_yaml: str | None = None) -> ConfigOut:
         raw_yaml=raw_yaml,
         system_prompt=_sys_prompt,
         guardrails=_guardrails,
+        delegate_enabled=bool(getattr(cfg, "delegate_enabled", True) if cfg else True),
     )
 
 
@@ -1440,9 +1441,28 @@ def _wizard_validate_and_write(raw_yaml: str, bootstrap_info: dict[str, Any]) ->
             except OSError:
                 pass
 
-    # Write the final config
+    # Write the final config atomically — write to a sibling temp file then
+    # rename so a crash mid-write never leaves a half-written config.
     output_path = Path.home() / ".cogtrix.yaml"
     yaml_text = yaml.dump(data, default_flow_style=False, sort_keys=False)
-    output_path.write_text(yaml_text, encoding="utf-8")
+    write_tmp: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            suffix=".yaml",
+            dir=output_path.parent,
+            delete=False,
+            encoding="utf-8",
+        ) as wt:
+            write_tmp = Path(wt.name)
+            wt.write(yaml_text)
+        write_tmp.replace(output_path)
+        write_tmp = None
+    finally:
+        if write_tmp is not None:
+            try:
+                write_tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
 
     return yaml_text

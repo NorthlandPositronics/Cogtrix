@@ -954,6 +954,95 @@ class TestExtractFinalSolution:
         report = "## Final Solution — Best Approach (confidence: 9.0/10)\n\n" "The robust answer.\n"
         assert _extract_final_solution(report) == "The robust answer."
 
+    def test_empty_best_solution_falls_back_to_report(self):
+        """BUG-252: when best_solution is empty, \n+ greedily consumes blank lines
+        and the footer separator ('---\\n*N iterations...*') must not be returned
+        as the final solution — fall back to the full report instead."""
+        from src.api.turn_runner import _extract_final_solution
+
+        # Mirrors _format_report output when best_solution == "":
+        # header line, 3 blank lines (join of empty string), then footer.
+        report = (
+            "## Branch 1 (confidence: 6.5/10)\nSome content.\n\n---\n\n"
+            "## Final Solution (confidence: 0.0/10)\n\n\n\n"
+            "---\n*2 iterations, best score: 0.0*"
+        )
+        result = _extract_final_solution(report)
+        # Must NOT return the footer as the solution
+        assert not result.lstrip().startswith(
+            "---"
+        ), "BUG-252: _extract_final_solution returned footer as solution when best_solution empty"
+        # Falls back to the full report
+        assert result == report
+
+
+# ===========================================================================
+# BUG-253 — think mode: final result emitted as token after pipeline
+# ===========================================================================
+
+
+class TestThinkModeTokenEmission:
+    """After _run_think_pipeline, turn_runner emits the result as a token
+    message so the frontend receives content even though deep_think runs
+    without the ws_callback (BUG-253)."""
+
+    def test_think_result_token_emitted_to_queue(self):
+        """A 'token' message with the think result must be enqueued before 'done'."""
+        import asyncio
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        async def _run():
+            from src.api.turn_runner import _run_message_turn_inner
+
+            session = MagicMock()
+            session.id = "sess-253"
+            session.agent_state = "idle"
+            session.turn_lock = asyncio.Lock()
+            session.cancel_event = MagicMock()
+            session.cancel_event.is_set.return_value = False
+            session.ws_queue = asyncio.Queue(maxsize=1000)
+            session.session_state = None
+            session.memory_manager = None
+            session.run_config = None
+            session.registry = None
+            session.active_confirmation_ui = None
+            session.last_activity = 0.0
+            session.token_counts = {"input_tokens": 0, "output_tokens": 0}
+
+            with (
+                patch("src.api.callbacks.WebSocketCallbackHandler", return_value=MagicMock()),
+                patch("src.api.confirmation.ApiConfirmationUI", return_value=MagicMock()),
+                patch(
+                    "src.orchestration.runner.run_agent",
+                    return_value="initial agent answer",
+                ),
+                patch(
+                    "src.api.turn_runner._run_think_pipeline",
+                    new=AsyncMock(return_value="deep think result"),
+                ),
+            ):
+                await _run_message_turn_inner(session, "test input", "think", None, None)
+
+            msgs = []
+            while not session.ws_queue.empty():
+                msgs.append(session.ws_queue.get_nowait())
+
+            token_msgs = [m for m in msgs if m.get("type") == "token"]
+            think_tokens = [
+                m for m in token_msgs if m.get("payload", {}).get("text") == "deep think result"
+            ]
+            assert think_tokens, (
+                "BUG-253: no 'token' message with think result found in queue; "
+                f"token messages were: {token_msgs}"
+            )
+            assert think_tokens[0]["payload"]["final"] is True
+
+            # done message must also contain the think result
+            done_msgs = [m for m in msgs if m.get("type") == "done"]
+            assert done_msgs and done_msgs[0]["payload"]["text"] == "deep think result"
+
+        asyncio.run(_run())
+
 
 # ===========================================================================
 # BUG-248 — tool_intensive classification must NOT skip force_deep_think in

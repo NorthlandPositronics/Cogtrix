@@ -199,6 +199,11 @@ class ConfigOut(BaseModel):
         default=None,
         description="Active guardrail configuration (assistant mode).",
     )
+    delegate_enabled: bool = Field(
+        default=True,
+        description="Whether the delegate (parallel delegation) mode is enabled. "
+        "When false, the 'delegate' option should be hidden in the chat UI.",
+    )
 
 
 class ConfigPatchRequest(BaseModel):

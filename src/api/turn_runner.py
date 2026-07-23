@@ -97,7 +97,10 @@ def _extract_final_solution(report: str) -> str:
     )
     if match:
         sol = match.group(1).strip()
-        if sol:
+        # BUG-252: when best_solution is empty, \n+ consumes all blank lines and
+        # the regex captures the footer separator ("---\n*N iterations...*") as the
+        # "solution".  Reject any match that starts with the horizontal-rule marker.
+        if sol and not sol.lstrip().startswith("---"):
             return sol
     return report
 
@@ -443,6 +446,19 @@ async def _run_message_turn_inner(
                 log.warning("Queue full, dropping CANCELLED error for session %s", session.id)
             raise
 
+        # BUG-253: deep_think / delegation run inside asyncio.to_thread without the
+        # ws_callback, so no incremental tokens are streamed during these phases.
+        # Emit the final result as a single token message now so the frontend has
+        # content to display regardless of whether it clears the earlier run_agent
+        # tokens on the "analyzing" state transition.
+        if mode in ("think", "delegate") and response_text:
+            try:
+                session.ws_queue.put_nowait(
+                    {"type": "token", "payload": {"text": response_text, "final": True}}
+                )
+            except asyncio.QueueFull:
+                log.debug("Queue full, dropping think-result token for session %s", session.id)
+
         # Update memory with the new exchange.
         if session.memory_manager is not None:
             try:
@@ -480,9 +496,16 @@ async def _run_message_turn_inner(
                     pass
 
         # Update session token counts from the callback accumulator.
+        # Use .get() with a default for the LHS so a missing key (e.g. from an
+        # incomplete token_counts_json in the DB or test construction) never
+        # raises KeyError.
         token_counts = _extract_token_counts(ws_callback)
-        session.token_counts["input_tokens"] += token_counts.get("input_tokens", 0)
-        session.token_counts["output_tokens"] += token_counts.get("output_tokens", 0)
+        session.token_counts["input_tokens"] = session.token_counts.get(
+            "input_tokens", 0
+        ) + token_counts.get("input_tokens", 0)
+        session.token_counts["output_tokens"] = session.token_counts.get(
+            "output_tokens", 0
+        ) + token_counts.get("output_tokens", 0)
 
         duration_ms = int((time.monotonic() - turn_start) * 1000)
         log.debug(
